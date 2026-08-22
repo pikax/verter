@@ -634,7 +634,7 @@ pub(super) fn containing_with_defaults_index(
 
 pub(super) fn top_level_syntax_index(macros: &[AnalyzedMacro], effective_index: usize) -> u32 {
     let effective = &macros[effective_index];
-    debug_assert!(is_top_level_macro(macros, effective_index));
+    verter_debug_assert!(is_top_level_macro(macros, effective_index));
 
     let preceding = macros
         .iter()

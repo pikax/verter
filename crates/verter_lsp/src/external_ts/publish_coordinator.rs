@@ -97,7 +97,7 @@ impl CarrierCompanion {
         role: SnapshotRole,
         script_kind: ScriptKind,
     ) -> Self {
-        debug_assert!(
+        verter_debug_assert!(
             role != SnapshotRole::CarrierIde,
             "the IDE companion is projected; build it with CarrierCompanion::carrier_ide"
         );

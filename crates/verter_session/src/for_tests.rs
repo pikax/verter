@@ -741,3 +741,16 @@ pub fn compile_scheduler_last_known_good_artifact_present_for_tests(
         .try_get_last_known_good(canonical_id, profile_hash)
         .is_some()
 }
+
+/// Criterion-only projection primitive harness. The module is compiled
+/// solely by the explicit `test-support` feature used by the checked-in
+/// projection safety benchmark; default production builds do not expose
+/// it. Re-exported at the crate root as `verter_session::projection_bench_support`
+/// (see `lib.rs`) so `benches/projection_safety_bench.rs` keeps a stable path.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod projection_bench_support {
+    pub use crate::project_semantic_dispatch::locator_view::{
+        ProjectionBenchCase, ProjectionBenchHarness,
+    };
+}

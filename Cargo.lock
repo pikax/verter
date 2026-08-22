@@ -3971,6 +3971,7 @@ dependencies = [
  "verter_audit",
  "verter_compiler",
  "verter_css_syntax",
+ "verter_debug_assert",
  "verter_ecma",
  "verter_identity",
  "verter_language",
@@ -3990,8 +3991,13 @@ dependencies = [
  "memchr",
  "rustc-hash 2.1.2",
  "smallvec",
+ "verter_debug_assert",
  "verter_span",
 ]
+
+[[package]]
+name = "verter_debug_assert"
+version = "0.0.1-beta.3"
 
 [[package]]
 name = "verter_diagnostics"
@@ -4031,6 +4037,9 @@ dependencies = [
 [[package]]
 name = "verter_ecma"
 version = "0.0.1-beta.3"
+dependencies = [
+ "verter_debug_assert",
+]
 
 [[package]]
 name = "verter_ffi"
@@ -4104,6 +4113,7 @@ dependencies = [
  "verter_actions",
  "verter_audit",
  "verter_compiler",
+ "verter_debug_assert",
  "verter_diagnostics",
  "verter_ffi",
  "verter_language",
@@ -4265,6 +4275,7 @@ dependencies = [
  "serde_repr",
  "sha2",
  "smallvec",
+ "verter_debug_assert",
  "verter_language",
  "verter_span",
  "verter_type_expr",
@@ -4318,6 +4329,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "smallvec",
  "verter_audit",
+ "verter_debug_assert",
  "verter_language",
  "verter_span",
  "web-time",
@@ -4343,6 +4355,7 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "verter_css_syntax",
+ "verter_debug_assert",
  "verter_language",
  "verter_no_typeexpr",
  "verter_parser",
@@ -4398,6 +4411,7 @@ dependencies = [
  "uuid",
  "verter_audit",
  "verter_compiler",
+ "verter_debug_assert",
  "verter_identity",
  "verter_language",
  "verter_macro_dto",
@@ -4440,6 +4454,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_shipped_cfg_contract"
+version = "0.0.1-beta.3"
+dependencies = [
+ "verter_compiler",
+ "verter_session",
+]
+
+[[package]]
+name = "verter_source_policy_gate"
+version = "0.0.1-beta.3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "static_assertions",
+ "syn 2.0.117",
+ "tempfile",
+ "verter_no_typeexpr",
+ "verter_session",
+ "verter_span",
+ "verter_type_expr",
+ "verter_workspace",
+ "walkdir",
+]
+
+[[package]]
 name = "verter_span"
 version = "0.0.1-beta.3"
 dependencies = [
@@ -4458,6 +4498,7 @@ dependencies = [
  "syn 2.0.117",
  "tempfile",
  "verter_compiler",
+ "verter_debug_assert",
 ]
 
 [[package]]
@@ -4478,6 +4519,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "verter_compiler",
+ "verter_debug_assert",
  "verter_macro_dto",
  "verter_session",
  "verter_span",
@@ -4498,6 +4540,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "verter_debug_assert",
  "verter_span",
  "verter_tsgo_api",
  "windows-sys",
@@ -4543,6 +4586,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trybuild",
+ "verter_debug_assert",
  "verter_language",
  "verter_span",
  "verter_test_support",
@@ -4613,6 +4657,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "verter_audit",
+ "verter_debug_assert",
  "verter_language",
  "verter_scheduler",
  "verter_span",

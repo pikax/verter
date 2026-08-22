@@ -111,6 +111,7 @@ hotpath = [
 ]
 
 [dependencies]
+verter_debug_assert = { workspace = true }
 verter_audit = { path = "../verter_audit" }
 verter_language = { path = "../verter_language" }
 verter_compiler = { path = "../verter_compiler" }

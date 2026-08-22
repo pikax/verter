@@ -1560,7 +1560,7 @@ pub(crate) fn materialize_component_meta_structure(
                     // `lower_unadmitted` hook, and a joiner on a
                     // panicked/rejected winner forks + cold-recomputes — so
                     // neither path lands here. Defensive soft-degrade.
-                    debug_assert!(
+                    verter_debug_assert!(
                         false,
                         "materialize_component_meta_structure: cooperative admission returned \
                          None — the materialiser compute never constructs Failed and admission \

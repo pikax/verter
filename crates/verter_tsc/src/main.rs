@@ -28,6 +28,9 @@
 //!   verter-tsc [--project tsconfig.json] [--noEmit]
 //!   verter-tsc --declaration --declarationDir dist/types
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 mod api_check;
 mod checker;
 mod error_map;
@@ -186,7 +189,7 @@ fn main() {
             process::exit(2);
         }
     };
-    debug_assert_eq!(
+    verter_debug_assert_eq!(
         result.public_api_outcomes.len(),
         result.admitted_carriers,
         "public API projection must retain exactly one outcome per ADMITTED carrier \

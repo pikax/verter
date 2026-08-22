@@ -30,6 +30,9 @@ const LAYER_1_IDENTITY_SPAN_LANGUAGE_CONTRACTS: &[&str] = &[
     // The dependency-neutral typed-identity/profile/mapping/result-contract
     // vocabulary crate this test file itself lives in.
     "verter_identity",
+    // Zero-dependency debug_assert!/debug_assert_eq!/debug_assert_ne! entry
+    // point; sits below every crate that uses it.
+    "verter_debug_assert",
 ];
 
 const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[
@@ -79,6 +82,18 @@ const LAYER_7_HARNESSES: &[&str] = &[
     // dev-dependent fan-out never trips the "nothing may depend on a
     // harness" firewall.
     "verter_test_support",
+    // Architecture/policy/portability guards relocated out of verter_session's
+    // consolidated test binary (gate-performance step 2). A pure test-only
+    // crate: its production [dependencies] is empty, and verter_session /
+    // verter_span / verter_workspace are consumed exclusively via
+    // [dev-dependencies] to check generated output against verter_session's
+    // public API — never to be depended ON by anything.
+    "verter_source_policy_gate",
+    // The gate's shipped-cfg guard target (gate-performance step 3,
+    // SINGLE-TEST-UNIVERSE directive): a pure test-only crate whose
+    // production [dependencies] is empty and whose `verter_session` edge is
+    // [dev-dependencies]-only — never depended ON by anything.
+    "verter_shipped_cfg_contract",
 ];
 
 /// Build tooling, not a layer. Checked by

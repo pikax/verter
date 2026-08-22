@@ -182,28 +182,28 @@ impl FunctionFlowGraph {
     /// The node of one binding.
     #[must_use]
     pub fn binding_node(&self, id: SkeletonBindingId) -> FlowNodeId {
-        debug_assert!((id.index() as u32) < self.binding_count);
+        verter_debug_assert!((id.index() as u32) < self.binding_count);
         FlowNodeId(id.index() as u32)
     }
 
     /// The node of one expression site.
     #[must_use]
     pub fn expr_site_node(&self, id: SkeletonExprSiteId) -> FlowNodeId {
-        debug_assert!((id.index() as u32) < self.expr_site_count);
+        verter_debug_assert!((id.index() as u32) < self.expr_site_count);
         FlowNodeId(self.binding_count + id.index() as u32)
     }
 
     /// The node of one return site.
     #[must_use]
     pub fn return_site_node(&self, id: SkeletonReturnSiteId) -> FlowNodeId {
-        debug_assert!((id.index() as u32) < self.return_site_count);
+        verter_debug_assert!((id.index() as u32) < self.return_site_count);
         FlowNodeId(self.binding_count + self.expr_site_count + id.index() as u32)
     }
 
     /// The node of one control region.
     #[must_use]
     pub fn region_node(&self, id: SkeletonRegionId) -> FlowNodeId {
-        debug_assert!((id.index() as u32) < self.region_count);
+        verter_debug_assert!((id.index() as u32) < self.region_count);
         FlowNodeId(
             self.binding_count + self.expr_site_count + self.return_site_count + id.index() as u32,
         )

@@ -21,6 +21,7 @@ currency_probe = []
 external-corpus = []
 
 [dependencies]
+verter_debug_assert = { workspace = true }
 arc-swap = "1.9"
 dashmap = "6.2"
 rustc-hash = { workspace = true }

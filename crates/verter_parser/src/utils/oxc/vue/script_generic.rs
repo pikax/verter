@@ -180,7 +180,7 @@ pub fn parse_generic<'a>(
     wrapped_code.extend_from_slice(GENERIC_WRAPPER_SUFFIX);
 
     // SAFETY: We're constructing valid UTF-8 from known ASCII prefix/suffix and user's generic string
-    debug_assert!(
+    verter_debug_assert!(
         std::str::from_utf8(&wrapped_code).is_ok(),
         "wrapped generic code is not valid UTF-8"
     );

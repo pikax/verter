@@ -285,7 +285,7 @@ const MACHINE_MARKERS: &[&str] = &[
 /// NOT wrongly skipped. `tracked_paths()` runs `git ls-files` from the
 /// repo root, which emits forward-slash repo-relative paths on every OS.
 const SELF_FILE_REPO_PATH: &str =
-    "crates/verter_session/tests/cases/tracked_paths_no_machine_roots.rs";
+    "crates/verter_source_policy_gate/tests/cases/tracked_paths_no_machine_roots.rs";
 
 /// Per-first-byte candidate lists over [`MACHINE_MARKERS`]: `starts[b]` holds
 /// the marker indices whose first byte is `b`, ascending. Built once per

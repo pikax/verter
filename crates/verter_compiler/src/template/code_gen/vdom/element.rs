@@ -2407,8 +2407,8 @@ pub fn process_element_leave<'alloc>(
     text_run_cache_indices: &FxHashMap<u32, usize>,
 ) -> ChildRecord {
     let tag_open = &element.tag_open;
-    debug_assert!((tag_open.start as usize + 1) <= source.len());
-    debug_assert!((tag_open.name_end as usize) <= source.len());
+    verter_debug_assert!((tag_open.start as usize + 1) <= source.len());
+    verter_debug_assert!((tag_open.name_end as usize) <= source.len());
     let tag_name = &source[tag_open.start as usize + 1..tag_open.name_end as usize];
     let helper = vnode_helper(element, is_block_root);
 

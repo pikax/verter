@@ -21,7 +21,7 @@ pub(super) const PREFIX: &str = "___VERTER___";
 
 #[inline]
 fn carrier_api_module_specifier_suffix() -> &'static str {
-    debug_assert_eq!(
+    verter_debug_assert_eq!(
         CARRIER_API_MODULE_SPECIFIER_SUFFIX.strip_suffix(".js"),
         CARRIER_API_VIRTUAL_SUFFIX.strip_suffix(".ts")
     );

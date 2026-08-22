@@ -17,6 +17,9 @@
 //! - It does not own a parser or lowering pipeline
 //! - `verter_session` orchestrates materialization and scheduling
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 pub mod analysis;
 pub mod analyzers;
 pub mod db;

@@ -127,13 +127,13 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
             // entirely; the oracle below stays authoritative.
             #[cfg(debug_assertions)]
             if let Some(graph_native) = resolver.dependency_value_symbol_graph_native(&target) {
-                debug_assert_eq!(
+                verter_debug_assert_eq!(
                     graph_native.kind, primary.kind,
                     "graph-native consumer-reader readiness: C4 graph-native value reader kind diverged for \
                      ({}, {:?}, {})",
                     target.canonical_id, target.owner, target.name,
                 );
-                debug_assert_eq!(
+                verter_debug_assert_eq!(
                     graph_native.type_annotation, primary.type_annotation,
                     "graph-native consumer-reader readiness: C4 graph-native value reader type_annotation diverged for \
                      ({}, {:?}, {})",
@@ -141,20 +141,20 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
                 );
                 // `FunctionSignature` does not implement `PartialEq`;
                 // compare via the structural debug projection.
-                debug_assert_eq!(
+                verter_debug_assert_eq!(
                     format!("{:?}", graph_native.signatures),
                     format!("{:?}", primary.signatures),
                     "graph-native consumer-reader readiness: C4 graph-native value reader signatures diverged for \
                      ({}, {:?}, {})",
                     target.canonical_id, target.owner, target.name,
                 );
-                debug_assert_eq!(
+                verter_debug_assert_eq!(
                     graph_native.object_shape, primary.object_shape,
                     "graph-native consumer-reader readiness: C4 graph-native value reader object_shape diverged for \
                      ({}, {:?}, {})",
                     target.canonical_id, target.owner, target.name,
                 );
-                debug_assert_eq!(
+                verter_debug_assert_eq!(
                     graph_native.enum_members, primary.enum_members,
                     "graph-native consumer-reader readiness: C4 graph-native value reader enum_members diverged for \
                      ({}, {:?}, {})",

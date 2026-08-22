@@ -573,7 +573,7 @@ impl ObjectProjectionFormula {
 
     #[allow(dead_code)] // Evaluator-owned constructor; unit builders reuse it.
     fn new(alternatives: Arc<[ObjectProjectionAlternative]>) -> Self {
-        debug_assert!(
+        verter_debug_assert!(
             alternatives.first().is_none_or(|first| alternatives
                 .iter()
                 .all(|alternative| alternative.selected == first.selected)),
@@ -970,7 +970,7 @@ pub(crate) mod evaluator_support {
                 .map(|fact| fact.key.clone())
                 .collect::<Vec<_>>(),
         );
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             complete_keys
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
@@ -979,8 +979,8 @@ pub(crate) mod evaluator_support {
             "object projection alternatives must have one positive fact per key"
         );
         let domain = if input.closed {
-            debug_assert!(input.residual_operands.is_empty());
-            debug_assert!(input.indeterminate_possible_writes.is_empty());
+            verter_debug_assert!(input.residual_operands.is_empty());
+            verter_debug_assert!(input.indeterminate_possible_writes.is_empty());
             AlternativeDomain::Closed(ClosedDomainData {
                 complete_keys,
                 scope: ClosedDomainScope::for_selector(&input.selector),

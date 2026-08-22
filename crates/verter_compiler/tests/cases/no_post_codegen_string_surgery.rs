@@ -607,7 +607,7 @@ fn accepts_readonly_slice_of_built_output() {
     let good = r#"
         fn inspect(ct: CodeTransform) -> usize {
             let built = ct.build_string();
-            debug_assert!(format!("head: {}", &built[..2]).len() > 0);
+            verter_debug_assert!(format!("head: {}", &built[..2]).len() > 0);
             built[..1].len()
         }
     "#;

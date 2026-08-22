@@ -265,7 +265,7 @@ fn compute_svelte_surface(
                     }
                 },
                 None => {
-                    debug_assert_ne!(source, SvelteSurfaceSource::LegacySlotInventory);
+                    verter_debug_assert_ne!(source, SvelteSurfaceSource::LegacySlotInventory);
                     script_fact_partial(outcome)
                 }
             }

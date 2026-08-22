@@ -1962,7 +1962,7 @@ impl HostStoreView {
                 });
             }
             let view = Self::build(&pre, session_id);
-            debug_assert_eq!(
+            verter_debug_assert_eq!(
                 view.validation_token(),
                 pre_token,
                 "the built view's token must equal the single pre-build capture \
@@ -3801,7 +3801,7 @@ mod build_claim {
             manager: &'m StoreViewManager,
             state: &mut StoreViewManagerState,
         ) -> (Self, u64) {
-            debug_assert!(
+            verter_debug_assert!(
                 !state.building.is_claimed(),
                 "the singleflight claim must be free when it is taken \
                  (double-claim would run parallel coherent builds)"
@@ -3983,7 +3983,7 @@ impl StoreViewManager {
                  condvar can only be signalled by this thread's own claim guard) and \
                  degrading the re-entrant read to return-only",
             );
-            debug_assert!(
+            verter_debug_assert!(
                 false,
                 "STORE-VIEW SELF-AWAIT: base_view was re-entered on the thread holding \
                  its own build claim. Parking here would deadlock permanently, so the \

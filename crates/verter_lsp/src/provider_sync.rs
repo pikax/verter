@@ -864,11 +864,11 @@ pub fn open_unresolved_carrier_commit(
     target: ProviderSyncState,
     ide_synced: bool,
 ) -> OpenUnresolvedCarrierCommit {
-    debug_assert!(
+    verter_debug_assert!(
         target.owner_binding.is_unresolved(),
         "open_unresolved_carrier_commit target must be Unresolved-bound"
     );
-    debug_assert!(
+    verter_debug_assert!(
         target.api_path.is_none(),
         "open_unresolved_carrier_commit target must not carry an owner-derived API path"
     );

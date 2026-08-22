@@ -153,7 +153,7 @@ impl AuthoredResolutionDebtFrame {
         // The latch flips in EVERY build so the frame's finalization state
         // is configuration-independent; only its prior value is asserted.
         let was_finished = self.finished.replace(true);
-        debug_assert!(
+        verter_debug_assert!(
             !was_finished,
             "authored resolution debt must be finalized exactly once"
         );
@@ -163,7 +163,7 @@ impl AuthoredResolutionDebtFrame {
 
 impl Drop for AuthoredResolutionDebtFrame {
     fn drop(&mut self) {
-        debug_assert!(
+        verter_debug_assert!(
             std::thread::panicking() || self.finished.get(),
             "authored resolution debt left an Instantiate call without finalization"
         );

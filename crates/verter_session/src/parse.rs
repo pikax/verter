@@ -818,7 +818,7 @@ fn build_svelte_snapshot_from_eval_source(
     // script bytes.
     let mut snapshot = match script_program {
         FrameworkScriptProgram::Shared(program) => {
-            debug_assert_eq!(
+            verter_debug_assert_eq!(
                 program.source_str(),
                 eval_source,
                 "a shared eval program must carry this carrier file's \

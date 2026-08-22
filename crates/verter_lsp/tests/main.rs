@@ -10,4 +10,7 @@
 //! `lsp_audit_trace_out_env_var` binary so its single test runs in its
 //! own process and cannot leak the env into this co-resident pool.
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 mod cases;

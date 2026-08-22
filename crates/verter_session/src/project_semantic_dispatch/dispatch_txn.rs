@@ -1278,7 +1278,7 @@ impl InferenceSession {
             return;
         }
         if checkpoint.candidate_lens.len() != self.infos.len() {
-            debug_assert!(
+            verter_debug_assert!(
                 false,
                 "session checkpoint info-count mismatch: checkpoint {} vs session {}",
                 checkpoint.candidate_lens.len(),
@@ -1295,7 +1295,7 @@ impl InferenceSession {
         if checkpoint.projection_candidate_lens.len() != checkpoint.projection_info_len
             || checkpoint.projection_info_len > reverse.projection_infos.len()
         {
-            debug_assert!(
+            verter_debug_assert!(
                 false,
                 "reverse projection checkpoint does not match the active session"
             );

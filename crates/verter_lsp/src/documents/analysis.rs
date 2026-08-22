@@ -321,7 +321,7 @@ impl DocumentRegistry {
                     }
                     let same_envelope =
                         Arc::ptr_eq(structure.envelope(), feature.structure.envelope());
-                    debug_assert!(
+                    verter_debug_assert!(
                         same_envelope,
                         "validated semantic and document artifact IDs must retain one sealed envelope"
                     );

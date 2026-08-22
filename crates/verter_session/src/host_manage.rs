@@ -774,7 +774,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         canonical_id: &str,
         tag: &str,
     ) -> Vec<crate::resolver_core::IntrinsicSurfaceMember> {
-        debug_assert_eq!(self.parent_canonical_id, canonical_id);
+        verter_debug_assert_eq!(self.parent_canonical_id, canonical_id);
         let (project_anchor, cache_generation) =
             self.host.project_intrinsic_cache_anchor(canonical_id);
         let cache_key = crate::resolver_core::fallthrough_resolver::intrinsic_surface_key(
@@ -830,7 +830,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         imported_name: Option<&str>,
         binding_kind: Option<crate::resolver_core::ImportBindingKind>,
     ) -> Option<String> {
-        debug_assert_eq!(self.parent_canonical_id, parent_canonical);
+        verter_debug_assert_eq!(self.parent_canonical_id, parent_canonical);
         let dep_canonical = match self.host.resolve_loaded_dependency_canonical(
             parent_canonical,
             import_source,
@@ -1037,7 +1037,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         eval_env: &mut Option<Self::EvalEnv>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Option<crate::resolver_core::FallthroughPropOverrideSet> {
-        debug_assert_eq!(self.parent_canonical_id, canonical_id);
+        verter_debug_assert_eq!(self.parent_canonical_id, canonical_id);
         self.host.build_generic_child_prop_overrides(
             canonical_id,
             snapshot,
@@ -1056,7 +1056,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         eval_env: &mut Option<Self::EvalEnv>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Vec<DynamicRootCandidate> {
-        debug_assert_eq!(self.parent_canonical_id, canonical_id);
+        verter_debug_assert_eq!(self.parent_canonical_id, canonical_id);
         self.host.resolve_dynamic_root_candidates(
             canonical_id,
             snapshot,

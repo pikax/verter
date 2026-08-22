@@ -58,6 +58,9 @@
 //! 2. Snapshot (cached content)
 //! 3. Disk via `NativeFs`
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 pub mod ambient_lib;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "ambient_lib_tests.rs"]

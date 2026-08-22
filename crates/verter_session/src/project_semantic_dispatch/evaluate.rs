@@ -134,7 +134,7 @@ impl EvaluateDeferredOutcome {
             // The frame requirement bites when there is a partial OR a suppress
             // to fold — the sole moments a dropped signal becomes the escape
             // hatch. A frameless pure-`Complete` (nothing to fold) is permitted.
-            debug_assert!(
+            verter_debug_assert!(
                 !dispatch.build_local_taint.borrow().is_empty(),
                 "into_active_query_build_node released a Partial or cache-suppressed node with \
                  no active cold-build/relation taint frame: the completeness / suppress signal \

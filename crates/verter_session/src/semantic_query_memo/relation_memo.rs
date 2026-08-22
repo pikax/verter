@@ -69,7 +69,7 @@ impl SemanticGraphStore {
         &self,
         key: &crate::semantic_query::RelateMemoKey,
     ) -> Option<InlineRelationFlight> {
-        debug_assert!(
+        verter_debug_assert!(
             key.inference_context.is_none(),
             "binding relation roots use independently-owned cooperative flights"
         );

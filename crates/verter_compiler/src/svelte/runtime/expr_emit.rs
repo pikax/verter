@@ -1142,7 +1142,7 @@ pub(super) fn declaration_name_mapped_code(
     match mapped_name_at(&code, DECL_LET_PREFIX.len(), name, name_span_start) {
         Some(mapping) => super::output::MappedCode::from_parts(code, vec![mapping]),
         None => {
-            debug_assert!(
+            verter_debug_assert!(
                 false,
                 "a synthesized declaration fragment whose name token is not at the fixed \
                  prefix offset cannot carry its authored provenance: {code}"

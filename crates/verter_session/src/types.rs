@@ -2119,7 +2119,7 @@ macro_rules! block_content_nominal_token {
             }
 
             pub(crate) fn mint(value: String) -> Self {
-                debug_assert!(!value.is_empty() && value.len() <= 256);
+                verter_debug_assert!(!value.is_empty() && value.len() <= 256);
                 Self(Arc::from(value))
             }
         }

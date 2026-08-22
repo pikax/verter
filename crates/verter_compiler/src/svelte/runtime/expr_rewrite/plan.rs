@@ -115,7 +115,7 @@ pub(super) fn plan_signal_edits(
     // decision. The planner sets `unresolved` if it ever sees a `MustRewrite` occurrence it
     // did not turn into an edit — a structural safeguard against a silent un-rewritten
     // signal read slipping through.
-    debug_assert!(
+    verter_debug_assert!(
         !planner.unresolved(),
         "rewrite planner left a resolved signal/prop occurrence un-rewritten in `{source}`"
     );
@@ -162,7 +162,7 @@ pub(super) fn plan_script_statement_edits(
     if let Some(surface) = planner.take_refusal() {
         return Err(surface);
     }
-    debug_assert!(
+    verter_debug_assert!(
         !planner.unresolved(),
         "rewrite planner left a resolved script occurrence un-rewritten in `{source}`"
     );

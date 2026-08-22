@@ -78,7 +78,7 @@ impl UpsertBatchTxn {
             verter_workspace::probe_scope!(UPSERT_WAIT);
             host.scheduler.wait_batch(&batch)
         };
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             states.len(),
             prepared.len(),
             "wait_batch must return one completion state per submitted request"

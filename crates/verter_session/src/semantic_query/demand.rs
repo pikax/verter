@@ -744,7 +744,7 @@ impl From<ProjectionMode> for Demand {
 /// terminal modes (§3.4 corollary). See the
 /// `demand_at_hop_is_monotone_in_the_terminal` guard.
 pub fn demand_at_hop(i: usize, n: usize, terminal: &Demand) -> Demand {
-    debug_assert_eq!(
+    verter_debug_assert_eq!(
         n,
         terminal.projection.path.len(),
         "demand_at_hop: n must equal the terminal path length (one hop per segment)"

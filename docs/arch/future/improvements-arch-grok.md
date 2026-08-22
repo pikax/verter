@@ -138,7 +138,7 @@ owned by the type-parameter-bound confinement block). No reverse
   producer boundaries transiently consume lease-only authored `TypeExpr` to
   mint graph, fact, or locator outputs and may not retain it.
 - Residual inventory — landed as a permanent curated ratchet
-  (`crates/verter_session/tests/cases/residual_type_expr_body_reader_inventory.rs`);
+  (`crates/verter_source_policy_gate/tests/cases/residual_type_expr_body_reader_inventory.rs`);
   do not expand the residual set. The open storage pockets (memoized
   `LoweredTypeDecl.type_parameters: Vec<TypeParam>`; `TypeParamBinding.constraint/default`
   `Arc<TypeExpr>` bounds in cached prepared decl bundles) are owned by the separate

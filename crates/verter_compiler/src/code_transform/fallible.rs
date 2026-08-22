@@ -138,7 +138,7 @@ impl<'a> CodeTransform<'a> {
         };
 
         if !self.splice_replace_range(start, end, content_ref) {
-            debug_assert!(
+            verter_debug_assert!(
                 preserved_first_outro.is_empty(),
                 "the nested no-op probe must fire before the outro extraction"
             );

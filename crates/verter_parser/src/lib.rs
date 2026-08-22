@@ -1,5 +1,8 @@
 //! # verter_parser — Vue SFC parser
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 pub mod ast;
 pub mod common;
 pub mod cursor;

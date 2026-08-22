@@ -97,7 +97,7 @@ impl VerterHost {
         // PRESENCE (`Some`/`None`). The oracle stays authoritative for the
         // id VALUE (see the reader's doc on stable-unique vs
         // equal-to-oracle); release builds skip this entirely.
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             oracle.is_some(),
             self.local_type_declaration_id_graph_native(canonical_source, resolved_name)
                 .is_some(),
@@ -257,7 +257,7 @@ impl VerterHost {
         #[cfg(debug_assertions)]
         {
             let graph_native = self.peel_value_decl_alias_graph_native(canonical_id, owner, name);
-            debug_assert_eq!(
+            verter_debug_assert_eq!(
                 current, graph_native,
                 "graph-native consumer-reader readiness: graph-native C2 peeler diverged from the oracle for \
                  ({canonical_id}, {owner:?}, {name})"
@@ -1752,7 +1752,7 @@ impl VerterHost {
                         registry_node_ids: Vec::new(),
                     })
                 } else {
-                    debug_assert!(
+                    verter_debug_assert!(
                     lengths_match,
                     "surface_identities length mismatch — closure-call cardinality drifted from \
                      ExpandedComponentTypes vector lengths. props {}/{}, emits {}/{}, \

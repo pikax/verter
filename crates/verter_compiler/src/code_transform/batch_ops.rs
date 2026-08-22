@@ -299,11 +299,11 @@ impl<'a> CodeTransform<'a> {
             return self;
         }
 
-        debug_assert!(
+        verter_debug_assert!(
             plain.windows(2).all(|w| w[0].0 <= w[1].0),
             "batch_prepend_left_merged requires a sorted plain channel"
         );
-        debug_assert!(
+        verter_debug_assert!(
             mapped.windows(2).all(|w| w[0].0 <= w[1].0),
             "batch_prepend_left_merged requires a sorted mapped channel"
         );
@@ -406,7 +406,7 @@ impl<'a> CodeTransform<'a> {
         // Precondition: inputs must be sorted by start position.
         // Overlapping ranges are tolerated — the chunk-processing loop already
         // handles them gracefully, and output_delta accounts for skipped regions.
-        debug_assert!(
+        verter_debug_assert!(
             overwrites.windows(2).all(|w| w[0].0 <= w[1].0),
             "batch_overwrite requires sorted ranges"
         );

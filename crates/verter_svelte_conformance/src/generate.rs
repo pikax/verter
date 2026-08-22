@@ -592,7 +592,7 @@ pub fn write_corpus(root: &Path) -> io::Result<WriteReport> {
     let expected = expected_files(&plan)?;
 
     let fixtures_dir = root.join(FIXTURES_DIR);
-    debug_assert_eq!(
+    verter_debug_assert_eq!(
         fixtures_dir.parent(),
         Some(root),
         "the clean-rewrite target must be the corpus-owned fixtures subtree"

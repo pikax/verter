@@ -2049,8 +2049,9 @@ struct SignificantByteState {
 
 impl SignificantByteState {
     fn previous_for_identifier(&mut self, start: usize) -> Option<u8> {
-        debug_assert_eq!(
-            self.cursor, start,
+        verter_debug_assert_eq!(
+            self.cursor,
+            start,
             "significant-byte state must advance with the lexical scanner"
         );
         self.work.identifier_lookups += 1;
@@ -2058,8 +2059,9 @@ impl SignificantByteState {
     }
 
     fn skip_insignificant(&mut self, start: usize, end: usize) {
-        debug_assert_eq!(
-            self.cursor, start,
+        verter_debug_assert_eq!(
+            self.cursor,
+            start,
             "insignificant lexical runs must be consumed in source order"
         );
         self.work.bytes_scanned += end - start;
@@ -2067,19 +2069,21 @@ impl SignificantByteState {
     }
 
     fn consume_identifier(&mut self, start: usize, end: usize, last_byte: u8) {
-        debug_assert_eq!(
-            self.cursor, start,
+        verter_debug_assert_eq!(
+            self.cursor,
+            start,
             "identifier tokens must be consumed in source order"
         );
-        debug_assert!(end > start, "an identifier token must not be empty");
+        verter_debug_assert!(end > start, "an identifier token must not be empty");
         self.work.bytes_scanned += end - start;
         self.cursor = end;
         self.last_significant = Some(last_byte);
     }
 
     fn consume_code_byte(&mut self, offset: usize, byte: u8) {
-        debug_assert_eq!(
-            self.cursor, offset,
+        verter_debug_assert_eq!(
+            self.cursor,
+            offset,
             "code bytes must be consumed in source order"
         );
         self.work.bytes_scanned += 1;
@@ -2090,8 +2094,9 @@ impl SignificantByteState {
     }
 
     fn finish(self, len: usize) -> SignificantByteScanWork {
-        debug_assert_eq!(
-            self.cursor, len,
+        verter_debug_assert_eq!(
+            self.cursor,
+            len,
             "the lexical scanner must classify every source byte"
         );
         self.work

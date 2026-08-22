@@ -242,7 +242,7 @@ pub fn build_manifest() -> CoverageManifest {
             let levels = RowLevels::decode(classified.row)
                 .expect("selected rows decode (generate enumerates in-range rows only)");
             let disposition = classify(&levels);
-            debug_assert_eq!(disposition.partition(), classified.partition);
+            verter_debug_assert_eq!(disposition.partition(), classified.partition);
             ManifestCase {
                 slug: slug(&levels),
                 row: classified.row,

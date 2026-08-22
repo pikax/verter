@@ -325,7 +325,7 @@ impl HostAuditRuntime {
         // The `sampler_started` latch above is THIS host's spawn signal,
         // read back per-host via `sampler_spawned()`.
         let mut slot = self.sampler_thread.lock();
-        debug_assert!(
+        verter_debug_assert!(
             slot.is_none(),
             "sampler_started latch must guarantee a single spawn",
         );

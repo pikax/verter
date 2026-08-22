@@ -324,7 +324,7 @@ impl QueryArena {
     ///
     /// Panics in debug mode if the arena exceeds `u32::MAX - 1` nodes.
     pub fn alloc(&mut self, node: Node) -> NodeId {
-        debug_assert!(
+        verter_debug_assert!(
             self.nodes.len() < (u32::MAX - 1) as usize,
             "arena overflow: exceeded u32::MAX - 1 nodes"
         );

@@ -362,7 +362,7 @@ impl VerterHost {
         canonical_id: &str,
         level: TypeInfoQueryLevel,
     ) -> Option<TypeInfoSurface> {
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             level,
             TypeInfoQueryLevel::PublicType,
             "resolve_vue_public_type serves the PublicType level"
@@ -519,7 +519,7 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         request: &VueMacroSurfaceRequest,
     ) -> Option<VueMacroSurface> {
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             request.level,
             TypeInfoQueryLevel::FullMetadata,
             "resolve_vue_macro_surface serves the FullMetadata level"

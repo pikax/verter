@@ -414,7 +414,7 @@ fn combinations(items: &[u8], k: usize) -> Vec<Vec<u8>> {
             current.pop();
         }
     }
-    debug_assert!(k >= 1 && k <= items.len());
+    verter_debug_assert!(k >= 1 && k <= items.len());
     let mut out = Vec::new();
     recurse(items, k, 0, &mut Vec::with_capacity(k), &mut out);
     out

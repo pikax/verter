@@ -2901,7 +2901,7 @@ impl<'ast, 'alloc> SsrCodeGen<'ast, 'alloc> {
                         if let Some(placeholder_pos) = static_class_placeholder_offset {
                             let start = placeholder_pos as usize;
                             let end = start + CLASS_PLACEHOLDER.len();
-                            debug_assert_eq!(
+                            verter_debug_assert_eq!(
                                 &attrs_obj[start..end],
                                 CLASS_PLACEHOLDER,
                                 "recorded placeholder offset must still point at CLASS_PLACEHOLDER"

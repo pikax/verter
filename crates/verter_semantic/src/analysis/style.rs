@@ -214,7 +214,7 @@ impl CssAnalysis {
     /// Only runs in debug builds (`debug_assert!`).
     pub fn debug_assert_valid_spans(&self, sfc_source_len: u32) {
         fn check(span: Span, sfc_source_len: u32, label: &str) {
-            debug_assert!(
+            verter_debug_assert!(
                 span.end <= sfc_source_len,
                 "CSS span out of bounds: {label} span {start}..{end} exceeds SFC length {sfc_source_len}",
                 start = span.start,

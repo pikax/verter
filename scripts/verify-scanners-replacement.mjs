@@ -70,7 +70,7 @@ const B4_RUST_GUARD_COMMANDS = [
     [
       "test",
       "-p",
-      "verter_session",
+      "verter_source_policy_gate",
       "--test",
       "main",
       "cases::scanners_replacement::scanners_replacement",
@@ -396,12 +396,22 @@ function realExec(command, args, cwd) {
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-function sumPassedTests(stdout) {
+// libtest prints one "test result: ok. N passed; M failed; ..." line per binary
+// and, critically, EXITS 0 even when a name filter matches nothing (N == 0). A
+// stale `-p`/module-path filter therefore "passes" a naive `status === 0` check
+// while having run NOTHING — the exact zero-selection-reads-as-pass shape this
+// verifier exists to catch (CLAUDE.md "Verification Must Prove Execution").
+// `summarizeTestRun` is the ONE place that turns raw stdout into a pass/fail
+// verdict for a guard command, so every caller gets the same zero-selection
+// floor instead of re-deriving (and potentially forgetting) it per call site.
+function summarizeTestRun(stdout) {
   let passed = 0;
+  let sawResultLine = false;
   for (const match of stdout.matchAll(/test result: \w+\. (\d+) passed;/g)) {
+    sawResultLine = true;
     passed += Number(match[1]);
   }
-  return passed;
+  return { passed, sawResultLine };
 }
 
 export function runFocusedRustGuards(root = DEFAULT_ROOT, exec = realExec) {
@@ -411,8 +421,16 @@ export function runFocusedRustGuards(root = DEFAULT_ROOT, exec = realExec) {
     console.log(`\n[verify] ${shown}`);
     const { status, stdout } = exec(command, args, root);
     invariant(status === 0, `rust guard failed (exit ${status}): ${shown}`);
-    const passed = sumPassedTests(stdout);
-    invariant(passed > 0, `rust guard selected zero tests: ${shown}`);
+    const { passed, sawResultLine } = summarizeTestRun(stdout);
+    invariant(
+      sawResultLine,
+      `rust guard produced no parseable "test result:" summary (cannot prove it ran): ${shown}`,
+    );
+    invariant(
+      passed > 0,
+      `rust guard ZERO-SELECTION: filter matched no tests, which libtest reports as exit 0 — ` +
+        `this would silently read as a pass without this check: ${shown}`,
+    );
     receipts.push({ command: shown, exit_code: status, tests_passed: passed });
   }
   return receipts;

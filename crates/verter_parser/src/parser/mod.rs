@@ -677,7 +677,7 @@ impl Syntax {
         }
 
         // Names match — safe to pop.
-        debug_assert!(
+        verter_debug_assert!(
             !self.stack_elements.is_empty(),
             "stack_elements should not be empty after name match"
         );

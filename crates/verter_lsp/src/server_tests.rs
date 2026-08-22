@@ -14015,7 +14015,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
     let pending_snapshot_provider_sync = DashSet::new();
     pending_snapshot_provider_sync.insert("/workspace/src/App.vue".to_string());
 
-    // No panic (pre-fix the debug_assert!(is_unresolved) fires on the Owned reuse).
+    // No panic (pre-fix the verter_debug_assert!(is_unresolved) fires on the Owned reuse).
     drain_pending_snapshot_provider_sync(
         Some(&sync),
         &documents,

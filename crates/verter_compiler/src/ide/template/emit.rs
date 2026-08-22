@@ -498,7 +498,7 @@ fn emit_plan_in_place<'alloc>(out: &mut CodeGenOutput<'alloc>, plan: &ExprPlan<'
             // Synthetic scaffolding is only produced by the object-literal layer,
             // which always relocates. An in-place synthetic piece is a caller bug.
             ExprPiece::Synthetic { .. } => {
-                debug_assert!(
+                verter_debug_assert!(
                     false,
                     "Synthetic piece (object-literal scaffolding) cannot be emitted IN-PLACE"
                 );
@@ -528,7 +528,7 @@ fn emit_plan_in_place<'alloc>(out: &mut CodeGenOutput<'alloc>, plan: &ExprPlan<'
             // verbatim source slice. It is only ever planned for the relocated
             // shorthands; in-place emission of one is a planner/caller bug.
             ExprPiece::SynthesizedCore { .. } => {
-                debug_assert!(
+                verter_debug_assert!(
                     false,
                     "SynthesizedCore piece cannot be emitted IN-PLACE (its text is not a source slice)"
                 );

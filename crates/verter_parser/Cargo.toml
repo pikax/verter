@@ -22,6 +22,7 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 parser_cache_audit = []
 
 [dependencies]
+verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
 verter_language = { path = "../verter_language", version = "0.0.1-beta.3" }
 verter_type_expr = { workspace = true }

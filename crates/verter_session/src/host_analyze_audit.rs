@@ -150,7 +150,7 @@ impl VerterHost {
         // rejects `SemanticAnalysis`; the `Active` arm captures a slot
         // in the host's active-request registry.
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        debug_assert!(
+        verter_debug_assert!(
             ctx.audit_registration.get().is_none(),
             "freshly-constructed RequestContext must have no audit_registration",
         );

@@ -47,12 +47,15 @@
 const VERDICT_LINE = /^\[gate\](?:\[error\])? VERDICT: (FAIL|PASS-WITH-TOLERATED|PASS)\b/;
 const FAILURE_LINE = /^\[gate\]\[error\]\s+\[(.+?)\]\s+(.+)$/;
 
-// The exact SURFACE header lines gate.mjs prints via `log()`, used to segment the log so a nextest
-// binary-id lookup for a given surface's failures searches ONLY that surface's own raw recap — never a
-// different surface's (which could name the same test under a different profile / outcome).
+// The exact header lines gate.mjs prints via `log()`, used to segment the log so a nextest binary-id
+// lookup for a given surface's failures searches ONLY that surface's own raw recap — never a different
+// surface's (which could name the same test under a different profile / outcome). Matched against
+// gate.mjs's ACTUAL current output, not the deleted SURFACE 2 (direct in-process libtest replay) / old
+// package-filtered SURFACE 3 shape — see the maintainer's SINGLE-TEST-UNIVERSE directive. There are only
+// two segments in the current gate: SURFACE 1 (the main archive's `cargo nextest run`) and the
+// SHIPPED-CFG GUARD's own small package-scoped `cargo nextest run -p verter_shipped_cfg_contract`.
 const SURFACE1_HEADER = /^\[gate\] SURFACE 1: nextest run from the archive/;
-const SURFACE2_HEADER = /^\[gate\] SURFACE 2: directly executing/;
-const SURFACE3_HEADER = /^\[gate\] SURFACE 3: building the shipped-cfg test universe/;
+const SHIPPED_CFG_HEADER = /^\[gate\] SHIPPED-CFG GUARD: cargo nextest run/;
 
 // Find the gate's own verdict in a captured log. Returns:
 //   { kind: "fail", failures: [{surface, name}] }   — a FAIL verdict; failures is the exact named list
@@ -89,25 +92,23 @@ export function parseGateVerdict(text) {
   return { kind: "fail", failures };
 }
 
-// Split a captured gate log into its per-surface raw segments (SURFACE 1 / SURFACE 3's own `cargo nextest
-// run` mirrored stdout+stderr — the raw recap `extractNextestTerminalFailures` can read binary-ids out
-// of). SURFACE 2 (the direct in-process libtest execution) is deliberately NOT segmented here: its stdout
-// is captured separately by gate.mjs (`captureStdoutSeparately: true`) and never mirrored live to the
-// gate's own stderr stream, so it never appears in an operator's tee capture — SURFACE 2 failures carry
-// their binary-id directly in the verdict-line `surface` tag instead (`libtest:<binary-id>`), which
-// `resolveIsolationTargets` reads without needing a log segment at all.
+// Split a captured gate log into its per-surface raw segments — SURFACE 1's own `cargo nextest run` and
+// the SHIPPED-CFG GUARD's own package-scoped `cargo nextest run -p verter_shipped_cfg_contract`, both
+// mirrored live to the gate's stdout/stderr by default (`runContainedStep`'s `captureStdoutSeparately`
+// defaults to `false` for both), so both raw recaps are present in an operator's `tee` capture and the
+// raw recap `extractNextestTerminalFailures` can read binary-ids out of either.
 export function splitGateLogSurfaces(text) {
   const lines = text.split("\n");
   const idx = (re) => lines.findIndex((l) => re.test(l));
   const s1 = idx(SURFACE1_HEADER);
-  const s2 = idx(SURFACE2_HEADER);
-  const s3 = idx(SURFACE3_HEADER);
+  const sc = idx(SHIPPED_CFG_HEADER);
   const verdict = lines.findIndex((l) => VERDICT_LINE.test(l));
   const end = lines.length;
-  const seg = (start, stop) => (start === -1 ? "" : lines.slice(start, stop === -1 ? end : stop).join("\n"));
-  const s1Stop = s2 !== -1 ? s2 : s3 !== -1 ? s3 : verdict !== -1 ? verdict : -1;
-  const s3Stop = verdict !== -1 ? verdict : -1;
-  return { surface1: seg(s1, s1Stop), surface3: seg(s3, s3Stop) };
+  const seg = (start, stop) =>
+    start === -1 ? "" : lines.slice(start, stop === -1 ? end : stop).join("\n");
+  const s1Stop = sc !== -1 ? sc : verdict !== -1 ? verdict : -1;
+  const scStop = verdict !== -1 ? verdict : -1;
+  return { surface1: seg(s1, s1Stop), shippedCfg: seg(sc, scStop) };
 }
 
 // A failure `name` wrapped in `<...>` is a SYNTHETIC diagnostic entry gate.mjs itself manufactures when a
@@ -123,8 +124,9 @@ export function isSyntheticFailureName(name) {
 // 2. Turning each named failure into an isolation target: an exact nextest filter expression + the cargo
 //    profile that produced it, recovered from the gate's own reused parsing (`extractNextestTerminalFailures`
 //    on the surface's raw segment) wherever the raw recap is available, or degrading to a name-only filter
-//    with an explicit caveat when it is not (SURFACE 2's synthetic verdict tag already carries binary-id
-//    directly; a truncated/partial log degrades gracefully rather than refusing outright).
+//    with an explicit caveat when it is not (a `libtest:<binary-id>` verdict tag, if one is ever produced,
+//    already carries binary-id directly; a truncated/partial log degrades gracefully rather than refusing
+//    outright).
 // ----------------------------------------------------------------------------------------------------
 
 // nextest's filterset DSL accepts a bare unquoted string for `test(=..)`/`binary_id(..)` when it contains
@@ -147,9 +149,22 @@ export function buildIsolationFilter(binaryId, name) {
 }
 
 // The exact `cargo nextest run ...` argv that reproduces ONE isolated attempt — printed in the report so a
-// human can paste it directly, and reused verbatim by the CLI's own rerun driver.
-export function buildIsolationRunArgs({ filter, cargoProfile, extraArgs = [] }) {
-  const args = ["nextest", "run", "-E", filter, "--test-threads", "1", ...extraArgs];
+// human can paste it directly, and reused verbatim by the CLI's own rerun driver. `packageScope`, when
+// given, adds `-p <package>` — required for the shipped-cfg guard's failures REGARDLESS of whether
+// binary-id recovery succeeded: that guard's live invocation is itself package-scoped
+// (`cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions`), and a
+// name-only rerun with no `-p` resolves against the whole workspace instead, where feature unification
+// can change which candidates even compile — risking a genuine package-scoped failure misclassified as
+// an INTERACTION.
+export function buildIsolationRunArgs({
+  filter,
+  cargoProfile,
+  packageScope = null,
+  extraArgs = [],
+}) {
+  const args = ["nextest", "run"];
+  if (packageScope) args.push("-p", packageScope);
+  args.push("-E", filter, "--test-threads", "1", ...extraArgs);
   if (cargoProfile) args.push("--cargo-profile", cargoProfile);
   return args;
 }
@@ -169,7 +184,7 @@ function recoverBinaryId(segmentText, name, extractFn) {
 // bucket, given the log's per-surface raw segments and the injected nextest-recap extractor.
 //
 // Returns { targets: [...], unclassifiable: [...] }.
-//   target: { surface, name, binaryId, cargoProfile, filter, runArgs, caveat }
+//   target: { surface, name, binaryId, cargoProfile, packageScope, filter, runArgs, caveat }
 //   unclassifiable: { surface, name, reason }
 export function resolveIsolationTargets({ failures, surfaces, extractNextestTerminalFailures }) {
   const targets = [];
@@ -187,16 +202,24 @@ export function resolveIsolationTargets({ failures, surfaces, extractNextestTerm
     }
     let binaryId = null;
     let cargoProfile = null;
+    let packageScope = null;
     let caveat = "";
     if (f.surface === "nextest" || f.surface.startsWith("nextest:")) {
       binaryId = recoverBinaryId(surfaces.surface1, f.name, extractNextestTerminalFailures);
       cargoProfile = null; // dev profile (SURFACE 1's own archive)
-    } else if (f.surface === "shipped-cfg/nextest" || f.surface.startsWith("shipped-cfg/nextest:")) {
-      binaryId = recoverBinaryId(surfaces.surface3, f.name, extractNextestTerminalFailures);
-      cargoProfile = "no-debug-assertions"; // SURFACE 3's shipped-cfg archive — see Cargo.toml
+    } else if (
+      f.surface === "shipped-cfg/nextest" ||
+      f.surface.startsWith("shipped-cfg/nextest:")
+    ) {
+      binaryId = recoverBinaryId(surfaces.shippedCfg, f.name, extractNextestTerminalFailures);
+      cargoProfile = "no-debug-assertions"; // the shipped-cfg guard's own profile — see Cargo.toml
+      // Package-scoped REGARDLESS of binary-id recovery: the live guard itself runs
+      // `-p verter_shipped_cfg_contract`, so the rerun must match that exactly, not degrade to a
+      // whole-workspace name-only selection when the raw recap segment was not present in the log.
+      packageScope = "verter_shipped_cfg_contract";
     } else if (f.surface.startsWith("libtest:")) {
       binaryId = f.surface.slice("libtest:".length);
-      cargoProfile = null; // SURFACE 2 runs from the SAME dev archive as SURFACE 1
+      cargoProfile = null; // runs from the SAME dev archive as SURFACE 1
     } else {
       unclassifiable.push({
         surface: f.surface,
@@ -209,7 +232,8 @@ export function resolveIsolationTargets({ failures, surfaces, extractNextestTerm
       caveat =
         "binary-id could not be recovered (the raw nextest recap for this surface was not present in the " +
         "captured log, or the name was not found in it) — this filter matches by test name ALONE, which " +
-        "may select more than one test if the same name exists in multiple binaries";
+        "may select more than one test if the same name exists in multiple binaries" +
+        (packageScope ? ` (rerun stays package-scoped to ${packageScope} regardless)` : "");
     }
     const filter = buildIsolationFilter(binaryId, f.name);
     targets.push({
@@ -217,8 +241,9 @@ export function resolveIsolationTargets({ failures, surfaces, extractNextestTerm
       name: f.name,
       binaryId,
       cargoProfile,
+      packageScope,
       filter,
-      runArgs: buildIsolationRunArgs({ filter, cargoProfile }),
+      runArgs: buildIsolationRunArgs({ filter, cargoProfile, packageScope }),
       caveat,
     });
   }

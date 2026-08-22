@@ -254,7 +254,7 @@ impl SemanticGraphStore {
         let mut staged: Vec<StagedMember> =
             Vec::with_capacity(relation_members.len() + flow_members.len() + call_members.len());
         for member in relation_members {
-            debug_assert!(
+            verter_debug_assert!(
                 member.flight.prepared.key() == &member.key.to_query_key(),
                 "an inline relation flight must publish its own exact full key"
             );
@@ -277,7 +277,7 @@ impl SemanticGraphStore {
             ));
         }
         for member in flow_members {
-            debug_assert!(
+            verter_debug_assert!(
                 matches!(member.flight.prepared.key(), SemanticQueryKey::FlowReturn(k) if **k == member.key),
                 "an inline flow-return flight must publish its own exact full key"
             );
@@ -295,7 +295,7 @@ impl SemanticGraphStore {
             staged.push(self.stage_member(family, entry, StagedFlight::Flow(member.flight), ctx));
         }
         for member in call_members {
-            debug_assert!(
+            verter_debug_assert!(
                 matches!(member.flight.prepared.key(), SemanticQueryKey::ResolveCall(k) if **k == member.key),
                 "an inline ResolveCall flight must publish its own exact full key"
             );

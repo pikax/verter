@@ -111,7 +111,26 @@ use walkdir::WalkDir;
 // discriminating detector.
 use super::handle_capable_consumer_guards::cfg_is_exactly_test_or_test_support;
 
+// Relocated from `verter_session` (gate-performance step 2): this guard scans
+// verter_session's OWN production `src/` and reads specific verter_session
+// production files by relative path (`OWNER_REL`/`RAISE_REL`), so — unlike a
+// same-crate test where `CARGO_MANIFEST_DIR` IS the scanned crate —
+// `crate_root()` must explicitly re-anchor to `crates/verter_session` rather
+// than to this crate's own manifest dir. The ONE exception is this file's own
+// self-read (`own_src` below), which must resolve against THIS crate's own
+// manifest dir instead — see `own_crate_root()`.
 fn crate_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crate is <ws>/crates/verter_source_policy_gate")
+        .join("crates/verter_session")
+}
+
+/// THIS crate's own manifest dir — distinct from `crate_root()` (the
+/// verter_session dir being scanned). Used only to re-read this file's own
+/// source for the self-referential doc/list-parity checks below.
+fn own_crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
@@ -17022,7 +17041,10 @@ fn hot_detector_spellings_are_live_or_synthetic() {
         prod_sources.len()
     );
 
-    let own_src = read_rel("tests/cases/output_projector_residual_guards.rs");
+    let own_src = std::fs::read_to_string(
+        own_crate_root().join("tests/cases/output_projector_residual_guards.rs"),
+    )
+    .expect("read own source");
 
     let lists: &[(&str, &[&str])] = &[
         ("HOT_MAT_DIRECT_IDENTS", HOT_MAT_DIRECT_IDENTS),

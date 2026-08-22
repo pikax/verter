@@ -303,7 +303,7 @@ impl Drop for TypeRuntimeTraceGuard {
         // out-of-contract identity-miss path that returns `None`.
         with_state_by_identity(state.storage, state.state_id, |trace_state| {
             let popped = trace_state.stack.pop();
-            debug_assert_eq!(
+            verter_debug_assert_eq!(
                 popped.map(|ctx| ctx.span_id),
                 Some(state.span_id),
                 "trace guard must pop its own span from its own state",

@@ -54,12 +54,14 @@ test("rust guard phase fails on a zero-selection child instead of silently passi
   assert.throws(
     () =>
       runFocusedRustGuards(".", fakeExec("running 0 tests\ntest result: ok. 0 passed; 0 failed\n")),
-    /selected zero tests/,
+    /ZERO-SELECTION/,
   );
-  // RED control: no cargo summary line at all is likewise zero proven work.
+  // RED control: no cargo summary line at all is likewise zero proven work,
+  // but distinguishably so — this is "never ran" rather than "ran and matched
+  // nothing", so it must fail on the no-parseable-summary message instead.
   assert.throws(
     () => runFocusedRustGuards(".", fakeExec("compiled fine, no tests emitted\n")),
-    /selected zero tests/,
+    /cannot prove it ran/,
   );
 });
 

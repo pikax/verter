@@ -24,6 +24,7 @@ path = "src/bin/verter_tsgo_fake_engine.rs"
 required-features = ["test-fake-engine"]
 
 [dependencies]
+verter_debug_assert = { workspace = true }
 # Async runtime for the process actor + scheduling lanes. `net` adds the
 # named-pipe (Windows) / Unix-domain-socket transport the `--api` ATTACH path
 # connects to (the server-minted pipe). Feature set otherwise matches the

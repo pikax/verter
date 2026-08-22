@@ -142,8 +142,8 @@ impl<'a> PositionResolver<'a> {
     /// where only line/column is needed.
     #[inline]
     pub fn offset_to_line_and_col(&self, offset: usize) -> (usize, usize) {
-        debug_assert!(offset <= self.input.len(), "offset out of bounds");
-        debug_assert!(
+        verter_debug_assert!(offset <= self.input.len(), "offset out of bounds");
+        verter_debug_assert!(
             self.input.is_char_boundary(offset),
             "offset must land on a char boundary"
         );
@@ -166,8 +166,8 @@ impl<'a> PositionResolver<'a> {
     /// Returns the 1-based line and UTF-16 column for the given byte offset.
     #[inline]
     pub fn offset_to_line_col(&self, offset: usize) -> (usize, usize, usize) {
-        debug_assert!(offset <= self.input.len(), "offset out of bounds");
-        debug_assert!(
+        verter_debug_assert!(offset <= self.input.len(), "offset out of bounds");
+        verter_debug_assert!(
             self.input.is_char_boundary(offset),
             "offset must land on a char boundary"
         );
@@ -270,8 +270,8 @@ impl<'a> PositionSweep<'a> {
     /// Advances linearly from the last known line position.
     #[inline]
     pub fn offset_to_line_col(&mut self, offset: usize) -> (usize, usize, usize) {
-        debug_assert!(offset <= self.resolver.input.len(), "offset out of bounds");
-        debug_assert!(
+        verter_debug_assert!(offset <= self.resolver.input.len(), "offset out of bounds");
+        verter_debug_assert!(
             self.resolver.input.is_char_boundary(offset),
             "offset must land on a char boundary"
         );

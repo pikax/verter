@@ -752,7 +752,7 @@ pub fn push_u32(buf: &mut String, n: u32) {
         val /= 10;
     }
     // SAFETY: digits are all ASCII (b'0'..=b'9'), valid UTF-8
-    debug_assert!(std::str::from_utf8(&tmp[pos..]).is_ok());
+    verter_debug_assert!(std::str::from_utf8(&tmp[pos..]).is_ok());
     buf.push_str(unsafe { std::str::from_utf8_unchecked(&tmp[pos..]) });
 }
 
@@ -1070,7 +1070,7 @@ pub fn format_patch_flag<'a>(
 /// element, visit_text, etc.) to catch AST position bugs early.
 #[inline(always)]
 pub fn debug_assert_slice_bounds(source: &str, start: u32, end: u32, context: &str) {
-    debug_assert!(
+    verter_debug_assert!(
         (end as usize) <= source.len() && (start as usize) <= (end as usize),
         "source slice out of bounds in {context}: start={start}, end={end}, source.len()={}",
         source.len()
@@ -1089,12 +1089,12 @@ pub fn debug_assert_element_bounds(
     _tag_open_end: u32,
     name_end: u32,
 ) {
-    debug_assert!(
+    verter_debug_assert!(
         (tag_open_start as usize) < source.len() && (name_end as usize) <= source.len(),
         "element tag name out of bounds: start={tag_open_start}, name_end={name_end}, source.len()={}",
         source.len()
     );
-    debug_assert!(
+    verter_debug_assert!(
         tag_open_start < name_end,
         "element tag_open.start ({tag_open_start}) must be before name_end ({name_end})"
     );
@@ -1380,7 +1380,7 @@ pub fn build_static_html_with_scope(
     let mut pos = start;
     for &offset in injection_offsets {
         let offset = offset as usize;
-        debug_assert!(
+        verter_debug_assert!(
             offset >= pos && offset <= end,
             "injection offset {offset} out of range [{pos}, {end}]"
         );

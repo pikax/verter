@@ -146,9 +146,9 @@ Any change driven THROUGH the landing-train lifecycle — including a single sub
 
 The canonical full verification pass:
 
-1. `node scripts/gate.mjs` — CANONICAL Rust gate. Builds the test universe ONCE via `cargo nextest archive` (single compile, no second-command recompile), then runs the two DEBUG surfaces from the same artifacts — SURFACE 1 = `cargo nextest run --workspace` (per-test process isolation, every workspace test target including the verter_session integration binaries — `main` plus the allowlisted `allocator_canaries`, consolidated per Anti-Binary-Growth Integration-Test Layout); SURFACE 2 = the verter_session libtest binaries executed DIRECTLY (in-process / multi-test-per-process, the same direct surface as `cargo test -p verter_session --tests`). SURFACE 2 runs those binaries from the SAME workspace-unified build as surface 1, avoiding the extra compile a package-scoped `-p verter_session` build used to trigger back when `session_metrics` was still a Cargo feature that unified differently standalone vs in the workspace; that feature has since been replaced by a runtime `HostConfig.metrics_enabled` toggle, so there is no more feature-unification divergence between the two builds — no test target the old pair compiled is dropped. SURFACE 3 then builds a SECOND `--workspace` archive with `--cargo-profile no-debug-assertions` and RUNS `package(verter_session) + package(verter_scheduler)` from it — see "Shipped-cfg surface" below. Before the archive build it runs a freshness-tooling preflight: it ensures the workspace `buf` + `oxfmt` binaries are present (auto-running `pnpm install --frozen-lockfile` inside the mutex/timeout/stall machinery when the `node_modules/.bin` shims are missing), then VERDICT-GATES the `cases::typeinfo_proto_ts_freshness::*` byte-pin tolerance on that outcome — tooling present/installed ⇒ tolerance OFF, so a freshness failure is a HARD gate failure (exit 1), NOT PASS-WITH-TOLERATED; a deterministic install failure (e.g. frozen-lockfile mismatch) ⇒ a LOUD setup failure (exit 127), never silently tolerated (when an install is attempted — both `node_modules/.bin/{buf,oxfmt}` shims already present ⇒ the preflight returns already-present and no install runs); when pnpm is not resolvable AND `buf` is not resolvable the Rust byte-pin pair SKIPS gracefully and PASSES, so the gate reports an ORDINARY PASS (no FAIL line) — the verdict-gated tolerance flips ON there only as a LATENT safety net that would surface PASS-WITH-TOLERATED solely in the unusual case the pair emitted a tolerated FAIL despite `buf` being absent. `oxfmt` absence NEVER grants tolerance — with `buf` present, a missing `oxfmt` is a LOUD setup failure (exit 127), not a degraded run. Run it with `node_modules` present (the normal path) so the byte-pin runs GENUINELY: with the tooling present a freshness failure is a HARD FAIL (a real stale-binding regression to regenerate + commit) — PASS-WITH-TOLERATED is NEVER the regression signal on a normal machine, and on a buf-less runner the pair yields an ordinary PASS via the skip, not PASS-WITH-TOLERATED. See `docs/arch/gate-performance.md`.
-2. `cargo clippy --workspace -- -D warnings`
-3. `cargo check --workspace --release` — the only thing in the loop that compiles the REAL release profile (opt-level 3 + fat LTO); the gate's shipped-cfg surface uses the cheap `no-debug-assertions` profile and surfaces 1–2 are debug. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. It is a CHECK and RUNS NO TESTS, so it cannot observe the runtime half of that class — a state mutation written inside a `debug_assert!` argument compiles fine and silently never executes in a shipped build. Gate SURFACE 3 is what covers that half. Mirrored in CI by the `rust-build-configs` job.
+1. `node scripts/gate.mjs` — CANONICAL Rust gate. SINGLE-TEST-UNIVERSE: builds the test universe ONCE via `cargo nextest archive --workspace` (dev profile) and runs it with `cargo nextest run` (per-test process isolation, every workspace test target including the ~25 verter_session integration binaries — this is SURFACE 1). Deliberate shared-process coverage (a leaked static, TLS surviving a test, a global cache mutated by one test changing another's result) lives INSIDE that one run as ordinary `#[test]`s in `verter_session/tests/cases/shared_process_contract.rs`, not a second archive or a second run. After surface 1, the gate runs the SHIPPED-CFG GUARD: `cargo check --workspace --all-targets --profile no-debug-assertions` (compile-only — catches an item wrongly hidden behind `cfg(debug_assertions)`), then a small package-scoped `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions` — the ONLY tests in the repo that execute with `debug_assertions`/overflow-checks off, run against an independently-verified expected `#[test]` count (never a bare "selected zero tests" check) — see "Shipped-cfg guard" below. Before the archive build it runs a freshness-tooling preflight: it ensures the workspace `buf` + `oxfmt` binaries are present (auto-running `pnpm install --frozen-lockfile` inside the mutex/timeout/stall machinery when the `node_modules/.bin` shims are missing), then VERDICT-GATES the `cases::typeinfo_proto_ts_freshness::*` byte-pin tolerance on that outcome — tooling present/installed ⇒ tolerance OFF, so a freshness failure is a HARD gate failure (exit 1), NOT PASS-WITH-TOLERATED; a deterministic install failure (e.g. frozen-lockfile mismatch) ⇒ a LOUD setup failure (exit 127), never silently tolerated (when an install is attempted — both `node_modules/.bin/{buf,oxfmt}` shims already present ⇒ the preflight returns already-present and no install runs); when pnpm is not resolvable AND `buf` is not resolvable the Rust byte-pin pair SKIPS gracefully and PASSES, so the gate reports an ORDINARY PASS (no FAIL line) — the verdict-gated tolerance flips ON there only as a LATENT safety net that would surface PASS-WITH-TOLERATED solely in the unusual case the pair emitted a tolerated FAIL despite `buf` being absent. `oxfmt` absence NEVER grants tolerance — with `buf` present, a missing `oxfmt` is a LOUD setup failure (exit 127), not a degraded run. Run it with `node_modules` present (the normal path) so the byte-pin runs GENUINELY: with the tooling present a freshness failure is a HARD FAIL (a real stale-binding regression to regenerate + commit) — PASS-WITH-TOLERATED is NEVER the regression signal on a normal machine, and on a buf-less runner the pair yields an ordinary PASS via the skip, not PASS-WITH-TOLERATED. See `docs/arch/gate-performance.md` and `docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`.
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo check --workspace --release` — the only thing in the loop that compiles the REAL release profile (opt-level 3 + fat LTO); the gate's shipped-cfg guard uses the cheap `no-debug-assertions` profile and surface 1 is debug. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. It is a CHECK and RUNS NO TESTS, so it cannot observe the runtime half of that class — a state mutation written inside a `debug_assert!` argument compiles fine and silently never executes in a shipped build. The gate's SHIPPED-CFG GUARD (`verter_shipped_cfg_contract`, run under `no-debug-assertions`) is what covers that half — the ONLY tests in the repo that execute with `debug_assertions` off. Mirrored in CI by the `rust-build-configs` job.
 4. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — host clippy cannot see target-gated code, and the `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE `extensions/lapce` + `extensions/zed` manifests, not this one. Same `rust-build-configs` job in CI.
 5. `cargo fmt --all --check`
 6. `pnpm test` for TypeScript changes
@@ -241,41 +241,64 @@ producer command.
   `finish()` exits 0 whenever FAIL is zero, so skipping on an infrastructure failure would silently retire a
   scenario whose artifacts are present.
 
-**Shipped-cfg surface (SURFACE 3) — what it covers, and what it does not.**
+**Shipped-cfg guard — what it covers, and what it does not.**
 
-`debug_assert!` does not evaluate its argument when `debug_assertions` is off, and `#[cfg(debug_assertions)]`
-items do not exist there. Every shipped artifact (the LSP binary, napi, wasm) is built that way. So a state
-mutation written inside a `debug_assert!` argument — the shipped shape being
-`debug_assert!(session.commit_completed())`, where the call performs the state transition — runs in every
-debug test and in NO shipped build.
+`std::debug_assert!` does not evaluate its argument when `debug_assertions` is off, and
+`#[cfg(debug_assertions)]` items do not exist there. Every shipped artifact (the LSP binary, napi, wasm) is
+built that way. So a state mutation written inside a raw `std::debug_assert!` argument would run in every
+debug test and in NO shipped build. Two structural layers close this for the macro-argument-evaluation
+class: `verter_debug_assert`'s clippy `disallowed-macros` ban on the raw `std::debug_assert!`/`_eq!`/`_ne!`
+macros (enforced by `cargo clippy --workspace --all-targets -- -D warnings`) routes every call site through
+`verter_debug_assert!`/`_eq!`/`_ne!` instead; those macros themselves force-evaluate their condition/operands
+into a local binding BEFORE branching on `cfg!(debug_assertions)`, so the argument always runs regardless of
+profile — only the pass/panic check is debug-only. (`#[cfg(debug_assertions)]` items disappearing from a
+shipped build is a separate class this pair does not cover — see below — and this guard is retained until
+both the `debug_assert!`-argument class and the `cfg(debug_assertions)`/overflow-checked-arithmetic classes
+are structurally eliminated repo-wide.)
 
-- **Nothing else in the repo sees it.** Surfaces 1 and 2 are debug builds, so the effect happens and the
-  tests pass. `cargo check --workspace --release` compiles the shipped cfg but RUNS NOTHING, so it cannot
-  observe a runtime no-op. Only executing tests with `debug_assertions` off makes it observable.
-- **How.** A second `cargo nextest archive --workspace --cargo-profile no-debug-assertions` (the profile is
-  declared in the workspace `Cargo.toml`: `debug_assertions` off + `overflow-checks` off, dev codegen
-  otherwise), then `cargo nextest run` over that archive with
-  `-E 'package(verter_session) + package(verter_scheduler)'`. Same discovery machinery, same watchdog, same
-  failure analyzer as surface 1 — a variant selects only the Cargo profile.
-- **It is also a compile gate.** A dependency's item gated on `debug_assertions` is a profile accident: the
-  predicate is evaluated per compilation unit, so a dependent crate's test code can reference an item that
-  vanishes under another profile. Under this profile that is a COMPILE error in the gate rather than a
-  shipped-build surprise. Cross-crate and cross-target test hooks therefore declare availability with a
-  cargo feature (`verter_scheduler`'s and `verter_session`'s `test-support`), never with `debug_assertions`.
-- **Selection integrity.** The surface fails closed (exit 127) if the filterset's packages are absent from
-  the shipped-cfg archive listing, or if the run executes zero tests.
+- **Nothing else in the repo sees the runtime-no-op class this guard was designed for.** Surface 1 is a
+  debug build, so an in-scope effect would happen and the tests would pass there regardless.
+  `cargo check --workspace --release` compiles the shipped cfg but RUNS NOTHING, so it cannot observe a
+  runtime no-op either. Only executing tests with `debug_assertions` off makes it observable.
+- **How.** (a) `cargo check --workspace --all-targets --profile no-debug-assertions` — compile-only, catches
+  an item wrongly hidden behind `cfg(debug_assertions)` or anything else that fails to compile under the
+  shipped configuration, across the WHOLE workspace, without running anything. (b) A small package-scoped
+  `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions` — NOT another
+  `--workspace` archive, NOT a second whole-workspace run: a normal `cargo nextest run -p <pkg>` that builds
+  only that crate + its dependency closure. `verter_shipped_cfg_contract` is deliberately small ("dozens of
+  tests at most") and covers only the production code paths its own tests exercise — see the crate's own
+  module doc for the current per-crate audit of what has `cfg(debug_assertions)` blocks today.
+- **It is also a compile gate, via step (a).** A dependency's item gated on `debug_assertions` is a profile
+  accident: the predicate is evaluated per compilation unit, so a dependent crate's test code can reference
+  an item that vanishes under another profile. Under this profile that is a COMPILE error in the gate rather
+  than a shipped-build surprise.
+- **Selection integrity.** The guard fails closed (exit 127) if `cargo nextest run -p
+  verter_shipped_cfg_contract` selects a different number of tests than an INDEPENDENT scan of that crate's
+  own source finds `#[test]` attributes — not merely "selected zero tests", which a regression that compiles
+  out every behavioral test while leaving the two profile-sanity canaries intact would still satisfy.
 - **NOT covered, explicitly.** It is not an optimised build: the profile inherits dev codegen (opt-level 0,
   no LTO, many codegen units), so optimisation-, inlining- and LTO-dependent behaviour is out of scope. It
-  runs under nextest process isolation only — there is no in-process shipped-cfg equivalent of surface 2 —
-  and it runs the filterset above, not the whole archive, so a `debug_assertions`-dependent regression in a
-  package outside that filterset is not covered. The real `release` profile is compiled only by
-  `cargo check --workspace --release`, which runs no tests.
-- **Cost.** A second whole-workspace compile: a different profile is a different unit hash, so no artifact
-  is shared with the dev archive.
+  covers only `verter_shipped_cfg_contract`'s own tests, not the whole workspace — a `debug_assertions`-
+  dependent regression in an untested production path elsewhere is not covered by step (b) (step (a) still
+  catches a `cfg(debug_assertions)`-hidden COMPILE failure anywhere in the workspace). The real `release`
+  profile is compiled only by `cargo check --workspace --release`, which runs no tests.
+- **Cost.** One compile-only whole-workspace check under a different profile (a different unit hash, so no
+  artifact is shared with the dev archive) plus one small package build+run — not a second whole-workspace
+  archive+run.
 
-Without Node, or to debug one surface in isolation, run the two underlying debug surfaces directly: `cargo nextest run --workspace` then `cargo test -p verter_session --tests`. Neither covers the shipped-cfg class; the closest manual equivalent is `cargo nextest run --workspace --cargo-profile no-debug-assertions -E 'package(verter_session) + package(verter_scheduler)'`. Run the gate with `node_modules` present (e.g. `pnpm install --frozen-lockfile` first in a fresh worktree) so the freshness-tooling preflight is a no-op and the `cases::typeinfo_proto_ts_freshness::*` byte-pin runs genuinely — with the tooling present a freshness failure is a HARD gate failure (exit 1, a real stale-binding regression to regenerate + commit), not tolerated. On a buf-less runner (pnpm not resolvable AND `buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS; the verdict-gated tolerance flips ON there only as a latent safety net (PASS-WITH-TOLERATED appears solely if the pair somehow emitted a tolerated FAIL despite `buf` being absent, which the skip does not). `oxfmt` absence never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure).
+Without Node, or to debug surface 1 in isolation, run `cargo nextest run --workspace` directly. It does not
+cover the shipped-cfg class; the closest manual equivalent is `cargo check --workspace --all-targets
+--profile no-debug-assertions` followed by `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile
+no-debug-assertions`. Run the gate with `node_modules` present (e.g. `pnpm install --frozen-lockfile` first
+in a fresh worktree) so the freshness-tooling preflight is a no-op and the `cases::typeinfo_proto_ts_freshness::*`
+byte-pin runs genuinely — with the tooling present a freshness failure is a HARD gate failure (exit 1, a real
+stale-binding regression to regenerate + commit), not tolerated. On a buf-less runner (pnpm not resolvable AND
+`buf` not resolvable) the Rust byte-pin SKIPS and PASSES, so the gate reports an ordinary PASS; the
+verdict-gated tolerance flips ON there only as a latent safety net (PASS-WITH-TOLERATED appears solely if the
+pair somehow emitted a tolerated FAIL despite `buf` being absent, which the skip does not). `oxfmt` absence
+never grants tolerance (with `buf` present a missing `oxfmt` is a LOUD setup failure).
 
-Bare `cargo test --workspace --tests` historically silently SKIPPED the verter_session integration suite (~4404 tests): a `session_metrics` Cargo feature unified differently standalone vs in the workspace, dropping those binaries from the workspace test set, so the run reported green while never compiling them. That feature has since been replaced by a runtime `HostConfig.metrics_enabled` toggle, and the skip no longer reproduces — confirmed by diffing the built executable sets of `cargo test --workspace --tests --no-run -v` against `cargo test -p verter_session --tests --no-run -v` (same verter_session executables in both). Still, `cargo test --workspace --tests` must NOT be used as the sole Rust gate — run `node scripts/gate.mjs` (which runs both surfaces from one archive, plus the shipped-cfg SURFACE 3 neither of them covers) or the `cargo nextest run --workspace` + `cargo test -p verter_session --tests` pair directly.
+Bare `cargo test --workspace --tests` historically silently SKIPPED the verter_session integration suite (~4404 tests): a `session_metrics` Cargo feature unified differently standalone vs in the workspace, dropping those binaries from the workspace test set, so the run reported green while never compiling them. That feature has since been replaced by a runtime `HostConfig.metrics_enabled` toggle, and the skip no longer reproduces — confirmed by diffing the built executable sets of `cargo test --workspace --tests --no-run -v` against `cargo test -p verter_session --tests --no-run -v` (same verter_session executables in both). Still, `cargo test --workspace --tests` must NOT be used as the sole Rust gate — run `node scripts/gate.mjs` (which runs surface 1 plus the small shipped-cfg guard) or `cargo nextest run --workspace` directly.
 
 Do not run bare `cargo test --workspace` (no `--tests`) by default — it also runs doctests and example builds, substantially slower. Run doctests (`cargo test --workspace --doc`) only when rustdoc examples changed or explicitly requested.
 

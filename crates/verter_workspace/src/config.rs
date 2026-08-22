@@ -539,7 +539,7 @@ impl ResolvedMembership {
         // are all empty, e.g. solution-style `"files": []`) is
         // `IncludeExclude`.
         if !self.files_declared && !self.include_declared && !self.exclude_declared {
-            debug_assert!(
+            verter_debug_assert!(
                 self.files.is_empty() && self.include.is_empty() && self.exclude.is_empty(),
                 "membership vectors must only be populated under their declared flags"
             );

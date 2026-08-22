@@ -929,7 +929,7 @@ impl<'a> SvelteParser<'a> {
     /// cannot spin. A no-op on the normal advancing path.
     fn ensure_root_progress(&mut self, iter_start: usize) {
         if self.pos == iter_start && !self.eof() {
-            debug_assert!(
+            verter_debug_assert!(
                 false,
                 "svelte root scan made no forward progress at byte {iter_start} (a recovery \
                  point consumed no input) — this is a no-forward-progress bug"

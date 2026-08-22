@@ -484,7 +484,7 @@ impl<'a> Lexer<'a> {
     /// Unicode spaces), narrower [`WhitespaceProfile::Css`] only ever closes on a single ASCII
     /// whitespace byte.
     pub(crate) fn consume_escape_profiled(&mut self, whitespace_profile: WhitespaceProfile) {
-        debug_assert_eq!(self.bytes.get(self.cursor), Some(&b'\\'));
+        verter_debug_assert_eq!(self.bytes.get(self.cursor), Some(&b'\\'));
         if let Some(len) = hex_escape_digits_len(self.bytes, self.cursor) {
             self.cursor += len;
             if let Some((cp, cp_len)) = codepoint_at(self.bytes, self.cursor) {
@@ -867,7 +867,7 @@ pub(crate) fn ascii_digits_len(bytes: &[u8], at: usize) -> usize {
 /// escape, not in how the hex digits themselves are scanned.
 #[inline]
 pub(crate) fn hex_escape_digits_len(bytes: &[u8], at: usize) -> Option<usize> {
-    debug_assert_eq!(bytes.get(at), Some(&b'\\'));
+    verter_debug_assert_eq!(bytes.get(at), Some(&b'\\'));
     let hex_start = at + 1;
     let digits = ascii_hex_digits_len(bytes, hex_start);
     if digits == 0 {

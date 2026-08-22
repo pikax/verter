@@ -30,6 +30,9 @@
 //! - [`gate`] — the runtime fail-closed wire gate (refuses a diverged tsgo).
 //! - [`error`] — typed crate errors.
 
+#[macro_use]
+extern crate verter_debug_assert;
+
 pub mod actor;
 pub mod api_attach;
 pub mod attach;

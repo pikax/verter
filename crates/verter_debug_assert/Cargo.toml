@@ -1,0 +1,13 @@
+[package]
+name = "verter_debug_assert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "The sole sanctioned debug_assert!/debug_assert_eq!/debug_assert_ne! entry point for Verter production code — enforced via clippy::disallowed_macros"
+keywords = ["vue", "compiler"]
+categories = ["compilers"]
+
+[dependencies]

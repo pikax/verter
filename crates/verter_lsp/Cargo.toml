@@ -25,6 +25,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_d
 test-support = []
 
 [dependencies]
+verter_debug_assert = { workspace = true }
 verter_session = { path = "../verter_session" }
 verter_language = { path = "../verter_language" }
 hotpath = { version = "0.16", optional = true }

@@ -494,8 +494,9 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
     // The encoder performs ZERO dispatch by construction; assert it here so the
     // invariant fails loudly the moment a future edit threads a resolver call
     // through this module.
-    debug_assert_eq!(
-        arena.dispatch_calls, 0,
+    verter_debug_assert_eq!(
+        arena.dispatch_calls,
+        0,
         "the graph encoder must never call dispatch during encode"
     );
 

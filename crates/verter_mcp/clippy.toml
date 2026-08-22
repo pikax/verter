@@ -14,3 +14,16 @@
 disallowed-methods = [
     { path = "std::env::temp_dir", reason = "shared OS path with no per-process/per-call component — use verter_test_support::unique_temp_dir(name) instead" },
 ]
+
+# Verter-wide `debug_assert!`/`debug_assert_eq!`/`debug_assert_ne!` ban (see
+# the workspace-root clippy.toml for the full rationale). Clippy does NOT
+# merge a workspace-root clippy.toml into a crate that has its own — each
+# per-crate file below is the crate's WHOLE config, so this crate needs its
+# own copy of the entry rather than inheriting the workspace one. Verified
+# empirically: a crate with a clippy.toml of its own does not see a
+# workspace-root-only `disallowed-macros` entry.
+disallowed-macros = [
+  { path = "std::debug_assert",    reason = "use verter_debug_assert::verter_debug_assert! — precompute any side-effecting value first, the raw macro's condition never runs in a shipped build" },
+  { path = "std::debug_assert_eq", reason = "use verter_debug_assert::verter_debug_assert_eq! — precompute any side-effecting value first, the raw macro's arguments never evaluate in a shipped build" },
+  { path = "std::debug_assert_ne", reason = "use verter_debug_assert::verter_debug_assert_ne! — precompute any side-effecting value first, the raw macro's arguments never evaluate in a shipped build" },
+]

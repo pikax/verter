@@ -196,7 +196,7 @@ impl<'a> CodeTransform<'a> {
             // chunk. First capture wins (the debug-assert catches accidental double-publication: a
             // preamble can be the intro OR an inserted chunk, never both).
             if is_preamble(self.intro()) {
-                debug_assert!(preamble_end.is_none());
+                verter_debug_assert!(preamble_end.is_none());
                 preamble_end.get_or_insert((generated_line, generated_column));
             }
         }
@@ -401,7 +401,7 @@ impl<'a> CodeTransform<'a> {
                     // generated position immediately after it as the preamble-end boundary.
                     // First capture wins (the debug-assert catches accidental double-publication).
                     if is_preamble(content) {
-                        debug_assert!(preamble_end.is_none());
+                        verter_debug_assert!(preamble_end.is_none());
                         preamble_end.get_or_insert((generated_line, generated_column));
                     }
                 }
@@ -459,7 +459,7 @@ impl<'a> CodeTransform<'a> {
                     // the module intro, but match here too so the boundary survives if a preamble is
                     // ever routed through a mapped insertion. First capture wins.
                     if is_preamble(content) {
-                        debug_assert!(preamble_end.is_none());
+                        verter_debug_assert!(preamble_end.is_none());
                         preamble_end.get_or_insert((generated_line, generated_column));
                     }
                 }

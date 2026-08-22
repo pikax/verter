@@ -1487,10 +1487,16 @@ fn production_dependency_closure_is_framework_neutral() {
         .filter_map(|line| line.split_whitespace().next())
         .map(str::to_owned)
         .collect();
-    let expected = ["memchr", "rustc-hash", "smallvec", "verter_span"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let expected = [
+        "memchr",
+        "rustc-hash",
+        "smallvec",
+        "verter_debug_assert",
+        "verter_span",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     assert_eq!(
         direct, expected,
         "direct normal/build dependency drift\n{tree}"
@@ -1537,6 +1543,7 @@ fn production_dependency_closure_is_framework_neutral() {
         ("memchr".to_owned(), "normal".to_owned(), None),
         ("rustc-hash".to_owned(), "normal".to_owned(), None),
         ("smallvec".to_owned(), "normal".to_owned(), None),
+        ("verter_debug_assert".to_owned(), "normal".to_owned(), None),
         ("verter_span".to_owned(), "normal".to_owned(), None),
     ]
     .into_iter()

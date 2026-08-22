@@ -210,7 +210,7 @@ impl VerterHost {
             &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
         >,
     ) -> Option<TypeInfoSurface> {
-        debug_assert_eq!(
+        verter_debug_assert_eq!(
             context.mode,
             ProjectionMode::Shallow,
             "project_shallow_surface_graph_only synthesises a one-level surface; mode must be Shallow"

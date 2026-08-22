@@ -2115,7 +2115,7 @@ fn compile_inner(
             if let Some(start) = tsx_code.find(START_MARKER) {
                 meta.block_start = start as u32;
                 let end = tsx_code.find(END_MARKER);
-                debug_assert!(
+                verter_debug_assert!(
                     end.is_some(),
                     "Found start marker but not end marker in TSX output"
                 );
@@ -2123,7 +2123,7 @@ fn compile_inner(
                     meta.block_end = (end + END_MARKER.len()) as u32;
                 }
             } else {
-                debug_assert!(
+                verter_debug_assert!(
                     false,
                     "destructured_block metadata exists but start marker not found in TSX output"
                 );

@@ -96,7 +96,7 @@ impl TemplateAstBuilder {
     /// `OpenTagEnd` or `SelfClosingTag` fires.
     pub fn set_tag_open_end(&mut self, end: u32) {
         let Some(&id) = self.open_stack.last() else {
-            debug_assert!(false, "set_tag_open_end called with empty open_stack");
+            verter_debug_assert!(false, "set_tag_open_end called with empty open_stack");
             return;
         };
         let el = element_mut(&mut self.ast.nodes[id.0]);
@@ -374,7 +374,7 @@ impl TemplateAstBuilder {
     /// Set the tag type on the currently open element.
     pub fn set_tag_type(&mut self, tag_type: TagType) {
         let Some(&id) = self.open_stack.last() else {
-            debug_assert!(false, "set_tag_type called with empty open_stack");
+            verter_debug_assert!(false, "set_tag_type called with empty open_stack");
             return;
         };
         element_mut(&mut self.ast.nodes[id.0]).tag_type = tag_type;
@@ -383,7 +383,7 @@ impl TemplateAstBuilder {
     /// Mark the currently open element as self-closing.
     pub fn set_self_closing(&mut self) {
         let Some(&id) = self.open_stack.last() else {
-            debug_assert!(false, "set_self_closing called with empty open_stack");
+            verter_debug_assert!(false, "set_self_closing called with empty open_stack");
             return;
         };
         element_mut(&mut self.ast.nodes[id.0]).is_self_closing = true;
@@ -394,7 +394,7 @@ impl TemplateAstBuilder {
     /// Set a prop flag on the currently open element.
     pub fn add_prop_flag(&mut self, flag: PropFlags) {
         let Some(&id) = self.open_stack.last() else {
-            debug_assert!(false, "add_prop_flag called with empty open_stack");
+            verter_debug_assert!(false, "add_prop_flag called with empty open_stack");
             return;
         };
         let el = element_mut(&mut self.ast.nodes[id.0]);
@@ -476,7 +476,7 @@ impl TemplateAstBuilder {
     }
 
     pub fn finish(mut self) -> TemplateAst {
-        debug_assert!(
+        verter_debug_assert!(
             self.open_stack.is_empty(),
             "TemplateAstBuilder::finish() called with {} unclosed element(s) on the open stack. \
              The caller must close all elements (or force-close on EOF) before finishing.",

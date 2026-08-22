@@ -42,8 +42,8 @@ impl<'dispatch, 'ctx> ConnectedWorkCredit<'dispatch, 'ctx> {
     }
 
     pub(super) fn refresh(&mut self) -> Result<(), crate::semantic_query::PartialReasonSet> {
-        debug_assert_eq!(self.window_start, 0);
-        debug_assert_eq!(self.remaining, 0);
+        verter_debug_assert_eq!(self.window_start, 0);
+        verter_debug_assert_eq!(self.remaining, 0);
         let available = self.dispatch.connected_work_available()?;
         self.window_start = available;
         self.remaining = available;

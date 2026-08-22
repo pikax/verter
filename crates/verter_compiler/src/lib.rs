@@ -10,6 +10,10 @@
 //! `verter_parser` directly.
 
 // ── Re-exports from verter_parser ──────────────────────────────────────────
+
+#[macro_use]
+extern crate verter_debug_assert;
+
 pub use verter_parser::ast;
 pub use verter_parser::common;
 pub use verter_parser::cursor;
