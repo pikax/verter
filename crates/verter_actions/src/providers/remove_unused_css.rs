@@ -324,14 +324,13 @@ mod tests {
         );
     }
 
-    // A17-style discriminating positive (A21, round-8 finding 6): a solo
-    // (ungrouped) unused selector whose rule body contains a quoted `}` in
-    // a declaration value. The old brace-depth counter walked raw
-    // characters with no string awareness, so it mistook the quoted `}`
-    // for the rule's real closing brace and left `"; color: red; }` behind
-    // as broken garbage. `rule_body_span` comes from the real structural
-    // parse, which tokenizes strings as opaque atomic tokens, and is
-    // immune to this.
+    // A discriminating positive: a solo (ungrouped) unused selector whose
+    // rule body contains a quoted `}` in a declaration value. The old
+    // brace-depth counter walked raw characters with no string awareness,
+    // so it mistook the quoted `}` for the rule's real closing brace and
+    // left `"; color: red; }` behind as broken garbage. `rule_body_span`
+    // comes from the real structural parse, which tokenizes strings as
+    // opaque atomic tokens, and is immune to this.
     #[test]
     fn solo_selector_with_quoted_brace_in_value_deletes_whole_rule() {
         let source = ".foo { content: \"}\"; color: red; }\n";

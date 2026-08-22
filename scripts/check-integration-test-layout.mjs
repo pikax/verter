@@ -111,10 +111,10 @@ function loadAllowlist() {
   }
   // The `allow` array is MANDATORY: a missing / non-array `allow` is a broken
   // allowlist, not "no exceptions" — fail loud (mirrors the Rust guard's panic).
-  // NOTE: the Rust guard additionally pins the allowlist to EXACTLY its two
+  // NOTE: the Rust guard additionally pins the allowlist to EXACTLY its
   // known process-isolated entries; that durable exact-count pin lives there on
   // purpose. This Node check is the fast structural mirror and does NOT replicate
-  // the exact-2 pin.
+  // that exact-count pin.
   if (!Array.isArray(parsed.allow)) {
     throw new Error(
       `allowlist ${toRepoRelPosix(ALLOWLIST_PATH)} is missing a top-level \`allow\` ` +

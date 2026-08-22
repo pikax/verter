@@ -12,7 +12,7 @@
 //! This binary is allocator-ONLY: it carries no non-allocation tests. The
 //! rest of the integration suite lives in the `main` binary.
 //!
-//! # Pre-cutover baseline
+//! # Legacy-path allocation baseline
 //!
 //! This module records the ALLOCATION half of the ratified Latency/Allocation
 //! bound: live allocations through the current legacy `css::process_style`
@@ -20,9 +20,9 @@
 //! generator category (the same input generators the wall-clock baseline in
 //! `docs/arch/refactor/rev11/evidence/J1/perf-baseline.md` measures). The
 //! numbers this binary prints (`eprintln!` markers, `cargo test -- --nocapture`)
-//! are the allocation baseline recorded in that same document; a later
-//! cutover's converged pipeline is required to stay within the same 1.2x
-//! (20%) ceiling per category.
+//! are the allocation baseline recorded in that same document; the converged
+//! style pipeline that replaces this entry point is required to stay within
+//! the same 1.2x (20%) ceiling per category.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -77,11 +77,12 @@ mod legacy_process_style_allocation_baseline {
     //! generated CSS through the legacy `css::process_style` entry point
     //! with a fixed representative option set (`scoped: true`,
     //! `is_module: false`) so counts are comparable across categories and,
-    //! later, across the pre-/post-cutover pipelines. `scoped: true` is
-    //! used uniformly (rather than mirroring each generator's own bench
-    //! group's options) because the ratified bound compares ALLOCATION
-    //! COUNT PER CATEGORY across the cutover, not per exact option
-    //! permutation — a fixed option set removes that as a confound.
+    //! later, against the converged style pipeline this legacy path is
+    //! replaced by. `scoped: true` is used uniformly (rather than mirroring
+    //! each generator's own bench group's options) because the ratified
+    //! bound compares ALLOCATION COUNT PER CATEGORY across the two
+    //! pipelines, not per exact option permutation — a fixed option set
+    //! removes that as a confound.
 
     use verter_compiler::css::{process_style, ProcessStyleOptions};
 

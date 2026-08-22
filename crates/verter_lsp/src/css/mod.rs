@@ -837,7 +837,7 @@ mod tests {
         );
     }
 
-    /// A23 round 3: a STALE `analysis` (same artifact-local style block id, distinct sealed
+    /// A STALE `analysis` (same artifact-local style block id, distinct sealed
     /// artifact identity — the same fixture shape as
     /// `selector_hover_refuses_stale_artifact_analysis_with_matching_local_id`) must not leak
     /// its `template` class name into completions at a selector position after `.`. Prior to the
