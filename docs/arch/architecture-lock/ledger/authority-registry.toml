@@ -432,3 +432,29 @@ documents = ["CSS-CLEAN-CUTOVER", "J-TRAIN-SCOPE-PARSING-ONLY", "ONE-CSS-PARSER-
 ratified_by = "designated maintainer (scope), codex architect (charter)"
 ratified_at = "2026-08-21"
 scope = "CSS owner reconciliation — parsing and Lightning CSS removal only, seven readers converging under one parse"
+
+# B5's dispatch predated its predecessor BV2's acceptance being recorded, and its
+# charter still reads "PROPOSED amendment / LOCKED" — an orchestration error, not
+# a ratification. MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §2 retroactively
+# authorises the landing directly: BV2 accepted above satisfies B5's DAG
+# predecessor set (BV1, BS1, BV2), so this authorization rests on the ruling, not
+# on a charter status-line edit.
+
+[[document]]
+id = "RULING-2026-08-22-BV2-B5-J1"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md"
+sha256 = "b7b0e5c24fc0ac2879e65cae1ab646e79b6ad08ec1b5cfab36c440f00f3c630c"
+
+[[document]]
+id = "B5-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/B5.md"
+sha256 = "a8e8ca4b225f736d0421a0ce2b407ad5409adc1e3486f5588bb7e84b32d83848"
+
+[[authorization]]
+block = "B5"
+documents = ["B5-CHARTER", "RULING-2026-08-22-BV2-B5-J1"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-22"
+scope = "Retroactive authorisation of B5's landing (exposing the accepted BV1/BS1 framework algorithms through the sole direct compiler core) now that its predecessor set is genuinely satisfied by BV2's acceptance."
