@@ -249,7 +249,10 @@ impl<'a> ResolverContext for HostResolverContext<'a> {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedValueDecl>> {
+    ) -> Result<
+        Option<Arc<PreparedValueDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
         // Overlay-aware view (same rationale as `prepared_decl_bundle`).
         self.inner.prepared_value_decl_in_with_store_view(
             &self.view,

@@ -445,7 +445,7 @@ fn classify_binding(
 ) -> TemplateClassSemanticFactRow {
     let route_candidate = dispatch
         .ctx
-        .prepared_value_decl(canonical, declaration.owner, declaration.name.as_ref())
+        .prepared_value_decl_return_only(canonical, declaration.owner, declaration.name.as_ref())
         .and_then(|prepared| {
             dispatch
                 .resolve_authored_reference_route(

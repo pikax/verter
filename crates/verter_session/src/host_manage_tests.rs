@@ -8147,9 +8147,14 @@ fn return_wrapper_role_degrades_typed_and_is_never_warmed() {
     assert_eq!(return_wrapper_role_for(&host, missing, "getValue").0, role);
     // (Arrival recovery is asserted at the end of this test.)
 
-    // A wholly UNRESOLVABLE import specifier is a distinct typed state: the
-    // declaration cannot be prepared at all, so the demand has no fact to read.
-    // It must never collapse onto either of the two reasons above.
+    // A wholly UNRESOLVABLE import specifier: `resolve_type_dependency_canonical`
+    // reports the same `MissingDependency` reason for "no route at all" as for
+    // "a known route to an unloaded file" (`missing` above) —
+    // `resolve_authored_reference_route`'s import-type-specifier arm has no
+    // separate outcome for the two. The declaration itself still PREPARES (an
+    // unrelated unresolvable import must not poison every sibling declaration's
+    // admission — see `insert_value_space_import_resolutions`), so the demand
+    // reaches this reason rather than failing earlier at the preparation step.
     let unprepared = "/workspace/src/unprepared.ts";
     upsert_ts(
         &host,
@@ -8161,7 +8166,7 @@ fn return_wrapper_role_degrades_typed_and_is_never_warmed() {
     assert_eq!(
         unprepared_role,
         verter_type_expr::ReactiveWrapperRole::Unresolved {
-            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::AnalysisUnavailable
+            reason: verter_type_expr::ReactiveWrapperUnresolvedReason::MissingDependency
         }
     );
     assert!(provenance.is_none());
@@ -8207,7 +8212,12 @@ fn return_wrapper_role_degrades_typed_and_is_never_warmed() {
     // exhausted, so the envelope class is proven where it is reachable.
 
     // Control: the degradations are DISTINCT typed values — an implementation
-    // that collapsed them onto one reason fails here.
+    // that collapsed them onto one reason fails here. `unprepared_role` is
+    // DELIBERATELY excluded from the pair against `missing_role`: both are the
+    // SAME `MissingDependency` reason by design — `resolve_authored_reference_route`'s
+    // import-type-specifier arm reports `MissingDependency` for "no route at
+    // all" identically to "a known route to an unloaded file" (see the comment
+    // on `unprepared` above); they are the same typed value, not a collapse bug.
     let cycle_role = return_wrapper_role_for(&host, cycle, "getValue").0;
     let missing_role = return_wrapper_role_for(&host, missing, "getValue").0;
     let inferred_role = return_wrapper_role_for(&host, inferred, "getValue").0;
@@ -8216,11 +8226,16 @@ fn return_wrapper_role_degrades_typed_and_is_never_warmed() {
         (&missing_role, &inferred_role),
         (&cycle_role, &inferred_role),
         (&cycle_role, &unprepared_role),
-        (&missing_role, &unprepared_role),
         (&inferred_role, &unprepared_role),
     ] {
         assert_ne!(a, b, "each failure class keeps its own typed reason");
     }
+    assert_eq!(
+        missing_role, unprepared_role,
+        "an unresolvable import specifier and a known-but-unloaded dependency \
+         report the SAME MissingDependency reason — resolve_authored_reference_route \
+         has no separate outcome for the two"
+    );
 
     // A re-demand equality alone cannot distinguish a cold recompute from a
     // WARMED partial (both answer the same reason), so prove non-warmth by

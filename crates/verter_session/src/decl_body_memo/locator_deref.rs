@@ -418,7 +418,26 @@ impl DeclBodyMemo {
                             slot.anchor.owner,
                             slot.anchor.symbol.as_ref(),
                         ))?;
-                        let expr = navigate_value_parts(&parts, &slot.path, &slot.anchor)?;
+                        let expr = match navigate_value_parts(&parts, &slot.path, &slot.anchor) {
+                            Ok(expr) => expr,
+                            // A shapeless, annotation-less, signature-less
+                            // position falls through to the enum-object
+                            // surface: an enum value declaration carries no
+                            // authored annotation/object-shape/signature at
+                            // all (its type surface is entirely the member
+                            // inventory), so the ordinary value-body facts
+                            // never populate for it — mirroring the
+                            // TYPE-space enum union above, one property per
+                            // member, keyed by name, valued by the member's
+                            // own scalar type.
+                            Err(LocatorBodyDerefError::ValueAnnotationAbsent) => self
+                                .navigate_enum_value_surface(
+                                    slot.anchor.owner,
+                                    slot.anchor.symbol.as_ref(),
+                                    &slot.path,
+                                )?,
+                            Err(other) => return Err(other),
+                        };
                         Ok(DerefedAuthoredBody {
                             shape: DerefedBodyShape::Single(expr),
                             // A plain value annotation position binds no
@@ -514,6 +533,47 @@ impl DeclBodyMemo {
                 })
             }
         }
+    }
+
+    /// Navigate an enum VALUE declaration's synthetic enum-object surface —
+    /// one property per member, keyed by name, valued by the member's own
+    /// scalar type (a foldable member carries its literal; a deferred member
+    /// its degraded sound primitive) — DERIVED from the merged value
+    /// members, the value-space counterpart of the TYPE-space enum union
+    /// above. Not an enum: [`LocatorBodyDerefError::ValueAnnotationAbsent`],
+    /// the same typed miss the caller's ordinary value-body facts already
+    /// return for a genuinely shapeless declaration.
+    fn navigate_enum_value_surface(
+        &self,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        path: &[TypeBodyPathStep],
+    ) -> Result<TypeExpr, LocatorBodyDerefError> {
+        let value_decl = match self.value_decl_outcome_in(owner, symbol) {
+            DemandOutcome::LeaseMiss => return Err(LocatorBodyDerefError::LeaseMiss),
+            DemandOutcome::Ready(Some(value_decl)) => value_decl,
+            DemandOutcome::Ready(None) => return Err(LocatorBodyDerefError::ValueAnnotationAbsent),
+        };
+        let Some(members) = value_decl.enum_members.as_ref() else {
+            return Err(LocatorBodyDerefError::ValueAnnotationAbsent);
+        };
+        let object_expr = verter_type_expr::ObjectExpr {
+            properties: members
+                .members
+                .iter()
+                .map(|entry| {
+                    ObjectMember::Property(verter_type_expr::ObjectProperty::synthetic_public_key(
+                        entry.name.clone().into(),
+                        crate::project_semantic_dispatch::lower::enum_scalar_type_expr(
+                            &entry.value,
+                        ),
+                        false,
+                        true,
+                    ))
+                })
+                .collect(),
+        };
+        navigate_expr(TypeExpr::Object(Arc::new(object_expr)), path)
     }
 
     /// Deref ONE authored type-argument position ([`TypeArgLocator`]) — the
@@ -769,13 +829,27 @@ fn navigate_value_parts(
             // The value declaration's TYPE SURFACE, in the same precedence
             // the `typeof` projection applies: the authored/inferred
             // annotation first, else the const-object / class-constructor
-            // shape. A shapeless, annotation-less position is the typed
-            // absence.
+            // shape, else — for the WHOLE-declaration (empty path) position
+            // only — a lone function signature (a `function` declaration
+            // carries no annotation and no object shape at all; its type
+            // lives entirely on `signatures`, so the whole-value position IS
+            // that one signature's function type, exactly as an explicit
+            // `[ValueSignature { ordinal: 0 }]` path would navigate).
+            // Genuinely OVERLOADED signature groups do not have a single
+            // function-type representation at this position and stay the
+            // typed absence (a `[ValueSignature { ordinal }]` locator
+            // addresses one overload directly). A shapeless, annotation-less,
+            // signature-less position is the typed absence.
             if let Some(annotation) = parts.type_annotation.clone() {
                 return navigate_expr(annotation, path);
             }
             if let Some(shape) = parts.object_shape.clone() {
                 return navigate_expr(TypeExpr::Object(Arc::new(shape)), path);
+            }
+            if path.is_empty() {
+                if let [signature] = parts.signatures.as_slice() {
+                    return navigate_signature_parts(signature, &[], anchor, parts.kind, 0);
+                }
             }
             Err(LocatorBodyDerefError::ValueAnnotationAbsent)
         }

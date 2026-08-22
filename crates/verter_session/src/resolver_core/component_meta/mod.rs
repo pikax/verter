@@ -29,15 +29,27 @@ pub(crate) use direct_macro::imported_registry_seed_can_skip_refresh;
 /// Collect owner-qualified lexical demands for bindings exposed by macros.
 /// The owner is the `defineExpose` use scope; admission resolves it to the
 /// exact visible declaration owner before expansion.
+///
+/// Demands the field's REFERENCED LOCAL BINDING
+/// (`AnalyzedExposeField::resolved_binding_name`), never the exposed
+/// property key: `defineExpose({ public: local })` must demand `local` (the
+/// value expression's identifier), which is the only one of the two that
+/// can actually resolve to a visible declaration — `public` is not itself a
+/// local binding. A field with NO referenced binding (a method, or any
+/// other non-identifier value expression) demands nothing at all — never a
+/// demand keyed on the property key, which could accidentally collide with
+/// an unrelated same-named binding elsewhere in scope.
 pub fn collect_requested_binding_demands(
     macros: &[AnalyzedMacro],
 ) -> BTreeSet<verter_type_expr::DeclBindingKey> {
     macros
         .iter()
         .flat_map(|mac| {
-            mac.expose_fields
-                .iter()
-                .map(|field| verter_type_expr::DeclBindingKey::new(mac.owner, field.name.as_str()))
+            mac.expose_fields.iter().filter_map(|field| {
+                field.resolved_binding_name().map(|binding_name| {
+                    verter_type_expr::DeclBindingKey::new(mac.owner, binding_name)
+                })
+            })
         })
         .collect()
 }

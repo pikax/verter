@@ -136,7 +136,10 @@ pub(crate) fn wrapper_role_for_value_signature_return(
     symbol: &str,
     signature_ordinal: usize,
 ) -> (ReactiveWrapperRole, Option<ReactiveWrapperImportProvenance>) {
-    let Some(prepared) = dispatch.ctx.prepared_value_decl(canonical, owner, symbol) else {
+    let Some(prepared) = dispatch
+        .ctx
+        .prepared_value_decl_return_only(canonical, owner, symbol)
+    else {
         return unresolved(ReactiveWrapperUnresolvedReason::AnalysisUnavailable);
     };
     let Some(signature) = prepared.signatures.get(signature_ordinal) else {
@@ -227,7 +230,10 @@ pub(crate) fn wrapper_role_for_sole_value_signature_return(
     owner: TopLevelOwnerId,
     symbol: &str,
 ) -> (ReactiveWrapperRole, Option<ReactiveWrapperImportProvenance>) {
-    let Some(prepared) = dispatch.ctx.prepared_value_decl(canonical, owner, symbol) else {
+    let Some(prepared) = dispatch
+        .ctx
+        .prepared_value_decl_return_only(canonical, owner, symbol)
+    else {
         return unresolved(ReactiveWrapperUnresolvedReason::AnalysisUnavailable);
     };
     match prepared.signatures.len() {

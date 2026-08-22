@@ -761,14 +761,9 @@ fn prepare_local_value_decl_outcome_with_base(
                 if let Some(edge) = routed {
                     push_unique_external_dep(&mut prepared.external_deps, edge);
                 }
-            } else {
-                let Some(identity) = import_canonicalization.final_resolution.get(
-                    &verter_type_expr::DeclBindingKey::new(owner, local_name.as_ref()),
-                ) else {
-                    return PreparedDeclOutcome::Failed(PreparationFailure::MissingExternalOwner {
-                        local_name: local_name.to_string(),
-                    });
-                };
+            } else if let Some(identity) = import_canonicalization.final_resolution.get(
+                &verter_type_expr::DeclBindingKey::new(owner, local_name.as_ref()),
+            ) {
                 push_unique_external_dep(
                     &mut prepared.external_deps,
                     PreparedExternalDep {
@@ -782,6 +777,16 @@ fn prepare_local_value_decl_outcome_with_base(
                     },
                 );
             }
+            // Else: the import target could not be canonicalized (an
+            // unresolvable specifier — no `node_modules` package, an
+            // unconfigured project, a genuine broken import). SKIPPED, never
+            // a preparation failure — the SAME policy the namespace arm above
+            // already documents and applies: an unrelated non-canonicalizable
+            // binding must not make the WHOLE declaration (annotation
+            // classification, signatures, object shape, everything) fail
+            // preparation. `typeof <local_name>` on this specific edge stays
+            // honestly unresolved (no external dep tracked); every other fact
+            // this declaration carries is unaffected.
         }
     }
 
@@ -1132,24 +1137,36 @@ impl PreparedValueDeclCache {
             .contains_key(&verter_type_expr::DeclBindingKey::new(owner, symbol_name))
     }
 
-    pub fn get(&self, symbol_name: &str) -> Option<Arc<PreparedValueDecl>> {
+    pub fn get(
+        &self,
+        symbol_name: &str,
+    ) -> Result<Option<Arc<PreparedValueDecl>>, PreparationFailure> {
         self.get_in(
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             symbol_name,
         )
     }
 
+    /// A genuine preparation `Failed` is returned as `Err` — a typed
+    /// outcome the caller must propagate as a failure, DISTINCT from
+    /// `Ok(None)` (the symbol is not inventoried, is an import-local, or
+    /// lowered to no decl — a proven, cacheable absence). Mirrors
+    /// [`PreparedTypeDeclCache::get_in`]'s exact contract on the value
+    /// side.
     pub fn get_in(
         &self,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedValueDecl>> {
-        let slot = self
+    ) -> Result<Option<Arc<PreparedValueDecl>>, PreparationFailure> {
+        let Some(slot) = self
             .slots
-            .get(&verter_type_expr::DeclBindingKey::new(owner, symbol_name))?;
+            .get(&verter_type_expr::DeclBindingKey::new(owner, symbol_name))
+        else {
+            return Ok(None);
+        };
         // Warm fast path — no gate.
         if let Some(cached) = slot.value.get() {
-            return cached.clone();
+            return Ok(cached.clone());
         }
         // Cold: serialise under the resettable in-flight gate, then re-check
         // warm (single-flight) — same primitive as the type cache above. A
@@ -1159,7 +1176,7 @@ impl PreparedValueDeclCache {
         // result or genuine absence is cacheable.
         let _gate = slot.build_gate.lock();
         if let Some(cached) = slot.value.get() {
-            return cached.clone();
+            return Ok(cached.clone());
         }
         let base_cell = self
             .name_resolution_bases
@@ -1168,17 +1185,14 @@ impl PreparedValueDeclCache {
         let name_resolution_base = if let Some(base) = base_cell.get() {
             base
         } else {
-            let built = match build_value_name_resolution_base(
+            let built = Arc::new(build_value_name_resolution_base(
                 &self.canonical_id,
                 self.state.as_ref(),
                 owner,
                 (!self.dep_edges.is_empty()).then_some(self.dep_edges.as_ref()),
                 &self.import_canonicalization,
                 &self.interner,
-            ) {
-                Ok(base) => Arc::new(base),
-                Err(_) => return None,
-            };
+            )?);
             base_cell.get_or_init(|| built)
         };
         match prepare_local_value_decl_outcome_with_base(
@@ -1199,14 +1213,19 @@ impl PreparedValueDeclCache {
                 crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
                     crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
                 );
-                None
+                Ok(None)
             }
             PreparedDeclOutcome::Ready(value) => {
                 let committed = value.map(Arc::new);
                 let _ = slot.value.set(committed.clone());
-                committed
+                Ok(committed)
             }
-            PreparedDeclOutcome::Failed(_) => None,
+            // A genuine preparation failure is NOT written into the
+            // write-once slot (nothing to cache — the next demand recomputes
+            // it, same non-persistence the `LeaseMiss` arm applies) and is
+            // NOT collapsed into `Ok(None)` here — the typed distinction
+            // survives to this method's caller.
+            PreparedDeclOutcome::Failed(failure) => Err(failure),
         }
     }
 

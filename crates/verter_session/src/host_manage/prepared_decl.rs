@@ -1391,6 +1391,12 @@ impl VerterHost {
         bundle.prepared_type_decls.get_in(owner, symbol_name)
     }
 
+    /// Lossy Option-shaped convenience wrapper — used by consumers (the
+    /// `ImportedRuntimeValueResolver` runtime-value-node route, standalone
+    /// tests) that do not distinguish a genuine preparation `Failed` from a
+    /// proven absence. [`Self::prepared_value_decl_in_with_context`]
+    /// preserves the full distinction; that is the accessor the
+    /// `defineExpose` admission gate uses.
     pub(crate) fn prepared_value_decl_in(
         &self,
         canonical_id: &str,
@@ -1403,6 +1409,8 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(self, &view, overlay);
         self.prepared_value_decl_in_with_context(&ctx, canonical_id, owner, symbol_name)
+            .ok()
+            .flatten()
     }
 
     pub(crate) fn prepared_value_decl_in_with_store_view(
@@ -1412,8 +1420,14 @@ impl VerterHost {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        let bundle = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)?;
+    ) -> Result<
+        Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
+        let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
+        else {
+            return Ok(None);
+        };
         bundle.prepared_value_decls.get_in(owner, symbol_name)
     }
 
@@ -1423,8 +1437,13 @@ impl VerterHost {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
-        let bundle = self.prepared_decl_bundle_with_context(ctx, canonical_id)?;
+    ) -> Result<
+        Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
+        let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, canonical_id) else {
+            return Ok(None);
+        };
         bundle.prepared_value_decls.get_in(owner, symbol_name)
     }
 

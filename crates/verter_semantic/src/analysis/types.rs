@@ -1588,6 +1588,26 @@ pub struct AnalyzedExposeField {
     pub tags: Vec<JsdocTag>,
 }
 
+impl AnalyzedExposeField {
+    /// The local value binding this exposed field's type must resolve
+    /// from: `referenced_binding` when the analyzer structurally captured
+    /// one (a plain identifier value — shorthand `{ foo }` and
+    /// explicit-identifier `{ public: local }` both capture it; OXC
+    /// normalizes a shorthand property's `value` to the same identifier as
+    /// its key, so `referenced_binding` is populated for both forms), else
+    /// `None`. NEVER falls back to `name` (the exposed property key): a
+    /// method (`{ foo() {} }`) or any other non-identifier value expression
+    /// (`{ public: local.foo }`) genuinely has NO referenced local
+    /// binding, and the property key is not itself a local declaration —
+    /// substituting it would resolve an unrelated same-named binding, if
+    /// one happens to exist in scope, rather than reporting the honest
+    /// "no resolvable binding" outcome.
+    #[must_use]
+    pub fn resolved_binding_name(&self) -> Option<&str> {
+        self.referenced_binding.as_deref()
+    }
+}
+
 /// How a prop type was resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

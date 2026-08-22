@@ -247,7 +247,40 @@ pub(crate) trait ResolverContext: sealed::Sealed {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedValueDecl>>;
+    ) -> Result<
+        Option<Arc<PreparedValueDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    >;
+
+    /// Consume a typed preparation failure as a ReturnOnly absence at an
+    /// Option-shaped semantic boundary — the value-space mirror of
+    /// [`Self::prepared_type_decl_return_only`]. The failure stays explicit
+    /// through [`Self::prepared_value_decl`]; this adapter is the sole lossy
+    /// boundary and taints every enclosing cacheability scope before
+    /// returning `None`. Callers that must preserve the `Failed` distinction
+    /// (the `defineExpose` admission gate) call [`Self::prepared_value_decl`]
+    /// directly instead.
+    fn prepared_value_decl_return_only(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Option<Arc<PreparedValueDecl>> {
+        match self.prepared_value_decl(canonical_id, owner, symbol_name) {
+            Ok(decl) => decl,
+            Err(failure) => {
+                note_non_cacheable_read_fan_out(NonCacheableReadReason::PreparationFailure);
+                tracing::error!(
+                    canonical_id,
+                    ?owner,
+                    symbol_name,
+                    ?failure,
+                    "prepared value declaration failed; serving ReturnOnly absence"
+                );
+                None
+            }
+        }
+    }
 
     /// Materialise (or warm-read) the canonical post-parse artifact,
     /// with the publication status flowed BY VALUE — see
@@ -878,7 +911,10 @@ impl ResolverContext for crate::VerterHost {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedValueDecl>> {
+    ) -> Result<
+        Option<Arc<PreparedValueDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
         #[cfg(any(test, feature = "test-support"))]
         {
             let view = crate::VerterHost::resolver_store_view(self).into_owned_view();

@@ -1637,7 +1637,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
     ) -> Option<EffectivePreparedValueDecl> {
-        if let Some(prepared) = self.ctx.prepared_value_decl(canonical, owner, symbol) {
+        if let Some(prepared) = self
+            .ctx
+            .prepared_value_decl_return_only(canonical, owner, symbol)
+        {
             return Some((Arc::from(canonical), owner, Arc::from(symbol), prepared));
         }
         if canonical.is_empty() {
@@ -1647,9 +1650,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if target.canonical_id == canonical && target.owner == owner && target.name == symbol {
             return None;
         }
-        let prepared =
-            self.ctx
-                .prepared_value_decl(&target.canonical_id, target.owner, &target.name)?;
+        let prepared = self.ctx.prepared_value_decl_return_only(
+            &target.canonical_id,
+            target.owner,
+            &target.name,
+        )?;
         Some((
             Arc::from(target.canonical_id.as_str()),
             target.owner,

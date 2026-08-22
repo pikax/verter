@@ -2698,8 +2698,20 @@ fn extract_exposed_from_macro(
                 .iter()
                 .find(|candidate| candidate.field.name == field.name)
         });
-        let type_source = resolve_exposed_type(&field.name, bindings, evaluated)
-            .map(SourcePosition::Present)
+        // Resolve the REFERENCED LOCAL BINDING's type, never the exposed
+        // property key: `defineExpose({ public: local })` must look up
+        // `local` (the value expression's identifier), not `public` (the
+        // published name), which may not exist as a local declaration at
+        // all. `resolved_binding_name` returns `referenced_binding` ONLY
+        // when the analyzer structurally captured one — a method or any
+        // other non-identifier value expression (`{ public: local.foo }`)
+        // has NO referenced binding at all, and must NOT fall back to
+        // `field.name`: `public` is not itself a local declaration, and an
+        // unrelated same-named binding elsewhere in scope must never be
+        // substituted for it.
+        let type_source = field
+            .resolved_binding_name()
+            .and_then(|binding_name| resolve_exposed_type(binding_name, bindings, evaluated))
             .or_else(|| resolved_field.map(|candidate| candidate.type_source.clone()))
             .unwrap_or_else(SourcePosition::unannotated);
         // Docs pair by name: the object-literal field's own leading JSDoc
@@ -2719,12 +2731,15 @@ fn extract_exposed_from_macro(
         out.push(ExposedAnalysis {
             name: field.name.clone(),
             type_source,
-            type_expansion: evaluated
-                .and_then(|eval| {
-                    eval.bindings
-                        .iter()
-                        .find(|binding| binding.name == field.name)
-                        .map(field_expansion_metadata)
+            type_expansion: field
+                .resolved_binding_name()
+                .and_then(|binding_name| {
+                    evaluated.and_then(|eval| {
+                        eval.bindings
+                            .iter()
+                            .find(|binding| binding.name == binding_name)
+                            .map(field_expansion_metadata)
+                    })
                 })
                 .or_else(|| {
                     exposed_lane_field(evaluated, macro_index, &field.name)
@@ -2795,12 +2810,27 @@ fn resolve_exposed_type(
     name: &str,
     bindings: &[AnalyzedBinding],
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
-) -> Option<SemanticTypeSource> {
+) -> Option<SourcePosition> {
     if let Some(eval) = evaluated {
         if let Some(f) = eval.bindings.iter().find(|f| f.name == name) {
             return match f.authority.outcome() {
-                ResolvedTypeOutcome::Present { source, .. } => Some(source.as_ref().clone()),
-                ResolvedTypeOutcome::Absent { .. } | ResolvedTypeOutcome::Failed { .. } => None,
+                ResolvedTypeOutcome::Present { source, .. } => {
+                    Some(SourcePosition::Present(source.as_ref().clone()))
+                }
+                // A demanded binding whose preparation FAILED is a genuine
+                // typed failure, never collapsed into the same `None` an
+                // unoffered binding returns below — the caller preserves
+                // `Failed` through publication instead of rendering the
+                // silent `Unknown` an `Absent` schema position would.
+                ResolvedTypeOutcome::Failed { failure } => {
+                    let verter_type_expr::TypedResolutionFailure::SourceConstruction(failure) =
+                        failure;
+                    Some(SourcePosition::Failed(*failure))
+                }
+                // A proven schema absence (an untyped binding) stays the
+                // caller's own unannotated fallback — not this function's
+                // concern.
+                ResolvedTypeOutcome::Absent { .. } => None,
             };
         }
     }
