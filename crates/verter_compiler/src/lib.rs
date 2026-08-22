@@ -93,6 +93,14 @@ pub use ide::script::VUE_GLOBAL_COMPONENTS_AUGMENTATION;
 pub use ide::script::VUE_JSX_RUNTIME_AUGMENTATION;
 pub use tsc::script::FALLTHROUGH_VUE_INTRINSIC_MAP_AUGMENTATION;
 
+// Test-only re-export: `template` stays `pub(crate)` in production (see its
+// `bench`-gated declaration above), so the A17 routing proof
+// (`tests/cases/style_declaration_list_routing.rs`, a separate integration
+// binary) needs a reachable path to the public `emit_static_style_object`
+// that does not depend on the unrelated `bench` visibility toggle.
+#[cfg(any(test, feature = "test-support"))]
+pub use template::code_gen::vdom::props::emit_static_style_object;
+
 #[cfg(test)]
 mod compile_ported_tests;
 #[cfg(test)]

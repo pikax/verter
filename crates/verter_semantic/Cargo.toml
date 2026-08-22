@@ -56,3 +56,12 @@ web-time = "1.1"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 static_assertions = "1.1.0"
 verter_test_support = { path = "../verter_test_support" }
+# Activates the `test-support` feature on `verter_css_syntax` for
+# `cargo test --package verter_semantic` (and example/bench) builds only —
+# the `parse_inline_style_declarations` invocation counter the A20 "shared
+# parser invoked exactly once" routing proof binds to
+# (`extract_static_style_vars_shared_parser_invoked_exactly_once`). The
+# regular dependency in `[dependencies]` does NOT enable the feature, so
+# production builds compile `parse_inline_style_declarations` without the
+# counter TLS or its increment.
+verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }

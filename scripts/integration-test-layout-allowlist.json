@@ -26,6 +26,12 @@
       "target": "lsp_audit_trace_out_env_var",
       "src_path": "crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs",
       "reason": "process-global VERTER_LSP_AUDIT_TRACE_OUT env mutation; separate binary isolates it and preserves exact test parity"
+    },
+    {
+      "package": "verter_compiler",
+      "target": "allocator_canaries",
+      "src_path": "crates/verter_compiler/tests/allocator_canaries.rs",
+      "reason": "single counting #[global_allocator] for style-pipeline allocation canaries (pre-cutover legacy baseline and, later, the converged style_planner ceiling)"
     }
   ]
 }

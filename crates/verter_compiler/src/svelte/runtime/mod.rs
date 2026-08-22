@@ -84,7 +84,6 @@ mod component_scope_facts;
 pub mod conformance_trace;
 mod cross_slot_redeclaration;
 mod css;
-mod css_reject;
 mod custom_element;
 mod declaration_tag_lowering;
 mod entity_decode;

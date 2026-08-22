@@ -4,6 +4,83 @@ use crate::dialect::{css, less, sass, scss, stylus, CssDialect};
 use crate::parser::CssSource;
 use crate::token::{css_identifier_eq_ignore_ascii_case, SyntaxToken, TokenFlags, TokenKind};
 
+/// Whitespace classification profile a scan uses. `Css` is the CSS Syntax Module Level 3 ASCII
+/// set ([`is_css_whitespace`]); `JsUnicode` is JS `\s` (that ASCII core, plus vertical tab, plus a
+/// run of Unicode space codepoints) — the profile the Svelte compat validation reader
+/// ([`crate::svelte_compat`]) needs so its scans match upstream `svelte@5.56.3`'s own
+/// Unicode-aware `\s` regexes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WhitespaceProfile {
+    Css,
+    JsUnicode,
+}
+
+/// Identifier name-start/name-continue codepoint profile. `Css` treats any codepoint `>= 128` as
+/// an identifier char (the general CSS Syntax Module rule this lexer otherwise applies);
+/// `SvelteCompat` narrows that threshold to `>= 160`, matching upstream `svelte@5.56.3`'s own
+/// identifier-char test (which excludes the U+0080..U+009F block the general rule admits).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IdentifierProfile {
+    Css,
+    SvelteCompat,
+}
+
+/// Decode the UTF-8 codepoint starting at byte `at`, returning `(codepoint, byte length)` — or
+/// `None` at or past the end of `bytes`. Shared by the general lexer's codepoint-aware scans (the
+/// `SvelteCompat` `>= 160` identifier threshold, `JsUnicode` whitespace) and
+/// [`crate::svelte_compat`]'s own codepoint-class scans (`nth-of`'s whitespace runs, the
+/// whitespace-or-colon property-name reader).
+#[inline]
+pub(crate) fn codepoint_at(bytes: &[u8], at: usize) -> Option<(u32, usize)> {
+    let &lead = bytes.get(at)?;
+    if lead < 0x80 {
+        return Some((u32::from(lead), 1));
+    }
+    let width = char_width(bytes, at);
+    let slice = bytes.get(at..at + width)?;
+    let c = std::str::from_utf8(slice).ok()?.chars().next()?;
+    Some((c as u32, c.len_utf8()))
+}
+
+/// Whether `cp` is whitespace under `profile`.
+#[inline]
+pub(crate) fn is_whitespace_codepoint(cp: u32, profile: WhitespaceProfile) -> bool {
+    match profile {
+        WhitespaceProfile::Css => cp < 128 && is_css_whitespace(cp as u8),
+        WhitespaceProfile::JsUnicode => is_js_whitespace_codepoint(cp),
+    }
+}
+
+/// JS `\s` (`WhiteSpace` ∪ `LineTerminator`): the [`is_css_whitespace`] ASCII core, plus vertical
+/// tab `\x0B` (which CSS does not treat as whitespace), plus the Unicode space run. Used by the
+/// Svelte compat profile ([`crate::svelte_compat`]) to match upstream `svelte@5.56.3`'s
+/// Unicode-aware `\s` regexes — genuinely wider than the general CSS Syntax Module ASCII set.
+#[inline]
+pub(crate) fn is_js_whitespace_codepoint(cp: u32) -> bool {
+    if cp < 128 {
+        return cp == 0x0B || is_css_whitespace(cp as u8);
+    }
+    if cp < 160 {
+        return false;
+    }
+    matches!(cp, 160 | 5760 | 8232 | 8233 | 8239 | 8287 | 12288 | 65279)
+        || (8192..=8202).contains(&cp)
+}
+
+/// Whether `byte` (an ASCII byte `< 0x80`) is an identifier name char under `profile`. `Css`
+/// delegates to the general [`is_name`] rule (alphanumeric, `_`, `-`, plus the CSS Syntax Module's
+/// NUL-substitution allowance); `SvelteCompat` is upstream `svelte@5.56.3`'s own narrower
+/// `REGEX_VALID_IDENTIFIER_CHAR = /[a-zA-Z0-9_-]/` (no NUL allowance).
+#[inline]
+fn is_ascii_name_char(byte: u8, profile: IdentifierProfile) -> bool {
+    match profile {
+        IdentifierProfile::Css => is_name(byte),
+        IdentifierProfile::SvelteCompat => {
+            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Lexer<'a> {
     source: &'a CssSource,
@@ -49,22 +126,32 @@ impl<'a> Lexer<'a> {
     }
 
     fn consume_whitespace(&mut self) -> SyntaxToken {
+        self.consume_whitespace_profiled(WhitespaceProfile::Css)
+    }
+
+    /// Consume a run of whitespace under `profile` — [`WhitespaceProfile::JsUnicode`]
+    /// additionally recognizes vertical tab and the Unicode space run, decoding codepoints where
+    /// the ASCII fast path doesn't apply. For [`WhitespaceProfile::Css`] this behaves identically
+    /// to the byte-stepping loop it replaces (the CSS ASCII whitespace set is single-byte only).
+    pub(crate) fn consume_whitespace_profiled(
+        &mut self,
+        profile: WhitespaceProfile,
+    ) -> SyntaxToken {
         let start = self.cursor;
         let mut flags = TokenFlags::TRIVIA;
-        while self
-            .bytes
-            .get(self.cursor)
-            .is_some_and(|byte| is_css_whitespace(*byte))
-        {
+        while let Some((cp, len)) = codepoint_at(self.bytes, self.cursor) {
+            if !is_whitespace_codepoint(cp, profile) {
+                break;
+            }
             if matches!(self.bytes[self.cursor], b'\n' | b'\r' | b'\x0c') {
                 flags |= TokenFlags::CONTAINS_NEWLINE;
             }
-            self.cursor += 1;
+            self.cursor += len;
         }
         self.make(TokenKind::Whitespace, flags, start, self.cursor)
     }
 
-    fn consume_comment(&mut self) -> SyntaxToken {
+    pub(crate) fn consume_comment(&mut self) -> SyntaxToken {
         let start = self.cursor;
         self.cursor += 2;
         let mut flags = TokenFlags::TRIVIA;
@@ -165,15 +252,49 @@ impl<'a> Lexer<'a> {
     }
 
     fn consume_name(&mut self) -> u16 {
+        self.consume_name_profiled(IdentifierProfile::Css, WhitespaceProfile::Css)
+    }
+
+    /// Consume a run of name (identifier-continuation) chars under `identifier_profile`,
+    /// decoding escapes via [`Self::consume_escape_profiled`] under `whitespace_profile` for the
+    /// escape's optional trailing separator. Shared by the general lexer's own identifier
+    /// tokenizing (`Css`/`Css`) and the Svelte compat profile's `read_identifier`
+    /// (`SvelteCompat`/`JsUnicode`) — see [`crate::svelte_compat`].
+    pub(crate) fn consume_name_profiled(
+        &mut self,
+        identifier_profile: IdentifierProfile,
+        whitespace_profile: WhitespaceProfile,
+    ) -> u16 {
         let mut flags = 0u16;
         while self.cursor < self.bytes.len() {
-            if is_name(self.bytes[self.cursor]) {
-                self.cursor += char_width(self.bytes, self.cursor);
-            } else if valid_escape(self.bytes, self.cursor) {
-                flags |= TokenFlags::CONTAINS_ESCAPE;
-                self.consume_escape();
-            } else {
-                break;
+            let byte = self.bytes[self.cursor];
+            if byte < 0x80 {
+                if is_ascii_name_char(byte, identifier_profile) {
+                    self.cursor += 1;
+                } else if valid_escape(self.bytes, self.cursor) {
+                    flags |= TokenFlags::CONTAINS_ESCAPE;
+                    self.consume_escape_profiled(whitespace_profile);
+                } else {
+                    break;
+                }
+                continue;
+            }
+            match identifier_profile {
+                IdentifierProfile::Css => {
+                    self.cursor += char_width(self.bytes, self.cursor);
+                }
+                IdentifierProfile::SvelteCompat => {
+                    // A lead byte alone can't distinguish U+0080..U+009F (excluded by Svelte's
+                    // own `>= 160` rule) from U+00A0 upward (allowed) — decode the codepoint.
+                    let Some((cp, len)) = codepoint_at(self.bytes, self.cursor) else {
+                        break;
+                    };
+                    if cp >= 160 {
+                        self.cursor += len;
+                    } else {
+                        break;
+                    }
+                }
             }
         }
         flags
@@ -188,9 +309,7 @@ impl<'a> Lexer<'a> {
         {
             self.cursor += 1;
         }
-        while self.bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
-            self.cursor += 1;
-        }
+        self.cursor += ascii_digits_len(self.bytes, self.cursor);
         let mut integer = true;
         if self.bytes.get(self.cursor) == Some(&b'.')
             && self
@@ -200,9 +319,7 @@ impl<'a> Lexer<'a> {
         {
             integer = false;
             self.cursor += 2;
-            while self.bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
-                self.cursor += 1;
-            }
+            self.cursor += ascii_digits_len(self.bytes, self.cursor);
         }
         if self
             .bytes
@@ -231,9 +348,7 @@ impl<'a> Lexer<'a> {
             if let Some(digit_start) = exponent_digits {
                 integer = false;
                 self.cursor = digit_start + 1;
-                while self.bytes.get(self.cursor).is_some_and(u8::is_ascii_digit) {
-                    self.cursor += 1;
-                }
+                self.cursor += ascii_digits_len(self.bytes, self.cursor);
             }
         }
         let flags = if integer {
@@ -359,35 +474,43 @@ impl<'a> Lexer<'a> {
     }
 
     fn consume_escape(&mut self) {
+        self.consume_escape_profiled(WhitespaceProfile::Css);
+    }
+
+    /// Consume one escape sequence (the `\` this method is called on, plus its hex numeral or
+    /// single escaped char) under `whitespace_profile` for the hex form's optional trailing
+    /// separator — [`WhitespaceProfile::JsUnicode`] matches upstream `svelte@5.56.3`'s
+    /// `REGEX_UNICODE_SEQUENCE` (`\r\n`, or any single JS-`\s` codepoint including multi-byte
+    /// Unicode spaces), narrower [`WhitespaceProfile::Css`] only ever closes on a single ASCII
+    /// whitespace byte.
+    pub(crate) fn consume_escape_profiled(&mut self, whitespace_profile: WhitespaceProfile) {
         debug_assert_eq!(self.bytes.get(self.cursor), Some(&b'\\'));
-        self.cursor += 1;
-        if self.cursor >= self.bytes.len() {
-            return;
-        }
-        if self.bytes[self.cursor].is_ascii_hexdigit() {
-            let mut digits = 0usize;
-            while self.cursor < self.bytes.len()
-                && self.bytes[self.cursor].is_ascii_hexdigit()
-                && digits < 6
-            {
-                self.cursor += 1;
-                digits += 1;
-            }
-            if self
-                .bytes
-                .get(self.cursor)
-                .is_some_and(|byte| is_css_whitespace(*byte))
-            {
-                self.cursor += 1;
-                if self.bytes[self.cursor - 1] == b'\r'
-                    && self.bytes.get(self.cursor) == Some(&b'\n')
-                {
-                    self.cursor += 1;
+        if let Some(len) = hex_escape_digits_len(self.bytes, self.cursor) {
+            self.cursor += len;
+            if let Some((cp, cp_len)) = codepoint_at(self.bytes, self.cursor) {
+                if is_whitespace_codepoint(cp, whitespace_profile) {
+                    if self.bytes[self.cursor] == b'\r'
+                        && self.bytes.get(self.cursor + 1) == Some(&b'\n')
+                    {
+                        self.cursor += 2;
+                    } else {
+                        self.cursor += cp_len;
+                    }
                 }
             }
         } else {
-            self.cursor += char_width(self.bytes, self.cursor);
+            self.cursor += 1;
+            if self.cursor < self.bytes.len() {
+                self.cursor += char_width(self.bytes, self.cursor);
+            }
         }
+    }
+
+    /// Reposition the cursor to a LOCAL byte offset within this lexer's source (a local position,
+    /// not an absolute one — see [`Self::position`]) — used by the Svelte compat profile's
+    /// grammar-order lookahead/rewind ([`crate::svelte_compat`]).
+    pub(crate) fn seek(&mut self, local: usize) {
+        self.cursor = local;
     }
 
     fn less_variable_declaration_follows(&self, start: usize) -> bool {
@@ -714,9 +837,54 @@ impl Iterator for Lexer<'_> {
     }
 }
 
+/// The CSS Syntax Module Level 3 ASCII whitespace set (tab, LF, FF, CR, space) — deliberately
+/// narrower than JS `\s` (which additionally includes vertical tab `\x0B` plus a run of Unicode
+/// space codepoints). The Svelte compat profile ([`crate::svelte_compat`]) builds its own
+/// Unicode-aware whitespace predicate on top of this shared ASCII core rather than
+/// re-enumerating the ASCII set a second time.
 #[inline]
-fn is_css_whitespace(byte: u8) -> bool {
+pub(crate) fn is_css_whitespace(byte: u8) -> bool {
     matches!(byte, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+}
+
+/// The byte length of a run of ASCII digits (`[0-9]*`) starting at `bytes[at]` — `0` when `at` is
+/// not itself a digit. Shared by the general lexer's number/dimension/percentage scanning and the
+/// Svelte compat profile's percentage and `nth-of` (`An+B`) digit runs.
+#[inline]
+pub(crate) fn ascii_digits_len(bytes: &[u8], at: usize) -> usize {
+    let mut j = at;
+    while bytes.get(j).is_some_and(u8::is_ascii_digit) {
+        j += 1;
+    }
+    j - at
+}
+
+/// The byte length of a CSS hex escape's numeral part (`\` + 1–6 ASCII hex digits) starting at
+/// `bytes[at]` (which must be `\\`), or `None` when the following byte is not a hex digit. Shared
+/// by [`Lexer::consume_escape`] (which then applies the ASCII CSS-Syntax trailing-whitespace rule)
+/// and the Svelte compat profile's `REGEX_UNICODE_SEQUENCE` matcher (which applies the Unicode JS
+/// `\s` trailing rule) — the two callers diverge only in which whitespace predicate closes the
+/// escape, not in how the hex digits themselves are scanned.
+#[inline]
+pub(crate) fn hex_escape_digits_len(bytes: &[u8], at: usize) -> Option<usize> {
+    debug_assert_eq!(bytes.get(at), Some(&b'\\'));
+    let hex_start = at + 1;
+    let digits = ascii_hex_digits_len(bytes, hex_start);
+    if digits == 0 {
+        return None;
+    }
+    Some(1 + digits)
+}
+
+/// The byte length of a run of ASCII hex digits, capped at 6 (the CSS/JS unicode-escape numeral
+/// limit) starting at `bytes[at]`.
+#[inline]
+fn ascii_hex_digits_len(bytes: &[u8], at: usize) -> usize {
+    let mut j = at;
+    while j - at < 6 && bytes.get(j).is_some_and(u8::is_ascii_hexdigit) {
+        j += 1;
+    }
+    j - at
 }
 
 #[inline]
@@ -774,8 +942,12 @@ fn starts_number(bytes: &[u8], offset: usize) -> bool {
     }
 }
 
+/// The UTF-8 byte width of the character whose lead byte is `bytes[offset]`. Shared by the general
+/// lexer's char-stepping and the Svelte compat profile's char-stepping — a `&str` guarantees every
+/// char-boundary lead byte is well-formed, so the invalid-lead-byte fallback below is never
+/// observed by either caller.
 #[inline]
-fn char_width(bytes: &[u8], offset: usize) -> usize {
+pub(crate) fn char_width(bytes: &[u8], offset: usize) -> usize {
     match bytes[offset] {
         0x00..=0x7f => 1,
         0xc0..=0xdf => 2,

@@ -47,6 +47,21 @@ conformance-trace = []
 external-corpus = []
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+# Opt-in test-support seam for items the SEPARATE integration-test binary
+# (`tests/cases/**`) must see but a normal `cargo build` must NOT compile.
+# The integration binary links `verter_compiler` as a NON-test dependency, so
+# a `#[cfg(test)]` item on the lib is invisible to it. This feature threads
+# the needle: absent from `default`, so production builds don't enable it,
+# yet the `[dev-dependencies]` self-edge below turns it ON for this crate's
+# OWN test targets (the integration binary among them). Currently gates the
+# `emit_static_style_object` re-export at crate root the A17 routing test
+# (`style_declaration_list_routing.rs`) needs — `template` stays
+# `pub(crate)` in every production build (see `template`'s own `bench`
+# feature gate above; this is deliberately a SEPARATE mechanism, since
+# `bench` widens `template`'s own visibility wholesale and interacts with
+# `trybuild`'s feature-detection fallback for the unrelated
+# `segmented_overwrite_compile_fail` fixture).
+test-support = []
 
 [dependencies]
 verter_ecma = { workspace = true }
@@ -107,6 +122,19 @@ tempfile = "3.27"
 serde = { workspace = true }
 serde_json = { workspace = true }
 trybuild = "1.0"
+# Activates the `test-support` feature on `verter_css_syntax` for
+# `cargo test --package verter_compiler` (and example/bench) builds only —
+# the `parse_inline_style_declarations` invocation counter the A17 "shared
+# parser invoked exactly once" routing proof binds to
+# (`style_declaration_list_routing.rs`, `ssr::css_to_js_object_tests`). The
+# regular dependency above does NOT enable the feature, so production builds
+# compile `parse_inline_style_declarations` without the counter TLS or its
+# increment.
+verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
+# Self-edge that activates this crate's OWN `test-support` feature for its
+# test / example / bench targets ONLY (the integration binary `tests/cases/**`
+# among them) — same idiom as the `verter_css_syntax` edge above.
+verter_compiler = { path = ".", features = ["test-support"] }
 
 [[bin]]
 name = "parse_corpus_probe"

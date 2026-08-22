@@ -1084,10 +1084,12 @@ pub(super) async fn handle_document_color(
 
     let colors = (|| {
         let doc = server.documents.get(uri)?;
+        let analysis = server.documents.get_analysis(uri);
         let blocks = project_carrier_blocks_for_document(&doc);
         Some(color_info::document_colors(
             &doc.source,
             &blocks,
+            analysis.as_ref(),
             &doc.line_index,
         ))
     })();

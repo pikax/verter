@@ -1,28 +1,110 @@
-//! A faithful VALIDATION-ONLY port of the official `svelte@5.56.3` CSS body reader's PARSE
-//! control flow (`phases/1-parse/read/style.js` + the `Parser` byte primitives in
-//! `phases/1-parse/index.js`).
+//! Svelte compatibility validation profile — a VALIDATION-ONLY reproduction of the official
+//! `svelte@5.56.3` CSS body reader's PARSE control flow (`phases/1-parse/read/style.js` + the
+//! `Parser` byte primitives in `phases/1-parse/index.js`).
+//!
+//! This is not the crate's general CSS Syntax Module Level 3 grammar: `svelte@5.56.3` hand-rolls
+//! its own CSS reader with its own GRAMMAR-ORDER control flow (which production is attempted in
+//! what order, matching upstream's exact reader sequence and error priority) and its own
+//! error-code taxonomy. The reader's TOKEN-LEVEL scanning runs over [`crate::lexer::Lexer`]:
+//! whitespace runs, comments, and identifiers delegate to its scanning methods (parameterized for
+//! the two genuine grammar deltas upstream's regexes need: JS `\s` (Unicode-aware) whitespace
+//! instead of the CSS Syntax Module's ASCII-only set, and a `>= 160` identifier-char codepoint
+//! threshold instead of the general `>= 128` rule — see [`crate::lexer::WhitespaceProfile`] /
+//! [`crate::lexer::IdentifierProfile`]); and every structural/punctuation decision that
+//! corresponds to one of the lexer's own one-byte `TokenKind`s under this reader's fixed
+//! `CssDialect::Css` dialect — brace, comma, colon, semicolon, paren, bracket — is read off the
+//! lexer's TOKEN STREAM (`at_token` / `eat_token` / `eat_double_colon`, peeking or consuming via
+//! a cloned lexer probe), not an independent byte comparison. What stays bespoke here is the
+//! CONTROL FLOW upstream's `read/style.js` implements that has no shared-lexer equivalent at all,
+//! plus a small, individually-justified set of byte-level reads a real CSS token cannot represent
+//! without changing observable behavior:
+//!
+//! - The whole-component envelope and body-loop stop condition (parsing begins at
+//!   `content_start`, the body loop stops at the literal `</style` or true EOF).
+//! - READ-AHEAD-THEN-REWIND grammar-ORDER decisions specific to this reader (e.g. "is this a
+//!   nested rule or a declaration", the exact production sequence, the exact error-code
+//!   taxonomy / first-failure priority).
+//! - `read_value` / `read_attribute_value`: upstream's own raw-run-with-backslash-escapes value
+//!   readers. These are NOT a CSS Syntax Module string token in disguise — unlike a spec string
+//!   token, neither bails out on an embedded raw newline (upstream's `BadString`-on-newline rule
+//!   has no analogue here; a quoted CSS value or attribute value can itself contain a literal
+//!   newline and upstream keeps scanning to the matching quote or EOF), and their backslash
+//!   handling is a plain "escape whatever follows" rule, not the CSS hex-escape grammar
+//!   `read_identifier` uses. Reusing [`crate::lexer::Lexer::consume_string`] here would silently
+//!   change upstream-observable behavior on an unterminated quoted value, so these stay bespoke
+//!   readers; the `/* … */` comment sub-scan inside `read_value` still delegates to
+//!   [`crate::lexer::Lexer::consume_comment`].
+//! - The `nth-of` (`An+B`) regex-shape matcher and the percentage matcher: both are narrower,
+//!   differently-shaped grammars than the general lexer's number/dimension tokenizing (no sign,
+//!   no exponent, no unit), so a general `consume_number` pass would over-accept (e.g. it would
+//!   tokenize `5e2%` as one `Percentage` spanning `5e2%`, where upstream's own
+//!   `\d+(\.\d+)?%` regex fails to match at all past the leading `5`). These stay dedicated
+//!   grammar routines, built on the shared digit-run/whitespace/codepoint primitives
+//!   ([`crate::lexer::ascii_digits_len`], [`crate::lexer::is_js_whitespace_codepoint`],
+//!   [`crate::lexer::codepoint_at`]) rather than a second independently-enumerated char class.
+//! - `@` production dispatch (`read_body`'s `parser.match('@')`) stays a raw byte comparison: the
+//!   shared lexer's `AtKeyword` token only forms when `@` is immediately followed by an
+//!   identifier-start byte, so a token-kind peek would silently diverge from upstream's
+//!   unconditional `matches(b"@")` on a bare/malformed `@` (e.g. `@ {`) — it would read as "no
+//!   at-rule" and fall into `read_rule` instead of upstream's own `read_at_rule` failure path.
+//! - The selector-grammar delimiter characters `&` (nesting), `*` (universal), `.` (class prefix),
+//!   and `|` (namespace separator): the shared lexer tokenizes every one of these as the same
+//!   undifferentiated `Delim` kind (there is no dedicated `TokenKind` per delimiter character), so
+//!   distinguishing them still requires reading the underlying byte — a `TokenKind::Delim` peek
+//!   would add a layer of indirection without replacing the byte comparison it is built on. These
+//!   stay direct `eat(byte, …)` calls. `#` (id prefix) DOES have a dedicated `TokenKind::Hash`, so
+//!   `read_selector`'s id-selector arm peeks it instead.
+//! - The `<!-- … -->` PAIRING-AND-SWALLOWING control flow (how it composes with `/* … */` in the
+//!   same `allow_comment_or_whitespace` loop, and swallowing everything between the opener and
+//!   terminator): this has no shared-lexer equivalent and stays bespoke. The opener/terminator
+//!   RECOGNITION itself is driven by the shared lexer's dedicated `TokenKind::Cdo`/`TokenKind::Cdc`
+//!   tokens.
+//! - `read_body`'s `</style` / EOF body-loop finish predicate: not a CSS token at all (a
+//!   Svelte-specific whole-component terminator), so it stays a literal string match.
+//!
+//! It is hosted here — as the ONE crate that owns all CSS-family parsing/scanning production
+//! code — specifically so no second, independently-maintained CSS reader lives outside this
+//! crate.
+//!
+//! ## Why this exists
 //!
 //! Upstream's `element.js` calls `read_style` — which PARSES the `<style>` CSS body via a full
 //! CSS reader and can THROW a parse error — BEFORE `if (current.css) e.style_duplicate(start)`.
 //! So a malformed CSS body in the 2nd `<style>` wins the first-error race over `style_duplicate`,
-//! and Verter must report the EXACT upstream CSS parse code. The parser reserves a
-//! [`StyleBodyProbe`] at the `read_style` position; this module is what the official-reject gate
-//! runs to FILL that slot.
+//! and a consumer reproducing `svelte@5.56.3`'s diagnostics must report the EXACT upstream CSS
+//! parse code for that race. Verter's Svelte official-reject gate
+//! (`verter_compiler::svelte::runtime::official_reject`) reserves a probe at the `read_style`
+//! position; [`style_body_reject_code`] is what fills that slot.
 //!
-//! Scope (codex-ruled): this is the upstream `read_style` PARSE-ENTRY control flow ONLY — enough
+//! Scope: this is the upstream `read_style` PARSE-ENTRY control flow ONLY (per J1-A16's ruling
+//! in `docs/arch/refactor/rev11/evidence/J1/css-family-authority-inventory-gap.md` — "Preserve
+//! the unusual whole-component envelope and nested-reader behavior... move its grammar corpus
+//! into `verter_css_syntax`"; that ruling explicitly found no durable prior "(codex-ruled)"
+//! exception on file for this module's predecessor, so this scope note is stated on its own
+//! merits, not as a claimed prior authority) — enough
 //! to return the FIRST exact parse code reachable from `read/style.js`'s readers
 //! (`css_expected_identifier`, `css_empty_declaration`, `css_selector_invalid`, plus the generic
 //! `expected_token` / `unexpected_eof` the `Parser` primitives throw). It builds NO CSS AST and
 //! performs NO CSS analysis / scoping — the post-parse CSS validation family (`css_global_*`,
 //! nesting placement, …) is a deferred CSS-scoping vertical (see the debt-ledger entry in
 //! `docs/arch/svelte-native-compiler-plan.md`). A body that parses CLEAN here returns `None`, so
-//! the later `style_duplicate` (or the unsupported-`<style>` rail) wins.
+//! the caller's later `style_duplicate` (or its unsupported-`<style>` rail) wins.
 //!
 //! The reader operates on the WHOLE component `source` from the CSS body's `content_start` and
 //! stops the body loop at the literal `</style` or EOF (upstream's `finished` predicate) — it is
 //! NOT given an isolated body slice, because upstream's nested CSS readers (a `read_block` /
 //! `read_value` inside an unterminated rule) run PAST `</style>` into the rest of the source, and
 //! that emergent behaviour decides the exact code.
+
+use std::sync::Arc;
+
+use crate::dialect::CssDialect;
+use crate::lexer::{
+    ascii_digits_len, codepoint_at, is_js_whitespace_codepoint, IdentifierProfile, Lexer,
+    WhitespaceProfile,
+};
+use crate::parser::CssSource;
+use crate::token::{SyntaxToken, TokenFlags, TokenKind};
 
 /// The result of one CSS reader step: `Ok(())` when the step parsed cleanly, `Err(code)` carrying
 /// the EXACT upstream CSS parse code the step would `throw`.
@@ -31,46 +113,66 @@ type CssResult = Result<(), &'static str>;
 /// Parse the CSS body that begins at `content_start` in `source` exactly as upstream's
 /// `read_style` → `read_body(parser, p => p.match('</style') || p.index >= p.template.length)`
 /// does, returning the FIRST exact CSS parse code on a body-parse FAILURE, or `None` when the
-/// body parses cleanly (so the later `style_duplicate` / unsupported-`<style>` rail wins).
+/// body parses cleanly (so the caller's later `style_duplicate` / unsupported-`<style>` rail
+/// wins).
 #[must_use]
-pub(super) fn css_body_parse_error(source: &str, content_start: usize) -> Option<&'static str> {
+pub fn style_body_reject_code(source: &str, content_start: usize) -> Option<&'static str> {
+    let css_source = CssSource::new(Arc::from(source), 0).ok()?;
+    let mut lexer = Lexer::new(&css_source, CssDialect::Css);
+    let start = content_start.min(css_source.text().len());
+    lexer.seek(start);
     let mut p = CssParser {
-        src: source.as_bytes(),
-        text: source,
-        index: content_start.min(source.len()),
+        src: css_source.text().as_bytes(),
+        text: css_source.text(),
+        lexer,
     };
     p.read_body().err()
 }
 
-/// The byte cursor + the upstream `Parser` primitives the CSS readers use. A faithful but
+/// The lexer-backed cursor + the upstream `Parser` primitives the CSS readers use. A faithful but
 /// validation-only mirror of the official `Parser` (`phases/1-parse/index.js`): the `eat(str,
 /// required=true)` form throws `expected_token`; `read_until` throws `unexpected_eof` at EOF; the
-/// rest are non-throwing scans.
+/// rest are non-throwing scans. Token-level scanning (whitespace runs, `/* … */` comments,
+/// identifiers) delegates to `lexer`; the cursor position IS `lexer`'s own cursor — there is no
+/// separate index to keep in sync.
 struct CssParser<'a> {
     src: &'a [u8],
     text: &'a str,
-    index: usize,
+    lexer: Lexer<'a>,
 }
 
 impl<'a> CssParser<'a> {
+    /// The parser's current byte position — `lexer`'s own cursor (this `Lexer` was constructed
+    /// over the whole component source with origin 0, so its absolute position IS this local
+    /// index).
+    fn index(&self) -> usize {
+        self.lexer.position() as usize
+    }
+
+    /// Reposition the cursor — a thin wrapper over [`Lexer::seek`] so every read/rewind site in
+    /// this file reads as "the parser's position", not "the lexer's".
+    fn seek(&mut self, at: usize) {
+        self.lexer.seek(at);
+    }
+
     fn len(&self) -> usize {
         self.src.len()
     }
 
     fn at_eof(&self) -> bool {
-        self.index >= self.len()
+        self.index() >= self.len()
     }
 
     /// `parser.match(str)` — whether `str` occurs at the current index.
     fn matches(&self, s: &[u8]) -> bool {
-        self.src[self.index..].starts_with(s)
+        self.src[self.index()..].starts_with(s)
     }
 
     /// `parser.eat(str, required)` — consume `str` if present (returning `true`); when `required`
     /// and absent, throw `expected_token`.
     fn eat(&mut self, s: &[u8], required: bool) -> Result<bool, &'static str> {
         if self.matches(s) {
-            self.index += s.len();
+            self.seek(self.index() + s.len());
             Ok(true)
         } else if required {
             Err("expected_token")
@@ -79,17 +181,72 @@ impl<'a> CssParser<'a> {
         }
     }
 
-    /// `parser.allow_whitespace()` — skip the parser's whitespace set.
-    fn allow_whitespace(&mut self) {
-        while self.index < self.len() && is_css_whitespace(self.codepoint_at(self.index)) {
-            self.index += char_len(self.src[self.index]);
+    /// Peek the [`TokenKind`] of the token that begins exactly at the current position, via the
+    /// shared lexer's real token stream — a clone so the probe never advances the parser's own
+    /// cursor. `None` at EOF.
+    fn peek_kind(&self) -> Option<TokenKind> {
+        self.lexer.clone().next().map(SyntaxToken::kind)
+    }
+
+    /// Whether the token at the current position is exactly `kind` — non-consuming.
+    fn at_token(&self, kind: TokenKind) -> bool {
+        self.peek_kind() == Some(kind)
+    }
+
+    /// `parser.eat(<punctuation>, required)` reproduced over the shared lexer's TOKEN STREAM for
+    /// a punctuation kind the lexer already tokenizes as its own one-byte [`TokenKind`] under
+    /// this reader's fixed [`CssDialect::Css`] dialect (brace / comma / colon / semicolon / paren
+    /// / bracket — every one of these is an unconditional single-byte token under `Css`, unlike
+    /// e.g. `{` under the Stylus dialect): consume the token if present (returning `true`); when
+    /// `required` and absent, throw `expected_token`.
+    fn eat_token(&mut self, kind: TokenKind, required: bool) -> Result<bool, &'static str> {
+        let mut probe = self.lexer.clone();
+        match probe.next() {
+            Some(token) if token.kind() == kind => {
+                self.lexer = probe;
+                Ok(true)
+            }
+            _ if required => Err("expected_token"),
+            _ => Ok(false),
         }
+    }
+
+    /// `parser.eat('::', required=false)` reproduced over the token stream as two zero-gap
+    /// adjacent `Colon` tokens — the CSS Syntax Module has no fused "double colon" token; `::` is
+    /// simply two back-to-back `:` delimiter tokens with no byte between them.
+    fn eat_double_colon(&mut self) -> bool {
+        let mut probe = self.lexer.clone();
+        let Some(first) = probe.next() else {
+            return false;
+        };
+        if first.kind() != TokenKind::Colon {
+            return false;
+        }
+        let mut probe2 = probe.clone();
+        let Some(second) = probe2.next() else {
+            return false;
+        };
+        if second.kind() == TokenKind::Colon && second.start == first.end {
+            self.lexer = probe2;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// `parser.allow_whitespace()` — skip a run of upstream's JS-`\s` whitespace, via the shared
+    /// lexer's [`WhitespaceProfile::JsUnicode`] scan.
+    fn allow_whitespace(&mut self) {
+        self.lexer
+            .consume_whitespace_profiled(WhitespaceProfile::JsUnicode);
     }
 
     /// `parser.read_until(pattern)` for a single-CODEPOINT-class pattern (the JS-regex classes are
     /// Unicode-aware — `\s` includes NBSP and the other Unicode spaces); at EOF (upstream's
     /// non-loose branch) throw `unexpected_eof`. Used for `REGEX_WHITESPACE_OR_COLON` in
-    /// `read_declaration`.
+    /// `read_declaration` — this is NOT an identifier-grammar read (upstream reads an arbitrary
+    /// non-whitespace-non-colon run as a "property name" with no char-class validation at all),
+    /// so it has no shared-lexer token equivalent; only its whitespace CLASS PREDICATE is shared.
     fn read_until_codepoint_class(
         &mut self,
         pred: impl Fn(u32) -> bool,
@@ -97,15 +254,18 @@ impl<'a> CssParser<'a> {
         if self.at_eof() {
             return Err("unexpected_eof");
         }
-        let start = self.index;
-        while self.index < self.len() && !pred(self.codepoint_at(self.index)) {
-            self.index += char_len(self.src[self.index]);
+        let start = self.index();
+        while let Some((cp, len)) = codepoint_at(self.src, self.index()) {
+            if pred(cp) {
+                break;
+            }
+            self.seek(self.index() + len);
         }
-        Ok(&self.text[start..self.index])
+        Ok(&self.text[start..self.index()])
     }
 
     /// The Unicode codepoint at byte `i` (decoding the UTF-8 char). Mirrors upstream's
-    /// `template.codePointAt(index)` for the `>= 160` identifier-char test and whitespace.
+    /// `template.codePointAt(index)` for `read_attribute_value`'s unquoted-close whitespace test.
     fn codepoint_at(&self, i: usize) -> u32 {
         self.text[i..].chars().next().map_or(0, |c| c as u32)
     }
@@ -114,22 +274,23 @@ impl<'a> CssParser<'a> {
     /// length) — the readers step whole scalars, never single bytes, so `codepoint_at` never lands
     /// on a continuation byte and the accumulated value keeps valid UTF-8.
     fn push_char(&mut self, out: &mut String) {
-        if let Some(c) = self.text[self.index..].chars().next() {
+        if let Some(c) = self.text[self.index()..].chars().next() {
             out.push(c);
-            self.index += c.len_utf8();
+            self.seek(self.index() + c.len_utf8());
         } else {
-            self.index += 1;
+            self.seek(self.index() + 1);
         }
     }
 
     /// Advance past the WHOLE char at the current index without accumulating it (the validation
     /// readers that do not build a value still step whole scalars).
     fn advance_char(&mut self) {
-        self.index += self
+        let len = self
             .text
-            .get(self.index..)
+            .get(self.index()..)
             .and_then(|s| s.chars().next())
             .map_or(1, char::len_utf8);
+        self.seek(self.index() + len);
     }
 
     /// `parser.match('</style' …)` body-loop finish predicate: at the literal `</style` or EOF.
@@ -160,10 +321,10 @@ impl<'a> CssParser<'a> {
         self.eat(b"@", true)?;
         self.read_identifier()?;
         self.read_value()?;
-        if self.matches(b"{") {
+        if self.at_token(TokenKind::LeftBrace) {
             self.read_block()?;
         } else {
-            self.eat(b";", true)?;
+            self.eat_token(TokenKind::Semicolon, true)?;
         }
         Ok(())
     }
@@ -178,18 +339,18 @@ impl<'a> CssParser<'a> {
     /// `read_selector_list(parser, inside_pseudo_class)`.
     fn read_selector_list(&mut self, inside_pseudo_class: bool) -> CssResult {
         self.allow_comment_or_whitespace()?;
-        while self.index < self.len() {
+        while self.index() < self.len() {
             self.read_selector(inside_pseudo_class)?;
             self.allow_comment_or_whitespace()?;
             let closes = if inside_pseudo_class {
-                self.matches(b")")
+                self.at_token(TokenKind::RightParen)
             } else {
-                self.matches(b"{")
+                self.at_token(TokenKind::LeftBrace)
             };
             if closes {
                 return Ok(());
             }
-            self.eat(b",", true)?;
+            self.eat_token(TokenKind::Comma, true)?;
             self.allow_comment_or_whitespace()?;
         }
         Err("unexpected_eof")
@@ -208,20 +369,31 @@ impl<'a> CssParser<'a> {
                 if self.eat(b"|", false)? {
                     self.read_identifier()?;
                 }
-            } else if self.eat(b"#", false)? || self.eat(b".", false)? {
-                // IdSelector (`#x`) / ClassSelector (`.x`) — distinct AST nodes upstream, the same
-                // parse control flow: a required identifier.
+            } else if self.at_token(TokenKind::Hash) {
+                // IdSelector (`#x`). The shared lexer's `Hash` token only forms when `#` is
+                // followed by a valid name sequence, unlike upstream's unconditional
+                // `eat('#', false)` — but every case that gates out (Hash doesn't form) is a case
+                // where `read_identifier`'s own scan (which shares the same name-char predicate)
+                // would consume zero characters starting right after `#` too, so it still throws
+                // the same `css_expected_identifier` either way; a raw fallback is not needed.
+                // Only the `#` prefix itself is consumed here (not the whole `Hash` token span),
+                // so `read_identifier` still runs from upstream's own position and keeps applying
+                // its own leading-digit/hyphen rejection.
+                self.eat(b"#", true)?;
                 self.read_identifier()?;
-            } else if self.eat(b"::", false)? || self.eat(b":", false)? {
+            } else if self.eat(b".", false)? {
+                // ClassSelector (`.x`) — no dedicated token for `.`, stays a raw byte comparison.
+                self.read_identifier()?;
+            } else if self.eat_double_colon() || self.eat_token(TokenKind::Colon, false)? {
                 // PseudoElementSelector (`::x`) / PseudoClassSelector (`:x`) — `::` is checked
                 // FIRST (the `||` short-circuit preserves upstream's branch order so a `:` does not
                 // eat the first colon of `::`); both read an identifier + an optional `(args)`.
                 self.read_identifier()?;
-                if self.eat(b"(", false)? {
+                if self.eat_token(TokenKind::LeftParen, false)? {
                     self.read_selector_list(true)?;
-                    self.eat(b")", true)?;
+                    self.eat_token(TokenKind::RightParen, true)?;
                 }
-            } else if self.eat(b"[", false)? {
+            } else if self.eat_token(TokenKind::LeftBracket, false)? {
                 self.allow_whitespace();
                 self.read_identifier()?;
                 self.allow_whitespace();
@@ -232,7 +404,7 @@ impl<'a> CssParser<'a> {
                 self.allow_whitespace();
                 self.read_attribute_flags();
                 self.allow_whitespace();
-                self.eat(b"]", true)?;
+                self.eat_token(TokenKind::RightBracket, true)?;
             } else if inside_pseudo_class && self.match_nth_of() {
                 self.read_nth_of();
             } else if self.match_percentage() {
@@ -244,30 +416,30 @@ impl<'a> CssParser<'a> {
                 }
             }
 
-            let index = self.index;
+            let index = self.index();
             self.allow_comment_or_whitespace()?;
 
-            let closes = self.matches(b",")
+            let closes = self.at_token(TokenKind::Comma)
                 || if inside_pseudo_class {
-                    self.matches(b")")
+                    self.at_token(TokenKind::RightParen)
                 } else {
-                    self.matches(b"{")
+                    self.at_token(TokenKind::LeftBrace)
                 };
             if closes {
                 // rewind, return the complex selector.
-                self.index = index;
+                self.seek(index);
                 return Ok(());
             }
 
-            self.index = index;
+            self.seek(index);
             let had_combinator = self.read_combinator();
             if had_combinator {
                 self.allow_whitespace();
-                let closes_after = self.matches(b",")
+                let closes_after = self.at_token(TokenKind::Comma)
                     || if inside_pseudo_class {
-                        self.matches(b")")
+                        self.at_token(TokenKind::RightParen)
                     } else {
-                        self.matches(b"{")
+                        self.at_token(TokenKind::LeftBrace)
                     };
                 if closes_after {
                     return Err("css_selector_invalid");
@@ -279,27 +451,27 @@ impl<'a> CssParser<'a> {
     /// `read_combinator(parser)` — returns whether a combinator (an explicit `+`/`~`/`>`/`||`, or
     /// a whitespace-only descendant combinator) was read. Non-throwing.
     fn read_combinator(&mut self) -> bool {
-        let start = self.index;
+        let start = self.index();
         self.allow_whitespace();
         if self.read_combinator_token() {
             self.allow_whitespace();
             return true;
         }
         // a whitespace-only descendant combinator: whitespace was consumed (index advanced).
-        self.index != start
+        self.index() != start
     }
 
     /// `read_block(parser)` — `{` … block items … `}`. Throws `expected_token` on a missing brace.
     fn read_block(&mut self) -> CssResult {
-        self.eat(b"{", true)?;
-        while self.index < self.len() {
+        self.eat_token(TokenKind::LeftBrace, true)?;
+        while self.index() < self.len() {
             self.allow_comment_or_whitespace()?;
-            if self.matches(b"}") {
+            if self.at_token(TokenKind::RightBrace) {
                 break;
             }
             self.read_block_item()?;
         }
-        self.eat(b"}", true)?;
+        self.eat_token(TokenKind::RightBrace, true)?;
         Ok(())
     }
 
@@ -309,11 +481,11 @@ impl<'a> CssParser<'a> {
         if self.matches(b"@") {
             return self.read_at_rule();
         }
-        let start = self.index;
+        let start = self.index();
         self.read_value()?;
-        let next = self.src.get(self.index).copied();
-        self.index = start;
-        if next == Some(b'{') {
+        let is_rule = self.at_token(TokenKind::LeftBrace);
+        self.seek(start);
+        if is_rule {
             self.read_rule()
         } else {
             self.read_declaration()
@@ -324,17 +496,18 @@ impl<'a> CssParser<'a> {
     /// `css_empty_declaration`; a non-`}`-terminated declaration must `eat(';', true)`.
     fn read_declaration(&mut self) -> CssResult {
         // `REGEX_WHITESPACE_OR_COLON = /[\s:]/` — JS `\s` is the Unicode set.
-        let property =
-            self.read_until_codepoint_class(|cp| is_css_whitespace(cp) || cp == u32::from(b':'))?;
+        let property = self.read_until_codepoint_class(|cp| {
+            is_js_whitespace_codepoint(cp) || cp == u32::from(b':')
+        })?;
         self.allow_whitespace();
-        self.eat(b":", false)?;
+        self.eat_token(TokenKind::Colon, false)?;
         self.allow_whitespace();
         let value = self.read_value()?;
         if value.is_empty() && !property.starts_with("--") {
             return Err("css_empty_declaration");
         }
-        if !self.matches(b"}") {
-            self.eat(b";", true)?;
+        if !self.at_token(TokenKind::RightBrace) {
+            self.eat_token(TokenKind::Semicolon, true)?;
         }
         Ok(())
     }
@@ -342,13 +515,20 @@ impl<'a> CssParser<'a> {
     /// `read_value(parser)` — read up to an unquoted/unparen `;` / `{` / `}` (returning the
     /// trimmed value text), skipping `/* … */` comments and respecting quotes + `url(...)`. At
     /// EOF it throws `unexpected_eof`.
+    ///
+    /// This is upstream's own raw-run-with-backslash-escapes reader, not a CSS Syntax Module
+    /// string token in disguise: inside a quoted span it does NOT bail out on an embedded raw
+    /// newline (there is no `BadString`-on-newline rule here — see the module doc), so it cannot
+    /// be replaced by [`Lexer::consume_string`] without changing observable behavior. The `/* …
+    /// */` comment sub-scan, however, has no such divergence and delegates to
+    /// [`Lexer::consume_comment`].
     fn read_value(&mut self) -> Result<String, &'static str> {
         let mut value = String::new();
         let mut escaped = false;
         let mut in_url = false;
         let mut quote_mark: Option<u8> = None;
-        while self.index < self.len() {
-            let ch = self.src[self.index];
+        while self.index() < self.len() {
+            let ch = self.src[self.index()];
             if escaped {
                 value.push('\\');
                 self.push_char(&mut value);
@@ -356,7 +536,7 @@ impl<'a> CssParser<'a> {
                 continue;
             } else if ch == b'\\' {
                 escaped = true;
-                self.index += 1;
+                self.seek(self.index() + 1);
                 continue;
             } else if Some(ch) == quote_mark {
                 quote_mark = None;
@@ -371,16 +551,15 @@ impl<'a> CssParser<'a> {
             } else if ch == b'/'
                 && !in_url
                 && quote_mark.is_none()
-                && self.src.get(self.index + 1) == Some(&b'*')
+                && self.src.get(self.index() + 1) == Some(&b'*')
             {
-                self.index += 2;
-                while self.index < self.len() {
-                    if self.src[self.index] == b'*' && self.src.get(self.index + 1) == Some(&b'/') {
-                        self.index += 2;
-                        break;
-                    }
-                    self.index += 1;
-                }
+                // Upstream's inline comment-skip has no REQUIRED closing-token check (unlike
+                // `allow_comment_or_whitespace`'s `eat('*/', true)`): an unterminated comment just
+                // runs to EOF, and the OUTER loop's own EOF check below is what yields
+                // `unexpected_eof` — exactly what `Lexer::consume_comment`'s `UNTERMINATED`
+                // handling already does (advance to end-of-input, no throw), so its return value
+                // needs no inspection here.
+                self.lexer.consume_comment();
                 continue;
             }
             self.push_char(&mut value);
@@ -390,6 +569,10 @@ impl<'a> CssParser<'a> {
 
     /// `read_attribute_value(parser)` — a quoted or unquoted attribute value, closing on the
     /// matching quote or (unquoted) a whitespace / `]`. At EOF it throws `unexpected_eof`.
+    ///
+    /// Like `read_value`, this does not implement the CSS Syntax Module's string-token grammar: a
+    /// quoted attribute value here does not bail out on an embedded raw newline either, so it
+    /// stays a bespoke reader rather than a [`Lexer::consume_string`] call (see the module doc).
     fn read_attribute_value(&mut self) -> CssResult {
         let mut escaped = false;
         let quote_mark = if self.eat(b"\"", false)? {
@@ -399,22 +582,22 @@ impl<'a> CssParser<'a> {
         } else {
             None
         };
-        while self.index < self.len() {
-            let ch = self.src[self.index];
+        while self.index() < self.len() {
+            let ch = self.src[self.index()];
             if escaped {
                 escaped = false;
                 self.advance_char();
                 continue;
             } else if ch == b'\\' {
                 escaped = true;
-                self.index += 1; // `\` is ASCII (1 byte)
+                self.seek(self.index() + 1); // `\` is ASCII (1 byte)
                 continue;
             }
             // `REGEX_CLOSING_BRACKET = /[\s\]]/` — JS `\s` is the Unicode set; the reader steps
             // whole chars so `codepoint_at` is only ever read on a char boundary.
             let closes = match quote_mark {
                 Some(q) => ch == q,
-                None => is_css_whitespace(self.codepoint_at(self.index)) || ch == b']',
+                None => is_js_whitespace_codepoint(self.codepoint_at(self.index())) || ch == b']',
             };
             if closes {
                 if let Some(q) = quote_mark {
@@ -428,40 +611,20 @@ impl<'a> CssParser<'a> {
     }
 
     /// `read_identifier(parser)` (the CSS one) — a CSS ident token. A leading `-?<digit>` is
-    /// `css_expected_identifier`; an EMPTY identifier is `css_expected_identifier`. Handles `\`
-    /// unicode escapes and ident chars (`[a-zA-Z0-9_-]` plus any codepoint ≥ 160).
+    /// `css_expected_identifier`; an EMPTY identifier is `css_expected_identifier`. Delegates its
+    /// char-classification loop (escape handling, ident chars including upstream's `>= 160`
+    /// codepoint threshold) to the shared lexer's `SvelteCompat`/`JsUnicode`-profiled name scan.
     fn read_identifier(&mut self) -> CssResult {
         // REGEX_LEADING_HYPHEN_OR_DIGIT = /-?\d/y at the current index.
         if self.match_leading_hyphen_or_digit() {
             return Err("css_expected_identifier");
         }
-        let mut len = 0usize;
-        while self.index < self.len() {
-            let ch = self.src[self.index];
-            if ch == b'\\' {
-                if let Some(seq_len) = self.match_unicode_sequence() {
-                    self.index += seq_len;
-                    len += 1;
-                } else {
-                    // `\` then the escaped char (a WHOLE char) — but only step it when one
-                    // EXISTS, so a trailing `\` at EOF advances by one and never overshoots `len`.
-                    self.index += 1;
-                    if self.index < self.len() {
-                        self.advance_char();
-                    }
-                    len += 1;
-                }
-            } else {
-                let cp = self.codepoint_at(self.index);
-                if cp >= 160 || is_valid_identifier_char(ch) {
-                    self.index += char_len(ch);
-                    len += 1;
-                } else {
-                    break;
-                }
-            }
-        }
-        if len == 0 {
+        let start = self.index();
+        self.lexer.consume_name_profiled(
+            IdentifierProfile::SvelteCompat,
+            WhitespaceProfile::JsUnicode,
+        );
+        if self.index() == start {
             return Err("css_expected_identifier");
         }
         Ok(())
@@ -469,21 +632,27 @@ impl<'a> CssParser<'a> {
 
     /// `allow_comment_or_whitespace(parser)` — whitespace then any run of `/* … */` / `<!-- … -->`
     /// comments. Upstream's REQUIRED close tokens (`eat('*/', true)` / `eat('-->', true)`) raise
-    /// `expected_token` on an unterminated comment, so this returns [`CssResult`] and propagates
-    /// that error: `read_until` advances to the close token OR end-of-input, after which the
-    /// REQUIRED `eat` fails (`expected_token`) when the close is absent.
+    /// `expected_token` on an unterminated comment: the `/* … */` arm delegates to
+    /// [`Lexer::consume_comment`] and turns its `UNTERMINATED` flag into that same error; the
+    /// `<!-- … -->` opener/terminator are the shared lexer's dedicated `TokenKind::Cdo`/
+    /// `TokenKind::Cdc` tokens (an exact-literal match with no extra requirement, so peeking them
+    /// is unconditionally equivalent to the raw byte match it replaces), driven through the same
+    /// `at_token`/`eat_token` helpers as the rest of this file; only the swallow-everything-between
+    /// scan (`read_until_str`) and its pairing with the `/* … */` arm in this same loop have no
+    /// shared-lexer equivalent and stay bespoke.
     fn allow_comment_or_whitespace(&mut self) -> CssResult {
         self.allow_whitespace();
-        while self.matches(b"/*") || self.matches(b"<!--") {
+        while self.matches(b"/*") || self.at_token(TokenKind::Cdo) {
             if self.matches(b"/*") {
-                self.index += 2;
-                self.read_until_str(b"*/");
-                self.eat(b"*/", true)?;
+                let comment = self.lexer.consume_comment();
+                if comment.flags & TokenFlags::UNTERMINATED != 0 {
+                    return Err("expected_token");
+                }
             }
-            if self.matches(b"<!--") {
-                self.index += 4;
+            if self.at_token(TokenKind::Cdo) {
+                self.eat_token(TokenKind::Cdo, true)?;
                 self.read_until_str(b"-->");
-                self.eat(b"-->", true)?;
+                self.eat_token(TokenKind::Cdc, true)?;
             }
             self.allow_whitespace();
         }
@@ -493,16 +662,19 @@ impl<'a> CssParser<'a> {
     // ── scan helpers (the regex primitives, hand-coded) ──────────────────────────────────
 
     /// Advance to the first occurrence of `needle` (or EOF), like `parser.read_until(/needle/)`.
+    /// Used only to swallow the run between a `<!--` opener and its `-->` terminator, which has
+    /// no shared-lexer token equivalent (see above) even though the opener/terminator themselves
+    /// do.
     fn read_until_str(&mut self, needle: &[u8]) {
-        while self.index < self.len() && !self.matches(needle) {
-            self.index += 1;
+        while self.index() < self.len() && !self.matches(needle) {
+            self.seek(self.index() + 1);
         }
     }
 
     /// `REGEX_MATCHER = /[~^$*|]?=/y` — consume an optional `~^$*|` then a required `=`. Returns
     /// whether a matcher was read (advancing only on a full match).
     fn read_matcher(&mut self) -> bool {
-        let i = self.index;
+        let i = self.index();
         let mut j = i;
         if let Some(&b) = self.src.get(j) {
             if matches!(b, b'~' | b'^' | b'$' | b'*' | b'|') {
@@ -510,7 +682,7 @@ impl<'a> CssParser<'a> {
             }
         }
         if self.src.get(j) == Some(&b'=') {
-            self.index = j + 1;
+            self.seek(j + 1);
             true
         } else {
             false
@@ -519,18 +691,18 @@ impl<'a> CssParser<'a> {
 
     /// `REGEX_ATTRIBUTE_FLAGS = /[a-zA-Z]+/y` — consume a run of ASCII letters.
     fn read_attribute_flags(&mut self) {
-        while self.index < self.len() && self.src[self.index].is_ascii_alphabetic() {
-            self.index += 1;
+        while self.index() < self.len() && self.src[self.index()].is_ascii_alphabetic() {
+            self.seek(self.index() + 1);
         }
     }
 
     /// `parser.read(REGEX_COMBINATOR)` — consume `+` / `~` / `>` / `||` at the current index.
     fn read_combinator_token(&mut self) -> bool {
         if self.matches(b"||") {
-            self.index += 2;
+            self.seek(self.index() + 2);
             true
-        } else if matches!(self.src.get(self.index), Some(b'+' | b'~' | b'>')) {
-            self.index += 1;
+        } else if matches!(self.src.get(self.index()), Some(b'+' | b'~' | b'>')) {
+            self.seek(self.index() + 1);
             true
         } else {
             false
@@ -540,19 +712,22 @@ impl<'a> CssParser<'a> {
     /// `parser.match_regex(REGEX_COMBINATOR)` — whether a combinator token is at the current index
     /// (non-consuming).
     fn match_combinator(&self) -> bool {
-        self.matches(b"||") || matches!(self.src.get(self.index), Some(b'+' | b'~' | b'>'))
+        self.matches(b"||") || matches!(self.src.get(self.index()), Some(b'+' | b'~' | b'>'))
     }
 
     /// `REGEX_LEADING_HYPHEN_OR_DIGIT = /-?\d/y` at the current index (non-consuming).
     fn match_leading_hyphen_or_digit(&self) -> bool {
-        let mut j = self.index;
+        let mut j = self.index();
         if self.src.get(j) == Some(&b'-') {
             j += 1;
         }
         matches!(self.src.get(j), Some(b) if b.is_ascii_digit())
     }
 
-    /// `REGEX_PERCENTAGE = /\d+(\.\d+)?%/y` at the current index (non-consuming).
+    /// `REGEX_PERCENTAGE = /\d+(\.\d+)?%/y` at the current index (non-consuming). See the module
+    /// doc for why this stays a dedicated grammar routine rather than a general
+    /// `Lexer::consume_number` call (that grammar additionally allows a sign and an exponent,
+    /// which this narrower upstream regex does not).
     fn match_percentage(&self) -> bool {
         self.percentage_len().is_some()
     }
@@ -560,32 +735,28 @@ impl<'a> CssParser<'a> {
     /// Consume a `REGEX_PERCENTAGE` match.
     fn read_percentage(&mut self) {
         if let Some(len) = self.percentage_len() {
-            self.index += len;
+            self.seek(self.index() + len);
         }
     }
 
-    /// The byte length of a `\d+(\.\d+)?%` match at the current index, or `None`.
+    /// The byte length of a `\d+(\.\d+)?%` match at the current index, or `None`. The digit-run
+    /// scans are the same shared primitive ([`crate::lexer::ascii_digits_len`]) the general
+    /// lexer's number/dimension tokenizing uses.
     fn percentage_len(&self) -> Option<usize> {
-        let mut j = self.index;
-        let start = j;
-        while matches!(self.src.get(j), Some(b) if b.is_ascii_digit()) {
-            j += 1;
-        }
+        let start = self.index();
+        let mut j = start + ascii_digits_len(self.src, start);
         if j == start {
             return None; // need ≥1 digit
         }
         if self.src.get(j) == Some(&b'.') {
-            let mut k = j + 1;
-            let frac_start = k;
-            while matches!(self.src.get(k), Some(b) if b.is_ascii_digit()) {
-                k += 1;
-            }
-            if k > frac_start {
-                j = k; // a fractional part requires ≥1 digit; otherwise the `.` is not consumed
+            let frac_start = j + 1;
+            let frac_len = ascii_digits_len(self.src, frac_start);
+            if frac_len > 0 {
+                j = frac_start + frac_len; // a fractional part requires ≥1 digit
             }
         }
         if self.src.get(j) == Some(&b'%') {
-            Some(j + 1 - self.index)
+            Some(j + 1 - self.index())
         } else {
             None
         }
@@ -605,7 +776,7 @@ impl<'a> CssParser<'a> {
     /// Consume a `REGEX_NTH_OF` match.
     fn read_nth_of(&mut self) {
         if let Some(len) = self.nth_of_len() {
-            self.index += len;
+            self.seek(self.index() + len);
         }
     }
 
@@ -631,7 +802,7 @@ impl<'a> CssParser<'a> {
     /// arm. A generic-optional-sign reader would over-accept `-2` / `-2n` / `-2n-1` and emit no
     /// reject — diverging from pinned `svelte@5.56.3`.
     fn nth_of_len(&self) -> Option<usize> {
-        let rest = &self.src[self.index..];
+        let rest = &self.src[self.index()..];
         let j = if rest.starts_with(b"even") {
             4
         } else if rest.starts_with(b"odd") {
@@ -646,21 +817,21 @@ impl<'a> CssParser<'a> {
         };
         // trailing alternation `((?=\s*[,)])|\s+of\s+)`, tried left-to-right (JS `\s` — Unicode):
         // (1) the zero-width end lookahead `\s*[,)]` — return `j` WITHOUT consuming the ws.
-        let k = skip_css_whitespace(rest, j);
+        let k = skip_js_whitespace(rest, j);
         if matches!(rest.get(k), Some(b',' | b')')) {
             return Some(j);
         }
         // (2) the CONSUMING `\s+of\s+` arm — `\s+` (≥1), the literal `of`, `\s+` (≥1). On match,
         // return the byte length INCLUDING the trailing whitespace (so the `<selector>` after
         // `of` is read by the normal selector loop).
-        let m = skip_css_whitespace(rest, j);
+        let m = skip_js_whitespace(rest, j);
         if m == j {
             return None; // `\s+` needs ≥1 whitespace before `of`
         }
         if !rest[m..].starts_with(b"of") {
             return None;
         }
-        let after_of = skip_css_whitespace(rest, m + 2);
+        let after_of = skip_js_whitespace(rest, m + 2);
         if after_of == m + 2 {
             return None; // `\s+` needs ≥1 whitespace after `of`
         }
@@ -678,9 +849,7 @@ impl<'a> CssParser<'a> {
             j += 1;
         }
         let dstart = j;
-        while matches!(rest.get(j), Some(b) if b.is_ascii_digit()) {
-            j += 1;
-        }
+        j += ascii_digits_len(rest, j);
         if rest.get(j) == Some(&b'n') {
             // `\d*n` (the leading digits are OPTIONAL here) + an OPTIONAL `\s*[+-]\s*\d+` offset.
             j += 1;
@@ -703,9 +872,7 @@ impl<'a> CssParser<'a> {
     fn nth_negative_arm_len(&self, rest: &[u8]) -> Option<usize> {
         debug_assert_eq!(rest.first(), Some(&b'-'));
         let mut j = 1usize; // the leading `-`
-        while matches!(rest.get(j), Some(b) if b.is_ascii_digit()) {
-            j += 1;
-        }
+        j += ascii_digits_len(rest, j);
         if rest.get(j) != Some(&b'n') {
             return None; // the `n` is mandatory
         }
@@ -721,7 +888,7 @@ impl<'a> CssParser<'a> {
     /// digit (e.g. `2n+`) is not a match.
     fn nth_offset_len(&self, rest: &[u8], from: usize, plus_or_minus: bool) -> Option<usize> {
         // `\s*<sign>\s*\d+` — the `\s*` runs are JS `\s` (Unicode).
-        let mut k = skip_css_whitespace(rest, from);
+        let mut k = skip_js_whitespace(rest, from);
         let sign_ok = match rest.get(k) {
             Some(b'+') => true,
             Some(b'-') => plus_or_minus,
@@ -730,39 +897,14 @@ impl<'a> CssParser<'a> {
         if !sign_ok {
             return None;
         }
-        k = skip_css_whitespace(rest, k + 1);
+        k = skip_js_whitespace(rest, k + 1);
         let ds = k;
-        while matches!(rest.get(k), Some(b) if b.is_ascii_digit()) {
-            k += 1;
-        }
+        k += ascii_digits_len(rest, k);
         if k > ds {
             Some(k)
         } else {
             None // a sign with no trailing digit is not an offset
         }
-    }
-
-    /// `REGEX_UNICODE_SEQUENCE = /\\[0-9a-fA-F]{1,6}(\r\n|\s)?/y` at the current index — the byte
-    /// length of the match (including the leading `\`), or `None` when it is not a hex escape.
-    fn match_unicode_sequence(&self) -> Option<usize> {
-        if self.src.get(self.index) != Some(&b'\\') {
-            return None;
-        }
-        let mut j = self.index + 1;
-        let hex_start = j;
-        while j < self.len() && j - hex_start < 6 && self.src[j].is_ascii_hexdigit() {
-            j += 1;
-        }
-        if j == hex_start {
-            return None; // need ≥1 hex digit
-        }
-        // optional trailing `\r\n` or a single whitespace (JS `\s` — Unicode).
-        if self.src.get(j) == Some(&b'\r') && self.src.get(j + 1) == Some(&b'\n') {
-            j += 2;
-        } else if j < self.len() && is_css_whitespace(self.codepoint_at(j)) {
-            j += char_len(self.src[j]);
-        }
-        Some(j - self.index)
     }
 }
 
@@ -770,68 +912,18 @@ impl<'a> CssParser<'a> {
 /// LineTerminator): INCLUDES U+FEFF, EXCLUDES U+0085. Rust `str::trim` (Unicode `White_Space`)
 /// diverges on exactly those two, so the official `value.trim()` routes here.
 fn trim_js_whitespace(s: &str) -> &str {
-    s.trim_matches(|c: char| is_css_whitespace(c as u32))
+    s.trim_matches(|c: char| is_js_whitespace_codepoint(c as u32))
 }
 
 /// Advance `k` past the JS-`\s` whitespace run in `rest` (a valid-UTF-8 suffix of the source; `k`
 /// on a char boundary), decoding codepoints — the `\s*` / `\s+` scans of `REGEX_NTH_OF` are
 /// Unicode-aware.
-fn skip_css_whitespace(rest: &[u8], mut k: usize) -> usize {
-    while let Some((cp, len)) = codepoint_with_len(rest, k) {
-        if !is_css_whitespace(cp) {
+fn skip_js_whitespace(rest: &[u8], mut k: usize) -> usize {
+    while let Some((cp, len)) = codepoint_at(rest, k) {
+        if !is_js_whitespace_codepoint(cp) {
             break;
         }
         k += len;
     }
     k
 }
-
-/// Decode the UTF-8 codepoint starting at byte `i` of `bytes`, returning `(codepoint, byte
-/// length)` — `None` at EOF or on undecodable bytes (a mid-character `i`; never produced by the
-/// boundary-preserving scans).
-fn codepoint_with_len(bytes: &[u8], i: usize) -> Option<(u32, usize)> {
-    let &lead = bytes.get(i)?;
-    if lead < 0x80 {
-        return Some((u32::from(lead), 1));
-    }
-    let slice = bytes.get(i..i + char_len(lead))?;
-    let c = std::str::from_utf8(slice).ok()?.chars().next()?;
-    Some((c as u32, c.len_utf8()))
-}
-
-/// Whether `cp` is in the official parser's whitespace set (`is_whitespace` in `index.js`): the
-/// common ASCII whitespace plus the rare Unicode whitespace codepoints.
-fn is_css_whitespace(cp: u32) -> bool {
-    if cp == 32 || (9..=13).contains(&cp) {
-        return true;
-    }
-    if cp < 160 {
-        return false;
-    }
-    matches!(cp, 160 | 5760 | 8232 | 8233 | 8239 | 8287 | 12288 | 65279)
-        || (8192..=8202).contains(&cp)
-}
-
-/// `REGEX_VALID_IDENTIFIER_CHAR = /[a-zA-Z0-9_-]/` for an ASCII byte.
-fn is_valid_identifier_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
-}
-
-/// The UTF-8 byte length of the char whose leading byte is `b` (1 for ASCII).
-fn char_len(b: u8) -> usize {
-    if b < 0x80 {
-        1
-    } else if b >= 0xF0 {
-        4
-    } else if b >= 0xE0 {
-        3
-    } else if b >= 0xC0 {
-        2
-    } else {
-        1 // a stray continuation byte — advance one to make progress
-    }
-}
-
-#[cfg(test)]
-#[path = "css_reject_tests.rs"]
-mod css_reject_tests;

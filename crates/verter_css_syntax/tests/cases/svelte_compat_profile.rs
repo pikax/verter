@@ -1,12 +1,20 @@
-//! Unit tests for the faithful `read/style.js` CSS body reader port.
+//! Unit tests for the `svelte_compat` faithful `read/style.js` CSS body reader port.
 //!
 //! Each expectation is grounded against the pinned `svelte@5.56.3` compiler (a `None` here ⇔ the
 //! pinned compiler ACCEPTS the style body / reports `style_duplicate` for a duplicate race; a
 //! `Some(code)` ⇔ the pinned compiler throws that exact CSS parse code at `read_style`). The
 //! reader is fed the WHOLE component source + the CSS body's content-start so a nested reader can
 //! run past `</style>` exactly as upstream does.
+//!
+//! Ported from the former `crates/verter_compiler/src/svelte/runtime/css_reject_tests.rs`
+//! (verbatim case coverage) as part of relocating the reader into this crate — the ONE crate
+//! authority for CSS-family parsing — as a Svelte compatibility validation profile (J1-A16). One
+//! case (`bare_unterminated_style_is_the_raw_block_strict_error_not_unexpected_eof`) exercised the
+//! FULL Svelte official-reject gate rather than this isolated reader and stayed in
+//! `verter_compiler`'s own test suite (`svelte_parse_defect_exact_codes.rs`) — it needs the
+//! compiler's parser + gate, which this crate does not and must not depend on.
 
-use super::css_body_parse_error;
+use verter_css_syntax::style_body_reject_code;
 
 /// The byte offset just past the FIRST `<style>`/`<style …>` open tag's `>` in `source` — the CSS
 /// content start the parser would reserve. Panics if there is no `<style …>` open tag.
@@ -18,7 +26,7 @@ fn first_style_content_start(source: &str) -> usize {
 
 /// The CSS parse code the reader reports for the FIRST `<style>` body in `source`.
 fn code(source: &str) -> Option<&'static str> {
-    css_body_parse_error(source, first_style_content_start(source))
+    style_body_reject_code(source, first_style_content_start(source))
 }
 
 // ── clean bodies parse cleanly (no defect ⇒ duplicate / unsupported-style rail wins) ──
@@ -83,15 +91,16 @@ fn nth_child_an_b_terminator_lookahead_is_clean() {
 // ACCEPTS. The `REGEX_NTH_OF` site is the OBSERVABLE divergence (the nth grammar is strictly
 // validated, so a missed Unicode space falls through to the digit-leading identifier reject); the
 // other swept sites parse clean both ways in the reject-only contract, so they carry no separate
-// (non-discriminating) case here — they are routed through the same codepoint-aware primitives as
-// `css/parse.rs` to keep the two CSS-parser ports uniform (no lingering byte-ASCII whitespace).
+// (non-discriminating) case here. This whitespace set is DELIBERATELY distinct from the crate's
+// own general [`verter_css_syntax::lexer`], which uses the ASCII-only CSS Syntax Module set — the
+// two must not be unified, or this parity breaks.
 #[test]
 fn nth_child_an_b_offset_with_nbsp_is_clean_like_svelte() {
     // NBSP (U+00A0) around the `+` offset — svelte's `\s*[+-]\s*` matches it; a byte-ASCII scan
     // misses the offset, the selector loop reads `2n␠…` as a digit-leading identifier and throws
     // `css_expected_identifier`. Oracle-confirmed: svelte@5.56.3 compiles `p:nth-child(2n␠+␠1)` to
     // `p.svelte-…:nth-child(2n + 1){…}` (no throw). Clean here iff the reject reader is
-    // codepoint-aware — RED (`Some("css_expected_identifier")`) against the byte-ASCII scan.
+    // codepoint-aware — RED (`Some("css_expected_identifier")`) against a byte-ASCII scan.
     assert_eq!(
         code("<style>p:nth-child(2n\u{a0}+\u{a0}1) {}</style>"),
         None
@@ -247,17 +256,18 @@ fn unterminated_html_comment_reports_expected_token() {
 // SWALLOWS the literal `</style>` text, so the reader runs PAST the close to true EOF (a quote
 // closes only on a matching quote, never on markup). A SCAFFOLDED body whose reader does NOT
 // swallow `</style>` stops at the close and surfaces a different code; a BARE unterminated
-// `<style>` is the unterminated-raw-block strict error (`css_expected_identifier`), NOT this. So
-// each fixture here CLOSES the `<style>` and opens a quote/value that swallows the close.
-// Grounded against pinned svelte@5.56.3 (each ⇒ `unexpected_eof`); the parse-parity corpus's
-// `read_style` `single_unexpected_eof_*` rows assert the SAME shapes through the full gate.
+// `<style>` is the unterminated-raw-block strict error (`css_expected_identifier`), NOT this — see
+// `verter_compiler`'s `svelte_parse_defect_exact_codes.rs` for that FULL-GATE negative control,
+// which needs the Svelte parser + official-reject gate this crate does not depend on. So each
+// fixture here CLOSES the `<style>` and opens a quote/value that swallows the close. Grounded
+// against pinned svelte@5.56.3 (each ⇒ `unexpected_eof`).
 
 /// The CSS code the reader reports for `frag` (a CLOSED-`<style>` fragment) appended after the
-/// §1.2-core scaffold prefix, feeding `css_body_parse_error` the whole source so the nested reader
-/// runs past `</style>` exactly as upstream's `read_style` does.
+/// §1.2-core scaffold prefix, feeding [`style_body_reject_code`] the whole source so the nested
+/// reader runs past `</style>` exactly as upstream's `read_style` does.
 fn swallow_code(frag: &str) -> Option<&'static str> {
     let src = format!("<script>let c = $state(0);</script>\n{frag}");
-    css_body_parse_error(&src, first_style_content_start(&src))
+    style_body_reject_code(&src, first_style_content_start(&src))
 }
 
 #[test]
@@ -277,20 +287,6 @@ fn attribute_selector_value_open_quote_swallows_close_reports_unexpected_eof() {
         swallow_code("<style>a[x=\"y</style>"),
         Some("unexpected_eof"),
     );
-}
-
-#[test]
-fn bare_unterminated_style_is_the_raw_block_strict_error_not_unexpected_eof() {
-    // NEGATIVE control — the EOF rows above are NOT a blanket "any `<style>` EOF ⇒ unexpected_eof".
-    // A BARE unterminated `<style>.a ` (no `</style>`) is flagged by the parser as an unterminated
-    // RAW BLOCK (`css_expected_identifier`) at an earlier encounter order, which is what the full
-    // gate reports — NOT `unexpected_eof`. (The isolated `css_body_parse_error` port can report
-    // `unexpected_eof` for the same bytes, but the WINNING gate code is the raw-block strict
-    // error; the corpus fixtures therefore use the CLOSED-`<style>` swallow shapes above.)
-    let bare = "<script>let c = $state(0);</script>\n<style>.a ";
-    let parsed = crate::svelte::parser::parse_svelte(bare);
-    let gate = crate::svelte::runtime::official_reject_gate(bare, &parsed).map(|r| r.official_code);
-    assert_eq!(gate, Some("css_expected_identifier"));
 }
 
 // ── malformed bodies report the exact upstream code ──
@@ -361,7 +357,7 @@ fn reader_uses_content_start_not_an_isolated_slice() {
         "<style>.a {}</style>\n<style>.b {</style>\n<button onclick={() => c++}>{c}</button>\n";
     let first_start = first_style_content_start(src);
     assert_eq!(
-        css_body_parse_error(src, first_start),
+        style_body_reject_code(src, first_start),
         None,
         "1st style clean"
     );
@@ -370,7 +366,7 @@ fn reader_uses_content_start_not_an_isolated_slice() {
     let second_gt = src[second_open..].find('>').unwrap();
     let second_start = second_open + second_gt + 1;
     assert_eq!(
-        css_body_parse_error(src, second_start),
+        style_body_reject_code(src, second_start),
         Some("css_expected_identifier"),
         "2nd style malformed body reports the CSS code"
     );

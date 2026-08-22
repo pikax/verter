@@ -197,6 +197,13 @@ pub struct CssAnalysis {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub var_usages: Vec<AnalyzedVarUsage>,
     pub rule_count: u32,
+    /// One record per complete declaration (custom-property or plain), the
+    /// per-declaration counterpart to `custom_properties` (which only
+    /// projects the `--`-prefixed subset). Consumers needing a declaration's
+    /// name/value spans or pre-classified color-literal candidates read this
+    /// instead of re-deriving them from raw bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declarations: Vec<AnalyzedDeclaration>,
 }
 
 impl CssAnalysis {
@@ -236,6 +243,13 @@ impl CssAnalysis {
         for usage in &self.var_usages {
             check(usage.reference.span, sfc_source_len, "var-usage");
             check(usage.reference.name_span, sfc_source_len, "var-usage name");
+        }
+        for decl in &self.declarations {
+            check(decl.name_span, sfc_source_len, "declaration name");
+            check(decl.value_span, sfc_source_len, "declaration value");
+            for candidate in &decl.color_candidates {
+                check(candidate.span, sfc_source_len, "color candidate");
+            }
         }
     }
 }
@@ -556,6 +570,78 @@ pub struct AnalyzedVarUsage {
     /// Index into `CssAnalysis.selectors` for the enclosing rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector_index: Option<u32>,
+}
+
+/// A single complete CSS declaration (custom-property or plain), the
+/// per-declaration counterpart `CssAnalysis.declarations` records for every
+/// `StyleCompleteness::Complete` declaration — unlike `custom_properties`,
+/// which only projects the `--`-prefixed subset.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedDeclaration {
+    /// SFC-absolute span of the property/custom-property name.
+    pub name_span: Span,
+    /// SFC-absolute span of the trimmed value text.
+    pub value_span: Span,
+    /// Index into `CssAnalysis.selectors` for the enclosing rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector_index: Option<u32>,
+    /// Pre-classified color-literal candidates within the value, derived
+    /// from the value's own typed `ComponentValueTree` — never a raw-byte
+    /// scan or comment/string mask.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub color_candidates: Vec<AnalyzedColorCandidate>,
+}
+
+/// The syntactic shape of a color-literal candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ColorCandidateKind {
+    /// A `#`-prefixed hex color token (e.g. `#fff`, `#ff0000`).
+    Hex,
+    /// An `rgb()`/`rgba()`/`hsl()`/`hsla()` function call.
+    Function,
+}
+
+/// A color-literal candidate span found while walking a declaration's value.
+/// Comment and string content structurally never produce a candidate — the
+/// walk simply does not visit `ComponentValue::Comment`/`ComponentValue::String`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedColorCandidate {
+    /// SFC-absolute span of the candidate (the hash token, or the whole
+    /// function call including its parentheses).
+    pub span: Span,
+    pub kind: ColorCandidateKind,
+    /// Lowercased function name (`"rgb"`/`"rgba"`/`"hsl"`/`"hsla"`).
+    /// `None` for `ColorCandidateKind::Hex`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function_name: Option<String>,
+    /// Numeric arguments read from the function's own `ComponentValue`
+    /// argument list (skipping `Comment` entries structurally), in source
+    /// order. [`NumericArg::Percentage`] preserves the `%` suffix (the
+    /// producer never divides it out) so a consumer can distinguish a 0-100
+    /// percentage scale from a bare 0-255/0-1 numeric scale rather than
+    /// guessing from magnitude alone. Empty for `ColorCandidateKind::Hex`
+    /// and — WHOLE-CANDIDATE invalidated, never a truncated partial list —
+    /// for a function containing ANY component that isn't a `Number` token,
+    /// a `Percentage` token, whitespace, a comma, or a comment: CSS
+    /// relative-color syntax (`rgb(from red 255 0 0)`), a nested function
+    /// (`calc()`, `min()`), or any other shape stay out of scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub numeric_args: Vec<NumericArg>,
+}
+
+/// One numeric argument to a color function. `Percentage` carries the bare
+/// magnitude with the `%` suffix stripped but its percentage-ness preserved
+/// (never divided by 100 or 255 at the producer) — a consumer normalizing
+/// `rgb()`/`hsl()` channels must apply its OWN percentage rule (always
+/// `/100`) rather than folding a percentage into the same 0-255-vs-0-1
+/// magnitude heuristic it uses for a bare `Number`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "camelCase")]
+pub enum NumericArg {
+    Number(f64),
+    Percentage(f64),
 }
 
 /// A CSS at-rule occurrence.

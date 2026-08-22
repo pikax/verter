@@ -3969,6 +3969,7 @@ dependencies = [
  "tempfile",
  "trybuild",
  "verter_audit",
+ "verter_compiler",
  "verter_css_syntax",
  "verter_ecma",
  "verter_identity",

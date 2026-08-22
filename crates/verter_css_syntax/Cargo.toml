@@ -9,6 +9,17 @@ authors.workspace = true
 description = "Framework-neutral lossless CSS, SCSS, and Less syntax"
 publish = false
 
+[features]
+# Test-only observability accessor: the `parse_inline_style_declarations`
+# invocation counter the A17/A20 "shared parser invoked exactly once"
+# routing proofs bind to. Enabled by consumers' DEV-dependency edges only
+# (`verter_compiler`/`verter_semantic` bind the counter from their own test
+# targets) — never on the default/production closure, so release builds
+# compile `parse_inline_style_declarations` without the counter TLS or its
+# increment. Plain `#[cfg(test)]` cannot gate this: the consumer is a
+# different crate, where this crate's `test` cfg is false.
+test-support = []
+
 [dependencies]
 verter_span = { path = "../verter_span" }
 memchr = "2.8.0"
