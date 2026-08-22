@@ -681,20 +681,18 @@ impl VerterHost {
     /// (a runtime object literal's member value is an arbitrary expression —
     /// resolving its real type is the same "typeof a value binding" demand
     /// the shared dispatch already serves for AUTHORED `typeof x` type
-    /// positions elsewhere, out of scope for this structural member-presence
-    /// repair): every member publishes as `unknown`, the same honest
-    /// "nothing here re-derives a value's type" policy this producer's
-    /// sibling (`tsc/script.rs`'s declaration-output `defineExpose`
-    /// fallback) already applies to a call-initialized value with no
-    /// authored annotation. The point this closes is the EMPTY surface
-    /// defect: a runtime-declared macro must publish its real members, not
-    /// zero members.
+    /// positions elsewhere, out of scope for member presence here): every
+    /// member publishes as `unknown`, the same honest "nothing here
+    /// re-derives a value's type" policy this producer's sibling
+    /// (`tsc/script.rs`'s declaration-output `defineExpose` fallback)
+    /// already applies to a call-initialized value with no authored
+    /// annotation. A runtime-declared macro publishes its real members, not
+    /// an empty surface.
     ///
     /// Only `DefineExpose` / `DefineProps` are handled — the two runtime
-    /// object forms the ruling names. Every other non-type-based macro kind
-    /// (`DefineEmits`, `DefineSlots`, `DefineOptions`, the `WithDefaults`
-    /// outer macro) keeps the prior `None` — unchanged, out of this repair's
-    /// scope.
+    /// object forms this synthesizer covers. Every other non-type-based
+    /// macro kind (`DefineEmits`, `DefineSlots`, `DefineOptions`, the
+    /// `WithDefaults` outer macro) returns `None`.
     fn runtime_object_macro_surface(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
@@ -750,10 +748,9 @@ impl VerterHost {
                     }));
                 }
             }
-            // Every other non-type-based macro kind keeps the prior `None`
-            // — out of this repair's scope (`DefineEmits`/`DefineSlots`
-            // runtime-object forms and the `WithDefaults` outer macro are
-            // not named by the ruling this fix implements).
+            // Every other non-type-based macro kind has no synthesized
+            // surface here (`DefineEmits`/`DefineSlots` runtime-object forms
+            // and the `WithDefaults` outer macro).
             _ => return None,
         }
         if entries.is_empty() {

@@ -19,11 +19,22 @@ pub(super) fn render_tsc_node(
     if macro_projection_faulted(MacroProjectionLane::Tsc) {
         return Err(partial_failure());
     }
-    rendered
-        .map(TscSpliceText::new)
-        .ok_or(ProjectionFailure::Unsupported(
+    let rendered = rendered.ok_or(ProjectionFailure::Unsupported(
+        UnsupportedReason::SemanticConstruct,
+    ))?;
+    // A NESTED resolver degradation (a genuine unmaterialized sentinel at
+    // some deeper compound position) does not always bubble up through the
+    // shared raise pipeline as an `Err` — it can be baked into the rendered
+    // text instead. Every caller of this shared TSC-text funnel fails
+    // closed on that fact rather than splicing the leaked sentinel as if it
+    // were real content; this is the ONE place that decision is made, so no
+    // individual macro-kind call site needs its own textual screen.
+    if rendered.degraded {
+        return Err(ProjectionFailure::Unsupported(
             UnsupportedReason::SemanticConstruct,
-        ))
+        ));
+    }
+    Ok(TscSpliceText::new(rendered.text))
 }
 
 pub(super) fn tsc_scope_requirements(
@@ -807,7 +818,7 @@ fn inferred_class_members(
                             UnsupportedReason::SemanticConstruct,
                         ));
                     }
-                    let Some(type_text) = crate::typeinfo::raise::render_node_display_with_ctx(
+                    let Some(rendered) = crate::typeinfo::raise::render_node_display_with_ctx(
                         ctx,
                         result.return_type(),
                     ) else {
@@ -815,7 +826,16 @@ fn inferred_class_members(
                             UnsupportedReason::SemanticConstruct,
                         ));
                     };
-                    (type_text, typeof_paths)
+                    // A degraded shape fails closed here exactly like every
+                    // other degraded shape on this path (see the comment
+                    // above): a leaked nested sentinel never splices as a
+                    // real inferred class-member type.
+                    if rendered.degraded {
+                        return Err(ClassInferenceFailure::Unsupported(
+                            UnsupportedReason::SemanticConstruct,
+                        ));
+                    }
+                    (rendered.text, typeof_paths)
                 }
                 crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
                     crate::semantic_query::FlowReturnFailure::Budget(reason),

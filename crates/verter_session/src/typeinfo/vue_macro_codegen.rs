@@ -1347,8 +1347,7 @@ impl VerterHost {
     /// or whose `TypeOf` resolution genuinely misses reports a typed
     /// [`TscExposeMemberType::Unavailable`] row instead of a silent
     /// `unknown` masquerading as success; the compiler falls back to its own
-    /// authored-syntax-derived type (or `unknown`) for that member exactly
-    /// as it did before this producer existed.
+    /// authored-syntax-derived type (or `unknown`) for that member.
     fn project_expose_runtime_object(
         &self,
         ctx: &dyn ResolverContext,
@@ -1361,7 +1360,7 @@ impl VerterHost {
     ) -> MacroTscOutcome {
         let mut members = Vec::with_capacity(mac.expose_fields.len());
         let mut ref_names: FxHashSet<String> = FxHashSet::default();
-        for field in &mac.expose_fields {
+        for (field_index, field) in mac.expose_fields.iter().enumerate() {
             let member_type = match &field.referenced_binding {
                 Some(binding_name) => {
                     let key = dispatch.typeof_key_for(
@@ -1381,37 +1380,14 @@ impl VerterHost {
                             if reduced.result_is_partial() {
                                 crate::request_context::mark_request_result_partial();
                             }
+                            // `render_tsc_node` itself fails closed (typed
+                            // `Err`) on a NESTED resolver degradation baked
+                            // into the rendered text — see its doc comment.
+                            // This producer never sees a leaked sentinel
+                            // masquerading as `Ok` text, so it needs no
+                            // second, textual screen of its own; a genuinely
+                            // resolved member is the only `Ok` outcome.
                             match render_tsc_node(ctx, reduced.node_id(), counters) {
-                                Ok(text)
-                                    if crate::semantic_query::compat_spelling::text_embeds_unmaterialized_sentinel(
-                                        text.as_str(),
-                                    ) =>
-                                {
-                                    // `render_tsc_node` returned `Ok`, but the
-                                    // rendered text itself carries a leaked
-                                    // compat-projection sentinel: a NESTED
-                                    // resolver degradation inside a
-                                    // structurally-materialized instantiated
-                                    // type (e.g. a generic function's
-                                    // closure-inferred type parameter, as in
-                                    // `computed(() => ...)`, or an unmodeled
-                                    // flow-return position for an untyped
-                                    // function) does not always bubble up
-                                    // through the shared raise pipeline as an
-                                    // `Err` — it can be baked into the
-                                    // returned text instead. This producer
-                                    // must never publish a leaked sentinel as
-                                    // if it were a real declaration type, so
-                                    // it degrades to the same honest
-                                    // `Unavailable` outcome the `Err` arm
-                                    // below already produces for a
-                                    // fully-failed resolution.
-                                    TscExposeMemberType::Unavailable(
-                                        TscDeclarationFailureReason::Unresolved(
-                                            UnresolvedReason::MissingDeclaration,
-                                        ),
-                                    )
-                                }
                                 Ok(text) => {
                                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
                                         ctx,
@@ -1439,7 +1415,7 @@ impl VerterHost {
             members.push(TscExposeMemberRow {
                 name: field.name.clone(),
                 member_type,
-                anchor: expose_member_anchor(mac, payload_index, &field.name),
+                anchor: expose_member_anchor(mac, payload_index, field_index),
             });
         }
         let type_references: Vec<String> = ref_names.into_iter().collect();

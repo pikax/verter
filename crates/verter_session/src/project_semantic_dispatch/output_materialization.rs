@@ -520,6 +520,19 @@ mod carrier {
         pub(crate) fn into_type_expr<P: OutputProjector + ?Sized>(self, cap: &P) -> TypeExpr {
             self.0.into_type_expr(cap)
         }
+
+        /// `true` when the sealed tree carries any typed resolver-degradation
+        /// leaf (at ANY depth, not only the root) — a genuine unmaterialized
+        /// sentinel (`QueryError::Miss`, `UnmodeledPosition`,
+        /// `BudgetExceeded`, …), never a deliberately-materialised
+        /// placeholder (`RaiseMiss`, `TypeParamCycle`, …). Reading this flag
+        /// does NOT require an [`OutputProjector`] capability: it exposes a
+        /// bool fact about the sealed payload, never the vaulted
+        /// [`TypeExpr`] itself, so a caller can decide whether to unwrap at
+        /// all before spending the capability-gated read.
+        pub(crate) fn has_degradation(&self) -> bool {
+            self.0.has_degradation()
+        }
     }
 
     /// Sealed carrier for a reduce-then-raise output result — the

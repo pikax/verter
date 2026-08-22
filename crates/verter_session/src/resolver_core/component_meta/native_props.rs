@@ -135,7 +135,8 @@ pub(crate) fn named_native_props_outcome(
         .filter_map(|member| {
             ResolvedNativeProp::from_surface_member(
                 member,
-                crate::typeinfo::raise::render_node_display_with_ctx(ctx, member.value),
+                crate::typeinfo::raise::render_node_display_with_ctx(ctx, member.value)
+                    .map(|rendered| rendered.text),
             )
         })
         .collect();

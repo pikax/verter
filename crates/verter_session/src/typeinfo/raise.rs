@@ -30,22 +30,43 @@ use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::SemanticNodeId;
 use crate::VerterHost;
 
+/// Terminal display text for one graph node, plus whether the underlying
+/// materialization carried any typed resolver-degradation leaf (see
+/// [`crate::project_semantic_dispatch::output_materialization::OutputTypeExpr::has_degradation`]).
+///
+/// `degraded` is set when a NESTED resolver miss (a genuine unmaterialized
+/// sentinel — `QueryError::Miss`, `UnmodeledPosition`, `BudgetExceeded`, …,
+/// never a deliberately-materialised placeholder) failed to bubble up as an
+/// `Err` from a deeper compound position and was instead baked into the
+/// rendered text as the terminal compatibility-projection spelling. A
+/// producer that turns this text into authored IDE splice content MUST
+/// treat `degraded: true` the same as an outright miss — never publish the
+/// leaked sentinel as if it were a real declaration type.
+pub(crate) struct RenderedNodeDisplay {
+    pub(crate) text: String,
+    pub(crate) degraded: bool,
+}
+
 /// Render one graph node as terminal TypeScript display text through the
 /// registered TypeInfo output sink.
 ///
-/// The caller receives only text. The sealed materialized carrier and its
-/// `TypeExpr` never cross this module boundary, so graph-oriented consumers
-/// cannot branch on a reverse-materialized shape.
+/// The caller receives only text (plus the typed `degraded` fact). The
+/// sealed materialized carrier and its `TypeExpr` never cross this module
+/// boundary, so graph-oriented consumers cannot branch on a
+/// reverse-materialized shape.
 pub(crate) fn render_node_display_with_ctx(
     ctx: &dyn crate::resolver_core::ResolverContext,
     node: SemanticNodeId,
-) -> Option<String> {
+) -> Option<RenderedNodeDisplay> {
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let cap = TypeinfoRaiseOutputCap::new(&dispatch);
-    let type_expr = cap.materialize_output_type_expr(node)?.into_type_expr(&cap);
-    verter_type_expr::render_type_expr_display(&type_expr)
-        .ok()
-        .map(|rendered| rendered.text)
+    let sealed = cap.materialize_output_type_expr(node)?;
+    let degraded = sealed.has_degradation();
+    let type_expr = sealed.into_type_expr(&cap);
+    let text = verter_type_expr::render_type_expr_display(&type_expr)
+        .ok()?
+        .text;
+    Some(RenderedNodeDisplay { text, degraded })
 }
 
 crate::project_semantic_dispatch::output_materialization::define_output_capability! {
