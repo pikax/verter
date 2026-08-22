@@ -47,6 +47,7 @@ struct FixturePropRow<'a> {
     optional: bool,
     type_text: &'a str,
     anchor: MacroAnchor,
+    degraded: Option<TscDeclarationFailureReason>,
 }
 
 #[derive(Clone, Copy)]
@@ -72,6 +73,7 @@ const fn authored_prop<'a>(
             macro_index,
             member_ordinal: AuthoredMemberOrdinal::new(member_ordinal),
         },
+        degraded: None,
     }
 }
 
@@ -86,6 +88,23 @@ const fn root_prop<'a>(
         optional,
         type_text,
         anchor: MacroAnchor::MacroArgument { macro_index },
+        degraded: None,
+    }
+}
+
+/// A root prop row whose inference genuinely degraded — `type_text` carries
+/// the same `unknown` fallback the producer substitutes, tagged with the
+/// typed reason so a consumer (e.g. root-narrowing bound construction) can
+/// tell it apart from a real `unknown`.
+const fn degraded_root_prop(name: &str, optional: bool, macro_index: u32) -> FixturePropRow<'_> {
+    FixturePropRow {
+        name,
+        optional,
+        type_text: "unknown",
+        anchor: MacroAnchor::MacroArgument { macro_index },
+        degraded: Some(TscDeclarationFailureReason::Unsupported(
+            UnsupportedReason::SemanticConstruct,
+        )),
     }
 }
 
@@ -293,6 +312,7 @@ fn fixture_bundle(fixtures: &[TscFixture<'_>]) -> MacroTscBundle {
                                     optional: row.optional,
                                     type_text: TscSpliceText::new(row.type_text),
                                     anchor: row.anchor,
+                                    degraded: row.degraded,
                                 })
                                 .collect(),
                             scope: fixture_scope(imports, declarations),
@@ -661,6 +681,7 @@ withDefaults(defineProps<{ value?: string }>(), { value: "x" })
             macro_index: 1,
             row: SynthesizedRowKind::ModelModifiersProp,
         },
+        degraded: None,
     };
     let wrong_kind = fixture_bundle(&[props_fixture_identity(0, 1, &[forged_props_row], &[], &[])]);
     assert_eq!(
@@ -1557,6 +1578,23 @@ fn gen_tsc_narrowing_with(sfc: &str, fixtures: &[TscFixture<'_>]) -> String {
     )
     .expect("explicit TSC fixture must match typed macro syntax")
     .code
+}
+
+fn gen_tsc_narrowing_result(
+    sfc: &str,
+    fixtures: &[TscFixture<'_>],
+) -> Result<super::script::TscOutput, super::script::TscGenerationError> {
+    let bundle = fixture_bundle(fixtures);
+    generate_tsc_output_with_options(
+        sfc,
+        "TestComp",
+        &TscGenOptions {
+            conditional_root_narrowing: true,
+            ..Default::default()
+        },
+        MacroTscInput::Authoritative(&bundle),
+        &FallthroughPropsProjection::none(),
+    )
 }
 
 fn gen_tsc_testing(sfc: &str) -> String {
@@ -3883,6 +3921,32 @@ defineProps<{ items: T[] }>()
 }
 
 // ── Conditional root narrowing ──────────────────────────────────────────────
+
+#[test]
+fn tsc_narrowing_bound_fails_closed_on_degraded_prop_row() {
+    // A degraded testing_rows entry (see TscPropRow::degraded) must never
+    // become a root-narrowing generic bound: `T_foo extends unknown =
+    // unknown` is not conservative, it lets TypeScript infer `T_foo` from
+    // any call-site argument — an unsound widening of a real public API,
+    // not just reduced precision. Generation must fail closed instead.
+    let err = gen_tsc_narrowing_result(
+        r#"<script setup lang="ts">
+defineProps<{foo?: boolean}>()
+</script>
+<template><div v-if="foo">A</div><span v-else>B</span></template>"#,
+        &[props_fixture("", &[degraded_root_prop("foo", true, 0)])],
+    )
+    .expect_err("a degraded row feeding a narrowing generic bound must fail closed");
+    assert_eq!(
+        err,
+        super::script::TscGenerationError::UnsupportedDeclarationShape {
+            subject: macro_subject(0),
+            reason: super::script::TscDeclarationShapeReason::TypeInfoDeclarationFailure(
+                TscDeclarationFailureReason::Unsupported(UnsupportedReason::SemanticConstruct),
+            ),
+        }
+    );
+}
 
 #[test]
 fn tsc_narrowing_basic() {

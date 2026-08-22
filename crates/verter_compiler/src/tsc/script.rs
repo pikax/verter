@@ -663,7 +663,10 @@ pub enum TscGenerationError {
     /// A retained local identity is absent or cannot be projected safely.
     MissingScopeDeclaration { subject: TscFailureSubject },
     /// The selected mode omits a declaration owner's body and cannot prove a
-    /// safe ambient carrier for one of its retained local declarations.
+    /// safe ambient carrier for one of its retained local declarations — OR
+    /// (via `TscDeclarationShapeReason::TypeInfoDeclarationFailure`) a
+    /// degraded testing-row inference cannot safely supply a public
+    /// root-narrowing generic bound.
     UnsupportedDeclarationShape {
         subject: TscFailureSubject,
         reason: TscDeclarationShapeReason,
@@ -1009,7 +1012,7 @@ impl std::fmt::Display for TscGenerationError {
             Self::UnsupportedDeclarationShape { subject, reason } => {
                 return write!(
                     formatter,
-                    "retained local declaration has no proven ambient projection ({reason:?}) for {subject}"
+                    "declaration shape is unsupported for this generation mode ({reason:?}) for {subject}"
                 );
             }
             Self::InvalidAuthoredMemberOrdinal { subject, .. } => (
@@ -1125,6 +1128,16 @@ struct TestingPropBinding {
     ts_type: String,
     optional: bool,
     map_span: Option<Span>,
+    /// Set when `ts_type` is the explicit `unknown` degradation fallback
+    /// (see `TscPropRow::degraded`) rather than a real or genuinely-authored
+    /// type. `unknown` is sound as a TESTING-mode `declare const` binding
+    /// (that consumer may ignore this field), but it is NOT a sound
+    /// root-narrowing generic bound — `T_prop extends unknown = unknown`
+    /// lets TypeScript infer `T_prop` from any call-site argument, silently
+    /// widening what the real (authored) props type would have accepted.
+    /// The narrowing-generic-bound consumer MUST check this field and fail
+    /// closed rather than splice `ts_type` when it is `Some`.
+    degraded: Option<TscDeclarationFailureReason>,
 }
 
 #[derive(Clone)]
@@ -1414,6 +1427,11 @@ struct TscMacroState {
     defaulted_prop_names: Vec<String>,
     // defineProps — internal bare-prop bindings used by testing mode
     testing_props: Vec<TestingPropBinding>,
+    /// The `defineProps` macro's own `TscFailureSubject`-identifying syntax
+    /// index, when a typed bundle populated `testing_props` — carried so a
+    /// later stage (root-narrowing generic-bound construction) can name a
+    /// concrete subject if one of those rows turns out degraded.
+    props_syntax_index: Option<u32>,
 
     // defineEmits — runtime emit names (for array output)
     emits_names: Vec<String>,
@@ -2115,6 +2133,7 @@ pub fn generate_tsc_output_with_options(
         } else {
             None
         };
+    validate_narrowing_bounds(&state, narrowing.as_ref())?;
 
     // ── 9. Generate code + source map ────────────────────────────────
     Ok(match tsc_options.mode {
@@ -3793,6 +3812,7 @@ fn apply_tsc_bundle(
                         )?)
                     }
                 });
+                state.props_syntax_index = Some(slot.syntax_index);
                 state.testing_props = props
                     .testing_rows
                     .iter()
@@ -3806,6 +3826,7 @@ fn apply_tsc_bundle(
                                     .any(|defaulted| defaulted == &row.name),
                             ts_type: row.type_text.as_str().to_string(),
                             map_span: macro_anchor_span(&slot, row.anchor)?,
+                            degraded: row.degraded,
                         })
                     })
                     .collect::<Result<Vec<_>, TscGenerationError>>()?;
@@ -4254,6 +4275,51 @@ fn carrier_required(state: &TscMacroState, mode: TscMode, owner: TscScriptOwner)
     }
 }
 
+/// Root-narrowing rewrites the authored public props type to route each
+/// narrowed prop through a fresh generic (`T_prop extends <bound> = <bound>`,
+/// see `generate_code`'s narrowing-generics construction — Declaration mode
+/// never narrows). A
+/// `TestingPropBinding::degraded` row cannot supply that bound: unlike a
+/// TESTING-mode `declare const` (where `unknown` is merely imprecise),
+/// `T_prop extends unknown = unknown` in the PUBLIC constructor signature
+/// lets TypeScript infer `T_prop` from any call-site argument — an actual
+/// unsoundness (accepts values the authored type would reject), not just
+/// reduced precision. Fail closed instead of silently widening a real
+/// public API when one of the props root-narrowing selected is degraded.
+fn validate_narrowing_bounds(
+    state: &TscMacroState,
+    narrowing: Option<&TscNarrowingInfo>,
+) -> Result<(), TscGenerationError> {
+    let Some(narrowing) = narrowing else {
+        return Ok(());
+    };
+    for generic in &narrowing.narrowing.generics {
+        let Some(row) = state
+            .testing_props
+            .iter()
+            .find(|entry| entry.name == generic.prop_name)
+        else {
+            continue;
+        };
+        if let Some(reason) = row.degraded {
+            // `props_syntax_index` is set in the SAME `apply_tsc_bundle` arm
+            // that populates `testing_props` (script.rs, `TscSemanticRole::
+            // Props`) — the only producer of a `degraded: Some(_)` row — so
+            // a degraded row here guarantees a recorded syntax index.
+            let subject = TscFailureSubject::macro_syntax(
+                state
+                    .props_syntax_index
+                    .expect("a degraded testing_props row implies apply_tsc_bundle recorded its props_syntax_index"),
+            );
+            return Err(TscGenerationError::UnsupportedDeclarationShape {
+                subject,
+                reason: TscDeclarationShapeReason::TypeInfoDeclarationFailure(reason),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_declaration_carriers(
     state: &TscMacroState,
     mode: TscMode,
@@ -4441,6 +4507,10 @@ fn process_props<'a>(
                 optional: !prop.required && !prop.has_default,
                 ts_type,
                 map_span: Some(local_to_sfc_span(prop.name_span, content_offset)),
+                // Runtime-object props are never TSC-macro-inference-degraded
+                // — their type comes from an authored annotation or a
+                // runtime-constructor mapping, both genuine.
+                degraded: None,
             });
         }
         state.props_ts = Some(PropsTs::Inline(entries));
@@ -4456,6 +4526,10 @@ fn process_props<'a>(
                     ts_type: "unknown".to_string(),
                     optional: true,
                     map_span: Some(local_to_sfc_span(elem.span, content_offset)),
+                    // Array-syntax props are genuinely untyped by the author
+                    // (no type information exists to degrade FROM), not a
+                    // resolver degradation.
+                    degraded: None,
                 })
             })
             .collect();

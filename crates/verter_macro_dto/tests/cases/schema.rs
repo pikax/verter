@@ -64,6 +64,7 @@ fn runtime_and_tsc_bundles_are_independent_contracts() {
                     optional: false,
                     type_text: TscSpliceText::new("boolean"),
                     anchor: authored(0, Some(0)),
+                    degraded: None,
                 }],
                 scope: TscScopeRequirements::default(),
             })),

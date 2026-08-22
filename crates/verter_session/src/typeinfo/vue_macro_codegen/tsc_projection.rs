@@ -37,6 +37,55 @@ pub(super) fn render_tsc_node(
     Ok(TscSpliceText::new(rendered.text))
 }
 
+/// Same underlying render as [`render_tsc_node`], for the ONE caller whose
+/// authored SPLICE TEXT is never emitted verbatim: `defineProps`'s
+/// `testing_rows` are a testing-mode binding surface (see
+/// [`verter_macro_dto::TscPropsProjection::testing_rows`]) — the public
+/// props type the compiler emits always preserves the parser-owned macro
+/// argument verbatim via `TscPublicPropsProjection::AuthoredArgument`. But
+/// `testing_rows` is NOT purely internal: `state.testing_props` also drives
+/// the `T_<prop>` root-narrowing generic bound (and, through it, part of the
+/// emitted public component type) when `conditional_root_narrowing` is
+/// active, so the row must stay PRESENT — dropping it would silently change
+/// which props root-narrowing sees. A degraded member (e.g. an unannotated
+/// class member whose return-type inference hit the same nested-resolver-
+/// miss `render_tsc_node` fails closed on) therefore keeps its row but
+/// substitutes the explicit `unknown` marker in place of the leaked
+/// sentinel, PLUS the typed [`TscDeclarationFailureReason`] that produced
+/// it. `unknown` is sound as a TESTING-mode `declare const` binding, but the
+/// narrowing-generic-bound consumer MUST treat the typed reason as fail-
+/// closed for that ONE prop's bound rather than splicing `unknown` there —
+/// `T_prop extends unknown = unknown` is not conservative, it is UNSOUND
+/// (TypeScript infers `T_prop` from any call-site argument, so a widened
+/// bound accepts values the authored type would have rejected). This keeps
+/// the containment invariant (one bad member's inference failure never
+/// escalates the whole macro to `Unsupported`) without EITHER leaking the
+/// degraded text OR silently vanishing the row OR silently unsoundly
+/// widening the public narrowing bound: the failure is reported, typed, at
+/// the row itself, AND separately, per-declaration, via `declaration_failure`
+/// on the owning `TscDependencyDeclaration` wherever the member's
+/// declaration is a tracked local dependency. A genuine miss (no rendered
+/// node at all) still fails closed, matching every other caller.
+pub(super) fn render_tsc_testing_node(
+    ctx: &dyn ResolverContext,
+    node: crate::semantic_query::SemanticNodeId,
+    counters: &mut VueMacroCodegenCounters,
+) -> Result<(TscSpliceText, Option<TscDeclarationFailureReason>), ProjectionFailure> {
+    counters.tsc_materializations += 1;
+    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(ctx, node);
+    if macro_projection_faulted(MacroProjectionLane::Tsc) {
+        return Err(partial_failure());
+    }
+    let rendered = rendered.ok_or(ProjectionFailure::Unsupported(
+        UnsupportedReason::SemanticConstruct,
+    ))?;
+    if rendered.degraded {
+        let reason = TscDeclarationFailureReason::Unsupported(UnsupportedReason::SemanticConstruct);
+        return Ok((TscSpliceText::new("unknown"), Some(reason)));
+    }
+    Ok((TscSpliceText::new(rendered.text), None))
+}
+
 pub(super) fn tsc_scope_requirements(
     mac: &AnalyzedMacro,
     inventory: &TscScopeInventory<'_>,

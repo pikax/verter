@@ -425,7 +425,12 @@ pub struct TscPropsProjection {
 }
 
 /// Closed public-props codegen authorization. The compiler preserves the exact
-/// parser-owned first type argument; semantic rows only drive testing bindings.
+/// parser-owned first type argument for the AUTHORED public props type;
+/// semantic rows (`testing_rows`) drive testing bindings AND — when
+/// `conditional_root_narrowing` is active — the per-prop root-narrowing
+/// generic bound, which IS part of the emitted public component type. A
+/// consumer that treats a `TscPropRow` as narrowing-generic-bound input
+/// MUST check `TscPropRow::degraded` first (see its doc).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub enum TscPublicPropsProjection {
     AuthoredArgument {
@@ -441,8 +446,21 @@ pub enum TscPublicPropsProjection {
 pub struct TscPropRow {
     pub name: String,
     pub optional: bool,
+    /// The member's real inferred/resolved type when `degraded` is `None`.
+    /// When `degraded` is `Some`, this carries the explicit `unknown`
+    /// fallback — sound as a TESTING-mode `declare const` binding, but NEVER
+    /// a genuine type: a consumer driving PUBLIC output (the
+    /// root-narrowing generic bound) from this row must treat `Some` the
+    /// same as an outright miss, not splice this text as if it constrained
+    /// anything.
     pub type_text: TscSpliceText,
     pub anchor: MacroAnchor,
+    /// Set when `type_text` is the `unknown` degradation fallback rather
+    /// than the member's real type — mirrors
+    /// [`TscExposeMemberType::Unavailable`]'s typed-degradation contract for
+    /// props rows, which (unlike expose members) have no `Resolved`/
+    /// `Unavailable` enum of their own.
+    pub degraded: Option<TscDeclarationFailureReason>,
 }
 
 /// Closed `defineEmits` TSC projection.
