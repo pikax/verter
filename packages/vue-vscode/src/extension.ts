@@ -92,6 +92,7 @@ import {
 } from "./mcpServer";
 import { clientProcessLifetimeArg } from "./clientProcessLifetime";
 import { addShowRecentAuditRecordsCommand } from "./audit";
+import { hostRustTriples } from "./rustHostTriple";
 import {
   PlainScriptDocumentSync,
   shouldSuppressPlainScriptDiagnostics,
@@ -670,12 +671,43 @@ function findLspBinary(extensionPath: string, log: LogOutputChannel): string {
   //    extensionPath is packages/vue-vscode, so monorepo root is ../../
   //    Prefer debug/release over bundled so `cargo build` changes are picked up.
   const monorepoRoot = join(extensionPath, "..", "..");
-  for (const profile of ["debug", "release"]) {
+  const triples = hostRustTriples();
+  // `artifact-dev` is what `pnpm build` produces for both NAPI and the LSP
+  // (see the "one explicit host target + profile" build lane); `debug` is
+  // the bare `cargo build -p verter_lsp` dev-loop profile; `release` covers
+  // a manual release build. "Newest wins" means exactly that: across every
+  // profile/triple candidate that exists on disk, pick the one with the
+  // latest mtime — NOT a fixed profile priority, or a later `cargo build
+  // -p verter_lsp` (which writes to `debug`) would be silently ignored
+  // once an `artifact-dev` build exists from a prior `pnpm build`.
+  let newestCandidate:
+    | { cargoPath: string; profile: string; triple: string | undefined; mtimeMs: number }
+    | undefined;
+  for (const profile of ["artifact-dev", "debug", "release"]) {
+    // Triple-qualified layout first (what an explicit `--target` build
+    // lane produces), then the legacy untriple-qualified layout a bare
+    // `cargo build` (no `--target`) still produces.
+    for (const triple of triples) {
+      const cargoPath = join(monorepoRoot, "target", triple, profile, `verter-lsp${ext}`);
+      if (existsSync(cargoPath)) {
+        const mtimeMs = statSync(cargoPath).mtimeMs;
+        if (!newestCandidate || mtimeMs > newestCandidate.mtimeMs) {
+          newestCandidate = { cargoPath, profile, triple, mtimeMs };
+        }
+      }
+    }
     const cargoPath = join(monorepoRoot, "target", profile, `verter-lsp${ext}`);
     if (existsSync(cargoPath)) {
-      log.info(`LSP binary: ${cargoPath} (dev ${profile})`);
-      return cargoPath;
+      const mtimeMs = statSync(cargoPath).mtimeMs;
+      if (!newestCandidate || mtimeMs > newestCandidate.mtimeMs) {
+        newestCandidate = { cargoPath, profile, triple: undefined, mtimeMs };
+      }
     }
+  }
+  if (newestCandidate) {
+    const { cargoPath, profile, triple } = newestCandidate;
+    log.info(`LSP binary: ${cargoPath} (dev ${profile}${triple ? `, ${triple}` : ""}, newest)`);
+    return cargoPath;
   }
 
   // 3. Bundled binary (VSIX packaging)

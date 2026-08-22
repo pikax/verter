@@ -213,6 +213,13 @@ async fn serve() {
 fn lsp_projection_host_config() -> HostConfig {
     HostConfig {
         analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+        // `$/verter/getStatistics` (custom_methods/mod.rs) unconditionally
+        // merges `host.metrics_snapshot()` into its response. verter_lsp
+        // previously forced this on by unconditionally depending on
+        // verter_session's now-retired `session_metrics` Cargo feature;
+        // preserve that always-on behavior as the runtime toggle's
+        // equivalent, or the merged counters silently read zero forever.
+        metrics_enabled: true,
         ..HostConfig::default()
     }
 }

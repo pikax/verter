@@ -13,15 +13,19 @@ When changing Rust code, rebuild downstream artifacts in order:
 verter_compiler + verter_semantic + verter_session + verter_ffi (Rust crates)
     ↓ cargo build
 verter_napi (NAPI-RS cdylib)    verter_lsp (LSP binary)    verter_wasm (wasm-bindgen cdylib)
-    ↓ pnpm run build:native         ↓ pnpm run build:lsp       ↓ pnpm run build:wasm
-@verter/native (.node binary)   verter-lsp (target/debug/)  @verter/wasm (WASM pkg)
-    ↓                                ↓                          ↓
-@verter/unplugin (bundler)      verter-vscode (F5/VSIX)     @verter/playground (browser)
-    ↓
-playground build (Vite)
+    ↓ pnpm run build:native         ↓ pnpm run build:lsp       ↓ pnpm run build:wasm (dev, no wasm-opt)
+@verter/native (.node binary)   verter-lsp (target/<triple>/debug/)  or `pnpm --filter @verter/wasm build`
+    ↓                                ↓                       (publication lane: + cached wasm-opt)
+@verter/unplugin (bundler)      verter-vscode (F5/VSIX)         ↓
+    ↓                                                       @verter/playground (browser, via its own
+playground build (Vite)                                     `sync:wasm` — no implicit copy from @verter/wasm)
     ↓
 playground E2E tests
 ```
+
+`pnpm build` (host developer build) is native + lsp + ts only — it never touches WASM. `pnpm dist`
+(publication-ready artifacts) adds the full WASM lane (bindgen + cached `wasm-opt` via
+`scripts/wasm-opt-cache.mjs`). See `CLAUDE.md` → Build.
 
 ## Common Rebuild Sequences
 
@@ -30,16 +34,18 @@ playground E2E tests
 | Rust crate (`verter_compiler`)            | `pnpm run build:native` → rebuild any downstream consumer                                              |
 | Rust LSP (`verter_lsp`)               | `pnpm run build:lsp` (or `build:lsp:release` for optimized) → restart VS Code extension host           |
 | Unplugin (`packages/unplugin`)        | `pnpm run build:ts` (or just rebuild unplugin)                                                         |
-| Playground after Rust/unplugin change | `pnpm run build:native` → `cd packages/playground && rm -rf dist node_modules/.vite && npx vite build` |
-| WASM (for playground browser editor)  | `pnpm run build:wasm`                                                                                  |
-| Everything                            | `pnpm build` (runs native → lsp → wasm → ts in correct order)                                          |
+| Playground after Rust/unplugin change | `pnpm run build:native` → `cd packages/playground && rm -rf dist node_modules/.vite && pnpm run sync:wasm && npx vite build` (playground never implicitly copies the WASM artifact — see Key Details; its own `build` script runs `sync:wasm` too and is the safer default) |
+| WASM, developer iteration             | `pnpm run build:wasm` (bindgen only, no `wasm-opt`, no playground copy)                                |
+| WASM, publication-ready               | `pnpm --filter @verter/wasm build` (bindgen + cached `wasm-opt`)                                       |
+| Host developer build                  | `pnpm build` (runs native → lsp → ts, no WASM)                                                         |
+| Publication-ready artifacts           | `pnpm dist` (runs native → lsp → wasm → ts in correct order)                                           |
 
 ## Key Details
 
 - `@verter/unplugin` depends on `@verter/native` — compiles `.vue` files at build time via the Rust native binary
 - `@verter/playground` uses `@verter/unplugin` (devDep) for Vue SFC compilation, and `@verter/wasm` (dep) for the in-browser editor
 - Native binary lives in `packages/native/dist/` after `build:native`
-- LSP binary lives in `target/debug/verter-lsp` (or `target/release/verter-lsp` with `build:lsp:release`)
+- LSP binary lives in `target/<host-triple>/debug/verter-lsp` (or `.../release/verter-lsp` with `build:lsp:release`) — `pnpm run build:lsp`/`build:lsp:release` and `build-host.mjs` all pass an explicit `--target <host-triple>` (see the "one explicit host target" build-lane rule), so the output is triple-qualified, not the bare `target/debug/`/`target/release/` a plain `cargo build` (no `--target`) would produce
 - Clear Vite cache (`node_modules/.vite`) when rebuilding playground after native changes
 
 ## Quick Rebuild (Native)

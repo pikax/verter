@@ -36,12 +36,13 @@
     }
   },
   "scripts": {
-    "clean:wasm": "npx shx rm -rf wasm/snippets && npx shx rm -f wasm/verter_wasm.js wasm/verter_wasm.d.ts wasm/verter_wasm_bg.wasm wasm/verter_wasm_bg.wasm.d.ts wasm/package.json wasm/README.md wasm/LICENSE",
-    "build:wasm": "pnpm run clean:wasm && cargo build --manifest-path ../../Cargo.toml --release -p verter_wasm --target wasm32-unknown-unknown && wasm-bindgen --target web --out-dir wasm --out-name verter_wasm ../../target/wasm32-unknown-unknown/release/verter_wasm.wasm && pnpm run opt:wasm",
-    "opt:wasm": "wasm-opt -Os wasm/verter_wasm_bg.wasm -o wasm/verter_wasm_bg.wasm",
+    "clean:wasm": "npx shx rm -rf wasm/snippets && npx shx rm -f wasm/verter_wasm.js wasm/verter_wasm.d.ts wasm/verter_wasm_bg.wasm.d.ts wasm/package.json wasm/README.md wasm/LICENSE",
+    "build:bindgen": "pnpm run clean:wasm && cargo build --manifest-path ../../Cargo.toml --release -p verter_wasm --target wasm32-unknown-unknown && wasm-bindgen --target web --out-dir wasm --out-name verter_wasm ../../target/wasm32-unknown-unknown/release/verter_wasm.wasm",
+    "opt:wasm": "node ../../scripts/wasm-opt-cache.mjs wasm/verter_wasm_bg.wasm wasm/verter_wasm_bg.wasm -- -Os",
+    "build:wasm": "pnpm run build:bindgen && pnpm run opt:wasm",
+    "build:dev": "pnpm run build:bindgen",
     "build:ts": "tsdown",
-    "build:copy-playground": "npx shx cp wasm/verter_wasm_bg.wasm ../playground/public/verter_wasm_bg.wasm",
-    "build": "pnpm run build:wasm && pnpm run build:ts && pnpm run build:copy-playground",
+    "build": "pnpm run build:wasm && pnpm run build:ts",
     "test:types": "tsc -p tsconfig.types.json",
     "test": "pnpm run test:types && vitest run"
   },

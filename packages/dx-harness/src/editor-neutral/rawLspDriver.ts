@@ -25,6 +25,7 @@ import {
 
 import { extractQuiescenceCounters, pollUntilQuiesced } from "../core/quiescence.js";
 import { awaitRawLspStartup, GET_STATISTICS_METHOD } from "../core/startupGate.js";
+import { resolvePlatformBinary } from "../core/rustHostTriple.js";
 
 const DIAGNOSTICS_METHOD = "textDocument/publishDiagnostics";
 const TYPE_PROVIDER_STATUS_METHOD = "$/verter/typeProviderStatus";
@@ -150,7 +151,7 @@ export function resolvePluginProbeLocation(candidate: string): ResolvedPluginPro
 }
 
 function platformBinary(root: string, stem: string): string {
-  return path.join(root, "target", "debug", process.platform === "win32" ? `${stem}.exe` : stem);
+  return resolvePlatformBinary(root, stem);
 }
 
 async function resolveTsgoBinary(repoRoot: string, explicit?: string): Promise<string> {

@@ -543,8 +543,11 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Full publication-ready lane (bindgen + wasm-opt). Deliberately NOT the
+      # root `pnpm build:wasm` — that is the host-developer lane and never
+      # runs wasm-opt.
       - name: Build WASM
-        run: pnpm run build:wasm
+        run: pnpm --filter @verter/wasm build
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
       - uses: actions/upload-artifact@v6

@@ -27,9 +27,7 @@ use std::sync::Arc;
 use crate::id::canonicalize_id;
 use crate::instant::Instant;
 use crate::shared::{read_lock, write_lock};
-#[cfg(feature = "session_metrics")]
-use crate::types::HostMetricsSnapshot;
-use crate::types::{MetaProvenance, MetaProvenanceSnapshot};
+use crate::types::{HostMetricsSnapshot, MetaProvenance, MetaProvenanceSnapshot};
 use crate::VerterHost;
 
 impl VerterHost {
@@ -835,8 +833,11 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
-    /// Snapshot of feature-gated host-level metrics counters.
-    #[cfg(feature = "session_metrics")]
+    /// Snapshot of host-level metrics counters.
+    ///
+    /// Every field reads zero unless `HostConfig::metrics_enabled` was
+    /// `true` at the time the underlying activity happened — the
+    /// counters are only written when the flag is on.
     pub fn metrics_snapshot(&self) -> HostMetricsSnapshot {
         use std::collections::BTreeMap;
         use std::sync::atomic::Ordering::Relaxed;

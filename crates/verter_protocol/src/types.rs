@@ -62,6 +62,12 @@ pub struct FfiHostConfig {
     /// host construction and reused across every batch call — to
     /// change the pool size, construct a new host.
     pub host_cpu_threads: Option<u32>,
+    /// Enable host performance-metrics collection (upsert/compile/resolve
+    /// counters and timers). `None`/absent keeps the default `false` —
+    /// counters stay zero and `getMetrics()`/`getStatistics()` merge no
+    /// data. Replaces the retired `session_metrics` Cargo feature as the
+    /// runtime opt-in for NAPI-constructed hosts.
+    pub metrics_enabled: Option<bool>,
 }
 
 /// Per-compilation variant options.

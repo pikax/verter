@@ -45,6 +45,30 @@ interface ResolveVerterBinaryOptions extends CommonResolveOptions {
   repoRoot: string;
   override?: string;
   platform?: NodeJS.Platform;
+  arch?: string;
+}
+
+/**
+ * Ordered candidate Rust host-target triples for a platform/arch — mirrors
+ * `packages/vue-vscode/src/rustHostTriple.ts`. Root build scripts
+ * (`build:lsp`, `build:native`) now pass an explicit `--target`, so cargo
+ * writes under `target/<triple>/<profile>/`; both are tried, triple first.
+ */
+function hostRustTriples(platform: NodeJS.Platform, arch: string): string[] {
+  if (platform === "darwin") {
+    if (arch === "arm64") return ["aarch64-apple-darwin"];
+    if (arch === "x64") return ["x86_64-apple-darwin"];
+    return [];
+  }
+  if (platform === "win32") {
+    return arch === "x64" ? ["x86_64-pc-windows-msvc"] : [];
+  }
+  if (platform === "linux") {
+    if (arch === "x64") return ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"];
+    if (arch === "arm64") return ["aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl"];
+    return [];
+  }
+  return [];
 }
 
 interface ResolveTypeScriptSdkOptions extends CommonResolveOptions, PackageResolveOptions {
@@ -107,12 +131,24 @@ export function resolveVerterBinary(options: ResolveVerterBinaryOptions): string
   const pathExists = options.pathExists ?? defaultPathExists;
   const cwd = options.cwd ?? options.repoRoot;
   const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
   const binaryName = platform === "win32" ? "verter-lsp.exe" : "verter-lsp";
+  const triples = hostRustTriples(platform, arch);
 
   const candidates = (
     options.override
       ? [resolveInputPath(options.override, cwd)]
       : [
+          // Triple-qualified layout (explicit `--target` build lane) before
+          // the legacy layout a bare `cargo build` still produces. `release`
+          // wins for perf realism; `artifact-dev` (what `pnpm build`
+          // produces) is the next-most-representative before falling back
+          // to an unoptimized `debug` build.
+          ...triples.flatMap((triple) => [
+            join(options.repoRoot, "target", triple, "release", binaryName),
+            join(options.repoRoot, "target", triple, "artifact-dev", binaryName),
+            join(options.repoRoot, "target", triple, "debug", binaryName),
+          ]),
           join(options.repoRoot, "target/release", binaryName),
           join(options.repoRoot, "target/debug", binaryName),
         ]

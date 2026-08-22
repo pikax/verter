@@ -115,10 +115,13 @@ src/
 
 ### Prerequisites
 
-The WASM binary must be built before the playground can run. From the repository root:
+The WASM binary must be built before the playground can run. Root `pnpm run build:wasm`
+is NOT enough — it produces an unoptimized bindgen-only artifact and skips `@verter/wasm`'s
+own TS build, so the package import still won't resolve. From the repository root, build
+the full package (bindgen + wasm-opt + TS):
 
 ```bash
-pnpm run build:wasm
+pnpm --filter @verter/wasm build
 ```
 
 ### Local Development
