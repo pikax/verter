@@ -758,31 +758,51 @@ notes = ""
 
 [[block]]
 id = "CM1"
-status = "IN_PROGRESS"
+status = "ACCEPTED"
 charter_digest = "1f18b0663dbd15b4e8069b0f0e5b20c2ede13dfe237cfb27f22ba0f69a2bf360"
+# context_packet_digest: UNFILLED — FINDING, not an oversight. No
+# context-packet.md (or any equivalent immutable dispatch packet, per
+# templates/context-packet.md) was ever produced for CM1; it was dispatched
+# directly off the maintainer's beta.4 regression-intake directive, same as
+# BV2. A differently-named "CM1 implementation evidence packet"
+# (evidence/CM1/context-packet.md) existed transiently on the `block/cm1`
+# branch (commit e9cdfea93) but (a) was never part of what actually landed on
+# trunk — 0e5177931's squash does not include it — and (b) even if it had
+# landed, its own commit message identifies it as evidence authored DURING
+# implementation, not a genuine pre-dispatch input packet, so it would not
+# have qualified to fill this field either way. Recorded empty rather than
+# filled with a digest of unrelated or reconstructed bytes — see
+# evidence/CM1/landing-equivalence.md and the closure record
+# (2026-08-22-cm1-closure-record.md). Same gap as BV2/B5 — see those rows'
+# comments and MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md.
 context_packet_digest = ""
-base_sha = "53d6c315701e81647fad77a6970f6f2c7c218aaf"
+base_sha = "eadec2dc0ebc5f9d9ffb9c325b71ecd6a255bc7d"
 implementation_candidate_sha = "47e85159063b0ea841548f0d29aa0eb1d22c7fad"
 implementation_ref = "refs/heads/block/cm1"
+# implementation_candidate_sha/implementation_ref: retained as historical WIP-
+# dispatch record only (AMD-013 round 4, FIX 2 provenance) — same convention
+# as BV2's row. It is NOT CM1's landed identity: see
+# evidence/CM1/landing-equivalence.md for why `47e8515` (block/cm1's tip) is
+# neither an ancestor nor a content-equivalent of what actually landed.
 landing_order = 3
-candidate_sha = ""
-candidate_tree = ""
-accepted_sha = ""
-accepted_tree = ""
-landing_equivalence_digest = ""
-evidence_digest = ""
+candidate_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
+candidate_tree = "9f848e6cbb90f22df3ed9bac023b983163275302"
+accepted_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
+accepted_tree = "9f848e6cbb90f22df3ed9bac023b983163275302"
+landing_equivalence_digest = "48811ae3c8dff7b87e3c8fe2af1c476c0bbb361c83f689d6827a7a13f31489ff"
+evidence_digest = "48811ae3c8dff7b87e3c8fe2af1c476c0bbb361c83f689d6827a7a13f31489ff"
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "PENDING"
-conformance_reviewed_sha = ""
-architecture_review = "PENDING"
-architecture_reviewed_sha = ""
-adversarial_review = "PENDING"
-adversarial_reviewed_sha = ""
-maintainer_decision = "PENDING"
+conformance_review = "PASS"
+conformance_reviewed_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
+architecture_review = "PASS"
+architecture_reviewed_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
+adversarial_review = "PASS"
+adversarial_reviewed_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
+maintainer_decision = "ACCEPTED"
 enabling_amendment = ""
-notes = "Created by the maintainer's beta.4 regression-intake directive to own Findings B and C, both regressions against published beta.3 and both beta.4 blockers. THE DECISIVE RULING IS THAT THESE ARE TWO DISTINCT DEFECTS, NOT ONE: the in-repo investigation reproduced a SILENT degrade to Unknown(MissingOutput) upstream of the raise layer, while the external benchmark observed a HARD UnraisableSource error at exposed[].type. Closing only the reproduced one would have left a release blocker armed and shipping, so the hard-error fixture is an ADDITIONAL acceptance condition and CM1 is not complete until both are closed with their own reproducing tests. Finding B root cause: eval_env.rs component_meta_binding_type_entries gates only on PreparedValueDecl.type_annotation.classification and ignores signatures, so a defineExpose'd function declaration or a const initialized by a call such as ref or computed - typed OR untyped - is never offered to macro-type expansion. Repair: structurally admit demanded visible value bindings, fix the call-binding owner/preparation handoff, and preserve Failed through publication. Finding C root cause: macros.rs constructor_to_ts_type recognizes runtime prop constructors but writes DISPLAY TEXT only, never a semantic source, while the sibling Options-API path maps constructor identity to a real Primitive fact - which is why optionality survives while the primitive type vanishes. Repair: the Options path's closed primitive semantics become the shared analyzer model; the runtime-macro path is the anomaly, and semantics are never derived from display text or at the output seam. Both defects reproduce identically across sequential, warm, concurrent and batch invocation, which rules out view/concurrency causes - the directive's request-view hypothesis was not what the evidence showed. Ruled fixable under the CURRENT architecture (Path A), so no C1 rework is required; C1 gains CM1 as a predecessor while RETAINING A6, B1 and B2 so it must preserve the corrected behaviour and migrate the new tests. Acceptance uses Verter's intended canonical type output from product contracts and beta.3 behaviour, never the benchmark's permissive string|String comparison. The strict output error remains PREFERABLE to an invented type: no unknown substitution, no omitted exposed entries, no swallowed failures, no stale graph state, no bypassed request-view isolation."
+notes = "Created by the maintainer's beta.4 regression-intake directive to own Findings B and C, both regressions against published beta.3 and both beta.4 blockers. THE DECISIVE RULING IS THAT THESE ARE TWO DISTINCT DEFECTS, NOT ONE: the in-repo investigation reproduced a SILENT degrade to Unknown(MissingOutput) upstream of the raise layer, while the external benchmark observed a HARD UnraisableSource error at exposed[].type. Closing only the reproduced one would have left a release blocker armed and shipping, so the hard-error fixture is an ADDITIONAL acceptance condition and CM1 is not complete until both are closed with their own reproducing tests. Finding B root cause: eval_env.rs component_meta_binding_type_entries gates only on PreparedValueDecl.type_annotation.classification and ignores signatures, so a defineExpose'd function declaration or a const initialized by a call such as ref or computed - typed OR untyped - is never offered to macro-type expansion. Repair: structurally admit demanded visible value bindings, fix the call-binding owner/preparation handoff, and preserve Failed through publication. Finding C root cause: macros.rs constructor_to_ts_type recognizes runtime prop constructors but writes DISPLAY TEXT only, never a semantic source, while the sibling Options-API path maps constructor identity to a real Primitive fact - which is why optionality survives while the primitive type vanishes. Repair: the Options path's closed primitive semantics become the shared analyzer model; the runtime-macro path is the anomaly, and semantics are never derived from display text or at the output seam. Both defects reproduce identically across sequential, warm, concurrent and batch invocation, which rules out view/concurrency causes - the directive's request-view hypothesis was not what the evidence showed. Ruled fixable under the CURRENT architecture (Path A), so no C1 rework is required; C1 gains CM1 as a predecessor while RETAINING A6, B1 and B2 so it must preserve the corrected behaviour and migrate the new tests. Acceptance uses Verter's intended canonical type output from product contracts and beta.3 behaviour, never the benchmark's permissive string|String comparison. The strict output error remains PREFERABLE to an invented type: no unknown substitution, no omitted exposed entries, no swallowed failures, no stale graph state, no bypassed request-view isolation. ACCEPTED 2026-08-22: predecessors BV1/BS1 were both already ACCEPTED at dispatch (2026-08-20), so CM1 was legitimately authorised (authority-registry.toml, block=CM1). Its work landed on trunk as two real commits, not one: 0e5177931 (Finding B — aliased-binding identity resolution, the exhaustive PreparedValueDecl admission gate, Failed-vs-Absent preservation, and the Present->UnraisableSource hard-error fixture repair) and 13eafb2ab (Finding C — the owner-aware RootBindingIndex replacing the deleted, structurally-unsound shadow scanner, shared by the Options and macro runtime-constructor paths). Neither corresponds to implementation_candidate_sha (block/cm1's tip 47e8515): 0e5177931 is a divergent squash of block/cm1's own corrected end state (that branch's internal revert a7bf8c696 already dropped the unsound shadow scanner before its own tip), and 13eafb2ab is an entirely separate lineage block/cm1 never contained, built and adversarially reviewed on its own (three codex xhigh design rounds plus a post-implementation pass that found and fixed three real bugs, 2f0379039) — see evidence/CM1/landing-equivalence.md for the full ancestry proof and the diagnosis of the stale-base_sha rehearsal conflict this closure resolves. Single independent review lane (ratified for BV2/B5/J1/CM1 only by MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §4) accepted in place of the three separately-named mandates; see the closure record (2026-08-22-cm1-closure-record.md) for the evidence weighed for this decision, including the regression suite (exposed_binding_regression.rs, formerly findbc_regression.rs) covering cold/warm/concurrent/batch/overlay invocation and both native and compat surfaces."
 
 [[block]]
 id = "C1"
