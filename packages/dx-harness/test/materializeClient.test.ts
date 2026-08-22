@@ -18,7 +18,7 @@ describe("buildMaterializeRequest", () => {
       workspaceRoot: "/ws",
       entries: ["/ws/A.vue", "/ws/B.vue"],
       vendorNodeModules: "/vendor/node_modules",
-      expectedVueVersion: "3.5.34",
+      expectedVueVersion: "3.6.0-rc.5",
       strictVueVersion: true,
     });
     // Keys must match serde's camelCase rename exactly (snake_case would be
@@ -33,7 +33,7 @@ describe("buildMaterializeRequest", () => {
     expect(req).toMatchObject({
       workspaceRoot: "/ws",
       vendorNodeModules: "/vendor/node_modules",
-      expectedVueVersion: "3.5.34",
+      expectedVueVersion: "3.6.0-rc.5",
       strictVueVersion: true,
     });
     // Negative: no snake_case leaks onto the wire.
@@ -81,7 +81,7 @@ describe("parseMaterializeResult", () => {
       tsconfigPath: "/ws/tsconfig.json",
       synthesizedTsconfig: true,
       supportRewrites: ["/ws/barrel.ts"],
-      vueVersionWarnings: [{ package: "vue", expected: "3.5.34", found: "3.4.0" }],
+      vueVersionWarnings: [{ package: "vue", expected: "3.6.0-rc.5", found: "3.4.0" }],
     });
     const r = parseMaterializeResult(json);
     expect(r.ideArtifacts[0].sourceMap).toBe("MAP");
@@ -104,14 +104,14 @@ describe("runMaterialize (hermetic fake binary)", () => {
       buildMaterializeRequest({
         workspaceRoot: "/ws",
         entries: ["/ws/A.vue"],
-        expectedVueVersion: "3.5.34",
+        expectedVueVersion: "3.6.0-rc.5",
         strictVueVersion: true,
       }),
       { extraArgs: [FAKE], cwd: HERE },
     );
 
     // The request body crossed stdin: the fake echoes expectedVueVersion back.
-    expect(result.verterTypesDts).toBe("3.5.34");
+    expect(result.verterTypesDts).toBe("3.6.0-rc.5");
     // The (already-shifted) source map is surfaced verbatim — B never recomputes it.
     expect(result.ideArtifacts[0].sourceMap).toBe("SHIFTED-MAP-A");
     expect(result.sourceMapIdentities["/ws/A.vue"]).toBe("identity-A");

@@ -4089,7 +4089,7 @@ fn html_entities_in_bind_value_decoded() {
 
 // Event-handler keys never enter dynamicProps: Vue relies on stable invoker
 // caching for listeners, so a handler binding never needs a PATCH_PROPS
-// re-patch. Confirmed directly against the real `@vue/compiler-sfc` (rc.3)
+// re-patch. Confirmed directly against the real `@vue/compiler-sfc` (rc.5)
 // oracle — `@click`-only props objects emit neither a dynamicProps array nor
 // the 8 /* PROPS */ flag, and `@click` never appears in a mixed array
 // alongside a genuinely dynamic prop like `:disabled`.
@@ -7232,8 +7232,8 @@ fn title_attr_with_newline_produces_valid_js() {
 /// `__vapor: true` into the SAME accumulated `runtimeOptions` string as
 /// `__name`/`props`/`emits` — spliced into the object literal as ONE
 /// inline property, never a separate trailing `__sfc__.__vapor = true`
-/// assignment (confirmed directly against the vendored rc.3 compiler
-/// source, and against the pinned rc.3 golden for
+/// assignment (confirmed directly against the vendored rc.5 compiler
+/// source, and against the pinned rc.5 golden for
 /// `basic-interpolation.vue`'s vapor cell: `{ __name: '…', __vapor: true,
 /// setup(…) {…} }`).
 #[test]
@@ -7799,7 +7799,7 @@ fn template_only_scoped_style_emits_scope_id_in_script() {
 /// all — `slots.vue`'s exact shape) emits `__vapor: true` as an INLINE
 /// property of the `_sfc_main` object literal, not a separate trailing
 /// `__sfc__.__vapor = true;` statement — confirmed directly against the
-/// pinned rc.3 golden (`const _sfc_main = { __vapor: true }`) and against
+/// pinned rc.5 golden (`const _sfc_main = { __vapor: true }`) and against
 /// `@vue/compiler-sfc`'s own `runtimeOptions` string-building convention
 /// (every dev-time property, `__name`/`props`/`emits`/`__vapor`/etc., is
 /// accumulated into ONE string spliced into the object literal, never a
@@ -13885,7 +13885,7 @@ fn static_hoist_v_if_branch_key_object_hoisted() {
 /// `v-if`/`v-else` branch's synthetic key), matching official's separate
 /// document-pre-order `cacheStatic` hoist-numbering pass — even though
 /// Verter's codegen itself is bottom-up (child `leave` before parent
-/// `leave`). Exact basic-interpolation.vue shape: the official rc.3 golden
+/// `leave`). Exact basic-interpolation.vue shape: the official rc.5 golden
 /// hoists `{ class: "root" }` as `_hoisted_1` (the root, an ancestor), then
 /// the branch keys as `_hoisted_2`/`_hoisted_3` (descendants) — NOT the
 /// other way around, which is what a naive bottom-up push order would
@@ -19397,7 +19397,7 @@ fn inline_template_vapor_fails_closed_not_silently_demoted() {
 }
 
 // =========================================================================
-// Companion default export + defineOptions merging (official 3.6.0-rc.1)
+// Companion default export + defineOptions merging (official 3.6.0-rc.5)
 // =========================================================================
 //
 // Official `@vue/compiler-sfc` non-inline gates on `defaultExport ||
@@ -19789,7 +19789,7 @@ const msg = 'hi'
 // D1 — defineOptions() must not reference setup-local bindings
 // =========================================================================
 //
-// Official `@vue/compiler-sfc` (3.6.0-rc.1) emits a compile ERROR when a
+// Official `@vue/compiler-sfc` (3.6.0-rc.5) emits a compile ERROR when a
 // `defineOptions()` argument references a locally declared (setup) variable,
 // because the argument is hoisted outside `setup()`:
 //   "`defineOptions()` in <script setup> cannot reference locally declared
@@ -20085,7 +20085,7 @@ fn result_inline_true_when_runtime_inline_happens() {
 // FIX1 — inline template refs: user (maybe-ref) imports bind ref_key/ref
 // =========================================================================
 //
-// Official binding metadata (compiler-sfc 3.6.0-rc.1):
+// Official binding metadata (compiler-sfc 3.6.0-rc.5):
 //   imported === "*" || (imported === "default" && source.endsWith(".vue"))
 //     || source === "vue"  →  "setup-const"   (string ref)
 //   everything else (named imports anywhere, default imports from
@@ -20470,7 +20470,7 @@ fn define_model_local_ref_default_is_compile_error() {
 // defineModel get/set transformers are NOT hoisted — setup-local refs valid
 // =========================================================================
 //
-// Official `processDefineModel` (3.6.0-rc.1) emits a defineModel options
+// Official `processDefineModel` (3.6.0-rc.5) emits a defineModel options
 // object's `get`/`set` transformer functions back INTO setup() (they wrap the
 // model ref via `useModel`), so ONLY the non-get/set option properties are
 // hoisted and scope-checked (`runtimeOptionNodes`). A setup-local referenced
@@ -21243,7 +21243,7 @@ const arr = ref([1, 2])
 // one, because the bare half is a write to a setup-scope `const`.
 //
 // Every expectation below is the byte-for-byte handler body that
-// `@vue/compiler-sfc` 3.5.34 emits for the same SFC.
+// `@vue/compiler-sfc` 3.6.0-rc.5 emits for the same SFC.
 // =========================================================================
 
 /// Compile in inline mode and assert the emitted script is parseable JS,
@@ -21615,7 +21615,7 @@ const a = ref(0)
 // iterated expression and the body are all real references that must resolve.
 //
 // Every `$setup` expectation below is the byte-for-byte handler body that
-// `@vue/compiler-sfc` 3.5.34 emits for the same SFC (with the one documented
+// `@vue/compiler-sfc` 3.6.0-rc.5 emits for the same SFC (with the one documented
 // divergence called out in the destructuring case).
 // =========================================================================
 
@@ -21741,7 +21741,7 @@ fn a_for_of_member_target_resolves_in_every_position() {
 /// declaration: each element writes to an existing binding and must resolve.
 ///
 /// This is the one deliberate divergence in the family. `@vue/compiler-sfc`
-/// 3.5.34 emits `for ([a, b] of $setup.xs)` — it leaves the pattern elements
+/// 3.6.0-rc.5 emits `for ([a, b] of $setup.xs)` — it leaves the pattern elements
 /// bare, so the loop writes to two undeclared globals and the setup refs are
 /// never updated. Verter resolves them.
 #[test]

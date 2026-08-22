@@ -198,7 +198,7 @@ fn escape_js_string_into_appends() {
 // ==================== Vapor HTML helpers ====================
 
 // Official `@vue/compiler-vapor`'s `genTemplates` (confirmed directly against
-// the vendored rc.3 source): `const flags = (root ? 1 : 0) | (isStatic ? 2 :
+// the vendored rc.5 source): `const flags = (root ? 1 : 0) | (isStatic ? 2 :
 // 0); if (flags || ns) args += ", ${flags}"` — a NUMERIC bitflag second
 // argument, omitted entirely when both bits are 0. Never the boolean `true`
 // this helper used to always emit.

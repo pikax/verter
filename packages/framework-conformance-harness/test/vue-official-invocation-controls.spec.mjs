@@ -18,7 +18,7 @@
 // discrimination proof is executed on every run, not only in review notes.
 //
 // All expectations were verified directly against the pinned dist
-// (@vue/compiler-sfc 3.6.0-rc.3, compiler-sfc.cjs.js): the JS branch emits
+// (@vue/compiler-sfc 3.6.0-rc.5, compiler-sfc.cjs.js): the JS branch emits
 // `__vapor: true` whenever `vapor`; the TS branch wraps in
 // `defineVaporComponent` when `vapor && !ssr`; `ssr` is read from
 // `options.templateOptions?.ssr` and suppresses client-only cssVars script

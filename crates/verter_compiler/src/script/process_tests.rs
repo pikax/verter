@@ -188,13 +188,13 @@ fn build_wrapper_start_basic() {
 
 // ── __vapor flag placement (official @vue/compiler-sfc's runtimeOptions) ──
 //
-// Confirmed directly against the vendored rc.3 compiler source
+// Confirmed directly against the vendored rc.5 compiler source
 // (`compileScript`'s non-TS branch: `if (vapor) runtimeOptions +=
 // '\n  __vapor: true,'`, unconditional on ssr; the TS `_defineComponent`
 // branch: `if (ssr && vapor) runtimeOptions += ...` — a non-SSR TS vapor
 // component uses the `defineVaporComponent` helper instead, NOT
 // implemented here, since that helper is not threaded through
-// `ComponentWrap`) and the pinned rc.3 golden for `basic-interpolation.vue`'s
+// `ComponentWrap`) and the pinned rc.5 golden for `basic-interpolation.vue`'s
 // vapor cell (`{ __name: '…', __vapor: true, setup(…) {…} }`).
 
 #[test]
@@ -668,7 +668,7 @@ fn build_returned_setup_bindings_only() {
 fn build_returned_preserves_declaration_order_not_alphabetical() {
     // Official's non-inline `__returned__` preserves SOURCE-DECLARATION
     // order (JS object insertion order), not an alphabetical sort — proven
-    // against the exact rc.3 `props-emit.vue` seed fixture, whose golden
+    // against the exact rc.5 `props-emit.vue` seed fixture, whose golden
     // is `{ props, emit, onClick }`. `zebra` is declared BEFORE `alpha`
     // here specifically so an alphabetical-sort regression would flip them.
     let mut bindings = FxHashMap::default();
@@ -686,7 +686,7 @@ fn build_returned_preserves_declaration_order_not_alphabetical() {
 fn build_returned_imports_sort_after_local_declarations_regardless_of_textual_position() {
     // The exact `basic-interpolation.vue` seed-fixture shape: `import {
     // ref } from "vue"` sits textually BEFORE `const count = ref(0)`, yet
-    // the rc.3 golden `__returned__` is `{ count, items, ref }` — both local
+    // the rc.5 golden `__returned__` is `{ count, items, ref }` — both local
     // `const`s first, the import LAST. Official's `allBindings` is built by
     // spreading local `scriptBindings`/`setupBindings` first, then merging
     // in used imports via a separate loop that only adds keys not already
@@ -808,7 +808,7 @@ fn build_returned_setup_import_excluded_when_genuinely_unused() {
 // `@vue/compiler-sfc` builds it into the SAME accumulated `runtimeOptions`
 // string as `__name`/`props`/`emits`, spliced into the object literal by
 // `build_setup_wrapper_start` (confirmed directly against the vendored
-// rc.3 compiler source and the pinned rc.3 golden for
+// rc.5 compiler source and the pinned rc.5 golden for
 // `basic-interpolation.vue`'s vapor cell) — never a separate trailing
 // `__sfc__.__vapor = true` assignment at the wrapper's CLOSE. See
 // `build_wrapper_start_vapor_js_inlines_vapor_flag` and its siblings below

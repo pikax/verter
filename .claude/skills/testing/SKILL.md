@@ -114,7 +114,7 @@ Extracted file contains module contents directly — `use super::*;`, helpers, a
 ### Pinned Vue Macro Runtime Oracle
 
 The official Vue macro baseline is generated only from the repository-pinned
-local `@vue/compiler-sfc@3.5.34`; tests must not fetch compiler output from the
+local `@vue/compiler-sfc@3.6.0-rc.5`; tests must not fetch compiler output from the
 network. `scripts/vue-macro-runtime-oracle/oracle-lib.mjs` parses compiled
 JavaScript and compares normalized runtime facts instead of carrier formatting.
 Schema v2 records compiler/profile provenance, constructor order, `skipCheck`,

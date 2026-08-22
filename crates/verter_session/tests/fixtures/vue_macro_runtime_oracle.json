@@ -3,7 +3,7 @@
   "provenance": {
     "generatedBy": "scripts/gen-vue-macro-runtime-oracle.mjs",
     "compiler": "@vue/compiler-sfc",
-    "version": "3.5.34",
+    "version": "3.6.0-rc.5",
     "fixtureSha256": "f4f35825551b2244071c7a58ba9f126d6e4623ed5c5003be46f1f9019efdfc09",
     "defaultCompileProfile": "development",
     "profiles": {

@@ -3,9 +3,18 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const repo = resolve(import.meta.dirname, "../../../../../..");
 const root = resolve(repo, "docs/arch/refactor/rev11/evidence/framework-conformance");
+// Sole authority for pin identities and evidence-lock digests (see that
+// module's header) — avoids a second hardcoded copy drifting out of sync
+// with it, as happened here across the 3.6.0-rc.3 -> 3.6.0-rc.5 bump.
+// pathToFileURL is required: a bare OS path (e.g. `C:\...` on Windows) is
+// not a valid dynamic-import specifier there.
+const { VUE_DOMAIN, EVIDENCE_LOCK_DIGESTS } = await import(
+  pathToFileURL(resolve(repo, "packages/framework-conformance-harness/src/domain-pin.mjs")).href
+);
 let checks = 0;
 
 let reviewPhase;
@@ -169,7 +178,7 @@ const vueDirect = [
 ];
 for (const name of vueDirect) {
   const entry = vueLock.packages[`node_modules/${name}`];
-  assert(entry?.version === "3.6.0-rc.3", `Vue direct package ${name} drifted`);
+  assert(entry?.version === VUE_DOMAIN.packageVersion, `Vue direct package ${name} drifted`);
   assert(entry.integrity?.startsWith("sha512-"), `Vue direct package ${name} has no integrity`);
 }
 assert(
@@ -182,19 +191,10 @@ assert(
 );
 
 const expectedDigests = new Map([
-  [
-    "oracles/vue/package-lock.json",
-    "0dd2290c0b7d01f4727953b838610727b18bcb999b634eeb8ab726508a34b951",
-  ],
-  ["oracles/vue/closure.tsv", "d5caba234d8545b8b7bc7cc4cca8b8cf63f8ed594140d7cae80f3c7ae64606b2"],
-  [
-    "oracles/svelte/package-lock.json",
-    "0c27c9fc7bed24be3fd7a546b55b6ee5858b244a57613390a213fdb454b92ce2",
-  ],
-  [
-    "oracles/svelte/closure.tsv",
-    "3dc4209c2911700de92858e350ddda2e6f5f333874a2eb330125ee808910dbce",
-  ],
+  ["oracles/vue/package-lock.json", EVIDENCE_LOCK_DIGESTS.vuePackageLockSha256],
+  ["oracles/vue/closure.tsv", EVIDENCE_LOCK_DIGESTS.vueClosureSha256],
+  ["oracles/svelte/package-lock.json", EVIDENCE_LOCK_DIGESTS.sveltePackageLockSha256],
+  ["oracles/svelte/closure.tsv", EVIDENCE_LOCK_DIGESTS.svelteClosureSha256],
   ["vue-official-cases.tsv", "76cbe75f5dbee5b6014ab44ec4b5e58ff77a65839fafdc40d7328dda30f456ba"],
   ["svelte-official-cases.tsv", "09eccfbe2be9a97b3f5f412d30109d346773917afe69dc74b1e59e75dcd3a42e"],
 ]);

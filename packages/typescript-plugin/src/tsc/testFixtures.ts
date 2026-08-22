@@ -20,20 +20,23 @@ export const VERTER_TYPES_DIR = path.join(WORKSPACE_ROOT, "packages", "types");
 export const VERTER_SVELTE_JSX_DIR = path.join(WORKSPACE_ROOT, "packages", "svelte-jsx");
 
 /**
- * Find a built `vue` package in the workspace pnpm store. Picks the 3.5.x line
- * (the workspace's pinned `@vue/compiler-sfc` 3.5.34 baseline) when present.
+ * Find the built `vue` package the workspace's top-level `node_modules/vue`
+ * symlink resolves to — the workspace's single pinned Vue line (see
+ * `domain-pin.mjs` / the root `package.json`) — rather than re-deriving the
+ * pinned version and pnpm's private store directory encoding from a regex.
+ * This needs no update on a future Vue version bump.
  */
 export function resolveWorkspaceVueDir(): string {
-  const pnpmDir = path.join(WORKSPACE_ROOT, "node_modules", ".pnpm");
-  const entries = fs.existsSync(pnpmDir) ? fs.readdirSync(pnpmDir) : [];
-  const candidates = entries.filter((e) => /^vue@3\.5\.\d+_typescript@/.test(e));
-  const chosen = candidates.sort().reverse()[0];
-  if (chosen === undefined) {
+  const vueEntry = path.join(WORKSPACE_ROOT, "node_modules", "vue");
+  if (!fs.existsSync(vueEntry)) {
     throw new Error(
-      "batch-tsc fixtures: no vue@3.5.x in the workspace pnpm store — run `pnpm install`",
+      "batch-tsc fixtures: no `vue` resolvable in the workspace node_modules — run `pnpm install`",
     );
   }
-  return path.join(pnpmDir, chosen, "node_modules");
+  // `vueEntry` is a symlink into `.pnpm/vue@<version>_typescript@.../node_modules/vue`;
+  // its parent is the pnpm store entry's `node_modules`, which also hoists the
+  // sibling `@vue/*` packages `wireNodeModules` below needs to link.
+  return path.dirname(fs.realpathSync(vueEntry));
 }
 
 /**

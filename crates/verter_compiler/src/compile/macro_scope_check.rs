@@ -19,7 +19,7 @@ use crate::template::code_gen::binding::BindingType;
 use crate::utils::oxc::bindings::collect_expression_free_ref_spans;
 
 /// The official `@vue/compiler-sfc` rejection message template for a
-/// setup-scoped macro-argument reference (3.6.0-rc.1; the macro name is
+/// setup-scoped macro-argument reference (3.6.0-rc.5; the macro name is
 /// substituted in).
 fn scope_message(macro_name: &str) -> String {
     format!(
@@ -276,7 +276,7 @@ fn check_destructure_pattern_defaults(
 
 /// Apply the official scope-reference rule to a `defineModel` call.
 ///
-/// Official `processDefineModel` (`@vue/compiler-sfc` 3.6.0-rc.1) treats a
+/// Official `processDefineModel` (`@vue/compiler-sfc` 3.6.0-rc.5) treats a
 /// `defineModel` options object differently from `defineProps` / `defineEmits`:
 /// the `get` / `set` transformer functions are emitted back INTO `setup()` (they
 /// wrap the model ref through `useModel`), so ONLY the remaining option

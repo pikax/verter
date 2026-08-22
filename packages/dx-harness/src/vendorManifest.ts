@@ -23,11 +23,13 @@ import { fileURLToPath } from "node:url";
 import { canonicalizePath, joinCanonical } from "./paths.js";
 
 /**
- * The pinned Vue line for the vendored shims — the workspace `vue` /
- * `@vue/compiler-*` line (`^3.5.34`). Every committed vendored `package.json`
- * carries exactly this version; the {@link vendorManifest} test asserts it.
+ * The pinned Vue line for the vendored shims, computed from the committed
+ * `vendor/shims/vue/package.json` (see {@link computeExpectedVueVersion}) —
+ * never a second hardcoded literal to keep in sync with it. Every committed
+ * vendored `package.json` carries exactly this version; the
+ * {@link vendorManifest} test asserts it.
  */
-export const VENDORED_VUE_VERSION = "3.5.34";
+export const VENDORED_VUE_VERSION = computeExpectedVueVersion();
 
 /**
  * Canonical absolute path to the committed `vendor/shims` directory — the

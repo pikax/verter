@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "@vue/compiler-sfc": "^3.5.30",
+    "@vue/compiler-sfc": "3.6.0-rc.5",
     "source-map": "^0.7.6"
   },
   "optionalDependencies": {

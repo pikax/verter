@@ -568,7 +568,7 @@ fn ssr_component() {
 // Official non-inline shape: 8-param `ssrRender` with `$setup.*`/`$props.*`
 // routing, never a free `_ctx.*` alias for setup bindings. Matches
 // `@vue/compiler-sfc` (`ssr:true` and `ssr:false` share a byte-identical
-// script tail, `__isScriptSetup` included) and the pinned rc.3 SSR goldens.
+// script tail, `__isScriptSetup` included) and the pinned rc.5 SSR goldens.
 
 /// Non-inline SSR must NOT set `__ssrInlineRender` (that flag means setup
 /// returns the render function — true-inline SSR, which Verter doesn't do).
@@ -609,7 +609,7 @@ fn ssr_script_non_inline_no_false_inline_flags() {
 /// `$setup` POSITIONAL PARAMETER (`$setup.msg`), never a free `_ctx.*`
 /// alias — official's real non-inline `ssrRender(_ctx, _push, _parent,
 /// _attrs, $props, $setup, $data, $options)` shape, confirmed directly
-/// against the real `@vue/compiler-sfc` and every pinned rc.3 SSR golden.
+/// against the real `@vue/compiler-sfc` and every pinned rc.5 SSR golden.
 /// This is WHY the setup-return marker (see
 /// `ssr_setup_return_carries_script_setup_marker` below) is safe to keep:
 /// nothing here depends on `_ctx`'s instance-proxy exposure of setup keys.

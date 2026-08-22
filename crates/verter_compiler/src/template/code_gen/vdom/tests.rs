@@ -766,7 +766,7 @@ fn template_v_if_injects_fragment_branch_key() {
 /// flag `64 /* STABLE_FRAGMENT */` (NOT the keyed/unkeyed 128/256 flags
 /// regardless of an explicit `:key`), and the per-item element is NOT its
 /// own block (`_createElementVNode`, not `_createElementBlock`/`_openBlock`
-/// wrapped) — confirmed against the pinned rc.3 oracle golden for
+/// wrapped) — confirmed against the pinned rc.5 oracle golden for
 /// `basic-interpolation.vue`.
 #[test]
 fn v_for_over_stable_setup_const_uses_stable_fragment() {
@@ -1181,7 +1181,7 @@ fn block_tree_vif_component_uses_block() {
 /// directives with children, `vue:beforeUpdate` hook) — a plain component
 /// with just a static `:key` does NOT set `isBlockRequired`, so it stays
 /// `_createVNode(...)`, NOT `(_openBlock(), _createBlock(...))`. Confirmed
-/// directly against the real vendored `@vue/compiler-dom@3.6.0-rc.3`.
+/// directly against the real vendored `@vue/compiler-dom@3.6.0-rc.5`.
 #[test]
 fn block_tree_vfor_component_over_stable_source_stays_vnode() {
     let code = gen_vdom_template(

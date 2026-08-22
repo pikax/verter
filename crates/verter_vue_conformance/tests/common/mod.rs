@@ -10,7 +10,7 @@ use verter_vue_conformance::{corpus_file, corpus_root, read_text_normalized};
 pub fn golden_path(backend: &str, case_id: &str, extension: &str) -> PathBuf {
     corpus_file(
         &corpus_root(),
-        &format!("goldens/3.6.0-rc.3/{backend}/{case_id}.{extension}"),
+        &format!("goldens/3.6.0-rc.5/{backend}/{case_id}.{extension}"),
     )
 }
 

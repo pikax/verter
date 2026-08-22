@@ -1438,8 +1438,8 @@ fn compile_inner(
             // `runtimeOptions` string) builds `__vapor: true` as an INLINE
             // object-literal property, never a separate trailing
             // `__sfc__.__vapor = true` assignment — confirmed directly
-            // against the vendored rc.3 compiler source and against the
-            // pinned rc.3 golden for `slots.vue`'s template-only vapor
+            // against the vendored rc.5 compiler source and against the
+            // pinned rc.5 golden for `slots.vue`'s template-only vapor
             // cell (`const _sfc_main = { __vapor: true }`). `__scopeId`
             // is a DIFFERENT, bundler-level mechanism in real
             // `@vitejs/plugin-vue` (`attachedProps` + the `_export_sfc`

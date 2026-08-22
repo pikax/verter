@@ -1,7 +1,7 @@
 # Vue macro runtime oracle
 
 This oracle captures normalized runtime facts from the repository-pinned local
-`@vue/compiler-sfc@3.5.34`. It never uses the network and does not compare
+`@vue/compiler-sfc@3.6.0-rc.5`. It never uses the network and does not compare
 cosmetic JavaScript formatting.
 
 `oracle-lib.mjs` compiles the sources in `fixtures.mjs`, parses the generated

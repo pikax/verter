@@ -164,7 +164,7 @@ pub struct ModelRuntimeShape {
 /// Closed broad runtime-constructor taxonomy in Vue-compatible terminal order.
 ///
 /// `Null` and `Unknown` are semantic classifications with no JavaScript
-/// constructor. BigInt is intentionally absent: pinned Vue 3.5.34 emits no
+/// constructor. BigInt is intentionally absent: pinned Vue 3.6.0-rc.5 emits no
 /// runtime BigInt constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, NoStoredSpan)]
 pub enum RuntimeConstructor {

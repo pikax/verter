@@ -121,7 +121,7 @@ fn push_prop_key(buf: &mut String, key: &str) {
 
 /// Whether `expr` (trimmed) is a compile-time-constant JS literal —
 /// string/number/boolean/`null`/`undefined` — official's narrow leaf case
-/// of `isDirectConstantValue`/`isDirectConstantAst` (rc.3
+/// of `isDirectConstantValue`/`isDirectConstantAst` (rc.5
 /// `generators/props.ts`). Deliberately narrower than official's full
 /// recursive array/object/template-literal-of-constants coverage (no
 /// fixture needs it); anything not recognized here conservatively wraps in
@@ -252,7 +252,7 @@ fn resolve_vapor_dynamic_component<'a>(
     None
 }
 
-/// Official `setInsertionState(parent, anchor)` 2nd arg (vendored rc.3):
+/// Official `setInsertionState(parent, anchor)` 2nd arg (vendored rc.5):
 /// omitted → append last child; a number → one-time 0-based DOM index
 /// (components/slot outlets, mount once); a node ref → insert before that
 /// already-navigated marker (v-if/v-for, which remount).
@@ -291,7 +291,7 @@ enum IfNegative {
 }
 
 /// Official `_createIf` 4th argument (`genIfFlags`/`genIfFlagNames`, vendored
-/// rc.3). `None` when official omits it (`flags === 1`: bare v-if, positive
+/// rc.5). `None` when official omits it (`flags === 1`: bare v-if, positive
 /// branch not NO_SCOPE-eligible, not nested where NO_SCOPE is disallowed).
 ///
 /// Reachable space is SINGLE_ROOT only (`build_closure_body` always returns
@@ -342,7 +342,7 @@ fn compute_if_flags(
     })
 }
 
-/// Official `_createFor` trailing flags (`genForFlags`, vendored rc.3).
+/// Official `_createFor` trailing flags (`genForFlags`, vendored rc.5).
 /// `is_single_node` is always true here (`build_closure_body` always hoists
 /// a template — official `isSingleNodeBlock` / `child.template != null`).
 /// Component / `v-once` / slot-root v-for are unsupported, so `component` /
@@ -380,7 +380,7 @@ enum DestructureAccessor {
     /// A rest element (`{ id, ...rest }`) — official's
     /// `_getRestElement({base}{suffix}, [excludedKeys...])`, excluding the
     /// STATIC sibling keys already destructured at the SAME nesting level
-    /// (rc.3 `packages/compiler-vapor/src/transforms/vFor.ts`, confirmed
+    /// (rc.5 `packages/compiler-vapor/src/transforms/vFor.ts`, confirmed
     /// directly against the vendored dist and the real with-vapor runtime).
     Rest {
         suffix: String,
@@ -438,7 +438,7 @@ impl DestructureAccessor {
 /// Per-leaf-identifier accessor for a destructuring pattern (`{ id, name }`,
 /// `[a, b]`, a rest element, a default value, arbitrary nesting/shorthand/
 /// renamed-key/string-literal-key mixes), walked off an already-parsed OXC
-/// AST — mirrors official `parseValueDestructure` (rc.3
+/// AST — mirrors official `parseValueDestructure` (rc.5
 /// `packages/compiler-vapor/src/transforms/vFor.ts`, confirmed directly
 /// against the vendored dist). Returns `false` only for a construct official
 /// ALSO doesn't destructure structurally (a computed key, or a rest/default
@@ -758,7 +758,7 @@ fn v_slot_destructure_leaves<'e>(
 }
 
 /// Loop-variable rename map for [`BindingResolver::push_for_scope`] —
-/// official `itemVar = _for_item${depth}` + `buildDestructureIdMap` (rc.3).
+/// official `itemVar = _for_item${depth}` + `buildDestructureIdMap` (rc.5).
 /// `param_part` is [`helpers::parse_v_for_expression`]'s first return
 /// (parens stripped); positions are value → key → index
 /// ([`helpers::split_v_for_params`]).
@@ -923,7 +923,7 @@ pub struct VaporCodeGen<'ast, 'alloc> {
     /// (`block_depth` stays 0); one inside another block-creating construct does
     /// not. `depth == 0` was the wrong proxy (document root vs root top-level
     /// block) and dropped FALSE_NO_SCOPE for a v-if one DOM level inside a
-    /// plain root wrapper (rc.3 `basic-interpolation.vue`).
+    /// plain root wrapper (rc.5 `basic-interpolation.vue`).
     block_depth: u32,
     /// v-for nesting depth (push/pop, distinct from `block_depth`) — official
     /// `context.scopeLevel` (`enterScope`/`exitScope`), naming
@@ -962,7 +962,7 @@ pub struct VaporCodeGen<'ast, 'alloc> {
     ///
     /// Reserved at enter (before children) because official allocates the
     /// construct id, then one wasted block-entry id, before any children
-    /// (rc.3). Verter's bottom-up walker would otherwise consume a child
+    /// (rc.5). Verter's bottom-up walker would otherwise consume a child
     /// interpolation id before `leave_element`.
     pending_construct_ref: Vec<Option<u32>>,
     /// Whether the whole template has exactly one meaningful top-level
@@ -1234,7 +1234,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         let cond = el.v_condition.as_ref().unwrap();
 
         // Construct id reserved at enter, before children — official allocates
-        // construct id + one wasted branch-entry id before branch content (rc.3);
+        // construct id + one wasted branch-entry id before branch content (rc.5);
         // leave-time reservation is too late for this bottom-up walker.
         let outer_ref = construct_ref;
         // Official `isSingleRootChild`: propagates through v-if/v-else-if/
@@ -1446,7 +1446,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 // No else branch — close the if-branch closure.
                 stmt.push_str("  }");
                 // Official `genMulti`: a present flags arg with no negative uses an
-                // explicit `null` placeholder for the skipped 3rd arg (rc.3 `genCall`).
+                // explicit `null` placeholder for the skipped 3rd arg (rc.5 `genCall`).
                 match compute_if_flags(
                     branch.is_static,
                     IfNegative::None,
@@ -1582,7 +1582,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
 
         // Key callback params stay the raw source names — official
         // `genCallback`/`genSimpleIdMap` leaves rawKey/rawIndex unrenamed
-        // (rc.3: `(item) => (item)`, never `(_for_item0) => (_for_item0.value)`).
+        // (rc.5: `(item) => (item)`, never `(_for_item0) => (_for_item0.value)`).
         let has_key = key_expr.is_some();
         if let Some(key) = key_expr {
             stmt.push_str(", (");
@@ -1593,7 +1593,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
 
         // `_createFor` 4th arg. Flags-present + key-absent needs an explicit
-        // `undefined` key-slot placeholder (rc.3:
+        // `undefined` key-slot placeholder (rc.5:
         // `_createFor(..., undefined, 9 /* FAST_REMOVE, IS_SINGLE_NODE */)`).
         let only_child = self.v_for_is_only_child(id, source);
         if let Some(flags) = compute_for_flags(only_child, self.options.is_production) {
@@ -1657,7 +1657,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
 
     /// Emit `const n{target} = _child(n{container})` (first nav in this parent
     /// scope) or `const n{target} = _next(n{prev})` (chained). Official
-    /// single-arg `next(node) => node.nextSibling` (rc.3). Separate from
+    /// single-arg `next(node) => node.nextSibling` (rc.5). Separate from
     /// `element::merge_into_parent`'s dom-index nav — this backs multi-anchor
     /// nav inside one parent, which a parent-absolute index cannot express.
     ///
@@ -1745,7 +1745,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     }
 
     /// Merge a non-root structural element (component, slot outlet, v-if/v-for)
-    /// into its parent. Official rc.3 is not limited to v-if/v-for: a component
+    /// into its parent. Official rc.5 is not limited to v-if/v-for: a component
     /// followed by dynamic text (`<div><MyComp>x</MyComp>after {{ a }}</div>`)
     /// also gets `<!>` (`t1 = "<div><!> "`, `_setInsertionState(n4, n3)`). The
     /// factor is whether something else in this parent needs to navigate past
@@ -1894,7 +1894,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
     }
 
-    /// Official 2-arg `setInsertionState(parent, anchor)` (rc.3) — append
+    /// Official 2-arg `setInsertionState(parent, anchor)` (rc.5) — append
     /// (1-arg) or insert before a node ref. Not the former 4-arg call.
     fn emit_set_insertion_state(
         &self,
@@ -1929,7 +1929,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     /// been visited — official `processDynamicChildren` timing. Mints the
     /// memoized container ref (none if no establishing children) and per-request
     /// anchor ids in DFS order, ANCHOR before container-ref within each request
-    /// (rc.3: `increaseId()` for the anchor precedes memoized `reference()`).
+    /// (rc.5: `increaseId()` for the anchor precedes memoized `reference()`).
     fn resolve_pending_nav_requests(
         &mut self,
         state: &mut VaporElementState<'alloc>,
@@ -2195,7 +2195,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
 
     /// Official FAST_REMOVE source: `isOnlyChild = parent &&
     /// parent.block.node !== parent.node && parent.node.children.length === 1`
-    /// (rc.3 `processFor`). Sole meaningful child of a PLAIN parent — not a
+    /// (rc.5 `processFor`). Sole meaningful child of a PLAIN parent — not a
     /// component, slot outlet, `<template v-slot>`, or another block whose
     /// `.node` equals itself.
     fn v_for_is_only_child(&self, id: NodeId, source: &str) -> bool {
@@ -2800,7 +2800,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     }
 
     /// Named `:prop="expr"` / static-attribute slot-outlet props — official
-    /// `genRawProps`/`genProp` (rc.3 `generators/slotOutlet.ts` +
+    /// `genRawProps`/`genProp` (rc.5 `generators/slotOutlet.ts` +
     /// `generators/props.ts`, confirmed against the vendored dist): a
     /// compile-time-constant value (string/number/boolean/`null`/
     /// `undefined` literal, or a static HTML attribute — always a source
@@ -2912,7 +2912,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     }
 
     /// `_createSlot(name, props, fallback)`, trailing default-valued args
-    /// omitted (rc.3 `slots.vue`: named + fallback emits all three; bare
+    /// omitted (rc.5 `slots.vue`: named + fallback emits all three; bare
     /// `<slot />` emits `_createSlot()`).
     ///
     /// `state` is the outlet's fallback content (its own HTML scope, handed
@@ -2930,7 +2930,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         use super::shared::helpers::push_u32;
 
         // Slot name from static `name`; the generated literal's opening quote
-        // anchors to the ATTRIBUTE name's start, not the value (rc.3
+        // anchors to the ATTRIBUTE name's start, not the value (rc.5
         // `delimiter-anchor` on `slots.vue`).
         let mut slot_name = "default";
         let mut slot_name_attr_start: Option<u32> = None;
@@ -3084,15 +3084,15 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // order. A nested closure allocates its template before the enclosing
         // root's skeleton (DFS visits children first); the two collections
         // (`root_elements.template_idx` vs `hoisted_templates`) must interleave
-        // by index (rc.3 `slots.vue`: `t0` = fallback, `t1` = root skeleton).
+        // by index (rc.5 `slots.vue`: `t0` = fallback, `t1` = root skeleton).
         //
-        // Official `genTemplates` (rc.3): `root` (official `isSingleRoot`) is
+        // Official `genTemplates` (rc.5): `root` (official `isSingleRoot`) is
         // true whenever the template has a single meaningful top-level
         // construct — for a direct root element that's `root_elements.len()
         // == 1`; for a v-if/v-else-if/v-else branch closure whose whole
         // chain IS that sole construct, the bit propagates in too
         // (`hoisted_templates`' own stored `is_root`, computed in
-        // `build_closure_body` from `self.template_single_root`; rc.1
+        // `build_closure_body` from `self.template_single_root`; rc.5
         // `elements-text/multi-root.vue` uses flag 2 only — no single root
         // there). `static` is `canUseStaticTemplate()`.
         let single_root = self.root_elements.len() == 1;
@@ -3194,7 +3194,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 }
             }
 
-            // Official `flushPendingOperations` (rc.3): one-time operations
+            // Official `flushPendingOperations` (rc.5): one-time operations
             // (`_on()`, etc.) before the aggregated `effect` array, regardless of
             // source order (`props-emit.vue`: `:disabled` is source-first but
             // `_renderEffect` prints after `@click`'s `_on`).
@@ -3463,7 +3463,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
 
         // Reserve construct-own id + burn one wasted branch/item-entry id at
         // enter, before children. Leave-time is too late: official allocates
-        // these two ids before any branch/item content (rc.3).
+        // these two ids before any branch/item content (rc.5).
         let construct_ref = if let Some(cond) = &el.v_condition {
             let outer = matches!(cond.kind, ElementNodeConditionKind::If)
                 .then(|| self.counters.next_node());
@@ -3495,7 +3495,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             outer
         } else if el.tag_type == TagType::SlotOutlet {
             // Slot outlet's own construct id, same reason as v-if/v-for. Fallback
-            // burns one wasted `enterBlock()` id (rc.3 `slots.vue`:
+            // burns one wasted `enterBlock()` id (rc.5 `slots.vue`:
             // `const n0 = _createSlot("header", null, () => { const n2 = t0() ... })`
             // — id 1 is consumed, never printed). Fallback-less `<slot/>` burns none.
             let outer = Some(self.counters.next_node());
@@ -3997,7 +3997,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
     ) {
         helpers::debug_assert_slice_bounds(source, text_node.start, text_node.end, "visit_text");
         // Newline-containing whitespace-only text between two ELEMENT/COMMENT
-        // tags is not a DOM node under Vue condense (rc.3
+        // tags is not a DOM node under Vue condense (rc.5
         // `basic-interpolation.vue` / `slots.vue` emit zero inter-tag bytes).
         // Emitting it both pollutes the skeleton and occupies a real sibling
         // that `_child`/`_next` never skip (`HierarchyRequestError: Node

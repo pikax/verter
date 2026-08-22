@@ -1,19 +1,19 @@
 {
-  "name": "verter-rev11-vue-3.6.0-rc.3-oracle",
+  "name": "verter-rev11-vue-3.6.0-rc.5-oracle",
   "version": "0.0.0",
   "private": true,
   "dependencies": {
-    "@vue/compiler-core": "3.6.0-rc.3",
-    "@vue/compiler-dom": "3.6.0-rc.3",
-    "@vue/compiler-sfc": "3.6.0-rc.3",
-    "@vue/compiler-ssr": "3.6.0-rc.3",
-    "@vue/compiler-vapor": "3.6.0-rc.3",
-    "@vue/reactivity": "3.6.0-rc.3",
-    "@vue/runtime-core": "3.6.0-rc.3",
-    "@vue/runtime-dom": "3.6.0-rc.3",
-    "@vue/runtime-vapor": "3.6.0-rc.3",
-    "@vue/server-renderer": "3.6.0-rc.3",
-    "@vue/shared": "3.6.0-rc.3",
-    "vue": "3.6.0-rc.3"
+    "@vue/compiler-core": "3.6.0-rc.5",
+    "@vue/compiler-dom": "3.6.0-rc.5",
+    "@vue/compiler-sfc": "3.6.0-rc.5",
+    "@vue/compiler-ssr": "3.6.0-rc.5",
+    "@vue/compiler-vapor": "3.6.0-rc.5",
+    "@vue/reactivity": "3.6.0-rc.5",
+    "@vue/runtime-core": "3.6.0-rc.5",
+    "@vue/runtime-dom": "3.6.0-rc.5",
+    "@vue/runtime-vapor": "3.6.0-rc.5",
+    "@vue/server-renderer": "3.6.0-rc.5",
+    "@vue/shared": "3.6.0-rc.5",
+    "vue": "3.6.0-rc.5"
   }
 }

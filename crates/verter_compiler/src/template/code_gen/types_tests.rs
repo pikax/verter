@@ -109,7 +109,7 @@ fn apply_to_preserves_same_position_prepend_order() {
 //
 // A nonzero-width tag (`<script setup>`, `<template>`) replaced by wholly
 // synthetic wrapper code has NO character-level correspondence to that tag
-// — confirmed directly against the pinned rc.3 oracle's own mapping (real
+// — confirmed directly against the pinned rc.5 oracle's own mapping (real
 // `@vue/compiler-sfc`/`compiler-vapor` never touch the tag text at all;
 // their `prependLeft`-based wrapper insertion carries no mapping either).
 // A plain `overwrite()` for the nonzero-width branch would produce an
@@ -481,7 +481,7 @@ fn vapor_element_state_ensure_text_ref() {
 
 /// Official has no separate id space for `xN` (text-accessor) vs `nN`
 /// (element) declarations — both print the SAME `dynamic.id` (confirmed
-/// against the vendored rc.3 compiler and every pinned golden emitting
+/// against the vendored rc.5 compiler and every pinned golden emitting
 /// both, e.g. `const n2 = t0()` paired with `const x2 = _txt(n2)`, never a
 /// distinct number). An element that needs BOTH a node ref (e.g. for a prop
 /// binding) and a text ref must get the SAME number for both.

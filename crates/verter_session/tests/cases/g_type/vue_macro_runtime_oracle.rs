@@ -46,7 +46,7 @@ fn pinned_vue_macro_oracle_carries_provenance_and_discriminating_runtime_facts()
     let oracle = oracle();
     assert_eq!(oracle["schemaVersion"], 2);
     assert_eq!(oracle["provenance"]["compiler"], "@vue/compiler-sfc");
-    assert_eq!(oracle["provenance"]["version"], "3.5.34");
+    assert_eq!(oracle["provenance"]["version"], "3.6.0-rc.5");
     assert_eq!(
         oracle["provenance"]["fixtureSha256"]
             .as_str()

@@ -10,7 +10,7 @@ const compilerRequire = createRequire(require.resolve("@vue/compiler-sfc/package
 const babelParser = compilerRequire("@babel/parser");
 
 export const VUE_MACRO_ORACLE_SCHEMA_VERSION = 2;
-export const VUE_MACRO_ORACLE_VERSION = "3.5.34";
+export const VUE_MACRO_ORACLE_VERSION = "3.6.0-rc.5";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
