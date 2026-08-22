@@ -1,9 +1,9 @@
 # Vendored Svelte source fixture
 
-`remove_typescript_nodes.5.56.3.js` is vendored VERBATIM from the Svelte
+`remove_typescript_nodes.5.56.10.js` is vendored VERBATIM from the Svelte
 compiler at the pinned oracle version:
 
-- Upstream: `svelte@5.56.3`
+- Upstream: `svelte@5.56.10`
 - Path in package: `src/compiler/phases/1-parse/remove_typescript_nodes.js`
 - License: MIT (see `LICENSE` in this directory; Copyright (c) 2016-2025 Svelte Contributors)
 

@@ -40,7 +40,7 @@ fn golden_lib_path() -> PathBuf {
 fn oracle_pin_version(lib_src: &str) -> String {
     for line in lib_src.lines() {
         let trimmed = line.trim();
-        // `export const SVELTE_ORACLE_VERSION = "5.56.3";`
+        // `export const SVELTE_ORACLE_VERSION = "5.56.10";`
         if let Some(rest) = trimmed.strip_prefix("export const SVELTE_ORACLE_VERSION") {
             let after_eq = rest.split('=').nth(1).expect("pin assignment has `=`");
             let quoted = after_eq.trim().trim_end_matches(';').trim();

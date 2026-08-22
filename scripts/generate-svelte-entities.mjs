@@ -4,7 +4,7 @@
  * static-attribute entity decode.
  *
  * Vendors the CANONICAL named-entity table the pinned official
- * `svelte@5.56.3` compiler uses (`src/compiler/phases/1-parse/utils/entities.js`,
+ * `svelte@5.56.10` compiler uses (`src/compiler/phases/1-parse/utils/entities.js`,
  * ~2231 entries incl. the 106 legacy no-semicolon forms) into a committed Rust
  * data module. The runtime IR's static-attribute serializer decodes
  * `decode_character_references(raw, is_attribute_value=true)` against this table
@@ -33,7 +33,7 @@ const __dirname = dirname(__filename);
 const REPO_ROOT = join(__dirname, "..");
 
 /** The pinned oracle version (kept in lockstep with gen-svelte-goldens.mjs). */
-const SVELTE_ORACLE_VERSION = "5.56.3";
+const SVELTE_ORACLE_VERSION = "5.56.10";
 
 /** The committed Rust data module path. */
 const OUT_PATH = join(REPO_ROOT, "crates/verter_compiler/src/svelte/runtime/entity_table.rs");

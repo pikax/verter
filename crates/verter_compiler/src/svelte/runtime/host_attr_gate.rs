@@ -3,7 +3,7 @@
 //! `bind:` directive.
 //!
 //! Several Svelte binds are valid ONLY when the host element carries a specific
-//! STATIC attribute; `svelte@5.56.3` raises a COMPILE ERROR otherwise. The runtime
+//! STATIC attribute; `svelte@5.56.10` raises a COMPILE ERROR otherwise. The runtime
 //! bind router only sees `(name, tag)`, so without this gate an invalid bind would
 //! emit a divergent / runtime-broken module. This gate is consumed by BOTH the
 //! emitter's bind classifier ([`super::client_shapes::classify_dom_value_bind`]) AND
@@ -27,7 +27,7 @@ use crate::svelte::parser::{SvelteAttribute, SvelteAttributeKind, SvelteAttribut
 /// The static-text view is ENTITY-DECODED: the official host-attribute gates
 /// compare against the attribute's decoded `Text.data` (`decode_character_references`),
 /// so a `type="check&#98;ox"` decodes to `"checkbox"` and `bind:checked` passes —
-/// matching svelte@5.56.3. The decode reuses the shared
+/// matching svelte@5.56.10. The decode reuses the shared
 /// [`decode_attr_entities`](super::entity_decode::decode_attr_entities) attribute
 /// decoder (the same path the mixed-attribute / `style:` literal lowering uses), so
 /// there is ONE decode authority. (Decoding owns the string, so this carrier is not
@@ -103,9 +103,9 @@ fn parsed_host_attr(source: &str, attrs: &[SvelteAttribute], name: &str) -> Host
 /// Whether the host element's typed attributes satisfy the official HOST-ATTRIBUTE
 /// requirement for this `(name, tag, routing)` bind. Returns `false` (⇒ the caller
 /// fails the bind closed) when the host is missing / has the wrong shape of a
-/// required attribute — exactly the cases svelte@5.56.3 raises a COMPILE ERROR for.
+/// required attribute — exactly the cases svelte@5.56.10 raises a COMPILE ERROR for.
 ///
-/// The gates (verified empirically against svelte@5.56.3):
+/// The gates (verified empirically against svelte@5.56.10):
 /// - The `<input type>` requirement — "'type' attribute must be a static text value
 ///   if input uses two-way binding". For an `<input>` bind, a `type` attribute, when
 ///   PRESENT, must be a STATIC TEXT VALUE (`Static(Some)`): a valueless `type`

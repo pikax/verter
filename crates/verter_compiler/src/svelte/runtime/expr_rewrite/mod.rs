@@ -350,7 +350,7 @@ pub enum ExprDialect {
     /// lowers stripped).
     Tsx,
     /// PLAIN Svelte JS (`SourceType::mjs()`) parse, with NO TypeScript-strip pass — the
-    /// FUNCTION-PAIR bind element lane ONLY. Official svelte@5.56.3 parses a binding
+    /// FUNCTION-PAIR bind element lane ONLY. Official svelte@5.56.10 parses a binding
     /// expression as plain JS (any TS construct is a parse error, refused upstream by
     /// `parse_plain_svelte_function_pair`), so a valid-JS element that LOOKS like TS to
     /// the TSX parser — e.g. ``tag<string>`x` `` (a relational compare, NOT a tagged

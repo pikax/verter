@@ -1,5 +1,5 @@
 //! The UNIFIED authored template-value preparation — the single owner of the
-//! official `build_expression` legacy branch (svelte@5.56.3 client
+//! official `build_expression` legacy branch (svelte@5.56.10 client
 //! `shared/utils.js`):
 //!
 //! ```js

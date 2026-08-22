@@ -129,7 +129,7 @@ impl<'a> SupportedClientIr<'a> {
     /// Rewrite a FUNCTION-PAIR bind element SOURCE STRING through the PLAIN-JS rewrite
     /// lane ([`rewrite_expression_plain_js`](expr_rewrite::rewrite_expression_plain_js)):
     /// the element is parsed as `SourceType::mjs()` and NOT TS-stripped, mirroring
-    /// official svelte@5.56.3's plain-JS parse of a binding expression. Used ONLY for the
+    /// official svelte@5.56.10's plain-JS parse of a binding expression. Used ONLY for the
     /// two `{get, set}` elements of a DOM function-pair bind (already accepted +
     /// extracted by `parse_plain_svelte_function_pair`); each element is rewritten
     /// INDEPENDENTLY as a value expression (signal reads/writes inside an inline arrow

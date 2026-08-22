@@ -70,7 +70,7 @@ pub struct ComponentIr {
     pub filename: Option<String>,
     /// The reactivity mode.
     pub mode: SvelteMode,
-    /// The official in-between MAYBE-RUNES fact (svelte@5.56.3 `analysis.maybe_runes`):
+    /// The official in-between MAYBE-RUNES fact (svelte@5.56.10 `analysis.maybe_runes`):
     /// a non-runes component that might still be "wannabe runes" — no explicit
     /// `runes: false` override, no top-level labeled statement, and no `export let`
     /// in the instance script. Only meaningful under [`SvelteMode::Legacy`]: the
@@ -1089,7 +1089,7 @@ pub enum TagIr {
         /// The call arguments.
         args: Vec<ExprId>,
         /// `Some(span)` when the render call carries a SPREAD argument
-        /// (`{@render row(...xs)}`) — official `svelte@5.56.3` HARD-ERRORS on it
+        /// (`{@render row(...xs)}`) — official `svelte@5.56.10` HARD-ERRORS on it
         /// (`render_tag_invalid_spread_argument`), so the client-surface gate fails
         /// closed at this span rather than silently dropping the spread. `None` for a
         /// spread-free render call (the normal static/dynamic snippet-call surface).
@@ -1225,7 +1225,7 @@ pub struct SvelteRuntimeIr<'a> {
     /// SOURCE-LEVEL direct child of a `{#snippet}` block body (any node kind),
     /// recorded at the snippet lowering call site — never inside the shared
     /// child-lowering helper, which `{#await}` bodies also use. Official
-    /// `svelte@5.56.3` validates a snippet direct child as component-owned placement
+    /// `svelte@5.56.10` validates a snippet direct child as component-owned placement
     /// (`is_component = true`), so the unified slot choke-point accepts a STATIC
     /// `slot="x"` on these hosts when the host kind is filler-capable (a regular
     /// element / component / `<svelte:component>` / `<svelte:self>` /

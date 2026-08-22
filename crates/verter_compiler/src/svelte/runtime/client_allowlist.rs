@@ -298,7 +298,7 @@ impl SupportedStaticAttr {
     }
 }
 
-/// The pinned Svelte `RESERVED_WORDS` set (svelte@5.56.3,
+/// The pinned Svelte `RESERVED_WORDS` set (svelte@5.56.10,
 /// `src/utils.js`'s `RESERVED_WORDS`). This is the STRICT reserved-word authority
 /// for the client element-name safety check — NOT OXC's narrower `is_keyword` (which
 /// omits `arguments` / `eval` / `implements` / `interface` / `package` / `private` /
@@ -365,19 +365,19 @@ pub(super) fn is_svelte_reserved_word(tag: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// DOM attribute / property tables (mirrored from svelte@5.56.3 `src/utils.js`)
+// DOM attribute / property tables (mirrored from svelte@5.56.10 `src/utils.js`)
 // ---------------------------------------------------------------------------
 //
 // These are the pinned official tables the client backend uses to decide a
 // dynamic attribute's emission shape: a DOM-property write (`node.prop = value`)
 // vs `$.set_attribute(node, 'name', value)`. They are TRANSCRIBED VERBATIM from
-// `svelte@5.56.3` `src/utils.js` — `DOM_BOOLEAN_ATTRIBUTES`, `ATTRIBUTE_ALIASES`,
+// `svelte@5.56.10` `src/utils.js` — `DOM_BOOLEAN_ATTRIBUTES`, `ATTRIBUTE_ALIASES`,
 // `DOM_PROPERTIES`, and the `normalize_attribute` / `is_dom_property` functions —
 // so the property-vs-attribute decision is byte-faithful to the official compiler
 // (never a hand-guessed list). The freshness guard
 // `dom_property_tables_match_pinned_svelte` keeps them honest.
 
-/// The official `DOM_BOOLEAN_ATTRIBUTES` (svelte@5.56.3 `src/utils.js`): attributes
+/// The official `DOM_BOOLEAN_ATTRIBUTES` (svelte@5.56.10 `src/utils.js`): attributes
 /// that are present-or-not (boolean). Used as the base of [`DOM_PROPERTIES`].
 const DOM_BOOLEAN_ATTRIBUTES: &[&str] = &[
     "allowfullscreen",
@@ -410,7 +410,7 @@ const DOM_BOOLEAN_ATTRIBUTES: &[&str] = &[
     "disableremoteplayback",
 ];
 
-/// The official `ATTRIBUTE_ALIASES` (svelte@5.56.3 `src/utils.js`): attribute names
+/// The official `ATTRIBUTE_ALIASES` (svelte@5.56.10 `src/utils.js`): attribute names
 /// (lowercase) that alias to a differently-cased DOM PROPERTY name because the
 /// attribute and the property behave differently. `class` is intentionally absent
 /// (handled separately by `$.set_class`).
@@ -430,7 +430,7 @@ const ATTRIBUTE_ALIASES: &[(&str, &str)] = &[
 ];
 
 /// The official `DOM_PROPERTIES` extras appended after `DOM_BOOLEAN_ATTRIBUTES`
-/// (svelte@5.56.3 `src/utils.js`): the camelCase property aliases plus the
+/// (svelte@5.56.10 `src/utils.js`): the camelCase property aliases plus the
 /// non-boolean reflected properties.
 const DOM_PROPERTIES_EXTRA: &[&str] = &[
     "formNoValidate",
@@ -449,7 +449,7 @@ const DOM_PROPERTIES_EXTRA: &[&str] = &[
     "disableRemotePlayback",
 ];
 
-/// The official `normalize_attribute` (svelte@5.56.3 `src/utils.js`):
+/// The official `normalize_attribute` (svelte@5.56.10 `src/utils.js`):
 /// `ATTRIBUTE_ALIASES[name.toLowerCase()] ?? name.toLowerCase()`. Lowercases the
 /// name and maps a known alias to its camelCase property name (`readonly` →
 /// `readOnly`); an un-aliased name returns its lowercase form.
@@ -464,7 +464,7 @@ pub(super) fn normalize_attribute(name: &str) -> String {
     lower
 }
 
-/// The official `is_dom_property` (svelte@5.56.3 `src/utils.js`): membership in
+/// The official `is_dom_property` (svelte@5.56.10 `src/utils.js`): membership in
 /// `DOM_PROPERTIES` = `DOM_BOOLEAN_ATTRIBUTES ∪ DOM_PROPERTIES_EXTRA`. The argument
 /// is the ALREADY-[`normalize_attribute`]'d name (the official call site is
 /// `is_dom_property(normalize_attribute(name))`), so `readOnly` / `isMap` / … are
@@ -754,14 +754,14 @@ mod tests {
                 "{word} must NOT be an OXC keyword (proving RESERVED_WORDS is stricter)"
             );
         }
-        // The exact pinned set has the official cardinality (svelte@5.56.3).
+        // The exact pinned set has the official cardinality (svelte@5.56.10).
         assert_eq!(SVELTE_RESERVED_WORDS.len(), 48);
     }
 
     #[test]
     fn normalize_attribute_lowercases_and_aliases() {
         // `normalize_attribute` lowercases + maps a known alias to its camelCase
-        // property name; an un-aliased name returns its lowercase form (svelte@5.56.3
+        // property name; an un-aliased name returns its lowercase form (svelte@5.56.10
         // `src/utils.js`).
         assert_eq!(normalize_attribute("readonly"), "readOnly");
         assert_eq!(normalize_attribute("READONLY"), "readOnly");
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn is_dom_property_decides_property_vs_set_attribute() {
-        // The pinned `DOM_PROPERTIES` membership (svelte@5.56.3 `src/utils.js`):
+        // The pinned `DOM_PROPERTIES` membership (svelte@5.56.10 `src/utils.js`):
         // `DOM_BOOLEAN_ATTRIBUTES ∪` the camelCase aliases + reflected props. The
         // argument is the ALREADY-normalized name (the official call site is
         // `is_dom_property(normalize_attribute(name))`).
@@ -838,7 +838,7 @@ mod tests {
 
     #[test]
     fn dom_boolean_attributes_has_the_pinned_cardinality() {
-        // The committed `DOM_BOOLEAN_ATTRIBUTES` mirrors the pinned svelte@5.56.3 list
+        // The committed `DOM_BOOLEAN_ATTRIBUTES` mirrors the pinned svelte@5.56.10 list
         // (28 entries); a desync from the official table fails this gate (and the
         // freshness check below, when node_modules is present).
         assert_eq!(DOM_BOOLEAN_ATTRIBUTES.len(), 28);
@@ -848,7 +848,7 @@ mod tests {
         assert_eq!(ATTRIBUTE_ALIASES.len(), 12);
     }
 
-    // The committed DOM tables are TRANSCRIBED VERBATIM from svelte@5.56.3
+    // The committed DOM tables are TRANSCRIBED VERBATIM from svelte@5.56.10
     // `src/utils.js`; the live-freshness check against `node_modules` lives in the
     // `tests/` boundary file (`svelte_element_attr_boundary.rs`'s
     // `dom_property_tables_match_pinned_svelte`), keeping `std::fs` out of this src

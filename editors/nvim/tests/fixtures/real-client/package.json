@@ -2,7 +2,7 @@
   "name": "verter-neovim-real-client-fixture",
   "private": true,
   "dependencies": {
-    "svelte": "5.56.3",
+    "svelte": "5.56.10",
     "typescript": "7.0.2",
     "vue": "3.6.0-rc.5"
   }

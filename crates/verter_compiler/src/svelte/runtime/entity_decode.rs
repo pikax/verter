@@ -1,6 +1,6 @@
 //! HTML entity decode + attribute-value re-escape for the static skeleton.
 //!
-//! A faithful port of `svelte@5.56.3`'s `decode_character_references` +
+//! A faithful port of `svelte@5.56.10`'s `decode_character_references` +
 //! `validate_code` (`phases/1-parse/utils/html.js`) plus the double-quoted
 //! attribute-value re-escape (`escape_html(value, is_attr)`). The parser-stored
 //! RAW attribute span is DECODED ONCE at the attribute-IR producer boundary
@@ -75,7 +75,7 @@ pub(super) fn escape_decoded_attr(v: &DecodedAttrValue) -> String {
 /// Decode the named + numeric HTML entity references in a raw attribute value into
 /// their characters against the canonical HTML5 table; an unknown reference and a
 /// bare `&` are kept literal. A faithful port of
-/// `decode_character_references(raw, is_attribute_value=true)` (svelte@5.56.3,
+/// `decode_character_references(raw, is_attribute_value=true)` (svelte@5.56.10,
 /// `phases/1-parse/utils/html.js`): the numeric pattern's trailing `;` is OPTIONAL
 /// (`#(?:x[a-fA-F\d]+|\d+)(?:;)?`), and a legacy no-`;` NAMED reference matches only
 /// at the official attribute-value boundary `\b(?!=)` — a following WORD char
@@ -88,7 +88,7 @@ pub(super) fn escape_decoded_attr(v: &DecodedAttrValue) -> String {
 /// directly by the runtime attribute lowering for a MIXED-attribute LITERAL chunk
 /// (`title="&copy; {x} &bogus;"` → the literal `&copy; ` decodes to `© `, the
 /// `&bogus;` stays literal, and the runtime concatenates `'© ' + x + ' &bogus;'` —
-/// a runtime STRING value that is never re-escaped, matching svelte@5.56.3).
+/// a runtime STRING value that is never re-escaped, matching svelte@5.56.10).
 pub(super) fn decode_attr_entities(value: &str) -> String {
     decode_entities(value, /* is_attribute_value */ true)
 }
@@ -101,7 +101,7 @@ pub(super) fn decode_attr_entities(value: &str) -> String {
 /// produce a `$.text(seed)` JS-STRING seed (a text-first region's decoded text) and
 /// by downstream text-node emitters; the static `from_html` skeleton is NOT decoded
 /// (its cloned-HTML template keeps the raw entities, which the browser decodes on
-/// clone — verified against svelte@5.56.3).
+/// clone — verified against svelte@5.56.10).
 pub(super) fn decode_text_entities(value: &str) -> String {
     decode_entities(value, /* is_attribute_value */ false)
 }
@@ -307,7 +307,7 @@ fn decode_one_entity(s: &str, is_attribute_value: bool) -> Option<(String, usize
 }
 
 /// Validate a numeric entity code point per the official `validate_code`
-/// (`svelte@5.56.3`): a line feed (`10`) becomes a space; `128..=159` is the
+/// (`svelte@5.56.10`): a line feed (`10`) becomes a space; `128..=159` is the
 /// Windows-1252 remap; the high/low surrogate range and the disallowed planes map
 /// to `NUL` (`0`); the valid planes pass through. Returns the validated code point
 /// (which may be `0` for a disallowed input — `char::from_u32(0)` is `NUL`, the

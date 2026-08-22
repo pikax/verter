@@ -1,5 +1,5 @@
 //! Unit tests for the CSS scoping analysis — each pinned against the official
-//! `svelte@5.56.3` `css-analyze.js` / `css/utils.js` / `css.js` behavior:
+//! `svelte@5.56.10` `css-analyze.js` / `css/utils.js` / `css.js` behavior:
 //! keyframes collection (with the `-global-` / `:global {}` exclusions),
 //! `is_global` / `is_global_like` / `is_global_block` metadata, `has_global`,
 //! and the `:global` / nesting placement validation family.

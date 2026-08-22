@@ -222,7 +222,7 @@ pub struct StateClassification {
     /// The declared rune flavour.
     pub declared: StateRuneKind,
     /// Whether the initializer is PROXIABLE (`should_proxy(init)`) — the official
-    /// `svelte@5.56.3` predicate over the initializer SHAPE alone. Independent of
+    /// `svelte@5.56.10` predicate over the initializer SHAPE alone. Independent of
     /// reads/writes/mutations.
     pub proxiable: bool,
     /// The observed uses.
@@ -249,7 +249,7 @@ pub enum StateLowering {
 /// Compute the `$state` lowering from the declared flavour, whether the
 /// initializer is PROXIABLE, and whether the binding is REASSIGNED.
 ///
-/// The rule is derived empirically from `svelte@5.56.3` (`generate: 'client'`,
+/// The rule is derived empirically from `svelte@5.56.10` (`generate: 'client'`,
 /// runes, non-dev) and confirmed against the compiler source
 /// (`is_state_source` / `should_proxy`):
 ///
@@ -524,7 +524,7 @@ pub struct AnalyzedExpr<'a> {
     pub render_callee: Result<RenderCalleeShape, ()>,
     /// The SYNTAX half of the official legacy value-wrap trigger
     /// (`build_expression`'s `metadata.has_member_expression ||
-    /// metadata.has_assignment` — svelte@5.56.3 `shared/utils.js`): whether the
+    /// metadata.has_assignment` — svelte@5.56.10 `shared/utils.js`): whether the
     /// SYNCHRONOUS part of the expression contains ANY member expression
     /// (including a GLOBAL-rooted one — `Math.PI` triggers, exactly as the
     /// official `MemberExpression` analyze visitor sets the flag
@@ -990,7 +990,7 @@ pub(super) fn is_props_callee(callee: &Expression<'_>) -> bool {
 }
 
 /// Peel every transparent `ParenthesizedExpression` layer off `expr`. Official
-/// svelte@5.56.3 parses with an ESTree AST that has NO parenthesized-expression
+/// svelte@5.56.10 parses with an ESTree AST that has NO parenthesized-expression
 /// nodes, so author parens are semantically transparent at every classification
 /// site — the shared classifiers peel them here, never per call site.
 #[must_use]
@@ -1183,7 +1183,7 @@ pub(super) fn carrier_tail_comment_trivia(
 /// frame for those forms too. A THIN derivation of the SINGLE shared family
 /// classifier ([`effect_family_call_fact`]) — the `needs_context` trigger: only
 /// the user-effect members force the `$.push($$props, true)` / `$.pop()`
-/// component frame (oracle-verified against svelte@5.56.3: `$effect.root` /
+/// component frame (oracle-verified against svelte@5.56.10: `$effect.root` /
 /// `$effect.tracking` alone never do). The kind match is deliberately
 /// well-formedness-blind: a malformed / type-argumented / optional user-effect
 /// call fails the component closed on the scan/rewriter rails, so its frame
@@ -1259,7 +1259,7 @@ pub(super) struct EffectFamilyCallFact {
     /// statement-only user-effect members (`effect_invalid_placement`: the `?.`
     /// chain node sits between the call and its statement parent) and ACCEPTS
     /// optional invocations of the expression-valued members with the `?.`
-    /// NORMALIZED away — both oracle-verified against svelte@5.56.3.
+    /// NORMALIZED away — both oracle-verified against svelte@5.56.10.
     pub(super) optional: bool,
     /// The whole CALL span — the source slice the instance-item carriers cut
     /// (author parens around the call stay OUTSIDE this span, so a carrier
@@ -1376,7 +1376,7 @@ pub(super) fn effect_family_expression_fact(expr: &Expression<'_>) -> Option<Eff
 /// Classify an expression as a WELL-FORMED effect-family call legal in STATEMENT
 /// position — the single statement-shape predicate the instance-item carrier,
 /// the handler statement gate, and the position seeds consume. Official
-/// svelte@5.56.3 accepts every family member as an expression statement: the
+/// svelte@5.56.10 accepts every family member as an expression statement: the
 /// user-effect members are statement-ONLY (`effect_invalid_placement` rejects
 /// every value position AND every OPTIONAL invocation — the `?.` chain node sits
 /// between the call and its statement parent), while `$effect.root(fn)` /
@@ -1402,7 +1402,7 @@ pub(super) fn effect_family_statement_fact(expr: &Expression<'_>) -> Option<Effe
 
 /// The CALL span of a STATEMENT-POSITION user-effect call — an expression
 /// statement whose expression is a WELL-FORMED `$effect(...)` /
-/// `$effect.pre(...)` family call. Official svelte@5.56.3 rejects the
+/// `$effect.pre(...)` family call. Official svelte@5.56.10 rejects the
 /// user-effect members in EVERY other position (`effect_invalid_placement`:
 /// "`$effect()` can only be used as an expression statement", checked against
 /// the call's DIRECT ESTree parent), so this is the single position predicate
@@ -1490,7 +1490,7 @@ pub(super) fn is_well_formed_props_id_call(expr: &Expression<'_>) -> bool {
 }
 
 /// Whether a `$state(…)` initializer's first argument is PROXIABLE — the
-/// official `svelte@5.56.3` `should_proxy` predicate over the initializer SHAPE.
+/// official `svelte@5.56.10` `should_proxy` predicate over the initializer SHAPE.
 ///
 /// `should_proxy` is a NEGATIVE-LIST, default-TRUE predicate (NOT an
 /// object/array/call whitelist): everything is proxiable EXCEPT a statically
@@ -2115,7 +2115,7 @@ pub enum RenderCalleeShape {
         args: Vec<(u32, u32)>,
     },
     /// A `{@render …(…)}` call carrying a SPREAD argument (`{@render row(...xs)}`).
-    /// Official `svelte@5.56.3` HARD-ERRORS on this (`render_tag_invalid_spread_argument`:
+    /// Official `svelte@5.56.10` HARD-ERRORS on this (`render_tag_invalid_spread_argument`:
     /// "cannot use spread arguments in {@render ...} tags"), so it is the fail-closed
     /// signal — the caller refuses rather than degrading to dropped (un-thunk-able) args.
     /// Independent of the callee shape (a spread can ride a static-name, member, or
@@ -2750,7 +2750,7 @@ fn direct_zero_arg_call_callee_of(expr: &Expression<'_>) -> Option<String> {
 /// Whether the SYNCHRONOUS part of an expression contains ANY member
 /// expression, assignment, or update expression — the syntax half of the
 /// official legacy value-wrap trigger (`metadata.has_member_expression ||
-/// metadata.has_assignment`, svelte@5.56.3 `shared/utils.js`). Nested
+/// metadata.has_assignment`, svelte@5.56.10 `shared/utils.js`). Nested
 /// function/arrow bodies are DEFERRED (official nulls `state.expression`
 /// inside them), so `() => obj.x` does not trigger. Computed ONCE here, on
 /// the canonical parse — no consumer re-parses to re-derive it.

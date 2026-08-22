@@ -66,8 +66,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 //               (bind_group_invalid_expression) — only `bind:group`.
 //
 // RUNTIME columns (consumed by the native client backend, matching pinned
-// svelte@5.56.3 emit shapes):
-//   official_helper  the OFFICIAL `svelte@5.56.3` helper IDENTITY — the
+// svelte@5.56.10 emit shapes):
+//   official_helper  the OFFICIAL `svelte@5.56.10` helper IDENTITY — the
 //               machine-readable fact of which `$.bind_*` / `bind_property` form the
 //               official compiler emits, preserved even for rows the native runtime does
 //               NOT emit yet. One of: "value" | "select_value" | "checked" | "group" |
@@ -129,7 +129,7 @@ const REGISTRY = [
     special: "group",
     // `bind:group` is the SOLE identifier/member-only bind: official throws
     // `bind_group_invalid_expression` for ANY function-pair (SequenceExpression)
-    // target (verified svelte@5.56.3 BindDirective.js — the throw precedes the
+    // target (verified svelte@5.56.10 BindDirective.js — the throw precedes the
     // two-element length check). Every other bind defaults to LvalueOrFunctionPair.
     policy: "identifier_or_member_only",
     official_helper: "group",
@@ -160,7 +160,7 @@ const REGISTRY = [
 
   // bind:focused — whether the element currently holds focus (read-direction;
   // DOM → local, set on focus/blur). Official emits the DEDICATED
-  // `$.bind_focused(el, set)` (universal.js) — verified svelte@5.56.3 emits
+  // `$.bind_focused(el, set)` (universal.js) — verified svelte@5.56.10 emits
   // `$.bind_focused(input, ($$value) => $.set(x, $$value))`. `focused: {}` in the
   // official `binding_properties` registry carries no `valid_elements`, so it
   // applies to ANY element (`*`); the svelte attribute type is `readonly` (a

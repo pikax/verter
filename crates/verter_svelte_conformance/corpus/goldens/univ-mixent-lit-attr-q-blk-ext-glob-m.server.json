@@ -1,7 +1,7 @@
 {
   "slug": "univ-mixent-lit-attr-q-blk-ext-glob-m",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/server",

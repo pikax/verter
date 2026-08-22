@@ -1,7 +1,7 @@
 {
   "slug": "cls-mixent-lit-id-uq-snip-ext-plain-n",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/client",

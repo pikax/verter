@@ -212,7 +212,7 @@ pub(super) enum SvelteRouteOutcome {
 /// [`every_committed_golden_names_the_same_pinned_official_domain`] additionally
 /// pins that derived value, so a wholesale re-pin of all twelve records is still
 /// caught rather than silently followed.
-pub(super) const SVELTE_PINNED_PACKAGE_VERSION: &str = "5.56.8";
+pub(super) const SVELTE_PINNED_PACKAGE_VERSION: &str = "5.56.10";
 
 /// The pinned official domain the committed Svelte goldens agree on.
 ///
@@ -712,7 +712,7 @@ fn the_recorded_runes_axis_matches_what_the_shipped_route_infers() {
 }
 
 /// Every committed golden names the SAME pinned official domain, and that
-/// domain is the pinned `svelte@5.56.8`.
+/// domain is the pinned `svelte@5.56.10`.
 #[test]
 fn every_committed_golden_names_the_same_pinned_official_domain() {
     let domain = pinned_svelte_domain();

@@ -1,5 +1,5 @@
 //! PARSER-STRICTNESS PARITY — Verter's forgiving parser must FAIL CLOSED on the
-//! malformed markup the official `svelte@5.56.3` STRICT parser rejects.
+//! malformed markup the official `svelte@5.56.10` STRICT parser rejects.
 //!
 //! Verter's tokenizer is intentionally infallible / recovery-based: it never panics,
 //! emitting a faithful tree even on malformed input. That recovery is correct for the
@@ -604,7 +604,7 @@ fn started_comment_at_eof_is_expected_token() {
 // strict, script-domain, and the explicit-`</p>`-autoclose — by the parser's DISCOVERY order
 // (`encounter_order`), never by source span; and it must gate the analyze-phase placement /
 // declaration / global-reference checks behind an EMPTY parse-defect stream. Each expected code
-// below was verified against the pinned `svelte@5.56.3` compiler (see the reject oracle); the
+// below was verified against the pinned `svelte@5.56.10` compiler (see the reject oracle); the
 // `// upstream:` annotation is the pinned verdict, NOT a guess.
 
 #[test]

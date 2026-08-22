@@ -119,7 +119,7 @@ use super::expr::{reparse_module, ExprArena};
 /// the committed name-parity corpus (every handler mapped to ≥1 corpus axis exercised by
 /// the production projection). It is a committed tooling anchor, not linked at runtime.
 #[allow(dead_code)]
-pub(super) const SVELTE_ORACLE_VERSION: &str = "5.56.3";
+pub(super) const SVELTE_ORACLE_VERSION: &str = "5.56.10";
 
 /// The canonical component-scope facts: the deconfliction inputs both the
 /// component-name derivation and the `is_pure` declared-root resolution read.

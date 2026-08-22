@@ -1,7 +1,7 @@
 {
   "slug": "generated/046_dir_style_important.svelte",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/server",

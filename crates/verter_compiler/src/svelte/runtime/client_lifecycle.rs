@@ -54,7 +54,7 @@ pub(super) enum InlineRenderOp {
     },
     /// An init-domain lifecycle op (`Action` / `Attachment`).
     Lifecycle(ElementLifecycleOp),
-    /// A LEGACY `on:` event on a `use:` action host — official svelte@5.56.3
+    /// A LEGACY `on:` event on a `use:` action host — official svelte@5.56.10
     /// wraps each such registration in its OWN `$.effect(() => $.event(…))` in
     /// the init domain (at the event's attribute source position), instead of
     /// the bare directive-batch `$.event(…)` statement action-less elements
@@ -65,7 +65,7 @@ pub(super) enum InlineRenderOp {
     EffectEvent(EventEmit),
     /// A non-`this` DOM bind on a `use:` action host — official wraps each in its
     /// OWN `$.effect(() => $.bind_*(...));` in the init domain at its attribute
-    /// source position (svelte@5.56.3 RegularElement.js under has_use). `bind:this`
+    /// source position (svelte@5.56.10 RegularElement.js under has_use). `bind:this`
     /// is NEVER wrapped (it stays the unwrapped inline BindThis arm).
     EffectBind {
         /// The bind's accepted DOM shape (routing + get/set form + group key).
@@ -118,7 +118,7 @@ pub(super) enum EventEmissionSlot {
     PostWalk,
 }
 
-/// Classify an event registration's emission slot — the official svelte@5.56.3
+/// Classify an event registration's emission slot — the official svelte@5.56.10
 /// placement rule keys on the LEGACY `on:` ORIGIN, not on delegation: only an
 /// `OnDirective` joins `RegularElement.js`'s `other_directives` walk (wrapped
 /// under `has_use`, else the after-update directive batch), while a MODERN
@@ -171,7 +171,7 @@ pub(super) enum BindEmissionSlot {
     SpecialHost,
 }
 
-/// Classify a bind registration's emission slot — the official svelte@5.56.3
+/// Classify a bind registration's emission slot — the official svelte@5.56.10
 /// placement rule for `RegularElement.js`: `bind:this` stays an unwrapped
 /// inline init op; any other bind wraps in its own init `$.effect` under
 /// `has_use`, else joins the element's after-update directive batch. A bind on
@@ -197,7 +197,7 @@ pub(super) fn bind_emission_slot(
 }
 
 /// A node's EULER-TOUR positions over the template tree — the AFTER-UPDATE
-/// stream linearization authority. Official `svelte@5.56.3` builds ONE
+/// stream linearization authority. Official `svelte@5.56.10` builds ONE
 /// after-update stream per fragment: a MODERN `on*` event registration is
 /// pushed onto the ENCLOSING state's after_update IMMEDIATELY at its element's
 /// attribute-visit time (BEFORE the children are merged), while the element's

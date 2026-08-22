@@ -1,7 +1,7 @@
 {
   "slug": "imports/default_named_mixed.svelte",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "./c.js",

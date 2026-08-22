@@ -57,7 +57,7 @@ pub struct BindTargetFact {
     /// tagged-template carrying TS type arguments (`g<a,b>(c)`), OR a TS-only node in a deeper
     /// sub-expression (a typed arrow / function param, a typed local). Detected by the wholesale
     /// shared `expression_contains_non_plain_svelte_js` scan (one authority for both bind lanes).
-    /// A deferred official surface that fails closed: official svelte@5.56.3
+    /// A deferred official surface that fails closed: official svelte@5.56.10
     /// PARSE-REJECTS plain-script TS in ANY template-expression position. The structural walk
     /// covers the member object spine + computed-index expressions, so a NON-ROOT TS node
     /// (`o!.x`, `a[x as T]`, `a[x!]`) is caught EXACTLY like a root wrapper (`name!` /
@@ -93,7 +93,7 @@ pub struct BindTargetFact {
     /// Whether the AUTHORED bind value wraps a `SequenceExpression` in PARENTHESES
     /// (`bind:value={(get, set)}` / `{((a, b))}`) — distinct from a bare sequence
     /// (`{get, set}`, which is `is_sequence = true` but NOT parenthesized). Official
-    /// svelte@5.56.3 REJECTS author parens around a bind sequence with `bind_invalid_parens`
+    /// svelte@5.56.10 REJECTS author parens around a bind sequence with `bind_invalid_parens`
     /// (a `(` between the `{` and the sequence start), while a parenthesized NON-sequence
     /// (`{(v)}`) stays accepted. Detected structurally: the fact is built from the
     /// `({source})`-wrapped parse, so the OUTER `ParenthesizedExpression` is Verter's
@@ -318,7 +318,7 @@ pub(super) fn target_expr_root_ident(expr: &Expression) -> Option<String> {
 /// a computed member as `[name]` / `[value]` and every other segment as a plain `.`-joined
 /// name. Operators and other non-identifier nodes contribute NOTHING, so the key is
 /// WHITESPACE- and OPERATOR-INSENSITIVE: `g[i+j]`, `g[i + j]`, `g[i*j]` all collapse to
-/// `"g.i.j"` (matching svelte@5.56.3's single shared accumulator), while `a.x` (`"a.x"`)
+/// `"g.i.j"` (matching svelte@5.56.10's single shared accumulator), while `a.x` (`"a.x"`)
 /// stays DISTINCT from `a["x"]` (`"a.[\"x\"]"`). Returns `None` only for a target that
 /// yields NO segment at all. Derived from the parsed OXC expression (the SAME node the rest
 /// of the fact reads), never a raw-source slice — so `o.x` and `o . x` canonicalize equal.
@@ -428,7 +428,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for KeypathSegments {
 /// This is the DEFAULT-CLOSED authority for the function-pair surface — it both DECIDES
 /// acceptance and EXTRACTS the two element sources from ONE parse (a default-closed lane,
 /// NOT a default-open enumerated allow-by-omission TS scan, and NOT a separate TSX slice).
-/// For the SUPPORTED surface (a plain `.svelte`, NOT `lang="ts"`), official svelte@5.56.3
+/// For the SUPPORTED surface (a plain `.svelte`, NOT `lang="ts"`), official svelte@5.56.10
 /// parses binding expressions with Acorn (`sourceType: "module"`), where ANY
 /// TypeScript-only construct is a PARSE ERROR. The OXC equivalent is `SourceType::mjs()`
 /// — NOT `tsx()` (TS-lenient) and NOT `jsx()`. So the acceptance decision is, in order:
@@ -500,7 +500,7 @@ fn parse_plain_svelte_function_pair(alloc: &Allocator, source: &str) -> Option<(
 
 /// The STRICT OFFICIAL-DELTA scan over a function-pair element parsed as plain Svelte JS
 /// (`SourceType::mjs()`). It flags the bounded set of constructs OXC's plain-JS parser
-/// TOLERATES (on a clean or recovered AST) but official svelte@5.56.3's Acorn parser
+/// TOLERATES (on a clean or recovered AST) but official svelte@5.56.10's Acorn parser
 /// REJECTS — the residual that `mjs` does NOT already reject at parse time. This is NOT
 /// an open-ended "all TS" enumeration: `mjs` already rejects type annotations,
 /// `as`/`satisfies`, expression-position `!`, generic arrows, typed params,
@@ -632,7 +632,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for StrictOfficialDeltaScan {
     fn visit_accessor_property(&mut self, it: &oxc_ast::ast::AccessorProperty<'a>) {
         // The `accessor` auto-accessor keyword is itself non-plain-ECMAScript (a TC39
         // decorators-proposal construct official's Acorn parser REJECTS — verified
-        // svelte@5.56.3: `Unexpected token`), so the node's very existence is the
+        // svelte@5.56.10: `Unexpected token`), so the node's very existence is the
         // refusal: there is NO plain-JS form that produces an `AccessorProperty`. A
         // wholesale reject is already anti-regrowth-complete (a new OXC field cannot
         // reopen a node that is unconditionally refused), so no per-field destructure is
@@ -749,7 +749,7 @@ mod plain_svelte_function_pair_tests {
     fn refuses_class_accessibility_field() {
         // `class C { public x = 1 }` parses clean under `mjs` (populating
         // `PropertyDefinition.accessibility`); the delta scan refuses it. Official
-        // svelte@5.56.3 rejects it (`Unexpected token`).
+        // svelte@5.56.10 rejects it (`Unexpected token`).
         assert!(refused("class C { public x = 1 }, set"));
         assert!(refused("class C { private x = 1 }, set"));
         assert!(refused("class C { protected x = 1 }, set"));
@@ -884,7 +884,7 @@ mod plain_svelte_function_pair_tests {
         // `mjs` it parses as `(tag < string) > `x` ` (NOT a tagged-template with TS type
         // arguments), so the helper ACCEPTS it and the getter SLICE is the verbatim
         // relational source — the `<string>` operands intact, never stripped to
-        // ``tag`x` ``. Official svelte@5.56.3 likewise accepts + keeps the relational
+        // ``tag`x` ``. Official svelte@5.56.10 likewise accepts + keeps the relational
         // form. The no-strip rewrite lane then preserves it end to end.
         let got = pair("tag<string>`x`, (x) => v = x");
         assert!(

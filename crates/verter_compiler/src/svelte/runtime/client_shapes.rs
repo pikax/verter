@@ -58,7 +58,7 @@ pub(super) enum ClientEventHandlerShape {
     /// declaration (`onclick={inc}` / `on:click={inc}`) — passed to the event
     /// helper by REFERENCE (`$.delegated('click', button, inc)` /
     /// `$.event('click', button, inc)`), identically in runes and legacy mode
-    /// (oracle-verified against svelte@5.56.3).
+    /// (oracle-verified against svelte@5.56.10).
     FunctionReference,
 }
 
@@ -495,7 +495,7 @@ pub(super) enum ClientBindShape {
 
 /// The GROUPING identity of a `bind:group` accumulator — the structural bind TARGET
 /// (`keypath`, derived from the typed bind-target fact, never a raw-source compare) plus the
-/// lexical `scope`. Mirrors official svelte@5.56.3's `[keypath, bindings]` group identity:
+/// lexical `scope`. Mirrors official svelte@5.56.10's `[keypath, bindings]` group identity:
 /// two `bind:group` inputs binding the same target in the same scope share ONE accumulator;
 /// a different target (or the same spelling in a different scope) gets its own. The emitter
 /// maps each distinct key to one allocated `binding_group[_N]` name (in source order).
@@ -575,7 +575,7 @@ pub(super) fn classify_bind_shape(
     // lvalue is supported. Checked structurally over the parsed target, BEFORE the
     // lvalue classification (which unwraps the TS spine).
     //
-    // Oracle-verified scoping (svelte@5.56.3): a TS-wrapped bind target is REACHABLE
+    // Oracle-verified scoping (svelte@5.56.10): a TS-wrapped bind target is REACHABLE
     // only inside a `<script lang="ts">` component — in a plain `<script>` the
     // official compiler PARSE-REJECTS `bind:value={name!}` (`Expected token }`). A
     // `lang="ts"` component is a settled broad deferral that fails closed ENTIRELY as
@@ -609,7 +609,7 @@ pub(super) fn classify_bind_shape(
         // `let el;` local) → the identifier `$.bind_this(el, ($$value) => SET, () => GET)`;
         // (2) a two-element getter/setter FUNCTION-PAIR (`bind:this={get, set}`) → the
         // user-supplied get/set passed DIRECTLY (`$.bind_this(el, set, get)`), matching
-        // official svelte@5.56.3. A member `bind:this={refs[0]}` / a prop target / a
+        // official svelte@5.56.10. A member `bind:this={refs[0]}` / a prop target / a
         // FREE-or-undeclared identifier target is the deferral-ledger member-bind /
         // prop-bind / declared-target-completion form.
         "this" => {
@@ -736,7 +736,7 @@ fn classify_dom_value_bind(
         return Err(refuse());
     };
     // The official HOST-ATTRIBUTE gates — a bind that is valid ONLY when its host
-    // carries a specific STATIC attribute (svelte@5.56.3 raises a COMPILE ERROR
+    // carries a specific STATIC attribute (svelte@5.56.10 raises a COMPILE ERROR
     // otherwise). The runtime router only sees `(name, tag)`, so without these gates
     // an invalid bind would emit a divergent / runtime-broken module. Driven from the
     // host's typed `AttrIr` inventory (NEVER a source-text scan).
@@ -792,7 +792,7 @@ fn classify_dom_value_bind(
             // A `$store` subscription target (`bind:value={$c}`): the getter is the
             // BARE accessor thunk and the setter the `($$value) =>
             // $.store_set(c, $$value)` closure, both passed directly
-            // (oracle-verified against svelte@5.56.3).
+            // (oracle-verified against svelte@5.56.10).
             if matches!(
                 bindings.resolve_kind(scopes, scope, root_name),
                 Some(BindingRuntimeKind::StoreSubscription)
@@ -965,12 +965,12 @@ pub(super) fn bind_member_root_is_writable_target(
 /// instance-script declarator or a `{let x = $derived(e)}` TEMPLATE DECLARATION TAG
 /// (`declaration_tag_lowering.rs` + `state_prep::classify_block_rune_declarator`,
 /// which sets `BindingRuntimeKind::Derived` directly) — emitting the plain
-/// `$.set(name, $$value)` two-way-bind shape (oracle-verified against svelte@5.56.8:
+/// `$.set(name, $$value)` two-way-bind shape (oracle-verified against svelte@5.56.10:
 /// `$.bind_value(input, () => $.get(doubled), ($$value) => $.set(doubled, $$value))`).
 /// A component `let:` slot-prop local (`lower_component.rs::lower_slot_region`, which
 /// mints the distinct `BindingRuntimeKind::SlotPropDerived`) shares `Derived`'s read
 /// shape but official REJECTS its bare-Identifier bind (`constant_binding`,
-/// oracle-verified against svelte@5.56.8) — so `SlotPropDerived` stays out of
+/// oracle-verified against svelte@5.56.10) — so `SlotPropDerived` stays out of
 /// [`is_writable_bind_root`] while both kinds stay in this MEMBER-arm predicate.
 /// Both constructs are exercised directly:
 /// `a_member_bind_rooted_at_a_derived_binding_is_accepted` (the `let:` slot-prop form,
@@ -1043,7 +1043,7 @@ fn is_writable_bind_root(kind: BindingRuntimeKind) -> bool {
 /// The accepted emission shape of a supported dynamic attribute / `class` / `style`
 /// surface . The classifier records this typed fact per accepted attribute
 /// so the plan/emitter reads a proven emission decision, never re-derives it from a
-/// raw name. Every shape mirrors a pinned `svelte@5.56.3` client form.
+/// raw name. Every shape mirrors a pinned `svelte@5.56.10` client form.
 ///
 /// The DOM-property-vs-`set_attribute` decision is the official
 /// `is_dom_property(normalize_attribute(name))` rule (the pinned tables in
@@ -1270,7 +1270,7 @@ pub(super) fn collect_prop_locals(instance_source: Option<&str>) -> Vec<String> 
 ///
 /// The declaration KIND is read from the parent `VariableDeclaration.kind` — a
 /// structural decision over the parsed program, never a text scan. Verified against
-/// svelte@5.56.3.
+/// svelte@5.56.10.
 // TODO(follow-up): lower the non-`let` rune-declarator forms instead of failing
 // closed — a `var` `$state`/`$derived` read selects `$.safe_get(name)` (the
 // var-hoisting helper), a read-only `const $state` constant-folds to its init (no

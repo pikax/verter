@@ -855,7 +855,7 @@ mod tests {
     }
 
     /// A representative sample of official Svelte `compiler-errors`/`validator`
-    /// STRICT-parse defects (pinned `svelte@5.56.8` oracle,
+    /// STRICT-parse defects (pinned `svelte@5.56.10` oracle,
     /// `sveltejs/svelte@44a7813730579b94004e182e5a67aab27aa9d2a6`): the carrier
     /// parser is intentionally forgiving/recovery-based, so `parse()` must
     /// still publish (never a hard reject — an editor mid-typing needs the
@@ -1198,7 +1198,7 @@ mod tests {
 
     #[test]
     fn empty_external_style_still_publishes_an_empty_css_artifact() {
-        // Official svelte@5.56.3 first-hand: `compile('<style></style><p>hi</p>',
+        // Official svelte@5.56.10 first-hand: `compile('<style></style><p>hi</p>',
         // { css: 'external' }).css` is NON-null — `{ code: '', hasGlobal: false,
         // map: {...} }`. An EXISTING `<style>` block always publishes the external
         // artifact, even when the rendered `css.code` is empty; only the ABSENCE

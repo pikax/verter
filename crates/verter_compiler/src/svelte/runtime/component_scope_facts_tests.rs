@@ -119,7 +119,7 @@ fn captures_exported_declarations() {
     // component-function name deconfliction reserves. The binder must unwrap `export`, so
     // `export let/const/var/function/class` land in BOTH the deconfliction set and the
     // declared roots; a module-scope export is a module-top declaration inherited by the
-    // instance scope. (Cross-checked against svelte@5.56.3: `export let Foo` + name `Foo`
+    // instance scope. (Cross-checked against svelte@5.56.10: `export let Foo` + name `Foo`
     // emits `Foo_1`; the `export_const` corpus axis is the authoritative svelte pin.)
     let facts = facts_for(
         Some("export const M = 1;"),
@@ -147,7 +147,7 @@ fn does_not_reserve_type_only_declarations() {
     // Verter behavior: a `type` alias / `interface` is erased by the projection, so it
     // does NOT reserve the component-function name; the binder must not admit a type-only
     // name as a value declaration — including the `export type` / `export interface`
-    // forms. (Cross-checked against svelte@5.56.3: svelte COMPILES + erases these — name
+    // forms. (Cross-checked against svelte@5.56.10: svelte COMPILES + erases these — name
     // `Foo` + `type Foo` stays a bare `Foo`.)
     let facts = facts_for(
         None,
@@ -212,7 +212,7 @@ fn preserves_module_to_instance_topology() {
 
 #[test]
 fn does_not_reserve_a_typescript_enum_declaration() {
-    // BUCKET 2 (svelte HARD-ERRORS): svelte@5.56.3 REJECTS an `enum` inside a `<script>`
+    // BUCKET 2 (svelte HARD-ERRORS): svelte@5.56.10 REJECTS an `enum` inside a `<script>`
     // (a hard compile error — it emits NO component and NO name), so name-parity is
     // VACUOUS — NOT a svelte-parity claim. Verter behavior (DEFENSIVE): the scope-view
     // projection erases the `TSEnumDeclaration`, so the enum NAME never binds. This keeps
@@ -290,7 +290,7 @@ fn reserves_a_class_expression_id() {
     // Verter behavior: a class-EXPRESSION binding `const x = class Foo {}` introduces
     // `Foo` in the class-expression's own scope, and the authoritative OXC scope tree
     // captures the class-expression id at every nesting level, so a component name `Foo`
-    // deconflicts to `Foo_1`. (Cross-checked against svelte@5.56.3: svelte likewise
+    // deconflicts to `Foo_1`. (Cross-checked against svelte@5.56.10: svelte likewise
     // reserves the class-expression id — corpus axis `class_expression`.)
     let facts = facts_for(None, Some("const x = class Foo {};"));
     assert!(
@@ -303,7 +303,7 @@ fn reserves_a_class_expression_id() {
 fn reserves_a_static_block_binding() {
     // Verter behavior: a `static { const Foo = 1 }` initializer block binds `Foo` in the
     // static block's own scope, and the scope tree captures static-block value bindings,
-    // so `Foo` reserves. (Cross-checked against svelte@5.56.3: svelte likewise reserves the
+    // so `Foo` reserves. (Cross-checked against svelte@5.56.10: svelte likewise reserves the
     // static-block binding — name `Foo` emits `Foo_1`.)
     let facts = facts_for(None, Some("class C { static { const Foo = 1; } }"));
     assert!(
@@ -316,7 +316,7 @@ fn reserves_a_static_block_binding() {
 fn reserves_a_switch_case_declaration() {
     // Verter behavior: a braceless `case` clause shares the switch block scope, so
     // `const Foo = 2` binds there and the scope tree captures it, so `Foo` reserves.
-    // (Cross-checked against svelte@5.56.3: svelte likewise reserves the switch-case
+    // (Cross-checked against svelte@5.56.10: svelte likewise reserves the switch-case
     // binding — name `Foo` emits `Foo_1`.)
     let facts = facts_for(None, Some("switch (x) { case 1: const Foo = 2; break; }"));
     assert!(
@@ -375,7 +375,7 @@ fn preserves_module_to_instance_topology_under_scope_tree() {
 
 // --- Ambient / runtime-erased exclusion: only runtime-surviving value bindings reserve
 // the component name, so Verter's projection erases ambient / type-erased declarations and
-// they do not reserve. (Cross-checked against svelte@5.56.3: an ambient
+// they do not reserve. (Cross-checked against svelte@5.56.10: an ambient
 // `declare const/function/class` COMPILES to a bare name; an `enum` is a svelte HARD ERROR
 // — Verter erases it DEFENSIVELY, name-parity VACUOUS. The corpus owns svelte parity.) ---
 
@@ -383,7 +383,7 @@ fn preserves_module_to_instance_topology_under_scope_tree() {
 fn does_not_reserve_an_ambient_declare_const() {
     // Verter behavior: only runtime-surviving value bindings reserve, so the projection
     // erases an ambient `declare const` and it never reserves the component name.
-    // (Cross-checked against svelte@5.56.3: `declare const Foo` + name `Foo` COMPILES to a
+    // (Cross-checked against svelte@5.56.10: `declare const Foo` + name `Foo` COMPILES to a
     // bare `Foo` — svelte accepts and erases the ambient declaration.)
     let facts = facts_for(None, Some("declare const Foo: number;"));
     assert!(
@@ -418,7 +418,7 @@ fn does_not_reserve_an_ambient_declare_class() {
 fn does_not_reserve_an_ambient_by_context_declare_global_function() {
     // Verter behavior: the projection erases the whole `declare global { … }` statement (a
     // `TSGlobalDeclaration`), so its inner `function GF` never binds and `GF` does not
-    // reserve the component name. (Cross-checked against svelte@5.56.3, re-probed via the
+    // reserve the component name. (Cross-checked against svelte@5.56.10, re-probed via the
     // pinned compiler: this BODILESS `declare global { function GF(): void; }` COMPILES to
     // a bare `GF` — svelte drops the ambient block — so Verter's erased scope AGREES. The
     // svelte outcome is body-SENSITIVE: a BODIED `declare global { function GF() {} }`
@@ -434,7 +434,7 @@ fn does_not_reserve_an_ambient_by_context_declare_global_function() {
 
 #[test]
 fn does_not_reserve_an_enum_member() {
-    // BUCKET 2 (svelte HARD-ERRORS): svelte@5.56.3 REJECTS a plain `enum`
+    // BUCKET 2 (svelte HARD-ERRORS): svelte@5.56.10 REJECTS a plain `enum`
     // (`typescript_invalid_feature`) — it emits NO component and NO name, so name-parity is
     // VACUOUS (this is NOT a svelte-parity claim; svelte rejects before naming). This locks
     // Verter's DEFENSIVE scope behavior only: the projection erases the `TSEnumDeclaration`
@@ -458,7 +458,7 @@ fn does_not_reserve_an_ambient_value_merged_with_an_interface() {
     // Verter behavior: a symbol whose only VALUE form is ambient (`declare const X`) merged
     // with a type-only `interface X` is fully erased by the projection, so `X` never
     // reserves; a merged symbol survives ONLY with a concrete non-ambient value
-    // declaration. (Cross-checked against svelte@5.56.3: this COMPILES to a bare `X`.)
+    // declaration. (Cross-checked against svelte@5.56.10: this COMPILES to a bare `X`.)
     let facts = facts_for(
         None,
         Some("declare const X: number;\ninterface X { p: number }"),
@@ -488,7 +488,7 @@ fn reserves_a_non_ambient_const() {
 fn reserves_a_function_overload_group_once() {
     // Positive control (Verter behavior): bodiless overload signatures + the
     // implementation share ONE runtime binding, so the single merged symbol reserves `f`.
-    // (Cross-checked against svelte@5.56.3: `function f(a: number): void; function f(a) {}`
+    // (Cross-checked against svelte@5.56.10: `function f(a: number): void; function f(a) {}`
     // + name `f` emits `f_1`.)
     let facts = facts_for(
         None,
@@ -504,7 +504,7 @@ fn reserves_a_function_overload_group_once() {
 fn reserves_a_value_declaration_merged_with_an_interface() {
     // Positive control (Verter behavior): a runtime `const Y` merged with a type-only
     // `interface Y` survives (the non-ambient value declaration wins), so `Y` reserves.
-    // (Cross-checked against svelte@5.56.3: `interface Y {…}; const Y = 1` + name `Y` emits
+    // (Cross-checked against svelte@5.56.10: `interface Y {…}; const Y = 1` + name `Y` emits
     // `Y_1`.)
     let facts = facts_for(None, Some("interface Y { p: number }\nconst Y = 1;"));
     assert!(
@@ -517,7 +517,7 @@ fn reserves_a_value_declaration_merged_with_an_interface() {
 // `remove_typescript_nodes ∘ create_scopes` scope view ERASES / treats as scope-inert, so
 // they contribute no runtime binding and must NOT reserve. These are the cases the old
 // exclusion blocklist diverged on; the positive projection makes them non-reserving.
-// (Cross-checked against svelte@5.56.3: each COMPILES to a bare name; the corpus owns the
+// (Cross-checked against svelte@5.56.10: each COMPILES to a bare name; the corpus owns the
 // svelte pins.) ---
 
 #[test]
@@ -525,7 +525,7 @@ fn does_not_reserve_a_lone_bodiless_overload_signature() {
     // A LONE bodiless function-overload signature (`function f(a): void;` with no
     // following implementation) is a type-only declaration (OXC `Function { body: None }`,
     // svelte's `TSDeclareFunction` → `b.empty`); Verter's projection erases it, so it must
-    // NOT reserve. (Cross-checked against svelte@5.56.3: it COMPILES to a bare name — corpus
+    // NOT reserve. (Cross-checked against svelte@5.56.10: it COMPILES to a bare name — corpus
     // axis `function_lone_overload`.) Contrast `reserves_a_function_overload_group_once`,
     // where a bodied implementation follows and the merged symbol DOES reserve.
     let facts = facts_for(None, Some("function f(a: number): void;"));
@@ -543,7 +543,7 @@ fn does_not_reserve_a_lone_bodiless_overload_signature() {
 fn does_not_reserve_an_import_equals_binding() {
     // `import X = require("y")` (`TSImportEqualsDeclaration`) is SCOPE-INERT in svelte's
     // scope pass — `create_scopes` declares nothing for it — so Verter's projection erases
-    // the statement and `X` does NOT reserve. (Cross-checked against svelte@5.56.3: it
+    // the statement and `X` does NOT reserve. (Cross-checked against svelte@5.56.10: it
     // COMPILES to a bare `X` — svelte does not reserve the import-equals local.) Although
     // OXC binds `X` as a value import, the projection erases the statement.
     let facts = facts_for(None, Some("import X = require(\"y\");"));
@@ -561,7 +561,7 @@ fn does_not_reserve_an_import_equals_binding() {
 fn does_not_reserve_an_export_assignment_reference() {
     // `export = X` (`TSExportAssignment`) is SCOPE-INERT in svelte's scope pass; its `X`
     // operand is neither a declaration nor a counted free reference, so an UNBOUND
-    // `export = X` does NOT reserve. (Cross-checked against svelte@5.56.3: it COMPILES to a
+    // `export = X` does NOT reserve. (Cross-checked against svelte@5.56.10: it COMPILES to a
     // bare `X`.) Verter's projection erases the whole statement, dropping the phantom `X`
     // value reference OXC records.
     let facts = facts_for(None, Some("export = X;"));
@@ -576,7 +576,7 @@ fn unwraps_ts_expression_wrappers_to_inner_value_refs() {
     // Verter behavior: the projection UNWRAPS the TS type carrier of an `x as T` /
     // `x satisfies T` / `x!` wrapper to its inner RUNTIME expression, so the inner value
     // reference survives while the type operand does not. (Cross-checked against
-    // svelte@5.56.3: svelte likewise erases the type carrier and keeps the inner expression
+    // svelte@5.56.10: svelte likewise erases the type carrier and keeps the inner expression
     // — these COMPILE.) (The `<T>x` angle-bracket `TSTypeAssertion` form is classified
     // UNWRAP for faithfulness but is unparseable under the `SourceType::tsx()` reparse —
     // JSX ambiguity — so it never reaches the projection in practice.)
@@ -609,7 +609,7 @@ fn unwraps_ts_expression_wrappers_to_inner_value_refs() {
 fn does_not_reserve_an_abstract_method_parameter() {
     // Verter behavior: the projection erases an abstract method (svelte's `MethodDefinition`
     // handler → `b.empty`), so its parameters are never bound and do NOT reserve.
-    // (Cross-checked against svelte@5.56.3: `abstract class A { abstract m(X): void }` +
+    // (Cross-checked against svelte@5.56.10: `abstract class A { abstract m(X): void }` +
     // name `X` COMPILES to a bare `X`.) OXC keeps the abstract method
     // (`MethodDefinitionType::TSAbstractMethodDefinition`) and binds its param `X` in the
     // method scope unless the projection erases the member.
@@ -632,7 +632,7 @@ fn does_not_reserve_an_abstract_method_parameter() {
 fn does_not_reserve_a_declare_field_computed_key() {
     // Verter behavior: the projection drops `declare` property definitions (svelte's
     // `ClassBody` handler), so a computed key `[X]` of a `declare` field is never visited
-    // and does NOT reserve. (Cross-checked against svelte@5.56.3: `class A { declare [X]:
+    // and does NOT reserve. (Cross-checked against svelte@5.56.10: `class A { declare [X]:
     // number }` with `X` undeclared + name `X` COMPILES to a bare `X`.) OXC keeps the
     // `declare` field and visits its computed key `X` as a value reference unless the
     // projection erases the member.
@@ -787,7 +787,7 @@ fn does_not_bind_a_this_parameter() {
     // Verter behavior: OXC never binds `this` as a value symbol and the value-position
     // filter drops its type, so a `this` param is a no-op for scope and does NOT reserve.
     // (svelte's `remove_this_param` likewise drops a leading `this` parameter.)
-    // (Cross-checked against svelte@5.56.3: `function f(this: X, a)` + name `X` COMPILES to
+    // (Cross-checked against svelte@5.56.10: `function f(this: X, a)` + name `X` COMPILES to
     // a bare `X`; the real param `a` still reserves.)
     let facts = facts_for(None, Some("function f(this: ThisType, a) { return a; }"));
     assert!(
@@ -808,7 +808,7 @@ fn does_not_bind_a_this_parameter() {
 fn does_reserve_a_referenced_ambient_declare() {
     // Verter behavior: an ambient `declare const Foo` is erased (emits no binding), so a
     // later VALUE reference to `Foo` is UNBOUND → a free reference → it reserves the
-    // component name. (Cross-checked against svelte@5.56.3: `declare const Foo;
+    // component name. (Cross-checked against svelte@5.56.10: `declare const Foo;
     // console.log(Foo)` + name `Foo` emits `Foo_1`.) This is the dual of
     // `does_not_reserve_an_ambient_declare_const`: the DECLARATION is erased but a real
     // value REFERENCE to the same name still counts.

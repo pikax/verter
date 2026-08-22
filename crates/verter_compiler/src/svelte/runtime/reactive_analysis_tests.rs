@@ -118,7 +118,7 @@ fn call_nested_in_optional_chain_base_is_found() {
 // analysis walks the expression in AST-visit order, and the check runs AFTER the
 // call's own children are visited. So a PURE call appearing BEFORE any dependency
 // is NOT has_call; the SAME pure call AFTER a dependency IS. Verified against the
-// pinned `svelte@5.56.3` compiler (a pure-call-before-dep emits an inline init; a
+// pinned `svelte@5.56.10` compiler (a pure-call-before-dep emits an inline init; a
 // dep-before-pure-call emits the `$.template_effect(($0) => …, [() => …])` form).
 
 #[test]
@@ -181,7 +181,7 @@ fn pure_call_with_spread_binding_argument_is_has_call() {
 // `has_state = true`) on the containing expression for ANY spread element, treating
 // `[...x]` the same as `[...x.values()]`. So a spread under a PURE-GLOBAL callee
 // with NO binding dependency anywhere STILL memoizes — the `deps > 0 || impure
-// callee` rule does NOT gate the spread case. Verified against pinned svelte@5.56.3:
+// callee` rule does NOT gate the spread case. Verified against pinned svelte@5.56.10:
 // each of `String(...globalThis.things)`, `[...globalThis.cls]`,
 // `{ ...globalThis.opts }` emits the memoized `$.template_effect(($0) => …, [() =>
 // …])` deps-array form.
@@ -355,7 +355,7 @@ fn pure_global_tagged_template_is_not_has_call() {
 //
 // Official sets `needs_clsx` for a single-expression `class={…}` UNLESS the value
 // is a `Literal` / `TemplateLiteral` / `BinaryExpression`. Verified against pinned
-// svelte@5.56.3: `class={a + b}` emits `$.set_class(el, 1, a + b)` (no clsx);
+// svelte@5.56.10: `class={a + b}` emits `$.set_class(el, 1, a + b)` (no clsx);
 // `class={c}` / `class={f()}` / `class={[…]}` / `class={{…}}` emit `$.clsx(…)`.
 
 /// The `class_value_needs_clsx` decision over a value-expression SOURCE: parse it the
@@ -442,7 +442,7 @@ fn other_class_value_shapes_need_clsx() {
 // `v.x = 1`, `v++`, `v.x++`) is impure ⇒ has_state; a write to a GLOBAL leaf
 // (`globalThis.x = 1`, `foo = 1`) is a plain init, but a binding member in the
 // RHS or an evaluated LHS key/default (`globalThis[v.y] = 1`) still counts.
-// Verified against pinned svelte@5.56.3 (a `{d.x}` over a demoted state joins the
+// Verified against pinned svelte@5.56.10 (a `{d.x}` over a demoted state joins the
 // `$.template_effect`; a bare `{d}` stays inline).
 
 fn has_binding_impurity(src: &str) -> bool {
@@ -508,7 +508,7 @@ fn assignment_and_update_are_has_state() {
     // WRITE half of has_state: an assignment/update MUTATION is impure ⇒ has_state — for a
     // member target (`v.x = 1` / `v.x++`) AND a bare-binding target (`v = 1` / `v++`). A
     // mutation DEFERRED inside a function body is not descended (stays pure). Verified
-    // against pinned svelte@5.56.3.
+    // against pinned svelte@5.56.10.
     assert!(
         has_binding_impurity("v.x = 1"),
         "member assignment target is has_state"
@@ -537,7 +537,7 @@ fn global_and_undeclared_mutations_are_not_state() {
     // The over-fire guard: a MUTATION whose write TARGET is rooted at a GLOBAL / undeclared
     // name is PURE ⇒ NOT has_state — official keeps `globalThis.x = 1`, `globalThis.x++`,
     // `foo = 1` (undeclared), and `String(globalThis.x = 1)` as a PLAIN init. Only a
-    // binding-rooted write is stateful. Verified against pinned svelte@5.56.3.
+    // binding-rooted write is stateful. Verified against pinned svelte@5.56.10.
     assert!(
         !has_binding_impurity("globalThis.x = 1"),
         "a member assignment rooted at a GLOBAL is NOT has_state"
@@ -568,7 +568,7 @@ fn binding_impurity_in_evaluated_position_of_global_write_is_state() {
     // global-target assignment/update is still reported (official's `MemberExpression.js`
     // `!is_pure` fires over the whole tree): the RHS, an evaluated LHS computed key, an
     // update-target computed key, and a destructuring default / computed key. Verified
-    // against pinned svelte@5.56.3 (all STATE at both call sites).
+    // against pinned svelte@5.56.10 (all STATE at both call sites).
     assert!(
         has_binding_impurity("globalThis.x = v.y"),
         "a binding-member RHS of a global-target write is has_state"
@@ -596,7 +596,7 @@ fn ts_wrapper_member_root_is_state() {
     // A TS skin (`as` / `satisfies` / `!`) is transparent for root resolution: a member /
     // write rooted at a binding through a cast is impure ⇒ has_state. Official marks
     // `(obj as any).y` and `(obj as any).x = 1` stateful; verified against pinned
-    // svelte@5.56.3.
+    // svelte@5.56.10.
     assert!(
         has_binding_impurity("(v as any).y"),
         "a member read through a TS `as` cast on a binding root is has_state"
@@ -625,7 +625,7 @@ fn ts_wrapper_member_root_is_state() {
 // plain local, a deep-proxied `$state` object, a prop — makes the value state-bearing
 // (⇒ the `get name() { return <expr>; }` getter member); a bare plain-local ident or a
 // member read deferred inside a nested function body stays a plain `name: <expr>` init.
-// Verified against pinned svelte@5.56.3 (boundary + component emit identically):
+// Verified against pinned svelte@5.56.10 (boundary + component emit identically):
 // `failed={obj.failed}` → getter; `onerror={() => obj.failed}` / `onerror={f}` → init.
 
 /// A root scope for the prop getter-vs-init predicate: a plain local `obj`, a

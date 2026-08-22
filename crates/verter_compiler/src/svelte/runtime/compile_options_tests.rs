@@ -465,7 +465,7 @@ fn compile_option_compatibility_component_api_5_and_absent_are_supported() {
 
 #[test]
 fn compile_option_compatibility_component_api_non_supported_values_fail_closed() {
-    // Fail-closed, no fail-open: svelte@5.56.3 accepts `componentApi` ∈ {4,5}
+    // Fail-closed, no fail-open: svelte@5.56.10 accepts `componentApi` ∈ {4,5}
     // ONLY — `4` is the refused compat FEATURE, `5` is the current supported API, and
     // any OTHER value (`0`, `6`, …) is an official `options_invalid_value` error.
     // Verter must fail closed on every non-`5` explicit value (never resolve a module),
@@ -815,7 +815,7 @@ fn name_option_sets_the_component_function_name() {
 #[test]
 fn name_reserved_word_deconflicts_with_a_counter_suffix() {
     // A `name` that sanitizes to a JS reserved word is an invalid function
-    // name, so `module.scope.generate` suffixes `_1` (svelte@5.56.3: `var` → `var_1`,
+    // name, so `module.scope.generate` suffixes `_1` (svelte@5.56.10: `var` → `var_1`,
     // `class` → `class_1`, `await` → `await_1`).
     for (name, expected) in [("var", "var_1"), ("class", "class_1"), ("await", "await_1")] {
         let opts = SvelteRuntimeOptions {
@@ -850,7 +850,7 @@ fn name_reserved_word_deconflicts_with_a_counter_suffix() {
 fn name_collision_with_a_declared_binding_deconflicts_with_a_counter_suffix() {
     // A `name` colliding with a declared user binding (a top-level `let`, an
     // import, an `{#each}` local — svelte's `root.conflicts`) suffixes `_1`
-    // (svelte@5.56.3: `name: 'foo'` + `let foo` → `foo_1`).
+    // (svelte@5.56.10: `name: 'foo'` + `let foo` → `foo_1`).
     let opts = SvelteRuntimeOptions {
         name: Some("foo".to_string()),
         ..base_opts()
@@ -897,7 +897,7 @@ fn name_collision_with_a_declared_binding_deconflicts_with_a_counter_suffix() {
 fn name_colliding_with_a_referenced_identifier_deconflicts() {
     // `Scope.generate` deconflicts against scope REFERENCES (used identifiers),
     // not only declarations. A `name: "String"` in a component that REFERENCES the
-    // global `String` must emit `String_1` (svelte@5.56.3: the generated component
+    // global `String` must emit `String_1` (svelte@5.56.10: the generated component
     // name must not shadow a referenced binding), never bare `String`.
     let opts = SvelteRuntimeOptions {
         name: Some("String".to_string()),
@@ -930,7 +930,7 @@ fn name_colliding_with_an_instance_script_referenced_identifier_deconflicts() {
     // component name against the MODULE scope's FULL reference set — which propagates
     // every free identifier referenced in the INSTANCE SCRIPT (and module script), not
     // just template expressions. A `name: "String"` whose INSTANCE SCRIPT references
-    // the global `String` must emit `String_1` (svelte@5.56.3), never bare `String`
+    // the global `String` must emit `String_1` (svelte@5.56.10), never bare `String`
     // (which would shadow the global the script's `String(x)` call resolves to →
     // broken runtime code).
     let opts = SvelteRuntimeOptions {
@@ -969,7 +969,7 @@ fn name_colliding_with_a_store_base_declaration_deconflicts() {
     // synthesized `$`-subscription accessor. A `const Foo = writable(0)` store declares
     // the base `Foo`; the auto-subscription binding is the synthesized `$Foo`. A
     // `name: "Foo"` therefore collides with the declared `const Foo` and must emit
-    // `Foo_1` (svelte@5.56.3) — NEVER a bare `function Foo` that DUPLICATES the source
+    // `Foo_1` (svelte@5.56.10) — NEVER a bare `function Foo` that DUPLICATES the source
     // `const Foo` (broken JS: two `Foo` declarations in one scope).
     let opts = SvelteRuntimeOptions {
         name: Some("Foo".to_string()),
@@ -995,7 +995,7 @@ fn name_colliding_with_a_store_base_declaration_deconflicts() {
 fn name_colliding_with_a_module_script_import_deconflicts() {
     // A `<script module>` import local is a source-form declaration in the module
     // scope. A `name: "Foo"` colliding with `import Foo from './x.js'` must emit
-    // `Foo_1` (svelte@5.56.3), never a bare `function Foo` shadowing the import.
+    // `Foo_1` (svelte@5.56.10), never a bare `function Foo` shadowing the import.
     let opts = SvelteRuntimeOptions {
         name: Some("Foo".to_string()),
         ..base_opts()
@@ -1017,7 +1017,7 @@ fn name_colliding_with_a_module_script_import_deconflicts() {
 #[test]
 fn name_colliding_with_a_slot_let_local_deconflicts() {
     // A slot `let:row` binding is a source-form template declaration. A `name: "row"`
-    // colliding with it must emit `row_1` (svelte@5.56.3), never a bare `function row`.
+    // colliding with it must emit `row_1` (svelte@5.56.10), never a bare `function row`.
     let opts = SvelteRuntimeOptions {
         name: Some("row".to_string()),
         ..base_opts()
@@ -1041,7 +1041,7 @@ fn name_does_not_reserve_an_unreferenced_synthesized_store_accessor() {
     // The authored-vs-synthesized distinction: every top-level declared base (here the
     // component import `Foo`) gets an INERT synthesized `$Foo` subscription-accessor
     // binding registered in the scope graph. That synthesized `$Foo` only becomes a
-    // real binding in svelte@5.56.3 when the source actually references `$Foo`. When
+    // real binding in svelte@5.56.10 when the source actually references `$Foo`. When
     // `$Foo` is NEVER referenced, svelte creates no `$Foo` binding, so a `name: "$Foo"`
     // is used verbatim (`function $Foo`). The deconfliction must derive from the SOURCE
     // (the base `Foo` is declared; `$Foo` is never referenced), NOT falsely reserve the
@@ -1070,7 +1070,7 @@ fn name_does_not_reserve_an_unreferenced_synthesized_store_accessor() {
 fn name_astral_char_sanitizes_per_utf16_code_unit() {
     // `Scope.generate` sanitizes per UTF-16 CODE UNIT (the JS-string regex), not
     // per Unicode scalar. An astral `name: "💩"` (ONE scalar, TWO UTF-16 units) becomes
-    // `__` (two `_`), matching svelte@5.56.3 — NOT `_` (a single per-scalar replace).
+    // `__` (two `_`), matching svelte@5.56.10 — NOT `_` (a single per-scalar replace).
     let opts = SvelteRuntimeOptions {
         name: Some("💩".to_string()),
         ..base_opts()
@@ -1105,7 +1105,7 @@ fn preserve_comments_retains_the_comment_and_shifts_sibling_offsets() {
     );
 
     // preserveComments: true — the comment occupies its OWN DOM node, retained in the
-    // skeleton (`<!-- c -->`) AND bound as its own walk anchor, matching svelte@5.56.3:
+    // skeleton (`<!-- c -->`) AND bound as its own walk anchor, matching svelte@5.56.10:
     // `var node = $.child(div); var span = $.sibling(node);` (every retained comment
     // inside a walked region gets a `var node` binding, NOT an inline offset-skip).
     let opts = SvelteRuntimeOptions {
@@ -1242,7 +1242,7 @@ fn fragments_tree_emits_the_from_tree_objectified_factory() {
     // The `$.from_tree` objectifier mirrors the HTML-string skeleton: the element name,
     // the baked attrs object, and the spread children. A reactive interpolation child is
     // the official ` ` placeholder text node (`['span', null, ' ']`). Byte-parity with
-    // svelte@5.56.3's `objectify` / `as_tree`.
+    // svelte@5.56.10's `objectify` / `as_tree`.
     let js = emit_tree(
         "<script>let { x } = $props();</script>\n<div class=\"card\">hello <span>{x}</span></div>\n",
     );
@@ -1356,7 +1356,7 @@ fn fragments_tree_rendered_anchor_first_root_unshifts_the_effect_start_hole() {
     // When the FIRST region root lowers to a rendered `<!>` comment anchor — a
     // block (`{#if}`) / component / `{@render}` / `{@html}` first-root — `as_tree`
     // UNSHIFTS an extra `null` hole for `effect.start` (mirroring
-    // `Template.as_tree`'s `nodes[0].type === 'comment'` unshift): svelte@5.56.3 emits
+    // `Template.as_tree`'s `nodes[0].type === 'comment'` unshift): svelte@5.56.10 emits
     // TWO leading holes (`[,, ['p', …]]`), not one. A first-root that lowers to a
     // rendered comment anchor (ANY block / component / `{@render}` / `{@html}`, not
     // only an authored `IrNode::Comment`) contributes its OWN leading hole, so the

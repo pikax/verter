@@ -263,7 +263,7 @@ pub struct ValueWrapCell {
 }
 
 /// The ONE exhaustive, wildcard-free value-wrap classification — the covering
-/// cell of each surface. Grounded against the pinned official `svelte@5.56.3`
+/// cell of each surface. Grounded against the pinned official `svelte@5.56.10`
 /// client transform (`shared/utils.js` `build_expression` and its direct +
 /// `build_attribute_value` / `build_template_chunk` consumers).
 #[must_use]

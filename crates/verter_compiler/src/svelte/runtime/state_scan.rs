@@ -355,7 +355,7 @@ pub fn script_uses_runes(
 
 /// Whether the instance script contains a DEFINITIVELY-LEGACY top-level construct
 /// — the negated half of the official `analysis.maybe_runes` condition
-/// (svelte@5.56.3 `phases/2-analyze/index.js`): a top-level `LabeledStatement`
+/// (svelte@5.56.10 `phases/2-analyze/index.js`): a top-level `LabeledStatement`
 /// (any label, exactly as official checks the raw AST — the admitted surface only
 /// ever carries `$:`) or an `export let` (a `let`-kind export declaration, or an
 /// export specifier whose local resolves to a top-level `let`). A component with

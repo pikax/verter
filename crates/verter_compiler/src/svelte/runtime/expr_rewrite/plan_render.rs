@@ -71,7 +71,7 @@ pub(super) fn state_snapshot_callee_span(call: &CallExpression<'_>) -> Option<ox
         // Only the WELL-FORMED single-non-spread-arg form is the supported
         // `$.snapshot(<expr>)` rewrite. Official rejects a zero-arg / >=2-arg call
         // (`rune_invalid_arguments_length`) and a spread arg (`rune_invalid_spread`) —
-        // oracle-verified against `svelte@5.56.3` at every paren position. The
+        // oracle-verified against `svelte@5.56.10` at every paren position. The
         // rune-scan gate fails those closed upstream so this rewriter never runs on
         // them; this arity/spread guard is defense-in-depth so the rewriter can NEVER
         // emit a raw `$.snapshot()` / `$.snapshot(a, b)` / `$.snapshot(...o)` even if

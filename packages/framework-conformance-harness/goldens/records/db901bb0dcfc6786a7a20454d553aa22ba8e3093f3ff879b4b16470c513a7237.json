@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 3,
+  "framework": "vue",
+  "domain": {
+    "upstream": "https://github.com/vuejs/core",
+    "commit": "f11c8f2639ce15559d64ea054e409081bd8a0ce1",
+    "tree": "980693b602cff54d492a1d6ada18470596cbf978",
+    "packageVersion": "3.6.0-rc.5"
+  },
+  "packageLockSha256": "4c3cc2fb175c4cba390e319aeae04dce6252ac818a2045f8383a040b488430a2",
+  "realizedClosureSha256": "b85a65e7d21c0470796a9860a2c1f5b1cf5f3353679003171c08275654922b85",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "f50dc68ff765b30822156a3585a3996bf4d45a11918ff3798a9ff9c054feb6bf",
+    "commit": "ee86a9cf8bc9cae7749ec4acffd086d22fb6e624",
+    "tree": "1c1041a1a4e22d94ceac63315fdf6b475d2d5a2f",
+    "worktreeDirty": false,
+    "implementationSha256": "03d67451c2b52d0f999322e1f7c951f21b5f3ff21848566e6b5694c08244bdb8"
+  },
+  "fixture": {
+    "path": "fixtures/vue/slots.vue",
+    "sha256": "6fe3f95ee839d348bce0786b11edd912f7e0b085c5166c8d15da75058ab062a7"
+  },
+  "options": {
+    "backend": "ssr",
+    "sourceMap": true,
+    "isProd": true,
+    "transformAssetUrls": {
+      "includeAbsolute": true
+    }
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "9d68e2a36f2aebc752548075472b0ce5ac51dddaa4a1570457b103a32dc33513",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "d8b9b622d414958819b1b8f63488a944ac0626e1a9e88bf4f1a8dbcc5166116b"
+  },
+  "code": "const _sfc_main = {}\nimport { mergeProps as _mergeProps } from \"vue\"\nimport { ssrRenderSlot as _ssrRenderSlot, ssrRenderAttrs as _ssrRenderAttrs } from \"vue/server-renderer\"\n\nfunction ssrRender(_ctx, _push, _parent, _attrs) {\n  _push(`<div${_ssrRenderAttrs(_mergeProps({ class: \"panel\" }, _attrs))}><header>`)\n  _ssrRenderSlot(_ctx.$slots, \"header\", {}, () => {\n    _push(`Untitled`)\n  }, _push, _parent)\n  _push(`</header><main>`)\n  _ssrRenderSlot(_ctx.$slots, \"default\", {}, null, _push, _parent)\n  _push(`</main></div>`)\n}\n_sfc_main.ssrRender = ssrRender\nexport default _sfc_main",
+  "map": {
+    "version": 3,
+    "sources": [
+      "fixtures/vue/slots.vue"
+    ],
+    "sourcesContent": [
+      "<template>\n  <div class=\"panel\">\n    <header>\n      <slot name=\"header\">Untitled</slot>\n    </header>\n    <main>\n      <slot />\n    </main>\n  </div>\n</template>\n"
+    ],
+    "names": [],
+    "mappings": ";;;;;6CACO,KAAK,EAAC,OAAO"
+  }
+}

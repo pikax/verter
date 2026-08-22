@@ -22,7 +22,7 @@
 //! their dense [`ordinal`](RefusalKind::ordinal)s.
 //!
 //! Grounding: the constraint rules and the grounded family verdicts were
-//! established against the pinned official `svelte@5.56.3` compiler (kept
+//! established against the pinned official `svelte@5.56.10` compiler (kept
 //! selectors stay scoped, absent values prune with `css_unused_selector`,
 //! a parentless `&` rejects with `css_nesting_selector_invalid_placement`)
 //! and against Verter's typed fail-closed surface (a legacy `<slot>` region
@@ -296,7 +296,7 @@ impl RefusalKind {
 }
 
 model_enum! {
-    /// Official-oracle-rejected cells: the pinned `svelte@5.56.3` compiler
+    /// Official-oracle-rejected cells: the pinned `svelte@5.56.10` compiler
     /// rejects the rendered fixture with the named diagnostic.
     pub enum DiagnosticKind {
         /// A parentless nesting selector (`& { … }` / `.wrap & { … }` at the

@@ -1,7 +1,7 @@
 {
   "slug": "generated/061_event_nondelegated_focus_on_svelte_element.svelte",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/client",

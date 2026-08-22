@@ -11,7 +11,7 @@
 //! rune scan ([`super::rune_scan::UnsupportedRuneScan`]) and carried on the
 //! classified surface — never re-discovered here.
 //!
-//! The official topology (pinned `svelte@5.56.3`):
+//! The official topology (pinned `svelte@5.56.10`):
 //!
 //! - `$.create_custom_element(Cmp, props, slots, accessors, shadowRootInit,
 //!   extend)` — a 6-argument CONDITIONAL shape. `props` (arg2) is the resolved
@@ -132,7 +132,7 @@ pub(super) fn build_custom_element_emission(
         let mut fields = Vec::new();
         // The official transform pushes `attribute` only for a TRUTHY string
         // (`if (attribute) …`): an EMPTY `attribute: ""` OMITS the field —
-        // pinned `svelte@5.56.3` emits `{ a: {} }`, never `attribute: ''`.
+        // pinned `svelte@5.56.10` emits `{ a: {} }`, never `attribute: ''`.
         if let Some(attribute) = def.attribute.as_deref().filter(|a| !a.is_empty()) {
             fields.push(format!("attribute: {}", js_single_quoted(attribute)));
         }

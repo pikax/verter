@@ -64,7 +64,7 @@ pub enum TemplateFactory {
         tree: Option<String>,
     },
     /// A `$.text(seed)` text-node factory — the official "text-first" region
-    /// optimization (`svelte@5.56.3`): when a region's whole cleaned sequence
+    /// optimization (`svelte@5.56.10`): when a region's whole cleaned sequence
     /// reduces to a SINGLE text run (pure static text, or one-or-more
     /// interpolations with no element/block sibling), the runtime creates the
     /// region's root as a bare text node via `$.text(...)` rather than cloning a
@@ -89,7 +89,7 @@ pub enum TemplateFactory {
     /// non-dynamic `{@render}` tag emits NO static template. The runtime calls the
     /// component / renders the snippet against the PARENT block's anchor directly
     /// (a top-level `<Foo/>` → `Foo($$anchor, {})`, no `from_html`, no `$.append`
-    /// of a cloned fragment). EMPIRICALLY confirmed against svelte@5.56.3. This is
+    /// of a cloned fragment). EMPIRICALLY confirmed against svelte@5.56.10. This is
     /// a RUNTIME-shape distinction — no template clone vs a `<!>` `from_html`.
     Standalone {
         /// Whether the standalone root is a component or a `{@render}` tag.
@@ -107,7 +107,7 @@ pub enum StandaloneKind {
 }
 
 /// The static-template trailing flag — the official `$.from_html(html, flags)`
-/// bitmask (`svelte@5.56.3` `src/constants.js`). A combination of:
+/// bitmask (`svelte@5.56.10` `src/constants.js`). A combination of:
 /// `TEMPLATE_FRAGMENT = 1` (a MULTI-ROOT fragment) and `TEMPLATE_USE_IMPORT_NODE =
 /// 1 << 1 = 2` (the template needs `importNode` — set when it contains a
 /// `<video>` or a CUSTOM element). The `SVG`/`MathML` bits (`4`/`8`) belong to the
@@ -308,7 +308,7 @@ pub struct NodePathPlan {
 /// `<svelte:window>`, `<svelte:document>`, `<svelte:body>`) renders NO body
 /// content: it owns its own region / window-listener / compile-option fold and is
 /// EXCLUDED from the body static-HTML skeleton entirely — it is neither a root nor
-/// a `<!>` anchor (verified against `svelte@5.56.3`: a `<svelte:head>…</svelte:head>`
+/// a `<!>` anchor (verified against `svelte@5.56.10`: a `<svelte:head>…</svelte:head>`
 /// before a `<div>` produces a body skeleton of just `<div>`, not `<!> <div>`).
 ///
 /// `<svelte:element>` / `<svelte:component>` / `<svelte:self>` / `<svelte:boundary>`
@@ -340,7 +340,7 @@ pub(super) fn is_non_body_special(node: &IrNode) -> bool {
 /// `{const}` / `{let}` declaration, a `{@debug}` / `{@attach}`, or a `{#snippet}`
 /// DECLARATION (a callable definition, not body output). It is EXCLUDED from the
 /// body static-HTML skeleton entirely — never a root, never a `<!>` anchor, never a
-/// body-position shift (verified against `svelte@5.56.3`: an `{@const}` before a
+/// body-position shift (verified against `svelte@5.56.10`: an `{@const}` before a
 /// `<li>` produces just `<li>`, a `{#snippet}` declaration before a `<div>`
 /// produces just `<div>`).
 ///
@@ -539,7 +539,7 @@ pub(super) fn region_ctx(ir: &SvelteRuntimeIr) -> CleanContext<'static> {
 /// same one element children use — the official compiler runs the same
 /// `clean_nodes` at every level). There is NO inter-root separator: the cleaned
 /// sequence's `TextRun`s are the ONLY source of inter-node whitespace (adjacent
-/// element roots concatenate directly, matching `svelte@5.56.3`).
+/// element roots concatenate directly, matching `svelte@5.56.10`).
 pub(super) fn synthesize_region(
     ir: &SvelteRuntimeIr,
     scope: &TemplateScope,
@@ -573,7 +573,7 @@ fn synthesize_region_with_client_nodes(
             reason: AnchorReason::EmptyRoot,
         };
     }
-    // Text-first region (`svelte@5.56.3`): a region whose WHOLE cleaned sequence is
+    // Text-first region (`svelte@5.56.10`): a region whose WHOLE cleaned sequence is
     // a SINGLE text run (pure static text, or interpolation-only, with no
     // element/block sibling) is created as a bare text node via `$.text(seed)`,
     // NOT a `from_html` clone. The seed is the static text for a pure-text run
@@ -903,7 +903,7 @@ fn collect_attr_slots(
 /// - A `Fragment` base reaches `roots[i]` via `FirstChild` (descend into the
 ///   cloned fragment) THEN `Sibling { offset: i }` for `i > 0` — a dynamic root
 ///   after a static root therefore carries BOTH steps (verified against
-///   svelte@5.56.3: `$.sibling($.first_child(fragment), 1)`), never a bare
+///   svelte@5.56.10: `$.sibling($.first_child(fragment), 1)`), never a bare
 ///   `Sibling` with no descent.
 /// - A `Node(parent)` base is emitted ONLY for a parent that has its OWN
 ///   reachable path — so any element used as a path base is itself named/planned.
@@ -928,7 +928,7 @@ fn build_client_paths(
     // offsets can never desync from the emitted template.
     let ctx = region_ctx(ir);
     let items = clean_nodes(ir, roots, ctx);
-    // The clone-root contract (`svelte@5.56.3` `Fragment.js` `is_single_element`): a
+    // The clone-root contract (`svelte@5.56.10` `Fragment.js` `is_single_element`): a
     // region whose WHOLE cleaned sequence is a SINGLE static-HTML ELEMENT is cloned
     // as that element DIRECTLY (a single-element `$.from_html` returns the element,
     // NOT a fragment). The clone-template VARIABLE *is* that element node — so the

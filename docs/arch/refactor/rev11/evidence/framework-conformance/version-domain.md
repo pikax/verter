@@ -63,17 +63,17 @@ maturity.
 ## Svelte
 
 - upstream: `https://github.com/sveltejs/svelte`
-- exact tag: `svelte@5.56.8`
-- annotated tag object: `a49603bbb50f948fd0c2bf5c55582a8f89b4d91c`
-- commit: `44a7813730579b94004e182e5a67aab27aa9d2a6`
-- tree: `63390158bfe8f997c474e35215a4fa627194c229`
-- package: `svelte@5.56.8`
-- integrity: `sha512-PY8LOw7xP6c8IOiVqdo0sbbZVYhXRSfklOQLAUyGBKqjTX0wx/z4l/9J+PmBpmlLnxzEb1NqltxQ5/wZme/Cmg==`
+- exact tag: `svelte@5.56.10`
+- annotated tag object: `75870e2a3e643af19fb7baabf754875942464510`
+- commit: `56a036f4ce873a24ee6631a06d03d372523d7a9b`
+- tree: `b7ced8028848a6c63bd8ff04177a43223ec89518`
+- package: `svelte@5.56.10`
+- integrity: `sha512-Lcxbj8I/KAbpY+VjtY4ENQBV0dDCipfGAhqb51XQZ67CIQqXgsv/8dPkbILaj4Fb6/b6JAEM/PIVbILXgDQy2g==`
 - package lock: `oracles/svelte/package-lock.json`
-- lock SHA-256: `0c27c9fc7bed24be3fd7a546b55b6ee5858b244a57613390a213fdb454b92ce2`
+- lock SHA-256: `110dbc95cb501f60177dec712df81a85e5fc8b3dda7a2592dfe5bd26b21d2053`
 - exact resolved closure: `oracles/svelte/closure.tsv`
-- closure SHA-256: `3dc4209c2911700de92858e350ddda2e6f5f333874a2eb330125ee808910dbce`
-- package manifest SHA-256: `ac1b539596a6ea3e1151b00720edaf73c42a4aab4aac5caafb1079e858a6578a`
+- closure SHA-256: `01e810a3c8ea5a286915071ebb04af86c1b735b1f9ef7b5db5f7605312c7a3e2`
+- package manifest SHA-256: `9877a609a49bb008a4f529cb92a6fed03ef77c3e6cb7221a864dc0832bc39939`
 - resolver: same npm/Node command as Vue
 - closure: 20 non-root packages, fully named/versioned/integrity-bound in the lock
 

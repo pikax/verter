@@ -1,7 +1,7 @@
 {
   "slug": "generated/059_event_quoted_click_on_component.svelte",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "./Foo.svelte",

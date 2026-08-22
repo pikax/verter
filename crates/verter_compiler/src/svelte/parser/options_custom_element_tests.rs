@@ -1,7 +1,7 @@
 //! Unit tests for the faithful `read_options` `customElement` expression engine — the ONE
 //! validate+extract walk the parser runs at options finalization and retains on the probe.
 //!
-//! Each expectation is grounded against the pinned `svelte@5.56.3` compiler (a `None` here ⇔ the
+//! Each expectation is grounded against the pinned `svelte@5.56.10` compiler (a `None` here ⇔ the
 //! pinned compiler ACCEPTS the `customElement` expression; a `Some(code)` ⇔ it throws that exact
 //! code). The input is the raw `{…}` inner expression text the parser resolves. The engine runs
 //! upstream's TWO stages in order: a SYNTACTICALLY-malformed expression → `js_parse_error` (the
@@ -272,7 +272,7 @@ fn object_with_method_tag_is_invalid_tagname() {
 // a syntactically-MALFORMED prefix throws `js_parse_error`, and only a single clean expression
 // consuming the whole `{…}` reaches the `read_options` validation. A full-span parse that does not
 // model the prefix cursor can only yield `js_parse_error` for `{1 2}` — these rows discriminate
-// that. Grounded against pinned svelte@5.56.3: `{1 2}`/`{foo bar}`/`{"a" "b"}`/`{a.b c}`/`{1;2}` →
+// that. Grounded against pinned svelte@5.56.10: `{1 2}`/`{foo bar}`/`{"a" "b"}`/`{a.b c}`/`{1;2}` →
 // `expected_token`; `{1 + }` → `js_parse_error`; `{1,2}`/`{(1)(2)}` → the WHOLE source is one
 // expression (sequence / call), so they reach validation (`svelte_options_invalid_customelement`).
 #[test]
@@ -364,7 +364,7 @@ fn clean_prefix_with_trailing_whitespace_validates() {
 // `read_options` classifies, so author parens are transparent at EVERY validation site. OXC
 // parses with `preserve_parens` on (as acorn does under `preserveParens: true`), so the engine
 // peels the typed `ParenthesizedExpression` nodes the same way. Every row below is grounded
-// against pinned svelte@5.56.3 first-hand: the paren-object / paren-null / paren-tag /
+// against pinned svelte@5.56.10 first-hand: the paren-object / paren-null / paren-tag /
 // paren-shadow / paren-props-field forms ACCEPT (with the same emission as their unwrapped
 // spellings), while a parenthesized INVALID value keeps its exact reject code — parens never
 // turn an invalid value valid. ──

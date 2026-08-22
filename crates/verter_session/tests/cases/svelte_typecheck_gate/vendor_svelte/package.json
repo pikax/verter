@@ -1,6 +1,6 @@
 {
   "name": "svelte",
-  "version": "5.56.3",
+  "version": "5.56.10",
   "types": "index.d.ts",
   "exports": {
     ".": { "types": "./index.d.ts" },

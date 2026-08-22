@@ -1,7 +1,7 @@
 # @verter/framework-conformance-harness
 
 Hermetic, **test-only** official-core compiler conformance harness for the
-exact pinned Vue `3.6.0-rc.5` and Svelte `5.56.8` compatibility domains
+exact pinned Vue `3.6.0-rc.5` and Svelte `5.56.10` compatibility domains
 (AMD-005 / BF1 / BF2). This package proves Verter's compiler output can be
 falsified against the exact official compilers and runtimes. It never
 implements, patches, or ships production compiler behavior — see

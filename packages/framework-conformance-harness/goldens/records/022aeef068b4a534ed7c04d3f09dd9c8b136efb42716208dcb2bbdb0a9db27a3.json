@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 3,
+  "framework": "svelte",
+  "domain": {
+    "upstream": "https://github.com/sveltejs/svelte",
+    "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+    "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
+    "packageVersion": "5.56.10"
+  },
+  "packageLockSha256": "110dbc95cb501f60177dec712df81a85e5fc8b3dda7a2592dfe5bd26b21d2053",
+  "realizedClosureSha256": "af0bc09b425ff3d618c95b9b67f9a6702e16469b63a27abb834d7f169020911a",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "f50dc68ff765b30822156a3585a3996bf4d45a11918ff3798a9ff9c054feb6bf",
+    "commit": "ee86a9cf8bc9cae7749ec4acffd086d22fb6e624",
+    "tree": "1c1041a1a4e22d94ceac63315fdf6b475d2d5a2f",
+    "worktreeDirty": false,
+    "implementationSha256": "03d67451c2b52d0f999322e1f7c951f21b5f3ff21848566e6b5694c08244bdb8"
+  },
+  "fixture": {
+    "path": "fixtures/svelte/legacy-slots.svelte",
+    "sha256": "78696aaa42b1f5398d7f0bc1ab426aaaecfc06cd31eef91afd5a10ccf2aa06b5"
+  },
+  "options": {
+    "generate": "server",
+    "runes": false,
+    "dev": true
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "4fa5a29d76049ad0a4cd2f971e93669f4f9bc38e1349b6f93901fe4eeb4e1265",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "e386b6f2af618f65856dbfee4e477e9f3c307c5750a011947fdb2499de6c5013"
+  },
+  "code": "Legacy_slots[$.FILENAME] = 'fixtures/svelte/legacy-slots.svelte';\n\nimport * as $ from 'svelte/internal/server';\n\nfunction Legacy_slots($$renderer, $$props) {\n\t$$renderer.component(\n\t\t($$renderer) => {\n\t\t\tlet title = $.fallback($$props['title'], \"Untitled\");\n\n\t\t\t$$renderer.push(`<div class=\"panel\">`);\n\t\t\t$.push_element($$renderer, 'div', 5, 0);\n\t\t\t$$renderer.push(`<header>`);\n\t\t\t$.push_element($$renderer, 'header', 6, 2);\n\t\t\t$$renderer.push(`<!--[-->`);\n\n\t\t\t$.slot($$renderer, $$props, 'header', {}, () => {\n\t\t\t\t$$renderer.push(`${$.escape(title)}`);\n\t\t\t});\n\n\t\t\t$$renderer.push(`<!--]--></header>`);\n\t\t\t$.pop_element();\n\t\t\t$$renderer.push(` <main>`);\n\t\t\t$.push_element($$renderer, 'main', 9, 2);\n\t\t\t$$renderer.push(`<!--[-->`);\n\t\t\t$.slot($$renderer, $$props, 'default', {}, null);\n\t\t\t$$renderer.push(`<!--]--></main>`);\n\t\t\t$.pop_element();\n\t\t\t$$renderer.push(`</div>`);\n\t\t\t$.pop_element();\n\t\t\t$.bind_props($$props, { title });\n\t\t},\n\t\tLegacy_slots\n\t);\n}\n\nLegacy_slots.render = function () {\n\tthrow new Error('Component.render(...) is no longer valid in Svelte 5. See https://svelte.dev/docs/svelte/v5-migration-guide#Components-are-no-longer-classes for more information');\n};\n\nexport default Legacy_slots;",
+  "map": {
+    "version": 3,
+    "names": [],
+    "sources": [
+      "legacy-slots.svelte"
+    ],
+    "sourcesContent": [
+      "<script>\n  export let title = \"Untitled\";\n</script>\n\n<div class=\"panel\">\n  <header>\n    <slot name=\"header\">{title}</slot>\n  </header>\n  <main>\n    <slot />\n  </main>\n</div>\n"
+    ],
+    "mappings": ";;;;;;kBAAA,CAAC;GACQ,IAAI,AAAA,KAAK,gCAAG,UAAU;;;;;;;;;gCAKN,KAAK;;;;;;;;;;;;;;EAJtB,CAAC;;;;;;;;;"
+  }
+}

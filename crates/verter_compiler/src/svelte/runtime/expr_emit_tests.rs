@@ -340,7 +340,7 @@ fn ts_non_null_is_stripped() {
 #[test]
 fn signal_read_inside_ternary_is_rewritten_in_both_arms() {
     // THE keystone F1 regression: `count > 0 ? count : 0` must rewrite the signal
-    // read in BOTH the condition and the consequent. Verified against svelte@5.56.3:
+    // read in BOTH the condition and the consequent. Verified against svelte@5.56.10:
     // `$.get(count) > 0 ? $.get(count) : 0`. RED against the verbatim `_ =>` arm
     // (which emitted raw `count > 0 ? count : 0`).
     let out = rewrite_with(
@@ -380,7 +380,7 @@ fn signal_read_inside_template_literal_is_rewritten() {
 #[test]
 fn signal_read_inside_logical_is_rewritten() {
     // `a && count` → the signal read is rewritten; the non-signal `a` is untouched.
-    // Verified against svelte@5.56.3.
+    // Verified against svelte@5.56.10.
     let out = rewrite_with(
         "a && count",
         "count",
@@ -424,7 +424,7 @@ fn signal_read_inside_unary_and_paren_and_conditional_chain_is_rewritten() {
 #[test]
 fn prefix_increment_in_value_position_becomes_update_pre() {
     // `++count` used in VALUE position (a call arg) → `$.update_pre(count)`.
-    // Verified against svelte@5.56.3 (`f(++count)` → `f($.update_pre(count))`).
+    // Verified against svelte@5.56.10 (`f(++count)` → `f($.update_pre(count))`).
     // RED against the prefix-blind rewriter (which emitted `$.update(count)`).
     let out = rewrite_with(
         "f(++count)",
@@ -451,7 +451,7 @@ fn prefix_decrement_in_value_position_becomes_update_pre_minus_one() {
 #[test]
 fn postfix_increment_stays_update() {
     // `f(count++)` → `f($.update(count))` (postfix is plain `$.update`). Verified
-    // against svelte@5.56.3.
+    // against svelte@5.56.10.
     let out = rewrite_with(
         "f(count++)",
         "count",
@@ -517,7 +517,7 @@ fn bind_target_lvalue_ts_detection_is_structural_anywhere() {
     // NOT flagged; a SEQUENCE (function-pair) is excluded (its TS rejection is owned by the
     // plain-JS function-pair lane).
     //
-    // TYPE-ARGUMENT boundary (oracle-verified svelte@5.56.3): a node carrying TS type arguments
+    // TYPE-ARGUMENT boundary (oracle-verified svelte@5.56.10): a node carrying TS type arguments
     // IS flagged (fail-closed) — both a BARE instantiation (`f<T>` / `arr[g<T>]`, an OXC
     // `TSInstantiationExpression` with no trailing call) AND a CALL / new / tagged-template that
     // carries type arguments (`arr[g<a,b>(c)]`, an OXC `CallExpression` with `type_arguments`).
@@ -543,7 +543,7 @@ fn bind_target_lvalue_ts_detection_is_structural_anywhere() {
     assert!(lvalue_ts("a[x as T]"));
     assert!(lvalue_ts("a[i!]"));
     // A BARE instantiation (`f<T>` root, `arr[g<T>]` index — OXC `TSInstantiationExpression`,
-    // no trailing call) IS flagged: official svelte@5.56.3 REJECTS both (`js_parse_error`),
+    // no trailing call) IS flagged: official svelte@5.56.10 REJECTS both (`js_parse_error`),
     // so the structural fail-close agrees with official (it does NOT over-refuse here).
     assert!(
         lvalue_ts("f<T>"),
@@ -686,7 +686,7 @@ fn signal_write_inside_switch_statement_is_rewritten() {
     // R3 (exhaustive statement traversal): a signal write inside a `switch`
     // statement's case body must be rewritten — the prior hand-enumerated walk
     // bailed on `SwitchStatement` and left the write RAW. Verified against
-    // svelte@5.56.3 (a handler `switch (x) { case 1: count++ }` rewrites `count++`
+    // svelte@5.56.10 (a handler `switch (x) { case 1: count++ }` rewrites `count++`
     // to `$.update(count)`).
     let out = rewrite_with(
         "() => { switch (k) { case 1: count++; break; default: count = 0; } }",
@@ -841,7 +841,7 @@ fn signal_read_inside_labeled_and_class_body_is_rewritten() {
 fn logical_assign_to_object_state_proxies() {
     // R9: `o ||= {b:2}` / `o ??= {}` / `o &&= {}` on object state carry the trailing
     // `, true` (the official `is_non_coercive_operator` set extends beyond `=`).
-    // Verified against svelte@5.56.3 (`$.set(o, $.get(o) || { b: 2 }, true)`).
+    // Verified against svelte@5.56.10 (`$.set(o, $.get(o) || { b: 2 }, true)`).
     let or_assign = rewrite_with("o ||= { b: 2 }", "o", BindingRuntimeKind::StateProxy);
     assert!(
         or_assign.contains("$.set(o, $.get(o) || { b: 2 }, true)"),
@@ -922,7 +922,7 @@ fn state_init_reactive_shadowed_undefined_conservative_failclose_discriminates_s
     // the demoted subcase from the live one (a template-handler reassignment — invisible
     // here — promotes the shadow to a live signal). This test DISCRIMINATES the three
     // subcases and honestly labels the one that is a known conservative OVER-refusal. All
-    // dispositions oracle-verified against `svelte@5.56.3`.
+    // dispositions oracle-verified against `svelte@5.56.10`.
 
     // (1) LIVE-signal shadow (reassigned as a whole IN THE INSTANCE SCRIPT → `$.state(…)`,
     //     read via `$.get`): official emits `let x = $.state($.proxy($.get(undefined)))`
@@ -1199,7 +1199,7 @@ fn effect_async_await_fails_closed_through_await_gate() {
 
 #[test]
 fn effect_async_no_await_passes_through_as_official_parity() {
-    // Oracle-verified (svelte@5.56.3): `$effect(async () => { c; })` with NO
+    // Oracle-verified (svelte@5.56.10): `$effect(async () => { c; })` with NO
     // `await` ACCEPTS as `$.user_effect(async () => { $.get(c); })` — the await
     // gate only fires on `await`, so the async-no-await passthrough is parity.
     let out = rewrite_with(
@@ -1268,7 +1268,7 @@ fn shadowed_effect_local_is_not_rewritten_and_not_refused() {
 
 #[test]
 fn rest_delete_target_delocalizes_as_a_read() {
-    // FIX-2 control (oracle svelte@5.56.3): a `delete rest.x` argument is a
+    // FIX-2 control (oracle svelte@5.56.10): a `delete rest.x` argument is a
     // reference READ — NOT an assignment/update lvalue — so it de-localizes to
     // `delete $$props.x`. This proves the write-verbatim gate is SCOPED to the
     // assignment/update lvalue surface (it never records a `delete` argument as a

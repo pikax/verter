@@ -9,7 +9,7 @@ use super::html::TemplateFlag;
 /// Emit the module imports from the import plan, interleaving the USER imports in the
 /// official two-slot order.
 ///
-/// The official import order (pinned svelte@5.56.3) is: the `disclose-version`
+/// The official import order (pinned svelte@5.56.10) is: the `disclose-version`
 /// side-effect import (the leading byte), the flag side-effect imports, each
 /// `<script module>` user import in SOURCE ORDER, the `import * as $ from
 /// 'svelte/internal/client'` runtime namespace, then each INSTANCE-script user import

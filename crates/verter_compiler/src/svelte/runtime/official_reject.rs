@@ -3,7 +3,7 @@
 //!
 //! The structural shape allowlists (the element/attr allowlist, the instance-script
 //! item allowlist) prove a surface is one Verter EMITS; they do NOT prove the input
-//! is one the official `svelte@5.56.3` compiler ACCEPTS. A §1.2-core-shaped input
+//! is one the official `svelte@5.56.10` compiler ACCEPTS. A §1.2-core-shaped input
 //! that official COMPILE-ERRORS (a duplicate declaration, a `$`-prefixed binding, a
 //! duplicate / mis-`context`-ed `<script>`, an invalid HTML placement, a global
 //! `$foo` reference) must therefore ALSO fail closed in Verter — accepting malformed
@@ -536,7 +536,7 @@ fn scan_attribute_invalid_name(nodes: &[SvelteNode]) -> Option<CoreOfficialValid
 }
 
 /// Whether an attribute NAME is invalid per the official `attribute_invalid_name` rule
-/// (the pinned `svelte@5.56.3` regex `/(^[0-9-.])|[\^$@%&#?!|()[\]{}^*+~;]/`): the FIRST
+/// (the pinned `svelte@5.56.10` regex `/(^[0-9-.])|[\^$@%&#?!|()[\]{}^*+~;]/`): the FIRST
 /// character is a digit / `-` / `.`, OR the name CONTAINS one of
 /// `^ $ @ % & # ? ! | ( ) [ ] { } * + ~ ;`. A colon name (`foo:bar`), a leading `_`, and
 /// mid-name `-` / `.` (`data-x` / `aria-label` / `_foo`) are all VALID. Expressed as a
@@ -1217,7 +1217,7 @@ impl<'a> oxc_ast_visit::Visit<'a> for InspectTracePlacementScan {
         // declaration/expression `Function` body (incl. a class method's value) hosts
         // the legal first-statement position.
         self.scopes.push(super::expr::function_scope_names(it));
-        // A GENERATOR body is NOT a legal trace host — official svelte@5.56.3 rejects a
+        // A GENERATOR body is NOT a legal trace host — official svelte@5.56.10 rejects a
         // generator-body first-statement trace with `inspect_trace_generator`. Only a
         // NON-generator function body hosts the legal first-statement position, so a
         // generator's first statement is never admitted to the allow-set and its trace

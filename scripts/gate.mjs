@@ -178,7 +178,7 @@
 // preflight above)
 //   The `verter_session/bf2-authoritative` feature (now ON for every archive — see `ARCHIVE_FEATURES` in
 //   gate-internals.mjs) gates 45 tests, including the ENTIRE `svelte_official_conformance_gate` suite —
-//   the tests that compare Verter's Svelte output against the pinned official `svelte@5.56.8` oracle.
+//   the tests that compare Verter's Svelte output against the pinned official `svelte@5.56.10` oracle.
 //   Those tests realize their Vue/Svelte oracles OFFLINE from a gitignored local npm cache
 //   (`.oracle-npm-cache`, warmed from the network ONLY by the explicit, never-automatic
 //   `node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`). A fresh checkout has no cache, and the harness does
@@ -1421,7 +1421,7 @@ async function runGate(opts, ctx) {
   // ---------- ORACLE-CACHE PREREQUISITE PREFLIGHT (the gate's SECOND step) ----------
   // `verter_session/bf2-authoritative` (now ON for every archive — see `buildNextestArchiveArgs`) gates 45
   // tests, including the ENTIRE `svelte_official_conformance_gate` suite: the tests that actually compare
-  // Verter's Svelte output against the pinned official `svelte@5.56.8` oracle. Those tests realize their
+  // Verter's Svelte output against the pinned official `svelte@5.56.10` oracle. Those tests realize their
   // Vue/Svelte oracles OFFLINE from a gitignored local npm cache (`.oracle-npm-cache`, warmed from the
   // network ONLY by the explicit `node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`, never by this gate). An
   // absent or unusable cache does not make those tests fail loudly on their own: the harness records the

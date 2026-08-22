@@ -1,6 +1,6 @@
 //! Unit tests for the span-bearing Svelte CSS parser: every node kind carries
 //! ABSOLUTE byte spans into the original component source, node payloads match
-//! the official `svelte@5.56.3` `read/style.js` reader, and a malformed body
+//! the official `svelte@5.56.10` `read/style.js` reader, and a malformed body
 //! returns a typed error (never a panic).
 
 use crate::svelte::runtime::css::parse::parse_style_body;

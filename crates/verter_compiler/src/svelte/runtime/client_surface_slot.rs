@@ -29,7 +29,7 @@ pub(super) struct SlotPlacementFacts<'a> {
 /// attr-bearing host — regular element, component, or `<svelte:*>` special — can
 /// quietly route a `slot` attribute past the official disposition.
 ///
-/// The official `svelte@5.56.3` disposition (`validate_slot_attribute`, driven here
+/// The official `svelte@5.56.10` disposition (`validate_slot_attribute`, driven here
 /// from the typed IR node kinds plus the three lowering-recorded placement-fact sets —
 /// never name/text sniffing):
 ///
@@ -165,7 +165,7 @@ pub(super) fn validate_slot_placement(
 /// a spread is `slot_element_invalid_attribute`. Duplicate attributes are the
 /// parse-level `attribute_duplicate` (upstream). A `<slot let:x>` (the
 /// producer-side provider binding) is official-ACCEPTED syntax whose PINNED
-/// official output is INVALID: svelte@5.56.3 emits a component-instance-scope
+/// official output is INVALID: svelte@5.56.10 emits a component-instance-scope
 /// `$.derived_safe_equal(() => $$slotProps.x)` reading an UNBOUND `$$slotProps`
 /// (bound only inside a component slot-content callback) — a guaranteed runtime
 /// `ReferenceError`. Verter INTENTIONALLY refuses it on the attribute inventory

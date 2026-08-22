@@ -57,7 +57,7 @@ const EXPECTED_BACKENDS: [&str; 2] = ["client", "server"];
 fn oracle_pin_version(lib_src: &str) -> String {
     for line in lib_src.lines() {
         let t = line.trim();
-        // `export const SVELTE_ORACLE_VERSION = "5.56.3";`
+        // `export const SVELTE_ORACLE_VERSION = "5.56.10";`
         if let Some(rest) = t.strip_prefix("export const SVELTE_ORACLE_VERSION") {
             let after_eq = rest.split('=').nth(1).expect("pin assignment has `=`");
             let quoted = after_eq.trim().trim_end_matches(';').trim();
@@ -714,14 +714,14 @@ fn lockfile_parser_extracts_the_bare_resolved_version() {
     let lock = "\
   '@sveltejs/acorn-typescript@1.0.10(acorn@8.16.0)':
     resolution: {integrity: sha512-aaa==}
-  oxfmt@0.52.0(svelte@5.56.3):
+  oxfmt@0.52.0(svelte@5.56.10):
     resolution: {integrity: sha512-bbb==}
-  svelte@5.56.3:
+  svelte@5.56.10:
     resolution: {integrity: sha512-ccc==}
 ";
     assert_eq!(
         lockfile_svelte_version(lock).as_deref(),
-        Some("5.56.3"),
+        Some("5.56.10"),
         "must extract the bare resolved svelte version, ignoring peer-suffixed entries"
     );
 }
@@ -732,10 +732,10 @@ fn lockfile_guard_discriminates_a_version_bump() {
     // the guard asserts must NOT hold — proving a bump fails the guard.
     let bumped_lock = "  svelte@5.99.0:\n    resolution: {integrity: sha512-zzz==}\n";
     let resolved = lockfile_svelte_version(bumped_lock).expect("resolved version");
-    let pin = oracle_pin_version("export const SVELTE_ORACLE_VERSION = \"5.56.3\";\n");
+    let pin = oracle_pin_version("export const SVELTE_ORACLE_VERSION = \"5.56.10\";\n");
     assert_ne!(
         resolved, pin,
-        "a lockfile svelte bump (5.99.0) must NOT equal the pin (5.56.3) — \
+        "a lockfile svelte bump (5.99.0) must NOT equal the pin (5.56.10) — \
          the guard would fail, as required"
     );
 }

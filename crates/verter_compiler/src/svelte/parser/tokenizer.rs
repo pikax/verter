@@ -106,7 +106,7 @@ fn unclosed_style_content_ends_at_boundary(content: &str) -> bool {
 /// The well-formedness classification of a close tag's boundary (the bytes after `</`),
 /// produced by [`SvelteParser::classify_close_boundary`]. The malformed variants each map
 /// to a distinct official parse-phase code so every close-tag boundary fails closed with
-/// the exact code the pinned `svelte@5.56.3` compiler emits.
+/// the exact code the pinned `svelte@5.56.10` compiler emits.
 enum CloseBoundary {
     /// A well-formed close: a name followed by optional whitespace then `>`. The caller
     /// reads the name separately (via `close_tag_name_bytes`) and applies match / ancestor
@@ -2245,7 +2245,7 @@ impl<'a> SvelteParser<'a> {
             // immediately followed by `/`) is therefore consumed AS the value, so `id=/>`
             // parses as `id="/"` + a NORMAL `>` close (the element stays open ⇒
             // `element_unclosed`), NOT a self-close — whereas `id=x/>` reads value `x` then
-            // self-closes at `/>`, exactly as the pinned `svelte@5.56.3` parser does.
+            // self-closes at `/>`, exactly as the pinned `svelte@5.56.10` parser does.
             let mut p = from;
             while p < self.len() {
                 let c = self.at(p);

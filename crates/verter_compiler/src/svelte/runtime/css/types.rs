@@ -1,6 +1,6 @@
 //! The span-bearing Svelte CSS AST + the per-`<style>` scope-plan side table.
 //!
-//! The AST mirrors the official `svelte@5.56.3` CSS AST node family
+//! The AST mirrors the official `svelte@5.56.10` CSS AST node family
 //! (`phases/1-parse/read/style.js` — `StyleSheet` / `Rule` / `Atrule` /
 //! `SelectorList` / `ComplexSelector` / `RelativeSelector` / `Combinator` /
 //! the simple-selector nodes / `Block` / `Declaration`) with one Rust-shape

@@ -45,7 +45,7 @@ pub enum ClientCompileError {
     /// The component uses a runtime surface this backend does not yet emit — fails
     /// closed with the typed reason (never a silent empty module).
     Unsupported(UnsupportedSvelteRuntimeSurface),
-    /// The component is MALFORMED Svelte the official `svelte@5.56.3` compiler also
+    /// The component is MALFORMED Svelte the official `svelte@5.56.10` compiler also
     /// COMPILE-ERRORS (a duplicate declaration, a `$`-prefixed binding, a duplicate /
     /// mis-`context`-ed `<script>`, an invalid HTML placement, a global `$foo`
     /// reference). Accepting it would change the observable contract from "compile

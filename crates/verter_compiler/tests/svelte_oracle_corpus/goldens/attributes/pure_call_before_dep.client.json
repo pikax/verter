@@ -1,7 +1,7 @@
 {
   "slug": "attributes/pure_call_before_dep.svelte",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/client",

@@ -8,7 +8,7 @@
 //! - [`serialize_clean_items`] — the HTML-string skeleton (the `$.from_html` backtick
 //!   argument): the official `stringify` output.
 //! - [`objectify_region`] — the `fragments: 'tree'` `$.from_tree` array literal: the
-//!   `svelte@5.56.3` `Template.as_tree` / `objectify` mirror (a JS array literal
+//!   `svelte@5.56.10` `Template.as_tree` / `objectify` mirror (a JS array literal
 //!   instead of a backtick string; a rendered `<!>` anchor is a sparse-array hole,
 //!   a text child decodes to `node.data`, esrap's non-multiline array/object bytes).
 
@@ -263,7 +263,7 @@ fn collect_static_attrs(
     // The official `bind:group` form emits a static `value="X"` as a runtime
     // `input.value = input.__value = 'X'` write (the group-value `__value` source),
     // NOT a baked static `value` attr — so a `value` on a `bind:group` input is pulled
-    // OUT of the cloned skeleton (the pinned svelte@5.56.3 group template is a bare
+    // OUT of the cloned skeleton (the pinned svelte@5.56.10 group template is a bare
     // `<input type="radio"/>`).
     let has_group_bind = attrs
         .iter()
@@ -365,7 +365,7 @@ fn collect_static_attrs(
 
 // ── `$.from_tree` objectification (the CSP-safe `fragments: 'tree'` factory) ──
 //
-// A faithful port of `svelte@5.56.3`'s `Template.as_tree` / `objectify`
+// A faithful port of `svelte@5.56.10`'s `Template.as_tree` / `objectify`
 // (`transform-template/template.js`): the SAME cleaned-item sequence the HTML-string
 // serializer consumes is emitted as a JS ARRAY LITERAL instead of a backtick string.
 // The two representations bake identical attributes (the shared [`collect_static_attrs`])

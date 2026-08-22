@@ -4,7 +4,7 @@
 //!
 //! The gate consumes one parser-owned, encounter-ordered defect stream (close-tag +
 //! strict-parse + parse-domain reject facts) and selects the minimum semantic-order
-//! unsuppressed defect — matching the official `svelte@5.56.3` compiler, which stops at the
+//! unsuppressed defect — matching the official `svelte@5.56.10` compiler, which stops at the
 //! FIRST parse error. Two regressions this gate has historically carried are FORBIDDEN:
 //!   (a) MIXED-UNIT / SPAN arbitration — picking the defect with the smallest `span.start`
 //!       (a byte offset), so a late-PROVEN outer defect anchored at an earlier span (an
@@ -160,7 +160,7 @@ fn gate_official_code_equals_the_encounter_order_pick_across_the_curated_set() {
     // across the parser's three fact rails — for every curated multi-defect case. This is the
     // architecture's promise; it fails if any rail is arbitrated by something other than
     // encounter order. Each case is a genuine multi-defect reject (verified against the pinned
-    // svelte@5.56.3).
+    // svelte@5.56.10).
     let cases: &[(&str, &str)] = &[
         // inner stray close (discovered first) vs outer EOF-unclosed.
         (

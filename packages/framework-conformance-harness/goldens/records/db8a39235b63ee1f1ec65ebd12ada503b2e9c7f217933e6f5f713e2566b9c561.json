@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 3,
+  "framework": "vue",
+  "domain": {
+    "upstream": "https://github.com/vuejs/core",
+    "commit": "f11c8f2639ce15559d64ea054e409081bd8a0ce1",
+    "tree": "980693b602cff54d492a1d6ada18470596cbf978",
+    "packageVersion": "3.6.0-rc.5"
+  },
+  "packageLockSha256": "4c3cc2fb175c4cba390e319aeae04dce6252ac818a2045f8383a040b488430a2",
+  "realizedClosureSha256": "b85a65e7d21c0470796a9860a2c1f5b1cf5f3353679003171c08275654922b85",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "f50dc68ff765b30822156a3585a3996bf4d45a11918ff3798a9ff9c054feb6bf",
+    "commit": "01c6e12b4e0ad5c41a493d13b180f1432943204a",
+    "tree": "d87148edb0cc8a961e75cc29b74917c6977cf86b",
+    "worktreeDirty": false,
+    "implementationSha256": "03d67451c2b52d0f999322e1f7c951f21b5f3ff21848566e6b5694c08244bdb8"
+  },
+  "fixture": {
+    "path": "fixtures/vue/props-emit.vue",
+    "sha256": "31e148d706cd3999fe256eee8a3a7f7aad6a757547dd55ec69a61c303b301652"
+  },
+  "options": {
+    "backend": "ssr",
+    "sourceMap": true,
+    "isProd": true,
+    "transformAssetUrls": {
+      "includeAbsolute": true
+    }
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "f38ba365d307751365a9be8fb9a3b2504a480b090af28fc1a2bfcbc608e4d60e",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "544a4ee996e15d0b53df35fef042f0f16fc6e8fd8b22e219124054bd0881d760"
+  },
+  "code": "\nconst _sfc_main = {\n  __name: 'props-emit',\n  props: {\n  label: { type: String, required: true },\n  disabled: { type: Boolean, default: false },\n},\n  emits: [\"toggle\"],\n  setup(__props, { expose: __expose, emit: __emit }) {\n  __expose();\n\nconst props = __props;\nconst emit = __emit;\n\nfunction onClick() {\n  emit(\"toggle\", !props.disabled);\n}\n\nconst __returned__ = { props, emit, onClick }\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })\nreturn __returned__\n}\n\n}\nimport { mergeProps as _mergeProps } from \"vue\"\nimport { ssrRenderAttrs as _ssrRenderAttrs, ssrInterpolate as _ssrInterpolate } from \"vue/server-renderer\"\n\nfunction ssrRender(_ctx, _push, _parent, _attrs, $props, $setup, $data, $options) {\n  _push(`<button${\n    _ssrRenderAttrs(_mergeProps({ disabled: $props.disabled }, _attrs))\n  }>${\n    _ssrInterpolate($props.label)\n  }</button>`)\n}\n_sfc_main.ssrRender = ssrRender\nexport default _sfc_main",
+  "map": {
+    "version": 3,
+    "sources": [
+      "fixtures/vue/props-emit.vue"
+    ],
+    "sourcesContent": [
+      "<script setup>\nconst props = defineProps({\n  label: { type: String, required: true },\n  disabled: { type: Boolean, default: false },\n});\nconst emit = defineEmits([\"toggle\"]);\n\nfunction onClick() {\n  emit(\"toggle\", !props.disabled);\n}\n</script>\n\n<template>\n  <button :disabled=\"disabled\" @click=\"onClick\">{{ label }}</button>\n</template>\n"
+    ],
+    "names": [],
+    "mappings": ";;;;;;;;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,OAGZ;AACF,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,MAAuB;;AAEpC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACnB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;AACjC;;;;;;;;;;;;;kCAIW,QAAQ,EAAE,eAAQ;;oBAAsB,YAAK"
+  }
+}

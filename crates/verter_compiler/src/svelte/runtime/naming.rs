@@ -1,11 +1,11 @@
 //! The component-function name derivation — the pinned official
-//! `svelte@5.56.3` `get_component_name` + `Scope.generate` rule.
+//! `svelte@5.56.10` `get_component_name` + `Scope.generate` rule.
 
 use rustc_hash::FxHashSet;
 
 use super::SvelteRuntimeOptions;
 
-/// The pinned official `svelte@5.56.3` reserved-word set (`RESERVED_WORDS`,
+/// The pinned official `svelte@5.56.10` reserved-word set (`RESERVED_WORDS`,
 /// `src/utils.js`) — `Scope.generate` suffixes a `_N` counter until the name is
 /// none of these. A generated component-function name equal to a reserved word is
 /// invalid JS, so `var` / `class` / `await` / … deconflict to `var_1` / ….
@@ -61,7 +61,7 @@ const RESERVED_WORDS: &[&str] = &[
 ];
 
 /// Derive the component-function name, matching the pinned official
-/// `svelte@5.56.3` derivation exactly (`get_component_name` then
+/// `svelte@5.56.10` derivation exactly (`get_component_name` then
 /// `module.scope.generate`).
 ///
 /// Official `get_component_name(filename)`: split the filename on `/` or `\`,
@@ -95,7 +95,7 @@ pub(super) fn derive_component_name(
 /// The official `get_component_name(filename)` — the filename-derived component
 /// name BEFORE identifier sanitization.
 ///
-/// Faithful to `svelte@5.56.3` `get_component_name`: from the basename, drop the
+/// Faithful to `svelte@5.56.10` `get_component_name`: from the basename, drop the
 /// FIRST `.svelte` literal occurrence (`basename.replace('.svelte', '')` — a JS
 /// string-pattern `replace` hits the first match only), NOT the last file extension.
 /// So `App.svelte` → `App`, `foo.bar.svelte` → `foo.bar`, `index.svelte` → `index`,
@@ -149,7 +149,7 @@ fn component_name_from_filename(filename: &str) -> String {
     }
 }
 
-/// The official `svelte@5.56.3` `hash(str)` (`src/compiler/utils.js`) — the djb2-XOR string
+/// The official `svelte@5.56.10` `hash(str)` (`src/compiler/utils.js`) — the djb2-XOR string
 /// hash a `<svelte:head>`'s `$.head('<hash>', …)` scope key is built from (applied to the
 /// compile `filename`). Byte-for-byte faithful: strip carriage returns, seed `5381`, fold each
 /// UTF-16 code unit in REVERSE order (`((h << 5) - h) ^ code`, 32-bit signed wrapping), then
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn filename_fallback_matches_official_get_component_name() {
-        // svelte@5.56.3 `get_component_name` = `basename.replace('.svelte', '')` — JS
+        // svelte@5.56.10 `get_component_name` = `basename.replace('.svelte', '')` — JS
         // string-pattern replace drops the FIRST `.svelte` occurrence, NOT the last
         // file extension (`Path::file_stem`). Then capitalize the first char and pass
         // through `Scope.generate` (which sanitizes non-identifier chars to `_`).
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn svelte_hash_matches_official_over_head_fixture_filenames() {
-        // Byte-exact against the pinned `svelte@5.56.3` `hash(filename)` (the values the
+        // Byte-exact against the pinned `svelte@5.56.10` `hash(filename)` (the values the
         // committed `special/svelte_head_*` goldens' `$.head('<hash>', …)` carry). A drift here
         // is a structural conformance failure (the topology comparator signs the literal).
         assert_eq!(svelte_hash("special/svelte_head_html.svelte"), "1tufvvq");

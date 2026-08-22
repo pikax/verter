@@ -127,7 +127,7 @@ fn every_bind_contract_row_is_consciously_accounted_for() {
 
         // The closed expected (official_helper, support) for EVERY documented binding
         // name — a `..`-free exhaustive match (a new name hits the wildcard panic). The
-        // official helper is the REAL pinned `svelte@5.56.3` identity (oracle-verified),
+        // official helper is the REAL pinned `svelte@5.56.10` identity (oracle-verified),
         // PRESERVED even for runtime-unsupported rows; support decides runtime emission.
         use OfficialRuntimeHelper as O;
         use RuntimeSupport as S;
@@ -291,7 +291,7 @@ fn readonly_bindings_carry_the_read_direction() {
 #[test]
 fn runtime_helper_metadata_matches_the_pinned_oracle_shapes() {
     // The runtime columns the DOM-bind emitter consumes, pinned to the empirical
-    // svelte@5.56.3 shapes (oracle-probe-out.txt). A registry edit that flips a
+    // svelte@5.56.10 shapes (oracle-probe-out.txt). A registry edit that flips a
     // helper / arity / event / prelude is caught here.
     let row = |name: &str| {
         SVELTE_BIND_CONTRACTS
@@ -299,7 +299,7 @@ fn runtime_helper_metadata_matches_the_pinned_oracle_shapes() {
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("row {name}"))
     };
-    // The OFFICIAL helper identity per row (svelte@5.56.3 oracle), now a fact column
+    // The OFFICIAL helper identity per row (svelte@5.56.10 oracle), now a fact column
     // distinct from runtime support.
     assert_eq!(row("open").official_helper, OfficialRuntimeHelper::Property);
     assert_eq!(row("open").prop_event, "toggle");
@@ -349,7 +349,7 @@ fn runtime_helper_metadata_matches_the_pinned_oracle_shapes() {
 fn resolve_runtime_bind_routes_the_builtin_and_wide_families_per_the_oracle() {
     // The builtin form-control binds (NOT in the IDE contract) route to their
     // dedicated helpers with the host-specific prelude, matching the pinned
-    // svelte@5.56.3 shapes (oracle-probe-out.txt).
+    // svelte@5.56.10 shapes (oracle-probe-out.txt).
     let input_value = resolve_runtime_bind("value", "input").unwrap();
     assert_eq!(input_value.helper, RuntimeHelper::Value);
     assert_eq!(input_value.prelude, BindPrelude::RemoveInputDefaults);
@@ -426,7 +426,7 @@ fn resolve_runtime_bind_routes_the_builtin_and_wide_families_per_the_oracle() {
 
 /// The UNSUPPORTED, DEDICATED-helper rows ("wrong-helper" = the generic
 /// `$.bind_property` form would emit the WRONG helper for them): each official
-/// `svelte@5.56.3` helper is a DEDICATED helper, so a generic property emission would
+/// `svelte@5.56.10` helper is a DEDICATED helper, so a generic property emission would
 /// be runtime-broken. These rows are unsupported by the native client runtime today,
 /// so the runtime router FAILS THEM CLOSED (`resolve_runtime_bind` returns `None`).
 /// The IDE contract row STILL exists (the IDE type-checks the bind) and records the
@@ -506,7 +506,7 @@ fn unsupported_wrong_helper_rows_fail_closed_at_the_runtime_router() {
 fn unsupported_correct_helper_rows_fail_closed_at_the_runtime_router() {
     // `(name, host)` pairs whose official helper IS the generic `$.bind_property` form
     // but which are unsupported by the native runtime. The host is each name's
-    // empirically-pinned svelte@5.56.3 `binding_properties.valid_elements` member
+    // empirically-pinned svelte@5.56.10 `binding_properties.valid_elements` member
     // (verified against the pinned `phases/bindings.js`): indeterminate → input;
     // naturalWidth/naturalHeight → img; videoWidth/videoHeight → video.
     let property_helper_rows: &[(&str, &str)] = &[
@@ -550,7 +550,7 @@ fn unsupported_correct_helper_rows_fail_closed_at_the_runtime_router() {
 
 /// The contract-ORACLE structural guard: for EVERY row the runtime router actually
 /// emits (every `(name, host)` where `resolve_runtime_bind` returns `Some`), the
-/// emitted [`RuntimeHelper`] matches the dedicated `svelte@5.56.3` helper for that
+/// emitted [`RuntimeHelper`] matches the dedicated `svelte@5.56.10` helper for that
 /// bind. A future row that routes to a helper not matching the pinned official shape
 /// is caught here. Pinned to the empirically-probed official helper per name. (A
 /// routing can only ever carry an emittable `RuntimeHelper` by construction — there is
@@ -559,7 +559,7 @@ fn unsupported_correct_helper_rows_fail_closed_at_the_runtime_router() {
 fn every_runtime_routable_row_matches_the_pinned_official_helper() {
     use RuntimeHelper::*;
     // The pinned official helper per BIND NAME (verified against
-    // svelte@5.56.3). A name absent here that the router emits is a coverage
+    // svelte@5.56.10). A name absent here that the router emits is a coverage
     // gap the loop flags; a name present here whose row routes to a different
     // helper is a wrong-helper regression.
     let official_helper = |name: &str| -> Option<RuntimeHelper> {
@@ -659,7 +659,7 @@ fn every_runtime_routable_row_matches_the_pinned_official_helper() {
     // the runtime-routable surface incomplete. Cross-check each builtin pair
     // (`(name, host)`) against its pinned official helper + arity + prelude so a
     // future wrong-helper / wrong-prelude regression in the builtin arm of
-    // `resolve_runtime_bind` is caught here too. Verified against svelte@5.56.3
+    // `resolve_runtime_bind` is caught here too. Verified against svelte@5.56.10
     // (oracle CASES `hello_input` / `textarea_value` / select / `checked`).
     let builtin_routable: &[(&str, &str, RuntimeHelper, HelperArity, BindPrelude)] = &[
         // `<input bind:value>` — $.bind_value, get/set, clears form defaults.
@@ -730,7 +730,7 @@ fn every_runtime_routable_row_matches_the_pinned_official_helper() {
 /// carries the exact official code for a function-pair (SequenceExpression) target,
 /// and EVERY other bind (the wide-family rows AND the builtin form-control binds that
 /// default through `bind_target_policy`) accepts the function-pair form. Data-driven —
-/// no `name == "group"` hard-code. Verified against svelte@5.56.3 (BindDirective.js:133
+/// no `name == "group"` hard-code. Verified against svelte@5.56.10 (BindDirective.js:133
 /// throws `bind_group_invalid_expression` for any group SequenceExpression target).
 #[test]
 fn bind_target_policy_is_data_driven_and_group_only() {
@@ -791,7 +791,7 @@ fn bind_target_policy_is_data_driven_and_group_only() {
 /// helper `$.bind_focused`, with `host_scope: Universal` (svelte's `focused: {}` has no
 /// valid/invalid_elements ⇒ valid on EVERY host). The special-host bind backend flips it to RUNTIME-supported: the
 /// native client emits `$.bind_focused(host, set)` — the host is the element var on a
-/// regular element and `$.window` on the window host. Verified against svelte@5.56.3
+/// regular element and `$.window` on the window host. Verified against svelte@5.56.10
 /// (`<input bind:focused={x}>` emits `$.bind_focused(input, ($$value) => $.set(x,
 /// $$value))`; `<svelte:window bind:focused={f}>` emits `$.bind_focused($.window,
 /// ($$value) => $.set(f, $$value, true))`).

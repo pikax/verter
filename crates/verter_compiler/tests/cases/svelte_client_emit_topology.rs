@@ -5,7 +5,7 @@
 //! `scripts/svelte-golden-lib.mjs` extractors derive (the helper sequence/set/
 //! counts, the import topology, the export-fn shape, the `from_html` template
 //! skeletons + fragment flag, and the delegated event set), and compares it to the
-//! COMMITTED official golden JSON (regenerated from the pinned `svelte@5.56.3` by
+//! COMMITTED official golden JSON (regenerated from the pinned `svelte@5.56.10` by
 //! `scripts/gen-svelte-goldens.mjs`). It is BEHAVIOR/topology parity, NOT byte
 //! identity — whitespace and walk-strategy details are not pinned. Local IDENTIFIER
 //! SPELLINGS, however, ARE structural for this comparator (`expr_sig` signs `Id(name)`
@@ -372,7 +372,7 @@ const SUPPORTED_MATRIX: &[&str] = &[
 /// dynamic-attribute / boolean-DOM-property / `class:`-`style:` directive / autofocus
 /// surface. Each row runs through the IDENTICAL compile + OXC-parse + BYTE-PRECISE
 /// full-module comparison gate as the matrix above: the committed `attributes/<slug>.
-/// client.json` is the official oracle (regenerated from the pinned `svelte@5.56.3`),
+/// client.json` is the official oracle (regenerated from the pinned `svelte@5.56.10`),
 /// and Verter's normalized emitted module must equal `clientModule` exactly. This is
 /// the argument/offset/identifier-precise oracle for the attribute surface — the
 /// substring/helper-name checks the corpus shipped with could not see a
@@ -512,7 +512,7 @@ const SUPPORTED_ATTRIBUTES: &[&str] = &[
 /// `is_passive_event` default on the modern delegated `touchstart` / `touchmove` path.
 /// Each row runs the IDENTICAL compile + OXC-parse + AST-structural full-module
 /// comparison as the matrix/attribute corpora — the committed `events/<slug>.client.json`
-/// is the official `svelte@5.56.3` oracle. The full-module structural comparison signs
+/// is the official `svelte@5.56.10` oracle. The full-module structural comparison signs
 /// every call argument (booleans, `void 0`, nested wrapper calls), so a wrong wrapper
 /// ORDER, a missing/extra capture/passive positional, or a delegated-vs-direct mode drift
 /// fails here.
@@ -554,7 +554,7 @@ const SUPPORTED_EVENTS: &[&str] = &[
 /// The SUPPORTED CONTROL-FLOW BLOCKS — `{#if}` / `{#each}` / `{#await}` / `{#key}`.
 /// Each row runs the IDENTICAL compile + OXC-parse + AST-structural full-module
 /// comparison as the other corpora — the committed `blocks/<slug>.client.json` is the
-/// official `svelte@5.56.3` oracle. The structural comparison signs the block helper
+/// official `svelte@5.56.10` oracle. The structural comparison signs the block helper
 /// (`$.if`/`$.each`/`$.await`/`$.key`), its argument arity (the each FLAG literal, the
 /// `$.index` vs keyed key callback, the pending/then/catch slots, the `{:else}` fallback
 /// arrow), the branch-render `$$render(consequent, …)` chain, and the per-region
@@ -918,7 +918,7 @@ const SUPPORTED_COMPONENTS: &[&str] = &[
 /// keyed-each `animate:` animations, and element-position `{@attach}` attachments. Each
 /// row runs the IDENTICAL compile + OXC-parse + AST-structural full-module comparison as
 /// the other corpora — the committed `lifecycle/<slug>.client.json` is the official
-/// `svelte@5.56.3` oracle. The structural comparison signs every helper call argument
+/// `svelte@5.56.10` oracle. The structural comparison signs every helper call argument
 /// (the `$.transition` FLAG integer literal, the `$.animation` 3-arg arity with its
 /// literal `null`, the `$.action` `$$node`/`$$action_arg` closure params, the getter
 /// thunks), so a wrong flag, a wrong helper family (`$.transition` for an `animate:`),
@@ -1203,7 +1203,7 @@ const SUPPORTED_SPECIALS: &[&str] = &[
 /// accessors exist), and the `$host()` → `$$props.$$host` handler lowering.
 /// Each row runs the IDENTICAL compile + OXC-parse + full-module structural
 /// comparison as the corpora above — the committed
-/// `options/<slug>.client.json` is the pinned `svelte@5.56.3` oracle.
+/// `options/<slug>.client.json` is the pinned `svelte@5.56.10` oracle.
 const SUPPORTED_OPTIONS: &[&str] = &[
     // A string tag (`customElement="my-el"`) — the 5-arg open-shadow default
     // (`{ mode: 'open' }` arg5) + `customElements.define` AFTER the
@@ -1281,7 +1281,7 @@ const SUPPORTED_OPTIONS: &[&str] = &[
 /// The per-option EMISSION oracle corpus (A#7) — one row per `5m` compile option
 /// (namespace / fragments / preserveWhitespace / preserveComments / discloseVersion
 /// / name), each a minimal component whose EMITTED module is compared full-module
-/// structurally against its svelte@5.56.3 golden. This is the authoritative
+/// structurally against its svelte@5.56.10 golden. This is the authoritative
 /// emission coverage for the compile-options surface: every claimed-WORKING option
 /// rests on a real emitted-output comparison, never a plan-object / `root_factory`
 /// assertion. Options whose emitted-output difference is NOT covered here (an
@@ -1758,7 +1758,7 @@ const SUPPORTED_CSS: &[&str] = &[
     // NON-ASCII in an UNQUOTED attribute-selector value (`[data-x=café]`): the
     // reject-reader + the scoping parser must step whole UTF-8 chars (a byte
     // step lands `codepoint_at` on a continuation byte → char-boundary panic).
-    // svelte@5.56.3 accepts + scopes; the div retains + bakes the hash.
+    // svelte@5.56.10 accepts + scopes; the div retains + bakes the hash.
     "css/nonascii_attr_selector_value",
     // ── the `<slot>` outlet projection (official `SlotElement` block semantics) ──
     // A selector matching an element INSIDE the slot fallback: kept + the
@@ -7113,7 +7113,7 @@ fn supported_options_cover_the_custom_element_corpus() {
 fn supported_compile_options_cover_the_per_option_emission_corpus() {
     // The per-option EMISSION oracle corpus (A#7) is the authoritative emission
     // coverage for the `5m` compile-options surface: every claimed-WORKING option
-    // has a full-module structural comparison against its svelte@5.56.3 golden. A
+    // has a full-module structural comparison against its svelte@5.56.10 golden. A
     // dropped row silently removes an option's emission coverage. Every non-custom
     // `options/*` fixture that is NOT the fail-closed vertical must be enumerated
     // (the `fragments_tree_html` html-tree row lives in SUPPORTED_FIXTURES).
@@ -7939,7 +7939,7 @@ fn helper_sequence_masking_ignores_helper_shaped_strings() {
 //
 // The generator mechanically enumerates the native-client codegen surface over three
 // orthogonal axes — value-expression SHAPE × TARGET × REACTIVITY — and pins the
-// OFFICIAL pinned-`svelte@5.56.3` module of every cell as the golden (under the
+// OFFICIAL pinned-`svelte@5.56.10` module of every cell as the golden (under the
 // `codegen/` subtree: `<slug>.svelte` + `<slug>.client.json` together). This gate
 // recompiles every cell with Verter, normalizes its emitted module the SAME way, and
 // asserts byte-equality (the argument/offset/identifier-precise oracle), plus the

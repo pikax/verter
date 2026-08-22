@@ -1,7 +1,7 @@
 /**
  * The COMPONENT-NAME PARITY corpus generator.
  *
- * For the sources `svelte@5.56.3` COMPILES, Verter deconflicts a component's `name`
+ * For the sources `svelte@5.56.10` COMPILES, Verter deconflicts a component's `name`
  * option against the runtime-binding surface and REPRODUCES svelte's own emitted name
  * (`get_component_name` → `module.scope.generate`, reserving
  * `references ∪ declarations ∪ conflicts`). The in-crate projection
@@ -177,7 +177,7 @@ function constructCases() {
       source: "class PP { constructor(public X: number) {} }",
       probes: ["PP", "X"],
     },
-    // A class index signature CRASHES pinned svelte@5.56.3 (an uncoded TypeError, NOT a
+    // A class index signature CRASHES pinned svelte@5.56.10 (an uncoded TypeError, NOT a
     // typed diagnostic). Verter's projection defensively erases it (the class name still
     // reserves) — a crash-parity gap, distinct from the typed reject-parity gaps.
     {

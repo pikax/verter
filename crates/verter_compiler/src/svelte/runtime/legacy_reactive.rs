@@ -1,7 +1,7 @@
 //! LEGACY (non-runes) `$:` reactive-statement analysis.
 //!
 //! Three cooperating pieces, each a structural mirror of the official
-//! `svelte@5.56.3` behaviour (scope pass → analyze pass → topological order):
+//! `svelte@5.56.10` behaviour (scope pass → analyze pass → topological order):
 //!
 //! 1. [`declare_reactive_assignment_targets`] — the IMPLICIT assignment-target
 //!    declaration pass. A top-level `$: <target> = …` whose target binds a name

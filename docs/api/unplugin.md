@@ -32,7 +32,7 @@ export default defineConfig({
 });
 ```
 
-Install and pin `svelte@5.56.3` in the application; emitted `svelte/internal/client` imports are deliberately resolved from the application's Svelte package.
+Install and pin `svelte@5.56.10` in the application; emitted `svelte/internal/client` imports are deliberately resolved from the application's Svelte package.
 
 For a mixed Vue/Svelte project:
 

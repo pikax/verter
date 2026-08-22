@@ -1,7 +1,7 @@
 {
   "slug": "attr-dec-escmix-cls-uq-dynel-ext-nest-n",
   "backend": "client",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "svelte/internal/client",

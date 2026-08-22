@@ -2,7 +2,7 @@
 //!
 //! Verter's tokenizer is intentionally infallible / recovery-based: it never panics and
 //! always emits a faithful tree, even on malformed markup. Each recovery point the
-//! official `svelte@5.56.3` STRICT parser rejects MUST push a typed
+//! official `svelte@5.56.10` STRICT parser rejects MUST push a typed
 //! [`SvelteStrictParseError`] so the official-reject gate fails closed (no `Main`)
 //! instead of accepting a divergent module. These named helpers are the SINGLE family
 //! every such recovery routes through — the static guard

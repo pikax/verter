@@ -183,7 +183,7 @@ jobs:
               - 'scripts/gen-svelte-name-parity-corpus.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               - 'crates/verter_compiler/tests/fixtures/svelte/name_parity_corpus.json'
-              - 'crates/verter_compiler/tests/fixtures/svelte/remove_typescript_nodes.5.56.3.js'
+              - 'crates/verter_compiler/tests/fixtures/svelte/remove_typescript_nodes.5.56.10.js'
               - 'crates/verter_compiler/tests/svelte_oracle_harness.rs'
               - 'crates/verter_compiler/tests/svelte_goldens_in_sync.rs'
               - 'crates/verter_compiler/src/svelte_oracle.rs'

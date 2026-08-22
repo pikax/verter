@@ -41,7 +41,7 @@ One directory per feature family:
 
 The committed goldens under `../goldens/` are the NORMALIZED helper-topology
 reference (structure + helper-call topology, NOT bytes), regenerated
-mechanically from the pinned `svelte@5.56.3` compiler. They are NEVER
+mechanically from the pinned `svelte@5.56.10` compiler. They are NEVER
 hand-edited.
 
 Regenerate / verify:

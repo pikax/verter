@@ -1,6 +1,6 @@
 //! The closed OFFICIAL-REJECT taxonomy: the [`CoreOfficialValidationRule`] enum (the
 //! official-error classes the §1.2-core surface must reject) and the [`OfficialRejection`]
-//! value (a rule class + the EXACT official `svelte@5.56.3` diagnostic code the violation
+//! value (a rule class + the EXACT official `svelte@5.56.10` diagnostic code the violation
 //! mirrors). Split out of `official_reject.rs` (the gate logic) as the pure rule/result
 //! vocabulary the gate, the reject-corpus matrix, and the parse-parity matrix all consume.
 
@@ -556,7 +556,7 @@ impl CoreOfficialValidationRule {
             }
         };
         format!(
-            "Svelte client emission rejects {detail} — the official `svelte@5.56.3` compiler \
+            "Svelte client emission rejects {detail} — the official `svelte@5.56.10` compiler \
              also compile-errors it (`{}`).",
             self.representative_official_code()
         )
@@ -587,7 +587,7 @@ impl CoreOfficialValidationRule {
 }
 
 /// One OFFICIAL-REJECT refusal: the [`CoreOfficialValidationRule`] class plus the EXACT
-/// official `svelte@5.56.3` diagnostic code the violation mirrors.
+/// official `svelte@5.56.10` diagnostic code the violation mirrors.
 ///
 /// Most rules map 1:1 to a single official code (their
 /// [`CoreOfficialValidationRule::representative_official_code`]); the

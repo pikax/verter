@@ -471,7 +471,7 @@ impl ImportPlan {
     /// The client import plan for a component in `legacy_mode`: the runes default
     /// plus the `svelte/internal/flags/legacy` side-effect import when the
     /// component is in legacy (non-runes) mode (`import 'svelte/internal/flags/legacy'`
-    /// — verified against `svelte@5.56.3`: a store-auto-subscription component
+    /// — verified against `svelte@5.56.10`: a store-auto-subscription component
     /// carries the legacy flag, a runes component does not).
     ///
     /// The async / tracing flags stay false: their emission (experimental async,

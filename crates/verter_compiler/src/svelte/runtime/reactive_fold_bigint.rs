@@ -9,7 +9,7 @@
 //!
 //! ## Why a cheap size guard (not try-and-catch)
 //!
-//! Official `svelte@5.56.3` evaluates two known BigInt operands by directly invoking the
+//! Official `svelte@5.56.10` evaluates two known BigInt operands by directly invoking the
 //! native operator (`binary['<<'](a, b) = a << b`, `binary['**'](a, b) = a ** b`) in the
 //! compiler's V8 process. V8 caps a BigInt at `kMaxLengthBits` = 2^30 significant bits; a
 //! result that would exceed it throws `RangeError: Maximum BigInt size exceeded` BEFORE

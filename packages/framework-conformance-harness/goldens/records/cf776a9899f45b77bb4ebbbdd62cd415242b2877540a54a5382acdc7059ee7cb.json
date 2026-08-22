@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 3,
+  "framework": "svelte",
+  "domain": {
+    "upstream": "https://github.com/sveltejs/svelte",
+    "commit": "56a036f4ce873a24ee6631a06d03d372523d7a9b",
+    "tree": "b7ced8028848a6c63bd8ff04177a43223ec89518",
+    "packageVersion": "5.56.10"
+  },
+  "packageLockSha256": "110dbc95cb501f60177dec712df81a85e5fc8b3dda7a2592dfe5bd26b21d2053",
+  "realizedClosureSha256": "af0bc09b425ff3d618c95b9b67f9a6702e16469b63a27abb834d7f169020911a",
+  "generator": {
+    "file": "bin/generate-goldens.mjs",
+    "sha256": "f50dc68ff765b30822156a3585a3996bf4d45a11918ff3798a9ff9c054feb6bf",
+    "commit": "01c6e12b4e0ad5c41a493d13b180f1432943204a",
+    "tree": "d87148edb0cc8a961e75cc29b74917c6977cf86b",
+    "worktreeDirty": false,
+    "implementationSha256": "03d67451c2b52d0f999322e1f7c951f21b5f3ff21848566e6b5694c08244bdb8"
+  },
+  "fixture": {
+    "path": "fixtures/svelte/legacy-slots.svelte",
+    "sha256": "78696aaa42b1f5398d7f0bc1ab426aaaecfc06cd31eef91afd5a10ccf2aa06b5"
+  },
+  "options": {
+    "generate": "server",
+    "runes": false,
+    "dev": false
+  },
+  "environment": {
+    "node": "v20.20.2",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "diagnostics": [],
+  "raw": {
+    "codeSha256": "2960dfff1a953f534d4e911e039fa81af3cb2ef22522629a125515d7fa2edd4d",
+    "mapPresent": true
+  },
+  "normalizer": {
+    "version": 6,
+    "implementationSha256": "a7b08b677b2f23e5a84b183e586d60624517c7923847b9e0e5b10899f607ee80",
+    "normalizedDigestSha256": "aee2f48d8ed89651ff5e6518cad2ac783f5b5f342230268a7e57acbb0b50c14b"
+  },
+  "code": "import * as $ from 'svelte/internal/server';\n\nexport default function Legacy_slots($$renderer, $$props) {\n\tlet title = $.fallback($$props['title'], \"Untitled\");\n\n\t$$renderer.push(`<div class=\"panel\"><header><!--[-->`);\n\n\t$.slot($$renderer, $$props, 'header', {}, () => {\n\t\t$$renderer.push(`${$.escape(title)}`);\n\t});\n\n\t$$renderer.push(`<!--]--></header> <main><!--[-->`);\n\t$.slot($$renderer, $$props, 'default', {}, null);\n\t$$renderer.push(`<!--]--></main></div>`);\n\t$.bind_props($$props, { title });\n}",
+  "map": {
+    "version": 3,
+    "names": [],
+    "sources": [
+      "legacy-slots.svelte"
+    ],
+    "sourcesContent": [
+      "<script>\n  export let title = \"Untitled\";\n</script>\n\n<div class=\"panel\">\n  <header>\n    <slot name=\"header\">{title}</slot>\n  </header>\n  <main>\n    <slot />\n  </main>\n</div>\n"
+    ],
+    "mappings": ";;0DAAA,CAAC;CACQ,IAAI,AAAA,KAAK,gCAAG,UAAU;;;;;8BAKN,KAAK;;;;;;;AAJtB,CAAC"
+  }
+}

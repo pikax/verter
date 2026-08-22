@@ -34,7 +34,7 @@ and fixture disposition are recorded in
   Zed, and Lapce adapters use the shared native client and LSP contracts, with
   each adapter's packaging limitations documented alongside its implementation.
 - **Svelte (experimental):** native **client** compilation is experimental and
-  pinned to `svelte@5.56.3`; it is usable for the in-scope covered fixtures,
+  pinned to `svelte@5.56.10`; it is usable for the in-scope covered fixtures,
   whose behavior is protected by runtime, conformance, and official-oracle
   tests. **SSR and hydration are not shipped** — they are post-merge follow-ups
   (the CSR/SSR hydration round-trip gate is a plan target, not a current

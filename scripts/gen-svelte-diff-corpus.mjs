@@ -6,7 +6,7 @@
  * pairwise/combinatorial set of MINIMAL `.svelte` fixtures across the
  * topology-relevant axes (root kind, text, attributes, directives, events,
  * blocks/regions, namespace/special contexts), then compiles each with the
- * PINNED official `svelte@5.56.3` compiler and writes a NORMALIZED golden that
+ * PINNED official `svelte@5.56.10` compiler and writes a NORMALIZED golden that
  * captures the EXPANDED topology schema the Rust differential matrix diffs
  * Verter's IR-derived candidate against.
  *

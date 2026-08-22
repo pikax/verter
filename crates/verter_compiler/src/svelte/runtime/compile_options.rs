@@ -6,7 +6,7 @@
 //!
 //! INLINE WINS per admitted key: an inline `<svelte:options namespace="html">` /
 //! `preserveWhitespace` OVERRIDES the corresponding compile option (matching the
-//! official `svelte@5.56.3` precedence). The resolver reads the TYPED AST only — the
+//! official `svelte@5.56.10` precedence). The resolver reads the TYPED AST only — the
 //! inline value is read through the shared parser value authority
 //! ([`options_namespace_value`] / [`options_boolean_value`]), never a raw rescan.
 //!
@@ -178,7 +178,7 @@ pub fn resolve_svelte_compile_options(
     // The compile-option fail-closed rejects (CompileProfile origin) — EXPLICIT
     // presence rejects, including a `false` / default-equivalent value.
     //
-    // `compatibility.componentApi`: svelte@5.56.3 accepts ONLY {4, 5} — `4` is the
+    // `compatibility.componentApi`: svelte@5.56.10 accepts ONLY {4, 5} — `4` is the
     // Svelte-4 instance-API compat FEATURE this backend refuses; `5` is the current
     // supported API. Any OTHER explicit value (`0`, `6`, …) is an official
     // `options_invalid_value` error, so it ALSO fails closed here (never resolves a

@@ -5,7 +5,7 @@
 //! dynamic / mixed expression attributes, spreads, `class:` / `style:` / `bind:` /
 //! `use:` / transition directives, and event handlers.
 //!
-//! Event handlers follow the official `svelte@5.56.3` model: the
+//! Event handlers follow the official `svelte@5.56.10` model: the
 //! `is_event_attribute` rule (`is_expression_attribute(attr) && name.starts_with('on')`,
 //! which accepts the quoted single-expression form `onclick="{...}"`), the
 //! `is_capture_event` event-name normalization (strip the trailing `capture`), and
@@ -340,7 +340,7 @@ fn single_expression_value_span(
 ///
 /// The literal decode is DECODE-ONLY (NO re-escaping): a mixed-attribute value is a
 /// runtime STRING the backend concatenates, never re-serialized HTML — so `&lt;`
-/// decodes to `<` and stays `<` (verified against svelte@5.56.3), NOT the skeleton
+/// decodes to `<` and stays `<` (verified against svelte@5.56.10), NOT the skeleton
 /// re-escape path [`super::entity_decode::escape_decoded_attr`] applies to a static
 /// attribute in the `from_html` template.
 ///

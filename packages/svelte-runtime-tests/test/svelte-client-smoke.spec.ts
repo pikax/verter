@@ -2,7 +2,7 @@
 //
 // Behavioral smoke for the native Svelte client emission (§1.2 conformance
 // target). It mounts Verter's EMITTED §1.2 module against the REAL pinned
-// `svelte@5.56.3` client runtime and asserts the observable DOM behavior:
+// `svelte@5.56.10` client runtime and asserts the observable DOM behavior:
 //   - the initial render shows `Hello world!` and `clicks: 0`;
 //   - editing the `<input>` (a `bind:value`) updates the `<h1>` reactively;
 //   - clicking the `<button>` (a delegated `onclick`) updates the count text.

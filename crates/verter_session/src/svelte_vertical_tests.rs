@@ -978,7 +978,7 @@ void title; void count; void onselect; void itemRow; void dispatch;
         &[
             (
                 "/workspace/node_modules/svelte/package.json",
-                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+                r#"{"name":"svelte","version":"5.56.10","types":"index.d.ts"}"#,
             ),
             (
                 "/workspace/node_modules/svelte/index.d.ts",
@@ -1137,7 +1137,7 @@ void direct; void one; void two; void fake;
         &[
             (
                 "/workspace/node_modules/svelte/package.json",
-                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+                r#"{"name":"svelte","version":"5.56.10","types":"index.d.ts"}"#,
             ),
             (
                 "/workspace/node_modules/svelte/index.d.ts",
@@ -1876,7 +1876,7 @@ fn svelte_inline_import_type_snippet_prop_resolves_typed_role() {
         &[
             (
                 "/workspace/node_modules/svelte/package.json",
-                r#"{"name":"svelte","version":"5.56.3","types":"index.d.ts"}"#,
+                r#"{"name":"svelte","version":"5.56.10","types":"index.d.ts"}"#,
             ),
             (
                 "/workspace/node_modules/svelte/index.d.ts",

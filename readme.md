@@ -26,7 +26,7 @@ Verter is a **full Vue compiler and toolchain** built in Rust: it compiles templ
 - **Built-in Linting**: ~186 lint rules across 12 categories (Vue, a11y, CSS, performance, security, SSR, and more) — runs natively in Rust, no ESLint needed
 - **MCP Server**: Built-in Model Context Protocol server with 49 Vue analysis tools for AI agents
 - **TypeScript Type Provider**: Delegates type checking to TSGO (fast Go binary) or tsserver (workspace TS version)
-- **Experimental Native Svelte Compilation**: Compiles a pinned, tested client-runtime surface against `svelte@5.56.3`; unsupported runtime features fail closed with typed diagnostics instead of producing successful placeholder modules
+- **Experimental Native Svelte Compilation**: Compiles a pinned, tested client-runtime surface against `svelte@5.56.10`; unsupported runtime features fail closed with typed diagnostics instead of producing successful placeholder modules
 - **Component-Meta Audit Footprint**: Opt-in per-request observability (loaded files, derivation graph, cache counters) with deterministic JSON serialization. See [docs/audit-footprint/](./docs/audit-footprint/).
 
 ### Generic Components

@@ -1,7 +1,7 @@
 {
   "slug": "univ-dyn-lit-attr-q-comp-ext-prune-m",
   "backend": "server",
-  "oracleVersion": "5.56.3",
+  "oracleVersion": "5.56.10",
   "imports": [
     {
       "source": "./Child.svelte",

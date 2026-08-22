@@ -1,5 +1,5 @@
 //! Unit tests for the scoped-CSS renderer — each construct pinned against the
-//! official `svelte@5.56.3` `phases/3-transform/css/index.js` behavior:
+//! official `svelte@5.56.10` `phases/3-transform/css/index.js` behavior:
 //! scope-class application (with the `:where(...)` specificity bump and the
 //! per-rule reset), `:global(...)` unwrapping, `:global { … }` block
 //! comment-wrapping, unused/empty rule pruning (whole-rule and per-selector),
@@ -234,7 +234,7 @@ fn closing_unused_comment_survives_adjacent_bare_global_unwrap() {
     // `.missing,:global x` — the prune closes its `/* (unused) ` comment with
     // an `appendRight`-affinity `*/` at the EXACT byte where the bare
     // `:global` token's content-only `update(start, end, "")` range begins.
-    // Official output (svelte@5.56.3): the comment close SURVIVES the update.
+    // Official output (svelte@5.56.10): the comment close SURVIVES the update.
     let (code, hash) = rendered(".missing,:global x { color: red; }");
     assert_eq!(code, "/* (unused) .missing,*/ x { color: red; }");
     // Should-NOT: a regression to `overwrite` clears the `*/` and the whole
@@ -573,7 +573,7 @@ fn star_selector_update_preserves_prune_close_at_its_start_boundary() {
     //
     //   /* (unused) .unused,*/.svelte-<hash> { color: red; }
     //
-    // (oracle-pinned against svelte@5.56.3). An `overwrite` would clear the
+    // (oracle-pinned against svelte@5.56.10). An `overwrite` would clear the
     // intro and LOSE the closing `*/` (an unbalanced comment swallowing the
     // whole rule); an `append` would keep the `*` (`*.svelte-<hash>`,
     // double-applying universal matching). Both mutations go RED here.
@@ -655,7 +655,7 @@ fn source_map_is_produced_only_on_demand_with_identical_code() {
 
 #[test]
 fn source_map_names_fall_back_to_unknown_and_basename_like_official() {
-    // Official svelte@5.56.3 first-hand: the css map rides magic-string's
+    // Official svelte@5.56.10 first-hand: the css map rides magic-string's
     // `generateMap({ source: options.filename, file: options.filename })`
     // over VALIDATED options (a missing filename defaults to `"(unknown)"`),
     // and magic-string emits the BASENAME (`file.split(/[/\\]/).pop()`) for
@@ -801,7 +801,7 @@ fn css_source_map_includes_ast_node_boundary_locations() {
 
 #[test]
 fn css_source_map_ast_boundary_mappings_are_all_exact() {
-    // Hard-checked first-hand against the official svelte@5.56.3 css.map for
+    // Hard-checked first-hand against the official svelte@5.56.10 css.map for
     // this same fixture. Both transforms register every CSS AST node start/end
     // (`addSourcemapLocation(node.start/end)` in 3-transform/css/index.js).
     // This test pins the complete correctness floor after that boundary
@@ -986,7 +986,7 @@ fn css_source_map_ast_boundary_mappings_are_all_exact() {
 
 #[test]
 fn nbsp_between_property_and_colon_still_renames_animation_keyframes() {
-    // Oracle-confirmed against svelte@5.56.3:
+    // Oracle-confirmed against svelte@5.56.10:
     // `.x{animation\u{a0}: spin 1s}@keyframes spin{}` parses the property as
     // `animation` (the `/[\s:]/` property scan stops at the NBSP), so the
     // Declaration visitor renames BOTH the value reference and the keyframes
@@ -1013,7 +1013,7 @@ fn nbsp_between_property_and_colon_still_renames_animation_keyframes() {
 
 #[test]
 fn type_selector_match_uses_unicode_case_fold_like_official() {
-    // Oracle-confirmed vs svelte@5.56.3: `<k>` + `\u{212A}{color:red}` (the
+    // Oracle-confirmed vs svelte@5.56.10: `<k>` + `\u{212A}{color:red}` (the
     // KELVIN SIGN selector) → `\u{212A}.svelte-hash{color:red}` — the
     // official TypeSelector compare is `element.name.toLowerCase() !==
     // name.toLowerCase()` (css-prune.js, FULL Unicode fold), and
@@ -1051,7 +1051,7 @@ fn escaped_global_keyword_fails_closed_not_wrong_offset_splice() {
     // `:\67 lobal(.x)` is a CSS-escaped `:global(`. The `:global(` removal
     // anchor adds the BYTE length of the literal keyword, but the escaped form
     // is longer than 8 bytes, so a byte splice lands mid-token and mangles the
-    // output. svelte@5.56.3 ITSELF mangles this (emits `al(.x{color:red}`), so
+    // output. svelte@5.56.10 ITSELF mangles this (emits `al(.x{color:red}`), so
     // there is no correct output to match — Verter fails closed instead of
     // emitting a wrong-offset splice. Against the pre-guard code this planned
     // Ok with a mangled `css_code`, so this discriminates.
