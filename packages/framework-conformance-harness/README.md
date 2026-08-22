@@ -162,7 +162,7 @@ follows.
   a negative-control arm each.
 - **Official-case coverage accounting** (`src/coverage-report.mjs`,
   `bin/coverage-report.mjs`): verifies every row of the BF1-ratified
-  `vue-official-cases.tsv` (2003 rows) and `svelte-official-cases.tsv` (3457
+  `vue-official-cases.tsv` (2003 rows) and `svelte-official-cases.tsv` (3475
   rows) against the pinned source checkouts. Exact mechanism: per-row
   path presence PLUS git object-hash content identity (the file/directory
   bytes the row was generated from are byte-identical to the pinned tree)
@@ -196,7 +196,7 @@ This is a bounded, honestly-scoped slice, not a claim of full framework
 conformance — see the charter's own "Scale and pacing guidance":
 
 - **Fixture corpus is small (6 fixtures, 48 golden cells)**, not the full
-  2003+3457-row official corpus. BF2 owns the harness MECHANISM; resolving
+  2003+3475-row official corpus. BF2 owns the harness MECHANISM; resolving
   every official case's actual disposition (imported/equivalent/etc.) is
   explicitly the later blocks' work (per the manifest's own
   `provisional_owner` column) — most manifest rows legitimately stay
@@ -239,7 +239,7 @@ node scripts/provision-oracle-npm-cache.mjs                                 # of
 # official-case coverage report (structural accounting always runs; content
 # verification against the pinned git checkouts requires the local clones):
 BF2_VUE_SOURCE=/path/to/vue-core-at-3adb2257... \
-BF2_SVELTE_SOURCE=/path/to/svelte-at-44a78137... \
+BF2_SVELTE_SOURCE=/path/to/svelte-at-56a036f4... \
 pnpm --filter @verter/framework-conformance-harness coverage-report
 ```
 

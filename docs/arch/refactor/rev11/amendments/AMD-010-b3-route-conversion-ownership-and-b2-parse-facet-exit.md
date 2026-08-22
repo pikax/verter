@@ -601,12 +601,15 @@ set directly from the two manifests on the prepared-against tree:
 | Manifest | Owner column | Value | Rows | Disposition |
 |---|---|---|---|---|
 | `evidence/framework-conformance/vue-official-cases.tsv` (2004 lines; `provisional_owner` = col 9) | `provisional_owner` | `B2/BV1` | **509** | all `blocked` |
-| `evidence/framework-conformance/svelte-official-cases.tsv` (3458 lines; `provisional_owner` = col 7) | `provisional_owner` | `B2/BS1` | **589** | all `blocked` |
+| `evidence/framework-conformance/svelte-official-cases.tsv` (3476 lines; `provisional_owner` = col 7) | `provisional_owner` | `B2/BS1` | **590** | all `blocked` |
 
-**Total 1098 rows, and every one is jointly owned.** The owner-column value
-distributions confirm there is no B2-sole row anywhere: Vue is `{BV1: 1494,
-B2/BV1: 509}`; Svelte is `{BS1: 2695, B2/BS1: 589, BF1: 144, BS1/B4: 29}`. All 1098
-B2-assigned rows currently read `blocked`.
+**Total 1099 rows, and every one is jointly owned.** (Re-verified against the
+svelte@5.56.10-regenerated manifest — see `svelte-case-identity-ledger.md`; the
+Svelte row/owner counts moved from the originally-prepared 3457/589/1098 to
+3475/590/1099, Vue is unaffected.) The owner-column value distributions confirm
+there is no B2-sole row anywhere: Vue is `{BV1: 1494, B2/BV1: 509}`; Svelte is
+`{BS1: 2706, B2/BS1: 590, BF1: 150, BS1/B4: 29}`. All 1099 B2-assigned rows
+currently read `blocked`.
 
 The "supported parse capability" restriction is exactly two cells, both owned solely
 by B2: `capability-matrix.tsv:2` (`VUE-PARSE-LOCAL`, `target_disposition = supported`)
@@ -628,7 +631,7 @@ publication, framework runtime semantics, or conformance corrections."
 (`charters/B2.md:10-13`). And the co-owners cannot help in time: `program-dag.toml`
 places `BV1` (`:111-115`) and `BS1` (`:117-121`) after `B4` (`:105-109`), which is
 itself after B2. **B2's exit as written cannot be met by B2 at its DAG position, for
-any of the 1098 rows.**
+any of the 1099 rows.**
 
 ### 4.2 Charter delta — `charters/B2.md:15-17`
 
@@ -876,13 +879,16 @@ distribution of `provisional_owner` × `disposition` over
 `svelte-official-cases.tsv` is exactly:
 
 ```
-589  B2/BS1   blocked
-144  BF1      not_applicable
-2695 BS1      blocked
+590  B2/BS1   blocked
+150  BF1      not_applicable
+2706 BS1      blocked
 29   BS1/B4   blocked
 ```
 
-The 144 `BF1` rows are **exactly** the 144 `not_applicable` rows — already
+(Re-verified against the svelte@5.56.10-regenerated manifest; originally 589/144/2695/29
+— see `svelte-case-identity-ledger.md`.)
+
+The 150 `BF1` rows are **exactly** the 150 `not_applicable` rows — already
 dispositioned under `contracts/conformance-goldens.md:11`, requiring no facet and no
 further work. The 29 `BS1/B4` rows are `blocked` but their owner column contains no
 `B2`, so B2's exit does not reach them. **Disposition:** neither set needs facet

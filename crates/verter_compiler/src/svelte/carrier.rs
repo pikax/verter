@@ -856,7 +856,7 @@ mod tests {
 
     /// A representative sample of official Svelte `compiler-errors`/`validator`
     /// STRICT-parse defects (pinned `svelte@5.56.10` oracle,
-    /// `sveltejs/svelte@44a7813730579b94004e182e5a67aab27aa9d2a6`): the carrier
+    /// `sveltejs/svelte@56a036f4ce873a24ee6631a06d03d372523d7a9b`): the carrier
     /// parser is intentionally forgiving/recovery-based, so `parse()` must
     /// still publish (never a hard reject — an editor mid-typing needs the
     /// recovered tree), but the strict-parse fact must still surface on the

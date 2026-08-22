@@ -15,6 +15,7 @@ import {
   parseCaseManifest,
   reEnumerateVueRows,
   reEnumerateSvelteRows,
+  reverseEnumerateSvelteRows,
 } from "../src/coverage-report.mjs";
 import { assertCheckoutPinned } from "../src/checkout-pin.mjs";
 import { VUE_DOMAIN, SVELTE_DOMAIN } from "../src/domain-pin.mjs";
@@ -29,8 +30,8 @@ function main() {
     const svelteStructure = accountManifestStructure("svelte-official-cases.tsv");
     if (vueStructure.rowCount !== 2003)
       throw new Error(`expected 2003 Vue rows, got ${vueStructure.rowCount}`);
-    if (svelteStructure.rowCount !== 3457)
-      throw new Error(`expected 3457 Svelte rows, got ${svelteStructure.rowCount}`);
+    if (svelteStructure.rowCount !== 3475)
+      throw new Error(`expected 3475 Svelte rows, got ${svelteStructure.rowCount}`);
     if (vueStructure.problems.length > 0)
       throw new Error(`Vue manifest problems: ${vueStructure.problems.join("; ")}`);
     if (svelteStructure.problems.length > 0)
@@ -46,16 +47,25 @@ function main() {
       const result = reEnumerateVueRows(vueSource, rows);
       vueEnumeration = { status: "ran", ...result };
     }
+    let svelteReverseEnumeration = {
+      status: "skipped",
+      reason: "BF2_SVELTE_SOURCE not set",
+    };
     if (svelteSource) {
       assertCheckoutPinned(svelteSource, SVELTE_DOMAIN);
       const rows = parseCaseManifest("svelte-official-cases.tsv");
       const result = reEnumerateSvelteRows(svelteSource, rows);
       svelteEnumeration = { status: "ran", ...result };
+      svelteReverseEnumeration = { status: "ran", ...reverseEnumerateSvelteRows(svelteSource, rows) };
     }
 
     return {
       vue: { structure: vueStructure, enumeration: vueEnumeration },
-      svelte: { structure: svelteStructure, enumeration: svelteEnumeration },
+      svelte: {
+        structure: svelteStructure,
+        enumeration: svelteEnumeration,
+        reverseEnumeration: svelteReverseEnumeration,
+      },
     };
   });
   console.log(JSON.stringify(report, null, 2));

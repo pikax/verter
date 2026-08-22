@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 
 import { EVIDENCE_ROOT } from "./paths.mjs";
+import { svelteManifest } from "../../../docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs";
 
 const VALID_DISPOSITIONS = new Set([
   "imported",
@@ -172,4 +173,39 @@ export function reEnumerateSvelteRows(svelteSourceRoot, rows) {
     else unresolvable.push(row.case_id);
   });
   return { total: rows.length, resolvable, unresolvable };
+}
+
+/**
+ * The MISSING reverse direction of coverage: does every upstream
+ * sample-directory / suite-sentinel that the generator's own enumeration
+ * rules WOULD produce a row for actually have one in the committed
+ * manifest — not merely "does every committed row still resolve upstream"
+ * (that is `reEnumerateSvelteRows` above; together the two directions are
+ * the bidirectional completeness check).
+ *
+ * Reuses the generator's own `svelteManifest()` walk rather than
+ * reimplementing "what counts as a case" a second time — a second scanner
+ * with its own idea of the enumeration rules would silently drift from the
+ * real one exactly the way `EXPECTED_SVELTE` drifted from the domain pin.
+ *
+ * Requires a local pinned checkout (env-paths.mjs) — callers must check
+ * availability and skip with an explicit reason when absent, never
+ * silently report success.
+ */
+export function reverseEnumerateSvelteRows(svelteSourceRoot, committedRows) {
+  const liveRows = svelteManifest(svelteSourceRoot);
+  const committedLocators = new Set(committedRows.map((row) => row.source_locator));
+  const liveLocators = new Set(liveRows.map((row) => row.source_locator));
+  const missingFromManifest = liveRows
+    .map((row) => row.source_locator)
+    .filter((locator) => !committedLocators.has(locator));
+  const goneFromUpstream = committedRows
+    .map((row) => row.source_locator)
+    .filter((locator) => !liveLocators.has(locator));
+  return {
+    liveTotal: liveRows.length,
+    committedTotal: committedRows.length,
+    missingFromManifest,
+    goneFromUpstream,
+  };
 }

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 const EXPECTED_VUE_OWNED: usize = 509;
-const EXPECTED_SVELTE_OWNED: usize = 589;
-const EXPECTED_TOTAL_OWNED: usize = 1_098;
+const EXPECTED_SVELTE_OWNED: usize = 590;
+const EXPECTED_TOTAL_OWNED: usize = 1_099;
 // A `parse()` call under `{ ignoreEmpty: false }` (`parse.spec.ts:243`,
 // "ignoreEmpty: false") selects a non-default `SFCParseOptions` toggle
 // Verter's carrier compiler has no equivalent for; the verify script now
@@ -15,7 +15,7 @@ const EXPECTED_UNVERIFIABLE: usize = 68;
 const EXPECTED_VUE_SHA256: &str =
     "620feadba653db459fddca73635a91b576413df7b22be68be50741bd70d7ef51";
 const EXPECTED_SVELTE_SHA256: &str =
-    "0ea5d53134f4b070cfdfd7442d063c19d67d74295fe85e43e907d037534822f4";
+    "0ba28efe7aafde6463d0a0977d8297561525d1c6d4161ffec33d0b8369eaaa3c";
 
 /// One recorded `- invocations:` line's parsed `key=\`value\`` pairs (the
 /// per-invocation expected/actual/variant/match detail this guard checks for
