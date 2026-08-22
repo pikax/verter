@@ -15,6 +15,7 @@ use crate::ast::types::{ChildrenMode, PropFlag, PropFlags};
 use crate::template::oxc::types::{ExpressionFlag, ExpressionFlags};
 
 use super::super::shared::helpers;
+use super::super::shared::inline_style::parse_style_declarations;
 
 // ======================== String transformation ========================
 
@@ -125,32 +126,22 @@ pub fn needs_quoted_key(key: &str) -> bool {
 /// Writes `{ "prop": "val", ... }` directly into `buf`.
 /// Falls back to a quoted string if the style text can't be parsed.
 pub fn emit_static_style_object(buf: &mut String, style: &str) {
-    let trimmed = style.trim();
-    if trimmed.is_empty() {
-        buf.push_str("{}");
-        return;
-    }
-
     // Collect declarations into a Vec, deduplicating keys (last wins, matching CSS cascade).
     // This matches Vue's parseStringStyle which uses a plain JS object for the same effect.
+    // Declarations are read from the shared CSS declaration-list parse
+    // entry point (`super::super::shared::inline_style`), never re-derived
+    // from raw bytes here — a hand-rolled `;`/`:` scan cannot tell a
+    // statement-separating `;` from one inside a quoted string value.
     let mut entries: Vec<(&str, &str)> = Vec::new();
-    for decl in trimmed.split(';') {
-        let decl = decl.trim();
-        if decl.is_empty() {
+    for (prop, val) in parse_style_declarations(style) {
+        if prop.is_empty() || val.is_empty() {
             continue;
         }
-        if let Some(colon_pos) = decl.find(':') {
-            let prop = decl[..colon_pos].trim();
-            let val = decl[colon_pos + 1..].trim();
-            if prop.is_empty() || val.is_empty() {
-                continue;
-            }
-            // Overwrite existing entry with same key (last wins)
-            if let Some(existing) = entries.iter_mut().find(|(k, _)| *k == prop) {
-                existing.1 = val;
-            } else {
-                entries.push((prop, val));
-            }
+        // Overwrite existing entry with same key (last wins)
+        if let Some(existing) = entries.iter_mut().find(|(k, _)| *k == prop) {
+            existing.1 = val;
+        } else {
+            entries.push((prop, val));
         }
     }
 
@@ -419,19 +410,22 @@ mod tests {
     }
 
     #[test]
-    fn style_obj_newlines_in_key() {
-        // Matches Vue official: { "{\n        padding": "'20px'" }
-        // The key must have newlines escaped in the JS string
+    fn style_obj_unparseable_garbage_yields_empty_object() {
+        // A bare `{` is not valid CSS declaration text — no property name
+        // can contain it. The naive `split(';')`/`find(':')` scanner this
+        // superseded didn't know that and silently smuggled the `{` and the
+        // newline after it into a fabricated key
+        // (`"{\n        padding": "'20px'"`); the shared grammar-aware
+        // parser correctly finds no valid declaration here and degrades to
+        // an empty object, rather than emitting garbage as if it were real
+        // CSS.
         let style = "{\n        padding: '20px'";
         let result = style_to_obj(style);
         assert!(
             !result.contains('\n'),
             "output must not contain literal newlines: {result:?}"
         );
-        assert_eq!(
-            result,
-            r#"{ "{\\n        padding": "'20px'" }"#.replace("\\\\n", "\\n")
-        );
+        assert_eq!(result, "{}");
     }
 
     #[test]

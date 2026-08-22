@@ -30,6 +30,7 @@ use oxc_ast::ast::{
     ArrowFunctionExpression, CallExpression, Expression, Function, Program, Statement,
 };
 use rustc_hash::FxHashSet;
+use verter_css_syntax::style_body_reject_code;
 use verter_span::Span;
 
 use super::cross_slot_redeclaration;
@@ -665,9 +666,7 @@ pub(crate) fn deferred_parse_defects_excluding_css(
 fn deferred_css_style_defects(source: &str, parsed: &ParsedSvelte) -> Vec<SelectedParseDefect> {
     let mut defects = Vec::new();
     for probe in &parsed.style_body_probes {
-        if let Some(code) =
-            super::css_reject::css_body_parse_error(source, probe.content_start as usize)
-        {
+        if let Some(code) = style_body_reject_code(source, probe.content_start as usize) {
             defects.push(SelectedParseDefect {
                 encounter_order: probe.encounter_order,
                 span: Span::new(

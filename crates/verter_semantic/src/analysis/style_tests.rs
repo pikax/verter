@@ -1708,3 +1708,193 @@ fn all_five_dialects_extract_disjoint_complete_classes_after_damage() {
         );
     }
 }
+
+// =============================================================================
+// `CssAnalysis.declarations` — per-declaration record (name_span, value_span,
+// selector_index, color_candidates), populated for every complete declaration.
+// =============================================================================
+
+/// A plain (non-`--`) declaration's value is retained in `declarations` — the
+/// gap this record closes. Before this record existed, a plain declaration's
+/// value text was not retained anywhere in `CssAnalysis`.
+#[test]
+fn test_declarations_populated_for_plain_property() {
+    let css = ".box { color: red; }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    assert_eq!(
+        css_analysis.declarations.len(),
+        1,
+        "a plain declaration must be recorded in `declarations`: {:?}",
+        css_analysis.declarations
+    );
+    let decl = &css_analysis.declarations[0];
+    assert_eq!(
+        &css[decl.name_span.start as usize..decl.name_span.end as usize],
+        "color"
+    );
+    assert_eq!(
+        &css[decl.value_span.start as usize..decl.value_span.end as usize],
+        "red"
+    );
+    assert!(decl.selector_index.is_some());
+    assert!(decl.color_candidates.is_empty());
+}
+
+/// Custom-property declarations are ALSO retained in `declarations` (both
+/// branches populate the shared record now — not just the `--`-prefixed one).
+#[test]
+fn test_declarations_populated_for_custom_property() {
+    let css = ":root { --color: blue; }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    assert_eq!(css_analysis.declarations.len(), 1);
+    let decl = &css_analysis.declarations[0];
+    assert_eq!(
+        &css[decl.name_span.start as usize..decl.name_span.end as usize],
+        "--color"
+    );
+    assert_eq!(
+        &css[decl.value_span.start as usize..decl.value_span.end as usize],
+        "blue"
+    );
+}
+
+/// A hex literal in a declaration value is classified as a color candidate.
+#[test]
+fn test_color_candidate_hex_literal() {
+    let css = ".box { color: #ff0000; }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    let decl = &css_analysis.declarations[0];
+    assert_eq!(decl.color_candidates.len(), 1);
+    let candidate = &decl.color_candidates[0];
+    assert_eq!(candidate.kind, ColorCandidateKind::Hex);
+    assert_eq!(
+        &css[candidate.span.start as usize..candidate.span.end as usize],
+        "#ff0000"
+    );
+    assert!(candidate.numeric_args.is_empty());
+}
+
+/// The verified discriminator: a comment INSIDE a color function's argument
+/// list. The current `color_info.rs` scanner re-slices the raw byte span and
+/// `.split(',')`/`.parse()`s it, so the comment breaks numeric parsing and
+/// silently produces zero usable arguments. The typed component-value walk
+/// skips `ComponentValue::Comment` entries structurally and extracts the
+/// numeric arguments correctly.
+#[test]
+fn test_color_candidate_rgb_function_numeric_args_skip_comment() {
+    let css = ".box { color: rgb(255, /* not blue */ 0, 0); }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    let decl = &css_analysis.declarations[0];
+    assert_eq!(decl.color_candidates.len(), 1);
+    let candidate = &decl.color_candidates[0];
+    assert_eq!(candidate.kind, ColorCandidateKind::Function);
+    assert_eq!(candidate.function_name.as_deref(), Some("rgb"));
+    assert_eq!(
+        candidate.numeric_args,
+        vec![
+            NumericArg::Number(255.0),
+            NumericArg::Number(0.0),
+            NumericArg::Number(0.0)
+        ]
+    );
+}
+
+/// `rgba`/`hsl`/`hsla` all match case-insensitively.
+#[test]
+fn test_color_candidate_function_names_case_insensitive_and_hsla() {
+    let css = ".box { color: HSLA(120, 50%, 50%, 0.5); }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    let decl = &css_analysis.declarations[0];
+    assert_eq!(decl.color_candidates.len(), 1);
+    let candidate = &decl.color_candidates[0];
+    assert_eq!(candidate.function_name.as_deref(), Some("hsla"));
+    assert_eq!(
+        candidate.numeric_args,
+        vec![
+            NumericArg::Number(120.0),
+            NumericArg::Percentage(50.0),
+            NumericArg::Percentage(50.0),
+            NumericArg::Number(0.5)
+        ]
+    );
+}
+
+/// A22: CSS relative-color syntax (`rgb(from red 255 0 0)`) is out of scope. The `from`/`red`
+/// identifiers must invalidate the WHOLE candidate's `numeric_args`, not just be skipped while
+/// the surrounding `255 0 0` numbers survive — a partial list would let `color_info.rs`
+/// fabricate a color for a shape this producer does not support.
+#[test]
+fn test_color_candidate_relative_color_syntax_invalidates_numeric_args() {
+    let css = ".box { color: rgb(from red 255 0 0); }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    let decl = &css_analysis.declarations[0];
+    assert_eq!(decl.color_candidates.len(), 1);
+    let candidate = &decl.color_candidates[0];
+    assert_eq!(candidate.function_name.as_deref(), Some("rgb"));
+    assert!(
+        candidate.numeric_args.is_empty(),
+        "relative-color syntax must invalidate the whole candidate, not leak a partial list"
+    );
+}
+
+/// A22: a nested math function (`calc()`) inside a color function's argument list is out of
+/// scope and must likewise invalidate the whole candidate.
+#[test]
+fn test_color_candidate_nested_calc_invalidates_numeric_args() {
+    let css = ".box { color: rgb(calc(255), 0, 0); }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().unwrap();
+
+    let decl = &css_analysis.declarations[0];
+    assert_eq!(decl.color_candidates.len(), 1);
+    let candidate = &decl.color_candidates[0];
+    assert!(
+        candidate.numeric_args.is_empty(),
+        "a nested calc() argument must invalidate the whole candidate"
+    );
+}
+
+/// Comments and strings never contribute a spurious color candidate: a
+/// string literal containing `#`-shaped text, and a comment containing
+/// `rgb(...)`-shaped text, are structurally excluded because the walk never
+/// visits `ComponentValue::Comment`/`ComponentValue::String` variants at all
+/// (never a byte mask over the raw text).
+#[test]
+fn test_color_candidates_exclude_comment_and_string_content() {
+    let css = ".box { content: \"#fake rgb(1,2,3)\"; }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().unwrap();
+    let content_decl = css_analysis
+        .declarations
+        .iter()
+        .find(|decl| &css[decl.name_span.start as usize..decl.name_span.end as usize] == "content")
+        .expect("content declaration recorded");
+    assert!(
+        content_decl.color_candidates.is_empty(),
+        "a quoted string must never contribute a color candidate: {:?}",
+        content_decl.color_candidates
+    );
+
+    let css_with_comment = ".box { color: red /* rgb(1,2,3) #fake */; }";
+    let analysis = analyze_css(css_with_comment);
+    let css_analysis = analysis.css.as_ref().unwrap();
+    let color_decl = &css_analysis.declarations[0];
+    assert_eq!(
+        color_decl.color_candidates.len(),
+        0,
+        "a comment must never contribute a color candidate: {:?}",
+        color_decl.color_candidates
+    );
+}

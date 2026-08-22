@@ -10,11 +10,11 @@ use verter_css_syntax::{
 use verter_span::Span;
 
 use super::style::{
-    compute_structured_specificity, AnalyzedAtRule, AnalyzedCssClass, AnalyzedCssId,
-    AnalyzedCustomProperty, AnalyzedSelector, AnalyzedSpecialPseudo, AnalyzedVarUsage, AtRuleKind,
-    AttributeOperator, AttributeSelector, CompoundSelector, CssAnalysis, CssVarFallback,
-    CssVarReference, SelectorCombinator, SelectorPseudoClass, SpecialPseudoKind,
-    StructuredSelector,
+    compute_structured_specificity, AnalyzedAtRule, AnalyzedColorCandidate, AnalyzedCssClass,
+    AnalyzedCssId, AnalyzedCustomProperty, AnalyzedDeclaration, AnalyzedSelector,
+    AnalyzedSpecialPseudo, AnalyzedVarUsage, AtRuleKind, AttributeOperator, AttributeSelector,
+    ColorCandidateKind, CompoundSelector, CssAnalysis, CssVarFallback, CssVarReference, NumericArg,
+    SelectorCombinator, SelectorPseudoClass, SpecialPseudoKind, StructuredSelector,
 };
 
 pub(super) fn project_style(
@@ -269,6 +269,13 @@ impl Projection<'_> {
         let name = self.source.slice(name_span).to_owned();
         let value_span = trim_value_span(self.source, value);
         let var_references = collect_var_references(self.source, value.values());
+        let color_candidates = collect_color_candidates(self.source, value.values());
+        self.analysis.declarations.push(AnalyzedDeclaration {
+            name_span,
+            value_span,
+            selector_index,
+            color_candidates,
+        });
         if name.starts_with("--") {
             self.analysis
                 .custom_properties
@@ -497,6 +504,116 @@ fn collect_var_references(source: &CssSource, values: &[ComponentValue]) -> Vec<
         }
     }
     output
+}
+
+/// Walks a declaration value's own `ComponentValue` tree for color-literal
+/// candidates: `#`-prefixed hash tokens and `rgb`/`rgba`/`hsl`/`hsla`
+/// function calls (matched case-insensitively). Comment and string exclusion
+/// is structural — the match below has no arm for
+/// `ComponentValue::Comment`/`ComponentValue::String`, so their content is
+/// never visited, never a byte mask ported from a raw-substring scan.
+fn collect_color_candidates(
+    source: &CssSource,
+    values: &[ComponentValue],
+) -> Vec<AnalyzedColorCandidate> {
+    let mut output = Vec::new();
+    collect_color_candidates_into(source, values, &mut output);
+    output
+}
+
+fn collect_color_candidates_into(
+    source: &CssSource,
+    values: &[ComponentValue],
+    output: &mut Vec<AnalyzedColorCandidate>,
+) {
+    for value in values {
+        match value {
+            ComponentValue::Token(token) if token.kind() == TokenKind::Hash => {
+                output.push(AnalyzedColorCandidate {
+                    span: token.span(),
+                    kind: ColorCandidateKind::Hex,
+                    function_name: None,
+                    numeric_args: Vec::new(),
+                });
+            }
+            ComponentValue::Function(function) => {
+                let name = source.slice(function.name_span());
+                if is_color_function_name(name) {
+                    output.push(AnalyzedColorCandidate {
+                        span: function.full_span(),
+                        kind: ColorCandidateKind::Function,
+                        function_name: Some(name.to_ascii_lowercase()),
+                        numeric_args: extract_numeric_args(source, function.values())
+                            .unwrap_or_default(),
+                    });
+                } else {
+                    // Not a color function itself — a color literal may
+                    // still be nested inside its arguments (e.g.
+                    // `linear-gradient(rgb(255, 0, 0), ...)`).
+                    collect_color_candidates_into(source, function.values(), output);
+                }
+            }
+            ComponentValue::Block(block) => {
+                collect_color_candidates_into(source, block.values(), output);
+            }
+            ComponentValue::Interpolation(interpolation) => {
+                collect_color_candidates_into(source, interpolation.values(), output);
+            }
+            ComponentValue::Token(_) | ComponentValue::String(_) | ComponentValue::Comment(_) => {}
+        }
+    }
+}
+
+fn is_color_function_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("rgb")
+        || name.eq_ignore_ascii_case("rgba")
+        || name.eq_ignore_ascii_case("hsl")
+        || name.eq_ignore_ascii_case("hsla")
+}
+
+/// Reads numeric arguments directly from the function's own
+/// `ComponentValue` list, skipping `Comment` entries structurally — never by
+/// re-slicing the candidate's raw byte span and `.split(',')`/`.parse()`ing
+/// it (the bug this record fixes: a comment between arguments breaks a
+/// raw-substring parse and silently drops every argument after it).
+///
+/// Returns `None` — invalidating the WHOLE candidate, never a truncated
+/// partial list — the instant ANY component isn't a `Number` token, a
+/// `Percentage` token, whitespace, a comma delimiter, or a comment: an
+/// identifier (`from`, CSS relative-color syntax), a nested function
+/// (`calc()`, `min()`), a block, an interpolation, or a string are all out
+/// of scope, and a candidate built from only the numbers that happen to
+/// surround an out-of-scope component would fabricate a color for a shape
+/// this producer does not actually support (e.g. `rgb(from red 255 0 0)`
+/// must not resolve to `rgb(255, 0, 0)`). Percentage tokens preserve their
+/// `%` suffix as [`NumericArg::Percentage`] (the `%` is stripped from the
+/// text but never divided out) so the caller can normalize a percentage
+/// scale distinctly from a bare number.
+fn extract_numeric_args(source: &CssSource, values: &[ComponentValue]) -> Option<Vec<NumericArg>> {
+    let mut args = Vec::new();
+    for value in values {
+        match value {
+            ComponentValue::Token(token) => match token.kind() {
+                TokenKind::Number => {
+                    let parsed = source.slice(token.span()).parse::<f64>().ok()?;
+                    args.push(NumericArg::Number(parsed));
+                }
+                TokenKind::Percentage => {
+                    let text = source.slice(token.span());
+                    let parsed = text.trim_end_matches('%').parse::<f64>().ok()?;
+                    args.push(NumericArg::Percentage(parsed));
+                }
+                TokenKind::Whitespace | TokenKind::Comma => {}
+                _ => return None,
+            },
+            ComponentValue::Comment(_) => {}
+            ComponentValue::Function(_)
+            | ComponentValue::Block(_)
+            | ComponentValue::Interpolation(_)
+            | ComponentValue::String(_) => return None,
+        }
+    }
+    Some(args)
 }
 
 fn build_var_reference(

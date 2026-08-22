@@ -6883,36 +6883,59 @@ fn html_attr_to_js_key(attr: &str) -> String {
 
 /// Convert a CSS inline style string to a JS object literal.
 ///
-/// `"color: red; font-size: 14px"` → `{"color":"red","fontSize":"14px"}`
+/// `"color: red; margin-left: 20px"` → `{"color":"red","margin-left":"20px"}`
+///
+/// Declarations are read from the shared CSS declaration-list parse entry
+/// point (`super::shared::inline_style`), never re-derived from raw bytes
+/// here — a hand-rolled `;`/`:` scan cannot tell a statement-separating `;`
+/// from one inside a quoted string value.
 fn css_to_js_object(css: &str) -> String {
     let mut result = String::from("{");
     let mut first = true;
-    for decl in css.split(';') {
-        let decl = decl.trim();
-        if decl.is_empty() {
+    for (prop, value) in super::shared::inline_style::parse_style_declarations(css) {
+        if prop.is_empty() || value.is_empty() {
             continue;
         }
-        if let Some(colon_pos) = decl.find(':') {
-            let prop = decl[..colon_pos].trim();
-            let value = decl[colon_pos + 1..].trim();
-            if prop.is_empty() || value.is_empty() {
-                continue;
-            }
-            if !first {
-                result.push(',');
-            }
-            first = false;
-            // Keep CSS property names in original kebab-case for SSR
-            // (Vue SSR emits {"margin-left":"20px"}, not {"marginLeft":"20px"})
-            result.push('"');
-            result.push_str(prop);
-            result.push_str("\":\"");
-            result.push_str(&escape_js_string(value));
-            result.push('"');
+        if !first {
+            result.push(',');
         }
+        first = false;
+        // Keep CSS property names in original kebab-case for SSR
+        // (Vue SSR emits {"margin-left":"20px"}, not {"marginLeft":"20px"})
+        result.push('"');
+        result.push_str(prop);
+        result.push_str("\":\"");
+        result.push_str(&escape_js_string(value));
+        result.push('"');
     }
     result.push('}');
     result
+}
+
+#[cfg(test)]
+mod css_to_js_object_tests {
+    use super::css_to_js_object;
+    use verter_css_syntax::parse_inline_style_declarations_thread_invocations;
+
+    // Discriminating positive (A17 row 8): a value containing a semicolon
+    // inside a quoted string must not be treated as a statement boundary —
+    // a real bug in the hand-rolled `split(';')` loop this superseded.
+    #[test]
+    fn css_to_js_object_quoted_semicolon_in_value_parses_correctly() {
+        let result = css_to_js_object(r#"content: "a;b"; color: red;"#);
+        assert_eq!(result, r#"{"content":"\"a;b\"","color":"red"}"#);
+    }
+
+    // Routing proof (A17 row 8): the shared declaration-list parser is
+    // invoked EXACTLY once per call — not zero (a private scanner still
+    // producing the output), not two-or-more (a redundant re-parse).
+    #[test]
+    fn css_to_js_object_shared_parser_invoked_exactly_once() {
+        let before = parse_inline_style_declarations_thread_invocations();
+        css_to_js_object("color: red; font-size: 14px");
+        let after = parse_inline_style_declarations_thread_invocations();
+        assert_eq!(after - before, 1);
+    }
 }
 
 /// Check if an HTML attribute is a boolean attribute.

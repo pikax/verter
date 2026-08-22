@@ -1114,29 +1114,30 @@ fn extract_style_vars_from_array(expr: &str) -> Vec<DynamicStyleVar> {
 /// Extract CSS variable definitions from a static `style` attribute value.
 ///
 /// Parses `"--color: red; --size: 10px; color: blue"` and extracts only `--*` declarations.
+///
+/// Declarations are read from the shared CSS declaration-list parse entry
+/// point (`verter_css_syntax::parse_inline_style_declarations` — the same
+/// one VDOM/SSR static-style codegen routes through), never re-derived from
+/// raw bytes here — a hand-rolled `;`/`:` scan cannot tell a
+/// statement-separating `;` from one inside a quoted string value.
 pub fn extract_static_style_vars(style_value: &str) -> Vec<StaticStyleVar> {
-    let mut results = Vec::new();
-
-    for decl in style_value.split(';') {
-        let decl = decl.trim();
-        if !decl.starts_with("--") {
-            continue;
-        }
-        if let Some(colon_pos) = decl.find(':') {
-            let name = decl[..colon_pos].trim();
-            let value = decl[colon_pos + 1..].trim();
-            if name.starts_with("--") {
-                let name_offset = (name.as_ptr() as usize - style_value.as_ptr() as usize) as u32;
-                results.push(StaticStyleVar {
-                    name: name.to_string(),
-                    value: value.to_string(),
-                    name_offset,
-                });
+    verter_css_syntax::parse_inline_style_declarations(style_value)
+        .into_iter()
+        .filter_map(|decl| {
+            let name_span = decl.name_span();
+            let name = &style_value[name_span.start as usize..name_span.end as usize];
+            if !name.starts_with("--") {
+                return None;
             }
-        }
-    }
-
-    results
+            let value_span = decl.value_span();
+            let value = &style_value[value_span.start as usize..value_span.end as usize];
+            Some(StaticStyleVar {
+                name: name.to_string(),
+                value: value.to_string(),
+                name_offset: name_span.start,
+            })
+        })
+        .collect()
 }
 
 /// Element namespace.
@@ -2954,6 +2955,32 @@ mod tests {
         assert_eq!(vars[0].value, "1");
         assert_eq!(vars[1].name, "--y");
         assert_eq!(vars[1].value, "2");
+    }
+
+    // Discriminating positive (A20): a value containing a semicolon inside a
+    // quoted string must not be treated as a statement boundary — the same
+    // bug class A17 fixes for VDOM/SSR (`template.rs:1120`'s prior
+    // `split(';')` loop).
+    #[test]
+    fn extract_static_style_vars_quoted_semicolon_in_value_parses_correctly() {
+        let vars = extract_static_style_vars(r#"--label: "a;b"; --color: red;"#);
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].name, "--label");
+        assert_eq!(vars[0].value, "\"a;b\"");
+        assert_eq!(vars[1].name, "--color");
+        assert_eq!(vars[1].value, "red");
+    }
+
+    // Routing proof (A20): the shared declaration-list parser is invoked
+    // EXACTLY once per call — not zero (a private scanner still producing
+    // the output), not two-or-more (a redundant re-parse, itself a
+    // parse-once violation).
+    #[test]
+    fn extract_static_style_vars_shared_parser_invoked_exactly_once() {
+        let before = verter_css_syntax::parse_inline_style_declarations_thread_invocations();
+        extract_static_style_vars("--color: red; --size: 10px; color: blue");
+        let after = verter_css_syntax::parse_inline_style_declarations_thread_invocations();
+        assert_eq!(after - before, 1);
     }
 
     // =========================================================================

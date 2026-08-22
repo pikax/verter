@@ -321,6 +321,23 @@ fn empty_second_style_body_still_reports_style_duplicate() {
     );
 }
 
+#[test]
+fn bare_unterminated_style_is_the_raw_block_strict_error_not_unexpected_eof() {
+    // NEGATIVE control — `verter_css_syntax::svelte_compat`'s isolated style-body reader is NOT
+    // a blanket "any `<style>` EOF ⇒ unexpected_eof": a BARE unterminated `<style>.a ` (no
+    // `</style>`) is flagged by the Svelte PARSER (not the style-body reader) as an unterminated
+    // RAW BLOCK (`css_expected_identifier`) at an earlier encounter order, which is what the FULL
+    // gate reports. (The isolated reader can report `unexpected_eof` for the same bytes in
+    // isolation — see `verter_css_syntax`'s own compat-profile test suite for the swallow-`</style>`
+    // shapes that DO win `unexpected_eof` through the full gate — but the winning gate code here
+    // is the raw-block strict error.)
+    assert_code(
+        "bare_unterminated_style_is_raw_block_strict_error",
+        "<script>let c = $state(0);</script>\n<style>.a ",
+        "css_expected_identifier",
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // (F3) `<svelte:options>` attribute / child-content EXACT codes. Upstream `read_options`
 //      (the Parser constructor's parse FINALIZATION, AFTER the root walk) validates the

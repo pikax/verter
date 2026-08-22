@@ -27,7 +27,7 @@ pub fn css_completions(
     let offset = line_index.position_to_offset(position)? as usize;
 
     // Find which style block we're in
-    let _style_block = blocks.iter().find(|b| {
+    let style_block = blocks.iter().find(|b| {
         b.tag_name == "style" && {
             let (cs, ce) = b.content_range();
             offset >= cs as usize && offset <= ce as usize
@@ -36,9 +36,32 @@ pub fn css_completions(
 
     let mut items = Vec::new();
 
-    // Offer custom properties and classes from analysis
+    // Offer custom properties and v-bind() reactive-binding completions from analysis — ONLY
+    // for the CURRENT (live) style block. Sealed full-identity join: missing or foreign producer
+    // identity (a stale analysis whose style entry no longer matches the block's live
+    // `block_ref` — reparsed/re-identified since `analysis` was computed) fails closed to ZERO
+    // completions here, the same join `is_declaration_value_position`/`selector_hover` perform —
+    // never a leak of a stale style entry's custom properties or bindings onto the live block.
+    //
+    // This join also stands in for `analysis.template`'s own freshness gate below:
+    // `FileAnalysisSnapshot.styles`/`.template` are always built together, from the same source
+    // read, in the same `get_analysis` call (see `verter_session::host_manage::analysis_io`) —
+    // there is no split-generation `FileAnalysisSnapshot` where `styles` is fresh and `template`
+    // is stale, or vice versa. `ArtifactBlockRef` equality proves BOTH the block id AND the
+    // artifact/parse-generation identity match (`artifact_identity` is content-addressed), so a
+    // matched `live_style` here proves the WHOLE snapshot — `template` included — was produced
+    // from the SAME parse generation as the live block; `template` has no per-block ref of its
+    // own to join against (an SFC has exactly one `<template>`), so it borrows this result.
+    let mut live_style_matches = false;
     if let Some(analysis) = analysis {
-        for style in analysis.styles.iter() {
+        let block_ref = style_block.block_ref.artifact_block_ref();
+        let live_style = analysis
+            .styles
+            .iter()
+            .find(|style| style.block_ref.as_ref() == Some(block_ref));
+        live_style_matches = live_style.is_some();
+
+        if let Some(style) = live_style {
             if let Some(css) = &style.css {
                 for prop in &css.custom_properties {
                     items.push(CompletionItem {
@@ -50,35 +73,27 @@ pub fn css_completions(
                     });
                 }
             }
-        }
 
-        // v-bind() completions for reactive bindings
-        for binding in &analysis.bindings {
-            if binding.is_reactive {
-                items.push(CompletionItem {
-                    label: format!("v-bind({})", binding.name),
-                    kind: Some(CompletionItemKind::SNIPPET),
-                    detail: Some(format!(
-                        "Bind to {} ({:?})",
-                        binding.name, binding.reactivity_kind
-                    )),
-                    insert_text: Some(format!("v-bind({})", binding.name)),
-                    ..Default::default()
-                });
+            // v-bind() completions for reactive bindings
+            for binding in &analysis.bindings {
+                if binding.is_reactive {
+                    items.push(CompletionItem {
+                        label: format!("v-bind({})", binding.name),
+                        kind: Some(CompletionItemKind::SNIPPET),
+                        detail: Some(format!(
+                            "Bind to {} ({:?})",
+                            binding.name, binding.reactivity_kind
+                        )),
+                        insert_text: Some(format!("v-bind({})", binding.name)),
+                        ..Default::default()
+                    });
+                }
             }
         }
     }
 
     // Check if we're in a property value context (after ':')
-    let content_before = &source[..offset];
-    let last_line = content_before.lines().last().unwrap_or("");
-    // Use text after last '{' to handle single-line rules like `.foo { border: .5px; }`
-    let context = if let Some(brace_pos) = last_line.rfind('{') {
-        &last_line[brace_pos + 1..]
-    } else {
-        last_line
-    };
-    let in_value = context.contains(':') && !context.contains(';');
+    let in_value = is_declaration_value_position(offset, style_block, analysis);
 
     if !in_value {
         // Offer common CSS property names
@@ -93,9 +108,11 @@ pub fn css_completions(
             });
         }
 
-        // Offer template class/ID completions when typing . or # in selector context
-        if let Some(analysis) = analysis {
-            if let Some(template) = analysis.template.as_deref() {
+        // Offer template class/ID completions when typing . or # in selector context — gated on
+        // `live_style_matches` (see the join comment above): a stale `analysis` must not leak
+        // template class/ID names computed against an earlier version of the file.
+        if live_style_matches {
+            if let Some(template) = analysis.and_then(|analysis| analysis.template.as_deref()) {
                 let byte_before = if offset > 0 {
                     source.as_bytes().get(offset - 1).copied()
                 } else {
@@ -152,6 +169,60 @@ pub fn css_completions(
     } else {
         Some(items)
     }
+}
+
+/// Whether `offset` sits inside a rule's declaration VALUE, read from the
+/// shared style-syntax parse — never a raw brace/colon/semicolon backward
+/// scan (that misclassifies e.g. a semicolon-shaped byte inside a quoted
+/// string value as a statement boundary). Structural signal: `offset` falls
+/// inside some selector's `rule_body_span` (is this a rule's declaration
+/// block at all) AND inside a `Complete` declaration's
+/// `name_span.end..=value_span.end` range (past the property name, at or
+/// before the end of its — possibly empty, still-being-typed — value).
+///
+/// **Fail-closed**, same join `selector_hover`/`document_colors` perform:
+/// the sealed `StyleBlockAnalysis.block_ref`, joined against the block's
+/// live `CarrierBlockView.block_ref`. `analysis: None`, OR no
+/// `analysis.styles` entry joins to the block's live `block_ref` (stale),
+/// OR the offset falls inside a declaration absent from `declarations`
+/// (incomplete/unparsed) all classify as "not a value position" — the safe
+/// default that offers property-name completions, never a value
+/// classification the parse cannot structurally confirm.
+fn is_declaration_value_position(
+    offset: usize,
+    style_block: &CarrierBlockView,
+    analysis: Option<&FileAnalysisSnapshot>,
+) -> bool {
+    let Some(analysis) = analysis else {
+        return false;
+    };
+    let block_ref = style_block.block_ref.artifact_block_ref();
+    let Some(style) = analysis
+        .styles
+        .iter()
+        .find(|style| style.block_ref.as_ref() == Some(block_ref))
+    else {
+        return false;
+    };
+    let Some(css) = style.css.as_ref() else {
+        return false;
+    };
+
+    let Ok(offset) = u32::try_from(offset) else {
+        return false;
+    };
+
+    let in_rule_body = css.selectors.iter().any(|sel| {
+        sel.rule_body_span
+            .is_some_and(|body| offset >= body.start && offset <= body.end)
+    });
+    if !in_rule_body {
+        return false;
+    }
+
+    css.declarations
+        .iter()
+        .any(|decl| offset >= decl.name_span.end && offset <= decl.value_span.end)
 }
 
 /// Completions INSIDE `v-bind(|)`: the setup-scope bindings by bare name.
@@ -766,6 +837,62 @@ mod tests {
         );
     }
 
+    /// A23 round 3: a STALE `analysis` (same artifact-local style block id, distinct sealed
+    /// artifact identity — the same fixture shape as
+    /// `selector_hover_refuses_stale_artifact_analysis_with_matching_local_id`) must not leak
+    /// its `template` class name into completions at a selector position after `.`. Prior to the
+    /// fix, `css_completions` read `analysis.template` directly with no join against the live
+    /// style block at all.
+    #[test]
+    fn css_completions_stale_analysis_template_class_never_leaks_into_live_completions() {
+        let current =
+            "<template><div class=\"live\"></div></template>\n<style scoped>\n.\n</style>";
+        let stale =
+            "<template><div class=\"live\"></div></template>\n<style scoped>\n.aaaaaa{}\n</style>";
+        let blocks = test_carrier_blocks(current);
+        let stale_blocks = test_carrier_blocks(stale);
+        let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
+        let stale_style_block = stale_blocks.iter().find(|b| b.tag_name == "style").unwrap();
+        assert_eq!(
+            style_block.block_ref.block_id(),
+            stale_style_block.block_ref.block_id(),
+            "fixture premise: identical artifact-local block id"
+        );
+        assert_ne!(
+            style_block.block_ref.artifact_block_ref(),
+            stale_style_block.block_ref.artifact_block_ref(),
+            "fixture premise: distinct sealed artifact identities"
+        );
+
+        // The stale snapshot: a superseded style entry (sealed to the superseded artifact) paired
+        // with a `template` carrying a class name ("stale-leak") that must never surface.
+        let stale_entry = build_style_for_block(stale, stale_style_block);
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![stale_entry]).into(),
+            template: Some(
+                (TemplateAnalysisSnapshot {
+                    elements: vec![make_element("div", &["stale-leak"])],
+                    ..Default::default()
+                })
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(current);
+        let dot_offset = current.rfind('.').unwrap() + 1;
+        let pos = line_index.offset_to_position(dot_offset as u32).unwrap();
+
+        let items = css_completions(&pos, current, &blocks, Some(&analysis), &line_index);
+        let labels: Vec<String> = items
+            .as_ref()
+            .map(|v| v.iter().map(|i| i.label.clone()).collect())
+            .unwrap_or_default();
+        assert!(
+            !labels.contains(&"stale-leak".to_string()),
+            "a stale analysis.template must not leak its class name into live completions: {labels:?}"
+        );
+    }
+
     /// @ai-generated - After '.' in value context (e.g., border: .5px) no class completions
     #[test]
     fn test_no_selector_completion_in_value() {
@@ -799,6 +926,185 @@ mod tests {
                 "should not offer template classes in value context"
             );
         }
+    }
+
+    /// Discriminating positive (A23): a PRIOR declaration's value contains a
+    /// semicolon-shaped byte inside a quoted string on the same line
+    /// (`content: "a;b";`). The old backward-scan took the text after the
+    /// last `{` and checked `contains(':') && !contains(';')`; the in-string
+    /// `;` makes `contains(';')` true even though no real declaration
+    /// boundary was crossed, so it wrongly concluded "not a value position"
+    /// and would have offered property-name completions right after
+    /// `color:`. Reading `rule_body_span`/`declarations[i]` structurally
+    /// (never scanning the raw text for `;`) classifies this correctly as a
+    /// value position — no property completions offered.
+    #[test]
+    fn css_completions_in_string_semicolon_before_cursor_still_classifies_value_position() {
+        let source = "<style>\n.foo { content: \"a;b\"; color:  }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+        let css = build_style(source, &blocks);
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![css]).into(),
+            ..Default::default()
+        };
+
+        // Cursor right after "color: " (between the two spaces before '}') —
+        // past the property name and colon, genuinely a value position even
+        // though nothing has been typed as the value yet.
+        let colon_idx = source.find("color:").unwrap();
+        let offset = colon_idx + "color: ".len();
+        let pos = line_index.offset_to_position(offset as u32).unwrap();
+
+        let items = css_completions(&pos, source, &blocks, Some(&analysis), &line_index);
+        assert!(
+            items.is_none(),
+            "a genuine value position (past 'color:') must not offer property \
+             completions, even though an in-string ';' precedes the cursor: {items:?}"
+        );
+    }
+
+    /// Fail-closed (A23): `analysis: None` at a value-position offset must
+    /// still offer property-name completions — never an empty/guessed set.
+    #[test]
+    fn css_completions_none_analysis_fails_closed_to_property_completions() {
+        let source = "<style>\n.foo { color: red; }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // A position that IS a genuine value position when analysis joins —
+        // proving the fail-closed path, not an offset that merely isn't a
+        // value position regardless.
+        let value_offset = source.find("red").unwrap();
+        let pos = line_index.offset_to_position(value_offset as u32).unwrap();
+
+        let items = css_completions(&pos, source, &blocks, None, &line_index);
+        assert!(
+            items.is_some(),
+            "analysis: None must fail closed to property completions"
+        );
+        let items = items.unwrap();
+        assert!(
+            items.iter().any(|i| i.label == "display"),
+            "expected property completions, got {items:?}"
+        );
+    }
+
+    /// Fail-closed (A23): a STALE `analysis` whose `styles[].block_ref` does
+    /// not match the live block's `block_ref` must offer property-name
+    /// completions, never the stale analysis's own value classification.
+    /// Mirrors `selector_hover_refuses_stale_artifact_analysis_with_matching_local_id`
+    /// / `document_colors_stale_analysis_block_ref_mismatch_fails_closed`.
+    #[test]
+    fn css_completions_stale_analysis_block_ref_mismatch_fails_closed_to_property_completions() {
+        let current = "<style>.foo{color:red}</style>";
+        let stale = "<style>.foo{color:blue}</style>";
+        let blocks = test_carrier_blocks(current);
+        let stale_blocks = test_carrier_blocks(stale);
+        let stale_style_block = stale_blocks.iter().find(|b| b.tag_name == "style").unwrap();
+
+        // The stale snapshot: the superseded content's analysis, sealed to
+        // the superseded artifact's own block_ref.
+        let stale_css = build_style_for_block(stale, stale_style_block);
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![stale_css]).into(),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(current);
+
+        // A genuine value position in the LIVE doc, which the stale join
+        // must never confirm.
+        let value_offset = current.find("red").unwrap();
+        let pos = line_index.offset_to_position(value_offset as u32).unwrap();
+
+        let items = css_completions(&pos, current, &blocks, Some(&analysis), &line_index);
+        assert!(
+            items.is_some(),
+            "a stale analysis must fail closed to property completions, never \
+             mis-bind through a naked ordinal"
+        );
+        let items = items.unwrap();
+        assert!(
+            items.iter().any(|i| i.label == "display"),
+            "expected property completions, got {items:?}"
+        );
+    }
+
+    /// Fail-closed (A23): a STALE `analysis` whose (non-joining) style entry has its OWN custom
+    /// property must not leak `var(--stale)` into the live block's completions. The prior fix
+    /// round joined `is_declaration_value_position`'s classification correctly but left the
+    /// custom-property/v-bind loop unconditional over EVERY `analysis.styles` entry — this is the
+    /// discriminator the pre-existing stale-fixture test above could not catch (its stale fixture
+    /// has no custom properties or bindings at all).
+    #[test]
+    fn css_completions_stale_analysis_custom_property_never_leaks_into_live_completions() {
+        let current = "<style>.foo{color:red}</style>";
+        let stale = "<style>.foo{--stale:red;color:blue}</style>";
+        let blocks = test_carrier_blocks(current);
+        let stale_blocks = test_carrier_blocks(stale);
+        let stale_style_block = stale_blocks.iter().find(|b| b.tag_name == "style").unwrap();
+
+        // The stale snapshot: the superseded content's analysis (with its own `--stale` custom
+        // property), sealed to the superseded artifact's own block_ref — never the live block's.
+        let stale_css = build_style_for_block(stale, stale_style_block);
+        assert!(
+            stale_css
+                .css
+                .as_ref()
+                .is_some_and(|css| css.custom_properties.iter().any(|p| p.name == "--stale")),
+            "fixture sanity: the stale style entry must actually carry --stale"
+        );
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![stale_css]).into(),
+            ..Default::default()
+        };
+        let line_index = LineIndex::new_utf16(current);
+
+        // A declaration VALUE position in the LIVE doc — exactly where a `var(--stale)`
+        // completion would be offered if the stale entry's custom properties leaked through.
+        let value_offset = current.find("red").unwrap();
+        let pos = line_index.offset_to_position(value_offset as u32).unwrap();
+
+        let items = css_completions(&pos, current, &blocks, Some(&analysis), &line_index);
+        assert!(items.is_some(), "expected property completions, got None");
+        let items = items.unwrap();
+        assert!(
+            !items.iter().any(|i| i.label == "var(--stale)"),
+            "a stale style entry's custom property must never leak into the live block's \
+             completions: {items:?}"
+        );
+    }
+
+    /// Fail-closed (A23): an incomplete/unparsed declaration at the offset
+    /// (an unterminated function inside the value — `rgb(` never closed
+    /// before the rule's `}` — marks the `Declaration` node itself
+    /// `StyleCompleteness::Recovered`, absent from `declarations`) must
+    /// offer property-name completions. Same discriminator fixture as
+    /// `document_colors_incomplete_declaration_fails_closed`.
+    #[test]
+    fn css_completions_incomplete_declaration_fails_closed_to_property_completions() {
+        let source = "<style>\n.foo { color: rgb( }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+        let css = build_style(source, &blocks);
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![css]).into(),
+            ..Default::default()
+        };
+
+        let inside_offset = source.find("rgb(").unwrap() + "rgb(".len();
+        let pos = line_index.offset_to_position(inside_offset as u32).unwrap();
+
+        let items = css_completions(&pos, source, &blocks, Some(&analysis), &line_index);
+        assert!(
+            items.is_some(),
+            "an incomplete/unparsed declaration must fail closed to property completions"
+        );
+        let items = items.unwrap();
+        assert!(
+            items.iter().any(|i| i.label == "display"),
+            "expected property completions, got {items:?}"
+        );
     }
 
     /// @ai-generated - Hover on CSS selector with no matches shows "no matching"

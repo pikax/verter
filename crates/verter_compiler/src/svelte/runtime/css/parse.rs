@@ -3,8 +3,8 @@
 //! the `Parser` byte primitives in `phases/1-parse/index.js`).
 //!
 //! The byte cursor mirrors the validation-only reader in
-//! [`css_reject`](crate::svelte::runtime::css_reject) (the official-reject
-//! gate's first-error CSS-body probe): the reader operates on the WHOLE
+//! [`verter_css_syntax::svelte_compat`] (the official-reject gate's
+//! first-error CSS-body probe): the reader operates on the WHOLE
 //! component `source` from the CSS body's start and stops the body loop at
 //! the literal `</style` or EOF, because upstream's nested readers run PAST
 //! `</style>` inside an unterminated construct. Every produced node carries a
@@ -62,7 +62,7 @@ pub fn parse_style_body(source: &str, content: Span) -> ParseResult<StyleSheet> 
 
 /// The byte cursor + the upstream `Parser` primitives the CSS readers use —
 /// the AST-building counterpart of the validation-only cursor in
-/// [`css_reject`](crate::svelte::runtime::css_reject).
+/// [`verter_css_syntax::svelte_compat`].
 struct CssParser<'a> {
     src: &'a [u8],
     text: &'a str,
@@ -768,7 +768,7 @@ impl<'a> CssParser<'a> {
     }
 
     /// `REGEX_NTH_OF` match (non-consuming) — see
-    /// [`css_reject`](crate::svelte::runtime::css_reject) for the arm-by-arm
+    /// [`verter_css_syntax::svelte_compat`] for the arm-by-arm
     /// derivation of the pinned upstream regex
     /// `(even|odd|\+?(\d+|\d*n(\s*[+-]\s*\d+)?)|-\d*n(\s*\+\s*\d+))((?=\s*[,)])|\s+of\s+)`.
     fn match_nth_of(&self) -> bool {
