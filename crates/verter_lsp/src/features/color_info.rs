@@ -799,7 +799,7 @@ mod tests {
         assert!(colors[0].color.blue.abs() < 0.01);
     }
 
-    /// A22 round 3: a numeric (non-percentage) `rgb()` channel has no "0-1 fractional number"
+    /// A numeric (non-percentage) `rgb()` channel has no "0-1 fractional number"
     /// form — per spec it is ALWAYS the 0-255 scale, even when its magnitude is `<= 1.0`. The
     /// pre-fix `> 1.0` magnitude-sniffing heuristic misread `rgb(1, 0, 0)` as already-full-scale
     /// (`1 <= 1.0`) and produced full red instead of a near-black `1/255` red.
@@ -824,7 +824,7 @@ mod tests {
         );
     }
 
-    /// A22 round 3: a mixed `rgb(100%, 1, 0%)` — the plain-number green channel must still use
+    /// A mixed `rgb(100%, 1, 0%)` — the plain-number green channel must still use
     /// the 0-255 scale (`1/255`) even though the red channel is a `Percentage` at `100.0`, which
     /// the old cross-channel `> 1.0` heuristic would have (wrongly) used to decide the whole
     /// channel scale.
@@ -849,7 +849,7 @@ mod tests {
         assert!(c.blue.abs() < 0.01, "expected zero blue, got {c:?}");
     }
 
-    /// A22 round 3: `rgba()`'s alpha channel is on its OWN scale (a bare `Number` is already
+    /// `rgba()`'s alpha channel is on its OWN scale (a bare `Number` is already
     /// 0-1), never the r/g/b channel scale. The pre-fix code divided alpha by the SAME 0-255-or-
     /// 0-1 decision as r/g/b, so `rgba(255, 0, 0, 0.5)` produced alpha ≈ `0.5 / 255` instead of
     /// `0.5`.
@@ -869,7 +869,7 @@ mod tests {
         );
     }
 
-    /// A22 round 3: `hsla()`'s `Number` alpha and `Percentage` alpha must agree for the same
+    /// `hsla()`'s `Number` alpha and `Percentage` alpha must agree for the same
     /// magnitude (`50%` == `0.5`), and neither divides by the h/s/l scale.
     #[test]
     fn document_colors_hsla_number_and_percentage_alpha_agree() {

@@ -5991,7 +5991,7 @@ fn declaration_mode_expose_partial_outcome_with_wrong_macro_index_is_rejected() 
     // A degraded (`Partial`) outcome that coincidentally shares this call's
     // `syntax_index` but carries a DIFFERENT call's `macro_index` is not a
     // legitimate "no answer for this call" — it is identity-corrupt bundle
-    // data. Before round 5, the degraded-outcome arm (`_ => continue`) never
+    // data. Previously, the degraded-outcome arm (`_ => continue`) never
     // checked `entry.macro_index` at all, so this fell through to the
     // syntax-derived fallback and was silently accepted as if the DTO had
     // genuinely produced no answer. It must hard-error instead, exactly like
@@ -6248,8 +6248,8 @@ defineExpose({ count })
 fn declaration_mode_expose_anchor_matches_correlation_but_not_entry_is_rejected() {
     // `entry.macro_index` (7) mismatches `correlation.macro_index` (0, the
     // single call's real macro_index) even though the MEMBER row's own
-    // anchor happens to match correlation (0). Since round 5, this is caught
-    // by the per-call entry-identity check that now runs immediately after
+    // anchor happens to match correlation (0). This is caught by the
+    // per-call entry-identity check that runs immediately after
     // resolving the unique bundle entry — BEFORE the outcome is even
     // matched, let alone the member loop reached — so it hard-errors as
     // `MacroIdentityMismatch`, mirroring `apply_tsc_bundle`'s own
@@ -6298,8 +6298,8 @@ defineExpose({ count })
 fn declaration_mode_expose_anchor_matches_entry_but_not_correlation_is_rejected() {
     // The member's own anchor matches `entry.macro_index` (5), but
     // `entry.macro_index` itself (5) mismatches `correlation.macro_index`
-    // (0, the single call's real macro_index). Since round 5 this is caught
-    // by the earlier per-call entry-identity check (same as the previous
+    // (0, the single call's real macro_index). This is caught by the
+    // earlier per-call entry-identity check (same as the previous
     // test) before the outcome — and so the member loop — is ever reached:
     // `entry.macro_index != correlation.macro_index` alone is sufficient,
     // independent of what the member row's own anchor says.

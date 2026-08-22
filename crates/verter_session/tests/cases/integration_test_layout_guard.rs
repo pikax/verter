@@ -584,11 +584,16 @@ fn allowlist_is_the_known_standalone_targets() {
             "lsp_audit_trace_out_env_var".to_string(),
             "crates/verter_lsp/tests/lsp_audit_trace_out_env_var.rs".to_string(),
         ),
+        (
+            "verter_compiler".to_string(),
+            "allocator_canaries".to_string(),
+            "crates/verter_compiler/tests/allocator_canaries.rs".to_string(),
+        ),
     ]);
     assert_eq!(
         actual, expected,
         "the integration-test-layout allowlist drifted from the known standalone \
-         targets (allocator_canaries + lsp_audit_trace_out_env_var). \
+         targets (allocator_canaries x2 + lsp_audit_trace_out_env_var). \
          Adding/removing an exception is an architecture decision: update BOTH this \
          guard's expectation and scripts/integration-test-layout-allowlist.json, and \
          justify the standalone target."
