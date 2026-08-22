@@ -1,27 +1,26 @@
 /**
  * @ai-generated - Exercises the typed two-stage framework style planner boundary.
  */
-use verter_compiler::style_planner::{
+use crate::style_planner::{
     analyze_css_module_classes, build_string_invocation_count, parse_ir_invocation_count,
     reset_build_string_invocation_count, reset_parse_ir_invocation_count, run_vue_style_cascade,
     transform_vue_css_modules, transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput,
     PlainCssInput, StyleRewriteFailureClass, StyleRewriteOutcome, StyleRewriteStage,
 };
-use verter_compiler::{
+use crate::{
     compile::{types::VueExecutionInputs, VueMacroSemanticInput},
     compile_request::{
         CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
         VueCompileRequest,
     },
-    standalone::{StandaloneCompiler, StandaloneSourceBytes},
 };
 use verter_css_syntax::CssDialect;
 
-use oxc_allocator::Allocator;
-use verter_compiler::svelte::{
+use crate::svelte::{
     parse_svelte,
     runtime::{compile_client, ClientCompileError, SvelteRuntimeOptions},
 };
+use oxc_allocator::Allocator;
 
 fn rewritten(outcome: StyleRewriteOutcome) -> (String, String) {
     match outcome {
@@ -52,12 +51,17 @@ fn normalize_selector(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn compile_style(source: &str) -> verter_compiler::compile::VerterCompileResult {
+fn compile_style(source: &str) -> crate::compile::VerterCompileResult {
     // Style-planner tests need a valid carrier around the authored style. A style-only SFC is
     // intentionally diagnosed as missing its template/script entry, which is unrelated to the
     // rewrite behavior these fixtures exercise.
+    //
+    // Drives the pre-assembly `compile()` entry directly (this module lives
+    // inside the crate under `#[cfg(test)]` precisely so it can — the raw
+    // per-style-block `VerterCompileResult` this file inspects has no
+    // equivalent on the public one-shot `StandaloneCompiler::compile` atomic
+    // contract).
     let carrier = format!("<template></template>{source}");
-    let source = StandaloneSourceBytes::copied_from(&carrier);
     let request = CompileRequest::new(
         vec![CompileProduct::RuntimeClient(
             RuntimeProductRequest::default(),
@@ -70,14 +74,15 @@ fn compile_style(source: &str) -> verter_compiler::compile::VerterCompileResult 
         false,
     )
     .expect("a lone RuntimeClient product must construct");
-    StandaloneCompiler
-        .compile_source(
-            &source,
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain RuntimeClient compile must not be refused")
+    let allocator = Allocator::new();
+    crate::compile::compile(
+        &carrier,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeClient compile must not be refused")
 }
 
 // @ai-generated - R2-2 follows the official Vue compiler's whole-selector global replacement.
@@ -113,7 +118,7 @@ struct VuePseudoOracleRow {
 #[test]
 fn vue_pseudo_selector_conformance_matrix() {
     let rows: Vec<VuePseudoOracleRow> =
-        serde_json::from_str(include_str!("../fixtures/vue_style_pseudo_oracle.json"))
+        serde_json::from_str(include_str!("vue_style_pseudo_oracle.json"))
             .expect("valid generated Vue style oracle");
     assert!(rows.len() >= 30, "pseudo matrix unexpectedly shrank");
 
@@ -539,9 +544,7 @@ fn svelte_stage_two_refuses_authored_scss() {
 // @ai-generated - The user-facing Vue compile route inherits planner fail-closed behavior.
 #[test]
 fn vue_compile_routes_authored_styles_through_the_ir_planner() {
-    let source = StandaloneSourceBytes::copied_from(
-        "<template/><style>.bad { color: v-bind(tone; }</style>",
-    );
+    let source = "<template/><style>.bad { color: v-bind(tone; }</style>";
     let request = CompileRequest::new(
         vec![CompileProduct::RuntimeClient(
             RuntimeProductRequest::default(),
@@ -554,14 +557,15 @@ fn vue_compile_routes_authored_styles_through_the_ir_planner() {
         false,
     )
     .expect("a lone RuntimeClient product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &source,
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain RuntimeClient compile must not be refused");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeClient compile must not be refused");
 
     assert!(
         result
@@ -653,11 +657,9 @@ fn scoped_keyframes_rename_and_rewrite_references() {
 // double-prepend it and the binding silently never applies.
 #[test]
 fn v_bind_js_key_and_css_var_reference_agree() {
-    let source = StandaloneSourceBytes::copied_from(
-        "<script setup>\nimport { ref } from 'vue'\nconst color = ref('red')\n</script>\n\
+    let source = "<script setup>\nimport { ref } from 'vue'\nconst color = ref('red')\n</script>\n\
          <template><div/></template>\n\
-         <style scoped>.x { color: v-bind(color); }</style>",
-    );
+         <style scoped>.x { color: v-bind(color); }</style>";
     let request = CompileRequest::new(
         vec![CompileProduct::RuntimeClient(
             RuntimeProductRequest::default(),
@@ -670,14 +672,15 @@ fn v_bind_js_key_and_css_var_reference_agree() {
         false,
     )
     .expect("a lone RuntimeClient product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &source,
-            &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
-        )
-        .expect("a plain RuntimeClient compile must not be refused");
+    let allocator = Allocator::new();
+    let result = crate::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        &VueMacroSemanticInput::Unavailable,
+        &allocator,
+    )
+    .expect("a plain RuntimeClient compile must not be refused");
 
     let css = &result.styles[0].code;
     assert!(css.contains("var(--sc100000-color)"), "CSS side: {css}");

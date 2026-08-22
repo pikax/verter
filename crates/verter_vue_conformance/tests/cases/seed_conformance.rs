@@ -39,8 +39,6 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
-use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
-
 use verter_compiler::compile::types::VueExecutionInputs;
 use verter_compiler::compile::CompileDiagnosticSeverity;
 use verter_compiler::compile_request::{
@@ -201,17 +199,23 @@ fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> V
     // crash — keep the suite able to report every cell. (`AssertUnwindSafe`:
     // the oxc allocator is not `UnwindSafe`; a panic mid-compile poisons
     // nothing we reuse — the allocator is dropped right after.)
+    // Drives the pre-assembly `compile_with_parsed()` entry directly
+    // (`#[doc(hidden)]` — this harness needs the RETAINED parse alongside
+    // the raw result to build a `RuntimeCompileOutput` without reparsing,
+    // a shape the public one-shot `StandaloneCompiler::compile` atomic
+    // contract does not expose).
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        StandaloneCompiler
-            .compile_source_with_parsed(
-                &StandaloneSourceBytes::copied_from(&sfc),
-                &request,
-                &execution_inputs,
-                &macro_semantics,
-            )
-            .expect("a plain RuntimeClient compile must not be refused")
+        let allocator = oxc_allocator::Allocator::new();
+        verter_compiler::compile::compile_with_parsed(
+            &sfc,
+            &request,
+            &execution_inputs,
+            &macro_semantics,
+            &allocator,
+        )
+        .expect("a plain RuntimeClient compile must not be refused")
     }));
-    let compiled = match result {
+    let (parsed, compile_result) = match result {
         Ok(compiled) => compiled,
         Err(payload) => {
             let message = payload
@@ -230,8 +234,7 @@ fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> V
         }
     };
 
-    let diagnostics = compiled
-        .result
+    let diagnostics = compile_result
         .errors
         .iter()
         .map(|d| DiagnosticRow {
@@ -249,8 +252,8 @@ fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> V
     let sfc_has_script = sfc.contains("<script");
     let bundle = verter_compiler::framework_common::vue_bridge::vue_result_to_runtime_bundle(
         &sfc,
-        &compiled.parsed,
-        compiled.result,
+        &parsed,
+        compile_result,
     );
     let profile = verter_session::CompileProfile {
         filename: Some(format!("cases/{case_id}.vue")),

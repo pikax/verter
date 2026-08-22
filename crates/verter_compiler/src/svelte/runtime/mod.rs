@@ -162,7 +162,28 @@ pub use client::{
     ClientModule, CompileOptionOrigin, UnsupportedSvelteCompileOption,
     UnsupportedSvelteRuntimeSurface,
 };
-pub use client_compile::{compile_client, ClientCompileError, GeneratedSourceMapInvalidReason};
+// `compile_client` accepts a caller-controlled `SvelteRuntimeOptions`
+// directly and returns complete usable JS+CSS product data — a raw-source
+// direct compiler in its own right, so a SHIPPED build must not be able to
+// reach it at all (not merely "hidden"): `pub(crate)` in production, `pub`
+// only under `cfg(test)`/`feature = "test-support"` — the same opt-in seam
+// `crate::compile::compile_with_parsed` uses for the identical reason. The
+// only production callers are `svelte::carrier` (same crate, unaffected)
+// and the direct one-shot core (`crate::standalone`, same crate,
+// unaffected). `verter_session`'s `svelte_official_conformance_matrix`
+// deliberately probes the `dev_codegen: true` axis ONE LAYER BELOW any
+// public request can reach it (`svelte::carrier.rs` hardcodes
+// `dev_codegen: false`, and this route's own canonical-request bridge
+// therefore cannot express `true` either) — it enables `test-support` on
+// its own `verter_compiler` dev-dependency edge for exactly that probe.
+// Every OTHER cross-crate caller (e.g. `verter_svelte_conformance`'s
+// classification matrix) goes through `StandaloneCompiler::compile`
+// instead — it needs no raw access.
+#[cfg(any(test, feature = "test-support"))]
+pub use client_compile::compile_client;
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use client_compile::compile_client;
+pub use client_compile::{ClientCompileError, GeneratedSourceMapInvalidReason};
 pub use compile_options::{
     resolve_svelte_compile_options, ResolvedSvelteCompileOptions, SvelteFragments, SvelteNamespace,
 };

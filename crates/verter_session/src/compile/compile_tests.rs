@@ -802,10 +802,10 @@ fn render_export_binding_follows_declared_fact_not_generated_text() {
 fn compile_multi_root_template_uses_fragment() {
     use verter_compiler::compile::types::VueExecutionInputs;
     use verter_compiler::compile_request::{
-        CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
-        VueCompileRequest,
+        CompileProduct, CompileRequest, FrameworkCompileRequest, ProductKind,
+        RuntimeProductRequest, VueCompileRequest,
     };
-    use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+    use verter_compiler::standalone::{DirectExecutionInputs, StandaloneCompiler};
 
     let source = "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div>aaaaa</template>";
     let request = CompileRequest::new(
@@ -821,33 +821,41 @@ fn compile_multi_root_template_uses_fragment() {
         true,
     )
     .expect("a lone RuntimeClient product must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
+    let execution_inputs = VueExecutionInputs::default();
+    let output = StandaloneCompiler
+        .compile(
+            source,
             &request,
-            &VueExecutionInputs::default(),
-            &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+            DirectExecutionInputs::Vue {
+                execution: &execution_inputs,
+                macros: &verter_compiler::compile::VueMacroSemanticInput::Unavailable,
+            },
         )
         .expect("a plain RuntimeClient compile must not be refused");
 
-    let tpl = result.template.expect("should have template block");
+    // The template's own generated code is written VERBATIM into the
+    // composed module (`compose_fragments` never rewrites it), so every
+    // template-codegen fact this test pins survives as a substring of the
+    // published artifact.
+    let code = output
+        .artifacts
+        .artifact(ProductKind::RuntimeClient)
+        .expect("RuntimeClient must produce an artifact")
+        .code();
 
     // Multi-root template must use Fragment
     assert!(
-        tpl.code.contains("_Fragment"),
-        "multi-root template should use _Fragment, got:\n{}",
-        tpl.code
+        code.contains("_Fragment"),
+        "multi-root template should use _Fragment, got:\n{code}"
     );
     // Must include _createTextVNode for the text node
     assert!(
-        tpl.code.contains("_createTextVNode"),
-        "multi-root template should use _createTextVNode for text, got:\n{}",
-        tpl.code
+        code.contains("_createTextVNode"),
+        "multi-root template should use _createTextVNode for text, got:\n{code}"
     );
-    // Imports must include Fragment
+    // The composed module's own import line must include Fragment
     assert!(
-        tpl.imports.contains(&"_Fragment"),
-        "multi-root template imports must include _Fragment, got: {:?}",
-        tpl.imports
+        code.contains("Fragment as _Fragment"),
+        "multi-root template's composed import line must include _Fragment, got:\n{code}"
     );
 }

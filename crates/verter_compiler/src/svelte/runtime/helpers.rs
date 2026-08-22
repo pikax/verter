@@ -429,6 +429,10 @@ impl RuntimeImport {
     }
 }
 
+/// The fixed local binding `import * as $ from '…'` emits — every runtime-namespace
+/// import binds this exact identifier, never a caller-chosen name.
+const RUNTIME_NAMESPACE_LOCAL: &str = "$";
+
 /// The runtime import topology a module needs.
 ///
 /// Captures which side-effect flag imports the module carries
@@ -450,6 +454,51 @@ pub struct ImportPlan {
     pub tracing_flag: bool,
     /// Which fixed runtime namespace the module imports.
     pub runtime: RuntimeImport,
+}
+
+impl ImportPlan {
+    /// This plan's own declared imports — the exact set
+    /// [`super::client_module_frame::emit_imports`] writes for the flag +
+    /// runtime-namespace portion of the prelude (the `<script module>`/
+    /// instance USER imports are a separate, per-[`super::client_imports::UserImport`]
+    /// fact — see its own `declared_imports`). Reported as a typed fact by
+    /// the producer that already knows exactly which lines it wrote, never
+    /// recovered by scanning emitted text.
+    #[must_use]
+    pub fn declared_imports(&self) -> Vec<crate::assembly::DeclaredImport> {
+        use crate::assembly::{DeclaredImport, DeclaredImportKind};
+
+        let mut out = Vec::new();
+        if self.disclose_version {
+            out.push(DeclaredImport {
+                specifier: "svelte/internal/disclose-version".to_string(),
+                kind: DeclaredImportKind::SideEffect,
+            });
+        }
+        if self.legacy_flag {
+            out.push(DeclaredImport {
+                specifier: "svelte/internal/flags/legacy".to_string(),
+                kind: DeclaredImportKind::SideEffect,
+            });
+        }
+        if self.async_flag {
+            out.push(DeclaredImport {
+                specifier: "svelte/internal/flags/async".to_string(),
+                kind: DeclaredImportKind::SideEffect,
+            });
+        }
+        if self.tracing_flag {
+            out.push(DeclaredImport {
+                specifier: "svelte/internal/flags/tracing".to_string(),
+                kind: DeclaredImportKind::SideEffect,
+            });
+        }
+        out.push(DeclaredImport {
+            specifier: self.runtime.module_specifier().to_string(),
+            kind: DeclaredImportKind::Namespace(RUNTIME_NAMESPACE_LOCAL.to_string()),
+        });
+        out
+    }
 }
 
 impl ImportPlan {

@@ -33,7 +33,7 @@ impl ProductPlan {
     /// prerequisite (a runtime template chunk consumed only to fill an IDE
     /// composition hole is a *dependency*, not a planned artifact, and
     /// must not appear here).
-    pub fn from_request(request: &CompileRequest) -> Self {
+    pub(crate) fn from_request(request: &CompileRequest) -> Self {
         let artifacts = request
             .products()
             .iter()
@@ -81,7 +81,7 @@ impl ProductPlan {
     /// [`crate::framework_common::RuntimeCompileOutput`] shape) still gets
     /// [`super::publish::publish`]'s atomicity and final-parse checks by
     /// declaring the one artifact it composes.
-    pub fn single(artifact: PlannedArtifact) -> Self {
+    pub(crate) fn single(artifact: PlannedArtifact) -> Self {
         Self {
             artifacts: vec![artifact],
         }

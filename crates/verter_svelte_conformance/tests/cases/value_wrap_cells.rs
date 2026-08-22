@@ -16,30 +16,55 @@
 //! `AuthoredValueSurface` variant inventory — a surface added to the compiler
 //! without a covered cell here fails in-tree.
 
-use oxc_allocator::Allocator;
-use verter_compiler::svelte::parser::parse_svelte;
-use verter_compiler::svelte::runtime::{compile_client, SvelteRuntimeOptions};
+use verter_compiler::compile_request::ProductKind;
+use verter_compiler::compile_request::{
+    CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
+    SvelteCompileRequest,
+};
+use verter_compiler::standalone::{
+    DirectExecutionInputs, StandaloneCompiler, SvelteExecutionInputs,
+};
 use verter_svelte_conformance::value_wrap::{
     classify_value_wrap, render_cell_fixture, value_wrap_cells, LegacyWrapPolicy,
     TriggerReachability, ValueWrapSurface, WrapMode,
 };
 
-/// Compile one cell fixture through the production client pipeline.
+/// Compile one cell fixture through the production client pipeline — the
+/// direct one-shot core, the SAME algorithm the host carrier drives.
 fn compile_cell(surface: ValueWrapSurface, mode: WrapMode) -> String {
     let source = render_cell_fixture(surface, mode);
-    let alloc = Allocator::default();
-    let parsed = parse_svelte(&source);
-    let opts = SvelteRuntimeOptions {
-        filename: Some("Cell.svelte".to_string()),
-        ..Default::default()
-    };
-    compile_client(&source, &parsed, &opts, &alloc, false, false)
+    let request = CompileRequest::new(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
+        None,
+        Some("Cell.svelte".to_string()),
+        None,
+        false,
+        false,
+    )
+    .expect("a lone RuntimeClient product must construct");
+    let execution_inputs = SvelteExecutionInputs::default();
+    let output = StandaloneCompiler
+        .compile(
+            &source,
+            &request,
+            DirectExecutionInputs::Svelte {
+                execution: &execution_inputs,
+            },
+        )
         .unwrap_or_else(|e| {
             panic!(
                 "value-wrap cell {surface:?} [{mode:?}] must compile; fixture:\n{source}\nerror: {e:?}"
             )
-        })
-        .code
+        });
+    output
+        .artifacts
+        .artifact(ProductKind::RuntimeClient)
+        .expect("the requested RuntimeClient artifact must be present")
+        .code()
+        .to_string()
 }
 
 /// The wrap observation: whether the emitted module contains the legacy

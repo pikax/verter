@@ -1,14 +1,11 @@
 //! Main module assembly.
 
 use verter_compiler::assembly::{
-    assemble_sequence, publish, ArtifactContribution, DeclaredImport, DeclaredImportKind, Fragment,
-    FragmentDialect, FrameworkDomain, PlacementSlot, PlannedArtifact, ProductPlan, SourceSpaceKind,
-    SourceUnitId, SyntacticContract, ValidatedFragment,
+    compose_main_module, DeclaredImport, DeclaredImportKind, ExtraFragment, FragmentDialect,
+    VueMainCompositionFailure, VueMainModuleRequest,
 };
-use verter_compiler::compile::format_import_specifier;
 use verter_compiler::compile_request::ProductKind;
 use verter_compiler::framework_common::RuntimeCompileOutput;
-use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 
 use crate::id::render_ids;
 use crate::types::{CompileProfile, FileMeta, HmrStrategy, VirtualNodeKind};
@@ -24,8 +21,8 @@ mod map_equality_tests;
 #[cfg(test)]
 mod map_tests;
 
-pub use map_compose::SfcRewriteRefusal;
 pub use map_input::{AssembleMapFailure, MapFragment, UncomposableCode, UncomposableFamily};
+pub use verter_compiler::assembly::SfcRewriteRefusal;
 
 use map_input::{agree_source_root, validate_and_decode, DecodedFragmentMap};
 
@@ -88,21 +85,31 @@ impl From<AssembleMapFailure> for VueMainAssemblyFailure {
     }
 }
 
-impl From<verter_compiler::assembly::FragmentRefusal> for VueMainAssemblyFailure {
-    fn from(failure: verter_compiler::assembly::FragmentRefusal) -> Self {
-        Self::FragmentValidation(failure)
-    }
-}
-
-impl From<verter_compiler::assembly::ComposeRefusal> for VueMainAssemblyFailure {
-    fn from(failure: verter_compiler::assembly::ComposeRefusal) -> Self {
-        Self::Composition(failure)
-    }
-}
-
-impl From<verter_compiler::assembly::AssemblyRefusal> for VueMainAssemblyFailure {
-    fn from(failure: verter_compiler::assembly::AssemblyRefusal) -> Self {
-        Self::Publication(failure)
+/// Lifts the shared [`verter_compiler::assembly`] composer's own failure
+/// shape into this crate's public, UNCHANGED four-variant enum — the
+/// `__sfc__`-placement half of a composition failure lands in `InputMap`
+/// (alongside this crate's own [`AssembleMapFailure::MissingRequiredInputMap`]/
+/// `UncomposableInputMap`, since all three answer "why did assembling this
+/// map-bearing input fail"); a fragment-grammar or sequencing defect keeps
+/// its own variant.
+impl From<verter_compiler::assembly::VueMainAssemblyFailure> for VueMainAssemblyFailure {
+    fn from(failure: verter_compiler::assembly::VueMainAssemblyFailure) -> Self {
+        match failure {
+            verter_compiler::assembly::VueMainAssemblyFailure::Composition(composition) => {
+                match composition {
+                    VueMainCompositionFailure::InvalidSfcExportPlacement(reason) => {
+                        Self::InputMap(AssembleMapFailure::InvalidSfcExportPlacement { reason })
+                    }
+                    VueMainCompositionFailure::FragmentValidation(reason) => {
+                        Self::FragmentValidation(reason)
+                    }
+                    VueMainCompositionFailure::Composition(reason) => Self::Composition(reason),
+                }
+            }
+            verter_compiler::assembly::VueMainAssemblyFailure::Publication(reason) => {
+                Self::Publication(reason)
+            }
+        }
     }
 }
 
@@ -123,23 +130,6 @@ impl std::fmt::Display for VueMainAssemblyFailure {
 }
 
 impl std::error::Error for VueMainAssemblyFailure {}
-
-/// Deterministic role-based [`SourceUnitId`] for one of this function's own
-/// scaffold/content fragments — same `canonical_id` + `role` always mints
-/// the same id, so the identity is a pure function of the two, never a
-/// counter.
-struct MainFragmentTag<'a> {
-    canonical_id: &'a str,
-    role: &'a str,
-}
-
-impl CanonicalEncode for MainFragmentTag<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.compile.vue_main_fragment.v1";
-    fn encode_fields(&self, e: &mut CanonicalEncoder) {
-        e.field_str(1, self.canonical_id);
-        e.field_str(2, self.role);
-    }
-}
 
 /// The exact language a Main module's fragments and final artifact are
 /// validated/parsed under — derived ONCE from the SAME inputs
@@ -179,43 +169,6 @@ fn dialect_lang_str(dialect: FragmentDialect) -> &'static str {
     }
 }
 
-/// One scaffold/content piece, minted, validated, and pushed onto
-/// `fragments` in one step — every piece of the Main module goes through
-/// this, so `assemble_sequence`/`publish` always compose the SAME
-/// collection that was actually validated, never a raw `{code, map}` pair
-/// reconstructed on the side.
-#[allow(clippy::too_many_arguments)]
-fn mint_and_validate(
-    fragments: &mut Vec<ValidatedFragment>,
-    canonical_id: &str,
-    role: &str,
-    planned_kind: ProductKind,
-    placement: PlacementSlot,
-    dialect: FragmentDialect,
-    code: String,
-    source_map: Option<String>,
-    imports: Vec<DeclaredImport>,
-) -> Result<(), VueMainAssemblyFailure> {
-    let fragment = Fragment {
-        domain: FrameworkDomain::Vue,
-        product: planned_kind,
-        source_unit: SourceUnitId::from_canonical(&MainFragmentTag { canonical_id, role }),
-        source_space: SourceSpaceKind::GeneratedFragment,
-        placement,
-        contract: SyntacticContract::CompleteModule,
-        dialect,
-        code,
-        source_map,
-        imports,
-        exports: Vec::new(),
-        helpers: Vec::new(),
-        dependencies: Vec::new(),
-    };
-    let validated = fragment.validate()?;
-    fragments.push(validated);
-    Ok(())
-}
-
 /// Assemble the Vue `_sfc_main` runtime module from the carrier's
 /// framework-neutral [`RuntimeCompileOutput`].
 ///
@@ -223,19 +176,15 @@ fn mint_and_validate(
 /// [`render_ids`], HMR); the carrier owns the blocks. Same blocks
 /// produce byte-identical output.
 ///
-/// Script rewrites (`__sfc__` → `_sfc_main`, then strip
-/// `export default _sfc_main;\n`) go through
-/// [`CodeTransform`](verter_compiler::code_transform::CodeTransform)
-/// so the same chunk list produces bytes and map. Template is verbatim.
-/// Assembly-owned bytes (imports, `__file`, HMR, SSR wrapper, export)
-/// carry no mapping.
-///
-/// Every scaffold/content piece is a real, VALIDATED
-/// [`verter_compiler::assembly::Fragment`] — sequenced through
-/// [`assemble_sequence`] and published through [`publish`] — never a raw
-/// `{code, source_map}` pair. The SAME validated collection is what
-/// `publish`'s atomicity checks (declared-import/undeclared-helper,
-/// final-parse) run against.
+/// The `__sfc__` → `_sfc_main` rewrite, script/template/import fragment
+/// minting, sequencing, and the final atomic-publication boundary are the
+/// SAME [`verter_compiler::assembly`] composer
+/// ([`compose_main_module`]/[`VueMainModuleRequest`]) the direct one-shot
+/// core shares — this function's own remaining job is exactly the HOST
+/// decoration: style/custom-block virtual imports, `__file`, HMR, and the
+/// Vite SSR-manifest registration, riding in as
+/// [`ExtraFragment`] prelude/trailer content, plus this crate's own hardened
+/// input-map validation ([`validate_inputs`]).
 ///
 /// # Errors
 ///
@@ -264,7 +213,14 @@ pub fn assemble_vue_main_module(
     let source_root = inputs
         .as_ref()
         .and_then(|inputs| inputs.source_root.clone());
-    let script_map = inputs.as_ref().and_then(|inputs| inputs.script.as_ref());
+    // Decoded under this crate's own hardened multi-fragment validator
+    // (`validate_inputs`/`validate_and_decode` above) — host-authored/
+    // cross-tool maps need it; lifted into the typed wire form the shared
+    // composer's request consumes.
+    let script_map = inputs
+        .as_ref()
+        .and_then(|inputs| inputs.script.as_ref())
+        .map(map_compose::to_source_map);
     // Re-encoded through this crate's own canonical-form encoder — never
     // the template's raw as-authored map string — so a legitimate
     // dual-spelling ignore list never crosses into `oxc_sourcemap`'s
@@ -273,23 +229,6 @@ pub fn assemble_vue_main_module(
         .as_ref()
         .and_then(|inputs| inputs.template.as_ref())
         .map(|map| map_compose::to_source_map(map).to_json_string());
-
-    // The rewrite runs whether or not a map was requested: it determines
-    // the module's bytes regardless of `profile.source_map`. Applies ONLY
-    // the script's own declared `SfcExportPlacement` fact — never scans
-    // generated text for the `__sfc__`/`export default` landmarks.
-    let rewritten_script = compiled
-        .script
-        .as_ref()
-        .map(|script| {
-            map_compose::rewrite_script(
-                &script.code,
-                script.sfc_export_placement.as_ref(),
-                script_map,
-            )
-        })
-        .transpose()
-        .map_err(|reason| AssembleMapFailure::InvalidSfcExportPlacement { reason })?;
 
     // Derived ONCE, reused for every fragment's own dialect, the final
     // artifact's dialect, and the returned `lang` — never a fixed
@@ -303,9 +242,8 @@ pub fn assemble_vue_main_module(
         ProductKind::RuntimeClient
     };
 
-    let mut fragments: Vec<ValidatedFragment> = Vec::new();
-
-    // ── prelude: style + custom-block virtual imports ──────────────────
+    // ── host decoration: style + custom-block virtual imports, ahead of
+    // the script ─────────────────────────────────────────────────────────
     let mut prelude = String::new();
     let mut prelude_imports: Vec<DeclaredImport> = Vec::new();
     for idx in 0..compiled.styles.len() {
@@ -328,182 +266,15 @@ pub fn assemble_vue_main_module(
     if !compiled.styles.is_empty() || !compiled.custom_blocks.is_empty() {
         prelude.push('\n');
     }
-    mint_and_validate(
-        &mut fragments,
-        canonical_id,
-        "prelude",
-        planned_kind,
-        PlacementSlot::ModulePrelude,
-        dialect,
-        prelude,
-        None,
-        prelude_imports,
-    )?;
+    let prelude_extra = vec![ExtraFragment {
+        role: "prelude",
+        code: prelude,
+        imports: prelude_imports,
+    }];
 
-    // ── script (including its imports) — precedes the template's runtime
-    // helper imports, official `@vitejs/plugin-vue` / `@vue/compiler-sfc`
-    // order. ESM hoists imports either way; the order is conformance. ────
-    let mut script_scaffold = String::new();
-    let (script_code, script_source_map, script_imports): (
-        String,
-        Option<String>,
-        Vec<DeclaredImport>,
-    ) = match &rewritten_script {
-        Some((code, map)) => {
-            // The script's own runtime-helper imports are ALREADY embedded
-            // in `code` (written by the SAME `CodeTransform` that produced
-            // it) — this fragment declares them as a fact about bytes it
-            // already contains, never a second import line this assembler
-            // writes itself.
-            let script_imports = compiled
-                .script
-                .as_ref()
-                .map(|s| &s.runtime_imports)
-                .filter(|names| !names.is_empty())
-                .map(|names| {
-                    vec![DeclaredImport {
-                        specifier: runtime.to_string(),
-                        kind: DeclaredImportKind::Named(names.clone()),
-                    }]
-                })
-                .unwrap_or_default();
-            (
-                code.clone(),
-                map.as_ref().filter(|_| want_maps).cloned(),
-                script_imports,
-            )
-        }
-        None => {
-            script_scaffold.push_str("const _sfc_main = {}\n");
-            if !compiled.scope_id.is_empty() {
-                let _ = writeln!(
-                    script_scaffold,
-                    "_sfc_main.__scopeId = \"{}\"",
-                    compiled.scope_id
-                );
-            }
-            (script_scaffold.clone(), None, Vec::new())
-        }
-    };
-    let script_ends_with_newline = script_code.ends_with('\n');
-    mint_and_validate(
-        &mut fragments,
-        canonical_id,
-        "script",
-        planned_kind,
-        PlacementSlot::ModuleBody,
-        dialect,
-        script_code,
-        script_source_map,
-        script_imports,
-    )?;
-
-    let mut post_script = String::new();
-    if !script_ends_with_newline {
-        post_script.push('\n');
-    }
-    mint_and_validate(
-        &mut fragments,
-        canonical_id,
-        "post_script",
-        planned_kind,
-        PlacementSlot::ModuleBody,
-        dialect,
-        post_script,
-        None,
-        Vec::new(),
-    )?;
-
-    // ── template ─────────────────────────────────────────────────────
-    if let Some(template) = &compiled.template {
-        let mut template_prelude = String::new();
-        let mut template_prelude_imports: Vec<DeclaredImport> = Vec::new();
-        if !template.imports.is_empty() {
-            let _ = write!(template_prelude, "import {{ ");
-            for (i, name) in template.imports.iter().enumerate() {
-                if i > 0 {
-                    template_prelude.push_str(", ");
-                }
-                template_prelude.push_str(&format_import_specifier(name));
-            }
-            let _ = writeln!(template_prelude, " }} from \"{}\"", runtime);
-            template_prelude_imports.push(DeclaredImport {
-                specifier: runtime.to_string(),
-                kind: DeclaredImportKind::Named(template.imports.clone()),
-            });
-        }
-        // SSR helpers are imported from "vue/server-renderer"
-        if !template.ssr_imports.is_empty() {
-            let _ = write!(template_prelude, "import {{ ");
-            for (i, name) in template.ssr_imports.iter().enumerate() {
-                if i > 0 {
-                    template_prelude.push_str(", ");
-                }
-                template_prelude.push_str(&format_import_specifier(name));
-            }
-            let _ = writeln!(template_prelude, " }} from \"vue/server-renderer\"");
-            template_prelude_imports.push(DeclaredImport {
-                specifier: "vue/server-renderer".to_string(),
-                kind: DeclaredImportKind::Named(template.ssr_imports.clone()),
-            });
-        }
-        template_prelude.push('\n');
-        mint_and_validate(
-            &mut fragments,
-            canonical_id,
-            "template_prelude",
-            planned_kind,
-            PlacementSlot::ModulePrelude,
-            dialect,
-            template_prelude,
-            None,
-            template_prelude_imports,
-        )?;
-
-        // The template is written verbatim and is never rewritten, so its
-        // map (already the template codegen's own encoded output,
-        // re-encoded through the canonical single-spelling encoder above)
-        // is sequenced directly with no chain step.
-        let template_ends_with_newline = template.code.ends_with('\n');
-        mint_and_validate(
-            &mut fragments,
-            canonical_id,
-            "template",
-            planned_kind,
-            PlacementSlot::ModuleBody,
-            dialect,
-            template.code.clone(),
-            template_map_json.clone(),
-            Vec::new(),
-        )?;
-
-        let mut post_template = String::new();
-        if !template_ends_with_newline {
-            post_template.push('\n');
-        }
-        match template.render_export {
-            verter_compiler::framework_common::TemplateRenderExport::SsrRender => {
-                post_template.push_str("_sfc_main.ssrRender = ssrRender\n");
-            }
-            verter_compiler::framework_common::TemplateRenderExport::Render => {
-                post_template.push_str("_sfc_main.render = render\n");
-            }
-        }
-        mint_and_validate(
-            &mut fragments,
-            canonical_id,
-            "post_template",
-            planned_kind,
-            PlacementSlot::ModuleBody,
-            dialect,
-            post_template,
-            None,
-            Vec::new(),
-        )?;
-    }
-
-    // ── trailer: custom-block invocations, __file, HMR, SSR registration,
-    // the terminal `export default` ──────────────────────────────────
+    // ── host decoration: custom-block invocations, __file, HMR, SSR
+    // registration — before the shared composer's terminal
+    // `export default` ──────────────────────────────────────────────────
     let mut trailer = String::new();
     for idx in 0..compiled.custom_blocks.len() {
         let _ = writeln!(
@@ -569,47 +340,26 @@ pub fn assemble_vue_main_module(
         trailer.push_str("  return _sfc_setup ? _sfc_setup(props, ctx) : undefined\n");
         trailer.push_str("}\n");
     }
-    trailer.push_str("export default _sfc_main");
-    mint_and_validate(
-        &mut fragments,
+    let trailer_extra = vec![ExtraFragment {
+        role: "trailer",
+        code: trailer,
+        imports: trailer_imports,
+    }];
+
+    let request = VueMainModuleRequest {
         canonical_id,
-        "trailer",
+        compiled,
+        dialect,
         planned_kind,
-        PlacementSlot::ModuleBody,
-        dialect,
-        trailer,
-        None,
-        trailer_imports,
-    )?;
-
-    let fragment_refs: Vec<&ValidatedFragment> = fragments.iter().collect();
-    let sequenced = assemble_sequence(&fragment_refs, source_root.as_deref())?;
-
-    // Publish through the shared atomic boundary: exact-cardinality,
-    // required-map, undeclared-helper, and final-parse checks over the
-    // fully composed module — this host composer never went through a
-    // `CompileRequest`/`ProductPlan`, so it declares the one artifact it
-    // itself composes. `fragments`/`emitted_imports` are the SAME
-    // collection just validated and sequenced, not a second copy.
-    let plan = ProductPlan::single(PlannedArtifact {
-        kind: planned_kind,
-        requires_source_projection_map: false,
-        requires_runtime_source_map: want_maps,
-    });
-    let emitted_imports: Vec<DeclaredImport> = fragments
-        .iter()
-        .flat_map(|f| f.fragment().imports.iter().cloned())
-        .collect();
-    let contribution = ArtifactContribution {
-        kind: planned_kind,
-        fragments: fragment_refs,
-        code: sequenced.code,
-        emitted_imports,
-        dialect,
-        source_projection_map: None,
-        runtime_source_map: want_maps.then_some(sequenced.source_map),
+        runtime,
+        want_maps,
+        source_root: source_root.as_deref(),
+        script_map: script_map.as_ref(),
+        template_map_json,
+        prelude_extra,
+        trailer_extra,
     };
-    let set = publish(&plan, vec![contribution])?;
+    let set = compose_main_module(request)?;
     let artifact = set
         .artifact(planned_kind)
         .expect("publish returns exactly the one planned artifact kind");

@@ -402,10 +402,10 @@ mod shipped_cfg_behaviour {
 mod compiler_behaviour {
     use verter_compiler::compile::{VueExecutionInputs, VueMacroSemanticInput};
     use verter_compiler::compile_request::{
-        CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
-        VueCompileRequest,
+        CompileProduct, CompileRequest, FrameworkCompileRequest, ProductKind,
+        RuntimeProductRequest, VueCompileRequest,
     };
-    use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+    use verter_compiler::standalone::{DirectExecutionInputs, StandaloneCompiler};
 
     #[test]
     fn v_for_and_interpolation_codegen_is_well_formed_under_shipped_cfg() {
@@ -413,13 +413,11 @@ mod compiler_behaviour {
         // in `template/code_gen/shared/helpers.rs` (element tag names,
         // interpolation expression spans, and a `v-for` iteration) — real
         // production template-codegen arithmetic, not a synthetic probe.
-        let source = StandaloneSourceBytes::copied_from(
-            "<template>\n\
+        let source = "<template>\n\
              <ul>\n\
              <li v-for=\"item in items\" :key=\"item.id\">{{ item.label }}</li>\n\
              </ul>\n\
-             </template>\n",
-        );
+             </template>\n";
 
         let request = CompileRequest::new(
             vec![CompileProduct::RuntimeClient(
@@ -434,24 +432,28 @@ mod compiler_behaviour {
         )
         .expect("a single RuntimeClient product must construct");
 
-        let result = StandaloneCompiler
-            .compile_source(
-                &source,
+        let execution_inputs = VueExecutionInputs::default();
+        let output = StandaloneCompiler
+            .compile(
+                source,
                 &request,
-                &VueExecutionInputs::default(),
-                &VueMacroSemanticInput::Unavailable,
+                DirectExecutionInputs::Vue {
+                    execution: &execution_inputs,
+                    macros: &VueMacroSemanticInput::Unavailable,
+                },
             )
             .expect("a v-for + interpolation template must not be refused under shipped cfg");
 
         assert!(
-            result.errors.is_empty(),
+            output.diagnostics.is_empty(),
             "template codegen must not error under shipped cfg: {:?}",
-            result.errors
+            output.diagnostics
         );
-        let code = result
-            .template
-            .expect("RuntimeClient must produce a template block")
-            .code;
+        let code = output
+            .artifacts
+            .artifact(ProductKind::RuntimeClient)
+            .expect("RuntimeClient must produce an artifact")
+            .code();
         assert!(
             code.contains("renderList"),
             "v-for codegen must emit the renderList helper call under shipped cfg: {code}"

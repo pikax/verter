@@ -16,10 +16,10 @@
 use verter_compiler::compile::types::VueExecutionInputs;
 use verter_compiler::compile::VueMacroSemanticInput;
 use verter_compiler::compile_request::{
-    CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
+    CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest, ProductKind,
     RuntimeProductRequest, VueCompileRequest,
 };
-use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+use verter_compiler::standalone::{DirectExecutionInputs, StandaloneCompiler};
 use verter_lsp::documents::position_map::PositionMapper;
 use verter_span::LspPosition;
 
@@ -42,18 +42,29 @@ fn compile_to_mapper(source: &str) -> (String, PositionMapper) {
         false,
     )
     .expect("RuntimeClient + IdeCompanion together must construct");
-    let result = StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
+    let execution_inputs = VueExecutionInputs::default();
+    let output = StandaloneCompiler
+        .compile(
+            source,
             &request,
-            &VueExecutionInputs::default(),
-            &VueMacroSemanticInput::Unavailable,
+            DirectExecutionInputs::Vue {
+                execution: &execution_inputs,
+                macros: &VueMacroSemanticInput::Unavailable,
+            },
         )
         .expect("a plain RuntimeClient + IdeCompanion compile must not be refused");
-    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let tsx = result.tsx.as_ref().expect("tsx block");
-    let mapper = PositionMapper::from_json(&tsx.source_map).expect("valid TSX source map");
-    (tsx.code.clone(), mapper)
+    assert!(
+        output.diagnostics.is_empty(),
+        "errors: {:?}",
+        output.diagnostics
+    );
+    let tsx = output
+        .artifacts
+        .artifact(ProductKind::IdeCompanion)
+        .expect("the requested IdeCompanion artifact must be present");
+    let mapper = PositionMapper::from_json(tsx.source_projection_map().unwrap_or(""))
+        .expect("valid TSX source map");
+    (tsx.code().to_string(), mapper)
 }
 
 /// The (line, first-column) of `needle`'s first occurrence in `source`

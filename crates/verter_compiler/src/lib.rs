@@ -108,6 +108,8 @@ pub use template::code_gen::vdom::props::emit_static_style_object;
 #[cfg(test)]
 mod compile_ported_tests;
 #[cfg(test)]
+mod direct_result_tests;
+#[cfg(test)]
 mod sourcemap_e2e_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;

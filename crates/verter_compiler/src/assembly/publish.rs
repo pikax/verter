@@ -11,7 +11,12 @@ use crate::compile_request::ProductKind;
 /// One artifact's finished composition, reported by the caller (the
 /// framework-owned composer) together with the exact facts `publish` needs
 /// to verify atomicity — never re-derived by scanning `code`.
-pub struct ArtifactContribution<'a> {
+///
+/// `pub(crate)`: the ONLY way to mint an [`ArtifactSet`] from outside this
+/// crate is [`crate::standalone::StandaloneCompiler::compile`] — no external
+/// crate constructs a contribution and calls [`publish`] independently. See
+/// "Structural closure of the raw-source direct route" in the B5 evidence.
+pub(crate) struct ArtifactContribution<'a> {
     pub kind: ProductKind,
     /// Every fragment that contributed to this artifact — the declared
     /// helper/import union this artifact's own emitted imports are
@@ -43,6 +48,7 @@ pub struct ArtifactContribution<'a> {
 pub struct AssembledArtifact {
     kind: ProductKind,
     code: String,
+    dialect: FragmentDialect,
     source_projection_map: Option<String>,
     runtime_source_map: Option<String>,
 }
@@ -54,6 +60,16 @@ impl AssembledArtifact {
 
     pub fn code(&self) -> &str {
         &self.code
+    }
+
+    /// The exact ECMAScript/TypeScript dialect [`Self::code`] is written in
+    /// — the same [`FragmentDialect`] its publishing
+    /// [`ArtifactContribution::dialect`] declared. A caller with no other
+    /// route to this fact (a raw-source direct-core consumer has no
+    /// [`crate::parser::types::ParsedSfc`] of its own to re-derive it from)
+    /// reads it here rather than re-parsing the carrier a second time.
+    pub fn dialect(&self) -> FragmentDialect {
+        self.dialect
     }
 
     pub fn source_projection_map(&self) -> Option<&str> {
@@ -152,7 +168,12 @@ fn declared_names<'a>(fragments: &[&'a ValidatedFragment], specifier: &str) -> V
 /// check below runs to completion against `contributions` before any
 /// [`ArtifactSet`] is constructed — a failure anywhere returns exactly one
 /// [`AssemblyRefusal`] and builds no artifact at all.
-pub fn publish(
+///
+/// `pub(crate)`: [`crate::assembly::vue_module::compose_main_module`] and
+/// [`crate::standalone::StandaloneCompiler::compile`] are this crate's only
+/// callers — no legacy alternate core outside `verter_compiler` may publish
+/// an [`ArtifactSet`] directly.
+pub(crate) fn publish(
     plan: &ProductPlan,
     contributions: Vec<ArtifactContribution<'_>>,
 ) -> Result<ArtifactSet, AssemblyRefusal> {
@@ -252,6 +273,7 @@ pub fn publish(
         .map(|c| AssembledArtifact {
             kind: c.kind,
             code: c.code,
+            dialect: c.dialect,
             source_projection_map: c.source_projection_map,
             runtime_source_map: c.runtime_source_map,
         })
@@ -488,6 +510,40 @@ mod tests {
             runtime_source_map: None,
         };
         assert!(publish(&plan, vec![contribution]).is_ok());
+    }
+
+    #[test]
+    fn multi_product_request_publishes_exactly_those_products_and_nothing_else() {
+        // Positive control for the missing/unplanned-artifact refusals below:
+        // a request naming MULTIPLE products publishes exactly that set in
+        // one atomic call — never a subset, never an extra virtual artifact.
+        let plan = plan_with(vec![
+            CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+            CompileProduct::Declarations(Default::default()),
+        ]);
+        let runtime = ArtifactContribution {
+            kind: ProductKind::RuntimeClient,
+            fragments: vec![],
+            code: "export default {}".to_string(),
+            emitted_imports: vec![],
+            dialect: FragmentDialect::Tsx,
+            source_projection_map: None,
+            runtime_source_map: None,
+        };
+        let declarations = ArtifactContribution {
+            kind: ProductKind::Declarations,
+            fragments: vec![],
+            code: "export default {}".to_string(),
+            emitted_imports: vec![],
+            dialect: FragmentDialect::Tsx,
+            source_projection_map: None,
+            runtime_source_map: None,
+        };
+        let set = publish(&plan, vec![runtime, declarations]).expect("publish succeeds");
+        assert_eq!(set.artifacts().len(), 2);
+        assert!(set.artifact(ProductKind::RuntimeClient).is_some());
+        assert!(set.artifact(ProductKind::Declarations).is_some());
+        assert!(set.artifact(ProductKind::IdeCompanion).is_none());
     }
 
     #[test]

@@ -28,11 +28,13 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use rayon::prelude::*;
 use tempfile::TempDir;
+use verter_compiler::assembly::FragmentDialect;
 use verter_compiler::compile::types::VueExecutionInputs;
+use verter_compiler::compile_request::ProductKind;
 use verter_compiler::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest, VueCompileRequest,
 };
-use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
+use verter_compiler::standalone::{DirectExecutionInputs, StandaloneCompiler};
 use verter_session::{
     CompileTarget, FileLanguage, HostConfig, PublicApiProjectionError, PublicApiProjectionSubject,
     UpsertRequest, VerterHost,
@@ -354,12 +356,15 @@ fn generate_all_tsx(
                     vue_path.display()
                 ))
             })?;
-            let result = StandaloneCompiler
-                .compile_source(
-                    &StandaloneSourceBytes::copied_from(&source),
+            let execution_inputs = VueExecutionInputs::default();
+            let output = StandaloneCompiler
+                .compile(
+                    &source,
                     &request,
-                    &VueExecutionInputs::default(),
-                    macro_input,
+                    DirectExecutionInputs::Vue {
+                        execution: &execution_inputs,
+                        macros: macro_input,
+                    },
                 )
                 .map_err(|error| {
                     api_check::TypecheckError::new(format!(
@@ -367,18 +372,26 @@ fn generate_all_tsx(
                         vue_path.display()
                     ))
                 })?;
+            let set = output.artifacts;
 
-            let tsx_block = result.tsx.ok_or_else(|| {
+            let tsx_block = set.artifact(ProductKind::IdeCompanion).ok_or_else(|| {
                 api_check::TypecheckError::new(format!(
                     "verter-tsc: compiler produced no validation carrier for {}",
                     vue_path.display()
                 ))
             })?;
+            // `.jsx` output (checked only under `checkJs`) for a JavaScript
+            // SFC, `.tsx` (always checked) for a TypeScript one — mirrors
+            // `verter_parser::parser::types::SfcScriptDialect::is_javascript`.
+            let tsx_is_jsx = matches!(
+                tsx_block.dialect(),
+                FragmentDialect::JavaScript | FragmentDialect::Jsx
+            );
 
             // Rewrite relative imports to absolute paths (the carriers live in a
             // virtual directory, not beside the source)…
             let vue_dir = vue_path.parent().unwrap_or(Path::new("."));
-            let mut code = rewrite_relative_imports(&tsx_block.code, vue_dir);
+            let mut code = rewrite_relative_imports(tsx_block.code(), vue_dir);
             // …and canonicalize the NON-relative carrier specifiers the first
             // pass cannot reach. This is not stub-only work: the IDE codegen
             // deliberately preserves an aliased child import (`@/Child.vue`)
@@ -391,12 +404,17 @@ fn generate_all_tsx(
             code = canonicalize_nonrelative_carrier_specifiers(&code, &canonical_id, host);
 
             // Append inline source map so `map_tsc_position()` can remap errors.
-            if !tsx_block.source_map.is_empty() {
-                let encoded =
-                    base64::prelude::BASE64_STANDARD.encode(tsx_block.source_map.as_bytes());
-                code.push_str(&format!(
-                    "\n//# sourceMappingURL=data:application/json;base64,{encoded}\n"
-                ));
+            // An IdeCompanion artifact's projection map is never optional
+            // (`PlannedArtifact::requires_source_projection_map` is always
+            // `true` for `IdeCompanion`), so this is always `Some` — an empty
+            // string is a truthful "no mappings recorded", not a disabled map.
+            if let Some(source_map) = tsx_block.source_projection_map() {
+                if !source_map.is_empty() {
+                    let encoded = base64::prelude::BASE64_STANDARD.encode(source_map.as_bytes());
+                    code.push_str(&format!(
+                        "\n//# sourceMappingURL=data:application/json;base64,{encoded}\n"
+                    ));
+                }
             }
 
             let hash = simple_hash(vue_path.to_string_lossy().as_bytes());
@@ -414,7 +432,7 @@ fn generate_all_tsx(
             // reporting real JavaScript errors.
             let tsx_name = verter_workspace::carrier_ide_provider_path(
                 &format!("{component_name}_{hash:016x}"),
-                tsx_block.is_jsx,
+                tsx_is_jsx,
             );
             let tsx_path = base_dir.join(&tsx_name);
 

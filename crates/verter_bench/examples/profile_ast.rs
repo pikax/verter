@@ -34,14 +34,13 @@ use verter_compiler::compile_request::{
 };
 use verter_compiler::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use verter_compiler::parser::Syntax as NewSyntax;
-use verter_compiler::standalone::{StandaloneCompiler, StandaloneSourceBytes};
 use verter_compiler::template::oxc::parse_template_expressions;
 use verter_compiler::tokenizer::byte::tokenize;
 
 fn compile(
     source: &str,
     macro_semantics: &VueMacroSemanticInput,
-    _allocator: &Allocator,
+    allocator: &Allocator,
 ) -> VerterCompileResult {
     let request = CompileRequest::new(
         vec![CompileProduct::RuntimeClient(
@@ -55,14 +54,18 @@ fn compile(
         false,
     )
     .expect("a lone RuntimeClient product must construct");
-    StandaloneCompiler
-        .compile_source(
-            &StandaloneSourceBytes::copied_from(source),
-            &request,
-            &VueExecutionInputs::default(),
-            macro_semantics,
-        )
-        .expect("a plain RuntimeClient compile must not be refused")
+    // Drives the pre-assembly `compile()` entry directly (`#[doc(hidden)]`
+    // — this profiler inspects the raw per-block output, a shape the public
+    // one-shot `StandaloneCompiler::compile` atomic contract does not
+    // expose).
+    verter_compiler::compile::compile(
+        source,
+        &request,
+        &VueExecutionInputs::default(),
+        macro_semantics,
+        allocator,
+    )
+    .expect("a plain RuntimeClient compile must not be refused")
 }
 
 struct VueFile {
