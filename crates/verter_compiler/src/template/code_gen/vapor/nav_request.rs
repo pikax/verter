@@ -39,7 +39,7 @@ impl PendingNavQueue {
 /// node ref (and any anchor id) cannot be numbered until every direct child
 /// has been visited.
 ///
-/// Official rc.3: `transformChildren` completes, then `processDynamicChildren`
+/// Official rc.5: `transformChildren` completes, then `processDynamicChildren`
 /// once — `increaseId()` for the anchor before memoized `reference()`. Eager
 /// mint on first request is too early when more than one child needs nav
 /// (root `<div>` with if/for gets id 5 instead of 10).

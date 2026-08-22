@@ -98,7 +98,7 @@ test("the pinned compiler generates the complete deterministic fixture matrix", 
 
   assert.deepEqual(first, second);
   assert.equal(first.provenance.compiler, "@vue/compiler-sfc");
-  assert.equal(first.provenance.version, "3.5.34");
+  assert.equal(first.provenance.version, "3.6.0-rc.5");
   assert.ok(first.provenance.fixtureSha256.length === 64);
   assert.deepEqual(
     first.cases.map(({ id }) => id),

@@ -237,7 +237,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// wrapper) uses an unmapped overwrite: still `Overwritten` (ordering vs
     /// later `move_slice` stays intact) but no source-map token. A mapped
     /// `Overwritten` would claim the tag's start for the entire replacement —
-    /// truthful only for 1:1 substitutions. Official rc.3 `prependLeft` wrapper
+    /// truthful only for 1:1 substitutions. Official rc.5 `prependLeft` wrapper
     /// insertion never touches the tag and carries no mapping either.
     pub fn overwrite_or_root_prefix(&mut self, start: u32, end: u32, content: &str) {
         if start == end {
@@ -1062,7 +1062,7 @@ pub enum ConditionBranchClose {
 ///
 /// `n` and `x` share one counter — official `context.reference()` has no
 /// separate id space: `const x2 = _txt(n2)` uses the same id as `const n2 = t0()`
-/// (rc.3). No `next_text()`; callers use `next_node()` (`ensure_text_ref`).
+/// (rc.5). No `next_text()`; callers use `next_node()` (`ensure_text_ref`).
 #[derive(Debug, Default)]
 pub struct VaporCounters {
     /// Node/text reference counter (n0, n1, ... — also used for x0, x1, ...).
@@ -1569,7 +1569,7 @@ impl<'a> VaporElementState<'a> {
     /// Ensure a text node ref is allocated for this element.
     ///
     /// Official `context.reference()` has no separate `xN`/`nN` id space
-    /// (`const n2 = t0()` + `const x2 = _txt(n2)`, rc.3). Reuses
+    /// (`const n2 = t0()` + `const x2 = _txt(n2)`, rc.5). Reuses
     /// `ensure_node_ref`; `text_node_ref` only marks "also emit `xN = _txt(nN)`".
     pub fn ensure_text_ref(&mut self, counters: &mut VaporCounters) -> u32 {
         if let Some(r) = self.text_node_ref {

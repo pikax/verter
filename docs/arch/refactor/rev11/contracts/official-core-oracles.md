@@ -6,7 +6,7 @@
 
 | framework | upstream identity | allowed use |
 |---|---|---|
-| Vue | `vuejs/core v3.6.0-rc.3`, commit `3adb225775c9b28223a56e07f7a2f874b6fbb138`, tree `36da8dc8841a35d3e1163e4b9bb5752f95ca527a` | compiler oracle and official runtime executor in hermetic tests |
+| Vue | `vuejs/core v3.6.0-rc.5`, commit `f11c8f2639ce15559d64ea054e409081bd8a0ce1`, tree `980693b602cff54d492a1d6ada18470596cbf978` | compiler oracle and official runtime executor in hermetic tests |
 | Svelte | `sveltejs/svelte svelte@5.56.8`, tag object `a49603bbb50f948fd0c2bf5c55582a8f89b4d91c`, commit `44a7813730579b94004e182e5a67aab27aa9d2a6`, tree `63390158bfe8f997c474e35215a4fa627194c229` | compiler oracle and official runtime executor in hermetic tests |
 
 The package locks under `evidence/framework-conformance/oracles/` are part of each

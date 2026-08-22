@@ -1,38 +1,57 @@
 # Exact framework version-domain manifest
 
-Resolved 2026-08-12. The package locks are the complete machine-readable dependency
-closures; this document records their source and direct-package identity.
+Resolved 2026-08-12, Vue domain re-resolved 2026-08-21 (v3.6.0-rc.3 → v3.6.0-rc.5,
+one pinned domain workspace-wide). The package locks are the complete
+machine-readable dependency closures; this document records their source and
+direct-package identity.
+
+**Scope of "re-resolved workspace-wide."** This re-resolution covers the
+runtime-output oracle domain this document and `domain-pin.mjs` govern: the
+package closures above and everything the `packages/framework-conformance-harness`
+goldens/corpus are generated against. It does NOT cover the separate, already-frozen
+BF1/BF2 official-case-manifest evidence package (`vue-official-cases.tsv`,
+`vue-options.tsv`, `option-inventories.md`, `generate-official-case-manifests.mjs`
+and `verify-b2-parse-facets.mjs`'s `EXPECTED_VUE`, and the corresponding
+`performance-gates.toml` BF2 cell), which is pinned to its own separate,
+already-measured source commit as part of a not-yet-ratified AMD-005 proposal
+(`capability-matrix.md`, `ssr-hydration.md`) and is not re-derived on every
+runtime-oracle version bump. Moving that package to track a new Vue commit needs a
+genuine BF1/BF2 re-certification (a fresh pinned checkout, regenerated manifests,
+and re-measured performance cells under BF2's own methodology), not a label edit —
+see `capability-matrix.tsv`'s `compatibility_domain` column, which stays
+`core@3.6.0-rc.3` deliberately, matching that frozen package and its governing
+(unratified) contract prose.
 
 ## Vue
 
 - upstream: `https://github.com/vuejs/core`
-- exact tag: `v3.6.0-rc.3`
+- exact tag: `v3.6.0-rc.5`
 - tag kind: lightweight
-- commit: `3adb225775c9b28223a56e07f7a2f874b6fbb138`
-- tree: `36da8dc8841a35d3e1163e4b9bb5752f95ca527a`
+- commit: `f11c8f2639ce15559d64ea054e409081bd8a0ce1`
+- tree: `980693b602cff54d492a1d6ada18470596cbf978`
 - package lock: `oracles/vue/package-lock.json`
-- lock SHA-256: `0dd2290c0b7d01f4727953b838610727b18bcb999b634eeb8ab726508a34b951`
+- lock SHA-256: `4c3cc2fb175c4cba390e319aeae04dce6252ac818a2045f8383a040b488430a2`
 - exact resolved closure: `oracles/vue/closure.tsv`
-- closure SHA-256: `d5caba234d8545b8b7bc7cc4cca8b8cf63f8ed594140d7cae80f3c7ae64606b2`
-- package manifest SHA-256: `df17ad96a1dc2b18783b2040e35bcd1e83239e8b7d4bd3255b5bdf2dbbf3b6e4`
+- closure SHA-256: `6af174230488ff2d6d054550d81f3a96218c137046abf37a9dc9d27639d9ea07`
+- package manifest SHA-256: `ffd153afc3d7f814c727b960698a8202237120fe970d0f7249148d8001d31f5f`
 - resolver: npm `10.8.2`, lockfile v3, Node `v20.20.2`, exact direct versions,
   `--package-lock-only --ignore-scripts --legacy-peer-deps --no-audit --no-fund`
 - closure: 25 non-root packages, fully named/versioned/integrity-bound in the lock
 
 | direct package | version | npm integrity |
 |---|---|---|
-| `vue` | `3.6.0-rc.3` | `sha512-SsLCdsc8WoOJC1KHsMxvkVFjKmVpurF2DZJSy5A8sOSBR6ar1cQ370j2TBO80MW7ct80aHh0oQWU9BzMo8H9Qg==` |
-| `@vue/compiler-core` | `3.6.0-rc.3` | `sha512-WtpFH7AYGbw7K1AbUKkLxYRfrp0+0kB5RHMlEeTk5sKGcwSV+sNZQbq7R3Ybaq55XLjPCd0QF7TG3AQauGoIiQ==` |
-| `@vue/compiler-dom` | `3.6.0-rc.3` | `sha512-n/3HTAcXwNdwrx8eS1JUwCw4wbS+gPi8hIM7WcoTvHqgYJL5xhfChsmJQtzkX24Lweu7strPsNSbNsf/S3D3WQ==` |
-| `@vue/compiler-sfc` | `3.6.0-rc.3` | `sha512-+QT0wGQixwrkvG+qGEY2SkzUJJw1M3KlXtJ+xFHeZXZrPmvLWVAt/4B/G/H0gVWa8SiqOZLedI7ADqmjgm7Q6Q==` |
-| `@vue/compiler-ssr` | `3.6.0-rc.3` | `sha512-iywY3ipWer9pJ6Xa5vQ1sGd/hT0cGPDn7m5zwJDKnBcflSt4pfktE+xl2t0cSFs4/mTHEevuz5xamdyCJ2L6KQ==` |
-| `@vue/compiler-vapor` | `3.6.0-rc.3` | `sha512-wMdb1WpwosxWl3sNOYLPw9DgL+AzSdaJWnBi5GEvR1ajqb7mY3Ivenvs5QIBGXRbNYKrQBqfdkBWH/3xNWIXwQ==` |
-| `@vue/runtime-core` | `3.6.0-rc.3` | `sha512-uGD8nlft/+wKALxpSDzItg1ICtNMQkkOjCurmG9evTVgerBmkm0RUmZGHlIaKVECLizKBpf7s+p0NaH9yZJfLA==` |
-| `@vue/runtime-dom` | `3.6.0-rc.3` | `sha512-/cB2vZhcGFhl+YYxwsJyFB1KjVFKK29JATuJzSQxhlXbCD+kAwJ1ZJB615RS9Yd5mC9hooM65G9clrbD9LlXHA==` |
-| `@vue/runtime-vapor` | `3.6.0-rc.3` | `sha512-4OrYk9KWBz71axcmDTPh1TiGG84dq937Olj3qlGp9rklVwUL0f+7w1dZSfWPzV4Y/d8ye6WgLfNmntqBOX094g==` |
-| `@vue/server-renderer` | `3.6.0-rc.3` | `sha512-YCKcCMz7NY92Wp6Ugv7JBFHqgbdteIC6CM3TzMMbJ8uB56sUXrF7qJRh3z6AyH3FESycFdXnUSIwNhkmjL5hfg==` |
-| `@vue/reactivity` | `3.6.0-rc.3` | `sha512-+Uvp1i+oozwkyVy2HGUhmA23QDO/YY+QyBm32oddZyG6+FEaEANG7NCQr+asSJzNHWAZmZo97zVNai0tOBdJRw==` |
-| `@vue/shared` | `3.6.0-rc.3` | `sha512-EFnGq/OonnFgOtgAhXLIv8owITuFsaGglKXjsAUJQ+2uVuCPxypdW7NIZUlt7ED2raM1Hn/C83eTeK0tZVGCZw==` |
+| `vue` | `3.6.0-rc.5` | `sha512-yM+CHEWSTc9FjJGIeViI86VVheHvJ3YaZrrXqlD7wX3S+8tNPR/vDMviGOv4ULIMTkzWWKWVRvylsytXbHBbNA==` |
+| `@vue/compiler-core` | `3.6.0-rc.5` | `sha512-OSOzR/4Mk8TMStNxFLFwcVjgFvvMGvlKEpboxv9W4ikQhsVLKEMTtzBVY5A11qwb6zGuwWJdCOeME5npmpURiQ==` |
+| `@vue/compiler-dom` | `3.6.0-rc.5` | `sha512-QBONzGYH7o448rwz+8FUWW4Gm4Zw0EtNhtRooOw/KDFF+/hWz1VlGIpvU9Hjv5MXDMMCu+UsLXEYFtXTSHgIwg==` |
+| `@vue/compiler-sfc` | `3.6.0-rc.5` | `sha512-o/IH60kRS8C06ek3tullJhm4sK3T6aDXQa8Dgq7qLxRCa5gXrIZMDO9+mZYy0THxAiTZs2tc/XwnKu0JqmSKRw==` |
+| `@vue/compiler-ssr` | `3.6.0-rc.5` | `sha512-KBsxaO538LZeNARcaYeEwOE0Fl/gw2mEYB9+hK/Hrk7yUCq4WeS9V32HL84SiTY4S6WXrcKP0pXB6zW6zvjB6w==` |
+| `@vue/compiler-vapor` | `3.6.0-rc.5` | `sha512-UXnYH+4NhPmEmlWcHuiR+KjfpZCuG1CBkWXTSH5720p2jRGzuEGiMUAx7CtMXyIJ0QZwdzDV09xFs35zsgJeYA==` |
+| `@vue/runtime-core` | `3.6.0-rc.5` | `sha512-NiT9xl/ndkTHASfQ9AjxDjTiClIZRmsIWb0orlKNnjHn6C09PNZX4V/c0Aewtlg8bouarpnV6JLbpg16gYMBJA==` |
+| `@vue/runtime-dom` | `3.6.0-rc.5` | `sha512-E5A1z7UEoPvAmIpZopSJ5ji8A1wuP2cFHVc41ZN2w32FWV3CxFQVJG3VNSHwFs8lBQ8Ji5SDnkMCfJXHVzt0iQ==` |
+| `@vue/runtime-vapor` | `3.6.0-rc.5` | `sha512-OmBf4R/SJ11h9ZXrpPThddh2SqTmyc9eCBLFSmH1rhfr/sVFMrrcxMXjFOX1Rn+Nlqiuf9pUx/hYwG2gY2uJHA==` |
+| `@vue/server-renderer` | `3.6.0-rc.5` | `sha512-esb8yrZjymuMO7Wqjp62B2cFCGvL1AkmlIp8KBsKowG+BOqzemOJHz1yhK7Tf3KE0LIEatDP/Gb4FZo+S/LwyQ==` |
+| `@vue/reactivity` | `3.6.0-rc.5` | `sha512-FcTNjZwCU4VPAv7W/EJD/ckatgxFJ20jU6S2dGmJC9RS08HAvKB/IjtCQaE7HBuIC4oXQnnahkNuilrDFt0BWA==` |
+| `@vue/shared` | `3.6.0-rc.5` | `sha512-2dQ2+xAv7USEKgM5ckB2PrNc4pBcqYNCmkk8/RQtbpxpNDK0RvH0c9vG4rgqsvFS4wy3RXyj2ZfoAhldkgZ2dw==` |
 
 The remaining 13 transitive packages and every regular/optional/peer dependency edge
 are exact in `closure.tsv`. Upstream range text retained as package metadata in npm's

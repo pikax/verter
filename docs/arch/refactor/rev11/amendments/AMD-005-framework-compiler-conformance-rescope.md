@@ -36,9 +36,9 @@ package.
 
 ## 2. Exact compatibility domains
 
-The only Vue runtime-output oracle domain is `vuejs/core v3.6.0-rc.3`, immutable
-commit `3adb225775c9b28223a56e07f7a2f874b6fbb138`, tree
-`36da8dc8841a35d3e1163e4b9bb5752f95ca527a`. Vue VDOM and Vue Vapor are separate
+The only Vue runtime-output oracle domain is `vuejs/core v3.6.0-rc.5`, immutable
+commit `f11c8f2639ce15559d64ea054e409081bd8a0ce1`, tree
+`980693b602cff54d492a1d6ada18470596cbf978`. Vue VDOM and Vue Vapor are separate
 capability families. Because the upstream domain is a release candidate, neither
 family may be classified Stable.
 

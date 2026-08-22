@@ -133,7 +133,7 @@ fn golden_meta(backend: Backend, topology: Topology, case_id: &str) -> GoldenMet
     let path = corpus_file(
         &corpus_root(),
         &format!(
-            "goldens/3.6.0-rc.3/{}/{case_id}.meta.json",
+            "goldens/3.6.0-rc.5/{}/{case_id}.meta.json",
             golden_dir(backend, topology)
         ),
     );

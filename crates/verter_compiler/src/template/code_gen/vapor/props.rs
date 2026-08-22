@@ -414,11 +414,11 @@ fn process_event(
     let resolver = ctx.resolver;
     let force_js = ctx.force_js;
 
-    // Official rc.3 (`@vue/compiler-vapor` `transformVOn`): delegation is now
+    // Official rc.5 (`@vue/compiler-vapor` `transformVOn`): delegation is now
     // OPT-IN via an explicit `.delegate` modifier (`isDelegatableEvent =
     // !!delegateModifier && arg.isStatic && delegatedEvents(arg.content)`) —
     // a bare `@click="handler"` with no modifier binds directly through
-    // `_on()`, matching the rc.3 seed goldens exactly. Delegation is no
+    // `_on()`, matching the rc.5 seed goldens exactly. Delegation is no
     // longer automatic for known-delegatable event names.
     if has_delegate && !non_delegatable && DELEGATABLE_EVENTS.contains(&event_name) {
         // Delegatable event: n{ref}.$evt{event} = _createInvoker(handler)
@@ -505,7 +505,7 @@ fn write_handler_expression(
     let resolved = resolve_expr(handler, value_start, oxc_exp, resolver, force_js);
 
     // Official (`genEventHandler`'s `isConstantBinding`, confirmed directly
-    // against the vendored rc.3 source): the arrow-wrap is skipped ONLY for
+    // against the vendored rc.5 source): the arrow-wrap is skipped ONLY for
     // a BARE identifier (no dots — `value.ast === null`; a genuine dotted
     // path like `foo.bar` always parses a sub-expression and is therefore
     // ALWAYS wrapped, regardless of `foo`'s own binding type) that resolves
@@ -513,7 +513,7 @@ fn write_handler_expression(
     // classifies function/class/enum declarations and imports as
     // `SETUP_CONST`, so `@click="onClick"` referencing a `function onClick
     // () {}` declaration emits the bare `_ctx.onClick`, never a wrapper —
-    // confirmed against the pinned rc.3 golden for `props-emit.vue`.
+    // confirmed against the pinned rc.5 golden for `props-emit.vue`.
     let is_constant_binding =
         !handler.contains('.') && resolver.get(handler) == Some(BindingType::SetupConst);
     let should_wrap = is_member && !is_constant_binding;

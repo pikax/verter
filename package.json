@@ -74,8 +74,8 @@
     "test:vue-macro-oracle": "node --test scripts/vue-macro-runtime-oracle/oracle.test.mjs"
   },
   "dependencies": {
-    "@vue/compiler-core": "3.5.34",
-    "@vue/compiler-sfc": "3.5.34",
+    "@vue/compiler-core": "3.6.0-rc.5",
+    "@vue/compiler-sfc": "3.6.0-rc.5",
     "oxfmt": "0.52.0"
   },
   "devDependencies": {
@@ -93,7 +93,7 @@
     "svelte": "5.56.3",
     "typescript": "7.0.2",
     "vitest": "^4.1.7",
-    "vue": "3.5.34"
+    "vue": "3.6.0-rc.5"
   },
   "lint-staged": {
     "*.rs": "cargo fmt --check --",

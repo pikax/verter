@@ -786,7 +786,7 @@ fn build_setup_wrapper_start(
         ComponentWrap::DefineComponent => {
             // Non-SSR Vapor routes through the dedicated `defineVaporComponent`
             // runtime wrapper instead of `defineComponent` (verified directly
-            // against `@vue/compiler-sfc` 3.6.0-rc.3: `vapor && !ssr ?
+            // against `@vue/compiler-sfc` 3.6.0-rc.5: `vapor && !ssr ?
             // defineVaporComponent : defineComponent`) — its own
             // implementation sets `.__vapor = true`, so `emits_vapor_flag_here`
             // below stays false for this branch.
@@ -853,7 +853,7 @@ fn build_setup_wrapper_start(
     // `emits` (unconditional on `ssr`), spliced into the object literal as
     // ONE inline property — never a separate trailing
     // `__sfc__.__vapor = true` assignment (confirmed directly against the
-    // vendored rc.3 compiler source and the pinned rc.3 golden for
+    // vendored rc.5 compiler source and the pinned rc.5 golden for
     // `basic-interpolation.vue`'s vapor cell). The TS `_defineComponent`
     // branch instead adds it only when `ssr && vapor`: a non-SSR TS Vapor
     // component routes through the SEPARATE `defineVaporComponent` runtime
@@ -943,7 +943,7 @@ fn build_setup_wrapper_end(
         // can identify script-setup components. Confirmed directly against
         // the real `@vue/compiler-sfc` (`compileScript({ssr: true})` and
         // `{ssr: false}` produce byte-identical script output for this tail)
-        // and the pinned rc.3 SSR goldens: the marker is present in BOTH.
+        // and the pinned rc.5 SSR goldens: the marker is present in BOTH.
         // Verter's SSR `ssrRender` uses official's real non-inline 8-param
         // signature with `$setup.*` member routing (never a free `_ctx.*`
         // alias for setup bindings), so the marker's presence never makes a
@@ -1028,7 +1028,7 @@ fn build_returned_object(
     // key iff it is not already present — so a used IMPORT always sorts
     // AFTER every local declaration, regardless of where the `import`
     // statement sits textually (almost always at the top of the file).
-    // Proven against the exact rc.3 `basic-interpolation.vue` seed
+    // Proven against the exact rc.5 `basic-interpolation.vue` seed
     // fixture: `import { ref } from "vue"` precedes `const count = ref(0)`
     // textually, yet the golden `__returned__` is `{ count, items, ref }` —
     // the two local `const`s first, the import last. `props-emit.vue`'s

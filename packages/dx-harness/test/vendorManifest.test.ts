@@ -25,8 +25,16 @@ describe("vendored shim source", () => {
     expect(() => readFileSync(joinCanonical(dir, "vue", "package.json"), "utf-8")).not.toThrow();
   });
 
-  it("computes expectedVueVersion ONCE from the committed vue/package.json", () => {
-    expect(computeExpectedVueVersion()).toBe(VENDORED_VUE_VERSION);
+  it("computes expectedVueVersion from the committed vue/package.json, and VENDORED_VUE_VERSION matches the on-disk file", () => {
+    // Read the committed file directly (bypassing computeExpectedVueVersion)
+    // so this proves both the function's output AND the module-level
+    // VENDORED_VUE_VERSION constant genuinely reflect what's on disk, rather
+    // than comparing the same computation to itself.
+    const onDisk = JSON.parse(
+      readFileSync(joinCanonical(vendorShimsDir(), "vue", "package.json"), "utf-8"),
+    ).version;
+    expect(computeExpectedVueVersion()).toBe(onDisk);
+    expect(VENDORED_VUE_VERSION).toBe(onDisk);
   });
 
   it("pins every vendored vue/@vue package to the SAME version (passes C's sync)", () => {
@@ -50,7 +58,13 @@ describe("buildVendorManifest", () => {
     const a = buildVendorManifest();
     const b = buildVendorManifest();
     expect(a).toEqual(b);
-    expect(a.vueVersion).toBe(VENDORED_VUE_VERSION);
+    // Compare against the on-disk file directly, not VENDORED_VUE_VERSION —
+    // both are now derived via computeExpectedVueVersion(), so that
+    // comparison would be a tautology.
+    const onDisk = JSON.parse(
+      readFileSync(joinCanonical(vendorShimsDir(), "vue", "package.json"), "utf-8"),
+    ).version;
+    expect(a.vueVersion).toBe(onDisk);
     expect(a.files.length).toBeGreaterThan(0);
 
     const paths = a.files.map((f) => f.path);

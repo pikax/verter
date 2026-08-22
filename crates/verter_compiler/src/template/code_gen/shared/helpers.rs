@@ -910,7 +910,7 @@ pub use verter_parser::common::html_entities::has_html_entities;
 /// Write a `_template("...", flags)` declaration directly into a buffer.
 ///
 /// `flags` is official `@vue/compiler-vapor`'s numeric bitflag second
-/// argument (`genTemplates`, confirmed directly against the vendored rc.3
+/// argument (`genTemplates`, confirmed directly against the vendored rc.5
 /// source): `(root ? 1 : 0) | (isStatic ? 2 : 0)`, omitted entirely when both
 /// bits are 0 — never the boolean `true` this used to always emit.
 ///

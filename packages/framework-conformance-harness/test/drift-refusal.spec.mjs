@@ -107,7 +107,7 @@ describe("package/evidence-lock drift refusal", () => {
     const mutated = path.join(dir, "package-lock.json");
     const original = readFileSync(VUE_EVIDENCE_LOCK, "utf8");
     // A real, minimal, PROVEN-applied mutation: flip one integrity char.
-    const mutatedText = original.replace("sha512-Ss", "sha512-Xs");
+    const mutatedText = original.replace("sha512-yM", "sha512-XM");
     expect(mutatedText).not.toBe(original); // proves the plant actually applied
     writeFileSync(mutated, mutatedText);
     expect(() =>

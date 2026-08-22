@@ -27,7 +27,7 @@ use crate::PublicApiMode;
 /// domain are both realized from. Cross-checked against the committed Vue
 /// golden records by
 /// [`the_observation_domains_match_the_committed_golden_pins`].
-const VUE_PINNED_PACKAGE_VERSION: &str = "3.6.0-rc.3";
+const VUE_PINNED_PACKAGE_VERSION: &str = "3.6.0-rc.5";
 
 /// Which pinned framework closure gives an artifact's imports their meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

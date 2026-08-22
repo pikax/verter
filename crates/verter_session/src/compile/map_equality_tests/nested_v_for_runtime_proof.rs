@@ -171,7 +171,7 @@ fn nested_v_for_source_rewrite_module_mounts_without_reference_error() {
 
 /// `v-if` parent of a deeper pending `v-if` chain. Early-flush used to skip
 /// because it tested `el.v_condition.is_none()` (plain parents only),
-/// dropping the inner `_createIf`. Expected HTML matches pinned rc.3
+/// dropping the inner `_createIf`. Expected HTML matches pinned rc.5
 /// (reactive `ref` — a `const` triggers an unrelated ONCE opt).
 #[test]
 fn v_if_nested_in_v_if_mounts_and_renders_inner_content() {
@@ -190,12 +190,12 @@ fn v_if_nested_in_v_if_mounts_and_renders_inner_content() {
     );
     assert_eq!(
         detail, "<div><section><p>x</p><!--if--></section><!--if--></div>",
-        "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly \
+        "mounted HTML must match the pinned rc.5 compiler's own mount of this fixture exactly \
          (confirmed independently against the real oracle), got:\n{detail}\n\nmodule:\n{module_code}"
     );
 }
 
-/// Three nested `v-if`s: consecutive flush-gate retrigger. Matches pinned rc.3.
+/// Three nested `v-if`s: consecutive flush-gate retrigger. Matches pinned rc.5.
 #[test]
 fn triple_nested_v_if_mounts_and_renders_deepest_content() {
     let source = "<template><div><section v-if=\"a\"><article v-if=\"b\"><p v-if=\"c\">deep</p></article></section></div></template>\
@@ -213,13 +213,13 @@ fn triple_nested_v_if_mounts_and_renders_deepest_content() {
     );
     assert_eq!(
         detail, "<div><section><article><p>deep</p><!--if--></article><!--if--></section><!--if--></div>",
-        "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly \
+        "mounted HTML must match the pinned rc.5 compiler's own mount of this fixture exactly \
          (confirmed independently against the real oracle), got:\n{detail}\n\nmodule:\n{module_code}"
     );
 }
 
 /// `v-for > v-if > v-if > v-for`: flush-gate on both conditional parents
-/// plus the `v-for` merge path. Matches pinned rc.3.
+/// plus the `v-for` merge path. Matches pinned rc.5.
 #[test]
 fn v_for_v_if_v_if_v_for_mounts_and_renders_innermost_content() {
     let source = "<template><div><li v-for=\"item in items\"><p v-if=\"item.show\">\
@@ -237,13 +237,13 @@ fn v_for_v_if_v_if_v_for_mounts_and_renders_innermost_content() {
     assert_eq!(
         detail,
         "<div><li><p><section><span>a</span><span>b</span><!--for--></section><!--if--></p><!--if--></li><!--for--></div>",
-        "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly \
+        "mounted HTML must match the pinned rc.5 compiler's own mount of this fixture exactly \
          (confirmed independently against the real oracle), got:\n{detail}\n\nmodule:\n{module_code}"
     );
 }
 
 /// Sibling `v-if` chains sharing a parent: safety-net flush, not the
-/// `leave_element` gate. Matches pinned rc.3.
+/// `leave_element` gate. Matches pinned rc.5.
 #[test]
 fn independent_sibling_v_if_chains_both_mount_correctly() {
     let source = "<template><div><p v-if=\"a\">A</p><span v-if=\"b\">B</span></div></template>\
@@ -262,7 +262,7 @@ fn independent_sibling_v_if_chains_both_mount_correctly() {
 }
 
 /// `v-if` flushed by a later ancestor, not a plain sibling that leaves
-/// first. Matches pinned rc.3.
+/// first. Matches pinned rc.5.
 #[test]
 fn v_if_flushed_by_later_plain_sibling_of_a_non_immediate_ancestor_mounts_correctly() {
     let source =
@@ -285,7 +285,7 @@ fn v_if_flushed_by_later_plain_sibling_of_a_non_immediate_ancestor_mounts_correc
 /// of its own, no separate template/DOM container — its sole structural
 /// child's own construct (here the inner `_createIf`) is donated directly
 /// as the outer branch's body. Confirmed byte-for-byte against the pinned
-/// rc.3 compiler's own generated code AND its real mount output (both
+/// rc.5 compiler's own generated code AND its real mount output (both
 /// `_createIf`s emit a `<!--if-->` anchor comment — official Vapor's
 /// `createIf` always anchors its branch, transparent wrapper or not).
 #[test]
@@ -301,7 +301,7 @@ fn template_v_if_wrapping_inner_v_if_mounts_and_renders_inner_content() {
     );
     assert_eq!(
         detail, "<div><p>x</p><!--if--><!--if--></div>",
-        "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly \
+        "mounted HTML must match the pinned rc.5 compiler's own mount of this fixture exactly \
          (confirmed independently against the real oracle), got:\n{detail}\n\nmodule:\n{module_code}"
     );
 }
@@ -310,7 +310,7 @@ fn template_v_if_wrapping_inner_v_if_mounts_and_renders_inner_content() {
 /// item's fields, not the `_for_item0` wrapper's own — a fallback that
 /// destructures directly off the wrapper (skipping `.value`) silently reads
 /// `undefined` for every field. Confirmed byte-for-byte against the pinned
-/// rc.3 compiler's own generated code for this fixture.
+/// rc.5 compiler's own generated code for this fixture.
 #[test]
 fn v_for_rest_element_destructure_reads_correct_runtime_values() {
     let source = "<template><ul><li v-for=\"{ id, ...rest } in list\">{{ id }}-{{ rest.x }}</li></ul></template>\
@@ -323,7 +323,7 @@ fn v_for_rest_element_destructure_reads_correct_runtime_values() {
     );
     assert_eq!(
         detail, "<ul><li>1-2</li><!--for--></ul>",
-        "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly, got:\n{detail}\n\nmodule:\n{module_code}"
+        "mounted HTML must match the pinned rc.5 compiler's own mount of this fixture exactly, got:\n{detail}\n\nmodule:\n{module_code}"
     );
 }
 
@@ -331,7 +331,7 @@ fn v_for_rest_element_destructure_reads_correct_runtime_values() {
 /// ACTUAL item's element when present and fall back to the default only
 /// when it's `undefined` — a fallback that skips destructuring entirely
 /// silently reads `undefined` unconditionally instead. Confirmed
-/// byte-for-byte against the pinned rc.3 compiler's own generated code for
+/// byte-for-byte against the pinned rc.5 compiler's own generated code for
 /// this fixture.
 #[test]
 fn v_for_array_default_value_destructure_reads_correct_runtime_values() {
@@ -345,6 +345,6 @@ fn v_for_array_default_value_destructure_reads_correct_runtime_values() {
     );
     assert_eq!(
         detail, "<ul><li>99-2</li><!--for--></ul>",
-        "mounted HTML must match the pinned rc.3 compiler's own mount of this fixture exactly, got:\n{detail}\n\nmodule:\n{module_code}"
+        "mounted HTML must match the pinned rc.5 compiler's own mount of this fixture exactly, got:\n{detail}\n\nmodule:\n{module_code}"
     );
 }

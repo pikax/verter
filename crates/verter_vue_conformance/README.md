@@ -35,7 +35,7 @@ corpus/
 ├── manifest.json                      # generated: case-id → SFC → per-backend artifacts + disposition
 ├── cases/<area>/<case>.vue            # seed SFC corpus (32 cases, one focused feature each)
 ├── support/types.ts                   # locally vendored shared types (hermetic compile reads stay in corpus/)
-└── goldens/3.6.0-rc.1/                # vendored official output, version-scoped
+└── goldens/3.6.0-rc.5/                # vendored official output, version-scoped
     ├── vdom/<area>/<case>.js          # official emitted render/component module (VDOM backend)
     ├── vdom/<area>/<case>.map.json    # its source map
     ├── vdom/<area>/<case>.meta.json   # per-cell metadata (schema, versions, hashes, disposition, diagnostics, helpers)
@@ -45,7 +45,7 @@ corpus/
 The generator/oracle package lives at `packages/vue-conformance-oracle`
 (private, never published). The single pin authority for the toolchain version
 is `VUE_ORACLE_VERSION` in `packages/vue-conformance-oracle/vue-golden-lib.mjs`
-(currently `3.6.0-rc.1` for `vue`, `@vue/compiler-dom`, `@vue/compiler-sfc`,
+(currently `3.6.0-rc.5` for `vue`, `@vue/compiler-dom`, `@vue/compiler-sfc`,
 and `@vue/compiler-vapor`; `esbuild` is pinned separately for the TS type-strip
 post-process).
 

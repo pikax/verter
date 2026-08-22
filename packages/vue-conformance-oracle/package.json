@@ -12,10 +12,10 @@
     "test": "pnpm run check && pnpm run check:style-pseudo"
   },
   "devDependencies": {
-    "@vue/compiler-dom": "3.6.0-rc.3",
-    "@vue/compiler-sfc": "3.6.0-rc.3",
-    "@vue/compiler-vapor": "3.6.0-rc.3",
+    "@vue/compiler-dom": "3.6.0-rc.5",
+    "@vue/compiler-sfc": "3.6.0-rc.5",
+    "@vue/compiler-vapor": "3.6.0-rc.5",
     "esbuild": "0.28.0",
-    "vue": "3.6.0-rc.3"
+    "vue": "3.6.0-rc.5"
   }
 }

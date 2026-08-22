@@ -37,7 +37,7 @@ pub struct BindingResolver<'alloc> {
     /// destructured sub-binding's leaf name) to its renamed accessor text
     /// (`_for_item{depth}.value`, `_for_key{depth}.value`, ...), mirroring
     /// official's real `context.withId(fn, idMap)` scoping (confirmed
-    /// directly against the vendored rc.3 `@vue/compiler-vapor` source:
+    /// directly against the vendored rc.5 `@vue/compiler-vapor` source:
     /// `genFor`'s `itemVar = _for_item${depth}` + `buildDestructureIdMap`).
     /// VDOM/SSR/IDE never push here — official's VDOM `genFor` does not
     /// rename loop variables at all, only Vapor does (`Two Template Codegen
