@@ -948,8 +948,8 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
     );
 
     // Only the LAST applicable stage changes (an element selector with no
-    // v-bind, no class): stage 1 and 2 both hand their retained IR forward
-    // unchanged; scoping's own change has no successor to force a re-parse
+    // v-bind, no class): the first two stages both hand their retained IR
+    // forward unchanged; scoping's own change has no successor to force a re-parse
     // for, so this still costs exactly 1 parse — even though scoping IS the
     // stage that ends up rewriting.
     reset_parse_ir_invocation_count();
