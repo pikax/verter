@@ -737,6 +737,11 @@ jobs:
           path: packages/native/dist
       - name: Build TS packages
         run: pnpm run build:ts
+      # @verter/wasm's build no longer implicitly copies its output into the
+      # playground package (build-lane separation — no package-level build
+      # modifies another package). The playground syncs explicitly.
+      - name: Sync WASM into the playground
+        run: pnpm --filter @verter/playground run sync:wasm
       - name: Build the playground
         run: pnpm --filter @verter/playground exec vite build
 
@@ -768,8 +773,11 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Full publication-ready lane (bindgen + wasm-opt), deliberately NOT the
+      # root `pnpm build:wasm` — that is the host-developer lane and never
+      # runs wasm-opt. This artifact is uploaded for playground-test/release.
       - name: Build WASM
-        run: pnpm run build:wasm
+        run: pnpm --filter @verter/wasm build
       - name: Smoke test WASM
         run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
       # Shared with playground-test so wasm32 is compiled ONCE per run.

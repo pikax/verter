@@ -307,7 +307,7 @@ corepack prepare pnpm@latest --activate
 git clone https://github.com/pikax/verter.git
 cd verter
 pnpm install
-pnpm build    # Builds: native bindings → LSP binary → WASM bindings → TypeScript packages
+pnpm build    # Builds: native bindings → LSP binary → TypeScript packages (no WASM; see `pnpm build:wasm` / `pnpm dist`)
 
 # 5. (Optional) Package VS Code extension
 pnpm package
@@ -327,7 +327,7 @@ pnpm package
 ### Commands
 
 ```bash
-# Build everything (sequential: native → lsp → wasm → TypeScript)
+# Host developer build (sequential: native → lsp → TypeScript; no WASM, no wasm-opt)
 pnpm build
 
 # Build individual layers

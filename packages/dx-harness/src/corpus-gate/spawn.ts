@@ -31,6 +31,7 @@ import {
   VERTER_READY_METHOD,
 } from "../core/startupGate.js";
 import { extractQuiescenceCounters, pollUntilQuiesced } from "../core/quiescence.js";
+import { resolvePlatformBinary } from "../core/rustHostTriple.js";
 import { editorNeutralServerEnvironment } from "../editor-neutral/rawLspDriver.js";
 import type { CorpusGateRoute, CorpusRouteStartup } from "./types.js";
 
@@ -47,7 +48,7 @@ function requireFile(label: string, candidate: string): string {
 }
 
 function platformBinary(root: string, stem: string): string {
-  return path.join(root, "target", "debug", process.platform === "win32" ? `${stem}.exe` : stem);
+  return resolvePlatformBinary(root, stem);
 }
 
 /** Mirrors `resolveTsgoBinary` in editor-neutral/rawLspDriver.ts. */

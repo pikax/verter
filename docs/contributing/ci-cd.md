@@ -225,21 +225,30 @@ This script compares local versions against published versions, detects pre-rele
 
 ## Build Order
 
-Dependencies must be built in order:
+`pnpm build` (host developer build) builds in order:
 
 ```
-native -> lsp -> wasm -> ts packages
+native -> lsp -> ts packages
+```
+
+It never builds WASM and never runs `wasm-opt`. `pnpm dist` (publication-ready artifacts) adds a WASM step
+between lsp and ts packages, building the full `@verter/wasm` lane (bindgen + cached `wasm-opt`):
+
+```
+native -> lsp -> wasm (bindgen + wasm-opt) -> ts packages
 ```
 
 **Common rebuild sequences:**
 
-| What changed                   | Rebuild commands                                          |
-| ------------------------------ | --------------------------------------------------------- |
-| Rust crate (`verter_compiler`)     | `pnpm run build:native` then rebuild downstream consumers |
-| Rust LSP (`verter_lsp`)        | `pnpm run build:lsp` then restart VS Code extension host  |
-| Unplugin (`packages/unplugin`) | `pnpm run build:ts`                                       |
-| WASM (for playground)          | `pnpm run build:wasm`                                     |
-| Everything                     | `pnpm build` (runs all in correct order)                  |
+| What changed                   | Rebuild commands                                                     |
+| ------------------------------ | ---------------------------------------------------------------------|
+| Rust crate (`verter_compiler`)     | `pnpm run build:native` then rebuild downstream consumers        |
+| Rust LSP (`verter_lsp`)        | `pnpm run build:lsp` then restart VS Code extension host              |
+| Unplugin (`packages/unplugin`) | `pnpm run build:ts`                                                   |
+| WASM, developer iteration      | `pnpm run build:wasm` (bindgen only, no `wasm-opt`, no playground copy) |
+| WASM, publication-ready        | `pnpm --filter @verter/wasm build` (bindgen + cached `wasm-opt`)      |
+| Host developer build           | `pnpm build` (native + lsp + ts, in order)                            |
+| Publication-ready artifacts    | `pnpm dist` (native + lsp + wasm + ts, in order)                      |
 
 ## Required GitHub Secrets
 

@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "vite",
     "build:workspace-deps": "pnpm --filter @verter/type-ir build && pnpm --filter @verter/proto build && pnpm --filter @verter/types build && pnpm --filter @verter/language-shared build && pnpm --filter @verter/native build:types",
-    "build": "pnpm run build:workspace-deps && pnpm --filter @verter/unplugin build && pnpm --filter @verter/wasm build && pnpm --filter @verter/component-meta build && vite build",
+    "sync:wasm": "npx shx cp ../wasm/wasm/verter_wasm_bg.wasm public/verter_wasm_bg.wasm",
+    "build": "pnpm run build:workspace-deps && pnpm --filter @verter/unplugin build && pnpm --filter @verter/wasm build && pnpm run sync:wasm && pnpm --filter @verter/component-meta build && vite build",
     "preview": "vite preview",
     "test": "vitest --run --exclude '**/compiler.spec.ts'",
     "test:wasm": "vitest --run src/core/compiler.spec.ts",

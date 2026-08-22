@@ -1128,6 +1128,7 @@ fn config_all_fields() {
         footprint_capture: None,
         typeinfo_scratch_cache_capacity: None,
         host_cpu_threads: None,
+        metrics_enabled: None,
     };
     let result = ffi_config_to_host(config).unwrap();
     assert!(!result.dev_mode);

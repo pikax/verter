@@ -90,7 +90,8 @@ cargo build -p verter_lsp
 # Build LSP binary (release, optimized)
 cargo build --release -p verter_lsp
 
-# Build WASM (raw cargo build plus wasm-bindgen glue; `pnpm run build:wasm` adds a wasm-opt pass)
+# Build WASM (raw cargo build plus wasm-bindgen glue — same as `pnpm run build:wasm`,
+# a runnable unoptimized developer artifact; no wasm-opt, no playground copy)
 cargo build --release -p verter_wasm --target wasm32-unknown-unknown
 wasm-bindgen --target web --out-dir packages/wasm/wasm --out-name verter_wasm target/wasm32-unknown-unknown/release/verter_wasm.wasm
 ```
@@ -111,7 +112,8 @@ Or use the project's build scripts:
 ```bash
 pnpm run build:native    # Build + copy native bindings
 pnpm run build:lsp       # Build LSP binary (debug)
-pnpm run build:wasm      # Build WASM + copy to playground
+pnpm run build:wasm      # Build WASM (bindgen only, no wasm-opt, no playground copy)
+pnpm dist                # Publication-ready artifacts (native release, LSP, optimized WASM, TS)
 ```
 
 ## Testing

@@ -109,6 +109,14 @@ export interface HostConfig {
    * `compileMany` calls. To change the pool size, construct a new host.
    */
   hostCpuThreads?: number;
+  /**
+   * Enable host performance-metrics collection. `undefined` (default)
+   * keeps the default `false` (counters stay zero; `getMetrics()`
+   * returns `null`). A runtime per-host construction choice — not a
+   * build-time feature.
+   * Default: false.
+   */
+  metricsEnabled?: boolean;
 }
 
 export interface HostCompileProfile {

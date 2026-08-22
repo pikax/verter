@@ -2,6 +2,9 @@
 /target/
 **/*.rs.bk
 
+# Content-addressed build caches (e.g. scripts/wasm-opt-cache.mjs)
+/.cache/
+
 # Node
 dist
 *.node

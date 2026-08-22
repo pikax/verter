@@ -226,6 +226,12 @@ pub struct NapiHostConfig {
     /// construction and reused across every batch call — to
     /// change the pool size, construct a new host.
     pub hostCpuThreads: Option<u32>,
+    /// Enable host performance-metrics collection. `None`/absent keeps
+    /// the default `false` (counters stay zero; `getMetrics()` returns
+    /// `null`). Replaces the retired `session_metrics` Cargo feature as
+    /// the runtime opt-in — previously that feature had to be compiled
+    /// in; now it is a per-host construction choice.
+    pub metricsEnabled: Option<bool>,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -241,6 +247,7 @@ impl From<NapiHostConfig> for FfiHostConfig {
             footprint_capture: n.footprintCapture,
             typeinfo_scratch_cache_capacity: n.typeinfoScratchCacheCapacity,
             host_cpu_threads: n.hostCpuThreads,
+            metrics_enabled: n.metricsEnabled,
         }
     }
 }
@@ -2196,29 +2203,25 @@ impl NapiVerterHost {
 
     /// Returns a snapshot of host performance metrics.
     ///
-    /// Only available when built with the `session_metrics` feature.
-    /// Returns `null` when the feature is disabled.
+    /// Only available when the host was constructed with
+    /// `NapiHostConfig::metricsEnabled = true`. Returns `null` otherwise.
     #[napi(js_name = "getMetrics")]
     pub fn get_metrics(&self) -> Option<NapiHostMetrics> {
-        #[cfg(feature = "session_metrics")]
-        {
-            let m = self.inner.metrics_snapshot();
-            Some(NapiHostMetrics {
-                upserts: m.upserts as f64,
-                compileRequests: m.compile_requests as f64,
-                compileCacheHits: m.compile_cache_hits as f64,
-                compileCacheHitRate: m.compile_cache_hit_rate,
-                virtualLoads: m.virtual_loads as f64,
-                resolves: m.resolves as f64,
-                sliceHashTimeUsTotal: m.slice_hash_time_us_total as f64,
-                avgSliceHashTimeUs: m.avg_slice_hash_time_us,
-                compileTimeUsTotal: m.compile_time_us_total as f64,
-            })
+        if !self.inner.config().metrics_enabled {
+            return None;
         }
-        #[cfg(not(feature = "session_metrics"))]
-        {
-            None
-        }
+        let m = self.inner.metrics_snapshot();
+        Some(NapiHostMetrics {
+            upserts: m.upserts as f64,
+            compileRequests: m.compile_requests as f64,
+            compileCacheHits: m.compile_cache_hits as f64,
+            compileCacheHitRate: m.compile_cache_hit_rate,
+            virtualLoads: m.virtual_loads as f64,
+            resolves: m.resolves as f64,
+            sliceHashTimeUsTotal: m.slice_hash_time_us_total as f64,
+            avgSliceHashTimeUs: m.avg_slice_hash_time_us,
+            compileTimeUsTotal: m.compile_time_us_total as f64,
+        })
     }
 
     /// Runs lint rules against a file's analysis data and returns diagnostics.

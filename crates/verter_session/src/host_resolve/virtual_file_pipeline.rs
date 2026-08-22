@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-#[cfg(feature = "session_metrics")]
 use crate::instant::Instant;
 
 use super::compile_request_build::{
@@ -521,10 +520,11 @@ impl VerterHost {
     ///
     /// Returns `None` if the raw ID cannot be parsed.
     pub fn resolve(&self, raw_id: &str) -> Option<ResolvedId> {
-        #[cfg(feature = "session_metrics")]
-        self.metrics
-            .resolves
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.config.metrics_enabled {
+            self.metrics
+                .resolves
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let parsed = parse_raw_id(raw_id)?;
         let canonical = self.resolve_alias_or_canonical(&parsed.canonical_id);
@@ -1337,10 +1337,11 @@ impl VerterHost {
     /// requested node from the served artifacts (a missing node is a typed
     /// [`HostError::MissingVirtualNode`]).
     pub fn get_virtual_file(&self, query: VirtualQuery) -> Result<VirtualFileResponse, HostError> {
-        #[cfg(feature = "session_metrics")]
-        self.metrics
-            .virtual_loads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.config.metrics_enabled {
+            self.metrics
+                .virtual_loads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let (canonical_id, node_kind, raw_was_lsp) = if let Some(raw) = query.raw_id.clone() {
             let parsed = parse_raw_id(&raw).ok_or(HostError::InvalidQuery)?;
@@ -1753,10 +1754,11 @@ impl VerterHost {
                 };
 
                 if let Some(hit) = warm_hit {
-                    #[cfg(feature = "session_metrics")]
-                    self.metrics
-                        .compile_cache_hits
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if self.config.metrics_enabled {
+                        self.metrics
+                            .compile_cache_hits
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
 
                     // Build effective meta for cache-hit render_ids.
                     let hit_meta = parse.meta.clone();
@@ -1831,21 +1833,21 @@ impl VerterHost {
             block_content_stamp: captured_block_content_stamp,
         } = cache_miss;
 
-        #[cfg(feature = "session_metrics")]
-        self.metrics
-            .compile_requests
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.config.metrics_enabled {
+            self.metrics
+                .compile_requests
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Feature-independent cold-compile rail (see
         // `MetaProvenance::compile_cold_runs`): bumped once per cold run past
         // the warm-hit consult — the deterministic observability of compile-slot
-        // COALESCING that the `session_metrics`-gated `compile_requests` mirrors.
+        // COALESCING that the metrics-gated `compile_requests` mirrors.
         self.provenance
             .compile_cold_runs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        #[cfg(feature = "session_metrics")]
-        let compile_start = Instant::now();
+        let compile_start = self.config.metrics_enabled.then(Instant::now);
 
         let content_override_hash = 0;
 
@@ -2073,8 +2075,7 @@ impl VerterHost {
             }
         };
 
-        #[cfg(feature = "session_metrics")]
-        {
+        if let Some(compile_start) = compile_start {
             let compile_elapsed_us = compile_start.elapsed().as_micros() as u64;
             self.metrics
                 .compile_time_us_total

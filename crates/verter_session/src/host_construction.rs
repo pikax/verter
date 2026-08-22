@@ -21,9 +21,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::shared::default_shared;
-use crate::types::HostConfig;
-#[cfg(feature = "session_metrics")]
-use crate::types::HostMetrics;
+use crate::types::{HostConfig, HostMetrics};
 use crate::{host_executor, VerterHost};
 
 /// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
@@ -449,7 +447,6 @@ impl VerterHost {
             load_generation: std::sync::atomic::AtomicU64::new(0),
             store_view_manager: crate::resolver_store::StoreViewManager::new(),
             last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
-            #[cfg(feature = "session_metrics")]
             metrics: HostMetrics::default(),
             scheduler,
             provenance,

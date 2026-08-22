@@ -62,6 +62,9 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
     if let Some(threads) = input.host_cpu_threads {
         out.host_cpu_threads = Some(threads as usize);
     }
+    if let Some(metrics_enabled) = input.metrics_enabled {
+        out.metrics_enabled = metrics_enabled;
+    }
     Ok(out)
 }
 

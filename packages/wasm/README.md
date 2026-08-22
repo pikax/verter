@@ -181,14 +181,22 @@ interface CodegenResult {
 ### Build Commands
 
 ```bash
-# Full build (cargo build -> wasm-bindgen -> wasm-opt -> tsdown -> copy to playground)
+# Full publication-ready build (cargo build -> wasm-bindgen -> cached wasm-opt -> tsdown).
+# This is what `pnpm dist` (root) and packages/playground's own `build` script invoke.
 pnpm run build
 
+# Developer lane: cargo build -> wasm-bindgen only, no wasm-opt. This is what the root
+# `pnpm build:wasm` invokes (as `build:dev`).
+pnpm run build:dev
+
 # Individual steps:
-pnpm run build:wasm             # Compile Rust to WASM, generate wasm-bindgen glue, optimize with wasm-opt
-pnpm run build:ts               # Bundle TypeScript wrapper with tsdown
-pnpm run build:copy-playground  # Copy .wasm to playground/public/
+pnpm run build:bindgen  # Compile Rust to WASM, generate wasm-bindgen glue (no optimization)
+pnpm run opt:wasm       # Size-optimize in place through the content-addressed wasm-opt cache
+pnpm run build:ts       # Bundle TypeScript wrapper with tsdown
 ```
+
+The playground does not get an implicit copy from this package's build — it syncs explicitly via its own
+`pnpm --filter @verter/playground run sync:wasm` (see `packages/playground/package.json`).
 
 The underlying commands:
 
@@ -199,14 +207,13 @@ cargo build --manifest-path ../../Cargo.toml --release -p verter_wasm --target w
 # Step 2: Generate browser JS glue and TypeScript declarations
 wasm-bindgen --target web --out-dir wasm --out-name verter_wasm ../../target/wasm32-unknown-unknown/release/verter_wasm.wasm
 
-# Step 3: Size-optimize the binary in place (Binaryen wasm-opt)
-wasm-opt -Os wasm/verter_wasm_bg.wasm -o wasm/verter_wasm_bg.wasm
+# Step 3: Size-optimize the binary in place, through the content-addressed cache
+# (../../scripts/wasm-opt-cache.mjs — keyed on the post-bindgen .wasm bytes, `wasm-opt
+# --version`, the exact args, and a cache schema version; skips wasm-opt entirely on a hit)
+node ../../scripts/wasm-opt-cache.mjs wasm/verter_wasm_bg.wasm wasm/verter_wasm_bg.wasm -- -Os
 
 # Step 4: Bundle the TypeScript wrapper
 tsdown src/index.ts --format cjs,esm --dts --outDir dist
-
-# Step 5: Copy binary to playground
-npx shx cp wasm/verter_wasm_bg.wasm ../playground/public/verter_wasm_bg.wasm
 ```
 
 ### Output Structure
@@ -233,10 +240,11 @@ opt-level = "s"   # Optimize for size
 lto = true         # Link-time optimization
 ```
 
-After `wasm-bindgen` runs, the binary is further shrunk by a Binaryen `wasm-opt -Os` pass
-(the `opt:wasm` script, formerly performed automatically by `wasm-pack`). Binaryen is
-vendored cross-platform via the `binaryen` npm package, so no separate toolchain install is
-required.
+After `wasm-bindgen` runs, the publication-ready lane (`pnpm run build`, not the developer
+`build:dev` lane) further shrinks the binary with a Binaryen `wasm-opt -Os` pass, run through
+the content-addressed cache described above (the `opt:wasm` script — formerly performed
+automatically by `wasm-pack`). Binaryen is vendored cross-platform via the `binaryen` npm
+package, so no separate toolchain install is required.
 
 ### Testing
 

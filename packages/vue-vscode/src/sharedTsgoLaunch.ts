@@ -25,6 +25,8 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "f
 import { dirname, join } from "path";
 import { randomBytes } from "crypto";
 
+import { hostRustTriples } from "./rustHostTriple";
+
 /** The fixed on-disk stem of the relay shim binary (mirrors `stage-bin.mjs`). */
 export const RELAY_SHIM_STEM = "verter-relay-shim";
 
@@ -65,11 +67,17 @@ export function relayShimCandidates(opts: {
   if (explicit) return [explicit];
 
   const base = relayShimBasename(platform);
+  const triples = hostRustTriples(platform);
   const candidates: string[] = [];
   // Dev builds first (freshest) — walk up to the monorepo root's target/ dir.
+  // Triple-qualified layout (an explicit `--target` build lane) before the
+  // legacy untriple-qualified layout a bare `cargo build` still produces.
   let dir = extensionPath;
   for (let i = 0; i < 5; i++) {
     for (const profile of ["debug", "release"]) {
+      for (const triple of triples) {
+        candidates.push(join(dir, "target", triple, profile, base));
+      }
       candidates.push(join(dir, "target", profile, base));
     }
     dir = dirname(dir);

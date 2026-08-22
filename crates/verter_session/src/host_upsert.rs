@@ -359,10 +359,11 @@ impl VerterHost {
         // fan-out events stay attributable to the outer audited request.
         let request_context = verter_scheduler::request_context::current_context();
 
-        #[cfg(feature = "session_metrics")]
-        self.metrics
-            .upserts
-            .fetch_add(requests.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        if self.config.metrics_enabled {
+            self.metrics
+                .upserts
+                .fetch_add(requests.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let mut prepared: Vec<PreparedUpsertCommit> = Vec::with_capacity(requests.len());
         let mut scheduler_requests: Vec<verter_scheduler::scheduler::Request> =
@@ -574,11 +575,12 @@ impl VerterHost {
         let parse = &new_host_data.parse;
         let parse_duration_ms = new_host_data.parse_duration_ms;
 
-        #[cfg(feature = "session_metrics")]
-        self.metrics.slice_hash_time_us_total.fetch_add(
-            (parse_duration_ms * 1000.0) as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        if self.config.metrics_enabled {
+            self.metrics.slice_hash_time_us_total.fetch_add(
+                (parse_duration_ms * 1000.0) as u64,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
 
         // ── Compute changes ──
         let mut changes = compute_upsert_changes_from_parse(old_host_data.map(|h| &h.parse), parse);

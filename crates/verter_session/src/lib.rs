@@ -507,7 +507,6 @@ pub struct VerterHost {
     /// equivalent in `ProjectTypeStore`.
     pub(crate) last_const_prop_overrides:
         Shared<rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<String>>>,
-    #[cfg(feature = "session_metrics")]
     pub(crate) metrics: HostMetrics,
     /// Scheduler for async per-file staging and blocker management.
     /// Upsert delegates coherent source transitions to it.

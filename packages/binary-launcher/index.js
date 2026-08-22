@@ -251,15 +251,22 @@ function createLauncher({ toolName, matrix, workspaceRoot, resolvePackageDir }) 
     }
 
     // A local cargo build wins over an installed package for contributors; in
-    // a published install neither `target/` directory exists.
-    candidates.push({
-      path: join(workspaceRoot, "target", "debug", row.binaryName),
-      source: "dev-build",
-    });
-    candidates.push({
-      path: join(workspaceRoot, "target", "release", row.binaryName),
-      source: "dev-build",
-    });
+    // a published install neither `target/` directory exists. Triple-qualified
+    // layout (an explicit `--target` build lane) is tried before the legacy
+    // untriple-qualified layout a bare `cargo build` (no `--target`) produces —
+    // `row.rustTarget` is the same triple `napi build`/the LSP build lane use.
+    // `artifact-dev` is what `pnpm build` (the ordinary host developer build)
+    // produces; `debug`/`release` cover a manual `cargo build`.
+    for (const profile of ["artifact-dev", "debug", "release"]) {
+      candidates.push({
+        path: join(workspaceRoot, "target", row.rustTarget, profile, row.binaryName),
+        source: "dev-build",
+      });
+      candidates.push({
+        path: join(workspaceRoot, "target", profile, row.binaryName),
+        source: "dev-build",
+      });
+    }
 
     candidates.push({ path: row.binaryName, source: "path" });
 

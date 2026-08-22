@@ -1,6 +1,4 @@
-#[cfg(feature = "session_metrics")]
 use std::collections::BTreeMap;
-#[cfg(feature = "session_metrics")]
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -540,6 +538,17 @@ pub struct HostConfig {
     /// When enabled, the host may specialize child root targets from
     /// statically resolvable call-site prop types.
     pub generic_root_propagation: bool,
+    /// Enable the host-level `HostMetrics` counters (upserts, compile
+    /// cache hit rate, per-profile compile timing, resolve/virtual-load
+    /// counts) read back via
+    /// [`VerterHost::metrics_snapshot`](crate::VerterHost::metrics_snapshot).
+    /// When `false` (the default) the counters are never written — a
+    /// consumer that never turns this on pays only the cost of one
+    /// `bool` read per call site. Independent of `audit_enabled`: this
+    /// gates the lightweight always-compiled counters used by
+    /// `verter_lsp`'s perf-stats custom method; the audit substrate is a
+    /// separate, heavier observability path.
+    pub metrics_enabled: bool,
     /// Enable the Rust-first native audit surface for component-meta requests.
     /// When true, timing/memory/store snapshots are captured and emitted as
     /// structured `RequestAuditRecord` data. Default: false (zero overhead).
@@ -1251,6 +1260,7 @@ impl Default for HostConfig {
             analysis_level: AnalysisLevel::Full,
             analysis_scope: None,
             generic_root_propagation: false,
+            metrics_enabled: false,
             audit_enabled: false,
             footprint_capture: false,
             audit_timing_capture: false,
@@ -4637,10 +4647,11 @@ pub struct MetaProvenanceSnapshot {
 
 /// Point-in-time snapshot of host performance metrics.
 ///
-/// Only available when the `session_metrics` feature is enabled.
-/// Obtained via [`VerterHost::metrics_snapshot`](crate::VerterHost::metrics_snapshot).
+/// The underlying counters only accumulate when
+/// [`HostConfig::metrics_enabled`] is `true`; with it `false` (the
+/// default) every field reads zero. Obtained via
+/// [`VerterHost::metrics_snapshot`](crate::VerterHost::metrics_snapshot).
 #[derive(Debug, Default)]
-#[cfg(feature = "session_metrics")]
 pub struct HostMetricsSnapshot {
     /// Total number of `upsert()` calls.
     pub upserts: u64,
@@ -4667,7 +4678,6 @@ pub struct HostMetricsSnapshot {
 }
 
 #[derive(Debug, Default)]
-#[cfg(feature = "session_metrics")]
 pub(crate) struct HostMetrics {
     pub(crate) upserts: std::sync::atomic::AtomicU64,
     pub(crate) compile_requests: std::sync::atomic::AtomicU64,

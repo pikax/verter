@@ -20,6 +20,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { LspClient } from "@verter/lsp-test-client";
 
 import { awaitRawLspStartup } from "../core/startupGate.js";
+import { resolvePlatformBinary } from "../core/rustHostTriple.js";
 import type { EnduranceProviderRoute, ProviderRuntimeAttestation } from "./types.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -35,7 +36,7 @@ function requireFile(label: string, candidate: string): string {
 }
 
 function platformBinary(root: string, stem: string): string {
-  return path.join(root, "target", "debug", process.platform === "win32" ? `${stem}.exe` : stem);
+  return resolvePlatformBinary(root, stem);
 }
 
 /** Mirrors `resolveTsgoBinary` in editor-neutral/rawLspDriver.ts. */
