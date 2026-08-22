@@ -197,6 +197,18 @@ id = "RULING-AMD-005-BV1-BS1-AUTHORISED"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-AMD-005-BV1-BS1-AUTHORISED.md"
 sha256 = "e2e4a6761981985fd64a650ebf14bebf8bd7598939b9484e2b56bbdf9dd3d6e3"
+[[document]]
+id = "TCM0-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/TCM0.md"
+sha256 = "7933e3d99d4a7a31f3ddeda719f02992a85fad9fcd6fcc8edc042cbecd5c0249"
+
+[[document]]
+id = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS-amendment.md"
+sha256 = "a5431e67ca638a96a43c1948e8171c851245f02a1a04d8794182d4c47e1891cf"
+
 
 # -- Authorizations --------------------------------------------------------
 # A0-A6 and B1 rest on the base Revision 11 program authority itself (their
@@ -458,3 +470,10 @@ documents = ["B5-CHARTER", "RULING-2026-08-22-BV2-B5-J1"]
 ratified_by = "maintainer"
 ratified_at = "2026-08-22"
 scope = "Retroactive authorisation of B5's landing (exposing the accepted BV1/BS1 framework algorithms through the sole direct compiler core) now that its predecessor set is genuinely satisfied by BV2's acceptance."
+
+[[authorization]]
+block = "TCM0"
+documents = ["TCM0-CHARTER", "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-22"
+scope = "Authorises TCM0 only: a READ-ONLY investigation and architecture lock over the current TypeScript content-mapper and semantic-API contracts. It changes no production route, ships no code, certifies no package, and deletes nothing. TCM1-TCM4 remain LOCKED and each requires its own record."
