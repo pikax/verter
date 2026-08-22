@@ -477,3 +477,22 @@ documents = ["TCM0-CHARTER", "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"]
 ratified_by = "maintainer"
 ratified_at = "2026-08-22"
 scope = "Authorises TCM0 only: a READ-ONLY investigation and architecture lock over the current TypeScript content-mapper and semantic-API contracts. It changes no production route, ships no code, certifies no package, and deletes nothing. TCM1-TCM4 remain LOCKED and each requires its own record."
+
+[[document]]
+id = "B6-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/B6.md"
+sha256 = "da1d10efe380e5e01a67a7627d6af574179f0e5a926fcc3aa092aefe9b9f1a9b"
+
+[[document]]
+id = "AMD-011-C2-B6-PREDECESSOR-EDGE"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-011-c2-b6-predecessor-edge.md"
+sha256 = "55ff4afedc4a5ef8cf020932ba9644a0791f1c6583d08405c4bbf1d123888003"
+
+[[authorization]]
+block = "B6"
+documents = ["B6-CHARTER", "AMD-011-C2-B6-PREDECESSOR-EDGE"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-22"
+scope = "Authorises B6 to execute now that its sole predecessor B5 is ACCEPTED. B6 exposes B5's accepted algorithms through prepared-first, prepared-repeat and direct-batch compiler-core routes, and owns the preparation/batch lifecycle and reuse. It owns no framework semantics: prepared state may not change request defaults, compatibility, products, helpers, diagnostics, mappings or publication meaning. Exit requires proof of direct/prepared/batch result identity, stable reuse without stale inputs, atomic per-request results, zero unrequested work, bounded memory, and the BF1-locked route-overhead cells. C4 stays LOCKED until B6 is accepted."
