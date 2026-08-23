@@ -1,0 +1,15 @@
+# Pin the formatting style edition independently of the language edition.
+#
+# `style_edition` governs rustfmt's stylistic defaults (import-group sort
+# order is the dominant visible effect); the language `edition` in
+# `Cargo.toml` governs what syntax the compiler accepts. The two are
+# independent knobs, and rustfmt otherwise defaults `style_edition` to the
+# crate's language edition when unset — so a future language-edition bump
+# would silently reflow the entire workspace as a side effect of an
+# unrelated dependency/toolchain change, mixing a mechanical formatting diff
+# into every substantive commit that happens to land near the bump.
+#
+# Pinning here keeps formatting stable across language-edition changes. A
+# style-edition bump is its own deliberate, reviewed formatting decision —
+# not a promised follow-up, and not implied by this pin.
+style_edition = "2021"

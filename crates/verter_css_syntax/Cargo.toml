@@ -25,7 +25,6 @@ verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span" }
 memchr = "2.8.0"
 smallvec = "1.15"
-rustc-hash = { workspace = true }
 
 [[test]]
 name = "main"

@@ -94,15 +94,7 @@ windows-sys = { version = "0.61.2", features = [
 [dev-dependencies]
 # The headless mechanics e2e drives the shim over a fake-editor LSP stdio + the
 # control client, and connects the minted `--api` pipe with the crate's attach
-# client against a REAL spawned tsgo.
-tokio = { version = "1.52", features = [
-    "io-util",
-    "process",
-    "sync",
-    "time",
-    "rt",
-    "rt-multi-thread",
-    "macros",
-    "net",
-] }
+# client against a REAL spawned tsgo. tokio itself is not re-declared here:
+# the [dependencies] copy above already carries a superset of the features
+# this crate's tests need.
 serde_json = { workspace = true }

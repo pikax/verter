@@ -384,6 +384,27 @@ fn valid_source_map_v3(map: &str, input_content: &str, output_content: &str) -> 
         || !object
             .get("mappings")
             .is_some_and(serde_json::Value::is_string)
+        // A `sections` member marks an INDEXED source map (the V3 spec's
+        // alternate top-level shape: a list of offset-anchored sub-maps
+        // instead of a single flat `mappings` stream). `oxc_sourcemap`'s
+        // decoder has no notion of `sections` and silently ignores it as an
+        // unknown field, decoding whatever flat `sources`/`mappings` happen
+        // to sit alongside it — so without this check a supplied indexed map
+        // would decode as if the `sections` payload never existed instead of
+        // being rejected. This function accepts only a flat regular map, so
+        // `sections` presence (regardless of content, including `[]`) is
+        // rejected up front.
+        || object.contains_key("sections")
+        // `rangeMappings` is a non-standard Sentry extension neither this
+        // codebase nor `oxc_sourcemap` produces or reads. `oxc_sourcemap`
+        // silently ignores it as an unknown field, but the prior validator
+        // (built on `sourcemap` 9.3) decoded and VLQ-validated its content,
+        // rejecting the whole map when that content was malformed. Without
+        // this check a supplied map carrying a malformed `rangeMappings`
+        // string would silently pass instead of being rejected — reject its
+        // presence up front so this function's accept set never depends on
+        // content it does not itself validate.
+        || object.contains_key("rangeMappings")
     {
         return false;
     }
@@ -404,14 +425,14 @@ fn valid_source_map_v3(map: &str, input_content: &str, output_content: &str) -> 
     }
     // JSON shape alone is insufficient: decoding also validates the VLQ
     // mapping stream and rejects structurally shaped but unusable maps.
-    let Ok(decoded) = sourcemap::SourceMap::from_slice(map.as_bytes()) else {
+    let Ok(decoded) = oxc_sourcemap::SourceMap::from_json_string(map) else {
         return false;
     };
-    decoded.get_source_count() == 1
-        && decoded.tokens().all(|token| {
+    decoded.get_sources().count() == 1
+        && decoded.get_tokens().all(|token| {
             position_within_utf16_content(output_content, token.get_dst_line(), token.get_dst_col())
-                && (!token.has_source()
-                    || (token.get_src_id() == 0
+                && (token.get_source_id().is_none()
+                    || (token.get_source_id() == Some(0)
                         && position_within_utf16_content(
                             input_content,
                             token.get_src_line(),
@@ -2004,6 +2025,182 @@ mod tests {
             &stale_host,
             &stale_request,
             BlockContentPostCaptureTerminal::Superseded,
+        );
+    }
+
+    /// `valid_source_map_v3` decodes through `oxc_sourcemap`, which validates
+    /// VLQ-stream well-formedness but NOT that a decoded token's position
+    /// actually falls inside the content it claims to point into — that is
+    /// the `position_within_utf16_content` bounds check this function layers
+    /// on top. A syntactically valid, cleanly-decodable map whose one token
+    /// points past the end of the destination content must still be
+    /// rejected; the SAME map re-pointed at an in-bounds column must be
+    /// accepted — proving the assertion discriminates on the bounds check
+    /// specifically, not on decodability.
+    ///
+    /// This bounds check predates the `oxc_sourcemap` consolidation. The
+    /// constructor/decoder calls were rewritten onto that API
+    /// (compile-enforced); the rejection this test proves is not a
+    /// consolidation discriminator.
+    #[test]
+    fn valid_source_map_v3_rejects_a_decodable_map_with_an_out_of_bounds_token() {
+        let input_content = "let x = 1;";
+        let output_content = "const x = 1;";
+
+        let make_map = |dst_col: u32| {
+            let token = oxc_sourcemap::Token::new(0, dst_col, 0, 0, Some(0), None);
+            let sm = oxc_sourcemap::SourceMap::new(
+                None,
+                vec![],
+                None,
+                vec![std::borrow::Cow::Borrowed("input.ts")],
+                vec![Some(std::borrow::Cow::Borrowed(input_content))],
+                vec![token].into_boxed_slice(),
+                None,
+            );
+            sm.to_json_string()
+        };
+
+        // `output_content` is 12 UTF-16 units long: column 12 is the exact
+        // end-of-line boundary (valid, one-past-the-last-char), column 13
+        // is one UTF-16 unit past it.
+        let in_bounds = make_map(12);
+        assert!(
+            oxc_sourcemap::SourceMap::from_json_string(&in_bounds).is_ok(),
+            "the constructed map must itself decode cleanly — this test isolates the \
+             bounds check, not VLQ well-formedness"
+        );
+        assert!(
+            valid_source_map_v3(&in_bounds, input_content, output_content),
+            "a token at the exact end-of-content column is in bounds and must be accepted"
+        );
+
+        let out_of_bounds = make_map(13);
+        assert!(
+            oxc_sourcemap::SourceMap::from_json_string(&out_of_bounds).is_ok(),
+            "the out-of-bounds variant must ALSO decode cleanly, so a rejection can only \
+             come from the bounds check"
+        );
+        assert!(
+            !valid_source_map_v3(&out_of_bounds, input_content, output_content),
+            "a token one UTF-16 unit past the destination content's end must be rejected"
+        );
+    }
+
+    /// `oxc_sourcemap`'s decoder has no `sections` concept and silently
+    /// ignores an unrecognized `sections` field as ordinary unknown JSON —
+    /// it does not itself reject an indexed source map the way the old
+    /// `sourcemap` crate's `SourceMap::from_slice`/`from_reader` did (that
+    /// crate detects `sections.is_some()` and returns
+    /// `Error::IncompatibleSourceMap` for anything but a `Regular` map).
+    /// Without an explicit `sections` check in `valid_source_map_v3`, a
+    /// syntactically-valid-looking map carrying a `sections` array — the
+    /// hallmark of an indexed map this validator is not equipped to
+    /// interpret — would be silently accepted using only its top-level
+    /// `sources`/`mappings`, discarding the `sections` payload instead of
+    /// being refused. Proves the explicit `sections`-presence check, not
+    /// just decodability, drives the rejection: an identical map with the
+    /// `sections` key removed must be accepted.
+    #[test]
+    fn valid_source_map_v3_rejects_a_map_carrying_a_sections_member() {
+        let input_content = "let x = 1;";
+        let output_content = "const x = 1;";
+
+        let with_sections = serde_json::json!({
+            "version": 3,
+            "sources": ["input.ts"],
+            "sourcesContent": [input_content],
+            "names": [],
+            "mappings": "",
+            "sections": [],
+        })
+        .to_string();
+        assert!(
+            oxc_sourcemap::SourceMap::from_json_string(&with_sections).is_ok(),
+            "the map must itself decode cleanly through oxc_sourcemap — a rejection can \
+             only come from the explicit sections check, not from decode failure"
+        );
+        assert!(
+            !valid_source_map_v3(&with_sections, input_content, output_content),
+            "a map carrying a `sections` member is an indexed map and must be rejected, \
+             matching the old sourcemap crate's IncompatibleSourceMap behavior"
+        );
+
+        let without_sections = serde_json::json!({
+            "version": 3,
+            "sources": ["input.ts"],
+            "sourcesContent": [input_content],
+            "names": [],
+            "mappings": "",
+        })
+        .to_string();
+        assert!(
+            valid_source_map_v3(&without_sections, input_content, output_content),
+            "the identical map with the `sections` key removed must be accepted — proving \
+             the rejection above is driven by `sections` presence, not some other field"
+        );
+    }
+
+    /// `oxc_sourcemap` has no `rangeMappings` field at all — it is a
+    /// non-standard Sentry extension, not part of the V3 spec `oxc_sourcemap`
+    /// implements. serde silently drops it as an unknown field. So a map
+    /// carrying `rangeMappings`, malformed or not, would — without an
+    /// explicit check — now silently decode as valid, the same
+    /// permissive-drift class as the `sections` gap above. Proves the
+    /// rejection is driven by `rangeMappings` presence, not decodability: the
+    /// map decodes cleanly through `oxc_sourcemap` (which never looks at the
+    /// field), and the identical map with `rangeMappings` removed is
+    /// accepted.
+    ///
+    /// The `mappings` line here must be non-empty and valid VLQ (`"AAAA"`):
+    /// the old `sourcemap` 9.3 crate's `decode_regular` skips a line's
+    /// segments entirely via `continue` when that line is empty, so an
+    /// empty `mappings` string never reaches `decode_rmi` and the old
+    /// validator would have accepted a malformed `rangeMappings` paired
+    /// with it — the fixture must actually exercise the old decoder's
+    /// `rangeMappings` validation path, not bypass it.
+    #[test]
+    fn valid_source_map_v3_rejects_a_map_carrying_a_range_mappings_member() {
+        let input_content = "let x = 1;";
+        let output_content = "const x = 1;";
+
+        let with_range_mappings = serde_json::json!({
+            "version": 3,
+            "sources": ["input.ts"],
+            "sourcesContent": [input_content],
+            "names": [],
+            "mappings": "AAAA",
+            // A malformed range-mappings VLQ segment: the old `sourcemap`
+            // crate's `decode_rmi` rejects "!" as invalid base64, but
+            // `oxc_sourcemap` never reads this field, so decodability alone
+            // cannot be what causes the rejection asserted below.
+            "rangeMappings": "!",
+        })
+        .to_string();
+        assert!(
+            oxc_sourcemap::SourceMap::from_json_string(&with_range_mappings).is_ok(),
+            "the map must itself decode cleanly through oxc_sourcemap — a rejection can \
+             only come from the explicit rangeMappings check, not from decode failure"
+        );
+        assert!(
+            !valid_source_map_v3(&with_range_mappings, input_content, output_content),
+            "a map carrying a `rangeMappings` member is rejected, matching the old \
+             sourcemap crate's malformed-VLQ decode-error behavior"
+        );
+
+        let without_range_mappings = serde_json::json!({
+            "version": 3,
+            "sources": ["input.ts"],
+            "sourcesContent": [input_content],
+            "names": [],
+            "mappings": "AAAA",
+        })
+        .to_string();
+        assert!(
+            valid_source_map_v3(&without_range_mappings, input_content, output_content),
+            "the identical map with the `rangeMappings` key removed must be accepted — \
+             proving the rejection above is driven by `rangeMappings` presence, not some \
+             other field"
         );
     }
 

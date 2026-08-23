@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use im::{HashMap, HashSet};
+use imbl::{HashMap, HashSet};
 use parking_lot::Mutex;
 
 use crate::published_state::PublishedRoot;
@@ -679,17 +679,30 @@ impl ResolutionFactRef {
 /// the ledger's contents, ordering, or the signatures derived from it depends
 /// on which hasher produced the buckets: witness canonicalisation orders facts
 /// structurally, never by hash.
-type FactVersionLedger =
-    HashMap<ResolutionFactKey, ResolutionFactVersion, rustc_hash::FxBuildHasher>;
+type FactVersionLedger = imbl::GenericHashMap<
+    ResolutionFactKey,
+    ResolutionFactVersion,
+    rustc_hash::FxBuildHasher,
+    imbl::shared_ptr::DefaultSharedPtr,
+>;
 
 /// One derived node's edge set, or one dependency's dependent set.
-type ResolutionEdgeSet = HashSet<ResolutionFactKey, rustc_hash::FxBuildHasher>;
+type ResolutionEdgeSet = imbl::GenericHashSet<
+    ResolutionFactKey,
+    rustc_hash::FxBuildHasher,
+    imbl::shared_ptr::DefaultSharedPtr,
+>;
 
-/// Persistent adjacency. `im` maps are HAMTs, so cloning a root shares
+/// Persistent adjacency. `imbl` maps are HAMTs, so cloning a root shares
 /// their nodes structurally and a mutation costs
 /// `O(changed keys × log n)` — the bound the decision DAG is sized
 /// against.
-type ResolutionEdgeMap = HashMap<ResolutionFactKey, ResolutionEdgeSet, rustc_hash::FxBuildHasher>;
+type ResolutionEdgeMap = imbl::GenericHashMap<
+    ResolutionFactKey,
+    ResolutionEdgeSet,
+    rustc_hash::FxBuildHasher,
+    imbl::shared_ptr::DefaultSharedPtr,
+>;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ResolutionFactRoot {
@@ -701,8 +714,12 @@ pub(crate) struct ResolutionFactRoot {
     /// owner canonical + population -> that owner's published child
     /// decisions. The index exists so an owner-set publication is
     /// `O(owner's decisions)` rather than a scan of the whole ledger.
-    owner_decisions:
-        HashMap<(String, ResolutionPopulation), ResolutionEdgeSet, rustc_hash::FxBuildHasher>,
+    owner_decisions: imbl::GenericHashMap<
+        (String, ResolutionPopulation),
+        ResolutionEdgeSet,
+        rustc_hash::FxBuildHasher,
+        imbl::shared_ptr::DefaultSharedPtr,
+    >,
     /// Direct fact keys advanced since the enclosing mutation batch
     /// began, drained by [`Self::take_pending_seeds`] at the publication
     /// protocol's propagation step.

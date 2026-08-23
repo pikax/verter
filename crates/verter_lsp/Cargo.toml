@@ -10,7 +10,7 @@ description = "Rust LSP server for Verter — Language Server Protocol implement
 publish = false
 
 [features]
-hotpath = ["dep:hotpath", "hotpath/hotpath", "verter_session/hotpath", "verter_diagnostics/hotpath"]
+hotpath = ["verter_session/hotpath", "verter_diagnostics/hotpath"]
 # Opt-in test-support seam for items the SEPARATE integration-test binary needs
 # (`#[cfg(any(test, feature = "test-support"))]`) — e.g. the delivered-ledger
 # read `ProjectSync::delivered_provider_content`. Activated by the self-edge in
@@ -28,12 +28,10 @@ test-support = []
 verter_debug_assert = { workspace = true }
 verter_session = { path = "../verter_session" }
 verter_language = { path = "../verter_language" }
-hotpath = { version = "0.16", optional = true }
 verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }
 verter_workspace = { path = "../verter_workspace" }
 verter_semantic = { path = "../verter_semantic" }
-verter_parser = { path = "../verter_parser" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_span = { path = "../verter_span" }
@@ -54,7 +52,6 @@ oxc_span = { workspace = true }
 oxc_sourcemap = "7.0.0"
 blake3 = { workspace = true }
 tower-lsp-server = "0.23"
-schemars = "1.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1.52", features = [
@@ -92,11 +89,7 @@ futures-util = "0.3.32"
 tower-service = "0.3.3"
 verter_macro_dto = { path = "../verter_macro_dto" }
 verter_test_support = { path = "../verter_test_support" }
-# The wire-equivalence integration test byte-compares the ACTUAL NAPI
-# protocol encoding of the LSP route's envelope.
-verter_protocol = { path = "../verter_protocol" }
 paste = "1.0.15"
-tempfile = "3.27"
 # Activates only test seams used by this crate's tests: cache-admission force
 # controls (`test-support`) and project-binding constructors (`test-util`).
 verter_session = { path = "../verter_session", features = ["test-support", "test-util"] }

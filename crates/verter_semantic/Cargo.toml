@@ -39,8 +39,7 @@ verter_type_expr_oxc = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-smallvec = "1.15"
-hotpath = { version = "0.16", optional = true }
+hotpath = { version = "0.23", optional = true }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_ast = { workspace = true }
@@ -56,7 +55,6 @@ bitflags = "2.11"
 web-time = "1.1"
 
 [dev-dependencies]
-criterion = { version = "0.8.2", features = ["html_reports"] }
 static_assertions = "1.1.0"
 verter_test_support = { path = "../verter_test_support" }
 # Activates the `test-support` feature on `verter_css_syntax` for

@@ -13,8 +13,11 @@ publish = false
 verter_ecma = { workspace = true }
 verter_type_expr = { path = "../verter_type_expr" }
 verter_span = { path = "../verter_span" }
-oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
-oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+# Used only by the #[cfg(test)] dependency_facts_tests module.
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }

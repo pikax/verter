@@ -395,7 +395,7 @@ impl VerterMcpServer {
         }
 
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -432,7 +432,7 @@ impl VerterMcpServer {
             "changed": result.changed,
             "has_parse_errors": result.diagnostics.has_errors,
         });
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&response).unwrap_or_default(),
         )]))
     }
@@ -450,7 +450,7 @@ impl VerterMcpServer {
             })
             .collect();
         let json = serde_json::to_string_pretty(&list).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -480,7 +480,7 @@ impl VerterMcpServer {
                         .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
                     let json = serde_json::to_string_pretty(&analysis)
                         .map_err(|e| mcp_err(e.to_string()))?;
-                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
                 })();
                 mcp_tool_success(result)
             })
@@ -506,7 +506,9 @@ impl VerterMcpServer {
                             // the failure came from ingestion and remains an MCP
                             // infrastructure error rather than collapsing to null.
                             if host.workspace_read().read_file(&canonical).is_none() {
-                                return Ok(CallToolResult::success(vec![Content::text("null")]));
+                                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                                    "null",
+                                )]));
                             }
                             return Err(error);
                         }
@@ -514,7 +516,7 @@ impl VerterMcpServer {
                     match host.get_public_api(&canonical) {
                         Ok(Some(_)) => {}
                         Ok(None) => {
-                            return Ok(CallToolResult::success(vec![Content::text("null")]))
+                            return Ok(CallToolResult::success(vec![ContentBlock::text("null")]))
                         }
                         Err(error) => {
                             return Err(public_api_projection_mcp_error(&canonical, error))
@@ -573,7 +575,7 @@ impl VerterMcpServer {
 
                     let json =
                         serde_json::to_string_pretty(&api).map_err(|e| mcp_err(e.to_string()))?;
-                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
                 })();
                 mcp_tool_success(result)
             })
@@ -619,7 +621,7 @@ impl VerterMcpServer {
                     let projected = crate::tools::framework_surface::project_response(&response);
                     let json = serde_json::to_string_pretty(&projected)
                         .map_err(|e| mcp_err(e.to_string()))?;
-                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
                 })();
                 mcp_tool_success(result)
             })
@@ -641,7 +643,7 @@ impl VerterMcpServer {
             .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
         let json =
             serde_json::to_string_pretty(&analysis.imports).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -659,7 +661,7 @@ impl VerterMcpServer {
             .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
         let json =
             serde_json::to_string_pretty(&analysis.bindings).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -679,7 +681,7 @@ impl VerterMcpServer {
             .template
             .ok_or_else(|| mcp_err("No template analysis available"))?;
         let json = serde_json::to_string_pretty(&tpl).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -701,7 +703,7 @@ impl VerterMcpServer {
             .ok_or_else(|| mcp_err(format!("No analysis for {}", canonical)))?;
         let json =
             serde_json::to_string_pretty(&analysis.styles).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -724,7 +726,7 @@ impl VerterMcpServer {
         let parsed = match verter_semantic::analysis::parse_selector(&params.selector) {
             Some(s) => s,
             None => {
-                return Ok(CallToolResult::success(vec![Content::text(
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
                     "Failed to parse selector",
                 )]))
             }
@@ -741,7 +743,7 @@ impl VerterMcpServer {
         }
 
         let json = serde_json::to_string_pretty(&results).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -844,7 +846,7 @@ impl VerterMcpServer {
             "total_bleed_count": bleeds.len(),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -910,7 +912,7 @@ impl VerterMcpServer {
         }
 
         let json = serde_json::to_string_pretty(&diag_vec).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -1018,7 +1020,7 @@ impl VerterMcpServer {
         });
 
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -1081,7 +1083,7 @@ impl VerterMcpServer {
             .collect();
         let json =
             serde_json::to_string_pretty(&actions_json).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1154,7 +1156,7 @@ impl VerterMcpServer {
 
                     let json = serde_json::to_string_pretty(&serde_json::Value::Object(outputs))
                         .map_err(|e| mcp_err(e.to_string()))?;
-                    Ok(CallToolResult::success(vec![Content::text(json)]))
+                    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
                 })();
                 mcp_tool_success(result)
             })
@@ -1187,7 +1189,7 @@ impl VerterMcpServer {
             .get_ide(&canonical, &profile)
             .ok_or_else(|| mcp_err(format!("Cannot generate IDE output for {}", canonical)))?;
 
-        Ok(CallToolResult::success(vec![Content::text(
+        Ok(CallToolResult::success(vec![ContentBlock::text(
             ide.code.as_ref().to_string(),
         )]))
     }
@@ -1243,7 +1245,7 @@ impl VerterMcpServer {
 
         let json = serde_json::to_string_pretty(&serde_json::Value::Object(graph))
             .map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(description = "Find orphan components unreachable from any bundler entry point.")]
@@ -1307,7 +1309,7 @@ impl VerterMcpServer {
         });
 
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -1371,7 +1373,7 @@ impl VerterMcpServer {
         });
 
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -1487,7 +1489,7 @@ impl VerterMcpServer {
             "total": issues.len(),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1676,7 +1678,7 @@ impl VerterMcpServer {
         });
 
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -1802,7 +1804,7 @@ impl VerterMcpServer {
         });
 
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -1832,7 +1834,7 @@ impl VerterMcpServer {
         );
 
         let json = serde_json::to_string_pretty(&quality).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1919,7 +1921,7 @@ impl VerterMcpServer {
         }
 
         let json = serde_json::to_string_pretty(&hooks).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -1978,7 +1980,7 @@ impl VerterMcpServer {
             .collect();
 
         let json = serde_json::to_string_pretty(&result).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2036,7 +2038,7 @@ impl VerterMcpServer {
                 .contains(AnalysisFlags::ASYNC_SETUP),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2116,7 +2118,7 @@ impl VerterMcpServer {
 
         let json =
             serde_json::to_string_pretty(&suggestions).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2195,7 +2197,7 @@ impl VerterMcpServer {
             "total": drilled.len(),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2260,7 +2262,7 @@ impl VerterMcpServer {
             "total": targets.len(),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2345,7 +2347,7 @@ impl VerterMcpServer {
             serde_json::to_value(&analysis.macro_type_deps).unwrap_or_default();
 
         let json = serde_json::to_string_pretty(&types).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2412,7 +2414,7 @@ impl VerterMcpServer {
         }
 
         let json = serde_json::to_string_pretty(&result).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2459,7 +2461,7 @@ impl VerterMcpServer {
             "total": type_issues.len(),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2489,7 +2491,7 @@ impl VerterMcpServer {
             &analysis.styles,
         );
 
-        Ok(CallToolResult::success(vec![Content::text(docs)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(docs)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2512,7 +2514,7 @@ impl VerterMcpServer {
             "is_watcher": verter_semantic::analysis::is_watcher_api(classification),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2594,7 +2596,7 @@ impl VerterMcpServer {
             "files": baseline.entries.len(),
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2646,7 +2648,7 @@ impl VerterMcpServer {
             "listeners": listeners,
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2764,7 +2766,7 @@ impl VerterMcpServer {
             "untested_components": untested,
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -2782,7 +2784,7 @@ impl VerterMcpServer {
 
         let snapshot = self.build_route_snapshot(root);
         let json = serde_json::to_string_pretty(&snapshot).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2814,7 +2816,7 @@ impl VerterMcpServer {
             "routes": matching,
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2846,7 +2848,7 @@ impl VerterMcpServer {
             "links": links,
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2878,7 +2880,7 @@ impl VerterMcpServer {
             "views": views,
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2902,7 +2904,7 @@ impl VerterMcpServer {
 
         let report = verter_semantic::analysis::analyze_route_health(&snapshot, &existing_files);
         let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Build a route analysis snapshot by combining framework detection, route extraction,
@@ -3011,7 +3013,7 @@ impl VerterMcpServer {
             "results": results,
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -3075,7 +3077,7 @@ impl VerterMcpServer {
             "unused_stores": unused_stores,
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -3147,7 +3149,7 @@ impl VerterMcpServer {
             "consumers": consumer_files,
         });
         let json = serde_json::to_string_pretty(&response).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -3173,7 +3175,7 @@ impl VerterMcpServer {
 
         let json =
             serde_json::to_string_pretty(&score_result).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -3194,7 +3196,7 @@ impl VerterMcpServer {
         let plan = build_ssr_migration_plan(&analysis);
 
         let json = serde_json::to_string_pretty(&plan).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -3272,7 +3274,7 @@ impl VerterMcpServer {
         });
 
         let json = serde_json::to_string_pretty(&report).map_err(|e| mcp_err(e.to_string()))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 }
 
@@ -3525,17 +3527,56 @@ fn chrono_now_iso() -> String {
 
 // ── ServerHandler trait ────────────────────────────────────────────
 
+/// MCP protocol revisions Verter supports.
+///
+/// rmcp's trait default (`ProtocolVersion::KNOWN_VERSIONS`) tracks every
+/// revision the *SDK* knows about, so a routine dependency bump can
+/// silently widen what a server advertises/accepts. Verter pins this
+/// explicitly to the four revisions exercised before the rmcp 1.7 -> 3.1.4
+/// migration; adopting a newer revision (e.g. 2026-07-28's inline-lifecycle
+/// / SEP-2322 semantics) is a deliberate protocol decision with its own
+/// negotiation/lifecycle test coverage, not a side effect of a dependency
+/// version bump.
+const SUPPORTED_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
+    ProtocolVersion::V_2024_11_05,
+    ProtocolVersion::V_2025_03_26,
+    ProtocolVersion::V_2025_06_18,
+    ProtocolVersion::V_2025_11_25,
+];
+
+/// Advertised `InitializeResult.protocol_version` — the handshake fallback
+/// when a client requests a revision outside `SUPPORTED_PROTOCOL_VERSIONS`.
+/// Pinned to the newest supported revision, not `ProtocolVersion::default()`
+/// / `LATEST`, so a future SDK bump that moves `LATEST` onto an untested
+/// revision cannot change what Verter negotiates.
+const ADVERTISED_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_25;
+
 #[tool_handler]
 impl ServerHandler for VerterMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Verter Vue compiler MCP server. Provides deep analysis, diagnostics, \
-             compilation, CSS matching, and cross-file analysis for Vue Single File Components. \
-             Use scan_project first to load a Vue project, then use get_component_summary \
-             for a complete overview of any component, or get_project_stats for project-wide \
-             insights. For detailed analysis, use analyze_file, lint_file, get_component_api, etc."
-                .to_string(),
-        )
+        // `ServerInfo::new`/`InitializeResult::new` default `server_info` via
+        // `Implementation::from_build_env()`, whose `env!(...)` calls are
+        // expanded where that function is DEFINED (inside the rmcp crate),
+        // not where it's called — so the default silently reports rmcp's own
+        // crate name/version ("rmcp" / the rmcp release) as the negotiated
+        // server identity, not Verter's. Set it explicitly so a routine rmcp
+        // bump can never change what identity Verter presents to clients.
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("verter-mcp", env!("CARGO_PKG_VERSION")))
+            .with_protocol_version(ADVERTISED_PROTOCOL_VERSION)
+            .with_instructions(
+                "Verter Vue compiler MCP server. Provides deep analysis, diagnostics, \
+                 compilation, CSS matching, and cross-file analysis for Vue Single File \
+                 Components. Use scan_project first to load a Vue project, then use \
+                 get_component_summary for a complete overview of any component, or \
+                 get_project_stats for project-wide insights. For detailed analysis, use \
+                 analyze_file, lint_file, get_component_api, etc."
+                    .to_string(),
+            )
+    }
+
+    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
+        std::borrow::Cow::Borrowed(SUPPORTED_PROTOCOL_VERSIONS)
     }
 }
 
