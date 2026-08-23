@@ -673,8 +673,11 @@ charter_digest = "5f70d4d335f98ba423d1afdf76a66abfaa2a85d9fdcdeb4df0388832d14619
 # no such file exists for BV2 to bind honestly. Recorded empty rather than
 # filled with a digest of unrelated bytes — see the ratification report for
 # this transition. MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md accepts BV2 and
-# waives the three-named-review-mandate requirement for it, but does not
-# waive this field.
+# waives the three-named-review-mandate requirement for it. This exact field
+# is grandfathered by name in scripts/validate-program-state.mjs's
+# CONTEXT_PACKET_DIGEST_LEGACY_GAP_GRANDFATHER set, citing MAINTAINER-RULING-
+# 2026-08-22-CODE-OVER-LEDGER.md §1 — a legacy gap that cannot be honestly
+# reconstructed, not a live requirement waived going forward.
 context_packet_digest = ""
 base_sha = "321cf06521a88ada0b45c53dabdd7489c7761d4b"
 candidate_sha = "b64a440a97071ef017957b9ed5d8fc872d2a5793"
@@ -709,7 +712,9 @@ status = "ACCEPTED"
 charter_digest = "a8e8ca4b225f736d0421a0ce2b407ad5409adc1e3486f5588bb7e84b32d83848"
 # context_packet_digest: UNFILLED — FINDING, not an oversight. No
 # context-packet.md exists for B5 (evidence/B5/ holds only landing-record.md).
-# Same gap as BV2 — see that row's comment and the ratification report.
+# Same gap as BV2 — see that row's comment. Grandfathered by name in
+# scripts/validate-program-state.mjs's CONTEXT_PACKET_DIGEST_LEGACY_GAP_
+# GRANDFATHER set, citing MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md §1.
 context_packet_digest = ""
 base_sha = "264f727cb3ccc8158ba52fd7678bda7ab9a73c7f"
 candidate_sha = "7b840cb3d3a79e6c66d8977a46370d0f03fbe940"
@@ -758,7 +763,7 @@ notes = ""
 
 [[block]]
 id = "CM1"
-status = "ACCEPTED"
+status = "REVIEW"
 charter_digest = "1f18b0663dbd15b4e8069b0f0e5b20c2ede13dfe237cfb27f22ba0f69a2bf360"
 # context_packet_digest: UNFILLED — FINDING, not an oversight. No
 # context-packet.md (or any equivalent immutable dispatch packet, per
@@ -774,7 +779,17 @@ charter_digest = "1f18b0663dbd15b4e8069b0f0e5b20c2ede13dfe237cfb27f22ba0f69a2bf3
 # filled with a digest of unrelated or reconstructed bytes — see
 # evidence/CM1/landing-equivalence.md and the closure record
 # (2026-08-22-cm1-closure-record.md). Same gap as BV2/B5 — see those rows'
-# comments and MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md.
+# comments and MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md. Grandfathered by
+# name in scripts/validate-program-state.mjs's CONTEXT_PACKET_DIGEST_LEGACY_
+# GAP_GRANDFATHER set, citing MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md
+# §1 — the CHURN that ruling ends is chasing THIS gap after the fact, not
+# this row's REVIEW status: this row's prior ACCEPTED->REVIEW reversion
+# (block/cm1-acceptance-repair, commits 364db87de/4f4ab6d39) correctly
+# recorded a genuine BLOCK review verdict and stands (round-3 correction —
+# an earlier draft of this row wrongly treated the STATUS reversion as part
+# of the churn too; see MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md §3,
+# corrected, and evidence/CM1/2026-08-22-acceptance-repair.md's disposition
+# history).
 context_packet_digest = ""
 base_sha = "eadec2dc0ebc5f9d9ffb9c325b71ecd6a255bc7d"
 implementation_candidate_sha = "47e85159063b0ea841548f0d29aa0eb1d22c7fad"
@@ -787,22 +802,44 @@ implementation_ref = "refs/heads/block/cm1"
 landing_order = 3
 candidate_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
 candidate_tree = "9f848e6cbb90f22df3ed9bac023b983163275302"
-accepted_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
-accepted_tree = "9f848e6cbb90f22df3ed9bac023b983163275302"
+accepted_sha = ""
+accepted_tree = ""
 landing_equivalence_digest = "48811ae3c8dff7b87e3c8fe2af1c476c0bbb361c83f689d6827a7a13f31489ff"
 evidence_digest = "48811ae3c8dff7b87e3c8fe2af1c476c0bbb361c83f689d6827a7a13f31489ff"
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "PASS"
-conformance_reviewed_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
-architecture_review = "PASS"
-architecture_reviewed_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
-adversarial_review = "PASS"
-adversarial_reviewed_sha = "13eafb2ab218cbdb762dda02e1f383b5bd6ec040"
-maintainer_decision = "ACCEPTED"
+conformance_review = "BLOCKING"
+conformance_reviewed_sha = ""
+architecture_review = "BLOCKING"
+architecture_reviewed_sha = ""
+adversarial_review = "BLOCKING"
+adversarial_reviewed_sha = ""
+# conformance_review/architecture_review/adversarial_review: BLOCKING, not
+# PASS — this row previously (falsely) recorded PASS at reviewed_sha =
+# 13eafb2ab with no reviewer ever having actually examined the candidate. A
+# genuine single-lane review (per the BV2/B5/J1/CM1 waiver) WAS dispatched
+# against 13eafb2ab and returned BLOCK — see evidence/CM1/2026-08-22-
+# acceptance-repair.md; that fact is recorded in this row's notes, in prose,
+# not in *_reviewed_sha, since the validator's universal review-verdict-
+# identity-binding check requires a non-PASS mandate to carry no reviewed
+# SHA at all (same convention 364db87de/4f4ab6d39 used). There is NO review-
+# mandate override for CM1 or any other block — round-3 correction: an
+# earlier draft of this row cited a REVIEW_MANDATE_MAINTAINER_OVERRIDE_
+# GRANDFATHER in scripts/validate-program-state.mjs and recorded status =
+# ACCEPTED despite this BLOCK; that mechanism was never actually authorised
+# by the maintainer (the verbatim ruling quote is conditional on "if the
+# code is correct", and MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md §4
+# explicitly keeps review mandates untouched) and has been REMOVED from the
+# validator. CM1 stays REVIEW and cannot reach ACCEPTED until it earns a
+# genuine PASS on all three mandates — gated on closing the four open gaps
+# named in the FOLLOW-ON paragraph below, owned by a dedicated CM1
+# corrective follow-up track reviewed under the normal three-mandate
+# protocol (see evidence/CM1/2026-08-22-acceptance-repair.md's "What
+# remains open" / "Disposition" sections).
+maintainer_decision = "PENDING"
 enabling_amendment = ""
-notes = "Created by the maintainer's beta.4 regression-intake directive to own Findings B and C, both regressions against published beta.3 and both beta.4 blockers. THE DECISIVE RULING IS THAT THESE ARE TWO DISTINCT DEFECTS, NOT ONE: the in-repo investigation reproduced a SILENT degrade to Unknown(MissingOutput) upstream of the raise layer, while the external benchmark observed a HARD UnraisableSource error at exposed[].type. Closing only the reproduced one would have left a release blocker armed and shipping, so the hard-error fixture is an ADDITIONAL acceptance condition and CM1 is not complete until both are closed with their own reproducing tests. Finding B root cause: eval_env.rs component_meta_binding_type_entries gates only on PreparedValueDecl.type_annotation.classification and ignores signatures, so a defineExpose'd function declaration or a const initialized by a call such as ref or computed - typed OR untyped - is never offered to macro-type expansion. Repair: structurally admit demanded visible value bindings, fix the call-binding owner/preparation handoff, and preserve Failed through publication. Finding C root cause: macros.rs constructor_to_ts_type recognizes runtime prop constructors but writes DISPLAY TEXT only, never a semantic source, while the sibling Options-API path maps constructor identity to a real Primitive fact - which is why optionality survives while the primitive type vanishes. Repair: the Options path's closed primitive semantics become the shared analyzer model; the runtime-macro path is the anomaly, and semantics are never derived from display text or at the output seam. Both defects reproduce identically across sequential, warm, concurrent and batch invocation, which rules out view/concurrency causes - the directive's request-view hypothesis was not what the evidence showed. Ruled fixable under the CURRENT architecture (Path A), so no C1 rework is required; C1 gains CM1 as a predecessor while RETAINING A6, B1 and B2 so it must preserve the corrected behaviour and migrate the new tests. Acceptance uses Verter's intended canonical type output from product contracts and beta.3 behaviour, never the benchmark's permissive string|String comparison. The strict output error remains PREFERABLE to an invented type: no unknown substitution, no omitted exposed entries, no swallowed failures, no stale graph state, no bypassed request-view isolation. ACCEPTED 2026-08-22: predecessors BV1/BS1 were both already ACCEPTED at dispatch (2026-08-20), so CM1 was legitimately authorised (authority-registry.toml, block=CM1). Its work landed on trunk as two real commits, not one: 0e5177931 (Finding B — aliased-binding identity resolution, the exhaustive PreparedValueDecl admission gate, Failed-vs-Absent preservation, and the Present->UnraisableSource hard-error fixture repair) and 13eafb2ab (Finding C — the owner-aware RootBindingIndex replacing the deleted, structurally-unsound shadow scanner, shared by the Options and macro runtime-constructor paths). Neither corresponds to implementation_candidate_sha (block/cm1's tip 47e8515): 0e5177931 is a divergent squash of block/cm1's own corrected end state (that branch's internal revert a7bf8c696 already dropped the unsound shadow scanner before its own tip), and 13eafb2ab is an entirely separate lineage block/cm1 never contained, built and adversarially reviewed on its own (three codex xhigh design rounds plus a post-implementation pass that found and fixed three real bugs, 2f0379039) — see evidence/CM1/landing-equivalence.md for the full ancestry proof and the diagnosis of the stale-base_sha rehearsal conflict this closure resolves. Single independent review lane (ratified for BV2/B5/J1/CM1 only by MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §4) accepted in place of the three separately-named mandates; see the closure record (2026-08-22-cm1-closure-record.md) for the evidence weighed for this decision, including the regression suite (exposed_binding_regression.rs, formerly findbc_regression.rs) covering cold/warm/concurrent/batch/overlay invocation and both native and compat surfaces."
+notes = "Created by the maintainer's beta.4 regression-intake directive to own Findings B and C, both regressions against published beta.3 and both beta.4 blockers. THE DECISIVE RULING IS THAT THESE ARE TWO DISTINCT DEFECTS, NOT ONE: the in-repo investigation reproduced a SILENT degrade to Unknown(MissingOutput) upstream of the raise layer, while the external benchmark observed a HARD UnraisableSource error at exposed[].type. Closing only the reproduced one would have left a release blocker armed and shipping, so the hard-error fixture is an ADDITIONAL acceptance condition and CM1 is not complete until both are closed with their own reproducing tests. Finding B root cause: eval_env.rs component_meta_binding_type_entries gates only on PreparedValueDecl.type_annotation.classification and ignores signatures, so a defineExpose'd function declaration or a const initialized by a call such as ref or computed - typed OR untyped - is never offered to macro-type expansion. Repair: structurally admit demanded visible value bindings, fix the call-binding owner/preparation handoff, and preserve Failed through publication. Finding C root cause: macros.rs constructor_to_ts_type recognizes runtime prop constructors but writes DISPLAY TEXT only, never a semantic source, while the sibling Options-API path maps constructor identity to a real Primitive fact - which is why optionality survives while the primitive type vanishes. Repair: the Options path's closed primitive semantics become the shared analyzer model; the runtime-macro path is the anomaly, and semantics are never derived from display text or at the output seam. Both defects reproduce identically across sequential, warm, concurrent and batch invocation, which rules out view/concurrency causes - the directive's request-view hypothesis was not what the evidence showed. Ruled fixable under the CURRENT architecture (Path A), so no C1 rework is required; C1 gains CM1 as a predecessor while RETAINING A6, B1 and B2 so it must preserve the corrected behaviour and migrate the new tests. Acceptance uses Verter's intended canonical type output from product contracts and beta.3 behaviour, never the benchmark's permissive string|String comparison. The strict output error remains PREFERABLE to an invented type: no unknown substitution, no omitted exposed entries, no swallowed failures, no stale graph state, no bypassed request-view isolation. LANDED ON TRUNK 2026-08-22 (dispatch authorization only — NOT ledger-ACCEPTED; see the review-mandate correction below): predecessors BV1/BS1 were both already ACCEPTED at dispatch (2026-08-20), so CM1 was legitimately authorised (authority-registry.toml, block=CM1). Its work landed on trunk as two real commits, not one: 0e5177931 (Finding B — aliased-binding identity resolution, the exhaustive PreparedValueDecl admission gate, Failed-vs-Absent preservation, and the Present->UnraisableSource hard-error fixture repair) and 13eafb2ab (Finding C — the owner-aware RootBindingIndex replacing the deleted, structurally-unsound shadow scanner, shared by the Options and macro runtime-constructor paths). Neither corresponds to implementation_candidate_sha (block/cm1's tip 47e8515): 0e5177931 is a divergent squash of block/cm1's own corrected end state (that branch's internal revert a7bf8c696 already dropped the unsound shadow scanner before its own tip), and 13eafb2ab is an entirely separate lineage block/cm1 never contained, built and adversarially reviewed on its own (three codex xhigh design rounds plus a post-implementation pass that found and fixed three real bugs, 2f0379039) — see evidence/CM1/landing-equivalence.md for the full ancestry proof and the diagnosis of the stale-base_sha rehearsal conflict. This ledger block does not claim to have resolved the live-mode rehearsal violation — validator exit 1 on CM1's replay is intended; J1 must rebase. Single independent review lane (ratified for BV2/B5/J1/CM1 only by MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §4) accepted in place of the three separately-named mandates; see the closure record (2026-08-22-cm1-closure-record.md) for the evidence weighed for this decision, including the regression suite (exposed_binding_regression.rs, formerly findbc_regression.rs) covering cold/warm/concurrent/batch/overlay invocation and both native and compat surfaces. FOLLOW-ON (not yet landed on trunk): the genuine BLOCK review above (evidence/CM1/2026-08-22-acceptance-repair.md) found three disclosed crates/ gaps: (1) the disclosed D3 gap — constructor_binding_source_position's Local+Absent arm was falling through to the caller's unannotated default instead of failing closed, needing a SemanticSourceFailure::UnrepresentableRequiredMemberValue return; (2) D1, nullable-constructor-array adoption, to be verified against vendored @vue/runtime-core (getType(null) returns the string null, assertType accepts only value === null), not guessed; (3) a genuine eval-classification bug in root_binding_index.rs — a naive fix (skip poisoning whenever the eval callee reference resolved to ANY bound symbol) is unsound (a bound alias, e.g. `const eval = globalThis.eval`, is still direct eval; binding presence alone does not prove a non-intrinsic value) and the correct fix must skip poisoning ONLY for a provably fresh, unmutated, unredeclared local function binding (SymbolFlags::Function && !symbol_is_mutated && symbol_redeclarations().is_empty()), with alias/reassignment/redeclaration discriminating tests, failing closed for every other case. OWNERSHIP CORRECTION: an earlier version of this row and of this ledger block's own working branch (block/ledger-subordinate-to-code) carried a crates/ narrowing for items (1)-(3) directly on this branch; that duplicated independent work already in flight on block/binding-index-owner-and-eval, which touches the SAME files (root_binding_index.rs, macros.rs, component_meta.rs) with a strict superset of changes. The maintainer-facing dispatch error of two blocks owning one file was resolved by ownership, not merge: block/binding-index-owner-and-eval owns direct-eval and the binding index (items 1-3, and any adjoining component_meta.rs/macros.rs surface); this ledger block (`block/ledger-subordinate-to-code`) owns the ledger and validator only and carries NO crates/ changes — see that branch's own commit dropping them. Items (1)-(3) therefore remain OPEN against CM1's acceptance criteria until block/binding-index-owner-and-eval lands and is itself reviewed; this row does not claim them fixed. That same reverted branch's ACCEPTED-to-REVIEW ledger correction (364db87de, 4f4ab6d39) correctly reverted CM1's status and STANDS (round-3 correction — an earlier draft of this row and of MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md §3 wrongly claimed that ruling superseded the STATUS reversion; the ruling's operative scope is the context_packet_digest identity-bookkeeping gap only, §1, and §4 explicitly keeps review mandates untouched, so no review-mandate override was ever actually authorised). The review-mandate fields above record the true BLOCK verdict; status stays REVIEW until a genuine PASS is earned on all three. NOT closed — real, disclosed, open gaps, tracked as debt rather than silently folded into a blanket CM1's-code-is-correct claim: the compat surface (packages/component-meta/test/compat-gaps.test.ts, its runtime defineProps object syntax preserves defaults without raw display authority test) still asserts the pre-repair type: unknown | undefined regression value for the exact shape Finding C's fix targets; no producer-owned typed constructor-identity enum exists per charter item 4 (CM1.md:110) — constructor identity is still a raw Arc<str> spelling (ConstructorBindingEntry.spelling) folded by string match at component_meta.rs's primitive_of, not a typed enum minted at the producer; Finding C's acceptance-matrix cells are proven mostly at binding-classification level (root_binding_index_tests.rs), not end-to-end through public get_component_meta/compat output; the Present->UnraisableSource fixture is discriminating but asserts by panic-message style, not the exact error variant. OWNER AND GATE for these four items: a dedicated corrective track — now identified as block/binding-index-owner-and-eval for items (1)-(3) — reviewed under the normal three-mandate protocol (the single-lane waiver was specific to the original CM1/BV2/B5/J1 batch and is not re-invoked for the follow-up); the fourth (compat-surface/typed-constructor-identity/end-to-end-proof/error-variant debt) remains unowned pending a dedicated dispatch. CM1 cannot reach ACCEPTED until all four close and it earns a genuine PASS on conformance_review/architecture_review/adversarial_review. candidate_sha above names CM1's genuinely-reviewed landed identity (13eafb2ab, unchanged); accepted_sha/accepted_tree are empty because CM1 is NOT ledger-ACCEPTED — status stays REVIEW pending that follow-up work. No crates/ verification is claimed by this row's own branch: block/ledger-subordinate-to-code carries docs/ and scripts/ changes only (its own commit history records the crates/ drop and the validator/gate test evidence); crates/ verification for items (1)-(3) is owned and reported by block/binding-index-owner-and-eval; the program orchestrator runs node scripts/gate.mjs before landing either."
 
 [[block]]
 id = "C1"
@@ -827,7 +864,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = ""
-notes = " STATUS CHANGED READY -> LOCKED 2026-08-20: the beta.4 regression intake added CM1 as a C1 predecessor (C1 now A6, B1, B2, CM1) so C1 must preserve CM1's corrected component-meta behaviour and migrate its regression tests. C1 was dependency-eligible and awaiting charter ratification; it is now additionally gated on CM1 acceptance, which is itself gated on BS1. This is a real critical-path change, not bookkeeping: C1 is the heaviest fan-in node remaining and is no longer next-dispatchable."
+notes = " STATUS CHANGED READY -> LOCKED 2026-08-20: the beta.4 regression intake added CM1 as a C1 predecessor (C1 now A6, B1, B2, CM1) so C1 must preserve CM1's corrected component-meta behaviour and migrate its regression tests. C1 was dependency-eligible and awaiting charter ratification; it is now additionally gated on CM1 acceptance, which is itself gated on BS1. This is a real critical-path change, not bookkeeping: C1 is the heaviest fan-in node remaining and is no longer next-dispatchable. CORRECTION 2026-08-22 (round 3): CM1's status is REVIEW, not ACCEPTED — its review mandates genuinely returned BLOCK and no maintainer override of that verdict exists (see CM1's own row note and evidence/CM1/2026-08-22-acceptance-repair.md). C1 remains NOT dependency-eligible; it stays gated on CM1 until CM1's dedicated corrective follow-up track closes its four disclosed gaps and earns a genuine PASS on all three review mandates."
 
 [[block]]
 id = "C2"
@@ -1468,10 +1505,9 @@ landing_order = 2
 # not to a candidate awaiting review — J1 remains IN_PROGRESS and this field
 # is not validator-required at that status (EVIDENCE_BOUND excludes
 # IN_PROGRESS). Two slices have landed under the 4-slice split
-# (eadec2dc0, 120eede71); block/css-cutover, block/svelte-css-grammar,
-# block/css-closing-items remain to land. J1's acceptance is complete only
-# once all 41 acceptance IDs are covered (MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md
-# §3) — the landed slices do not by themselves constitute acceptance.
+# (eadec2dc0, 120eede71). Remaining CSS work integrates into
+# block/j1-integration (MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md);
+# J1's acceptance is complete only once all 41 acceptance IDs are covered.
 candidate_sha = "120eede711dd4358c75ad225430f4df349d47a74"
 candidate_tree = "10828574b1e6b4d394c031eade9541740813115d"
 accepted_sha = ""
@@ -1489,7 +1525,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = ""
-notes = "MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §3: J1 is PERMITTED to land as slices — the 4-slice split the orchestrator ratified on its own authority (which it had no authority to do) is now ratified explicitly by the maintainer, specific to J1 and not a general licence to split an acceptance unit. Two slices landed so far: eadec2dc0 (refactor(core): converge the CSS readers on one shared parse) and 120eede71 (fix(core): bring style_planner to parity with the legacy CSS route); the remaining slices (block/css-cutover, block/svelte-css-grammar, block/css-closing-items) land under the same permission. Acceptance is not recorded on this row until every one of J1's 41 acceptance IDs is covered — the landed slices alone do not constitute acceptance. Single independent review lane (ratified for BV2/B5/J1/CM1 only) applies once acceptance review begins."
+notes = "MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md: remaining CSS work integrates into branch block/j1-integration, which lands on the protected trunk as the single J1 block. No new DAG blocks; J1's 41 acceptance IDs are unchanged. Forced slice order into block/j1-integration (CSS-ALLOCATION-OWNERSHIP-2026-08-23 landing sequence): (1) Svelte grammar convergence (block/svelte-css-grammar); (2) verter_css_syntax allocation predecessor (block/css-parser-allocation); (3) verter_compiler arena-lifecycle predecessor (block/css-arena-lifecycle); (4) cutover reconstructed on the cumulative result (css-cutover-squashed). block/css-closing-items is a DONOR ONLY and is never landed; its worktree is already removed; the branch is retained at afc2ddbd3 because remaining A9/A12/A13/A14 hunks are not yet proven rehomed and must be transplanted into the cutover. A slice landing into the integration branch is not an acceptance event. Two slices already on trunk: eadec2dc0 (converge the CSS readers on one shared parse) and 120eede71 (bring style_planner to parity with the legacy CSS route). MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §3: J1 remains one acceptance unit of 41 IDs; acceptance is not recorded on this row until every ID is covered. Single independent review lane (ratified for BV2/B5/J1/CM1 only) applies once acceptance review begins."
 
 [[block]]
 id = "J2"
@@ -1764,7 +1800,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM0.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM0.md. CORRECTED 2026-08-23: the prior note here ('NOT authorised: requires a digest-bound authority-registry record before dispatch') is stale — authority-registry.toml already carries a ratified [[authorization]] record for TCM0 (ratified_at 2026-08-22, documents TCM0-CHARTER + DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS, extended 2026-08-23 with TCM-STEERING + TCM-PACKAGE-CERTIFICATION-SETTLED). TCM0's investigation evidence is produced but not yet complete: evidence/TCM0/OPEN-GAPS.md records outstanding gaps that gate TCM0's own acceptance — incomplete steering-capability coverage beyond the TypeProvider trait's 44 methods (G-LEDGER-SCOPE), no comparative topology benchmark numbers (G-TOPOLOGY), no locked full performance-threshold table (G-PERF-NUMBERS), the pending rows #25-26 maintainer ruling (G-TCM0-ACCEPTANCE-ROWS-25-26), an open maintainer decision on bulk symbol/type/reference/completion/diagnostic Semantic API probes charter item 2 literally requires but TCM0's evidence only inventories (G-SEMANTIC-API-CERTIFICATION, added 2026-08-23), an incomplete projection-mask total-function policy (G-PROJECTION-MASK-TOTALITY, added 2026-08-23), a string-encoded field count for mapping-products-string-surface.md that is corrected but explicitly NOT closed after two failed manual-closure attempts (G-STRING-SURFACE-CITATIONS, reopened 2026-08-23), and a required compiler-diagnostic LSP-vs-CLI convergence with no valid later-block owner (G-DIAGNOSTIC-CONVERGENCE, added 2026-08-23). Status stays LOCKED here because conformance_review/architecture_review/adversarial_review below are still PENDING with no reviewed_sha — this row's status field is not advanced past LOCKED by this correction; TCM0's own review-and-acceptance is a separate, not-yet-dispatched act, and it cannot proceed to ACCEPTED until every OPEN-GAPS.md row gating TCM0 itself is closed."
 
 [[block]]
 id = "TCM1"
@@ -1789,7 +1825,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM1.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM1.md, REWRITTEN 2026-08-23 into the 5-part implementation-ready shape (intent contract, numbered owned scope, numbered exit criteria, forbidden, material bounds) and pre-registered as TCM1-CHARTER in authority-registry.toml (sha256 58a905edd335c7e61c2f6d98c35f45313c6a2b90fd411cfb39854dcfea880340, re-pinned after follow-up corrections to the mapping-products-string-surface.md field count it cites, most recently reworking exit criterion 1 from a name-keyed syn scanner (rejected as violating this program's own landed-scanner-bar rule) into a compiler-enforced deletion-based completeness proof — see evidence/TCM0/OPEN-GAPS.md's G-STRING-SURFACE-CITATIONS row). Status stays LOCKED: sole predecessor TCM0 is not yet ACCEPTED (begun-predecessor rule, validate-program-state.mjs). Dispatchable as soon as TCM0 is ACCEPTED — add an [[authorization]] row citing TCM1-CHARTER (+ TCM-STEERING) and flip this status to READY."
 
 [[block]]
 id = "TCM2"
@@ -1814,7 +1850,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM2.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM2.md, REWRITTEN 2026-08-23 into the 5-part implementation-ready shape and pre-registered as TCM2-CHARTER in authority-registry.toml (sha256 2886fa6e30de34f17d5de747399bfde6a657685425947cdf8d671f0fe85c2312). Status stays LOCKED: predecessors TCM0 and TCM1 are not yet ACCEPTED. May be dispatched CONCURRENTLY with TCM3 once TCM0+TCM1 are ACCEPTED (charter section 4 of TCM3.md settles the parallelism question the steering left conditional; program-dag.toml's existing predecessors already express it — no DAG edge change needed)."
 
 [[block]]
 id = "TCM3"
@@ -1839,7 +1875,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM3.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM3.md, REWRITTEN 2026-08-23 into the 5-part implementation-ready shape, including a new blocking exit criterion (TCM3-EC-G1) requiring a maintainer ruling on feature-ownership-ledger.md rows #25-26 before this block can close, plus a later-added exit criterion 9 citing the steering's conformance coverage list for TCM3's semantic-plane scope. Pre-registered as TCM3-CHARTER in authority-registry.toml (sha256 24cd32280ef623082e761f00db800ec8fb56bb1af02725cb92bbed86859b159b, re-digested after exit criterion 9 was added). Status stays LOCKED: predecessors TCM0 and TCM1 are not yet ACCEPTED. May be dispatched CONCURRENTLY with TCM2 once TCM0+TCM1 are ACCEPTED."
 
 [[block]]
 id = "TCM4"
@@ -1864,4 +1900,4 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM4.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM4.md, REWRITTEN 2026-08-23 into the 5-part implementation-ready shape, executing deletion-closure.md's 19-item steering cross-check as its exit criterion 5 and gating rows #25-26 deletion on TCM3-EC-G1 (exit criterion 7), plus a later-added exit criterion 10 citing the steering's conformance coverage list for TCM4's activation/deletion scope. Required-outcomes item 3, owned-scope item 9, and exit criterion 5 all defer items 17-18's disposition to whichever resolution TCM0's own acceptance record ratifies for OPEN-GAPS.md's G-DELETION-CLOSURE-ITEMS-17-18 row — none of the three preselects execution-time discovery. Pre-registered as TCM4-CHARTER in authority-registry.toml (sha256 890d4ce433210763e09949bc3ee841488c8497114faae0c0ddcd05a56c355829, re-digested after the exit-criterion-5 reword). Status stays LOCKED: predecessors TCM0, TCM1, TCM2, TCM3 are not yet ACCEPTED."

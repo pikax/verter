@@ -87,7 +87,8 @@ windows-sys = { version = "0.61.2", features = [
 # tokio's `net` feature, NOT a sync-fd workaround.
 
 [dev-dependencies]
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time", "sync"] }
+# tokio itself is not re-declared here: the [dependencies] copy above already
+# carries a superset of the features this crate's tests need.
 # Self dev-dependency: enables the `test-fake-engine` feature for THIS crate's
 # test builds only (cargo builds dev-dependencies when compiling tests), so the
 # fake engine bin exists for `cargo test` (CARGO_BIN_EXE_) while a default

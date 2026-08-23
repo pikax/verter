@@ -18,7 +18,6 @@ name = "verter-mcp"
 path = "src/main.rs"
 
 [dependencies]
-verter_audit = { path = "../verter_audit" }
 verter_session = { path = "../verter_session" }
 verter_semantic = { path = "../verter_semantic" }
 verter_workspace = { path = "../verter_workspace" }
@@ -26,13 +25,13 @@ verter_tsgo_api = { path = "../verter_tsgo_api" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_actions = { path = "../verter_actions" }
 verter_protocol = { path = "../verter_protocol" }
-rmcp = { version = "1.7", features = [
+rmcp = { version = "3.1.4", features = [
   "server",
   "macros",
   "transport-io",
   "transport-streamable-http-server",
 ] }
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "signal"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = "1.2"
@@ -43,8 +42,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 axum = "0.8.9"
 
 [dev-dependencies]
+verter_audit = { path = "../verter_audit" }
 verter_span = { path = "../verter_span" }
 verter_compiler = { path = "../verter_compiler" }
 verter_macro_dto = { path = "../verter_macro_dto" }
 verter_test_support = { path = "../verter_test_support" }
 verter_type_expr = { workspace = true }
+# SDK conformance tests drive a real rmcp client against VerterMcpServer
+# over an in-process transport (tests/cases/rmcp_sdk_conformance.rs).
+rmcp = { version = "3.1.4", features = ["client"] }

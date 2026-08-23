@@ -76,7 +76,7 @@ verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
-hotpath = { version = "0.16", optional = true }
+hotpath = { version = "0.23", optional = true }
 bitflags = "2.11"
 memchr = "2.8.0"
 # Arbitrary-precision integers for the Svelte client const-fold evaluator's BigInt
@@ -90,7 +90,6 @@ num-bigint = "0.4"
 half = "2"
 rustc-hash = { workspace = true }
 smallvec = "1.15"
-lazy_static = "1.5.0"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }
 oxc_ast_visit = { workspace = true }
@@ -99,29 +98,22 @@ oxc_semantic = { workspace = true }
 oxc_span = { workspace = true }
 oxc_syntax = { workspace = true }
 oxc_diagnostics = "0.126.0"
-bumpalo = { version = "3.20.3", features = ["collections"] }
 serde = { workspace = true }
-serde_repr = "0.1.20"
 serde_json = { workspace = true }
-allocator-api2 = "0.4.0"
 oxc_sourcemap = "7.0.0"
 base64 = "0.22.1"
 sha2 = { workspace = true }
 hex = "0.4.3"
 lightningcss = { workspace = true }
-phf = { version = "0.13.1", features = ["macros"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1.1"
 
 [dev-dependencies]
-dhat = "0.3.3"
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
 tempfile = "3.27"
-serde = { workspace = true }
-serde_json = { workspace = true }
 trybuild = "1.0"
 # Activates the `test-support` feature on `verter_css_syntax` for
 # `cargo test --package verter_compiler` (and example/bench) builds only —

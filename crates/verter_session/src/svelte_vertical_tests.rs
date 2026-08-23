@@ -1688,6 +1688,12 @@ fn byte_line_col(text: &str, offset: usize) -> (u32, u32) {
     (line, col)
 }
 
+// The three public-API source-map tests below were rewritten onto the
+// `oxc_sourcemap` decoder API (`from_json_string` / `get_tokens` /
+// `get_source_content`) in place of the deleted `sourcemap` crate. That
+// rewrite is compile-enforced. Production mapping behaviour did not
+// change; these tests are not decoder-migration discriminators.
+
 #[test]
 fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
     // The `.svelte.verter.ts` API carrier resolves a consumer's prop
@@ -1709,7 +1715,7 @@ fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
         .source_map
         .as_deref()
         .expect("the svelte public-API carrier carries a source map");
-    let map = sourcemap::SourceMap::from_slice(map_json.as_bytes())
+    let map = oxc_sourcemap::SourceMap::from_json_string(map_json)
         .expect("the published map parses as V3 JSON");
 
     // The map names the authored component as its one source and embeds the
@@ -1721,7 +1727,7 @@ fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
         "the map source is the authored component canonical"
     );
     assert_eq!(
-        map.get_source_contents(0),
+        map.get_source_content(0),
         Some(source),
         "the map embeds the exact authored source bytes"
     );
@@ -1740,13 +1746,13 @@ fn svelte_public_api_source_map_links_prop_names_to_authored_annotation() {
     let (dst_line, dst_col) = byte_line_col(code, generated_offset);
     let (src_line, src_col) = byte_line_col(source, authored_offset);
     let token = map
-        .tokens()
+        .get_tokens()
         .find(|token| token.get_dst_line() == dst_line && token.get_dst_col() == dst_col)
         .unwrap_or_else(|| {
             panic!(
                 "a mapping segment starts at the generated prop-name token \
                  ({dst_line}:{dst_col}); tokens: {:?}",
-                map.tokens()
+                map.get_tokens()
                     .map(|t| (
                         t.get_dst_line(),
                         t.get_dst_col(),
@@ -1781,7 +1787,7 @@ fn svelte_public_api_source_map_covers_every_local_interface_prop_member() {
         .source_map
         .as_deref()
         .expect("the svelte public-API carrier carries a source map");
-    let map = sourcemap::SourceMap::from_slice(map_json.as_bytes())
+    let map = oxc_sourcemap::SourceMap::from_json_string(map_json)
         .expect("the published map parses as V3 JSON");
 
     let props_object = "{ contractProp: string; optionalCount?: number }";
@@ -1806,7 +1812,7 @@ fn svelte_public_api_source_map_covers_every_local_interface_prop_member() {
         let (dst_line, dst_col) = byte_line_col(code, generated_offset);
         let (src_line, src_col) = byte_line_col(source, member_at);
         let token = map
-            .tokens()
+            .get_tokens()
             .find(|token| token.get_dst_line() == dst_line && token.get_dst_col() == dst_col)
             .unwrap_or_else(|| panic!("a mapping segment starts at the generated `{name}` token"));
         assert_eq!(
@@ -1832,7 +1838,7 @@ fn svelte_public_api_source_map_links_legacy_export_let_prop_name() {
         .source_map
         .as_deref()
         .expect("the svelte public-API carrier carries a source map");
-    let map = sourcemap::SourceMap::from_slice(map_json.as_bytes())
+    let map = oxc_sourcemap::SourceMap::from_json_string(map_json)
         .expect("the published map parses as V3 JSON");
 
     let generated_offset = code
@@ -1844,7 +1850,7 @@ fn svelte_public_api_source_map_links_legacy_export_let_prop_name() {
     let (dst_line, dst_col) = byte_line_col(code, generated_offset);
     let (src_line, src_col) = byte_line_col(source, authored_offset);
     let token = map
-        .tokens()
+        .get_tokens()
         .find(|token| token.get_dst_line() == dst_line && token.get_dst_col() == dst_col)
         .unwrap_or_else(|| panic!("a mapping segment starts at the generated `count` token"));
     assert_eq!(

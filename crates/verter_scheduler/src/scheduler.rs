@@ -190,7 +190,7 @@ fn dispatch_ready_job_to_executor(
     executor: &dyn StageExecutor,
     source_loader: &dyn SourceLoader,
     inbox_sender: &crossbeam_channel::Sender<Submission>,
-    dag: Arc<Mutex<SchedulerDag>>,
+    dag: Arc<DagMutex>,
     source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     cancellation: &CancellationToken,
 ) {
@@ -366,7 +366,7 @@ fn run_file_stage(
     executor: &dyn StageExecutor,
     source_loader: &dyn SourceLoader,
     inbox_sender: &crossbeam_channel::Sender<Submission>,
-    dag: Arc<Mutex<SchedulerDag>>,
+    dag: Arc<DagMutex>,
     source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
 ) {
     let node = file_node.unwrap_or_else(|| {
@@ -987,6 +987,52 @@ pub(crate) enum DispatchOutcome {
     Skipped,
 }
 
+/// The mutex type guarding the scheduler's central [`SchedulerDag`] — the
+/// single most contended lock in the scheduler (every admission, dispatch,
+/// and completion acquires it).
+///
+/// A dedicated alias rather than reusing the crate-wide `Mutex` import: under
+/// the `hotpath` feature this becomes `hotpath::wrap::parking_lot::Mutex`,
+/// hotpath 0.23's drop-in instrumented wrapper, so the DAG lock's wait/hold
+/// duration is exactly the kind of bottleneck that instrumentation exists to
+/// surface — but the wrapper doesn't implement `Debug`/`Default`, and
+/// `scheduler.rs` has several OTHER, unrelated `Mutex<T>` fields on
+/// `#[derive(Debug, Default)]` structs (dispatch-pause state, cache-call
+/// recording) that would break if the crate-wide import were swapped
+/// instead. Scoping the wrap to this one alias keeps every other lock in the
+/// file byte-identical to the pre-instrumentation code regardless of the
+/// feature.
+#[cfg(feature = "hotpath")]
+type DagMutex = hotpath::wrap::parking_lot::Mutex<SchedulerDag>;
+#[cfg(not(feature = "hotpath"))]
+type DagMutex = Mutex<SchedulerDag>;
+
+/// Guard type returned by locking a [`DagMutex`]. See [`DagMutex`] for why
+/// this is a dedicated alias rather than a bare `parking_lot::MutexGuard`.
+// `#[allow(dead_code)]` on both branches: rustc's type-alias dead-code check
+// does not credit `acquire_dag_for_admission`'s return-position reference to
+// this alias — reproduces on EITHER branch (whichever is the active cfg), so
+// it is a rustc false positive for a private lifetime-generic alias used
+// only in return position, not an actually-unused alias.
+#[cfg(feature = "hotpath")]
+#[allow(dead_code)]
+type DagMutexGuard<'a> = hotpath::wrap::parking_lot::MutexGuard<'a, SchedulerDag>;
+#[cfg(not(feature = "hotpath"))]
+#[allow(dead_code)]
+type DagMutexGuard<'a> = parking_lot::MutexGuard<'a, SchedulerDag>;
+
+/// Construct a [`DagMutex`]. Under `hotpath` this routes through
+/// `hotpath::mutex!`; without it, this is a plain `parking_lot::Mutex::new`,
+/// identical to the pre-instrumentation code.
+#[cfg(feature = "hotpath")]
+fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
+    hotpath::mutex!(parking_lot::Mutex::new(dag), label = "scheduler_dag")
+}
+#[cfg(not(feature = "hotpath"))]
+fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
+    Mutex::new(dag)
+}
+
 /// The main scheduler.
 ///
 /// Manages per-file nodes, a priority queue, and a driver thread that
@@ -1021,7 +1067,7 @@ pub struct Scheduler {
     ///
     /// Wrapped in `Arc` so worker closures can clone a handle for
     /// completion signalling without holding `&self`.
-    pub(crate) dag: Arc<Mutex<SchedulerDag>>,
+    pub(crate) dag: Arc<DagMutex>,
     /// Overlapping borrowed cache-node calls keyed by their full DAG identity.
     /// Values are request-scoped rendezvous only, never durable cache entries.
     scoped_cache_flights: DashMap<WorkNodeIdentity, Arc<ScopedCacheFlight>>,
@@ -1300,7 +1346,7 @@ impl Scheduler {
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
-            dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
+            dag: Arc::new(new_dag_mutex(SchedulerDag::with_budget(
                 config.resolved_dag_budget(),
             ))),
             scoped_cache_flights: DashMap::new(),
@@ -1391,7 +1437,7 @@ impl Scheduler {
             nodes: DashMap::new(),
             source_root: Arc::new(crate::source_root::SchedulerSourceDirectory::new()),
             edges: EdgeManager::new(),
-            dag: Arc::new(Mutex::new(SchedulerDag::with_budget(
+            dag: Arc::new(new_dag_mutex(SchedulerDag::with_budget(
                 config.resolved_dag_budget(),
             ))),
             scoped_cache_flights: DashMap::new(),
@@ -3356,7 +3402,7 @@ impl Scheduler {
     /// DIFFER. Test-only; release builds take `self.dag.lock()` directly
     /// with no epoch.
     #[cfg(any(test, feature = "test-support"))]
-    fn acquire_dag_for_admission(&self) -> (parking_lot::MutexGuard<'_, SchedulerDag>, u64) {
+    fn acquire_dag_for_admission(&self) -> (DagMutexGuard<'_>, u64) {
         let guard = self.dag.lock();
         // `+ 1` so the first acquisition observes epoch 1 (epoch 0 is the
         // "no acquisition yet" sentinel, never a recorded value).
@@ -5532,7 +5578,7 @@ impl Scheduler {
     fn terminalize_pool_submit_violation(
         self: &Arc<Self>,
         err: crate::pool::SchedulerPoolSubmitError,
-        dag: &Mutex<SchedulerDag>,
+        dag: &DagMutex,
         canonical: &Arc<str>,
         generation: u64,
         task_kind: &TaskKind,
@@ -5896,7 +5942,7 @@ impl Scheduler {
     /// or Artifact panic) preserve other per-profile waiters at the
     /// same `(canonical, generation)`.
     fn terminalize_failure(
-        dag: &Mutex<SchedulerDag>,
+        dag: &DagMutex,
         canonical: &Arc<str>,
         generation: u64,
         task_kind: &TaskKind,
@@ -6068,7 +6114,7 @@ impl Scheduler {
         generation: u64,
         task_kind: &TaskKind,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<Mutex<SchedulerDag>>,
+        dag: Arc<DagMutex>,
     ) {
         // `terminalize_failure` runs UNCONDITIONALLY (no generation
         // guard) so a panic on a now-superseded generation still
@@ -6121,7 +6167,7 @@ impl Scheduler {
         executor: &dyn StageExecutor,
         source_loader: &dyn SourceLoader,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<Mutex<SchedulerDag>>,
+        dag: Arc<DagMutex>,
         source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     ) {
         // Typed dependency-failure short-circuit BEFORE task-kind
@@ -6228,7 +6274,7 @@ impl Scheduler {
         executor: &dyn StageExecutor,
         source_loader: &dyn SourceLoader,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<Mutex<SchedulerDag>>,
+        dag: Arc<DagMutex>,
         source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     ) {
         use crate::job::SchedulerError;
@@ -6347,7 +6393,7 @@ impl Scheduler {
         generation: u64,
         executor: &dyn StageExecutor,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<Mutex<SchedulerDag>>,
+        dag: Arc<DagMutex>,
     ) {
         use crate::job::SchedulerError;
 
@@ -6428,7 +6474,7 @@ impl Scheduler {
         profile_hash: u64,
         executor: &dyn StageExecutor,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
-        dag: Arc<Mutex<SchedulerDag>>,
+        dag: Arc<DagMutex>,
     ) {
         use crate::job::SchedulerError;
 
@@ -19183,6 +19229,12 @@ mod tests {
     /// would FAIL (the admitting thread already holds it). The atomic
     /// path collects dedup events and fires them after `drop(dag)`, so
     /// `try_lock()` succeeds.
+    ///
+    /// The `dag` field's type is `DagMutex` (plain `parking_lot::Mutex`
+    /// without the `hotpath` feature, the instrumented wrapper with it).
+    /// That alias is compile-enforced; this test's lock/unlock contract
+    /// is identical for both backends and is not a DagMutex-vs-Mutex
+    /// discriminator.
     #[test]
     fn dedup_callbacks_run_after_dag_unlock() {
         let canonical = "/dup.vue";
@@ -19193,7 +19245,7 @@ mod tests {
         // records the outcome via the shared Arc.
         struct LockProbeCtx {
             id: u64,
-            dag: Arc<Mutex<SchedulerDag>>,
+            dag: Arc<DagMutex>,
             try_lock_succeeded: Arc<std::sync::atomic::AtomicBool>,
             fire_count: Arc<std::sync::atomic::AtomicU64>,
         }

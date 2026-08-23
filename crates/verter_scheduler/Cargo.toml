@@ -10,7 +10,17 @@ description = "Async file scheduler for Verter — driver-owned DAG with typed i
 publish = false
 
 [features]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# `hotpath/parking_lot` turns on hotpath's drop-in instrumented wrapper for
+# `parking_lot::Mutex`, used for the scheduler's central DAG lock
+# (`new_dag_mutex` in scheduler.rs — every admission, dispatch, and
+# completion acquires it). The submission-inbox `crossbeam_channel` is NOT
+# wrapped: `Sender<Submission>`/`Receiver<Submission>` are referenced by
+# fully-qualified `crossbeam_channel::` path throughout scheduler.rs, so
+# swapping the inbox's own construction to `hotpath::wrap::crossbeam_channel`
+# would type-mismatch against every one of those call sites — adopting it
+# would need those signatures converted to a shared type alias first, which
+# is out of scope here.
+hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/parking_lot"]
 # Exposes this crate's test-only instrumentation to cross-crate test code:
 # the HostCpuPool internals (per-pool identity token TLS,
 # `HostCpuPool::pool_id`, `HostCpuPool::build_count`, the
@@ -35,7 +45,7 @@ test-support = []
 [dependencies]
 verter_debug_assert = { workspace = true }
 arc-swap = "1.9"
-hotpath = { version = "0.16", optional = true }
+hotpath = { version = "0.23", optional = true }
 parking_lot = "0.12.5"
 rustc-hash = { workspace = true }
 smallvec = "1.15"

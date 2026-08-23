@@ -270,6 +270,14 @@ Per the charter's abort/rescope condition, neither gap blocks TCM0 itself (TCM0 
 authorizes no activation) — they are named here as required follow-up probes TCM2/TCM3 must close before
 either can be accepted, not defects that block this investigation's own conclusions.
 
+**Superseded, 2026-08-23:** the "not for production activation" half of this verdict is superseded by
+`rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md` — the maintainer ruled this exact
+candidate certified for production activation, having reproduced the probe result themselves ("the probe
+passed previously so the mentioned version is correct"). The §4c defect and the two verification gaps
+above are NOT waived by that ruling; they stay recorded exactly as written here and are carried forward
+as binding TCM2/TCM3 design constraints. This paragraph records the supersession; it does not retract
+the finding.
+
 ## Reproduction
 
 ```bash

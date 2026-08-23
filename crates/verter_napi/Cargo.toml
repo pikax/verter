@@ -15,7 +15,6 @@ crate-type = ["cdylib", "rlib"]
 verter_audit = { path = "../verter_audit" }
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
 verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
-verter_type_runtime = { path = "../verter_type_runtime", version = "0.0.1-beta.1" }
 verter_workspace = { path = "../verter_workspace", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }

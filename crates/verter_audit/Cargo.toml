@@ -37,7 +37,6 @@ path = "src/bin/verter-audit-inspect/main.rs"
 verter_span = { path = "../verter_span" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-parking_lot = "0.12.5"
 ts-rs = "12"
 clap = { version = "4.6", features = ["derive"] }
 

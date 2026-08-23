@@ -15,10 +15,14 @@ model. Do not treat `superseded_by = —` as proof a ruling is uncontested; it m
 ruling's own text names it as superseded. Ledger `digest` binding is a separate step owned by the
 program orchestrator (RULING 1), not performed here.
 
-## Maintainer directives (25)
+## Maintainer directives (29)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`STEERING-TCM-CONTENT-MAPPERS`](MAINTAINER-STEERING-TCM-CONTENT-MAPPERS.md) | maintainer-directive | 2026-08-22 | TCM0, TCM1, TCM2, TCM3, TCM4 | — |
+| [`TCM-PACKAGE-CERTIFICATION-SETTLED`](MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md) | maintainer-ruling | 2026-08-23 | TCM0, TCM1, TCM2, TCM3, TCM4 | — |
+| [`CSS-WORK-REACHES-J1`](MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md) | maintainer-ruling | 2026-08-23 | J1 | — |
+| [`CODE-OVER-LEDGER`](MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md) | maintainer-ruling | 2026-08-22 | BV2, B5, CM1, scripts/validate-program-state.mjs, ledger bookkeeping protocol | — |
 | [`HARDEN-ORCHESTRATION`](MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION.md) | maintainer-directive | 2026-08-20 | program-wide orchestration machinery | — |
 | [`CSS-CLEAN-CUTOVER`](MAINTAINER-DIRECTIVE-CSS-CLEAN-CUTOVER.md) | maintainer-directive | 2026-08-20 | Track J (J1-J4), CSS/style pipeline architecture | — |
 | [`NO-LIGHTNINGCSS`](MAINTAINER-RULING-NO-LIGHTNINGCSS.md) | maintainer-directive | 2026-08-17 | Track J / J1, BCSS0 (superseded within this document), CSS/style pipeline | CSS-CLEAN-CUTOVER |
@@ -45,10 +49,11 @@ program orchestrator (RULING 1), not performed here.
 | [`PARALLEL-REVIEW-SEATS`](MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md) | maintainer-directive | 2026-08-18 | program-wide review-seat protocol | — |
 | [`REVIEW-BUDGET-BY-ARTIFACT-CLASS`](MAINTAINER-RULING-REVIEW-BUDGET.md) | maintainer-directive | 2026-08-17 | program-wide review protocol | — |
 
-## Architecture rulings (12)
+## Architecture rulings (13)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`TIMING-ARCHITECTURE-2026-08-23`](ARCHITECT-RULING-2026-08-23-TIMING-ARCHITECTURE.md) | architecture-ruling | 2026-08-23 | program-wide timing architecture (production and tests) | — |
 | [`C1-FOUR-FORKS`](ARCH-RULING-C1-FOUR-FORKS.md) | architecture-ruling | 2026-08-20 | C1 | — |
 | [`C1-THREE-GAPS-ADDENDUM`](ARCH-ADDENDUM-C1-THREE-GAPS.md) | architecture-ruling | 2026-08-20 | C1 | — |
 | [`D1-SIX-FORKS`](ARCH-RULING-D1-SIX-FORKS.md) | architecture-ruling | 2026-08-20 | D1 | C1-D1-FLOW-FILE-RECONCILIATION |
@@ -76,4 +81,4 @@ program orchestrator (RULING 1), not performed here.
 | [`B4-C1-SERIALIZE`](DISPOSITION-B4-C1-SERIALIZE.md) | disposition | unknown | B4, C1 | — |
 | [`BS1-SERIALIZE-BEHIND-BV1`](DISPOSITION-BS1-SERIALIZE.md) | disposition | unknown | BS1, BV1 | — |
 | [`TYPECHECK-POC-TO-H-TRAIN`](DISPOSITION-TYPECHECK-POC-TO-H-TRAIN.md) | disposition | 2026-08-18 | H2, H3 (future Track H blocks) | — |
-
+| [`CSS-ALLOCATION-OWNERSHIP-2026-08-23`](ARCHITECT-RULING-2026-08-23-CSS-ALLOCATION-OWNERSHIP.md) | architecture-ruling | 2026-08-23 | J1 | — |

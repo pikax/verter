@@ -12,12 +12,13 @@ maintainer or the amendment process to adopt when each block is authorized.
   (`crates/verter_lsp/tests/cases/kebab_tag_mapping_full_columns.rs:65`); `checker.rs:411` base64-encodes
   the string directly into a `sourceMappingURL` comment. See
   `evidence/TCM0/mapping-products-string-surface.md` for the corrected chain.
-- **Scope the surface as wider than the two cited lines.** At least nine distinct `Option<String>`/
-  `String` fields across `verter_compiler` plus four across `verter_protocol`'s FFI wire types carry the
-  same string-encoded convention (full list in `mapping-products-string-surface.md`). TCM1's acceptance
-  bar should include the FFI wire types, not stop at the in-process boundary — otherwise TCM1 leaves a
-  second string-encoded path alive at the NAPI/WASM boundary, in tension with the "one clean cutover"
-  rule.
+- **Scope the surface as wider than the two cited lines.** At least 36 distinct `Option<String>`/
+  `String`/`Option<Arc<str>>`/`&str` fields (32+ across `verter_compiler`, 4 across `verter_protocol`'s
+  FFI wire types) carry the same string-encoded convention — a best-effort STARTING inventory in
+  `mapping-products-string-surface.md`, explicitly not claimed exhaustive (two manual passes each found
+  the prior one incomplete; see that file's own hedge). TCM1's acceptance bar should include the FFI wire
+  types, not stop at the in-process boundary — otherwise TCM1 leaves a second string-encoded path alive at
+  the NAPI/WASM boundary, in tension with the "one clean cutover" rule.
 - **Single point of origin.** TCM1 should replace the discard-to-string pattern at `CodeTransform`'s own
   `generate_map`/`generate_map_json*` (`code_transform/source_map.rs`), not at each downstream consumer
   site — the typed intermediate (`oxc_sourcemap::SourceMap<'static>`) already exists transiently at

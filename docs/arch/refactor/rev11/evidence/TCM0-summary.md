@@ -15,8 +15,8 @@ each requiring its own digest-bound authority-registry record before dispatch).
 | artifact | what it resolves |
 |---|---|
 | [`decisions/ADR-021-typescript-content-mapper-dual-plane.md`](../decisions/ADR-021-typescript-content-mapper-dual-plane.md) | the ratified architecture decision this investigation locks |
-| [`TCM0/package-lock-and-semantic-api.md`](TCM0/package-lock-and-semantic-api.md) | charter items 1-2 — exact candidate package identity/provenance, the content-mapper protocol confirmed present in the actual downloaded bytes, and a live-probed semantic-API certification including one genuinely reproduced defect |
-| [`TCM0/mapping-products-string-surface.md`](TCM0/mapping-products-string-surface.md) | the full extent of the string-encoded projection surface `source_projection_map()` represents, a correction to the amendment's own citation, and the acceptance bar this hands to TCM1 |
+| [`TCM0/package-lock-and-semantic-api.md`](TCM0/package-lock-and-semantic-api.md) | charter items 1-2 — exact candidate package identity/provenance, the content-mapper protocol confirmed present in the actual downloaded bytes, and PARTIAL semantic-API certification: session init/disposal/stale-Program/cancellation-absence are live-probed with one genuinely reproduced defect, but bulk symbol/type/reference/completion/diagnostic behavior is inventoried from type declarations, not live-probed — see `evidence/TCM0/OPEN-GAPS.md`'s `G-SEMANTIC-API-CERTIFICATION` |
+| [`TCM0/mapping-products-string-surface.md`](TCM0/mapping-products-string-surface.md) | a best-effort (explicitly not claimed exhaustive — two manual passes each found the prior one incomplete) inventory of the string-encoded projection surface `source_projection_map()` represents, a correction to the amendment's own citation, and the acceptance bar this hands to TCM1 |
 | [`TCM0/feature-ownership-ledger.md`](TCM0/feature-ownership-ledger.md) | charter item 3 — all 44 `TypeProvider` methods/capabilities (31 ledger rows; 8 priority-tier variants folded into their base method's row), one owner each from the four legal owners, zero left unclassified, two rows explicitly named governance-pending rather than silently defaulted |
 | [`TCM0/diagnostic-ownership-matrix.md`](TCM0/diagnostic-ownership-matrix.md) | charter item 4 — attribution/suppression/precedence/dedup for every diagnostic class, including one required correction to current behavior (generated-region diagnostics must surface with honest attribution, not be silently dropped as today's code does) |
 | [`TCM0/projection-class-contract.md`](TCM0/projection-class-contract.md) | charter item 5 — the minimal class set and the terminal mask-derivation policy, built directly on the upstream `SpanMapFeature`/`SpanMapKind`/`SpanMapFidelity` wire primitives confirmed present in the candidate |
@@ -36,8 +36,10 @@ in a test file (`kebab_tag_mapping_full_columns.rs:65`); `checker.rs:411` instea
 string directly into an inline `sourceMappingURL` comment for `tsc`/`tsgo` to parse independently. The
 amendment's underlying thesis — the surface is string-encoded and must become typed — is unaffected;
 only the specific citation needed correcting, and the true extent of the string-encoded surface turned
-out to be considerably WIDER than the two cited lines (at least nine struct fields in `verter_compiler`
-plus four in `verter_protocol`'s FFI wire types — `TCM0/mapping-products-string-surface.md`).
+out to be considerably WIDER than the two cited lines — at least 36 struct/enum-variant fields across
+`verter_compiler`, `verter_protocol`, `verter_session`, and `verter_lsp`, and explicitly NOT claimed
+exhaustive after two manual passes each found the prior one incomplete
+(`TCM0/mapping-products-string-surface.md`).
 
 ## What the investigation found that no document had stated at all
 
