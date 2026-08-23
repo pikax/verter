@@ -905,3 +905,99 @@ an authority file that this record deliberately does not edit.
 The three `[~]` rows and the two `[ ]` rows are the honest state of this record at draft. A checklist
 ticked complete while U-1 sits unratified would be exactly the failure mode this program's
 verification rule exists to prevent.
+
+
+---
+
+# 13. Gate-file extension register
+
+`performance-gates.toml`'s SCOPE header allows cells to be ADDED for later blocks and requires each
+addition to carry "a new lock record digest and the same independent review class". This section is
+that register: it is the record's list of gate-file extensions accepted after this record's original
+acceptance. Adding a row changes this file's bytes and therefore its digest, which is exactly the
+mechanism the SCOPE header asks for. **No row here may weaken, reweight, subset or reinterpret an
+existing cell**, and none does: every extension below is strictly additive, and `[primary_suite]`,
+`[runner]`, `[statistics]` and the A6 cell are untouched by all of them.
+
+| # | Cell(s) added | Owner | Landed | Threshold source |
+|---|---|---|---|---|
+| E-1 | `BF2_VUE_ORACLE_MANIFEST_GENERATE`, `BF2_SVELTE_ORACLE_MANIFEST_GENERATE` | BF1 (for BF2) | `630595072` | A 10-invocation session of the BF1-owned, already-authored `generate-official-case-manifests.mjs` against the pinned oracle sources — a reference tool that is not BF2's candidate harness |
+| E-2 | `B6_COMPILER_ROUTE_OVERHEAD` | B6 | this record's amending commit | Absolutes from the already-locked A6 cell's per-component product budget; relatives from a frozen formula instantiated on a neutral B5-direct calibration session, confirmed by a disjoint holdout |
+
+**E-1 is recorded retroactively.** That extension landed without amending this record, so the
+"new lock record digest" half of its own SCOPE rule went unsatisfied at the time. Recording it here
+does not re-open or re-review it — its cells, thresholds and evidence are unchanged — it closes a
+bookkeeping gap that would otherwise make this register look complete while omitting the first
+extension that ever happened. The gap is disclosed rather than quietly backfilled.
+
+**E-2 threshold provenance, in full.** This is the extension this amendment exists for, and it is the
+one case in this file where the block that will be MEASURED by a cell is not permitted anywhere near
+the choice of that cell's numbers.
+
+- **Absolute wall `20_000_000` ns.** `A6_META_COMPILE_40_COLD_RUST` locks 100 ms for 40 components,
+  i.e. 2.5 ms per component, for a **heavier** workload: a fresh host, upsert, load, per-component
+  metadata, then a host-backed batch compile. The route-overhead cell's direct arm is
+  `StandaloneCompiler::compile` over eight local sources with no host, no component-meta and no VFS.
+  A strictly lighter path may not be budgeted slower than an already-locked heavier one at the same
+  per-file product rate, so the budget is 8 x 2.5 ms.
+- **Absolute peak RSS `134_217_728` bytes.** Half of A6's 256 MiB catastrophe stop for a 41-file
+  host process, for an eight-file process with no host or session at all. Like A6's, this is a
+  catastrophe stop; the tight fence is the relative bound.
+- **Relative bounds.** `max(3.0000, 2 x population CV)` — `[statistics].no_regression_floor_percent`
+  and `noise_multiplier` — frozen in
+  `docs/arch/refactor/rev11/evidence/B6/cell-lock/pre-measure-registration.md` section 7 and
+  committed **before** the calibration session ran. Instantiated on the B5 direct leg, the
+  pre-existing one-shot path B6 replaces: wall CV 5.1678% gives
+  **10.3356%**, peak-RSS CV 0.5986% gives **3.0000%**. Truncated at
+  four decimal places, never rounded up: verification.md 8.3 is an upper bound.
+- **What none of them is.** No threshold is `k x` any B6 observation, and none was read from B6's
+  own measurement evidence. B6's existing timing and RSS figures additionally failed the
+  idle-machine protocol and are retained as contaminated audit evidence only.
+
+**E-2 sessions.** Calibration 30 cold invocations, median wall 0.3663 ms,
+max peak RSS 6.13 MiB. Disjoint holdout 30 cold invocations,
+median wall 0.3651 ms, max peak RSS 6.11 MiB. The
+holdout is the pass/fail evidence and it passes both absolutes with the observed
+holdout-to-calibration wall drift at 0.3186%, inside the 10.3356% bound. Every
+invocation in both sessions reproduced the pinned output digest, so the correctness oracle held
+throughout. Raw per-invocation samples and control readings are committed under
+`docs/arch/refactor/rev11/evidence/B6/cell-lock/`.
+
+**Which E-2 gates can actually fail.** Recorded here because a reader judging a future B6 run needs it,
+and because the honest version is less flattering than the headline. BOTH wall metrics have near-zero
+teeth, and the ABSOLUTE is the weaker of the two: 20 ms sits 54.77x above the holdout median
+(0.3651 ms) and first trips at roughly a 5377% regression, while the
+10.3356% relative bound rests on a 5.1678% wall CV — 3.50x A6's
+1.4757% measured noise floor, so the bound is 3.45x wider than A6's 3.0%. That is scale, not
+sloppiness: the operation is ~0.3651 ms against A6's ~70 ms, so cold-process startup
+jitter dominates. The peak-RSS ABSOLUTE is weak too (20.95x headroom) and is a catastrophe stop,
+as at A6. E-2's real discriminating power is the output oracle, the two-sided work counters
+(8 / 8 / 5384 exact equality), the peak-RSS RELATIVE bound (3.0000% against a
+0.5986% CV and a 1.29% observed excursion), and the three structural
+route counters. A block wanting a tight wall bound adds an in-process arm excluding process startup and
+calibrates it under this discipline; it does not narrow this bound after the fact, which ADR-016 forbids.
+
+**E-2 forward hazard: the corpus pin versus the three unmeasured arms.** `corpus_fingerprint` pins
+harness git-blob `6c69bd6e6b0f674eec20d92aff9080aad0f877ad`, and A6's discipline treats a run whose harness blob differs as not
+this cell. That blob deliberately REFUSES `--arm prepared-first|prepared-repeat|batch` — which is why
+no fabricated baseline exists for them — so measuring the three arms E-2 gates necessarily requires a
+different harness blob and therefore necessarily breaks the pin. Neither this record, the ruling, nor
+the registration says how that resolves, and this register does not invent a resolution. **Owner: B6**,
+which must settle it before claiming E-2's arm metrics, by an explicit route (re-pin under the
+recalibration rule with the direct arm's numbers reproduced, or a successor cell id) rather than by
+silently measuring against a different blob.
+
+**E-2 evidence caveat.** `route.direct.payload_bytes` is gated at exact equality 5384 but has no
+per-invocation column in the raw sample rows: the recorded per-invocation evidence is the output digest,
+and identical digests imply identical code bytes and therefore identical payload length. The section 10
+condition-4 claim for payload_bytes is sound BY IMPLICATION from the digest, not by direct measurement,
+and is stated that way rather than presented as a recorded number.
+
+**E-2 outstanding governance step.** The SCOPE header requires an extension to carry a new lock record
+digest AND the same independent review class (ADR-016). This register delivers the digest half. The
+independent performance reviewer's sign-off on this specific addition is an OUTSTANDING follow-up, in
+the same posture the BF2 banner records for E-1 — the cell is locked and binding, but no claim is made
+here that that review class has signed it off.
+
+**What this register does not do.** It does not accept B6, amend B6's charter, alter the DAG, or add a
+ledger block row. B6 is still measured against E-2 later, on its own idle-machine run.

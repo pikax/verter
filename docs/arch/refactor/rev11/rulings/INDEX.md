@@ -50,10 +50,11 @@ program orchestrator (RULING 1), not performed here.
 | [`PARALLEL-REVIEW-SEATS`](MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md) | maintainer-directive | 2026-08-18 | program-wide review-seat protocol | — |
 | [`REVIEW-BUDGET-BY-ARTIFACT-CLASS`](MAINTAINER-RULING-REVIEW-BUDGET.md) | maintainer-directive | 2026-08-17 | program-wide review protocol | — |
 
-## Architecture rulings (13)
+## Architecture rulings (14)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`B6-ROUTE-OVERHEAD-CELL-LOCK-2026-08-23`](ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md) | architecture-ruling | 2026-08-23 | B6, BF1, performance-gates.toml | — |
 | [`TIMING-ARCHITECTURE-2026-08-23`](ARCHITECT-RULING-2026-08-23-TIMING-ARCHITECTURE.md) | architecture-ruling | 2026-08-23 | program-wide timing architecture (production and tests) | — |
 | [`C1-FOUR-FORKS`](ARCH-RULING-C1-FOUR-FORKS.md) | architecture-ruling | 2026-08-20 | C1 | — |
 | [`C1-THREE-GAPS-ADDENDUM`](ARCH-ADDENDUM-C1-THREE-GAPS.md) | architecture-ruling | 2026-08-20 | C1 | — |

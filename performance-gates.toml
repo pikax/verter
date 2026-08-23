@@ -749,3 +749,268 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 # its own performance-lock exit, per this file's ordinary EXTENSION rules —
 # not by reusing BF2's invalidated numbers.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXTENSION under this file's own SCOPE header: one B6-owned cell, added to
+# close the route-overhead performance lock that BF1's exit #6 owned, that a
+# later accepted disposition deferred to B6's own landing, and that B6's charter
+# still imports as an acceptance condition. The contradiction and its resolution
+# are recorded in
+# docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md.
+# This does not touch any A6 or BF2 cell, the primary_suite, or any field above
+# this marker, and it does not accept B6.
+#
+# WHY B6 DOES NOT CHOOSE THIS GATE. ADR-016 forbids post-measurement gate
+# selection, and this repository already rejected exactly that pattern for
+# BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE (see the open row at the end
+# of this file). Every threshold here is therefore sourced from something other
+# than B6:
+#   * the two ABSOLUTE budgets are product/CI budgets derived from the ALREADY
+#     LOCKED A6 cell above — 8 x A6's 2.5 ms/component cold budget for wall, and
+#     half A6's 41-file host RSS catastrophe stop for memory. Neither is a
+#     multiple of any observed route-overhead figure;
+#   * the two RELATIVE bounds instantiate a formula frozen in
+#     docs/arch/refactor/rev11/evidence/B6/cell-lock/pre-measure-registration.md
+#     section 7 BEFORE the calibration session ran, applied to the B5 DIRECT
+#     leg — the pre-existing one-shot StandaloneCompiler path that B6 will
+#     replace, not B6's own arms.
+# B6's existing timing/RSS results are contaminated audit evidence (they failed
+# the idle-machine protocol) and were not read when this cell was written.
+#
+# MEASUREMENT PROTOCOL. The bootstrap shape of
+# docs/arch/refactor/rev11/evidence/BF2/debt-BF2-perf-gate-deferred.md:
+# digest-addressed pre-measure registration, then a 30-cold-invocation
+# calibration session ([statistics].short_min_samples) whose ONLY output is the
+# CV that instantiates the frozen formula, then a DISJOINT 30-cold-invocation
+# holdout session that is the pass/fail evidence. Calibration numbers never
+# became limits. Both sessions ran under the registration's idle-machine
+# protocol (1-minute load average < 2.00, zero foreign cargo/rustc/nextest
+# processes, low-power mode off) with runner.control_benchmark executed at the
+# start AND end of each session; a session was void if control medians drifted
+# by more than runner.max_control_drift_percent. Raw per-invocation samples,
+# control readings and derivations:
+#   docs/arch/refactor/rev11/evidence/B6/cell-lock/calibration/
+#   docs/arch/refactor/rev11/evidence/B6/cell-lock/holdout/
+#
+# THREE ARMS DO NOT EXIST YET, AND THE HARNESS SAYS SO. prepared-first,
+# prepared-repeat and batch are part of this cell's identity because they are
+# B6's route surface, but they do not exist on the B5 tree this cell was locked
+# from. The harness REFUSES those arms with an explicit error rather than
+# reporting a number for them, so no fabricated baseline can be mistaken for a
+# measurement. Their absolute ceilings are the B5-direct product budget: a route
+# that did not exist at lock time does not earn a larger budget than the one it
+# replaces.
+#
+# METRICS ARE CONJUNCTIVE, as for every cell in this file. An absolute pass does
+# not offset a relative failure, and a timing pass does not offset a
+# work-counter, zero-work, or output-oracle failure.
+# ─────────────────────────────────────────────────────────────────────────────
+[[cell]]
+id = "B6_COMPILER_ROUTE_OVERHEAD"
+owner = "B6"
+# The four route arms B6 owns, over one RuntimeClient product. Only the DIRECT
+# arm exists on the B5 tree this cell was locked from; the harness REFUSES the
+# other three rather than reporting a fabricated number for them.
+operation = "route_overhead_direct_prepared_first_prepared_repeat_batch; product=RuntimeClient; frameworks=vue+svelte"
+corpus_fingerprint = "git-blob:6c69bd6e6b0f674eec20d92aff9080aad0f877ad (crates/verter_bench/examples/route_overhead_baseline.rs); eight in-process sources (4 Vue, 4 Svelte), no fixture directory, no third-party corpus"
+# SHA-256 over the literal request-identity string frozen in
+# evidence/B6/cell-lock/pre-measure-registration.md section 11 (no trailing newline).
+normalized_product_request_digest = "bf427b56a4f46a151d818c52e9493fd5817da4a7ac2e74352612962ea2f4ab80"
+result_contract = "vue_svelte_runtime_client_artifact_set"
+semantic_profile = "none"
+execution_profile = "cargo build -p verter_bench --release --example route_overhead_baseline, CARGO_BUILD_JOBS=4, system allocator (no attribution feature), single-threaded, one cold process per sample"
+cache_state = "cold_process_per_invocation"
+threads = 1
+boundary = "rust"
+required = true
+
+[cell.validity]
+required_product_kinds = ["runtime_client_compile"]
+required_output_profiles = []
+required_presentation_profiles = []
+required_serialization_profiles = []
+required_mapping_kinds = []
+required_diagnostics_policy = "not_applicable"
+required_exactness = "exact"
+# Payload = concatenation over corpus order of id || 0x00 || artifact.code() ||
+# 0x00 || decimal(styles.len()) || 0x0a. Load-insensitive: a candidate that emits
+# different code faster fails here regardless of machine conditions.
+output_oracle = "sha256(route_overhead_payload) == 577f62e3ba72dcf39cd56d62285372b249752be1c1b8c3bedf02e70070446131"
+zero_counter_assertions = ["network.dns_resolution_attempts", "network.socket_connect_attempts", "artifact.ide_companion_published", "artifact.runtime_server_published", "artifact.declarations_published", "artifact.public_api_published", "artifact.analysis_published"]
+
+# ── wall clock ──
+#
+# WHICH GATES CAN ACTUALLY FAIL (read this before judging a B6 run). BOTH wall
+# metrics below have near-zero teeth on the B5-direct arm, and the absolute is
+# the weaker of the two:
+#   * the 20 ms absolute sits 54.77x above the measured holdout median
+#     (0.3651 ms) and first trips at roughly a 5377% regression;
+#   * the 10.3356% relative bound is derived from a 5.1678% wall CV, which is
+#     3.50x A6's 1.4757% measured noise floor, making the bound 3.45x wider
+#     than A6's 3.0%. The cause is scale, not sloppiness: this operation is
+#     ~0.3651 ms against A6's ~70 ms, so cold-process startup jitter
+#     dominates a measurement two orders of magnitude shorter.
+# The cell's real discriminating power is therefore the output oracle, the
+# two-sided work counters (8 / 8 / 5384 exact equality), the peak-RSS RELATIVE
+# bound (3.0000% against a 0.5986% CV and a 1.29% observed
+# excursion), and the three structural route counters. The peak-RSS ABSOLUTE is
+# weak too (20.95x headroom) and is, as at A6, a catastrophe stop rather than a
+# fence. A future block wanting a tight wall bound should add an in-process arm
+# that excludes process startup and calibrate it under this same discipline --
+# NOT narrow this bound after the fact, which ADR-016 forbids.
+#
+# Absolute: 8 x A6's 2.5 ms/component cold product budget
+# (A6_META_COMPILE_40_COLD_RUST locks 100 ms for 40 components). This arm is
+# STRICTLY LIGHTER than that locked path — no host, no component-meta, no VFS —
+# so it may not be budgeted slower at the same per-file product rate. It is NOT
+# a multiple of any observed route-overhead median.
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "absolute_max"
+limit = 20000000
+
+# Relative: max(3.0000, 2 x population CV) over the 30-sample calibration
+# session, per the formula frozen in pre-measure-registration.md section 7
+# BEFORE that session ran. Calibration wall CV was
+# 5.1678%. Truncated at 4 dp, never rounded up.
+[[cell.metric]]
+name = "wall_ns"
+statistic = "median"
+comparison = "no_regression_percent_max"
+limit = 10.3356
+
+# ── peak RSS ──
+# Absolute: half of A6's 256 MiB 41-file HOST catastrophe stop. This is a
+# standalone eight-file process with no host or session. A catastrophe stop, not
+# a fit; the tight fence is the relative bound below.
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "absolute_max"
+limit = 134217728
+
+# Calibration peak-RSS CV was 0.5986%.
+[[cell.metric]]
+name = "peak_rss_bytes"
+statistic = "max"
+comparison = "no_regression_percent_max"
+limit = 3.0000
+
+# ── the three arms that do not exist on the B5 tree ──
+# They share the B5-direct product ceiling. A route that did not exist at lock
+# time does not earn a larger budget than the one it replaces. They also carry
+# the SAME relative wall bound: the registration (section 7) freezes "the same
+# wall percentage is the no-regression bound on every wall metric in the cell",
+# because prepared/batch have no independent B5 noise and the B5-direct
+# calibration is their comparable leg. Metric names are free-form strings to the
+# validator, so a bound on wall_ns does NOT implicitly cover these three --
+# each is stated explicitly or it does not exist.
+[[cell.metric]]
+name = "route.prepared_first.wall_ns"
+statistic = "median"
+comparison = "absolute_max"
+limit = 20000000
+
+[[cell.metric]]
+name = "route.prepared_first.wall_ns"
+statistic = "median"
+comparison = "no_regression_percent_max"
+limit = 10.3356
+
+[[cell.metric]]
+name = "route.prepared_repeat.wall_ns"
+statistic = "median"
+comparison = "absolute_max"
+limit = 20000000
+
+[[cell.metric]]
+name = "route.prepared_repeat.wall_ns"
+statistic = "median"
+comparison = "no_regression_percent_max"
+limit = 10.3356
+
+[[cell.metric]]
+name = "route.batch.wall_ns"
+statistic = "median"
+comparison = "absolute_max"
+limit = 20000000
+
+[[cell.metric]]
+name = "route.batch.wall_ns"
+statistic = "median"
+comparison = "no_regression_percent_max"
+limit = 10.3356
+
+# ── structural work counters (not timed) ──
+# Two-sided: a faster run that compiled fewer files, or emitted less, fails.
+[[cell.metric]]
+name = "route.direct.compile_calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 8
+
+[[cell.metric]]
+name = "route.direct.compile_calls"
+statistic = "max"
+comparison = "absolute_min"
+limit = 8
+
+[[cell.metric]]
+name = "route.direct.artifact_count"
+statistic = "max"
+comparison = "absolute_max"
+limit = 8
+
+[[cell.metric]]
+name = "route.direct.artifact_count"
+statistic = "max"
+comparison = "absolute_min"
+limit = 8
+
+[[cell.metric]]
+name = "route.direct.payload_bytes"
+statistic = "max"
+comparison = "absolute_max"
+limit = 5384
+
+[[cell.metric]]
+name = "route.direct.payload_bytes"
+statistic = "max"
+comparison = "absolute_min"
+limit = 5384
+
+# Reuse IS the prepared route. A reparse on repeat is the overhead this cell exists to catch.
+[[cell.metric]]
+name = "route.prepared_repeat.additional_parse_calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 0
+
+# A batch of 8 unique sources parses each exactly once.
+[[cell.metric]]
+name = "route.batch.unique_source_parse_calls"
+statistic = "max"
+comparison = "absolute_max"
+limit = 8
+
+# parses / unique sources. Identically 1.0 on the DIRECT arm (8/8).
+[[cell.metric]]
+name = "parse_amplification"
+statistic = "max"
+comparison = "absolute_max"
+limit = 1.0
+
+[cell.competitor]
+rule = "none"
+competitor_ids = []
+max_wall_slowdown_percent = "not_applicable"
+max_peak_rss_increase_percent = "not_applicable"
+post_result_exception_allowed = false
+
+[cell.memory]
+owner_budget_bytes = "not_applicable"
+allocator_slack_bytes = "not_applicable"
+quiescence_protocol = "not_applicable"
+max_positive_slope_bytes_per_hour = "not_applicable"

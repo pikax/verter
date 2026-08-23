@@ -575,3 +575,17 @@ id = "RULING-2026-08-23-TIMING-ARCHITECTURE"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-TIMING-ARCHITECTURE.md"
 sha256 = "b4076f19e90646c9fe1c609a22078ae1179fbd5740ad033728a26ea7d0ab712d"
+
+# BF1/B6 authority contradiction over B6_COMPILER_ROUTE_OVERHEAD: BF1 owned
+# locking the cell, a later accepted disposition deferred it to B6, B6 cannot
+# choose its own threshold. This ruling records that contradiction and the
+# pre-B6 gate-authority repair. It does not accept B6, amend B6's charter,
+# or add a DAG/ledger block. The cell is locked into repo-root
+# performance-gates.toml from a neutral B5-direct calibration and a disjoint
+# holdout, registered as row E-2 of the Implementation Lock Record extension
+# register.
+[[document]]
+id = "RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md"
+sha256 = "dccb05d01e6997d3ab1de6af99dc59d19c71c0671713c1bf1bc7b4f0fe06bf94"
