@@ -1,3 +1,17 @@
+---
+ruling_id: "CSS-ALLOCATION-OWNERSHIP-2026-08-23"
+type: "architecture-ruling"
+date: "2026-08-23"
+date_source: "in-document (**Date:** 2026-08-23)"
+binds: ["J1"]
+source_file: "ARCHITECT-RULING-2026-08-23-CSS-ALLOCATION-OWNERSHIP.md"
+summary: "Splits the CSS allocation regression into two ADOPT-NOW predecessor blocks of the CSS cutover: a verter_css_syntax block owning parse_style_ir/StyleSyntaxIr allocation density (must optimise the shared parser, never route around it or add a second parser), and a verter_compiler block owning the per-:slotted() Allocator::new() lifecycle defect (requires an enabled requested-byte/scaling regression test, since the count-only canary cannot catch it). Rules block/css-closing-items unlandable as a preparatory dual-path migration under the J1 charter's prohibition on style_planner and legacy css/ coexisting as Vue transform authorities; it becomes a staging/evidence donor. Rules the 2.64x count / 5.54x requested-byte regression unacceptable to ship under the present contract, and refuses a ratio rebase absent proof of a material benchmark-definition error established independently of the candidate's miss."
+supersedes: []
+superseded_by: []
+contradicts: []
+notes: "Supersedes the debt row assigning the entire CSS allocation regression to block/css-cutover, and supersedes the earlier allocation DEFER only to the extent it was read as authorization to land block/css-closing-items on the protected branch; the DEFER remains valid as an unlanded/WIP disposition. Records three qualifications limiting the evidence: 5.54x is cumulative allocator-REQUESTED bytes (not peak/retained/RSS), Allocator::new() was not experimentally isolated from the rest of the planner phase, and the study's claim that fixing owner #1 would not move slotted_rules' bytes ratio is false. Explicitly states the ignored allocation canary is NOT a Stub Prevention violation (real body, honestly RED) but is equally not a passing acceptance gate."
+---
+
 # Architect ruling — CSS allocation ownership and the J1 landing sequence
 
 **Date:** 2026-08-23

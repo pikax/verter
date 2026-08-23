@@ -76,4 +76,4 @@ program orchestrator (RULING 1), not performed here.
 | [`B4-C1-SERIALIZE`](DISPOSITION-B4-C1-SERIALIZE.md) | disposition | unknown | B4, C1 | — |
 | [`BS1-SERIALIZE-BEHIND-BV1`](DISPOSITION-BS1-SERIALIZE.md) | disposition | unknown | BS1, BV1 | — |
 | [`TYPECHECK-POC-TO-H-TRAIN`](DISPOSITION-TYPECHECK-POC-TO-H-TRAIN.md) | disposition | 2026-08-18 | H2, H3 (future Track H blocks) | — |
-
+| [`CSS-ALLOCATION-OWNERSHIP-2026-08-23`](ARCHITECT-RULING-2026-08-23-CSS-ALLOCATION-OWNERSHIP.md) | architecture-ruling | 2026-08-23 | J1 | — |
