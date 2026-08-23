@@ -98,6 +98,13 @@ is impossible; TCM2 implements it.
 No production code. No routing change. No mapper process. No package
 publication. No activation.
 
+## Timing taxonomy
+
+TCM0 is investigation and architecture lock. It owns no live queue, flight,
+coalescer, or protocol-admission surface. The four-part timing taxonomy in
+`architecture.md` §1.6 therefore adds no TCM0 acceptance criteria. This
+paragraph does not reopen `evidence/TCM0/OPEN-GAPS.md`.
+
 ## Acceptance
 
 TCM0 cannot be accepted with any of: "semantic mechanism TBD"; "retain provider

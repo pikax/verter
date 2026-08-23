@@ -201,7 +201,7 @@ sha256 = "e2e4a6761981985fd64a650ebf14bebf8bd7598939b9484e2b56bbdf9dd3d6e3"
 id = "TCM0-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM0.md"
-sha256 = "ef294120f67ad2b523348b9642b10e33ef3533c0ee9ffcdde594db75b7d00141"
+sha256 = "2ea41dd85befd978e06364d952eb3b262c9b6edba1f1ac8ce37eba9845b91e97"
 
 [[document]]
 id = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
@@ -484,6 +484,12 @@ path = "docs/arch/refactor/rev11/rulings/MAINTAINER-STEERING-TCM-CONTENT-MAPPERS
 sha256 = "fa5c13d4ac1c127df63bb6443a1d2d0574a0aa33b4372c3b9c44eae6dcf610ee"
 
 [[document]]
+id = "COALESCER-CLOSURE-IS-NAMED-DISPOSITION"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md"
+sha256 = "2efb7d5ed57717c6164523828abde9098b53faecfc68adce556a0bea14889f8e"
+
+[[document]]
 id = "TCM-PACKAGE-CERTIFICATION-SETTLED"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md"
@@ -493,25 +499,25 @@ sha256 = "646bbe2e41f8e28e9ebb6fb3faf29f2b70cd948c76240deb89656e3168cf0ae0"
 id = "TCM1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM1.md"
-sha256 = "58a905edd335c7e61c2f6d98c35f45313c6a2b90fd411cfb39854dcfea880340"
+sha256 = "2886c796307ac8b28e3288de5062a207a3262f9f78fa407ecf31637e90cc4a28"
 
 [[document]]
 id = "TCM2-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM2.md"
-sha256 = "2886fa6e30de34f17d5de747399bfde6a657685425947cdf8d671f0fe85c2312"
+sha256 = "3cae6cef57c87b1eba9a1d6143adba11ab390eb838783de3daa19dee353b1af2"
 
 [[document]]
 id = "TCM3-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM3.md"
-sha256 = "24cd32280ef623082e761f00db800ec8fb56bb1af02725cb92bbed86859b159b"
+sha256 = "78efb323bf669b81e235ecef7225e33bb622a83be1470c36ee898c52f981e752"
 
 [[document]]
 id = "TCM4-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM4.md"
-sha256 = "890d4ce433210763e09949bc3ee841488c8497114faae0c0ddcd05a56c355829"
+sha256 = "a9f1b3e71d6fe7890b982971615d55a5e69be67146bbfed102367d1aea1c4575"
 
 [[authorization]]
 block = "TCM0"
@@ -569,3 +575,17 @@ id = "RULING-2026-08-23-TIMING-ARCHITECTURE"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-TIMING-ARCHITECTURE.md"
 sha256 = "b4076f19e90646c9fe1c609a22078ae1179fbd5740ad033728a26ea7d0ab712d"
+
+# BF1/B6 authority contradiction over B6_COMPILER_ROUTE_OVERHEAD: BF1 owned
+# locking the cell, a later accepted disposition deferred it to B6, B6 cannot
+# choose its own threshold. This ruling records that contradiction and the
+# pre-B6 gate-authority repair. It does not accept B6, amend B6's charter,
+# or add a DAG/ledger block. The cell is locked into repo-root
+# performance-gates.toml from a neutral B5-direct calibration and a disjoint
+# holdout, registered as row E-2 of the Implementation Lock Record extension
+# register.
+[[document]]
+id = "RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md"
+sha256 = "dccb05d01e6997d3ab1de6af99dc59d19c71c0671713c1bf1bc7b4f0fe06bf94"

@@ -51,6 +51,7 @@ walkdir = "2.5"
 glob = "0.3.3"
 rayon = "1.12"
 tempfile = "3.27"
+sha2 = { workspace = true }
 hotpath = { version = "0.23", optional = true }
 
 [dev-dependencies]
@@ -186,3 +187,7 @@ path = "examples/profile_public_api_batch.rs"
 [[example]]
 name = "currency_phase_probe"
 path = "examples/currency_phase_probe.rs"
+
+[[example]]
+name = "route_overhead_baseline"
+path = "examples/route_overhead_baseline.rs"

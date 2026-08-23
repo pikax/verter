@@ -37,9 +37,21 @@ inputs to a future freeze:
 Tracked as debt — durable owner, resolution gate, and acceptance ID at
 [`../BF2/debt-BF2-perf-gate-deferred.md`](../BF2/debt-BF2-perf-gate-deferred.md).
 
-The remaining six cells below (`BV1`/`BS1`/`B6`/`C4`-owned) are unaffected by
-either freeze and stay deferred to their owning blocks' own landings, per
-this document's original scope — no threshold is invented for them here.
+The remaining six cells below (`BV1`/`BS1`/`B6`/`C4`-owned) were originally left
+deferred to their owning blocks' landings. That deferral contradicts BF1 exit #6
+and B6's charter, which still requires a BF1-locked `B6_COMPILER_ROUTE_OVERHEAD`
+cell. The contradiction and its repair are recorded in
+[`../../rulings/ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md`](../../rulings/ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md).
+Absolute product/CI budgets and the B5-direct harness are pre-registered at
+[`../B6/cell-lock/pre-measure-registration.md`](../B6/cell-lock/pre-measure-registration.md).
+The cell is now **LOCKED** in repo-root `performance-gates.toml` as an EXTENSION
+under that file's SCOPE header, and registered as row E-2 of the Implementation
+Lock Record's section 13 extension register. No threshold is derived from B6's
+contaminated timing/RSS: the absolutes come from the already-locked A6 cell and
+the relative bounds instantiate a pre-registered formula on a neutral B5-direct
+calibration confirmed by a disjoint holdout (see
+`../B6/cell-lock/idle-protocol-log.md` for the machine conditions). Locking the
+cell does NOT accept B6, which is still measured against it later.
 
 ## Required new cells
 
@@ -54,7 +66,7 @@ this document's original scope — no threshold is invented for them here.
 | `BS1_SVELTE_CLIENT_RUNES_DIRECT_CORE` | BS1 algorithm | runes corpus, dev/prod, topology/runtime oracle and work counts |
 | `BS1_SVELTE_CLIENT_LEGACY_DIRECT_CORE` | BS1 algorithm | legacy only where supported; same counter classes |
 | `BS1_SVELTE_SERVER_DIRECT_CORE` | BS1 algorithm | server corpus, render oracle, maps and memory |
-| `B6_COMPILER_ROUTE_OVERHEAD` | B6 routes | identical corpus across direct, prepared first/repeat, and batch; output digest, reuse/cold-build counts, latency/RSS |
+| `B6_COMPILER_ROUTE_OVERHEAD` | pre-B6 gate-authority repair, then B6 | **FROZEN** — see the ruling cited above. Identical corpus across direct, prepared first/repeat, and batch; output digest, reuse/cold-build counts, latency/RSS. Absolutes 20 ms / 128 MiB from the locked A6 cell; relatives 10.3356% wall and 3.0000% peak RSS from a 30-invocation B5-direct calibration confirmed by a disjoint 30-invocation holdout. Only the DIRECT arm exists on the B5 tree — the harness refuses the other three rather than reporting a number, and they inherit the same ceilings and the same relative wall bound |
 | `C4_PROJECT_ROUTE_EQUIVALENCE` | C4 staging | local imported-macro corpus; direct/staged output and type-query counts, latency/RSS |
 
 Each cell is conjunctive: correctness, non-vacuity, zero-unrequested-work, absolute

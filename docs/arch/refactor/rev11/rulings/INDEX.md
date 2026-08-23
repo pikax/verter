@@ -21,6 +21,7 @@ program orchestrator (RULING 1), not performed here.
 |---|---|---|---|---|
 | [`STEERING-TCM-CONTENT-MAPPERS`](MAINTAINER-STEERING-TCM-CONTENT-MAPPERS.md) | maintainer-directive | 2026-08-22 | TCM0, TCM1, TCM2, TCM3, TCM4 | — |
 | [`TCM-PACKAGE-CERTIFICATION-SETTLED`](MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md) | maintainer-ruling | 2026-08-23 | TCM0, TCM1, TCM2, TCM3, TCM4 | — |
+| [`COALESCER-CLOSURE-IS-NAMED-DISPOSITION`](MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md) | maintainer-ruling | 2026-08-23 | K3, G2, H2, TCM4 | — |
 | [`CSS-WORK-REACHES-J1`](MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md) | maintainer-ruling | 2026-08-23 | J1 | — |
 | [`CODE-OVER-LEDGER`](MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md) | maintainer-ruling | 2026-08-22 | BV2, B5, CM1, scripts/validate-program-state.mjs, ledger bookkeeping protocol | — |
 | [`HARDEN-ORCHESTRATION`](MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION.md) | maintainer-directive | 2026-08-20 | program-wide orchestration machinery | — |
@@ -49,10 +50,11 @@ program orchestrator (RULING 1), not performed here.
 | [`PARALLEL-REVIEW-SEATS`](MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md) | maintainer-directive | 2026-08-18 | program-wide review-seat protocol | — |
 | [`REVIEW-BUDGET-BY-ARTIFACT-CLASS`](MAINTAINER-RULING-REVIEW-BUDGET.md) | maintainer-directive | 2026-08-17 | program-wide review protocol | — |
 
-## Architecture rulings (13)
+## Architecture rulings (14)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`B6-ROUTE-OVERHEAD-CELL-LOCK-2026-08-23`](ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md) | architecture-ruling | 2026-08-23 | B6, BF1, performance-gates.toml | — |
 | [`TIMING-ARCHITECTURE-2026-08-23`](ARCHITECT-RULING-2026-08-23-TIMING-ARCHITECTURE.md) | architecture-ruling | 2026-08-23 | program-wide timing architecture (production and tests) | — |
 | [`C1-FOUR-FORKS`](ARCH-RULING-C1-FOUR-FORKS.md) | architecture-ruling | 2026-08-20 | C1 | — |
 | [`C1-THREE-GAPS-ADDENDUM`](ARCH-ADDENDUM-C1-THREE-GAPS.md) | architecture-ruling | 2026-08-20 | C1 | — |
