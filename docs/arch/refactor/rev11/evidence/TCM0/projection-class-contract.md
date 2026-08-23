@@ -26,11 +26,26 @@ must carry an explicit, computed `features` value; `undefined`/omitted is a defe
 default, because `undefined` on the wire normalizes to `All` (confirmed:
 `dist/ast/spanMap.d.ts` — `NormalizedSpanMapSegment` "omitted features have been normalized to `All`").
 
+## Correction, 2026-08-23: a fifth class was missing — reconciled to the steering, not invented
+
+The four classes below (`AuthoredVerbatim`, `AuthoredTransformed`, `SynthesizedHelper`, `ExternalUnit`)
+are the set this file originally ratified. The maintainer's steering
+(`rulings/MAINTAINER-STEERING-TCM-CONTENT-MAPPERS.md` §8) is explicit and normative on a case this set
+did not name: "A synthesized definition target is represented as: `relation = Atom`,
+`original_len = 0`, `projection_class = DefinitionAnchor`." `DefinitionAnchor` is therefore a REQUIRED
+fifth class, added below as class 5 — this is a reconciliation to already-ratified steering text, not a
+new taxonomy invented at integration time. This does not reopen the RELATION model: the steering is
+equally explicit that "There is no fourth `Anchor` relation" — the three generic relations
+(`ExactCopy`/`Atom`/`IdentityAlias`, TypeScript-terminal `Verbatim`/`Atom`/`Alias`) are unchanged;
+`DefinitionAnchor` is a `projection_class` value, not a fourth relation, and it always pairs with
+`relation = Atom`.
+
 ## The minimal class set
 
-Four classes, derived from the actual carrier-region taxonomy the External-Source Decision Table
+Five classes, derived from the actual carrier-region taxonomy the External-Source Decision Table
 (`external-source-decision-table.md`) and the diagnostic matrix (`diagnostic-ownership-matrix.md`)
-already establish — not a fifth invented taxonomy:
+already establish, plus the steering's explicit `DefinitionAnchor` requirement above — not a sixth
+invented taxonomy:
 
 1. **`AuthoredVerbatim`** — a generated span that is a byte-for-byte copy of authored source (e.g. an
    inline `<script>` block's own TS content, copied unchanged into the TSX). `SpanMapKind::Verbatim`,
@@ -56,6 +71,17 @@ already establish — not a fifth invented taxonomy:
    this class exists to make explicit that "external unit" is a *routing* distinction (which document
    owns the span), not a *feature-restriction* distinction; once routed to its own document, the span
    behaves as `AuthoredVerbatim` there.
+5. **`DefinitionAnchor`** — a synthesized, zero-length definition target: `relation = Atom`,
+   `original_len = 0` (steering §8, verbatim). This is NOT a `SynthesizedHelper` — a `SynthesizedHelper`
+   span may have nonzero generated length and represents injected helper *code*; a `DefinitionAnchor` is
+   specifically the zero-length target position a `go to definition` jump lands on (e.g. the anchor for a
+   macro-synthesized binding that has no authored token of its own to point at). Mask: `Definition` only
+   — never `Hover` (there is no authored content at a zero-length position to explain beyond what the
+   definition jump itself conveys), never `Rename`/`CodeActions`/`References`/`Completion`/`SemanticTokens`
+   (a zero-length position has no text to rename, act on, reference, complete against, or classify).
+   Distinguish from `SpanMapKind::Atom` used for a nonzero-length `AuthoredTransformed` span: the
+   `original_len = 0` discriminant is what selects `DefinitionAnchor` over `AuthoredTransformed`, not the
+   `relation` alone (`Atom` relation appears in both).
 
 ## Terminal policy: class × relation × region × owner × certified capability → mask
 
@@ -81,8 +107,11 @@ The mask a wire span actually carries is the AND of:
 
 - Any code path that omits `features` on a minted `SpanMapSegment` (normalizes to `All` — the exact
   defect this contract exists to prevent).
-- A fifth class invented ad hoc by a later block instead of extending this table (extension is fine;
+- A sixth class invented ad hoc by a later block instead of extending this table (extension is fine;
   silent proliferation is not — the ADR TCM1 produces must reference this file, not restate it).
+- Pairing `projection_class = DefinitionAnchor` with a nonzero `original_len`, or pairing it with any
+  `relation` other than `Atom` — the steering's exact tuple is `(relation = Atom, original_len = 0,
+  projection_class = DefinitionAnchor)`, not a looser approximation.
 - Deriving a mask from string/name heuristics on the span's content — masks are derived structurally
   from the class/relation/region/owner tuple above, consistent with the Typed-IR-Only Resolver Rule
   already governing the rest of Verter's semantic surface.

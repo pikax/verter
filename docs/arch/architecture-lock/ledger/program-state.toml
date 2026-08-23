@@ -1764,7 +1764,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM0.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM0.md. CORRECTED 2026-08-23: the prior note here ('NOT authorised: requires a digest-bound authority-registry record before dispatch') is stale — authority-registry.toml already carries a ratified [[authorization]] record for TCM0 (ratified_at 2026-08-22, documents TCM0-CHARTER + DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS, extended 2026-08-23 with TCM-STEERING + TCM-PACKAGE-CERTIFICATION-SETTLED). TCM0's investigation evidence is produced but not yet complete: evidence/TCM0/OPEN-GAPS.md records outstanding gaps that gate TCM0's own acceptance — incomplete steering-capability coverage beyond the TypeProvider trait's 44 methods (G-LEDGER-SCOPE), no comparative topology benchmark numbers (G-TOPOLOGY), no locked full performance-threshold table (G-PERF-NUMBERS), the pending rows #25-26 maintainer ruling (G-TCM0-ACCEPTANCE-ROWS-25-26), an open maintainer decision on bulk symbol/type/reference/completion/diagnostic Semantic API probes charter item 2 literally requires but TCM0's evidence only inventories (G-SEMANTIC-API-CERTIFICATION, added 2026-08-23), an incomplete projection-mask total-function policy (G-PROJECTION-MASK-TOTALITY, added 2026-08-23), a string-encoded field count for mapping-products-string-surface.md that is corrected but explicitly NOT closed after two failed manual-closure attempts (G-STRING-SURFACE-CITATIONS, reopened 2026-08-23), and a required compiler-diagnostic LSP-vs-CLI convergence with no valid later-block owner (G-DIAGNOSTIC-CONVERGENCE, added 2026-08-23). Status stays LOCKED here because conformance_review/architecture_review/adversarial_review below are still PENDING with no reviewed_sha — this row's status field is not advanced past LOCKED by this correction; TCM0's own review-and-acceptance is a separate, not-yet-dispatched act, and it cannot proceed to ACCEPTED until every OPEN-GAPS.md row gating TCM0 itself is closed."
 
 [[block]]
 id = "TCM1"
@@ -1789,7 +1789,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM1.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM1.md, REWRITTEN 2026-08-23 into the 5-part implementation-ready shape (intent contract, numbered owned scope, numbered exit criteria, forbidden, material bounds) and pre-registered as TCM1-CHARTER in authority-registry.toml (sha256 58a905edd335c7e61c2f6d98c35f45313c6a2b90fd411cfb39854dcfea880340, re-pinned after follow-up corrections to the mapping-products-string-surface.md field count it cites, most recently reworking exit criterion 1 from a name-keyed syn scanner (rejected as violating this program's own landed-scanner-bar rule) into a compiler-enforced deletion-based completeness proof — see evidence/TCM0/OPEN-GAPS.md's G-STRING-SURFACE-CITATIONS row). Status stays LOCKED: sole predecessor TCM0 is not yet ACCEPTED (begun-predecessor rule, validate-program-state.mjs). Dispatchable as soon as TCM0 is ACCEPTED — add an [[authorization]] row citing TCM1-CHARTER (+ TCM-STEERING) and flip this status to READY."
 
 [[block]]
 id = "TCM2"
@@ -1814,7 +1814,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM2.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM2.md, REWRITTEN 2026-08-23 into the 5-part implementation-ready shape and pre-registered as TCM2-CHARTER in authority-registry.toml (sha256 2886fa6e30de34f17d5de747399bfde6a657685425947cdf8d671f0fe85c2312). Status stays LOCKED: predecessors TCM0 and TCM1 are not yet ACCEPTED. May be dispatched CONCURRENTLY with TCM3 once TCM0+TCM1 are ACCEPTED (charter section 4 of TCM3.md settles the parallelism question the steering left conditional; program-dag.toml's existing predecessors already express it — no DAG edge change needed)."
 
 [[block]]
 id = "TCM3"
@@ -1839,7 +1839,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM3.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM3.md, REWRITTEN 2026-08-23 into the 5-part implementation-ready shape, including a new blocking exit criterion (TCM3-EC-G1) requiring a maintainer ruling on feature-ownership-ledger.md rows #25-26 before this block can close, plus a later-added exit criterion 9 citing the steering's conformance coverage list for TCM3's semantic-plane scope. Pre-registered as TCM3-CHARTER in authority-registry.toml (sha256 24cd32280ef623082e761f00db800ec8fb56bb1af02725cb92bbed86859b159b, re-digested after exit criterion 9 was added). Status stays LOCKED: predecessors TCM0 and TCM1 are not yet ACCEPTED. May be dispatched CONCURRENTLY with TCM2 once TCM0+TCM1 are ACCEPTED."
 
 [[block]]
 id = "TCM4"
@@ -1864,4 +1864,4 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
-notes = "Drafted by the content-mapper amendment train. Charter at docs/arch/refactor/rev11/charters/TCM4.md. NOT authorised: requires a digest-bound authority-registry record before dispatch."
+notes = "Charter at docs/arch/refactor/rev11/charters/TCM4.md, REWRITTEN 2026-08-23 into the 5-part implementation-ready shape, executing deletion-closure.md's 19-item steering cross-check as its exit criterion 5 and gating rows #25-26 deletion on TCM3-EC-G1 (exit criterion 7), plus a later-added exit criterion 10 citing the steering's conformance coverage list for TCM4's activation/deletion scope. Required-outcomes item 3, owned-scope item 9, and exit criterion 5 all defer items 17-18's disposition to whichever resolution TCM0's own acceptance record ratifies for OPEN-GAPS.md's G-DELETION-CLOSURE-ITEMS-17-18 row — none of the three preselects execution-time discovery. Pre-registered as TCM4-CHARTER in authority-registry.toml (sha256 890d4ce433210763e09949bc3ee841488c8497114faae0c0ddcd05a56c355829, re-digested after the exit-criterion-5 reword). Status stays LOCKED: predecessors TCM0, TCM1, TCM2, TCM3 are not yet ACCEPTED."

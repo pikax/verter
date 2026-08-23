@@ -1,6 +1,11 @@
 # TCM0 — Current TypeScript contract and dual-plane architecture lock
 
-**Status:** DRAFT, pending DAG amendment + authorization record.
+**Status:** LOCKED — DAG amendment (`program-dag.toml` TCM0 block, predecessor `A6`) and the
+digest-bound authorization record (`authority-registry.toml` `[[authorization]] block = "TCM0"`,
+ratified 2026-08-22, extended 2026-08-23) have both landed. Pending TCM0's own
+review-and-acceptance: `conformance_review`/`architecture_review`/`adversarial_review` are still
+PENDING in `program-state.toml`, and evidence-completeness gaps that must close before TCM0
+leaves LOCKED are tracked in `evidence/TCM0/OPEN-GAPS.md`.
 **Class:** foundational (investigation + architecture lock).
 **Predecessors:** the accepted checkpoint established by the ledger ratification.
 **Downstream:** TCM1, TCM2, TCM3, TCM4 all depend on this.

@@ -201,7 +201,7 @@ sha256 = "e2e4a6761981985fd64a650ebf14bebf8bd7598939b9484e2b56bbdf9dd3d6e3"
 id = "TCM0-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM0.md"
-sha256 = "7933e3d99d4a7a31f3ddeda719f02992a85fad9fcd6fcc8edc042cbecd5c0249"
+sha256 = "ef294120f67ad2b523348b9642b10e33ef3533c0ee9ffcdde594db75b7d00141"
 
 [[document]]
 id = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
@@ -471,12 +471,48 @@ ratified_by = "maintainer"
 ratified_at = "2026-08-22"
 scope = "Retroactive authorisation of B5's landing (exposing the accepted BV1/BS1 framework algorithms through the sole direct compiler core) now that its predecessor set is genuinely satisfied by BV2's acceptance."
 
+[[document]]
+id = "TCM-STEERING"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-STEERING-TCM-CONTENT-MAPPERS.md"
+sha256 = "fa5c13d4ac1c127df63bb6443a1d2d0574a0aa33b4372c3b9c44eae6dcf610ee"
+
+[[document]]
+id = "TCM-PACKAGE-CERTIFICATION-SETTLED"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md"
+sha256 = "646bbe2e41f8e28e9ebb6fb3faf29f2b70cd948c76240deb89656e3168cf0ae0"
+
+[[document]]
+id = "TCM1-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/TCM1.md"
+sha256 = "58a905edd335c7e61c2f6d98c35f45313c6a2b90fd411cfb39854dcfea880340"
+
+[[document]]
+id = "TCM2-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/TCM2.md"
+sha256 = "2886fa6e30de34f17d5de747399bfde6a657685425947cdf8d671f0fe85c2312"
+
+[[document]]
+id = "TCM3-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/TCM3.md"
+sha256 = "24cd32280ef623082e761f00db800ec8fb56bb1af02725cb92bbed86859b159b"
+
+[[document]]
+id = "TCM4-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/TCM4.md"
+sha256 = "890d4ce433210763e09949bc3ee841488c8497114faae0c0ddcd05a56c355829"
+
 [[authorization]]
 block = "TCM0"
-documents = ["TCM0-CHARTER", "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"]
+documents = ["TCM0-CHARTER", "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS", "TCM-STEERING", "TCM-PACKAGE-CERTIFICATION-SETTLED"]
 ratified_by = "maintainer"
 ratified_at = "2026-08-22"
-scope = "Authorises TCM0 only: a READ-ONLY investigation and architecture lock over the current TypeScript content-mapper and semantic-API contracts. It changes no production route, ships no code, certifies no package, and deletes nothing. TCM1-TCM4 remain LOCKED and each requires its own record."
+scope = "Authorises TCM0 only: a READ-ONLY investigation and architecture lock over the current TypeScript content-mapper and semantic-API contracts. It changes no production route and ships no code. Corrected 2026-08-23: TCM0 does not itself certify a package by INVESTIGATION AUTHORITY ALONE (this authorization record grants TCM0 the right to investigate and produce evidence, not the right to declare a package production-certified on its own say-so) — but TCM-PACKAGE-CERTIFICATION-SETTLED, cited below as a second document backing this same record, is the maintainer's OWN ruling doing exactly that certification directly; TCM0's investigation evidence (package-lock-and-semantic-api.md) is the record that ruling certifies. TCM0 deletes nothing. TCM1-TCM4 remain LOCKED and each requires its own record. TCM-STEERING and TCM-PACKAGE-CERTIFICATION-SETTLED added 2026-08-23: the former is the maintainer's original steering directive landed verbatim as a citable authority document (previously referenced only informally); the latter is the maintainer ruling settling the one open certification hedge TCM0's own package-lock-and-semantic-api.md left (Status: production-certified, not merely candidate-discovery-certified), superseding an architecture-consult finding that read that hedge as a blocker rather than a TCM3 design constraint. Neither document authorises TCM1-TCM4 to leave LOCKED; TCM1-CHARTER/TCM2-CHARTER/TCM3-CHARTER/TCM4-CHARTER are registered below as documents only (charter-structure implementation-ready, digest-bound; TCM0's own remaining evidence-completeness gaps are tracked in evidence/TCM0/OPEN-GAPS.md and gate TCM0's OWN acceptance, not these charters' readiness) — each still requires its own [[authorization]] record, gated on TCM0's (and, for TCM2-TCM4, TCM1's) acceptance, before dispatch."
 
 [[document]]
 id = "B6-CHARTER"
