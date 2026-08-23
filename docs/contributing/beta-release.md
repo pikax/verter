@@ -119,7 +119,7 @@ publishing workflow. Rehearse on the immutable release-candidate SHA instead:
 
 ```bash
 pnpm install --frozen-lockfile
-node scripts/gate.mjs
+node scripts/gate.mjs --exhaustive
 node scripts/check-versions.mjs --json
 ```
 

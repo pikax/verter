@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Canonical Rust gate CLI.
 //
-// SECURITY: this binary runs only the real gate (oracle → archive →
-// nextest → direct libtest → verdict). `--prepare` is a warm utility,
+// SECURITY: this binary runs only the real gate (prerequisites → real harness smokes → archive/list →
+// Surface + shipped-cfg lanes, concurrent when the ceiling allows it, serial otherwise → verdict).
+// `--prepare` is a warm utility,
 // never a gate PASS. No test-seam, classifier hook, custom-command
 // mode, or env var can make this CLI return the success contract without
 // building and running the suite. Internals live in `gate-internals.mjs`;
@@ -11,7 +12,8 @@
 // OPERATION-SCOPED EXIT SEMANTICS (read this before trusting an exit 0)
 //   `exit 0` means "the requested OPERATION succeeded" — it is scoped to the mode you ran, NOT a blanket
 //   gate pass. Concretely:
-//     * ONLY `node scripts/gate.mjs` (no mode flag) is THE GATE. Its exit 0 means the FULL test suite built
+//     * `node scripts/gate.mjs` and `node scripts/gate.mjs --exhaustive` are THE GATE. Their exit 0 means
+//       the FULL test suite built
 //       AND passed (except the env-only typeinfo freshness PAIR, by exact name, AND only when the freshness-
 //       tooling preflight below proves `pnpm` is not resolvable AND `buf` is not resolvable — the condition
 //       under which the Rust byte-pin test skips; see FRESHNESS-TOOLING PREFLIGHT). That, and only that, is
@@ -35,8 +37,9 @@
 //   many operations sequentially (create/use/drop/recreate; multiple hosts alive at once; repeated edits;
 //   scheduler shutdown+restart; `OnceLock` lifecycle; failure then recovery) inside the ONE process
 //   nextest gives that test — not a second archive, not a second run.
-//   After SURFACE 1, the gate runs a small SHIPPED-CFG GUARD (see below) — NOT a second whole-workspace
-//   archive/run — covering behaviour that can differ only because `debug_assertions` / `overflow-checks`
+//   After archive/list and every post-list precondition, Surface 1 overlaps a small serial SHIPPED-CFG
+//   GUARD (see below) — NOT a second whole-workspace archive/run — covering behaviour that can
+//   differ only because `debug_assertions` / `overflow-checks`
 //   are off. Every build command issued is a `--workspace` archive build (for surface 1) or a tiny
 //   package-scoped build (for the guard), so the gate NEVER issues the package-scoped
 //   `cargo test -p verter_session` resolution and so structurally cannot incur the recompile that
@@ -78,19 +81,12 @@
 //   workspace — a `debug_assertions`-dependent regression outside that crate's reach is not covered by
 //   the guard (though `cargo check --profile no-debug-assertions --all-targets` still compiles it).
 //
-// CANONICAL FEATURE SET (why no `-p verter_session`)
-//   `cargo nextest run --workspace` and `cargo test --workspace` SHARE Cargo feature unification, which
-//   activates `verter_session`'s `session_metrics` feature (a downstream crate — `verter_lsp` — depends on
-//   `verter_session` with `features = ["session_metrics"]`, so the real LSP binary forces it ON in the
-//   workspace build; `verter_napi` only exposes an opt-in `session_metrics` forwarding feature, default off).
-//   The package-scoped `cargo test -p verter_session` resolution builds `verter_session` with
-//   `session_metrics` OFF (its default) and a different dev-dep closure ⇒ a different unit hash ⇒ an
-//   artifact-reuse miss ⇒ a full recompile of the verter_session reverse-dependency chain on the very next
-//   gate command. This gate deliberately tests the workspace-unified (`session_metrics` ON) configuration —
-//   the PRODUCTION-REACHABLE one (what the shipped LSP binary uses; also reachable from an opt-in
-//   `verter_napi/session_metrics` build) — which is exactly why it
-//   never issues the package-scoped resolution. It does NOT use `--all-features` (the repo has slow/external
-//   feature gates) and does NOT mutate any Cargo.toml.
+// CANONICAL WORKSPACE RESOLUTION (why no `-p verter_session`)
+//   Surface 1 consumes the one `cargo nextest archive --workspace` universe. The retired package-scoped
+//   `cargo test -p verter_session --tests` command redundantly replayed tests Surface 1 already owned and
+//   could force another Cargo resolution/build. Deliberate shared-process contracts now live inside the one
+//   archive-backed Surface 1 run, so the production gate never issues that package-scoped blanket replay.
+//   It does NOT use `--all-features` (the repo has slow/external feature gates) and does NOT mutate Cargo.toml.
 //
 // EQUIVALENCE TO THE TWO-COMMAND GATE
 //   The legacy gate was: `cargo nextest run --workspace` then `cargo test -p verter_session --tests`. The
@@ -102,10 +98,10 @@
 //   1's one archive/run as `verter_session/tests/cases/shared_process_contract.rs` — see PURPOSE above.
 //
 // SAFETY MODEL (pure Node + OS-native tools; ZERO new compiled binaries)
-//   1. Runner-owned target dir: every cargo step runs with CARGO_TARGET_DIR + --target-dir forced to
-//      <repo>/target/gate-runner (override via --target-dir / VERTER_GATE_TARGET_DIR), so the gate's
-//      .cargo-lock is fully runner-owned and cleanup can never hit a developer's cargo / rust-analyzer
-//      (which write the default target/debug). User target overrides are scrubbed.
+//   1. Runner-owned targets: the archive/list front half uses <runnerTarget>; post-list Surface and shipped
+//      lanes use pairwise-disjoint <runnerTarget>/lanes/<lane>/target plus separate gate work/extract/output
+//      roots. CARGO_TARGET_DIR is forced per lane (override controls only the runner parent), so no lane
+//      shares a Cargo lock or timing source with another and cleanup never targets developer target/debug.
 //   2. Single-flight mutex: an atomic mkdir lockdir with a gate-owned sentinel (storing the owning repo
 //      realpath) + owner.json + start-identity. A LIVE holder => REFUSE (LOCK-REFUSED). A dead/stale
 //      holder => reclaim via atomic rename (never bare rm of a live holder's dir), defeating PID reuse via
@@ -123,21 +119,26 @@
 //      developer's interactive cargo / rust-analyzer (which carry the repo root but write target/debug) is
 //      never touched.
 //   5. Whole-gate hard timeout (default 80m, --timeout) — a deadline for the ENTIRE gate, not per-step. It
-//      covers the archive build, surface 1, and the shipped-cfg guard. On
-//      expiry the active step's tree is reaped + a sweep runs; exit 124.
-//   6. Stall detector with SEPARATE build vs test phases:
+//      covers the archive build, surface 1, and the shipped-cfg guard. It is absolute across both post-list
+//      lanes (concurrent or serial, per deriveGateLaneResourceSplit's `concurrent` flag) and the shipped
+//      check→contract transition. On expiry every registered forest is reaped; exit 124.
+//   6. Aggregate stall detector with SEPARATE build vs test phases:
 //        BUILD phase (the archive build): progress = stdout/stderr byte growth OR runner-owned target-tree
 //          artifact growth (file-count + newest-mtime, bounded scan). A long silent rustc is NOT a stall.
-//        TEST phase (the nextest run + the direct libtest execs): progress = stdout/stderr byte growth
+//        TEST phase (the Surface and shipped-contract nextest runs): progress = stdout/stderr byte growth
 //          ONLY. Target-tree growth is NOT a valid test liveness signal; a silent test binary IS a hang.
-//      Default stall 12m (--stall). On stall: reap + sweep; exit 125.
+//      Any live lane's progress advances one aggregate vector; completed lanes cannot keep a survivor alive.
+//      Default stall 12m (--stall). On stall: reap all registered forests + sweep; exit 125.
 //   7. Spotlight marker (macOS): a <runnerTarget>/.metadata_never_index file is written so Spotlight does
 //      not index the build tree (a harmless no-op file on Linux/Windows).
-//   8. Resource ceiling: build jobs and test concurrency are finite (defaults: min(host CPUs, 4)); every
-//      contained child tree is sampled for aggregate RSS once per second and is reaped when it reaches
-//      the gate memory ceiling (default: 50% of physical RAM). A ceiling trip is the distinct, non-PASS
+//   8. Resource ceiling: build jobs and test concurrency are independently finite; omitted build jobs use
+//      the measured CPU/memory tier and omitted test threads default to min(host CPUs, 12). Every
+//      live process forests are sampled from one OS process-table snapshot once per second and their
+//      disjoint RSS is summed against one gate ceiling (default: 50% of physical RAM). A ceiling trip reaps
+//      every lane and is the distinct, non-PASS
 //      `ABORTED — memory ceiling` outcome (exit 123). Repeated sampler failure also aborts rather than
-//      silently running unmonitored.
+//      silently running unmonitored. Raw per-lane output (concurrent or serial) is buffered and replayed
+//      exactly once in Surface/check/contract order so parseable status rows never interleave.
 //   9. Terminal-outcome accounting: a test that did not PASS fails the gate and is NAMED, whatever its
 //      outcome class. nextest reports several non-`FAIL` terminal outcomes — `N timed out`, `N exec
 //      failed`, a crash status (SIGABRT/SIGSEGV/LEAK-FAIL/…) — and reports a cancelled or interrupted run
@@ -251,8 +252,28 @@
 //   abnormal exit, missing summary, or count mismatch stays hard regardless.
 //   In CI deps are already installed, so the preflight is a cheap no-op.
 //
+// REPORT-ONLY TELEMETRY
+//   After mutex acquisition all startup probes share a separate hard aggregate reporting deadline. The
+//   canonical build/test deadline begins only after that collection settles, so telemetry spends none of
+//   the verdict-bearing timeout. The gate then emits a bounded environment fingerprint, stable phase
+//   durations, and the maximum monitored contained-child-tree RSS with the phase/process count from that
+//   SAME observation. A partial/aborted run is explicitly `partial`, never `complete`. Final text and schema-v1
+//   summaries land together under `gate-work/`; Cargo HTML timings are capability-gated and snapshotted
+//   immediately after the dev archive, shipped check, and shipped contract. Missing probes/reports/copies
+//   warn and retain the historical argv/verdict. Surface 1 remains archive-backed and gets no `--timings`.
+//   Per-test reports count final process identities separately from parseably timed identities; legacy
+//   `count` remains the timed-count alias. No telemetry observation is consulted by a verdict branch.
+//
+// EXECUTION POLICY
+//   A bare gate is local fail-fast: nextest stops scheduling after its first failure, and any hard Surface-1
+//   receipt cancels a live shipped step or prevents its remaining contract. The final verdict records that
+//   guard as incomplete and is always FAIL.
+//   `--exhaustive` changes fail-fast policy only: Surface 1 and the small shipped contract receive
+//   `--no-fail-fast`, and both isolated post-list lanes are awaited after ordinary test failures.
+//   A green bare run still completes every required stage and carries the same canonical PASS contract.
+//
 // USAGE
-//   node scripts/gate.mjs [--timeout 80m] [--stall 12m] [--target-dir <DIR>] [--no-fail-fast]
+//   node scripts/gate.mjs [--timeout 80m] [--stall 12m] [--target-dir <DIR>] [--exhaustive]
 //                         [--build-jobs N] [--test-threads N] [--memory-limit 12GiB]
 //                                                           # THE GATE — exit 0 = suite built + passed.
 //   node scripts/gate.mjs --prepare [--target-dir <DIR>] [--timeout 80m] [--stall 12m]
@@ -272,7 +293,7 @@
 //   warm-pass, or prints help. An unknown flag is a USAGE error (exit 127), never a silent success.
 //
 // EXIT CODES (distinct, documented; exit 0 is OPERATION-scoped — see OPERATION-SCOPED EXIT SEMANTICS above)
-//   0   PASS / PASS-WITH-TOLERATED  (the GATE: a real `node scripts/gate.mjs` run); OR a successful
+//   0   PASS / PASS-WITH-TOLERATED  (the GATE: a real bare or `--exhaustive` run); OR a successful
 //       --prepare warm-pass (PREPARED_NOT_GATE — NOT a gate pass); OR --help after printing usage
 //   1   FAIL          (a build/test command failed / a non-tolerated test failed)
 //   123 ABORTED       (active child tree reached the memory ceiling, or its RSS monitor became unavailable)
@@ -287,7 +308,7 @@
 //   VERTER_GATE_TARGET_DIR             runner-owned target dir (default <repo>/target/gate-runner)
 //   CARGO_TARGET_DIR / CARGO_BUILD_TARGET_DIR / CARGO_BUILD_BUILD_DIR are SCRUBBED and forced to the
 //     runner-owned dir.
-//   CARGO_BUILD_JOBS is SCRUBBED and forced to --build-jobs (default min(host CPUs, 4)).
+//   CARGO_BUILD_JOBS is SCRUBBED and forced to --build-jobs (default CPU/memory tier: at most 12).
 //   (No environment variable can divert this CLI to a non-gate success path.)
 
 import { readdirSync, realpathSync, statSync } from "node:fs";
@@ -298,6 +319,11 @@ import {
   EXIT_FAIL,
   EXIT_LOCK_REFUSED,
   EXIT_USAGE,
+  deriveGateLaneLayout,
+  buildGateLaneCommandPlan,
+  orchestrateGateLanes,
+  reduceGateLaneReceipts,
+  canonicalGateLaneTranscriptSegments,
   // logging + time
   log,
   warn,
@@ -306,25 +332,34 @@ import {
   parseDuration,
   // --prepare success output (warm-pass marker — never a gate PASS token)
   preparedSuccessLines,
+  buildPrepareWarmSpawnEnv,
+  classifyPrepareWarmResult,
   // setup
   resolveRepoRoot,
   defaultLockDir,
   buildCargoEnv,
   deriveGateResourceLimits,
+  deriveGateLaneResourceSplit,
   parseMemorySize,
   formatMemorySize,
   // mutex + teardown
   Mutex,
-  reapActiveStep,
-  provenanceSweep,
   // contained step + analysis
-  runContainedStep,
+  createGateRunSupervisor,
   mapStepReason,
   analyzeNextestSurface,
   countTestAttributesInDir,
   decideShippedCfgGuardExpectedCountMatch,
   // gate telemetry (report-only; see the "GATE TELEMETRY" section of gate-internals.mjs)
+  classifyGateTargetState,
   collectNextestTestTimings,
+  createGateTelemetry,
+  createGateTelemetryReporter,
+  GATE_TELEMETRY_STARTUP_MAX_MS,
+  formatGateTelemetryText,
+  gatePhaseStatusFromStep,
+  recordGateAggregateForestPeak,
+  summarizeGateTelemetry,
   summarizeNextestTimings,
   // build-prerequisite preflight (the non-cargo artifacts the suite loads from disk)
   checkBuildPrerequisites,
@@ -333,11 +368,18 @@ import {
   // conformance suites realize from)
   checkOracleCachePrerequisite,
   oracleCacheProbeBudgetMs,
+  // real conformance-harness preflight
+  HARNESS_SMOKE_MARKER,
+  HARNESS_SMOKE_MODES,
+  harnessSmokeCommand,
+  decideHarnessSmokeResult,
+  formatHarnessSmokeFailure,
   // archive builder — feature parity for the one workspace archive surface 1 builds
   buildNextestArchiveArgs,
   // trybuild exclusion (interim, pending maintainer disposition) — filter builder + coverage guard
   TRYBUILD_EXCLUDED_SUITES,
   buildTrybuildExclusionFilterExpr,
+  buildCanonicalSurface1FilterExpr,
   countTrybuildExclusionMatches,
   // freshness-tooling preflight (verdict-gating authority)
   preflightFreshnessTooling,
@@ -583,26 +625,67 @@ function computeExtractedBinarySizes(listJson, extractDir) {
 // surface, derived from the SAME captured stdout+stderr the gate already parses for pass/fail (see the
 // "GATE TELEMETRY" section in gate-internals.mjs). Grouped into one block so the numbers that answer
 // "where did the time go" sit together rather than interleaved with the pass/fail log lines.
-function logNextestTimingReport(label, text, allSuites) {
+function logNextestTimingReport(label, text, allSuites, telemetry = null, telemetryKey = null) {
   const timings = collectNextestTestTimings(text);
   const report = summarizeNextestTimings(timings, allSuites, 50);
+  if (telemetry && telemetryKey) telemetry.nextest[telemetryKey] = report;
   log(
     `${label} TIMING: ${report.timedCount}/${report.totalTests} terminal test(s) carried a parseable ` +
       `duration, summing to ${report.totalSec.toFixed(1)}s of reported per-test time (tests run process- ` +
       "isolated and concurrently, so this sum is NOT the surface's wall-clock).",
   );
+  log(
+    `${label} TIMING: ${report.processCount} final terminal process identity/-ies, ${report.timedCount} timed.`,
+  );
   log(`${label} TIMING — cumulative duration by package (${report.perPackage.length} package(s)):`);
   for (const p of report.perPackage) {
-    log(`  ${p.key}: ${p.count} test(s), ${p.totalSec.toFixed(1)}s`);
+    log(
+      `  ${p.key}: ${p.count} test(s), ${p.totalSec.toFixed(1)}s; ` +
+        `${p.processCount} process(es), ${p.timedCount} timed`,
+    );
   }
   log(`${label} TIMING — cumulative duration by binary (${report.perBinary.length} binary/-ies):`);
   for (const b of report.perBinary) {
-    log(`  ${b.key}: ${b.count} test(s), ${b.totalSec.toFixed(1)}s`);
+    log(
+      `  ${b.key}: ${b.count} test(s), ${b.totalSec.toFixed(1)}s; ` +
+        `${b.processCount} process(es), ${b.timedCount} timed`,
+    );
   }
   log(`${label} TIMING — top ${report.topFamilies.length} highest cumulative-time test families:`);
   for (const f of report.topFamilies) {
-    log(`  ${f.totalSec.toFixed(2)}s (${f.count} test(s)) ${f.key}`);
+    log(
+      `  ${f.totalSec.toFixed(2)}s (${f.count} test(s)) ${f.key}; ` +
+        `${f.processCount} process(es), ${f.timedCount} timed`,
+    );
   }
+  return report;
+}
+
+function recordTelemetryPhaseSafe(ctx, phaseId, observation) {
+  if (!ctx?.telemetryReporter) return;
+  ctx.telemetryReporter.recordPhase(phaseId, observation);
+}
+
+function recordContainedStepTelemetry(ctx, phaseId, result) {
+  recordTelemetryPhaseSafe(ctx, phaseId, {
+    status: gatePhaseStatusFromStep(result),
+    durationMs: result?.durationMs ?? null,
+    peakRssBytes: result?.peakRssBytes || 0,
+    peakRssProcessCount: result?.peakRssProcessCount || 0,
+    detail: result?.cancellationReason || result?.reason || null,
+  });
+}
+
+function cargoTimingEnabled(ctx, phaseId) {
+  return Boolean(ctx.telemetryReporter?.cargoTimingEnabled(phaseId));
+}
+
+function beginCargoTimingCapture(ctx, phaseId, sourceTargetDir = ctx.runnerTarget) {
+  return ctx.telemetryReporter?.beginCargoTiming(phaseId, sourceTargetDir) || null;
+}
+
+function finishCargoTimingCapture(ctx, phaseId, capture) {
+  ctx.telemetryReporter?.finishCargoTiming(phaseId, capture);
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -612,22 +695,22 @@ function logNextestTimingReport(label, text, allSuites) {
 // An unknown argument is a USAGE error (exit 127), never a silent success.
 //
 // OPERATION-SCOPED EXIT SEMANTICS — the two NON-gate modes (`--help`, `--prepare`) each legitimately exit 0
-// on success, but ONLY `node scripts/gate.mjs` with NO mode flag carries the gate-pass contract. To keep
+// on success, while bare and `--exhaustive` gate runs carry the gate-pass contract. To keep
 // those two modes from being confusable with a gate pass, BOTH are MUTUALLY EXCLUSIVE and argv-strict:
 //   --help / -h : accepts NO other argv token whatsoever. `gate.mjs --help --anything` (a flag OR a
 //     positional) is a USAGE error (exit 127) — only a bare `gate.mjs --help` prints usage and exits 0, so
 //     a stray flag can never be silently swallowed under the exit-0 help mode.
 //   --prepare   : accepts ONLY the companion flags the prepare warm-pass actually uses (--target-dir,
 //     --timeout, --stall, --build-jobs, --memory-limit, each with its value); ANY other flag (e.g.
-//     --no-fail-fast / --test-threads — gate-only) or ANY positional token is a USAGE error (exit 127).
+//     --exhaustive / --test-threads — gate-only) or ANY positional token is a USAGE error (exit 127).
 //     `gate.mjs --prepare junk` /
 //     `--prepare --selftest-x` exit 127, so prepare's exit-0 cannot be reached with junk argv.
 // The gate mode (no mode flag) accepts the full real-gate flag set.
 // ----------------------------------------------------------------------------------------------------
 
 // Flags --prepare is allowed to combine with (the warm-pass front half — archiveAndList — reads exactly
-// these). Each takes a value argument. Gate-only flags (--no-fail-fast / --test-threads) are NOT here, so
-// `--prepare --no-fail-fast` is a usage error rather than a silently-ignored flag.
+// these). Each takes a value argument. Gate-only flags (--exhaustive / --test-threads) are NOT here, so
+// `--prepare --exhaustive` is a usage error rather than a silently-ignored flag.
 const PREPARE_ALLOWED_VALUE_FLAGS = new Set([
   "--target-dir",
   "--timeout",
@@ -635,6 +718,8 @@ const PREPARE_ALLOWED_VALUE_FLAGS = new Set([
   "--build-jobs",
   "--memory-limit",
 ]);
+const GATE_ALLOWED_VALUE_FLAGS = new Set([...PREPARE_ALLOWED_VALUE_FLAGS, "--test-threads"]);
+const ARGUMENT_VALUE_ERROR_MARKER = "ARGUMENT VALUE ERROR";
 
 function usageError(msg) {
   return new Error(msg);
@@ -648,6 +733,23 @@ function parsePositiveInteger(value, flag) {
   return parsed;
 }
 
+function readRequiredOptionValue(argv, valueIndex, flag, operation) {
+  const value = argv[valueIndex];
+  const operationPrefix = operation === "prepare" ? "--prepare: " : "";
+  if (typeof value !== "string" || value.length === 0) {
+    throw usageError(
+      `${ARGUMENT_VALUE_ERROR_MARKER}: ${operationPrefix}'${flag}' requires a non-empty value`,
+    );
+  }
+  if (value.startsWith("-")) {
+    throw usageError(
+      `${ARGUMENT_VALUE_ERROR_MARKER}: ${operationPrefix}'${flag}' requires a value; ` +
+        `option-looking token '${value}' cannot be consumed as that value`,
+    );
+  }
+  return value;
+}
+
 function defaultOptions(mode) {
   const resources = deriveGateResourceLimits();
   return {
@@ -655,7 +757,7 @@ function defaultOptions(mode) {
     timeoutSecs: parseDuration("80m"),
     stallSecs: parseDuration("12m"),
     targetDir: process.env.VERTER_GATE_TARGET_DIR || "",
-    noFailFast: true,
+    exhaustive: false,
     buildJobs: resources.buildJobs,
     testThreads: resources.testThreads,
     memoryLimitBytes: resources.memoryLimitBytes,
@@ -682,21 +784,21 @@ function parseArgs(argv) {
   // non-gate warm-pass; rejecting stray argv keeps its exit-0 unreachable with junk arguments.
   if (argv.includes("--prepare")) {
     const opts = defaultOptions("prepare");
+    let explicitBuildJobs;
+    let explicitMemoryLimitBytes;
     let i = 0;
     while (i < argv.length) {
       const a = argv[i];
       if (a === "--prepare") {
         // the mode selector itself; already handled.
       } else if (PREPARE_ALLOWED_VALUE_FLAGS.has(a)) {
-        const v = argv[++i];
-        if (v === undefined) {
-          throw usageError(`--prepare: '${a}' requires a value`);
-        }
+        const v = readRequiredOptionValue(argv, i + 1, a, "prepare");
+        i++;
         if (a === "--target-dir") opts.targetDir = v;
         else if (a === "--timeout") opts.timeoutSecs = parseDuration(v);
         else if (a === "--stall") opts.stallSecs = parseDuration(v);
-        else if (a === "--build-jobs") opts.buildJobs = parsePositiveInteger(v, a);
-        else if (a === "--memory-limit") opts.memoryLimitBytes = parseMemorySize(v);
+        else if (a === "--build-jobs") explicitBuildJobs = parsePositiveInteger(v, a);
+        else if (a === "--memory-limit") explicitMemoryLimitBytes = parseMemorySize(v);
       } else {
         throw usageError(
           `--prepare accepts only --target-dir/--timeout/--stall/--build-jobs/--memory-limit ` +
@@ -706,37 +808,52 @@ function parseArgs(argv) {
       }
       i++;
     }
+    Object.assign(
+      opts,
+      deriveGateResourceLimits({
+        buildJobs: explicitBuildJobs,
+        memoryLimitBytes: explicitMemoryLimitBytes,
+      }),
+    );
     return opts;
   }
 
-  // Gate mode — the real-gate flag set. No mode flag, so the gate-pass contract applies.
+  // Gate mode — the real-gate flag set. Bare local and explicit exhaustive runs share the gate-pass contract.
   const opts = defaultOptions("gate");
+  let explicitBuildJobs;
+  let explicitTestThreads;
+  let explicitMemoryLimitBytes;
   let i = 0;
   while (i < argv.length) {
     const a = argv[i];
-    if (a === "--timeout") {
-      opts.timeoutSecs = parseDuration(argv[++i]);
-    } else if (a === "--stall") {
-      opts.stallSecs = parseDuration(argv[++i]);
-    } else if (a === "--target-dir") {
-      opts.targetDir = argv[++i];
-    } else if (a === "--no-fail-fast") {
-      opts.noFailFast = true;
-    } else if (a === "--build-jobs") {
-      opts.buildJobs = parsePositiveInteger(argv[++i], a);
-    } else if (a === "--test-threads") {
-      opts.testThreads = parsePositiveInteger(argv[++i], a);
-    } else if (a === "--memory-limit") {
-      opts.memoryLimitBytes = parseMemorySize(argv[++i]);
+    if (a === "--exhaustive") {
+      opts.exhaustive = true;
+    } else if (GATE_ALLOWED_VALUE_FLAGS.has(a)) {
+      const v = readRequiredOptionValue(argv, i + 1, a, "gate");
+      i++;
+      if (a === "--target-dir") opts.targetDir = v;
+      else if (a === "--timeout") opts.timeoutSecs = parseDuration(v);
+      else if (a === "--stall") opts.stallSecs = parseDuration(v);
+      else if (a === "--build-jobs") explicitBuildJobs = parsePositiveInteger(v, a);
+      else if (a === "--test-threads") explicitTestThreads = parsePositiveInteger(v, a);
+      else if (a === "--memory-limit") explicitMemoryLimitBytes = parseMemorySize(v);
     } else {
       throw usageError(
         `unknown argument: '${a}'. This gate accepts only --timeout/--stall/--target-dir/` +
-          `--no-fail-fast/--build-jobs/--test-threads/--memory-limit/--prepare/--help; ` +
+          `--exhaustive/--build-jobs/--test-threads/--memory-limit/--prepare/--help; ` +
           `it has no test-seam or custom-command mode.`,
       );
     }
     i++;
   }
+  Object.assign(
+    opts,
+    deriveGateResourceLimits({
+      buildJobs: explicitBuildJobs,
+      testThreads: explicitTestThreads,
+      memoryLimitBytes: explicitMemoryLimitBytes,
+    }),
+  );
   return opts;
 }
 
@@ -788,7 +905,13 @@ async function main() {
   // the SIGINT/SIGTERM handlers exit without cancelling main(), so whether the advisory prints on a
   // signalled run is genuinely indeterminate. No invariant is claimed here beyond: at most once.
   const oversizeScanPromise = new Promise((resolve) => {
-    setImmediate(() => resolve(collectOversizeProductionSourcesSafe(repoRealpath)));
+    setImmediate(() => {
+      const startedAtMs = nowMs();
+      resolve({
+        result: collectOversizeProductionSourcesSafe(repoRealpath),
+        durationMs: nowMs() - startedAtMs,
+      });
+    });
   });
 
   const runnerTarget = opts.targetDir
@@ -796,15 +919,87 @@ async function main() {
       ? opts.targetDir
       : join(repoRealpath, opts.targetDir)
     : join(repoRealpath, "target", "gate-runner");
+  const targetInitialState = classifyGateTargetState(runnerTarget);
 
   // Gate work dir (archive, list JSON, extract) lives under the runner target dir.
   const gateDir = join(runnerTarget, "gate-work");
+  const laneLayout = deriveGateLaneLayout(runnerTarget, gateDir);
 
   const lockdir =
     process.env.VERTER_GATE_LOCK || process.env.MOM_GATE_LOCK || defaultLockDir(repoRealpath);
 
   const token = `${process.pid}.${nowMs()}.${Math.floor(Math.random() * 1e9)}`;
   const cargoEnv = buildCargoEnv(process.env, runnerTarget, undefined, opts.buildJobs);
+  // Surface 1 and the shipped-cfg lane run CONCURRENTLY once past archive/list ONLY when the ceiling
+  // splits on both resource axes (`deriveGateLaneResourceSplit(...).concurrent === true`; see runGate
+  // below); otherwise they run serially, shipped after Surface settles — see the note at the
+  // orchestrateGateLanes call site. Sizing both lanes to the SAME opts.buildJobs/opts.testThreads ceiling
+  // would request 2x that ceiling from the host for the whole overlap window when they do overlap, so
+  // `deriveGateLaneResourceSplit` partitions the ONE ceiling across the two lanes so their COMBINED demand
+  // never exceeds it — the front archive/list phase above is sequential (no lane overlap yet) and keeps
+  // the full `opts.buildJobs` ceiling via `cargoEnv`.
+  const laneResourceSplit =
+    opts.mode === "gate"
+      ? deriveGateLaneResourceSplit({ buildJobs: opts.buildJobs, testThreads: opts.testThreads })
+      : null;
+  const surfaceCargoEnv =
+    opts.mode === "gate"
+      ? buildCargoEnv(
+          process.env,
+          laneLayout.surface1.targetDir,
+          undefined,
+          laneResourceSplit.surface.buildJobs,
+        )
+      : null;
+  const shippedCargoEnv =
+    opts.mode === "gate"
+      ? buildCargoEnv(
+          process.env,
+          laneLayout.shippedCfg.targetDir,
+          undefined,
+          laneResourceSplit.shippedCfg.buildJobs,
+        )
+      : null;
+  let telemetry = null;
+  let telemetryReporter = null;
+  let telemetryFinalized = false;
+
+  const finalizeTelemetry = (finalExitCode) => {
+    if (!telemetry || telemetryFinalized) return;
+    telemetryFinalized = true;
+    let summary;
+    try {
+      if (supervisor) recordGateAggregateForestPeak(telemetry, supervisor.snapshotTelemetry());
+      summary = summarizeGateTelemetry(telemetry, {
+        terminalReached: true,
+        exitCode: finalExitCode,
+      });
+      const textSummary = formatGateTelemetryText(summary);
+      for (const line of textSummary.split("\n")) log(line);
+
+      // The gate already owns gateDir. Keep one concise text summary and its additive schema-v1 JSON
+      // beside each other; write failures are warnings only and cannot replace the existing gate verdict.
+      try {
+        mkdirSync(gateDir, { recursive: true });
+        writeFileSync(join(gateDir, "gate-telemetry-v1.log"), textSummary + "\n", "utf8");
+        writeFileSync(
+          join(gateDir, "gate-telemetry-v1.json"),
+          JSON.stringify(summary, null, 2) + "\n",
+          "utf8",
+        );
+        log(
+          "GATE TELEMETRY ARTIFACTS: gate-work/gate-telemetry-v1.log + " +
+            "gate-work/gate-telemetry-v1.json",
+        );
+      } catch {
+        warn(
+          "GATE TELEMETRY WARNING: schema-v1 text/JSON artifacts could not be written; gate verdict unchanged",
+        );
+      }
+    } catch {
+      warn("GATE TELEMETRY WARNING: terminal summary unavailable; gate verdict unchanged");
+    }
+  };
 
   // Ensure the runner target dir exists + drop the Spotlight marker (macOS) — harmless no-op file elsewhere.
   mkdirSync(runnerTarget, { recursive: true });
@@ -821,17 +1016,10 @@ async function main() {
   });
 
   // Teardown — idempotent. ORDER IS LOAD-BEARING for the signal path:
-  //   1. Reap the ACTIVE step's WHOLE tree (negative-PGID TERM→grace→KILL / Windows taskkill /T /F) and
-  //      VERIFY it is dead (the reap returns a confirmed-dead outcome). This is the SAME reapTree the
-  //      watchdog uses, applied to the live child runContainedStep registered. The provenance sweep alone
-  //      is NOT sufficient on the signal path — it skips direct libtest binaries and any non-build-tool
-  //      child — so an external SIGTERM to ONLY the gate pid (not the group) would otherwise leave a
-  //      running test tree orphaned. The mutex is NOT released until the tree is reaped (and we log if
-  //      death could not be confirmed within the bound — we still release then, to avoid a permanent hang,
-  //      but record the uncertainty rather than claim a clean teardown).
-  //   2. Provenance sweep (the backstop for any detached build-tool descendant).
-  //   3. Release the mutex (token-checked) — only AFTER the tree is reaped, so a second gate can never
-  //      start while the old test process still runs.
+  //   1. Fence new admissions and close/reap EVERY exact process-forest registration through the one
+  //      gate-owned supervisor. The close waits for each child and its descendants to be confirmed dead.
+  //   2. Release the mutex (token-checked) only after supervisor close settles, so a second gate can never
+  //      start while any old registered test process still runs.
   // Did THIS gate acquire the lock? Declared before teardown so the closure reads the live value. The
   // sweep + reap below are gated on it: a gate that REFUSED the lock (another gate holds it) shares the
   // SAME default runner target dir as the holder, so an UNCONDITIONAL provenanceSweep(runnerTarget) would
@@ -841,6 +1029,10 @@ async function main() {
   // process. (release() below is always safe: the mutex is token-checked and releases nothing it does not
   // own, so a non-acquiring gate's release is a no-op on the holder's lock.)
   let acquired = false;
+  // Created once after the canonical deadline is established, then threaded through every sequential
+  // front step and both post-list lanes (concurrent or serial). Signal/finally teardown closes this same
+  // authority.
+  let supervisor = null;
 
   // Memoized so EVERY caller awaits the SAME completion. The signal handlers AND the main-flow `finally`
   // both invoke teardown; without memoization the second caller's short-circuit would let it race ahead to
@@ -851,12 +1043,15 @@ async function main() {
   const teardown = () => {
     if (teardownPromise) return teardownPromise;
     teardownPromise = (async () => {
+      const telemetryStartedAtMs = nowMs();
+      let telemetryStatus = "ok";
       // Only an ACQUIRING gate owns this runner target; a non-acquiring gate skips reap+sweep so it can
       // never touch the holder's (or any other) process tree.
-      if (acquired) {
+      if (acquired && supervisor) {
         try {
-          const reap = await reapActiveStep();
+          const reap = await supervisor.closeAndReapAll("GATE_TEARDOWN");
           if (reap && reap.reaped && !reap.confirmedDead) {
+            telemetryStatus = "failed";
             warn(
               "teardown could not CONFIRM the active step's process tree was reaped within the kill " +
                 "budget — releasing the lock anyway to avoid a permanent hang, but the tree's death is " +
@@ -864,25 +1059,29 @@ async function main() {
             );
           }
         } catch {
+          telemetryStatus = "failed";
           /* best-effort reap */
-        }
-        try {
-          await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
-        } catch {
-          /* ignore */
         }
       }
       mutex.release();
+      if (telemetryReporter) {
+        recordTelemetryPhaseSafe({ telemetry, telemetryReporter }, "teardown", {
+          status: telemetryStatus,
+          startedAtMs: telemetryStartedAtMs,
+        });
+      }
     })();
     return teardownPromise;
   };
   const installSignalTraps = () => {
     process.on("SIGINT", async () => {
       await teardown();
+      finalizeTelemetry(130);
       process.exit(130);
     });
     process.on("SIGTERM", async () => {
       await teardown();
+      finalizeTelemetry(143);
       process.exit(143);
     });
   };
@@ -901,6 +1100,51 @@ async function main() {
     await teardown();
     process.exit(EXIT_LOCK_REFUSED);
   }
+  // Whole-gate telemetry begins only after the mutex is successfully acquired. Everything below remains
+  // report-only: all startup probes share their own hard aggregate deadline, may be unavailable, and no
+  // probe result enters a verdict branch or spends the canonical build/test timeout budget.
+  const telemetryStartupDeadlineMs = nowMs() + GATE_TELEMETRY_STARTUP_MAX_MS;
+  telemetry = createGateTelemetry({ mode: opts.mode });
+  telemetry.lanes =
+    opts.mode === "gate"
+      ? {
+          overlapBoundary: "post-list",
+          executionPolicy: opts.exhaustive ? "exhaustive" : "local-fail-fast",
+          aggregateAuthority: {
+            deadline: "whole-gate-absolute",
+            stall: "aggregate-live-vector",
+            rssCeiling: "one-supervisor-same-snapshot-sum",
+          },
+          surface1: { ...laneLayout.surface1, ...laneResourceSplit.surface },
+          shippedCfg: {
+            ...laneLayout.shippedCfg,
+            ...laneResourceSplit.shippedCfg,
+            coldTarget: true,
+            serial: ["check", "contract"],
+          },
+          replayOrder: ["surface-1", "shipped-check", "shipped-contract"],
+          resourceSplit: laneResourceSplit,
+        }
+      : null;
+  telemetryReporter = createGateTelemetryReporter({
+    telemetry,
+    deadlineMs: telemetryStartupDeadlineMs,
+    targetState: targetInitialState,
+    resources: {
+      buildJobs: opts.buildJobs,
+      testThreads: opts.mode === "prepare" ? null : opts.testThreads,
+      memoryLimitBytes: opts.memoryLimitBytes,
+      profiles: opts.mode === "prepare" ? ["dev"] : ["dev", "no-debug-assertions"],
+    },
+    env: cargoEnv,
+    runnerTarget,
+    gateDir,
+  });
+  telemetryReporter.collectStartup();
+  // Establish the canonical deadline only after report-only startup collection settles. Reordering this
+  // above collectStartup would let slow/unavailable telemetry shorten the build/test budget and change the
+  // gate verdict despite telemetry's report-only contract.
+  const deadlineMs = nowMs() + opts.timeoutSecs * 1000;
   log(`mutex acquired (token=${token} lockdir=${lockdir})`);
   log(`runner target dir: ${runnerTarget}`);
   log(
@@ -908,9 +1152,29 @@ async function main() {
       `test threads=${opts.mode === "prepare" ? "n/a (prepare runs no tests)" : opts.testThreads}, ` +
       `active child-tree RSS=${formatMemorySize(opts.memoryLimitBytes)}`,
   );
+  if (opts.mode === "gate") {
+    const laneScheduling = laneResourceSplit.concurrent
+      ? "the two post-list lanes run concurrently"
+      : "the ceiling is too small to run both lanes at once without oversubscribing it — the two " +
+        "post-list lanes run SERIALLY instead (shipped-cfg starts only after Surface 1 settles)";
+    log(
+      `lane resource partition (combined demand bounded to the ceiling above — ${laneScheduling}): ` +
+        `surface-1 build-jobs=${laneResourceSplit.surface.buildJobs} ` +
+        `test-threads=${laneResourceSplit.surface.testThreads}; ` +
+        `shipped-cfg build-jobs=${laneResourceSplit.shippedCfg.buildJobs} ` +
+        `test-threads=${laneResourceSplit.shippedCfg.testThreads}`,
+    );
+    log(`execution policy: ${opts.exhaustive ? "exhaustive" : "local fail-fast"}`);
+  }
 
-  const deadlineMs = nowMs() + opts.timeoutSecs * 1000;
   const stallMs = opts.stallSecs * 1000;
+  supervisor = createGateRunSupervisor({
+    deadlineMs,
+    stallMs,
+    memoryLimitBytes: opts.memoryLimitBytes,
+    killGraceMs: mutex.KILL_GRACE_MS,
+    ownershipRoots: [runnerTarget],
+  });
 
   let exitCode = EXIT_PASS;
   try {
@@ -924,6 +1188,12 @@ async function main() {
         stallMs,
         buildJobs: opts.buildJobs,
         memoryLimitBytes: opts.memoryLimitBytes,
+        supervisor,
+        telemetry,
+        telemetryReporter,
+        laneLayout,
+        surfaceCargoEnv,
+        shippedCargoEnv,
       });
     } else {
       exitCode = await runGate(opts, {
@@ -935,6 +1205,13 @@ async function main() {
         stallMs,
         buildJobs: opts.buildJobs,
         memoryLimitBytes: opts.memoryLimitBytes,
+        supervisor,
+        telemetry,
+        telemetryReporter,
+        laneLayout,
+        surfaceCargoEnv,
+        shippedCargoEnv,
+        laneResourceSplit,
       });
     }
   } catch (e) {
@@ -943,8 +1220,14 @@ async function main() {
   } finally {
     // Printed here (not inside runGate/runPrepare) so both modes share one call site. Reached only by
     // paths that get this far: see the note at the scan's construction for what is NOT covered.
-    printOversizeProductionSourcesResult(await oversizeScanPromise);
+    const advisory = await oversizeScanPromise;
+    printOversizeProductionSourcesResult(advisory.result);
+    recordTelemetryPhaseSafe({ telemetry, telemetryReporter }, "advisory", {
+      status: advisory.result.scanError ? "failed" : "ok",
+      durationMs: advisory.durationMs,
+    });
     await teardown();
+    finalizeTelemetry(exitCode);
   }
   process.exit(exitCode);
 }
@@ -952,7 +1235,7 @@ async function main() {
 // ----------------------------------------------------------------------------------------------------
 // The ONE build variant. There is only one whole-workspace test universe now (SINGLE-TEST-UNIVERSE): the
 // dev profile, built by `cargo nextest archive --workspace` and enumerated by `cargo nextest list`.
-// Surface 1 runs from it. The shipped-cfg guard (see runShippedCfgGuard) does NOT archive the workspace —
+// Surface 1 runs from it. The shipped-cfg lane (see runShippedCfgLane) does NOT archive the workspace —
 // it is a `cargo check` compile-only step plus a tiny package-scoped `cargo nextest run`, neither of which
 // goes through this archive/variant machinery at all.
 // ----------------------------------------------------------------------------------------------------
@@ -971,10 +1254,10 @@ const TRYBUILD_EXCLUSION_FILTER = buildTrybuildExclusionFilterExpr();
 // SHIPPED-CFG CONTRACT EXCLUSION. `verter_shipped_cfg_contract`'s tests are DELIBERATELY meaningless
 // under surface 1's dev-profile `--workspace` archive: its two profile-sanity canaries assert
 // `debug_assertions` and overflow-checks are OFF, which is true only under the alternate
-// `no-debug-assertions` profile the shipped-cfg guard runs it under (`runShippedCfgGuard`). Excluded from
+// `no-debug-assertions` profile the shipped-cfg guard runs it under (`runShippedCfgLane`). Excluded from
 // surface 1's selection here so the SAME package still runs — deliberately, under the right profile — a
 // few steps later, rather than failing surface 1 for behaving exactly as designed.
-const SURFACE_1_FILTER = `(${TRYBUILD_EXCLUSION_FILTER}) and not package(verter_shipped_cfg_contract)`;
+const SURFACE_1_FILTER = buildCanonicalSurface1FilterExpr();
 
 // Shared coverage guard: verify every registered trybuild row matches real work in THIS archive's own
 // listing, log the exclusion LOUDLY (count + reason + filter string, never a silent skip), and return the
@@ -1005,7 +1288,7 @@ function verifyTrybuildExclusionCoverage(allSuites, surfaceLabel) {
 
 // ----------------------------------------------------------------------------------------------------
 // Archive + list — the shared front half of the gate and --prepare (surface 1's ONE archive; the
-// shipped-cfg guard does not archive at all — see runShippedCfgGuard). Returns the parsed list JSON + the
+// shipped-cfg guard does not archive at all — see runShippedCfgLane). Returns the parsed list JSON + the
 // extract dir, or an `{ error }` on setup/build failure. `variant` selects the Cargo profile and the
 // archive/extract paths; there is currently one variant (VARIANT_DEBUG, the default).
 // ----------------------------------------------------------------------------------------------------
@@ -1026,17 +1309,19 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
   // nextest's --extract-to canonicalizes the destination BEFORE extracting, so it must already exist.
   mkdirSync(extractDir, { recursive: true });
 
-  // --- BUILD the whole workspace test universe ONCE (workspace unification => session_metrics ON;
-  // ARCHIVE_FEATURES => verter_session/bf2-authoritative ON, so the 45 oracle-backed conformance tests are
+  // --- BUILD the whole workspace test universe ONCE (ARCHIVE_FEATURES =>
+  // verter_session/bf2-authoritative ON, so the 45 oracle-backed conformance tests are
   // PRESENT in the archive surface 1 runs from — see buildNextestArchiveArgs) ---
   log(`archiving ${variant.label} (cargo nextest archive --workspace) …`);
-  const archiveRes = await runContainedStep({
+  const cargoTimingCapture = beginCargoTimingCapture(ctx, "dev-archive");
+  const archiveRes = await ctx.supervisor.runStep("front", {
     cmd: "cargo",
     args: buildNextestArchiveArgs({
       buildJobs,
       cargoProfile: variant.cargoProfile,
       archiveFile,
       runnerTarget,
+      timingsEnabled: cargoTimingEnabled(ctx, "dev-archive"),
     }),
     cwd: repoRealpath,
     env: cargoEnv,
@@ -1046,6 +1331,8 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
     targetDir: runnerTarget,
     memoryLimitBytes,
   });
+  finishCargoTimingCapture(ctx, "dev-archive", cargoTimingCapture);
+  recordContainedStepTelemetry(ctx, "dev-archive", archiveRes);
   if (archiveRes.reason) {
     return { error: mapStepReason(archiveRes), where: "archive", res: archiveRes };
   }
@@ -1074,8 +1361,8 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
   log(
     `archive [${variant.key}] built in ${Math.round(archiveRes.durationMs / 1000)}s -> ${archiveFile}`,
   );
-  // TELEMETRY (report-only): the archive step's own successful peak RSS is measured internally by the
-  // watchdog and normally discarded once the step succeeds; the archive's on-disk size costs one stat().
+  // TELEMETRY (report-only): the archive step's successful peak RSS is measured internally by the
+  // watchdog and retained in the phase/whole summary; the archive's on-disk size costs one stat().
   let archiveSizeBytes = 0;
   try {
     archiveSizeBytes = statSync(archiveFile).size;
@@ -1091,7 +1378,7 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
   log(
     `listing suites from the [${variant.key}] archive (cargo nextest list --message-format json) …`,
   );
-  const listRes = await runContainedStep({
+  const listRes = await ctx.supervisor.runStep("front", {
     cmd: "cargo",
     args: [
       "nextest",
@@ -1115,6 +1402,7 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
     memoryLimitBytes,
     captureStdoutSeparately: true, // keep JSON out of the mirrored stderr stream
   });
+  recordContainedStepTelemetry(ctx, "dev-list", listRes);
   if (listRes.reason) {
     return { error: mapStepReason(listRes), where: "list", res: listRes };
   }
@@ -1144,8 +1432,8 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
     err(`could not parse nextest list JSON: ${e.message}`);
     return { error: EXIT_USAGE, where: "list-parse", res: listRes };
   }
-  // TELEMETRY (report-only): the list/extract step's own successful peak RSS (also discarded on success
-  // today) + the total size of every suite binary this archive extracted.
+  // TELEMETRY (report-only): the list/extract step's successful peak RSS retained in the phase/whole
+  // summary + the total size of every suite binary this archive extracted.
   const extractedSizes = computeExtractedBinarySizes(listJson, extractDir);
   log(
     `list [${variant.key}] TELEMETRY: peak RSS ${formatMemorySize(listRes.peakRssBytes)} across ` +
@@ -1171,8 +1459,8 @@ async function runPrepare(ctx) {
   const out = await archiveAndList(ctx);
   if (out.error) return out.error;
   const { listJson, extractDir } = out;
-  const buildMetaTargetDir =
-    listJson["rust-build-meta"] && listJson["rust-build-meta"]["target-directory"];
+  const rustBuildMeta = listJson["rust-build-meta"];
+  const buildMetaTargetDir = rustBuildMeta && rustBuildMeta["target-directory"];
   const suites = Object.values(listJson["rust-suites"] || {});
   // One-shot warm: launch each suite binary with --list (no test execution) so the OS first-launch
   // assessment for that binary is performed now via the legitimate path. STRICT: a successful warm is
@@ -1182,6 +1470,7 @@ async function runPrepare(ctx) {
   let warmed = 0;
   let warmFailures = 0;
   let missing = 0;
+  const telemetryStartedAtMs = nowMs();
   for (const s of suites) {
     const bin = resolveSuiteBinary(s["binary-path"], buildMetaTargetDir, extractDir);
     if (!bin || !existsSync(bin)) {
@@ -1192,25 +1481,41 @@ async function runPrepare(ctx) {
       );
       continue;
     }
-    const r = spawnSync(bin, ["--list"], { encoding: "utf8", windowsHide: true, timeout: 30000 });
-    if (r.status === 0) {
+    const warmEnvResult = buildPrepareWarmSpawnEnv({
+      suite: s,
+      rustBuildMeta,
+      baseEnv: ctx.cargoEnv,
+    });
+    if (!warmEnvResult.ok) {
+      warmFailures++;
+      warn(`${warmEnvResult.detail} — NOT counted as warmed`);
+      continue;
+    }
+    const warmEnv = warmEnvResult.env;
+    const r = spawnSync(bin, ["--list"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 30000,
+      env: warmEnv,
+    });
+    const warmResult = classifyPrepareWarmResult(r);
+    if (warmResult.ok) {
       warmed++;
     } else {
       warmFailures++;
-      const how = r.signal
-        ? `signal ${r.signal}`
-        : r.status === null
-          ? "no exit status (spawn/timeout)"
-          : `exit ${r.status}`;
       warn(
-        `prepare: warm '--list' of ${s["binary-id"] || bin} did NOT exit 0 (${how}) — NOT counted as ` +
+        `prepare: warm '--list' of ${s["binary-id"] || bin} did NOT exit 0 (${warmResult.detail}) — NOT counted as ` +
           "warmed (a warm-list failure is reported, never swallowed as success)",
       );
     }
   }
+  recordTelemetryPhaseSafe(ctx, "prepare-warm", {
+    status: warmFailures > 0 || missing > 0 ? "failed" : "ok",
+    startedAtMs: telemetryStartedAtMs,
+  });
   if (warmFailures > 0 || missing > 0) {
     // STRICT warm counting: a warm-list failure / missing binary is NEVER swallowed as success — it is a
-    // fail-setup (exit 127). This is NOT a gate verdict (the gate is `node scripts/gate.mjs`); it means
+    // fail-setup (exit 127). This is NOT a gate verdict; it means
     // prepare could not complete its warm-pass.
     err(
       `prepare: ${warmFailures} warm-list failure(s) + ${missing} missing binary/-ies — a warm FAILURE is ` +
@@ -1229,9 +1534,10 @@ async function runPrepare(ctx) {
 
 async function runVueMacroOracleChecks(ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
-  for (const invocation of vueMacroOracleGateCommands(process.execPath)) {
+  for (const [index, invocation] of vueMacroOracleGateCommands(process.execPath).entries()) {
+    const phaseId = index === 0 ? "vue-macro-oracle-check" : "vue-macro-oracle-tests";
     log(`Vue macro oracle: ${invocation.name} …`);
-    const result = await runContainedStep({
+    const result = await ctx.supervisor.runStep("front", {
       cmd: invocation.cmd,
       args: invocation.args,
       cwd: repoRealpath,
@@ -1242,6 +1548,7 @@ async function runVueMacroOracleChecks(ctx) {
       targetDir: runnerTarget,
       memoryLimitBytes,
     });
+    recordContainedStepTelemetry(ctx, phaseId, result);
     if (result.reason) {
       err(`${invocation.name} ${result.reason} after ${Math.round(result.durationMs / 1000)}s`);
       return mapStepReason(result);
@@ -1277,120 +1584,385 @@ async function runVueMacroOracleChecks(ctx) {
 // structurally eliminated repo-wide (see the top-of-file SHIPPED-CFG GUARD comment for this block's audit
 // result); once that holds, `no-debug-assertions` becomes the canonical profile and this guard is removed.
 // ----------------------------------------------------------------------------------------------------
-async function runShippedCfgGuard(opts, ctx) {
-  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
+function stepOutput(result) {
+  return `${result?.stdout || ""}\n${result?.stderr || ""}`;
+}
 
-  // --- (a) compile-only check: catches an item wrongly hidden behind cfg(debug_assertions) or any other
-  // target that fails to compile under the shipped configuration, without running anything. ---
-  log("SHIPPED-CFG GUARD: cargo check --workspace --all-targets --profile no-debug-assertions …");
-  const checkRes = await runContainedStep({
+function persistLaneOutput(lane, receipt) {
+  try {
+    const output =
+      receipt.laneId === "surface-1"
+        ? receipt.output
+        : `${receipt.check?.output || ""}\n${receipt.contract?.output || ""}`;
+    writeFileSync(lane.outputFile, output, "utf8");
+  } catch (error) {
+    receipt.exitCode = EXIT_USAGE;
+    receipt.messages.push({
+      phaseId: receipt.laneId === "surface-1" ? "surface-1" : "shipped-check",
+      level: "error",
+      text: `gate setup failed writing ${receipt.laneId} buffered output: ${error?.message || error}`,
+    });
+  }
+  return receipt;
+}
+
+async function runSurface1Lane(opts, ctx, { allSuites, commandPlan, freshnessToleranceAllowed }) {
+  const { repoRealpath, deadlineMs, stallMs, memoryLimitBytes, laneLayout, surfaceCargoEnv } = ctx;
+  const lane = laneLayout.surface1;
+  const runRes = await ctx.supervisor.runStep("surface-1", {
     cmd: "cargo",
-    args: ["check", "--workspace", "--all-targets", "--profile", "no-debug-assertions"],
+    args: commandPlan.surface1.args,
     cwd: repoRealpath,
-    env: cargoEnv,
+    env: surfaceCargoEnv,
+    phase: "test",
+    deadlineMs,
+    stallMs,
+    targetDir: lane.targetDir,
+    memoryLimitBytes,
+    mirrorOutput: false,
+  });
+  recordContainedStepTelemetry(ctx, "surface-1", runRes);
+  const output = stepOutput(runRes);
+  const messages = [];
+  if (runRes.reason) {
+    messages.push({
+      phaseId: "surface-1",
+      level: "error",
+      text: `nextest run ${runRes.reason} after ${Math.round(runRes.durationMs / 1000)}s`,
+    });
+    return persistLaneOutput(lane, {
+      laneId: "surface-1",
+      hardFailure: false,
+      exitCode: runRes.reason === "CANCELLED" ? EXIT_USAGE : mapStepReason(runRes),
+      failures: [],
+      toleratedOccurred: false,
+      coverage: { parseable: false, complete: false },
+      output,
+      result: runRes,
+      analysis: null,
+      allSuites,
+      messages,
+    });
+  }
+  if (runRes.spawnError) {
+    messages.push({
+      phaseId: "surface-1",
+      level: "error",
+      text: "could not launch 'cargo' for Surface 1 (command not found / not executable)",
+    });
+    return persistLaneOutput(lane, {
+      laneId: "surface-1",
+      hardFailure: false,
+      exitCode: EXIT_USAGE,
+      failures: [],
+      toleratedOccurred: false,
+      coverage: { parseable: false, complete: false },
+      output,
+      result: runRes,
+      analysis: null,
+      allSuites,
+      messages,
+    });
+  }
+
+  const analysis = analyzeNextestSurface(output, runRes.code, freshnessToleranceAllowed);
+  const complete =
+    analysis.summary.runCountFound && analysis.summary.count === 1 && analysis.summary.unrun === 0;
+  messages.push({
+    phaseId: "surface-1",
+    level: "log",
+    text:
+      `SURFACE 1 done in ${Math.round(runRes.durationMs / 1000)}s: ` +
+      `${analysis.summary.runCount}${analysis.summary.unrun > 0 ? `/${analysis.summary.initialCount}` : ""} run, ` +
+      `${analysis.summary.passed} passed, ${analysis.summary.nonPassed} did not pass ` +
+      `(${analysis.summary.failed} failed, ${analysis.summary.timedOut} timed out, ` +
+      `${analysis.summary.execFailed} exec failed` +
+      `${analysis.summary.unrun > 0 ? `, ${analysis.summary.unrun} NEVER RAN` : ""}) ` +
+      `(${analysis.namedCount} named, ${analysis.toleratedCount} tolerated), ` +
+      `${analysis.summary.skipped} skipped; run exit ${runRes.code}`,
+  });
+  messages.push({
+    phaseId: "surface-1",
+    level: "log",
+    text:
+      `SURFACE 1 TELEMETRY: peak RSS ${formatMemorySize(runRes.peakRssBytes)} across ` +
+      `${runRes.peakRssProcessCount} process(es)`,
+  });
+  return persistLaneOutput(lane, {
+    laneId: "surface-1",
+    hardFailure: analysis.failures.length > 0,
+    exitCode: null,
+    failures: analysis.failures.map((failure) => ({ ...failure })),
+    toleratedOccurred: analysis.toleratedCount > 0,
+    coverage: { parseable: analysis.summary.runCountFound, complete },
+    output,
+    result: runRes,
+    analysis,
+    allSuites,
+    messages,
+  });
+}
+
+async function runShippedCfgLane(opts, ctx, { allSuites, commandPlan }) {
+  const { repoRealpath, deadlineMs, stallMs, memoryLimitBytes, laneLayout, shippedCargoEnv } = ctx;
+  const lane = laneLayout.shippedCfg;
+  const receipt = {
+    laneId: "shipped-cfg",
+    hardFailure: false,
+    exitCode: null,
+    failures: [],
+    check: { status: "not-run", output: "", result: null },
+    contract: {
+      status: "not-run",
+      parseable: false,
+      complete: false,
+      output: "",
+      result: null,
+      analysis: null,
+    },
+    parity: { complete: false, matches: false, expectedTestCount: null },
+    allSuites,
+    messages: [],
+  };
+
+  const checkTimingCapture = beginCargoTimingCapture(ctx, "shipped-check", lane.targetDir);
+  const checkRes = await ctx.supervisor.runStep("shipped-cfg", {
+    cmd: "cargo",
+    args: commandPlan.shippedCfg.checkArgs,
+    cwd: repoRealpath,
+    env: shippedCargoEnv,
     phase: "build",
     deadlineMs,
     stallMs,
-    targetDir: runnerTarget,
+    targetDir: lane.targetDir,
     memoryLimitBytes,
+    mirrorOutput: false,
   });
+  finishCargoTimingCapture(ctx, "shipped-check", checkTimingCapture);
+  recordContainedStepTelemetry(ctx, "shipped-check", checkRes);
+  receipt.check = {
+    status: checkRes.reason === "CANCELLED" ? "cancelled" : checkRes.code === 0 ? "ok" : "failed",
+    output: stepOutput(checkRes),
+    result: checkRes,
+  };
   if (checkRes.reason) {
-    err(
-      `SHIPPED-CFG GUARD: cargo check ${checkRes.reason} after ${Math.round(checkRes.durationMs / 1000)}s`,
-    );
-    return { exit: mapStepReason(checkRes) };
+    receipt.messages.push({
+      phaseId: "shipped-check",
+      level: checkRes.reason === "CANCELLED" ? "warn" : "error",
+      text:
+        `SHIPPED-CFG GUARD: cargo check ${checkRes.reason} after ` +
+        `${Math.round(checkRes.durationMs / 1000)}s` +
+        (checkRes.cancellationReason ? ` (${checkRes.cancellationReason})` : ""),
+    });
+    if (checkRes.reason !== "CANCELLED" || checkRes.cancellationReason !== "SURFACE_1_FAIL_FAST") {
+      receipt.exitCode = checkRes.reason === "CANCELLED" ? EXIT_USAGE : mapStepReason(checkRes);
+    }
+    return persistLaneOutput(lane, receipt);
+  }
+  if (checkRes.spawnError) {
+    receipt.exitCode = EXIT_USAGE;
+    receipt.messages.push({
+      phaseId: "shipped-check",
+      level: "error",
+      text: "could not launch 'cargo' for the shipped-cfg compile check (command not found / not executable)",
+    });
+    return persistLaneOutput(lane, receipt);
   }
   if (checkRes.code !== 0) {
-    if (checkRes.spawnError) {
-      err(
-        `could not launch 'cargo' for the shipped-cfg compile check (command not found / not executable)`,
-      );
-      return { exit: EXIT_USAGE };
-    }
-    err(
-      checkRes.signalName
-        ? `SHIPPED-CFG GUARD: cargo check child terminated by signal ${checkRes.signalName} — ` +
-            "the shipped-cfg configuration did not finish compiling"
-        : `SHIPPED-CFG GUARD: cargo check --profile no-debug-assertions failed (exit ${checkRes.code}) — ` +
-            "an item is likely wrongly hidden behind cfg(debug_assertions), or otherwise fails to compile " +
-            "under the shipped configuration",
-    );
-    return { exit: EXIT_FAIL };
+    const name = checkRes.signalName
+      ? `cargo check child terminated by signal ${checkRes.signalName}; shipped configuration did not finish compiling`
+      : `cargo check --profile no-debug-assertions failed (exit ${checkRes.code}); an item may be hidden behind cfg(debug_assertions) or otherwise fail under shipped configuration`;
+    receipt.failures.push({ surface: "check", name });
+    receipt.hardFailure = true;
+    receipt.messages.push({ phaseId: "shipped-check", level: "error", text: name });
+    return persistLaneOutput(lane, receipt);
   }
-  log(`SHIPPED-CFG GUARD: compile check clean in ${Math.round(checkRes.durationMs / 1000)}s`);
+  receipt.messages.push({
+    phaseId: "shipped-check",
+    level: "log",
+    text: `SHIPPED-CFG GUARD: compile check clean in ${Math.round(checkRes.durationMs / 1000)}s`,
+  });
 
-  // --- (b) the small package-scoped behavioral/profile-sanity target. NOT --workspace, NOT an archive:
-  // a normal `cargo nextest run -p <pkg>` builds only this crate + its dependency closure. ---
-  log(
-    "SHIPPED-CFG GUARD: cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions …",
-  );
-  const runArgs = [
-    "nextest",
-    "run",
-    "-p",
-    "verter_shipped_cfg_contract",
-    "--cargo-profile",
-    "no-debug-assertions",
-  ];
-  if (opts.noFailFast) runArgs.push("--no-fail-fast");
-  runArgs.push("--test-threads", String(opts.testThreads));
-  const runRes = await runContainedStep({
+  const contractTimingCapture = beginCargoTimingCapture(ctx, "shipped-contract", lane.targetDir);
+  const runRes = await ctx.supervisor.runStep("shipped-cfg", {
     cmd: "cargo",
-    args: runArgs,
+    args: commandPlan.shippedCfg.contractArgs,
     cwd: repoRealpath,
-    env: cargoEnv,
-    // BUILD phase: this single invocation both compiles the small crate and runs it — artifact-growth
-    // liveness (not byte-growth-only) is the right tolerance for the compile half, and the run half is
-    // seconds long regardless.
+    env: shippedCargoEnv,
     phase: "build",
     deadlineMs,
     stallMs,
-    targetDir: runnerTarget,
+    targetDir: lane.targetDir,
     memoryLimitBytes,
+    mirrorOutput: false,
   });
+  finishCargoTimingCapture(ctx, "shipped-contract", contractTimingCapture);
+  recordContainedStepTelemetry(ctx, "shipped-contract", runRes);
+  receipt.contract = {
+    status: runRes.reason === "CANCELLED" ? "cancelled" : "failed",
+    parseable: false,
+    complete: false,
+    output: stepOutput(runRes),
+    result: runRes,
+    analysis: null,
+  };
   if (runRes.reason) {
-    err(
-      `SHIPPED-CFG GUARD: verter_shipped_cfg_contract nextest run ${runRes.reason} after ` +
-        `${Math.round(runRes.durationMs / 1000)}s`,
-    );
-    return { exit: mapStepReason(runRes) };
+    receipt.messages.push({
+      phaseId: "shipped-contract",
+      level: runRes.reason === "CANCELLED" ? "warn" : "error",
+      text:
+        `SHIPPED-CFG GUARD: verter_shipped_cfg_contract nextest run ${runRes.reason} after ` +
+        `${Math.round(runRes.durationMs / 1000)}s` +
+        (runRes.cancellationReason ? ` (${runRes.cancellationReason})` : ""),
+    });
+    if (runRes.reason !== "CANCELLED" || runRes.cancellationReason !== "SURFACE_1_FAIL_FAST") {
+      receipt.exitCode = runRes.reason === "CANCELLED" ? EXIT_USAGE : mapStepReason(runRes);
+    }
+    return persistLaneOutput(lane, receipt);
   }
-  // No freshness tolerance here — verter_shipped_cfg_contract carries no trybuild and no
-  // typeinfo_proto_ts_freshness tests, so every failure from this small crate is hard.
-  const guard = analyzeNextestSurface(runRes.stdout + "\n" + runRes.stderr, runRes.code, false);
-  // Independent expected inventory (deletion-bar row "shipped configuration silently selects zero
-  // tests"), not a bare `runCount !== 0` check: a `runCount === 0` check alone is blind to a
-  // regression that compiles out every BEHAVIORAL test (e.g. an accidental cfg(debug_assertions) on a
-  // #[test] fn meant to run under both profiles) while leaving the two profile-sanity canaries intact —
-  // that scenario still reports `runCount === 2` and would pass a bare non-zero check while exercising
-  // zero product behaviour under shipped cfg. Comparing against a count discovered independently from
-  // this crate's OWN source (not nextest's self-report, not a hand-maintained list) catches it.
+  if (runRes.spawnError) {
+    receipt.exitCode = EXIT_USAGE;
+    receipt.messages.push({
+      phaseId: "shipped-contract",
+      level: "error",
+      text: "could not launch 'cargo' for the shipped-cfg contract (command not found / not executable)",
+    });
+    return persistLaneOutput(lane, receipt);
+  }
+
+  const guard = analyzeNextestSurface(receipt.contract.output, runRes.code, false);
+  const complete =
+    guard.summary.runCountFound && guard.summary.count === 1 && guard.summary.unrun === 0;
+  receipt.contract = {
+    ...receipt.contract,
+    status: "ok",
+    parseable: guard.summary.runCountFound,
+    complete,
+    analysis: guard,
+  };
+  receipt.failures.push(...guard.failures.map((failure) => ({ ...failure })));
+  receipt.hardFailure = receipt.failures.length > 0;
   const expectedTestCount = countTestAttributesInDir(
     join(repoRealpath, "crates", "verter_shipped_cfg_contract", "src"),
   );
   const parityFailure = decideShippedCfgGuardExpectedCountMatch(
-    guard.summary.runCount,
+    guard.summary.initialCount,
     expectedTestCount,
   );
+  receipt.parity = {
+    complete: !parityFailure,
+    matches: !parityFailure,
+    expectedTestCount,
+    selectedTestCount: guard.summary.initialCount,
+  };
   if (parityFailure) {
-    err(parityFailure.message);
-    return { exit: parityFailure.exit };
+    receipt.exitCode = parityFailure.exit;
+    receipt.messages.push({
+      phaseId: "shipped-contract",
+      level: "error",
+      text: parityFailure.message,
+    });
+    return persistLaneOutput(lane, receipt);
   }
-  log(
-    `SHIPPED-CFG GUARD done in ${Math.round(runRes.durationMs / 1000)}s: ` +
+  receipt.messages.push({
+    phaseId: "shipped-contract",
+    level: "log",
+    text:
+      `SHIPPED-CFG GUARD done in ${Math.round(runRes.durationMs / 1000)}s: ` +
       `${guard.summary.runCount}${guard.summary.unrun > 0 ? `/${guard.summary.initialCount}` : ""} run, ` +
       `${guard.summary.passed} passed, ${guard.summary.nonPassed} did not pass ` +
       `(${guard.summary.failed} failed, ${guard.summary.timedOut} timed out, ` +
       `${guard.summary.execFailed} exec failed` +
       `${guard.summary.unrun > 0 ? `, ${guard.summary.unrun} NEVER RAN` : ""}) ` +
       `(${guard.namedCount} named), ${guard.summary.skipped} skipped; run exit ${runRes.code}`,
-  );
-  log(
-    `SHIPPED-CFG GUARD TELEMETRY: peak RSS ${formatMemorySize(runRes.peakRssBytes)} across ` +
+  });
+  receipt.messages.push({
+    phaseId: "shipped-contract",
+    level: "log",
+    text:
+      `SHIPPED-CFG GUARD TELEMETRY: peak RSS ${formatMemorySize(runRes.peakRssBytes)} across ` +
       `${runRes.peakRssProcessCount} process(es) (compile check: peak RSS ` +
       `${formatMemorySize(checkRes.peakRssBytes)} across ${checkRes.peakRssProcessCount} process(es))`,
-  );
-  return { failures: guard.failures.map((f) => ({ surface: f.surface, name: f.name })) };
+  });
+  return persistLaneOutput(lane, receipt);
+}
+
+function replayGateLaneTranscript(receipts, ctx, allSuites) {
+  for (const segment of canonicalGateLaneTranscriptSegments(receipts)) {
+    log(segment.header);
+    if (segment.output) {
+      process.stderr.write(segment.output.endsWith("\n") ? segment.output : `${segment.output}\n`);
+    }
+    const owner = segment.phaseId === "surface-1" ? receipts.surface : receipts.shipped;
+    for (const message of owner?.messages || []) {
+      if (message.phaseId !== segment.phaseId) continue;
+      if (message.level === "error") err(message.text);
+      else if (message.level === "warn") warn(message.text);
+      else log(message.text);
+    }
+    if (
+      segment.phaseId === "shipped-contract" &&
+      receipts.shipped?.contract?.status === "not-run"
+    ) {
+      warn(
+        "SHIPPED-CFG GUARD: contract NOT ADMITTED because the compile check did not complete successfully",
+      );
+    }
+    if (segment.phaseId === "surface-1" && receipts.surface?.analysis) {
+      logNextestTimingReport(
+        "SURFACE 1",
+        receipts.surface.output,
+        allSuites,
+        ctx.telemetry,
+        "surface1",
+      );
+    }
+    if (segment.phaseId === "shipped-contract" && receipts.shipped?.contract?.analysis) {
+      logNextestTimingReport(
+        "SHIPPED-CFG CONTRACT",
+        receipts.shipped.contract.output,
+        allSuites,
+        ctx.telemetry,
+        "shippedContract",
+      );
+    }
+  }
+}
+
+// Run the harness-owned preflights sequentially so each duration/RSS line is
+// independently attributable. Returning false always maps to setup exit 127:
+// no Cargo universe has been built, and no gate verdict has been produced.
+async function runHarnessSmokeChecks(ctx) {
+  const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
+  for (const mode of HARNESS_SMOKE_MODES) {
+    const command = harnessSmokeCommand(repoRealpath, mode);
+    log(`HARNESS-SMOKE [${mode}]: running the canonical conformance harness …`);
+    const result = await ctx.supervisor.runStep("front", {
+      ...command,
+      env: cargoEnv,
+      phase: "test",
+      deadlineMs,
+      stallMs,
+      targetDir: runnerTarget,
+      captureStdoutSeparately: true,
+      memoryLimitBytes,
+    });
+    recordContainedStepTelemetry(ctx, `harness-smoke-${mode}`, result);
+    log(
+      `HARNESS-SMOKE [${mode}] TELEMETRY: duration ${((result.durationMs || 0) / 1000).toFixed(
+        3,
+      )}s, peak RSS ${formatMemorySize(result.peakRssBytes || 0)} across ${
+        result.peakRssProcessCount || 0
+      } process(es)`,
+    );
+    const decision = decideHarnessSmokeResult(mode, result);
+    if (!decision.ok) {
+      err(formatHarnessSmokeFailure(mode, decision));
+      return false;
+    }
+    log(`HARNESS-SMOKE [${mode}]: SATISFIED`);
+  }
+  return true;
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -1398,12 +1970,15 @@ async function runShippedCfgGuard(opts, ctx) {
 //   0. Verify the non-cargo BUILD PREREQUISITES the suite loads from disk.
 //   1. Verify the pinned Vue macro oracle and its extractor.
 //   2. archive (build ONCE, dev profile) + list (parse rust-suites).
-//   3. SURFACE 1 — nextest run from the archive (process isolation). Includes deliberate shared-process
+//   3. POST-LIST LANES — Surface 1 nextest from the archive overlaps the serial shipped check and contract
+//      when the build-jobs/test-threads ceiling can be split across both without oversubscribing it;
+//      otherwise the two lanes run serially instead (see deriveGateLaneResourceSplit's `concurrent` flag).
+//      Surface includes deliberate shared-process
 //      coverage (verter_session/tests/cases/shared_process_contract.rs) as ordinary tests in this ONE run
 //      — see SINGLE-TEST-UNIVERSE at the top of this file.
-//   4. SHIPPED-CFG GUARD — a compile-only check under `no-debug-assertions` plus a small package-scoped
-//      nextest run of `verter_shipped_cfg_contract`. NOT a second whole-workspace archive.
-//   5. Aggregate failures across both; tolerated-only => PASS-WITH-TOLERATED.
+//      The shipped lane is a compile-only check under `no-debug-assertions` plus, only after check success,
+//      a small package-scoped nextest run of `verter_shipped_cfg_contract`. NOT a second workspace archive.
+//   4. Reduce fixed receipt slots; tolerated-only complete coverage => PASS-WITH-TOLERATED.
 // ----------------------------------------------------------------------------------------------------
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
@@ -1431,9 +2006,14 @@ async function runGate(opts, ctx) {
   // The probe is bounded by the GATE's remaining wallclock, not by its own constant: it runs with the
   // single-flight mutex held, so a probe that could outlive `--timeout` would hold the lock past the
   // deadline that is supposed to release it.
+  const prerequisiteStartedAtMs = nowMs();
   const prerequisites = checkBuildPrerequisites({
     repoRoot: repoRealpath,
     timeoutMs: probeBudgetMs(deadlineMs, nowMs()),
+  });
+  recordTelemetryPhaseSafe(ctx, "build-prerequisite", {
+    status: prerequisites.ok ? "ok" : "failed",
+    startedAtMs: prerequisiteStartedAtMs,
   });
   if (!prerequisites.ok) {
     for (const line of prerequisites.lines) err(line);
@@ -1455,10 +2035,15 @@ async function runGate(opts, ctx) {
   // validates the realized closure against the committed lockfile (paths, names, versions, edges, per-
   // package content digests). It runs BEFORE the archive build, same bounded-by-the-gate's-own-deadline
   // model as the build-prerequisite probe (still holding the single-flight mutex).
+  const oracleStartedAtMs = nowMs();
   const oraclePrereq = checkOracleCachePrerequisite({
     repoRoot: repoRealpath,
     env: cargoEnv,
     timeoutMs: oracleCacheProbeBudgetMs(deadlineMs, nowMs()),
+  });
+  recordTelemetryPhaseSafe(ctx, "oracle-cache", {
+    status: oraclePrereq.ok ? "ok" : "failed",
+    startedAtMs: oracleStartedAtMs,
   });
   if (!oraclePrereq.ok) {
     for (const line of oraclePrereq.lines) err(line);
@@ -1467,6 +2052,14 @@ async function runGate(opts, ctx) {
   log(
     `oracle-cache prerequisite preflight: SATISFIED — realized ${JSON.stringify(oraclePrereq.realized)}`,
   );
+
+  // ---------- REAL CONFORMANCE-HARNESS SMOKES (the gate's THIRD step) ----------
+  // Oracle realization proves the pinned installs are structurally usable. These smokes now exercise the
+  // two broader runtime boundaries before Cargo pays to build the Rust universe: the real Vapor DOM/runtime
+  // preload and the real workspace-domain TypeScript virtual host. Both run through the same contained-step
+  // deadline/stall/RSS machinery as every other external gate phase and require an exact structured receipt.
+  const harnessSmokesOk = await runHarnessSmokeChecks(ctx);
+  if (!harnessSmokesOk) return EXIT_USAGE;
 
   // ---------- FRESHNESS-TOOLING PREFLIGHT (verdict-gating authority) ----------
   // BEFORE the archive build (and inside the held mutex + containment model), self-ensure the typeinfo
@@ -1485,6 +2078,7 @@ async function runGate(opts, ctx) {
   // `pnpm install --frozen-lockfile` runs through `runContainedStep` so it inherits the SAME whole-gate
   // deadline + stall + teardown the cargo steps use (NOT an unbounded pre-mutex mutation). `--frozen-
   // lockfile` never mutates the lockfile, so CI (deps already installed) makes the preflight a cheap no-op.
+  const freshnessStartedAtMs = nowMs();
   const preflight = await preflightFreshnessTooling({
     repoRoot: repoRealpath,
     // The preflight's tool RESOLVER must see the SAME PATH the Rust test execution sees: `cargoEnv`
@@ -1522,7 +2116,7 @@ async function runGate(opts, ctx) {
         };
       }
       const { cmd, args, windowsVerbatimArguments } = launch;
-      return runContainedStep({
+      return ctx.supervisor.runStep("front", {
         cmd,
         args,
         windowsVerbatimArguments,
@@ -1535,6 +2129,17 @@ async function runGate(opts, ctx) {
         memoryLimitBytes,
       });
     },
+  });
+  recordTelemetryPhaseSafe(ctx, "freshness-tooling", {
+    status:
+      preflight.action === "watchdog"
+        ? "aborted"
+        : preflight.action === "setup-fail"
+          ? "failed"
+          : "ok",
+    startedAtMs: freshnessStartedAtMs,
+    peakRssBytes: preflight.installRes?.peakRssBytes || 0,
+    peakRssProcessCount: preflight.installRes?.peakRssProcessCount || 0,
   });
   if (preflight.action === "setup-fail") {
     err(`gate setup failed ensuring freshness tooling: ${preflight.detail}`);
@@ -1555,9 +2160,9 @@ async function runGate(opts, ctx) {
   const vueMacroOracleResult = await runVueMacroOracleChecks(ctx);
   if (vueMacroOracleResult !== EXIT_PASS) return vueMacroOracleResult;
 
-  // This CLI has NO self-test seam and NO ambient-env divert: runGate ALWAYS issues the real archive
-  // build + nextest run + direct libtest execution. (The reusable multi-step seam lives in
-  // gate-internals.mjs and is driven ONLY by the self-test, in-process — never reachable from this CLI.)
+  // This CLI has NO self-test seam and NO ambient-env divert: runGate ALWAYS issues the real archive/list,
+  // archive-backed Surface 1, and isolated serialized shipped check/contract lane. Reusable seams live in
+  // gate-internals.mjs and are driven ONLY by selftests in-process — never reachable from this CLI.
   const out = await archiveAndList(ctx);
   if (out.error) {
     err(`gate setup failed at the ${out.where} step`);
@@ -1567,10 +2172,22 @@ async function runGate(opts, ctx) {
   const buildMetaTargetDir =
     listJson["rust-build-meta"] && listJson["rust-build-meta"]["target-directory"];
   const allSuites = Object.values(listJson["rust-suites"] || {});
+  for (const path of [
+    ctx.laneLayout.surface1.targetDir,
+    ctx.laneLayout.surface1.workDir,
+    ctx.laneLayout.surface1.extractDir,
+    dirname(ctx.laneLayout.surface1.outputFile),
+    ctx.laneLayout.shippedCfg.targetDir,
+    ctx.laneLayout.shippedCfg.workDir,
+    dirname(ctx.laneLayout.shippedCfg.outputFile),
+  ]) {
+    mkdirSync(path, { recursive: true });
+  }
   const sidecars = ensureRequiredWindowsDebugSidecars({
     allSuites,
     runnerTarget: ctx.runnerTarget,
     extractDir,
+    destinationExtractDir: ctx.laneLayout.surface1.extractDir,
   });
   if (sidecars.error) {
     err(`Windows archive debug-sidecar setup failed: ${sidecars.error}`);
@@ -1578,7 +2195,7 @@ async function runGate(opts, ctx) {
   }
   if (sidecars.copied > 0) {
     log(
-      `restored ${sidecars.copied} runtime-required Windows PDB sidecar(s) beside archived tests`,
+      `restored ${sidecars.copied} runtime-required Windows PDB sidecar(s) beside Surface 1 extracted tests`,
     );
   }
   log(
@@ -1591,73 +2208,36 @@ async function runGate(opts, ctx) {
     return EXIT_USAGE;
   }
 
-  // Aggregate verdict accumulators.
-  const failures = []; // { surface, name }
-  let toleratedOccurred = false;
-
-  // ---------- SURFACE 1: nextest run from the archive (process isolation) ----------
-  log("SURFACE 1: nextest run from the archive (process isolation) …");
-  const runArgs = [
-    "nextest",
-    "run",
-    "--archive-file",
+  const commandPlan = buildGateLaneCommandPlan({
     archiveFile,
-    "--extract-to",
-    extractDir,
-    "--extract-overwrite",
-    "--workspace-remap",
+    surfaceExtractDir: ctx.laneLayout.surface1.extractDir,
     repoRealpath,
-    "-E",
-    SURFACE_1_FILTER,
-  ];
-  if (opts.noFailFast) runArgs.push("--no-fail-fast");
-  runArgs.push("--test-threads", String(opts.testThreads));
-  const runRes = await runContainedStep({
-    cmd: "cargo",
-    args: runArgs,
-    cwd: repoRealpath,
-    env: cargoEnv,
-    phase: "test", // TEST phase: byte-growth-only liveness (a silent test binary is a hang)
-    deadlineMs,
-    stallMs,
-    targetDir: runnerTarget,
-    memoryLimitBytes,
+    filterExpr: SURFACE_1_FILTER,
+    exhaustive: opts.exhaustive,
+    testThreads: ctx.laneResourceSplit.surface.testThreads,
+    shippedTestThreads: ctx.laneResourceSplit.shippedCfg.testThreads,
+    shippedCheckTimingsEnabled: cargoTimingEnabled(ctx, "shipped-check"),
+    shippedContractTimingsEnabled: cargoTimingEnabled(ctx, "shipped-contract"),
   });
-  if (runRes.reason) {
-    err(`nextest run ${runRes.reason} after ${Math.round(runRes.durationMs / 1000)}s`);
-    return mapStepReason(runRes);
-  }
-  const nextestText = runRes.stdout + "\n" + runRes.stderr;
-  // SURFACE-1 verdict via the shared analyzer (the same code the self-test drives in-process). It consults
-  // the run exit code + the summary's run-but-did-not-pass total (`runCount - passed`), NOT just the
-  // `FAIL [` lines, so a crash (SIGABRT/SIGSEGV/LEAK-FAIL/…), a TIMEOUT, an `exec failed`, a cancelled run
-  // that left tests unexecuted, or a setup/harness error in ANY crate fails the gate — and each such test
-  // is NAMED in the verdict, not folded into an opaque "unaccounted" line.
-  const s1 = analyzeNextestSurface(nextestText, runRes.code, freshnessToleranceAllowed);
-  for (const f of s1.failures) failures.push(f);
-  if (s1.toleratedCount > 0) toleratedOccurred = true;
-  log(
-    `SURFACE 1 done in ${Math.round(runRes.durationMs / 1000)}s: ` +
-      `${s1.summary.runCount}${s1.summary.unrun > 0 ? `/${s1.summary.initialCount}` : ""} run, ` +
-      `${s1.summary.passed} passed, ${s1.summary.nonPassed} did not pass ` +
-      `(${s1.summary.failed} failed, ${s1.summary.timedOut} timed out, ${s1.summary.execFailed} exec failed` +
-      `${s1.summary.unrun > 0 ? `, ${s1.summary.unrun} NEVER RAN` : ""}) ` +
-      `(${s1.namedCount} named, ${s1.toleratedCount} tolerated), ${s1.summary.skipped} skipped; ` +
-      `run exit ${runRes.code}`,
-  );
-  log(
-    `SURFACE 1 TELEMETRY: peak RSS ${formatMemorySize(runRes.peakRssBytes)} across ` +
-      `${runRes.peakRssProcessCount} process(es)`,
-  );
-  logNextestTimingReport("SURFACE 1", nextestText, allSuites);
 
-  // ---------- SHIPPED-CFG GUARD: compile check + small package-scoped run ----------
-  // Runs after surface 1 so the far-more-common regression class reports first. See runShippedCfgGuard
-  // for what this guard covers and, just as importantly, what it does not.
-  const guardResult = await runShippedCfgGuard(opts, ctx);
-  if (guardResult.exit !== undefined) return guardResult.exit;
-  for (const f of guardResult.failures)
-    failures.push({ surface: `shipped-cfg/${f.surface}`, name: f.name });
+  // ---------- POST-LIST LANES ----------
+  // When ctx.laneResourceSplit.concurrent is true, both promises are admitted together before either
+  // receipt is observed. When the ceiling is too small to split (either axis below 2), orchestrateGateLanes
+  // runs them serially instead — see its `concurrent` option. Shipped remains internally serial in either
+  // case (check -> contract), while Surface consumes the immutable front archive through its own extract root.
+  const receipts = await orchestrateGateLanes({
+    exhaustive: opts.exhaustive,
+    concurrent: ctx.laneResourceSplit.concurrent,
+    runSurfaceLane: () =>
+      runSurface1Lane(opts, ctx, {
+        allSuites,
+        commandPlan,
+        freshnessToleranceAllowed,
+      }),
+    runShippedLane: () => runShippedCfgLane(opts, ctx, { allSuites, commandPlan }),
+    cancelLane: (laneId, reason) => ctx.supervisor.cancelLane(laneId, reason),
+  });
+  replayGateLaneTranscript(receipts, ctx, allSuites);
 
   // Always stated at the tail of the run, regardless of verdict, so a reader who only reads the last few
   // lines cannot mistake a green gate for full coverage: this run excluded a named, counted test class from
@@ -1669,9 +2249,11 @@ async function runGate(opts, ctx) {
   );
 
   // ---------- Aggregate verdict ----------
-  if (failures.length > 0) {
-    err(`VERDICT: FAIL — ${failures.length} non-tolerated failure(s):`);
-    for (const f of failures.slice(0, 50)) err(`  [${f.surface}] ${f.name}`);
+  const decision = reduceGateLaneReceipts(receipts);
+  if (decision.exitCode !== null) return decision.exitCode;
+  if (decision.verdict === "FAIL") {
+    err(`VERDICT: FAIL — ${decision.failures.length} non-tolerated failure(s):`);
+    for (const f of decision.failures.slice(0, 50)) err(`  [${f.surface}] ${f.name}`);
     // Do NOT re-run the gate on any other branch to decide whether this pre-existed — the working branch's
     // gate is green by invariant, never by comparison. Triage each named failure in isolation instead:
     err(
@@ -1680,7 +2262,7 @@ async function runGate(opts, ctx) {
     );
     return EXIT_FAIL;
   }
-  if (toleratedOccurred) {
+  if (decision.verdict === "PASS-WITH-TOLERATED") {
     log(
       "VERDICT: PASS-WITH-TOLERATED (only the env-only typeinfo_proto_ts_freshness pair produced an actual " +
         "FAIL line, by exact name, AND the freshness-tooling preflight proved pnpm is not resolvable AND buf " +

@@ -3,9 +3,9 @@
 // timeout / stall / teardown integration scenarios.
 //
 // THIS IS NOT THE PRODUCTION GATE. It exists ONLY so the self-test (`gate-selftest.mjs`) can drive the
-// REAL gate primitives — the single-flight `Mutex`, `runContainedStep` (process-group containment + the
-// whole-gate budget + the phase stall detector), the signal-teardown lifecycle (reap the active step tree
-// before releasing the lock), and the multi-step seam — in a genuine subprocess with a genuine process
+// REAL gate primitives — the single-flight `Mutex`, the gate-owned process supervisor (process-tree
+// whole-gate budget + the aggregate stall detector), the signal-teardown lifecycle (reap every registered
+// tree before releasing the lock), and the multi-step seam — in a genuine subprocess with a genuine process
 // group, against cargo-free `sleep`/`echo` stand-ins. The production gate CLI (`gate.mjs`) deliberately
 // exposes NO arbitrary-command or seam mode; those test-only entry points live HERE, on a self-test
 // script that production never runs, so the production gate can never return success without running the
@@ -43,9 +43,7 @@ import {
   defaultLockDir,
   buildCargoEnv,
   Mutex,
-  reapActiveStep,
-  provenanceSweep,
-  runContainedStep,
+  createGateRunSupervisor,
   mapStepReason,
   runMultiStepSeam,
   shellInvocation,
@@ -133,19 +131,20 @@ async function main() {
   // one touches no other process. (This stand-in MUST mirror gate.mjs exactly, or the self-test stops
   // characterizing the production teardown.)
   let acquired = false;
+  let supervisor = null;
 
-  // The SAME teardown lifecycle gate.mjs uses: reap the active step's whole tree (verified) BEFORE
-  // releasing the lock, then sweep, then release — memoized so the signal handler and the main `finally`
-  // share one completion. This is what scenario (xvii) (SIGTERM to the gate pid only) exercises.
+  // The SAME teardown lifecycle gate.mjs uses: fence admissions and close/reap every registration BEFORE
+  // releasing the lock — memoized so the signal handler and the main `finally` share one completion. This
+  // is what scenario (xvii) (SIGTERM to the gate pid only) exercises.
   let teardownPromise = null;
   const teardown = () => {
     if (teardownPromise) return teardownPromise;
     teardownPromise = (async () => {
       // Only an ACQUIRING runner owns this runner target; a non-acquiring runner skips reap+sweep so it
       // can never touch the holder's (or any other) process tree.
-      if (acquired) {
+      if (acquired && supervisor) {
         try {
-          const reap = await reapActiveStep();
+          const reap = await supervisor.closeAndReapAll("SELFTEST_TEARDOWN");
           if (reap && reap.reaped && !reap.confirmedDead) {
             warn(
               "gate-selftest-runner: active step tree NOT confirmed dead within budget (released anyway)",
@@ -153,11 +152,6 @@ async function main() {
           }
         } catch {
           /* best-effort */
-        }
-        try {
-          await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
-        } catch {
-          /* ignore */
         }
       }
       mutex.release();
@@ -189,6 +183,11 @@ async function main() {
 
   const deadlineMs = nowMs() + opts.timeoutSecs * 1000;
   const stallMs = opts.stallSecs * 1000;
+  supervisor = createGateRunSupervisor({
+    deadlineMs,
+    stallMs,
+    killGraceMs: mutex.KILL_GRACE_MS,
+  });
 
   let exitCode = EXIT_PASS;
   try {
@@ -201,6 +200,7 @@ async function main() {
         runnerTarget,
         deadlineMs,
         stallMs,
+        supervisor,
       });
     } else {
       // Single-command mode (TEST phase: byte-growth-only liveness — the silent-`sleep` stall scenario
@@ -211,7 +211,7 @@ async function main() {
         exitCode = EXIT_USAGE;
       } else {
         const inv = shellInvocation(cmdString);
-        const res = await runContainedStep({
+        const res = await supervisor.runStep("selftest", {
           cmd: inv.cmd,
           args: inv.args,
           cwd: repoRealpath,

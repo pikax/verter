@@ -48,6 +48,55 @@ playground E2E tests
 - LSP binary lives in `target/<host-triple>/debug/verter-lsp` (or `.../release/verter-lsp` with `build:lsp:release`) — `pnpm run build:lsp`/`build:lsp:release` and `build-host.mjs` all pass an explicit `--target <host-triple>` (see the "one explicit host target" build-lane rule), so the output is triple-qualified, not the bare `target/debug/`/`target/release/` a plain `cargo build` (no `--target`) would produce
 - Clear Vite cache (`node_modules/.vite`) when rebuilding playground after native changes
 
+### Canonical gate build telemetry
+
+`node scripts/gate.mjs` capability-probes Cargo's stable HTML timings and, when supported, adds
+`--timings` only to the dev `cargo nextest archive`, shipped-cfg `cargo check`, and package-scoped shipped
+contract `cargo nextest run`. It never adds the flag to archive-backed Surface 1 and never launches a
+second build/run for telemetry. The dev archive reads the front target timing source; shipped check and
+contract read their isolated shipped-lane target source sequentially. Each overwrite-prone report is cleared at its exact file,
+validated after each producing command settles, and snapshotted immediately under
+`gate-work/cargo-timings/`. The source must be proven absent before launch, or—if exact-file deletion
+fails—have a changed pre/post SHA-256 content identity; unchanged or ambiguous sources are refused.
+Version/help probe budgets share a separate hard aggregate startup-reporting deadline and hard-terminate
+their direct child. The canonical build/test deadline begins only after startup collection settles;
+reporting failures warn and mark telemetry partial without changing the gate verdict.
+
+The terminal `gate-work/gate-telemetry-v1.{log,json}` pair records a bounded tool/host fingerprint,
+stable build/test phase durations, cold/empty/warm target state, lane layout/policy, and the maximum
+same-snapshot aggregate live-forest RSS with its total process count and per-lane contributions. Use these artifacts when comparing build-job or
+test-thread configurations; do not infer build cost from per-test summed seconds.
+After the one archive/list and all post-list preconditions, Surface 1 overlaps the serial shipped
+`check -> contract` lane in separate Cargo targets. The shipped target is intentionally cold relative to
+the front archive target; its check warms the contract. One supervisor retains the absolute whole-gate
+deadline, aggregate stall vector, and one aggregate memory ceiling, and raw output is replayed once in
+Surface/check/contract order. The bare local gate cancels shipped after a hard Surface receipt and may omit
+the remaining shipped phases; use
+`node scripts/gate.mjs --exhaustive` for every comparable full-run benchmark. A truncated local report is
+correctly `partial` and must not be compared against an exhaustive baseline as a performance improvement.
+
+The current independently measured policy caps at 12 Cargo build jobs and 12
+nextest threads. Both are CPU-clamped; omitted build jobs are also memory-tiered
+from the effective child-tree ceiling (12 jobs at >=16 GiB, 8 at >=12 GiB,
+otherwise 4). On the
+32-logical-CPU / 127.17-GiB Windows reference host, cold target-absent dev
+archives measured 422.775s / 283.920s / 234.792s at 4/8/12 jobs, with peak RSS
+7.72 / 9.90 / 11.60 GiB. Identical-inventory Surface 1 runs measured 695.769s /
+426.028s / 357.825s at 4/8/12 threads, with peak RSS 1.85 / 3.08 / 3.84 GiB.
+The global memory rule remains unchanged. The tier matters on the documented
+24-GiB host: its 12-GiB default ceiling selects 8 jobs, because the measured
+12-job peak was already 11.60 GiB; 8 jobs peaked at 9.90 GiB. Explicit positive
+resource overrides are never clamped, so future comparisons can retest either
+axis independently; retain the nextest serialized heavy-test groups during
+every comparison.
+
+`--prepare` may reuse an already-built archive target as a first-launch check.
+On Windows, proc-macro test harnesses need the host runtime DLL search path;
+the prepare launcher derives it from each suite's nextest list metadata and
+prepends it to the sanitized child PATH. Do not copy DLLs, filter proc-macro
+suites, or treat loader exits as warmed: missing metadata and every non-zero
+launch remain strict setup failures.
+
 ## Quick Rebuild (Native)
 
 ```bash

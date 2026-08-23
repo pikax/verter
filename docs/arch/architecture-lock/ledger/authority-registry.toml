@@ -197,6 +197,18 @@ id = "RULING-AMD-005-BV1-BS1-AUTHORISED"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-AMD-005-BV1-BS1-AUTHORISED.md"
 sha256 = "e2e4a6761981985fd64a650ebf14bebf8bd7598939b9484e2b56bbdf9dd3d6e3"
+[[document]]
+id = "TCM0-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/TCM0.md"
+sha256 = "7933e3d99d4a7a31f3ddeda719f02992a85fad9fcd6fcc8edc042cbecd5c0249"
+
+[[document]]
+id = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS-amendment.md"
+sha256 = "7d3ae3b7a5c7a0b0176facb247fe74a20cbfbdc68b09c759fd182c027cbb83b8"
+
 
 # -- Authorizations --------------------------------------------------------
 # A0-A6 and B1 rest on the base Revision 11 program authority itself (their
@@ -432,3 +444,55 @@ documents = ["CSS-CLEAN-CUTOVER", "J-TRAIN-SCOPE-PARSING-ONLY", "ONE-CSS-PARSER-
 ratified_by = "designated maintainer (scope), codex architect (charter)"
 ratified_at = "2026-08-21"
 scope = "CSS owner reconciliation — parsing and Lightning CSS removal only, seven readers converging under one parse"
+
+# B5's dispatch predated its predecessor BV2's acceptance being recorded, and its
+# charter still reads "PROPOSED amendment / LOCKED" — an orchestration error, not
+# a ratification. MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §2 retroactively
+# authorises the landing directly: BV2 accepted above satisfies B5's DAG
+# predecessor set (BV1, BS1, BV2), so this authorization rests on the ruling, not
+# on a charter status-line edit.
+
+[[document]]
+id = "RULING-2026-08-22-BV2-B5-J1"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md"
+sha256 = "e439ea9721716281a8249731fb3d20923a03c50899055163dde35bf61c71bad0"
+
+[[document]]
+id = "B5-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/B5.md"
+sha256 = "a8e8ca4b225f736d0421a0ce2b407ad5409adc1e3486f5588bb7e84b32d83848"
+
+[[authorization]]
+block = "B5"
+documents = ["B5-CHARTER", "RULING-2026-08-22-BV2-B5-J1"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-22"
+scope = "Retroactive authorisation of B5's landing (exposing the accepted BV1/BS1 framework algorithms through the sole direct compiler core) now that its predecessor set is genuinely satisfied by BV2's acceptance."
+
+[[authorization]]
+block = "TCM0"
+documents = ["TCM0-CHARTER", "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-22"
+scope = "Authorises TCM0 only: a READ-ONLY investigation and architecture lock over the current TypeScript content-mapper and semantic-API contracts. It changes no production route, ships no code, certifies no package, and deletes nothing. TCM1-TCM4 remain LOCKED and each requires its own record."
+
+[[document]]
+id = "B6-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/B6.md"
+sha256 = "da1d10efe380e5e01a67a7627d6af574179f0e5a926fcc3aa092aefe9b9f1a9b"
+
+[[document]]
+id = "AMD-011-C2-B6-PREDECESSOR-EDGE"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-011-c2-b6-predecessor-edge.md"
+sha256 = "55ff4afedc4a5ef8cf020932ba9644a0791f1c6583d08405c4bbf1d123888003"
+
+[[authorization]]
+block = "B6"
+documents = ["B6-CHARTER", "AMD-011-C2-B6-PREDECESSOR-EDGE"]
+ratified_by = "maintainer"
+ratified_at = "2026-08-22"
+scope = "Authorises B6 to execute now that its sole predecessor B5 is ACCEPTED. B6 exposes B5's accepted algorithms through prepared-first, prepared-repeat and direct-batch compiler-core routes, and owns the preparation/batch lifecycle and reuse. It owns no framework semantics: prepared state may not change request defaults, compatibility, products, helpers, diagnostics, mappings or publication meaning. Exit requires proof of direct/prepared/batch result identity, stable reuse without stale inputs, atomic per-request results, zero unrequested work, bounded memory, and the BF1-locked route-overhead cells. C4 stays LOCKED until B6 is accepted."

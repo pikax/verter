@@ -391,3 +391,37 @@ name = "Final architecture lock"
 class = "foundational-final"
 predecessors = ["L2"]
 conditional_predecessor_if_opened = ["L3"]
+
+# ── TypeScript content-mapper amendment train (DISC-2026-08-22) ──────────────
+# NO block here may be dispatched until it holds a digest-bound authorization
+# record in authority-registry.toml — MAINTAINER-RULING-2026-08-22-BV2-B5-J1 §6.
+
+[[block]]
+id = "TCM0"
+name = "Current TypeScript contract and dual-plane architecture lock"
+class = "foundational"
+predecessors = ["A6"]
+
+[[block]]
+id = "TCM1"
+name = "Compact mapping products inside CodeTransform"
+class = "foundational"
+predecessors = ["TCM0"]
+
+[[block]]
+id = "TCM2"
+name = "Content-mapper projection plane (dormant until TCM4)"
+class = "framework subsystem"
+predecessors = ["TCM0", "TCM1"]
+
+[[block]]
+id = "TCM3"
+name = "TypeScript semantic capability closure (dormant until TCM4)"
+class = "framework subsystem"
+predecessors = ["TCM0", "TCM1"]
+
+[[block]]
+id = "TCM4"
+name = "Atomic activation and deletion"
+class = "foundational"
+predecessors = ["TCM0", "TCM1", "TCM2", "TCM3"]

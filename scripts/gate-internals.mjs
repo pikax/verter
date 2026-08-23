@@ -24,8 +24,28 @@ import {
   readdirSync,
   realpathSync,
 } from "node:fs";
-import { availableParallelism, cpus, tmpdir, totalmem } from "node:os";
-import { join, dirname, basename, sep, isAbsolute, win32, posix } from "node:path";
+import {
+  availableParallelism,
+  arch as osArch,
+  cpus,
+  platform as osPlatform,
+  release as osRelease,
+  tmpdir,
+  totalmem,
+  type as osType,
+  version as osVersion,
+} from "node:os";
+import {
+  join,
+  dirname,
+  basename,
+  sep,
+  isAbsolute,
+  resolve,
+  relative,
+  win32,
+  posix,
+} from "node:path";
 import { createHash } from "node:crypto";
 
 // ----------------------------------------------------------------------------------------------------
@@ -45,6 +65,83 @@ export const EXIT_TIMEOUT = 124;
 export const EXIT_STALL = 125;
 export const EXIT_LOCK_REFUSED = 126;
 export const EXIT_USAGE = 127;
+
+// Canonical conformance-harness preflight contract. Command construction is
+// pure so the self-test can prove the production gate targets the harness-
+// owned executable in both modes without introducing a production test seam.
+export const HARNESS_SMOKE_MARKER = "HARNESS-SMOKE FAILED";
+export const HARNESS_SMOKE_MODES = Object.freeze(["vapor", "typescript"]);
+export const HARNESS_SMOKE_RECEIPT_SCHEMA = "verter-harness-smoke/v1";
+
+export function harnessSmokeCommand(repoRoot, mode, nodePath = process.execPath) {
+  if (!HARNESS_SMOKE_MODES.includes(mode)) {
+    throw new RangeError(`unknown harness smoke mode: ${JSON.stringify(mode)}`);
+  }
+  return {
+    cmd: nodePath,
+    args: [
+      join(repoRoot, "packages", "framework-conformance-harness", "bin", "gate-smoke.mjs"),
+      mode,
+    ],
+    cwd: repoRoot,
+  };
+}
+
+// Convert every runContainedStep result shape into an explicit smoke verdict.
+// A status-0 process is insufficient: success requires one exact, mode-bound
+// receipt and no timeout/stall/memory/signal/spawn ambiguity.
+export function decideHarnessSmokeResult(mode, result) {
+  if (result.reason) {
+    return { ok: false, detail: `${result.reason}: smoke did not complete` };
+  }
+  if (result.spawnError) {
+    return { ok: false, detail: "spawn error: smoke executable could not be launched" };
+  }
+  if (result.signalName) {
+    return { ok: false, detail: `${result.signalName}: smoke child was signalled` };
+  }
+  if (result.code !== 0) {
+    return { ok: false, detail: `smoke exited non-zero (exit ${result.code})` };
+  }
+  const output = typeof result.stdout === "string" ? result.stdout.trim() : "";
+  if (output === "") return { ok: false, detail: "missing smoke receipt" };
+  let receipt;
+  try {
+    receipt = JSON.parse(output);
+  } catch (error) {
+    return { ok: false, detail: `invalid smoke receipt JSON (${error.message})` };
+  }
+  if (receipt === null || typeof receipt !== "object" || Array.isArray(receipt)) {
+    return { ok: false, detail: "invalid smoke receipt: expected an object" };
+  }
+  const keys = Object.keys(receipt).sort();
+  if (JSON.stringify(keys) !== JSON.stringify(["mode", "ok", "schema"])) {
+    return { ok: false, detail: `receipt keys invalid: ${JSON.stringify(keys)}` };
+  }
+  if (receipt.schema !== HARNESS_SMOKE_RECEIPT_SCHEMA) {
+    return { ok: false, detail: `receipt schema invalid: ${JSON.stringify(receipt.schema)}` };
+  }
+  if (receipt.mode !== mode) {
+    return {
+      ok: false,
+      detail: `receipt mode mismatch: expected ${mode}, got ${JSON.stringify(receipt.mode)}`,
+    };
+  }
+  if (receipt.ok !== true) {
+    return { ok: false, detail: "receipt did not attest ok:true" };
+  }
+  return { ok: true, receipt };
+}
+
+// Single production formatter for every smoke refusal. Keeping the mode-bound prefix here lets the
+// self-test pin exact attribution for watchdog, process, and receipt failures without mirroring the
+// gate's diagnostic assembly.
+export function formatHarnessSmokeFailure(mode, decision) {
+  if (!HARNESS_SMOKE_MODES.includes(mode)) {
+    throw new RangeError(`unknown harness smoke mode: ${JSON.stringify(mode)}`);
+  }
+  return `${HARNESS_SMOKE_MARKER} [${mode}]: ${decision.detail}`;
+}
 
 // MEMORY / MEMORY_MONITOR reap escalation is far tighter than the TIMEOUT/STALL default (5000ms):
 // a ceiling breach means the tree is allocating right now, so runContainedStep's reapNow gives it this
@@ -82,10 +179,17 @@ function positiveInteger(value, label) {
   return parsed;
 }
 
-// Conservative defaults for the canonical gate. Four-way compile/test concurrency keeps an 8-core
-// workstation responsive, while the child-tree RSS ceiling reserves half of physical memory for the OS,
-// the parent agent, editors, and unrelated work. Callers may lower or raise these explicit limits, but a
-// canonical invocation always resolves to finite positive values.
+// Independently measured caps for the canonical gate. On the benchmark host, twelve-way Cargo compilation
+// and twelve-way nextest execution were the fastest tested points on their separate 4/8/12 axes. Keep the
+// policies independently owned: omitted build jobs also honor the memory tier below, while omitted test
+// threads only clamp to available CPU capacity. Explicit caller overrides remain exact positive values.
+// The child-tree RSS ceiling continues to reserve half of physical memory for the OS, the parent agent,
+// editors, and unrelated work.
+export const DEFAULT_GATE_BUILD_JOBS = 12;
+export const DEFAULT_GATE_TEST_THREADS = 12;
+export const GATE_BUILD_JOBS_12_MIN_MEMORY_LIMIT_BYTES = 16 * GiB;
+export const GATE_BUILD_JOBS_8_MIN_MEMORY_LIMIT_BYTES = 12 * GiB;
+
 export function deriveGateResourceLimits({
   cpuCount = typeof availableParallelism === "function" ? availableParallelism() : cpus().length,
   totalMemBytes = totalmem(),
@@ -94,16 +198,71 @@ export function deriveGateResourceLimits({
   memoryLimitBytes,
 } = {}) {
   const saneCpuCount = Number.isSafeInteger(cpuCount) && cpuCount > 0 ? cpuCount : 1;
-  const defaultParallelism = Math.max(1, Math.min(4, saneCpuCount));
   const saneTotalMem =
     Number.isFinite(totalMemBytes) && totalMemBytes > 0 ? totalMemBytes : 2 * GiB;
+  const effectiveMemoryLimitBytes = positiveInteger(
+    memoryLimitBytes ?? Math.max(512 * MiB, Math.floor(saneTotalMem * 0.5)),
+    "memory limit bytes",
+  );
+  // Twelve build jobs peaked at 11.60 GiB on the measured host, leaving unsafe headroom under the
+  // documented 24-GiB host's 12-GiB default ceiling. Use twelve only from a 16-GiB effective ceiling;
+  // a 12-GiB ceiling selects the measured 8-job point (9.90-GiB peak), and smaller ceilings retain the
+  // prior four-job cap. Test execution is independently much lighter (3.84-GiB peak at twelve threads).
+  const memoryBoundBuildJobs =
+    effectiveMemoryLimitBytes >= GATE_BUILD_JOBS_12_MIN_MEMORY_LIMIT_BYTES
+      ? 12
+      : effectiveMemoryLimitBytes >= GATE_BUILD_JOBS_8_MIN_MEMORY_LIMIT_BYTES
+        ? 8
+        : 4;
+  const defaultBuildJobs = Math.max(
+    1,
+    Math.min(DEFAULT_GATE_BUILD_JOBS, memoryBoundBuildJobs, saneCpuCount),
+  );
+  const defaultTestThreads = Math.max(1, Math.min(DEFAULT_GATE_TEST_THREADS, saneCpuCount));
   return {
-    buildJobs: positiveInteger(buildJobs ?? defaultParallelism, "build jobs"),
-    testThreads: positiveInteger(testThreads ?? defaultParallelism, "test threads"),
-    memoryLimitBytes: positiveInteger(
-      memoryLimitBytes ?? Math.max(512 * MiB, Math.floor(saneTotalMem * 0.5)),
-      "memory limit bytes",
-    ),
+    buildJobs: positiveInteger(buildJobs ?? defaultBuildJobs, "build jobs"),
+    testThreads: positiveInteger(testThreads ?? defaultTestThreads, "test threads"),
+    memoryLimitBytes: effectiveMemoryLimitBytes,
+  };
+}
+
+// The two post-list lanes (Surface 1 and the shipped-cfg guard) normally run CONCURRENTLY — Surface 1's
+// archive-backed nextest run overlaps the shipped-cfg lane's own `cargo check` compile (its own cold,
+// isolated target dir) and then its `nextest run` build+execute. `deriveGateResourceLimits` above sizes ONE
+// ceiling; historically BOTH lanes were independently sized to that SAME ceiling, so a host that measured
+// itself at N cores requested 2N cores for the whole overlap window ("cargo build jobs=8, test
+// threads=8" applied twice, concurrently, on an 8-core host). This function partitions ONE ceiling across
+// the two lanes so their COMBINED demand — build jobs and test threads independently — never exceeds it.
+// Surface 1 (the full workspace test universe) gets the majority share; the shipped-cfg lane (a small
+// package-scoped contract — ten-ish tests — whose own wall-clock matters far less than Surface 1's) gets
+// a minority share, floored at 1.
+//
+// Below a ceiling of 2 on either axis there is no way to give both lanes >= 1 unit of that axis while also
+// bounding their SUM to the ceiling — a lane cannot run `cargo`/`nextest` with 0 build jobs or 0 test
+// threads. Rather than let the caller run both lanes concurrently at a combined demand that exceeds the
+// ceiling (the exact defect this function exists to fix), the returned `concurrent: false` flag tells the
+// caller the two lanes must be run ONE AT A TIME instead — see `orchestrateGateLanes`'s `concurrent` option.
+// Serialized, only one lane's `cargo`/`nextest` invocation is ever live, so the ceiling is honored even
+// though each lane's own numeric share still reads 1 (the minimum a lane can run with). `concurrent` is
+// false whenever EITHER axis is unsplittable at this ceiling, even if the other axis has room, because the
+// two lanes overlap in wall-clock as a unit — a build-axis oversubscription is not cured by a fine
+// test-axis split.
+export const SHIPPED_CFG_LANE_SHARE = 0.25;
+
+export function deriveGateLaneResourceSplit({ buildJobs, testThreads }) {
+  const totalBuildJobs = positiveInteger(buildJobs, "build jobs");
+  const totalTestThreads = positiveInteger(testThreads, "test threads");
+  const split = (total) => {
+    if (total <= 1) return { surface: total, shipped: total };
+    const shipped = Math.max(1, Math.min(total - 1, Math.round(total * SHIPPED_CFG_LANE_SHARE)));
+    return { surface: total - shipped, shipped };
+  };
+  const buildSplit = split(totalBuildJobs);
+  const testSplit = split(totalTestThreads);
+  return {
+    surface: { buildJobs: buildSplit.surface, testThreads: testSplit.surface },
+    shippedCfg: { buildJobs: buildSplit.shipped, testThreads: testSplit.shipped },
+    concurrent: totalBuildJobs >= 2 && totalTestThreads >= 2,
   };
 }
 
@@ -126,8 +285,10 @@ export function ensureRequiredWindowsDebugSidecars({
   allSuites,
   runnerTarget,
   extractDir,
+  destinationExtractDir = extractDir,
   windows = IS_WINDOWS,
   existsFn = existsSync,
+  mkdirFn = (path) => mkdirSync(path, { recursive: true }),
   copyFileFn = copyFileSync,
 }) {
   if (!windows) return { copied: 0 };
@@ -171,7 +332,9 @@ export function ensureRequiredWindowsDebugSidecars({
 
     const toPdb = (path) => `${path.slice(0, -4)}.pdb`;
     const sourcePdb = toPdb(pathApi.join(pathApi.resolve(runnerTarget), relativeBinary));
-    const destinationPdb = toPdb(resolvedBinary);
+    const destinationPdb = toPdb(
+      pathApi.join(pathApi.resolve(destinationExtractDir, "target"), relativeBinary),
+    );
     if (!existsFn(sourcePdb)) {
       return {
         error: `required Windows debug sidecar is missing for '${binaryId}': ${sourcePdb}`,
@@ -183,6 +346,9 @@ export function ensureRequiredWindowsDebugSidecars({
       // `--extract-overwrite` replaces members present in the new archive but does not remove
       // sidecars the archive omits. Therefore destination existence proves nothing about freshness:
       // always overwrite it from the PDB produced alongside this run's exact test executable.
+      if (pathApi.resolve(destinationExtractDir) !== pathApi.resolve(extractDir)) {
+        mkdirFn(pathApi.dirname(destinationPdb));
+      }
       copyFileFn(sourcePdb, destinationPdb);
     } catch (error) {
       return {
@@ -1519,7 +1685,7 @@ export function checkOracleCachePrerequisite(opts) {
 // `ARCHIVE_FEATURES` turns `verter_session/bf2-authoritative` on for that archive build
 // (`archiveAndList` in gate.mjs), so the 45 tests that feature gates are PRESENT in the archived test
 // universe — not merely listed by a standalone `cargo test --features` invocation nobody runs. The
-// separate shipped-cfg guard (`runShippedCfgGuard`) does not consume this archive at all — it is a
+// separate shipped-cfg lane (`runShippedCfgLane`) does not consume this archive at all — it is a
 // small package-scoped `cargo nextest run -p verter_shipped_cfg_contract`, built and run independently.
 export const ARCHIVE_FEATURES = Object.freeze(["verter_session/bf2-authoritative"]);
 
@@ -1527,13 +1693,21 @@ export const ARCHIVE_FEATURES = Object.freeze(["verter_session/bf2-authoritative
 // feature dropped here is dropped from every surface at once (never a per-variant divergence) and is
 // directly unit-testable without invoking cargo.
 export function buildNextestArchiveArgs(opts) {
-  const { buildJobs, cargoProfile, archiveFile, runnerTarget, features = ARCHIVE_FEATURES } = opts;
+  const {
+    buildJobs,
+    cargoProfile,
+    archiveFile,
+    runnerTarget,
+    features = ARCHIVE_FEATURES,
+    timingsEnabled = false,
+  } = opts;
   return [
     "nextest",
     "archive",
     "--workspace",
     "--build-jobs",
     String(buildJobs),
+    ...(timingsEnabled ? ["--timings"] : []),
     ...(features.length > 0 ? ["--features", features.join(",")] : []),
     ...(cargoProfile ? ["--cargo-profile", cargoProfile] : []),
     "--archive-file",
@@ -1542,6 +1716,387 @@ export function buildNextestArchiveArgs(opts) {
     runnerTarget,
     "--zstd-level",
     "-7",
+  ];
+}
+
+// Pure builder for archive-backed Surface 1. The local default deliberately lets nextest stop scheduling
+// after its first failure; exhaustive CI/diagnostic runs opt back into the historical all-failures argv.
+export function buildSurface1RunArgs({
+  archiveFile,
+  extractDir,
+  repoRealpath,
+  filterExpr,
+  exhaustive = false,
+  testThreads,
+}) {
+  return [
+    "nextest",
+    "run",
+    "--archive-file",
+    archiveFile,
+    "--extract-to",
+    extractDir,
+    "--extract-overwrite",
+    "--workspace-remap",
+    repoRealpath,
+    "-E",
+    filterExpr,
+    ...(exhaustive ? ["--no-fail-fast"] : []),
+    "--test-threads",
+    String(testThreads),
+  ];
+}
+
+// Pure builders for the two shipped-cfg Cargo commands. `timingsEnabled` is a report-only capability
+// result: false omits Cargo's stable HTML timing report, while true adds it at the verified supported
+// position. Execution policy controls only nextest fail-fast; selection, profile and thread arguments stay
+// identical.
+export function buildShippedCfgCheckArgs({ timingsEnabled = false } = {}) {
+  return [
+    "check",
+    "--workspace",
+    "--all-targets",
+    "--profile",
+    "no-debug-assertions",
+    ...(timingsEnabled ? ["--timings"] : []),
+  ];
+}
+
+export function buildShippedCfgContractArgs({
+  timingsEnabled = false,
+  exhaustive = false,
+  testThreads,
+}) {
+  return [
+    "nextest",
+    "run",
+    "-p",
+    "verter_shipped_cfg_contract",
+    "--cargo-profile",
+    "no-debug-assertions",
+    ...(timingsEnabled ? ["--timings"] : []),
+    ...(exhaustive ? ["--no-fail-fast"] : []),
+    "--test-threads",
+    String(testThreads),
+  ];
+}
+
+// ----------------------------------------------------------------------------------------------------
+// PARALLEL GATE LANES. The front archive/list phase remains owned by runnerTarget/gateDir. Only the two
+// post-list execution lanes receive isolated mutable roots. Layout derivation is pure and fail-closed so a
+// future path edit cannot silently make Cargo targets, extracted archives, work files, or buffered output
+// aliases of one another.
+// ----------------------------------------------------------------------------------------------------
+function pathIsExactlyContained(parent, candidate) {
+  const rel = relative(parent, candidate);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+export function deriveGateLaneLayout(runnerTarget, gateDir) {
+  const runnerRoot = resolve(runnerTarget);
+  const gateRoot = resolve(gateDir);
+  if (!pathIsExactlyContained(runnerRoot, gateRoot)) {
+    throw new RangeError(
+      "gate work root must be exactly contained in the runner-owned target root",
+    );
+  }
+
+  const surfaceGateRoot = join(gateRoot, "lanes", "surface-1");
+  const shippedGateRoot = join(gateRoot, "lanes", "shipped-cfg");
+  const layout = {
+    front: { targetDir: runnerRoot, gateDir: gateRoot },
+    surface1: {
+      laneId: "surface-1",
+      targetDir: join(runnerRoot, "lanes", "surface-1", "target"),
+      workDir: join(surfaceGateRoot, "work"),
+      extractDir: join(surfaceGateRoot, "extract"),
+      outputFile: join(surfaceGateRoot, "output.log"),
+    },
+    shippedCfg: {
+      laneId: "shipped-cfg",
+      targetDir: join(runnerRoot, "lanes", "shipped-cfg", "target"),
+      workDir: join(shippedGateRoot, "work"),
+      outputFile: join(shippedGateRoot, "output.log"),
+    },
+  };
+  const mutableRoots = [
+    layout.surface1.targetDir,
+    layout.surface1.workDir,
+    layout.surface1.extractDir,
+    layout.surface1.outputFile,
+    layout.shippedCfg.targetDir,
+    layout.shippedCfg.workDir,
+    layout.shippedCfg.outputFile,
+  ].map((root) => resolve(root));
+  for (const candidate of mutableRoots) {
+    if (!pathIsExactlyContained(runnerRoot, candidate)) {
+      throw new RangeError(`lane mutable root is not exactly contained: ${candidate}`);
+    }
+  }
+  for (let i = 0; i < mutableRoots.length; i++) {
+    for (let j = i + 1; j < mutableRoots.length; j++) {
+      if (
+        mutableRoots[i] === mutableRoots[j] ||
+        pathIsExactlyContained(mutableRoots[i], mutableRoots[j]) ||
+        pathIsExactlyContained(mutableRoots[j], mutableRoots[i])
+      ) {
+        throw new RangeError(
+          `lane mutable roots must be pairwise-disjoint: ${mutableRoots[i]} / ${mutableRoots[j]}`,
+        );
+      }
+    }
+  }
+  return layout;
+}
+
+// One command plan delegates to the pre-existing command builders. It is shared by production and the
+// cargo-free architecture test, so overlap cannot introduce a second filter/profile/archive policy.
+// `shippedTestThreads` defaults to `testThreads` (the historical single-value behavior) when omitted, so
+// existing callers that size both lanes identically are unaffected; production sizes it independently via
+// `deriveGateLaneResourceSplit` so the two lanes' combined test-thread demand, when they run concurrently,
+// sums to one ceiling instead of each independently claiming the whole ceiling.
+export function buildGateLaneCommandPlan({
+  archiveFile,
+  surfaceExtractDir,
+  repoRealpath,
+  filterExpr,
+  exhaustive,
+  testThreads,
+  shippedTestThreads = testThreads,
+  shippedCheckTimingsEnabled = false,
+  shippedContractTimingsEnabled = false,
+}) {
+  return {
+    surface1: {
+      args: buildSurface1RunArgs({
+        archiveFile,
+        extractDir: surfaceExtractDir,
+        repoRealpath,
+        filterExpr,
+        exhaustive,
+        testThreads,
+      }),
+    },
+    shippedCfg: {
+      checkArgs: buildShippedCfgCheckArgs({ timingsEnabled: shippedCheckTimingsEnabled }),
+      contractArgs: buildShippedCfgContractArgs({
+        timingsEnabled: shippedContractTimingsEnabled,
+        exhaustive,
+        testThreads: shippedTestThreads,
+      }),
+    },
+  };
+}
+
+// Admit both lane promises before observing either result. A local Surface hard failure cancels only the
+// shipped lane; exhaustive mode always awaits both. Watchdog/setup receipts carry an exitCode and are left
+// to the supervisor's stronger aggregate abort authority.
+//
+// `concurrent` (default true — the historical/normal behavior) governs WHETHER both lanes are admitted
+// together. When the caller's `deriveGateLaneResourceSplit` reports `concurrent: false` (the ceiling is too
+// small to give both lanes their own core without the combined demand exceeding it), pass `concurrent:
+// false` here: `runShippedLane` is never even INVOKED until `runSurfaceLane` has settled, so only one
+// lane's `cargo`/`nextest` invocation is ever live and the ceiling is genuinely honored, not just described.
+// The serial path reuses the exact same cancellation rules as the concurrent path (local fail-fast, infra
+// exitCode) so the two scheduling modes differ only in overlap, never in verdict semantics.
+export async function orchestrateGateLanes({
+  exhaustive,
+  runSurfaceLane,
+  runShippedLane,
+  cancelLane,
+  concurrent = true,
+}) {
+  if (typeof exhaustive !== "boolean") throw new TypeError("exhaustive must be a boolean");
+  if (typeof concurrent !== "boolean") throw new TypeError("concurrent must be a boolean");
+  for (const [name, fn] of [
+    ["runSurfaceLane", runSurfaceLane],
+    ["runShippedLane", runShippedLane],
+    ["cancelLane", cancelLane],
+  ]) {
+    if (typeof fn !== "function") throw new TypeError(`${name} must be a function`);
+  }
+
+  if (!concurrent) {
+    // Serialized: `runShippedLane` is not called at all until `runSurfaceLane` resolves, so the two lanes'
+    // `cargo`/`nextest` invocations never overlap in wall-clock — the combined demand at any instant is
+    // exactly one lane's share, never both summed.
+    let surface;
+    try {
+      surface = await runSurfaceLane();
+    } catch (error) {
+      await cancelLane("shipped-cfg", "SURFACE_1_INFRASTRUCTURE");
+      throw error;
+    }
+    if (surface?.exitCode != null) {
+      await cancelLane("shipped-cfg", "SURFACE_1_INFRASTRUCTURE");
+      return { surface, shipped: null };
+    }
+    if (!exhaustive && surface?.hardFailure) {
+      await cancelLane("shipped-cfg", "SURFACE_1_FAIL_FAST");
+      return { surface, shipped: null };
+    }
+    let shipped;
+    try {
+      shipped = await runShippedLane();
+    } catch (error) {
+      await cancelLane("surface-1", "SHIPPED_CFG_INFRASTRUCTURE");
+      throw error;
+    }
+    if (shipped?.exitCode != null) {
+      await cancelLane("surface-1", "SHIPPED_CFG_INFRASTRUCTURE");
+    }
+    return { surface, shipped };
+  }
+
+  let surfacePromise;
+  let shippedPromise;
+  try {
+    surfacePromise = Promise.resolve(runSurfaceLane());
+  } catch (error) {
+    surfacePromise = Promise.reject(error);
+  }
+  try {
+    shippedPromise = Promise.resolve(runShippedLane());
+  } catch (error) {
+    shippedPromise = Promise.reject(error);
+  }
+
+  const surfaceCancellation = surfacePromise.then(
+    async (surface) => {
+      if (surface?.exitCode != null) {
+        await cancelLane("shipped-cfg", "SURFACE_1_INFRASTRUCTURE");
+      } else if (!exhaustive && surface?.hardFailure) {
+        await cancelLane("shipped-cfg", "SURFACE_1_FAIL_FAST");
+      }
+    },
+    () => cancelLane("shipped-cfg", "SURFACE_1_INFRASTRUCTURE"),
+  );
+  const shippedCancellation = shippedPromise.then(
+    async (shipped) => {
+      if (shipped?.exitCode != null) {
+        await cancelLane("surface-1", "SHIPPED_CFG_INFRASTRUCTURE");
+      }
+    },
+    () => cancelLane("surface-1", "SHIPPED_CFG_INFRASTRUCTURE"),
+  );
+  let surface;
+  let shipped;
+  try {
+    [surface, shipped] = await Promise.all([surfacePromise, shippedPromise]);
+  } catch (error) {
+    await Promise.allSettled([surfaceCancellation, shippedCancellation]);
+    throw error;
+  }
+  await Promise.all([surfaceCancellation, shippedCancellation]);
+  return { surface, shipped };
+}
+
+function receiptExitCode(receipt) {
+  return Number.isSafeInteger(receipt?.exitCode) ? receipt.exitCode : null;
+}
+
+// Pure final authority. Promise completion order cannot enter this function: it reads fixed receipt slots
+// and appends failures in Surface/check/contract order. Coverage is an independent green fence.
+export function reduceGateLaneReceipts({ surface = null, shipped = null } = {}) {
+  const exits = [receiptExitCode(surface), receiptExitCode(shipped)].filter(
+    (code) => code !== null,
+  );
+  if (exits.length > 0) {
+    const priority = [EXIT_MEMORY, EXIT_TIMEOUT, EXIT_STALL, EXIT_USAGE, EXIT_FAIL];
+    const exitCode = priority.find((code) => exits.includes(code)) ?? exits[0];
+    return {
+      verdict: null,
+      exitCode,
+      failures: [],
+      coverageComplete: false,
+      measurementComplete: false,
+      coverageDisposition: "aborted",
+    };
+  }
+
+  const surfaceComplete = Boolean(surface?.coverage?.parseable && surface?.coverage?.complete);
+  const shippedComplete = Boolean(
+    shipped?.check?.status === "ok" &&
+    shipped?.contract?.status === "ok" &&
+    shipped?.contract?.parseable &&
+    shipped?.contract?.complete &&
+    shipped?.parity?.complete &&
+    shipped?.parity?.matches,
+  );
+  const coverageComplete = surfaceComplete && shippedComplete;
+  const coverageDisposition = coverageComplete
+    ? "complete"
+    : shipped?.check?.status === "cancelled" || shipped?.contract?.status === "cancelled"
+      ? "cancelled-by-local-fail-fast"
+      : surface?.hardFailure || shipped?.hardFailure
+        ? "blocked-by-failure"
+        : "incomplete";
+  const failures = [];
+  for (const failure of surface?.failures || []) failures.push({ ...failure });
+  for (const failure of shipped?.failures || []) {
+    failures.push({
+      ...failure,
+      surface: String(failure.surface || "unknown").startsWith("shipped-cfg/")
+        ? failure.surface
+        : `shipped-cfg/${failure.surface || "unknown"}`,
+    });
+  }
+  if (!coverageComplete) {
+    const missing = [];
+    if (!surfaceComplete) missing.push("complete parseable Surface 1 receipt");
+    if (shipped?.check?.status !== "ok") missing.push("successful shipped-cfg check receipt");
+    if (
+      !shipped?.contract ||
+      shipped.contract.status !== "ok" ||
+      !shipped.contract.parseable ||
+      !shipped.contract.complete
+    ) {
+      missing.push("complete parseable shipped-cfg contract receipt");
+    }
+    if (!shipped?.parity?.complete || !shipped?.parity?.matches) {
+      missing.push("shipped-cfg expected-count parity");
+    }
+    failures.push({
+      surface: "gate/incomplete",
+      name: `<required parallel-lane coverage incomplete: ${missing.join("; ")}>`,
+    });
+  }
+  return {
+    verdict:
+      failures.length > 0 ? "FAIL" : surface?.toleratedOccurred ? "PASS-WITH-TOLERATED" : "PASS",
+    exitCode: null,
+    failures,
+    coverageComplete,
+    measurementComplete: coverageComplete,
+    coverageDisposition,
+  };
+}
+
+export const GATE_LANE_TRANSCRIPT_HEADERS = Object.freeze({
+  "surface-1": "SURFACE 1: nextest run from the archive (process isolation) …",
+  "shipped-check":
+    "SHIPPED-CFG GUARD: cargo check --workspace --all-targets --profile no-debug-assertions …",
+  "shipped-contract":
+    "SHIPPED-CFG GUARD: cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions …",
+});
+
+export function canonicalGateLaneTranscriptSegments({ surface = null, shipped = null } = {}) {
+  return [
+    {
+      phaseId: "surface-1",
+      header: GATE_LANE_TRANSCRIPT_HEADERS["surface-1"],
+      output: String(surface?.output || ""),
+    },
+    {
+      phaseId: "shipped-check",
+      header: GATE_LANE_TRANSCRIPT_HEADERS["shipped-check"],
+      output: String(shipped?.check?.output || ""),
+    },
+    {
+      phaseId: "shipped-contract",
+      header: GATE_LANE_TRANSCRIPT_HEADERS["shipped-contract"],
+      output: String(shipped?.contract?.output || ""),
+    },
   ];
 }
 
@@ -1555,8 +2110,8 @@ export function buildNextestArchiveArgs(opts) {
 // Measured here: 98s cold, 0.8s warm. Two of them tripped the gate's own 360s budget in a real run while
 // passing 3/3 in isolation (already-raised once). `.config/nextest.toml` carries a `slow-timeout` override
 // for the same class (see the "trybuild compile-fail tests" comment there) — that override is UNCHANGED
-// and still applies to anyone running these tests directly; this exclusion only removes them from the
-// three canonical gate surfaces.
+// and still applies to anyone running these tests directly; this exclusion removes them from canonical
+// archive-backed Surface 1. The shipped contract has an independent package-only inventory.
 //
 // One row per file that actually calls `trybuild::TestCases::new()` — verified against a real
 // `cargo nextest list --workspace --message-format json` listing, not guessed from filenames. A
@@ -1590,9 +2145,13 @@ export function buildTrybuildExclusionFilterExpr(suites = TRYBUILD_EXCLUDED_SUIT
   return `not (${arms.join(" or ")})`;
 }
 
-// Per-row skip args for a DIRECTLY-executed libtest binary (SURFACE 2), which never sees a nextest
-// filterset. `--skip <prefix>` is a plain (non-`--exact`) substring filter, verified to remove every test
-// under the prefix from BOTH `--list` and a real run while leaving unrelated same-named tests untouched.
+export function buildCanonicalSurface1FilterExpr(suites = TRYBUILD_EXCLUDED_SUITES) {
+  return `(${buildTrybuildExclusionFilterExpr(suites)}) and not package(verter_shipped_cfg_contract)`;
+}
+
+// Legacy Surface-2 selftest fixture: per-row skip args for a directly executed libtest binary, which never
+// sees a nextest filterset. Production gate.mjs no longer calls this helper. `--skip <prefix>` remains a
+// plain (non-`--exact`) substring filter for the frozen regression classifier exercised in gate-selftest.mjs.
 export function trybuildSkipArgsForPackage(pkg, suites = TRYBUILD_EXCLUDED_SUITES) {
   const args = [];
   for (const s of suites) {
@@ -1652,9 +2211,10 @@ export const TOLERATED_TEST_NAMES = new Set([
   // Post-consolidation, both env-only freshness tests live in the single `verter_protocol::main`
   // integration binary under the module path `cases::typeinfo_proto_ts_freshness::<fn>`. nextest renders
   // a run line as "<STATUS> [   …s] (n/m) verter_protocol::main cases::typeinfo_proto_ts_freshness::<fn>"
-  // (the last whitespace token is the bare libtest path), and a direct libtest run prints
-  // "test cases::typeinfo_proto_ts_freshness::<fn> ... FAILED" — so the EXACT name on BOTH surfaces is the
-  // `cases::`-prefixed module path. (Pre-consolidation these were a standalone `typeinfo_proto_ts_freshness`
+  // (the last whitespace token is the bare libtest path). The retained legacy direct-libtest classifier's
+  // fixture prints "test cases::typeinfo_proto_ts_freshness::<fn> ... FAILED", so the exact name in both
+  // active Surface 1 and that selftest-only fixture is the `cases::`-prefixed module path.
+  // (Pre-consolidation these were a standalone `typeinfo_proto_ts_freshness`
   // binary; that bare/`typeinfo_proto_ts_freshness::`-qualified form no longer exists in the archive.)
   "cases::typeinfo_proto_ts_freshness::typeinfo_ts_bindings_are_byte_equal_to_regenerated_buf_output",
   "cases::typeinfo_proto_ts_freshness::proto_ts_bindings_byte_pinned_repo_wide",
@@ -1689,6 +2249,87 @@ export function err(msg) {
 // ----------------------------------------------------------------------------------------------------
 export const PREPARE_SUCCESS_MARKER = "PREPARED_NOT_GATE";
 
+// A Windows proc-macro test harness is a real executable suite, but unlike ordinary target test binaries
+// it is built for the host and dynamically loads Rust's host libraries. cargo-nextest supplies the listed
+// host libdir while running it; --prepare's direct first-launch must reproduce that loader environment.
+// The source of truth is the same nextest list JSON that supplied the suite. Missing/malformed metadata is
+// an explicit warm setup failure, never a reason to skip the suite or fall back to ambient process.env.
+export function buildPrepareWarmSpawnEnv({
+  suite,
+  rustBuildMeta,
+  baseEnv,
+  windows = IS_WINDOWS,
+} = {}) {
+  if (!windows || suite?.kind !== "proc-macro") return { ok: true, env: baseEnv };
+
+  const binaryId = suite?.["binary-id"] || "?";
+  const buildPlatform = suite?.["build-platform"];
+  const libdir =
+    typeof buildPlatform === "string" && buildPlatform !== ""
+      ? rustBuildMeta?.platforms?.[buildPlatform]?.libdir
+      : null;
+  if (
+    libdir?.status !== "available" ||
+    typeof libdir.path !== "string" ||
+    !isCwdIndependentAbsolute(libdir.path, true)
+  ) {
+    return {
+      ok: false,
+      detail:
+        `prepare: proc-macro suite ${binaryId} has no usable Windows runtime libdir for listed ` +
+        `build platform ${JSON.stringify(buildPlatform)} (expected rust-build-meta.platforms` +
+        `[build-platform].libdir with status="available" and a CWD-independent absolute path)`,
+    };
+  }
+  if (baseEnv === null || typeof baseEnv !== "object" || Array.isArray(baseEnv)) {
+    return {
+      ok: false,
+      detail: `prepare: proc-macro suite ${binaryId} has no constructed base environment`,
+    };
+  }
+
+  const env = { ...baseEnv };
+  const pathKey = findPathEnvKey(baseEnv, true);
+  const priorPath = pathKey === null ? "" : baseEnv[pathKey];
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === "PATH") delete env[key];
+  }
+  const libdirFolded = libdir.path.toUpperCase();
+  const priorComponents =
+    typeof priorPath === "string" && priorPath !== ""
+      ? priorPath
+          .split(pathDelimiterFor(true))
+          .filter((component) => component.toUpperCase() !== libdirFolded)
+      : [];
+  env.PATH = [libdir.path, ...priorComponents].join(pathDelimiterFor(true));
+  return { ok: true, env };
+}
+
+// The only successful direct warm is an exact numeric status 0 with no simultaneous signal or spawn error.
+// Keep the classification pure so STATUS_DLL_NOT_FOUND, ordinary non-zero exits, contradictory result
+// shapes, signals, and timeouts/spawn failures remain cargo-free testable and can never be tolerated as
+// "probably warmed".
+export function classifyPrepareWarmResult(result) {
+  const hasSignal = result?.signal !== null && result?.signal !== undefined;
+  const hasSpawnError = result?.error !== null && result?.error !== undefined;
+  if (result?.status === 0 && !hasSignal && !hasSpawnError) return { ok: true };
+
+  const details = [];
+  if (result?.status !== null && result?.status !== undefined) {
+    details.push(`exit ${result.status}`);
+  }
+  if (hasSignal) details.push(`signal ${result.signal}`);
+  if (hasSpawnError) {
+    const spawnError = result.error;
+    const spawnErrorDetail =
+      typeof spawnError?.message === "string" && spawnError.message !== ""
+        ? spawnError.message
+        : String(spawnError);
+    details.push(`spawn error ${spawnErrorDetail}`);
+  }
+  return { ok: false, detail: details.join("; ") || "no exit status (spawn/timeout)" };
+}
+
 export function preparedSuccessLines(suiteCount, warmed, warmFailures, missing) {
   // NB: no line below may contain the token "PASS" — a CI `grep PASS` of prepare's output must find nothing
   // that looks like a gate verdict. `assertNoPassToken` enforces this on the assembled array.
@@ -1696,8 +2337,9 @@ export function preparedSuccessLines(suiteCount, warmed, warmFailures, missing) 
     `prepare: archived + listed ${suiteCount} suites; warmed first-launch assessment for ${warmed} ` +
       `binaries (${warmFailures} warm-list failure(s), ${missing} missing binary/-ies)`,
     "prepare is a PRE-WARM (it moves the legitimate first-launch assessment earlier); it does NOT disable " +
-      "Gatekeeper or remove the cost, and it is NOT a gate verdict — the gate is `node scripts/gate.mjs`.",
-    `${PREPARE_SUCCESS_MARKER}: tests were NOT run — run the gate (\`node scripts/gate.mjs\`, no mode flag) ` +
+      "Gatekeeper or remove the cost, and it is NOT a gate verdict — run a bare or exhaustive gate.",
+    `${PREPARE_SUCCESS_MARKER}: tests were NOT run — run the local gate (\`node scripts/gate.mjs\`) or ` +
+      `the exhaustive gate (\`node scripts/gate.mjs --exhaustive\`) ` +
       "to actually build + verify the suite. A prepare exit 0 means PREPARED, never a verdict.",
   ];
   return assertNoPassToken(lines);
@@ -1753,16 +2395,55 @@ export function parseDuration(d) {
 // Returns a normalized non-empty string, or "" if the identity is uncheckable (the caller FAILs CLOSED on
 // an alive-but-uncheckable holder).
 // ----------------------------------------------------------------------------------------------------
+const DOTNET_UNIX_EPOCH_MS = 62_135_596_800_000;
+
+export function normalizeWindowsWmicCreationDate(value) {
+  const match =
+    /^\s*CreationDate=(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})\s*$/i.exec(
+      String(value || ""),
+    );
+  if (!match) return "";
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, micros, sign, zone] =
+    match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const millis = Number(micros.slice(0, 3));
+  const wallMs = Date.UTC(year, month - 1, day, hour, minute, second, millis);
+  const wall = new Date(wallMs);
+  if (
+    year < 1601 ||
+    wall.getUTCFullYear() !== year ||
+    wall.getUTCMonth() !== month - 1 ||
+    wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour ||
+    wall.getUTCMinutes() !== minute ||
+    wall.getUTCSeconds() !== second ||
+    wall.getUTCMilliseconds() !== millis
+  ) {
+    return "";
+  }
+  const offsetMinutes = Number(zone) * (sign === "+" ? 1 : -1);
+  const dotnetMs = wallMs - offsetMinutes * 60_000 + DOTNET_UNIX_EPOCH_MS;
+  return Number.isSafeInteger(dotnetMs) ? `win-start-ms:${dotnetMs}` : "";
+}
+
 export function procIdentity(pid) {
   if (!/^\d+$/.test(String(pid))) return "";
   if (IS_WINDOWS) {
-    // PowerShell CIM creation date (preferred), falling back to wmic.
+    // Get-Process is materially faster than a CIM query. Millisecond-normalized start time is shared by
+    // every bulk snapshot below, avoiding representation drift between DateTime sources.
     let r = spawnSync(
       "powershell",
       [
         "-NoProfile",
+        "-NonInteractive",
         "-Command",
-        `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CreationDate`,
+        `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; ` +
+          `if ($p) { "win-start-ms:$([math]::Floor($p.StartTime.ToUniversalTime().Ticks / 10000))" }`,
       ],
       { encoding: "utf8", windowsHide: true },
     );
@@ -1776,12 +2457,28 @@ export function procIdentity(pid) {
           windowsHide: true,
         },
       );
-      out = (r.stdout || "").trim();
+      out = normalizeWindowsWmicCreationDate(r.stdout || "");
     }
     return out.replace(/\s+/g, " ").trim();
   }
   const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
   return (r.stdout || "").trim().replace(/\s+/g, " ");
+}
+
+export function classifyProcessIdentityComparison(storedIdentity, liveIdentity) {
+  const stored = String(storedIdentity || "");
+  const live = String(liveIdentity || "");
+  const bothPresent = Boolean(stored && live);
+  const hasRawWmic = /^\s*CreationDate=/i.test(stored) || /^\s*CreationDate=/i.test(live);
+  const comparable =
+    bothPresent &&
+    !hasRawWmic &&
+    stored.startsWith("win-start-ms:") === live.startsWith("win-start-ms:");
+  return {
+    comparable,
+    matches: comparable && stored === live,
+    provesReuse: comparable && stored !== live,
+  };
 }
 
 // Is a pid alive? EPERM ⇒ alive (a process we cannot signal but that exists).
@@ -1912,49 +2609,47 @@ export async function reapTree(pid, graceMs, verifyBudgetMs = 4000) {
 // target-dir processes.
 // ----------------------------------------------------------------------------------------------------
 export function listProcesses() {
-  // Returns [{ pid, cmd }]. POSIX: `ps -axww -o pid=,command=`. Windows: `wmic process get ...` or CIM.
+  // Returns [{ pid, cmd, identity }]. Every provenance signal is conditioned on this start identity.
   if (IS_WINDOWS) {
     let r = spawnSync(
       "powershell",
       [
         "-NoProfile",
         "-Command",
-        'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }',
+        'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`twin-start-ms:$([math]::Floor($_.CreationDate.ToUniversalTime().Ticks / 10000))`t$($_.CommandLine)" }',
       ],
       { encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
     );
     let out = r.stdout || "";
     if (!out.trim()) {
-      r = spawnSync("wmic", ["process", "get", "ProcessId,CommandLine", "/format:csv"], {
-        encoding: "utf8",
-        windowsHide: true,
-        maxBuffer: 64 * 1024 * 1024,
-      });
+      r = spawnSync(
+        "wmic",
+        ["process", "get", "ProcessId,CreationDate,CommandLine", "/format:csv"],
+        {
+          encoding: "utf8",
+          windowsHide: true,
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      );
       out = r.stdout || "";
     }
     const rows = [];
     for (const line of out.split(/\r?\n/)) {
-      const tabIdx = line.indexOf("\t");
-      if (tabIdx > 0) {
-        const pid = line.slice(0, tabIdx).trim();
-        const cmd = line.slice(tabIdx + 1).trim();
-        if (/^\d+$/.test(pid)) rows.push({ pid: parseInt(pid, 10), cmd });
+      const firstTab = line.indexOf("\t");
+      const secondTab = firstTab < 0 ? -1 : line.indexOf("\t", firstTab + 1);
+      if (firstTab > 0 && secondTab > firstTab) {
+        const pid = line.slice(0, firstTab).trim();
+        const identity = line.slice(firstTab + 1, secondTab).trim();
+        const cmd = line.slice(secondTab + 1).trim();
+        if (/^\d+$/.test(pid) && identity) rows.push({ pid: parseInt(pid, 10), cmd, identity });
         continue;
       }
-      // wmic CSV fallback: Node,CommandLine,ProcessId
-      const parts = line.split(",");
-      if (parts.length >= 3) {
-        const pid = parts[parts.length - 1].trim();
-        const cmd = parts
-          .slice(1, parts.length - 1)
-          .join(",")
-          .trim();
-        if (/^\d+$/.test(pid)) rows.push({ pid: parseInt(pid, 10), cmd });
-      }
+      // WMIC's CSV format is command-line ambiguous when argv contains commas. Refuse to synthesize an
+      // identity from an ambiguous row; an empty fallback is fail-closed (it sends no provenance signal).
     }
     return rows;
   }
-  const r = spawnSync("ps", ["-axww", "-o", "pid=,command="], {
+  const r = spawnSync("ps", ["-axww", "-o", "pid=,lstart=,command="], {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
   });
@@ -1963,12 +2658,9 @@ export function listProcesses() {
   for (const line of out.split("\n")) {
     const trimmed = line.replace(/^\s+/, "");
     if (!trimmed) continue;
-    const sp = trimmed.indexOf(" ");
-    if (sp < 0) continue;
-    const pidTok = trimmed.slice(0, sp);
-    if (!/^\d+$/.test(pidTok)) continue;
-    const cmd = trimmed.slice(sp + 1);
-    rows.push({ pid: parseInt(pidTok, 10), cmd });
+    const match = /^(\d+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.*)$/.exec(trimmed);
+    if (!match) continue;
+    rows.push({ pid: Number(match[1]), identity: match[2].replace(/\s+/g, " "), cmd: match[3] });
   }
   return rows;
 }
@@ -1989,76 +2681,180 @@ export function listProcesses() {
 // SURFACE 1/3 run produced. Parent-pid tree walk (mirroring `parseWindowsProcessTableRss`, which was never
 // vulnerable to this because Windows job-tree membership is a parent-pid property, not group membership)
 // finds every descendant regardless of what process group it reassigned itself into.
-export function parsePosixProcessTableRss(text, rootPid) {
-  const rows = new Map();
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line);
-    if (!match) continue;
-    rows.set(Number(match[1]), { parentPid: Number(match[2]), rssKiB: Number(match[3]) });
-  }
-  if (!rows.has(Number(rootPid))) {
-    return {
-      ok: false,
-      rssBytes: 0,
-      processCount: 0,
-      detail: "process tree root absent from ps snapshot",
-    };
-  }
-  const included = new Set([Number(rootPid)]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const [pid, row] of rows) {
-      if (!included.has(pid) && included.has(row.parentPid)) {
-        included.add(pid);
-        changed = true;
+function parseProcessForestRss(rows, roots, unitBytes, absentDetail) {
+  const perRoot = [];
+  const claimedByPid = new Map();
+  for (const root of Array.isArray(roots) ? roots : []) {
+    const rootPid = Number(root.pid);
+    const expectedRootIdentity = root.identity || root.rootIdentity || "";
+    const identityRequired =
+      Object.prototype.hasOwnProperty.call(root, "identity") ||
+      Object.prototype.hasOwnProperty.call(root, "rootIdentity");
+    const rootRow = rows.get(rootPid);
+    if (!root.closed && (!Number.isInteger(rootPid) || rootPid <= 0 || !rootRow)) {
+      const detail = `${absentDetail}: live root ${rootPid || String(root.pid)} missing`;
+      return { ok: false, rssBytes: 0, processCount: 0, detail, error: detail };
+    }
+    if (!root.closed && identityRequired && !expectedRootIdentity) {
+      const detail = `process identity unavailable at live root ${rootPid}`;
+      return { ok: false, rssBytes: 0, processCount: 0, detail, error: detail };
+    }
+    if (!root.closed && root.pendingIdentity && !rootRow.identity) {
+      const detail = `process identity unavailable at pending live root ${rootPid}`;
+      return { ok: false, rssBytes: 0, processCount: 0, detail, error: detail };
+    }
+    if (
+      !root.closed &&
+      expectedRootIdentity &&
+      (!rootRow.identity || rootRow.identity !== expectedRootIdentity)
+    ) {
+      const detail =
+        `process identity mismatch at live root ${rootPid}: expected ${expectedRootIdentity}, got ` +
+        `${rootRow.identity || "<uncheckable>"}`;
+      return { ok: false, rssBytes: 0, processCount: 0, detail, error: detail };
+    }
+    const included = new Set();
+    if (
+      !root.closed &&
+      rootRow &&
+      (!expectedRootIdentity || rootRow.identity === expectedRootIdentity)
+    ) {
+      included.add(rootPid);
+    }
+    for (const owned of root.ownedIdentities || []) {
+      const row = rows.get(Number(owned.pid));
+      if (row?.identity && owned.identity && row.identity === owned.identity) {
+        included.add(Number(owned.pid));
       }
     }
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [pid, row] of rows) {
+        if (!included.has(pid) && included.has(row.parentPid)) {
+          included.add(pid);
+          changed = true;
+        }
+      }
+    }
+    if (root.closed && included.size === 0) continue;
+    for (const pid of included) {
+      const prior = claimedByPid.get(pid);
+      if (prior !== undefined) {
+        const detail =
+          `process forest overlap at pid ${pid}: registration ${String(prior)} and ` +
+          `${String(root.tokenId)}`;
+        return { ok: false, rssBytes: 0, processCount: 0, detail, error: detail };
+      }
+      claimedByPid.set(pid, root.tokenId);
+    }
+    let rssBytes = 0;
+    for (const pid of included) rssBytes += rows.get(pid).rss * unitBytes;
+    const identities = [...included]
+      .map((pid) => ({ pid, identity: rows.get(pid).identity || "" }))
+      .filter((row) => row.identity);
+    perRoot.push({
+      tokenId: root.tokenId,
+      laneId: root.laneId,
+      pid: rootPid,
+      rssBytes,
+      processCount: included.size,
+      pids: [...included],
+      identities,
+    });
   }
-  let rssKiB = 0;
-  for (const pid of included) rssKiB += rows.get(pid).rssKiB;
-  return { ok: true, rssBytes: rssKiB * 1024, processCount: included.size };
+  const perLane = {};
+  for (const row of perRoot) {
+    const lane = perLane[row.laneId] || { rssBytes: 0, processCount: 0 };
+    lane.rssBytes += row.rssBytes;
+    lane.processCount += row.processCount;
+    perLane[row.laneId] = lane;
+  }
+  return {
+    ok: true,
+    rssBytes: perRoot.reduce((sum, row) => sum + row.rssBytes, 0),
+    processCount: perRoot.reduce((sum, row) => sum + row.processCount, 0),
+    perRoot,
+    perLane,
+  };
+}
+
+export function parsePosixProcessForestRss(text, roots) {
+  const rows = new Map();
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)(?:\s+(.+?))?\s*$/.exec(line);
+    if (!match) continue;
+    rows.set(Number(match[1]), {
+      parentPid: Number(match[2]),
+      rss: Number(match[3]),
+      identity: (match[4] || "").trim().replace(/\s+/g, " "),
+    });
+  }
+  return parseProcessForestRss(rows, roots, 1024, "process tree root absent from ps snapshot");
+}
+
+export function parsePosixProcessTableRss(text, rootPid) {
+  const result = parsePosixProcessForestRss(text, [
+    { tokenId: 1, laneId: "single-step", pid: rootPid },
+  ]);
+  return result.ok
+    ? { ok: true, rssBytes: result.rssBytes, processCount: result.processCount }
+    : {
+        ok: false,
+        rssBytes: 0,
+        processCount: 0,
+        detail: "process tree root absent from ps snapshot",
+      };
 }
 
 // Parse `pid<TAB>parent-pid<TAB>working-set-bytes` rows and recursively sum a Windows process tree.
-export function parseWindowsProcessTableRss(text, rootPid) {
+export function parseWindowsProcessForestRss(text, roots) {
   const rows = new Map();
   for (const line of String(text || "").split(/\r?\n/)) {
-    const match = /^\s*(\d+)\s+([0-9]+)\s+([0-9]+)\s*$/.exec(line);
+    const match = /^\s*(\d+)\s+([0-9]+)\s+([0-9]+)(?:\s+(.+?))?\s*$/.exec(line);
     if (!match) continue;
-    rows.set(Number(match[1]), { parentPid: Number(match[2]), rssBytes: Number(match[3]) });
+    rows.set(Number(match[1]), {
+      parentPid: Number(match[2]),
+      rss: Number(match[3]),
+      identity: (match[4] || "").trim(),
+    });
   }
-  if (!rows.has(Number(rootPid))) {
-    return {
-      ok: false,
-      rssBytes: 0,
-      processCount: 0,
-      detail: "tree root absent from CIM snapshot",
-    };
-  }
-  const included = new Set([Number(rootPid)]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const [pid, row] of rows) {
-      if (!included.has(pid) && included.has(row.parentPid)) {
-        included.add(pid);
-        changed = true;
-      }
-    }
-  }
-  let rssBytes = 0;
-  for (const pid of included) rssBytes += rows.get(pid).rssBytes;
-  return { ok: true, rssBytes, processCount: included.size };
+  return parseProcessForestRss(rows, roots, 1, "tree root absent from CIM snapshot");
+}
+
+export function parseWindowsProcessTableRss(text, rootPid) {
+  const result = parseWindowsProcessForestRss(text, [
+    { tokenId: 1, laneId: "single-step", pid: rootPid },
+  ]);
+  return result.ok
+    ? { ok: true, rssBytes: result.rssBytes, processCount: result.processCount }
+    : { ok: false, rssBytes: 0, processCount: 0, detail: "tree root absent from CIM snapshot" };
+}
+
+function parseProcessForestSnapshotWithExitRaces(parser, text, roots) {
+  const first = parser(text, roots);
+  if (first.ok) return first;
+  // A root may exit while the single native snapshot command is in flight, before Node can dispatch the
+  // child's close event. Reparse the SAME snapshot (never issue a second OS query) with only roots proven
+  // dead after capture marked closed. A still-live missing/overlapping root remains a hard monitor failure.
+  let changed = false;
+  const after = roots.map((root) => {
+    if (root.closed || pidAlive(root.pid)) return root;
+    changed = true;
+    return { ...root, closed: true };
+  });
+  return changed ? parser(text, after) : first;
 }
 
 // Platform-native process-tree RSS snapshot. The production watchdog treats repeated inability to sample
 // as a memory-safety abort, so a missing/broken process inspector cannot silently disable the ceiling.
-export function sampleProcessTreeRssBytes(rootPid) {
-  if (!rootPid) return { ok: false, rssBytes: 0, processCount: 0, detail: "child pid unavailable" };
+export function sampleProcessForestRssBytes(roots) {
+  if (!Array.isArray(roots) || roots.length === 0) {
+    return { ok: true, rssBytes: 0, processCount: 0, perRoot: [], perLane: {} };
+  }
   if (IS_WINDOWS) {
     const command =
-      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.WorkingSetSize)" }';
+      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.WorkingSetSize)`twin-start-ms:$([math]::Floor($_.CreationDate.ToUniversalTime().Ticks / 10000))" }';
     const result = spawnSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", command],
@@ -2077,10 +2873,14 @@ export function sampleProcessTreeRssBytes(rootPid) {
         detail: result.error ? result.error.message : `PowerShell CIM exited ${result.status}`,
       };
     }
-    return parseWindowsProcessTableRss(result.stdout, rootPid);
+    return parseProcessForestSnapshotWithExitRaces(
+      parseWindowsProcessForestRss,
+      result.stdout,
+      roots,
+    );
   }
 
-  const result = spawnSync("ps", ["-axww", "-o", "pid=,ppid=,rss="], {
+  const result = spawnSync("ps", ["-axww", "-o", "pid=,ppid=,rss=,lstart="], {
     encoding: "utf8",
     timeout: 5_000,
     maxBuffer: 64 * 1024 * 1024,
@@ -2093,7 +2893,15 @@ export function sampleProcessTreeRssBytes(rootPid) {
       detail: result.error ? result.error.message : `ps exited ${result.status}`,
     };
   }
-  return parsePosixProcessTableRss(result.stdout, rootPid);
+  return parseProcessForestSnapshotWithExitRaces(parsePosixProcessForestRss, result.stdout, roots);
+}
+
+export function sampleProcessTreeRssBytes(rootPid) {
+  if (!rootPid) return { ok: false, rssBytes: 0, processCount: 0, detail: "child pid unavailable" };
+  const result = sampleProcessForestRssBytes([{ tokenId: 1, laneId: "single-step", pid: rootPid }]);
+  return result.ok
+    ? { ok: true, rssBytes: result.rssBytes, processCount: result.processCount }
+    : { ok: false, rssBytes: 0, processCount: 0, detail: result.detail };
 }
 
 export function isBuildTool(cmd) {
@@ -2162,10 +2970,16 @@ export function cmdReferencesTargetDir(cmd, targetDir) {
   return targetDirMatches(cmd, targetDir, IS_WINDOWS);
 }
 
-export async function provenanceSweep(targetDir, graceMs) {
-  if (!targetDir) return;
+export async function provenanceSweep(targetDir, graceMs, options = {}) {
+  if (!targetDir) return { matched: 0, signalled: 0, identityMismatches: 0 };
+  const {
+    listProcessesFn = listProcesses,
+    processIdentityFn = procIdentity,
+    delayFn = delay,
+    signalProcessFn = null,
+  } = options;
   const self = process.pid;
-  const term = (pid) => {
+  const nativeSignal = (pid, signal) => {
     if (IS_WINDOWS) {
       // /T tears down the whole tree (a swept cargo.exe may have spawned rustc.exe children), /F forces it.
       spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
@@ -2174,35 +2988,42 @@ export async function provenanceSweep(targetDir, graceMs) {
       });
     } else {
       try {
-        process.kill(pid, "SIGTERM");
+        process.kill(pid, signal);
       } catch {
         /* ignore */
       }
     }
   };
-  const kill = (pid) => {
-    if (IS_WINDOWS) {
-      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
-        windowsHide: true,
-        stdio: "ignore",
-      });
-    } else {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        /* ignore */
-      }
-    }
-  };
+  const signal = signalProcessFn || nativeSignal;
   const matches = () =>
-    listProcesses().filter(
-      (p) => p.pid !== self && isBuildTool(p.cmd) && cmdReferencesTargetDir(p.cmd, targetDir),
+    listProcessesFn().filter(
+      (p) =>
+        p.pid !== self &&
+        p.identity &&
+        isBuildTool(p.cmd) &&
+        cmdReferencesTargetDir(p.cmd, targetDir),
     );
+  let matched = 0;
+  let signalled = 0;
+  let identityMismatches = 0;
+  const signalExact = (candidate, signalName) => {
+    matched += 1;
+    const liveIdentity = processIdentityFn(candidate.pid);
+    if (!liveIdentity || liveIdentity !== candidate.identity) {
+      identityMismatches += 1;
+      return;
+    }
+    signal(candidate.pid, signalName);
+    signalled += 1;
+  };
   // TERM pass.
-  for (const p of matches()) term(p.pid);
-  await delay(Math.min(graceMs, 1500));
+  const termMatches = matches();
+  for (const p of termMatches) signalExact(p, "SIGTERM");
+  if (termMatches.length === 0) return { matched, signalled, identityMismatches };
+  await delayFn(Math.min(graceMs, 1500));
   // KILL pass.
-  for (const p of matches()) kill(p.pid);
+  for (const p of matches()) signalExact(p, "SIGKILL");
+  return { matched, signalled, identityMismatches };
 }
 
 // The gate-owned sentinel marker written INSIDE the lockdir at acquire time. A directory is reclaimable
@@ -2440,12 +3261,17 @@ export class Mutex {
         // run concurrently, which is worse than a manual cleanup, so an empty/uncheckable identity is
         // NEVER treated as evidence of PID reuse.
         const liveIdent = procIdentity(holderPid);
-        const proveReuse = holderIdent && liveIdent && holderIdent !== liveIdent;
+        const identityComparison = classifyProcessIdentityComparison(holderIdent, liveIdent);
+        const proveReuse = identityComparison.provesReuse;
         if (!proveReuse) {
           const ageS = Math.round((nowMs() - (owner.createdAtMs || this._lockdirBirthMs())) / 1000);
-          if (holderIdent && liveIdent) {
+          if (identityComparison.matches) {
             // Identities both present and equal => genuinely the same live holder.
             this.refuseDetail = `live holder pid=${holderPid} age=${ageS}s targetDir=${owner.targetDir || "?"}`;
+          } else if (holderIdent && liveIdent && !identityComparison.comparable) {
+            this.refuseDetail =
+              `holder pid=${holderPid} appears alive but PID reuse cannot be ruled out because the stored ` +
+              `and live start identities use different formats — refusing (fail-closed)`;
           } else {
             // One or both identities empty/uncheckable while the PID is alive => fail-closed refusal.
             this.refuseDetail =
@@ -2535,326 +3361,999 @@ export function artifactSignature(dir) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// Module-level ACTIVE-STEP handle. runContainedStep registers the CURRENT live child (its pid IS the PGID
-// on POSIX; the tree root on Windows) here for the duration of that step and clears it on completion. The
-// SIGINT/SIGTERM teardown reads this (via reapActiveStep) and reaps the SAME tree (the negative-PGID
-// TERM→grace→KILL / Windows `taskkill /T /F`) BEFORE running the provenance sweep and releasing the mutex —
-// so an external signal to ONLY the gate pid (not the whole group) cannot leave a running
-// cargo/nextest/libtest tree orphaned while the lock is released and a second gate starts. Without this,
-// the signal handler ran only the provenance sweep, which skips direct libtest binaries and any
-// non-build-tool child, leaving the active test tree alive past lock release.
+// Exact multi-registration tree teardown. A registration is identified by a monotonic token plus the
+// ChildProcess object that was admitted synchronously. Native snapshots capture descendant creation
+// identities; signals are sent only while those exact identities remain live. This handles descendants
+// that establish their own POSIX process groups without broad name/path killing or PID-reuse hazards.
 // ----------------------------------------------------------------------------------------------------
-let ACTIVE_STEP = null; // { pid, targetDir, killGraceMs } | null
-
-// Reap the active step's whole tree, returning the VERIFIED reap outcome (so teardown can record whether
-// the tree was confirmed dead before release). Returns null when there is no active step.
-export async function reapActiveStep() {
-  const active = ACTIVE_STEP;
-  if (!active || !active.pid) return null;
-  try {
-    return await reapTree(active.pid, active.killGraceMs);
-  } catch {
-    /* best-effort reap */
-    return { reaped: true, confirmedDead: false, wasLive: true };
-  }
+function exactChildTerminal(registration) {
+  const child = registration?.child;
+  return Boolean(
+    registration?.childClosed ||
+    (child &&
+      ((child.exitCode !== null && child.exitCode !== undefined) ||
+        (child.signalCode !== null && child.signalCode !== undefined))),
+  );
 }
 
-// ----------------------------------------------------------------------------------------------------
-// runContainedStep — launch one external command in a NEW process group (POSIX) / job-tree (Windows) under
-// the whole-gate deadline + the phase-appropriate stall detector, capturing combined stdout+stderr to a
-// growing buffer (also mirrored to our stderr). Returns
-// { code, reason, durationMs, stdout, stderr, spawnError, reapConfirmedDead, signalName, peakRssBytes }.
-//   reason: "MEMORY" | "MEMORY_MONITOR" | "TIMEOUT" | "STALL" | "".
-//   reapConfirmedDead: when a watchdog reap ran, whether the child tree was VERIFIED dead afterward
-//     (true), false if death could not be confirmed within the bound. Undefined when no reap ran.
-//   signalName: the SIGNAL name the child was terminated by (e.g. "SIGABRT") when it was signal-killed
-//     (code===128 stand-in), "" when it exited normally. Lets a caller report the real signal instead of
-//     the misleading synthesized "exit 128".
-//
-//   phase: "build" => progress is byte growth OR target-tree artifact growth.
-//          "test"  => progress is byte growth ONLY (a silent test binary is a hang).
-//
-//   deadlineMs: the WHOLE-GATE absolute deadline (ms epoch). The step is bounded by it; when it passes the
-//               step is reaped as TIMEOUT. (The same deadline is shared across every step so the budget is
-//               whole-gate, not per-step.)
-//
-//   killGraceMs: the SIGTERM->SIGKILL grace used for a TIMEOUT/STALL (or external-signal) reap. Defaults to
-//                5000ms.
-//   memoryKillGraceMs: the SEPARATE, much shorter SIGTERM->SIGKILL grace used ONLY for a MEMORY /
-//                MEMORY_MONITOR reap (defaults to MEMORY_KILL_GRACE_MS, 200ms) — a ceiling breach means the
-//                tree is allocating right now, so it does not get the same multi-second grace a well-behaved
-//                build/test process gets on TIMEOUT/STALL.
-// ----------------------------------------------------------------------------------------------------
-export async function runContainedStep(opts) {
+function processIdentitySnapshot() {
+  const rows = new Map();
+  if (IS_WINDOWS) {
+    const command =
+      'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId),$($_.ParentProcessId),win-start-ms:$([math]::Floor($_.CreationDate.ToUniversalTime().Ticks / 10000))" }';
+    const result = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", command],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 5_000,
+        maxBuffer: 64 * 1024 * 1024,
+      },
+    );
+    if (result.status !== 0 || result.error) {
+      return {
+        ok: false,
+        detail: result.error ? result.error.message : `PowerShell CIM exited ${result.status}`,
+        rows,
+      };
+    }
+    for (const line of String(result.stdout || "").split(/\r?\n/)) {
+      const match = /^\s*(\d+),(\d+),(.+?)\s*$/.exec(line);
+      if (!match) continue;
+      rows.set(Number(match[1]), {
+        pid: Number(match[1]),
+        parentPid: Number(match[2]),
+        identity: match[3].trim(),
+      });
+    }
+  } else {
+    const result = spawnSync("ps", ["-axww", "-o", "pid=,ppid=,lstart="], {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (result.status !== 0 || result.error) {
+      return {
+        ok: false,
+        detail: result.error ? result.error.message : `ps exited ${result.status}`,
+        rows,
+      };
+    }
+    for (const line of String(result.stdout || "").split(/\r?\n/)) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+      if (!match) continue;
+      rows.set(Number(match[1]), {
+        pid: Number(match[1]),
+        parentPid: Number(match[2]),
+        identity: match[3].trim().replace(/\s+/g, " "),
+      });
+    }
+  }
+  return { ok: true, rows };
+}
+
+export function processForestFromSnapshot(snapshot, registration) {
+  if (!snapshot.ok) return { ok: false, detail: snapshot.detail, rows: [] };
+  const root = snapshot.rows.get(registration.pid);
+  const rootIdentityMismatch = Boolean(
+    root && registration.rootIdentity && root.identity !== registration.rootIdentity,
+  );
+  const included = new Set();
+  if (root && !rootIdentityMismatch && !exactChildTerminal(registration)) {
+    included.add(registration.pid);
+  }
+  for (const owned of registration.ownedIdentities || []) {
+    const row = snapshot.rows.get(Number(owned.pid));
+    if (row?.identity && owned.identity && row.identity === owned.identity) {
+      included.add(Number(owned.pid));
+    }
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, row] of snapshot.rows) {
+      if (!included.has(pid) && included.has(row.parentPid)) {
+        included.add(pid);
+        changed = true;
+      }
+    }
+  }
+  const depth = new Map([...included].map((pid) => [pid, pid === registration.pid ? 0 : 1]));
+  changed = true;
+  while (changed) {
+    changed = false;
+    for (const pid of included) {
+      if (depth.has(pid)) continue;
+      const parentDepth = depth.get(snapshot.rows.get(pid)?.parentPid);
+      if (parentDepth !== undefined) {
+        depth.set(pid, parentDepth + 1);
+        changed = true;
+      }
+    }
+  }
+  return {
+    ok: true,
+    rootIdentityMismatch,
+    rows: [...included]
+      .map((pid) => ({ ...snapshot.rows.get(pid), depth: depth.get(pid) || 0 }))
+      .sort((a, b) => b.depth - a.depth || b.pid - a.pid),
+  };
+}
+
+function exactIdentityAlive(row) {
+  const identity = procIdentity(row.pid);
+  return Boolean(identity) && identity === row.identity;
+}
+
+async function reapRegisteredRootFallback(registration, graceMs, verifyMs) {
+  if (!registration.pid) {
+    return { reaped: false, confirmedDead: true, wasLive: false };
+  }
+  if (!registration.rootIdentity) {
+    return {
+      reaped: false,
+      confirmedDead: false,
+      wasLive: !exactChildTerminal(registration),
+      identityRefused: true,
+    };
+  }
+  if ((registration.ownedIdentities || []).length > 0) {
+    // A failed snapshot cannot prove or enumerate retained descendants. Refuse to claim clean teardown,
+    // even if the original root is gone or its PID now belongs to a replacement process.
+    return { reaped: false, confirmedDead: false, wasLive: true };
+  }
+  if (exactChildTerminal(registration)) {
+    return { reaped: false, confirmedDead: true, wasLive: false };
+  }
+  const liveIdentity = procIdentity(registration.pid);
+  const rootIsExact = Boolean(
+    registration.rootIdentity && liveIdentity && liveIdentity === registration.rootIdentity,
+  );
+  if (!rootIsExact) {
+    // The admitted root is gone, reused, or uncheckable. Never turn its numeric PID into authority.
+    return {
+      reaped: false,
+      confirmedDead: !liveIdentity || liveIdentity !== registration.rootIdentity,
+      wasLive: false,
+      identityRefused: Boolean(liveIdentity),
+    };
+  }
+  const wasLive = true;
+  if (IS_WINDOWS) {
+    // The ChildProcess object is the exact admission identity even before CIM exposes the new process.
+    // /T remains scoped to that registered root's current descendants.
+    spawnSync("taskkill.exe", ["/PID", String(registration.pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  } else {
+    try {
+      registration.child.kill("SIGTERM");
+    } catch {
+      /* already exited */
+    }
+    const graceDeadline = nowMs() + Math.max(0, graceMs);
+    while (nowMs() < graceDeadline && pidAlive(registration.pid)) await delay(50);
+    if (pidAlive(registration.pid)) {
+      try {
+        registration.child.kill("SIGKILL");
+      } catch {
+        /* already exited */
+      }
+    }
+  }
+  const verifyDeadline = nowMs() + Math.max(0, verifyMs);
+  while (nowMs() < verifyDeadline) {
+    if (exactChildTerminal(registration) || !pidAlive(registration.pid)) {
+      // Windows taskkill /T is a tree primitive. On POSIX a failed snapshot means descendants in their
+      // own process groups could not be enumerated, so report that uncertainty rather than claim them dead.
+      return { reaped: true, confirmedDead: IS_WINDOWS, wasLive };
+    }
+    await delay(50);
+  }
+  return { reaped: true, confirmedDead: false, wasLive };
+}
+
+async function reapRegisteredForest(registration, graceMs, verifyMs = 4_000) {
+  if (!registration.pid) return { reaped: false, confirmedDead: true, wasLive: false };
+  let forest = processForestFromSnapshot(processIdentitySnapshot(), registration);
+  if (!forest.ok) {
+    return reapRegisteredRootFallback(registration, graceMs, verifyMs);
+  }
+  if (forest.rootIdentityMismatch && forest.rows.length === 0) {
+    return { reaped: false, confirmedDead: true, wasLive: false, identityRefused: true };
+  }
+  if (forest.rows.length === 0) {
+    if (!registration.rootIdentity) {
+      return reapRegisteredRootFallback(registration, graceMs, verifyMs);
+    }
+    if (exactChildTerminal(registration) || !pidAlive(registration.pid)) {
+      return { reaped: false, confirmedDead: true, wasLive: false };
+    }
+    // Newly spawned roots can briefly precede their process-table row. Retry once, then use only the exact
+    // ChildProcess identity as a fail-safe so close cannot hang without signalling anything.
+    await delay(25);
+    forest = processForestFromSnapshot(processIdentitySnapshot(), registration);
+    if (forest.rootIdentityMismatch && forest.rows.length === 0) {
+      return { reaped: false, confirmedDead: true, wasLive: false, identityRefused: true };
+    }
+    if (!forest.ok || forest.rows.length === 0) {
+      return reapRegisteredRootFallback(registration, graceMs, verifyMs);
+    }
+  }
+  const wasLive = true;
+  const known = new Map(forest.rows.map((row) => [row.pid, row]));
+
+  if (IS_WINDOWS) {
+    // Each taskkill tree root is revalidated immediately before signalling. Retained descendants remain
+    // individually authoritative even after the admitted root has exited or its PID has been reused.
+    for (const row of forest.rows) {
+      if (!exactIdentityAlive(row)) continue;
+      spawnSync("taskkill.exe", ["/PID", String(row.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    }
+  } else {
+    for (const row of forest.rows) {
+      if (!exactIdentityAlive(row)) continue;
+      try {
+        process.kill(row.pid, "SIGTERM");
+      } catch {
+        /* already exited */
+      }
+    }
+    const gracefulDeadline = nowMs() + Math.max(0, graceMs);
+    while (nowMs() < gracefulDeadline) {
+      if ([...known.values()].every((row) => !exactIdentityAlive(row))) break;
+      await delay(50);
+    }
+    forest = processForestFromSnapshot(processIdentitySnapshot(), registration);
+    if (forest.ok) {
+      for (const row of forest.rows) known.set(row.pid, row);
+    }
+    for (const row of [...known.values()].sort((a, b) => b.depth - a.depth || b.pid - a.pid)) {
+      if (!exactIdentityAlive(row)) continue;
+      try {
+        process.kill(row.pid, "SIGKILL");
+      } catch {
+        /* already exited */
+      }
+    }
+  }
+
+  const verifyDeadline = nowMs() + Math.max(0, verifyMs);
+  while (nowMs() < verifyDeadline) {
+    if ([...known.values()].every((row) => !exactIdentityAlive(row))) {
+      return { reaped: true, confirmedDead: true, wasLive };
+    }
+    await delay(50);
+  }
+  return {
+    reaped: true,
+    confirmedDead: [...known.values()].every((row) => !exactIdentityAlive(row)),
+    wasLive,
+  };
+}
+
+function cancelledStepResult(reason = "CANCELLED", cancellationReason = "") {
+  return {
+    code: 128,
+    reason,
+    cancellationReason,
+    durationMs: 0,
+    stdout: "",
+    stderr: "",
+    spawnError: false,
+    reapConfirmedDead: true,
+    signalName: "",
+    peakRssBytes: 0,
+    memoryLimitBytes: 0,
+    peakRssProcessCount: 0,
+    memoryProcessCount: 0,
+    memorySampleFailures: 0,
+    memorySampleFailureDetail: "",
+  };
+}
+
+function normalizedProvenanceRoot(root, windows) {
+  if (typeof root !== "string" || root.trim() === "") {
+    throw new TypeError("supervisor ownership roots must be non-empty paths");
+  }
+  const pathApi = windows ? win32 : posix;
+  let path = pathApi.normalize(root);
+  const filesystemRoot = pathApi.parse(path).root;
+  while (path.length > filesystemRoot.length && path.endsWith(pathApi.sep)) {
+    path = path.slice(0, -1);
+  }
+  return { path, key: windows ? path.toLowerCase() : path };
+}
+
+// Reduce exact runner-owned provenance authorities without inventing a broader common parent. Containment
+// is path-segment-aware (`gate-runner` never owns sibling `gate-runner2`) and Windows comparisons follow the
+// platform's case-insensitive path semantics. The first normalized spelling of each retained input wins.
+export function minimizeProvenanceRoots(roots, { windows = IS_WINDOWS } = {}) {
+  if (!Array.isArray(roots)) throw new TypeError("provenance roots must be an array");
+  const pathApi = windows ? win32 : posix;
+  const unique = [];
+  const seen = new Set();
+  for (const root of roots) {
+    const normalized = normalizedProvenanceRoot(root, windows);
+    if (seen.has(normalized.key)) continue;
+    seen.add(normalized.key);
+    unique.push(normalized);
+  }
+  return unique
+    .filter((candidate, candidateIndex) =>
+      unique.every((ancestor, ancestorIndex) => {
+        if (ancestorIndex === candidateIndex) return true;
+        const relativePath = pathApi.relative(ancestor.key, candidate.key);
+        const contained =
+          relativePath === "" ||
+          (relativePath !== ".." &&
+            !relativePath.startsWith(`..${pathApi.sep}`) &&
+            !pathApi.isAbsolute(relativePath));
+        return !contained;
+      }),
+    )
+    .map((entry) => entry.path);
+}
+
+// One gate-owned authority for every registered process forest. Production currently admits steps
+// through this supervisor; post-list Surface/shipped overlap uses the same authority and polling interval.
+export function createGateRunSupervisor(options = {}) {
   const {
-    cmd,
-    args,
-    cwd,
-    env,
-    phase,
-    deadlineMs,
-    stallMs,
-    targetDir,
-    killGraceMs = 5000,
-    // MEMORY / MEMORY_MONITOR reap grace: deliberately far shorter than killGraceMs. A ceiling breach means
-    // a process is actively allocating RIGHT NOW — the whole point of the ceiling is to stop that growth as
-    // fast as possible, so these two reasons must not sit through the same SIGTERM grace window a
-    // well-behaved TIMEOUT/STALL reap gives a tree to exit cleanly. See MEMORY_KILL_GRACE_MS below.
-    memoryKillGraceMs = MEMORY_KILL_GRACE_MS,
-    captureStdoutSeparately = false,
-    windowsVerbatimArguments = false,
+    deadlineMs = 0,
+    stallMs = 0,
     memoryLimitBytes = 0,
     memoryPollMs = 1000,
     memorySampleFailureLimit = 3,
-    memorySampler = sampleProcessTreeRssBytes,
-  } = opts;
+    killGraceMs = 5000,
+    memoryKillGraceMs = MEMORY_KILL_GRACE_MS,
+    now = nowMs,
+    setIntervalFn = setInterval,
+    clearIntervalFn = clearInterval,
+    spawnFn = spawn,
+    processIdentityFn = null,
+    processAliveFn = pidAlive,
+    sampleProcessForestRssFn = sampleProcessForestRssBytes,
+    reapRegisteredForestFn = reapRegisteredForest,
+    provenanceSweepFn = provenanceSweep,
+    artifactSignatureFn = artifactSignature,
+    beforeCloseSnapshot = null,
+    ownershipRoots = [],
+  } = options;
 
-  const child = spawn(cmd, args, {
-    cwd,
-    env,
-    shell: false,
-    detached: !IS_WINDOWS, // POSIX: new process group (setsid). Windows: taskkill /T is the tree primitive.
-    windowsHide: true,
-    // Forwarded for the `cmd /d /s /c "<quoted>"` pnpm-install launch (the args carry one pre-quoted
-    // verbatim element); default false leaves every other step's normal Node arg-quoting untouched.
-    windowsVerbatimArguments,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  // Publish the live child as the active step so the signal teardown can reap its WHOLE tree (not just the
-  // sweep's build-tool subset) before releasing the lock. Cleared in the close handler below.
-  ACTIVE_STEP = { pid: child.pid, targetDir, killGraceMs };
-
-  let stdoutBuf = "";
-  let stderrBuf = "";
-  let totalBytes = 0;
-  let lastGrowthMs = nowMs();
-  let lastSize = -1;
-  let lastArtifact = "";
-  let peakRssBytes = 0;
-  // The process count reported alongside peakRssBytes MUST be the count observed AT the peak sample, not
-  // whatever the most recent sample happened to see — see the update site below for why the two used to
-  // drift apart.
-  let peakRssProcessCount = 0;
-  let memoryProcessCount = 0;
+  let nextTokenId = 1;
+  let closing = false;
+  let closePromise = null;
+  let globalAbortReason = "";
+  const cancelledLanes = new Map();
+  const active = new Map();
+  const forests = new Map();
+  const knownRegistrations = new Map();
+  const knownOwnershipRoots = new Map();
+  for (const root of ownershipRoots) {
+    const normalized = normalizedProvenanceRoot(root, IS_WINDOWS);
+    knownOwnershipRoots.set(normalized.key, normalized.path);
+  }
+  let lastProgressMs = now();
+  let progressFingerprint = "";
+  let lastMemorySampleMs = Number.NEGATIVE_INFINITY;
   let memorySampleFailures = 0;
   let memorySampleFailureDetail = "";
-  let lastMemorySampleMs = 0;
+  let aggregatePeakRssBytes = 0;
+  let aggregatePeakProcessCount = 0;
+  let aggregatePeakPerLane = {};
+  const perLane = {};
+  let watchdogRunning = false;
 
-  child.stdout.on("data", (d) => {
-    const s = d.toString();
-    totalBytes += d.length;
-    if (captureStdoutSeparately) {
-      stdoutBuf += s;
-    } else {
-      stdoutBuf += s;
-      process.stderr.write(s);
+  const ensureLane = (laneId) => {
+    if (!perLane[laneId]) {
+      perLane[laneId] = {
+        peakRssBytes: 0,
+        peakRssProcessCount: 0,
+        lastRssBytes: 0,
+        lastProcessCount: 0,
+      };
     }
-  });
-  child.stderr.on("data", (d) => {
-    const s = d.toString();
-    totalBytes += d.length;
-    stderrBuf += s;
-    process.stderr.write(s);
-  });
-
-  let reason = "";
-  let reaped = false;
-  // Did the watchdog's reap actually signal a LIVE child/process group? Set SYNCHRONOUSLY by reapNow at the
-  // instant it begins the reap (before any await), so the close handler reads a settled value even when the
-  // child resolves `close` in the same tick. A real watchdog reap hits a live group (true); a one-tick
-  // race where the child had already exited before we signaled gets ESRCH (false). The close handler clears
-  // a spurious `reason` ONLY when this is false — so a process that TRAPS SIGTERM and exits(0)
-  // (watchdogSignaledLive=true) keeps its abort verdict.
-  let watchdogSignaledLive = false;
-  // Whether the watchdog reap CONFIRMED the tree dead (from reapTree's verification poll). Surfaced to the
-  // caller so a teardown can record reap certainty.
-  let reapConfirmedDead;
-  // The in-flight reap promise (reapTree's grace-loop + SIGKILL + verification poll, then the provenance
-  // sweep). The close handler awaits it so the tree is fully torn down before we return.
-  let reapPromise = null;
-  const startMs = nowMs();
-
-  const reapNow = (why) => {
-    if (reaped) return;
-    reaped = true;
-    reason = why;
-    // Capture the signaled-live discriminator SYNCHRONOUSLY, before the awaited reap can interleave with the
-    // child's `close`.
-    watchdogSignaledLive = groupOrPidAlive(child.pid);
-    // MEMORY / MEMORY_MONITOR get the short memoryKillGraceMs escalation, not the TIMEOUT/STALL killGraceMs:
-    // the tree is actively over the RSS ceiling right now, so it must not be given the same multi-second
-    // SIGTERM grace a well-behaved build/test process gets to exit cleanly.
-    const grace = why === "MEMORY" || why === "MEMORY_MONITOR" ? memoryKillGraceMs : killGraceMs;
-    reapPromise = (async () => {
-      const outcome = await reapTree(child.pid, grace);
-      reapConfirmedDead = outcome.confirmedDead;
-      // reapTree already captured wasLive synchronously; prefer its richer signal when present.
-      if (typeof outcome.wasLive === "boolean") watchdogSignaledLive = outcome.wasLive;
-      await provenanceSweep(targetDir, grace);
-    })();
+    return perLane[laneId];
   };
 
-  // Watchdog: owns the RSS ceiling, whole-gate deadline, and phase stall detector. Memory is checked first:
-  // once the tree crosses the safe ceiling, continuing even until the next deadline/stall check risks the
-  // very machine-wide OOM this runner exists to prevent.
-  const watchdog = setInterval(
-    () => {
-      const cur = nowMs();
+  const retire = (entry) => {
+    if (active.get(entry.tokenId) !== entry) return;
+    active.delete(entry.tokenId);
+    lastProgressMs = now();
+    progressFingerprint = "";
+  };
+
+  const refuseUnpublishedIdentity = (entry) => {
+    if (entry.identityPublished) return false;
+    entry.identityPending = false;
+    entry.rootIdentity = "";
+    entry.terminalBeforeIdentity = true;
+    forests.delete(entry.tokenId);
+    knownRegistrations.delete(entry.tokenId);
+    return true;
+  };
+
+  const refuseUnpublishedTerminal = (entry) =>
+    exactChildTerminal(entry) && refuseUnpublishedIdentity(entry);
+
+  const requestAbort = (entry, reason, cancellationReason = "") => {
+    if (entry.abortPromise) return entry.abortPromise;
+    entry.reason = reason;
+    entry.cancellationReason = cancellationReason;
+    entry.watchdogSignaledLive = !exactChildTerminal(entry) && groupOrPidAlive(entry.pid);
+    const grace =
+      reason === "MEMORY" || reason === "MEMORY_MONITOR" ? memoryKillGraceMs : entry.killGraceMs;
+    entry.abortPromise = (async () => {
+      refuseUnpublishedTerminal(entry);
+      if (entry.identityPending) {
+        const sample = sampleProcessForestRssBytes([
+          {
+            tokenId: entry.tokenId,
+            laneId: entry.laneId,
+            pid: entry.pid,
+            pendingIdentity: true,
+            ownedIdentities: entry.ownedIdentities,
+            closed: exactChildTerminal(entry) || !processAliveFn(entry.pid),
+          },
+        ]);
+        const identity = sample.ok
+          ? sample.perRoot?.[0]?.identities?.find((row) => row.pid === entry.pid)?.identity || ""
+          : "";
+        if (refuseUnpublishedTerminal(entry)) {
+          // The admitted ChildProcess became terminal while the native snapshot was in flight.
+        } else if (identity) {
+          entry.rootIdentity = identity;
+          entry.identityPending = false;
+          entry.identityPublished = true;
+          knownRegistrations.set(entry.tokenId, entry);
+        } else if (exactChildTerminal(entry) || !processAliveFn(entry.pid)) {
+          refuseUnpublishedIdentity(entry);
+        }
+      }
+      if (entry.terminalBeforeIdentity) {
+        entry.reapConfirmedDead = true;
+        return {
+          reaped: false,
+          confirmedDead: true,
+          wasLive: false,
+          terminalBeforeIdentity: true,
+        };
+      }
+      if (!entry.rootIdentity) {
+        entry.reapConfirmedDead = false;
+        return { reaped: false, confirmedDead: false, wasLive: false, identityRefused: true };
+      }
+      let outcome;
+      try {
+        outcome = await reapRegisteredForestFn(entry, grace);
+      } catch {
+        outcome = { reaped: true, confirmedDead: false, wasLive: true };
+      }
+      entry.reapConfirmedDead = outcome.confirmedDead;
+      if (typeof outcome.wasLive === "boolean") entry.watchdogSignaledLive = outcome.wasLive;
+      return outcome;
+    })();
+    return entry.abortPromise;
+  };
+
+  const abortAll = (reason, cancellationReason = "") => {
+    if (reason !== "CANCELLED") {
+      globalAbortReason = reason;
+      closing = true;
+    }
+    return Promise.all(
+      [...forests.values()].map((entry) => requestAbort(entry, reason, cancellationReason)),
+    );
+  };
+
+  const watchdogTick = async () => {
+    if (watchdogRunning) return;
+    watchdogRunning = true;
+    try {
+      if (globalAbortReason) return;
+      const cur = now();
+      const registrations = [...forests.values()];
+      if (registrations.length === 0) return;
+
       if (memoryLimitBytes > 0 && cur - lastMemorySampleMs >= memoryPollMs) {
         lastMemorySampleMs = cur;
+        const roots = registrations.map((entry) => ({
+          tokenId: entry.tokenId,
+          laneId: entry.laneId,
+          pid: entry.pid,
+          pendingIdentity: entry.identityPending,
+          ...(entry.identityPending ? {} : { identity: entry.rootIdentity }),
+          ownedIdentities: entry.ownedIdentities,
+          // A short command can exit while the one native OS snapshot is running, before Node dispatches
+          // its close event. Mark a now-dead native root closed so strict forest parsing does not turn that
+          // benign sampling race into three MEMORY_MONITOR failures. Injected samplers retain their exact
+          // scripted roots (fake pids are intentionally not OS-live).
+          closed:
+            exactChildTerminal(entry) ||
+            (sampleProcessForestRssFn === sampleProcessForestRssBytes && !pidAlive(entry.pid)),
+        }));
         let sample;
         try {
-          sample = memorySampler(child.pid);
+          sample = sampleProcessForestRssFn(roots);
+          if (sample && typeof sample.then === "function") sample = await sample;
         } catch (error) {
-          sample = { ok: false, detail: error && error.message ? error.message : String(error) };
+          sample = { ok: false, detail: error?.message || String(error) };
         }
-        if (sample && sample.ok) {
+        if (sample?.ok) {
           memorySampleFailures = 0;
           memorySampleFailureDetail = "";
-          // memoryProcessCount is this SAMPLE's count (used by the abort message below, where "this
-          // sample" and "the peak sample" are the same sample by construction). peakRssProcessCount is
-          // the count AT WHICHEVER sample produced peakRssBytes — captured only when this sample ties or
-          // extends the running max, so the two numbers a caller reports together ("peak RSS X across N
-          // process(es)") describe the SAME instant. Before this fix peakRssProcessCount did not exist and
-          // callers read memoryProcessCount instead, which held whatever the LAST sample before the step
-          // ended saw — for a non-aborting run that is unrelated to the peak-RSS sample, so a build whose
-          // true peak occurred mid-run with several concurrent rustc could report that peak's byte value
-          // paired with a much later, lower-parallelism sample's process count (e.g. "4.87 GiB across 1
-          // process(es)" for a 4-way parallel archive build).
-          memoryProcessCount = sample.processCount || 0;
-          if (sample.rssBytes >= peakRssBytes) {
-            peakRssProcessCount = memoryProcessCount;
+          for (const entry of registrations) {
+            const row = sample.perRoot?.find((candidate) => candidate.tokenId === entry.tokenId);
+            if (entry.identityPending) {
+              const rootIdentity = row?.identities?.find(
+                (identity) => identity.pid === entry.pid && identity.identity,
+              );
+              if (refuseUnpublishedTerminal(entry)) {
+                // The exact child exited while this sample was in flight; never publish the sampled PID.
+              } else if (rootIdentity) {
+                entry.rootIdentity = rootIdentity.identity;
+                entry.identityPending = false;
+                entry.identityPublished = true;
+                knownRegistrations.set(entry.tokenId, entry);
+              }
+            }
+            if (!entry.terminalBeforeIdentity && Array.isArray(row?.identities)) {
+              entry.ownedIdentities = row.identities.filter(
+                (identity) =>
+                  identity.pid !== entry.pid && identity.identity && Number.isInteger(identity.pid),
+              );
+            }
+            if (exactChildTerminal(entry) && (!row || (row.processCount || 0) === 0)) {
+              forests.delete(entry.tokenId);
+            }
+            if (!row) continue;
+            entry.memoryProcessCount = row.processCount || 0;
+            if ((row.rssBytes || 0) >= entry.peakRssBytes) {
+              entry.peakRssBytes = row.rssBytes || 0;
+              entry.peakRssProcessCount = row.processCount || 0;
+            }
           }
-          peakRssBytes = Math.max(peakRssBytes, sample.rssBytes || 0);
-          if (sample.rssBytes >= memoryLimitBytes) {
-            err(
-              `ABORTED — memory ceiling: active child tree RSS ${formatMemorySize(sample.rssBytes)} ` +
-                `across ${memoryProcessCount} process(es) reached the ${formatMemorySize(memoryLimitBytes)} ` +
-                "limit; terminating the contained process tree. No gate verdict was produced.",
+          for (const [laneId, contribution] of Object.entries(sample.perLane || {})) {
+            const lane = ensureLane(laneId);
+            lane.lastRssBytes = contribution.rssBytes || 0;
+            lane.lastProcessCount = contribution.processCount || 0;
+            if (lane.lastRssBytes >= lane.peakRssBytes) {
+              lane.peakRssBytes = lane.lastRssBytes;
+              lane.peakRssProcessCount = lane.lastProcessCount;
+            }
+          }
+          if ((sample.rssBytes || 0) >= aggregatePeakRssBytes) {
+            aggregatePeakRssBytes = sample.rssBytes || 0;
+            aggregatePeakProcessCount = sample.processCount || 0;
+            aggregatePeakPerLane = Object.fromEntries(
+              Object.entries(sample.perLane || {}).map(([laneId, contribution]) => [
+                laneId,
+                { ...contribution },
+              ]),
             );
-            reapNow("MEMORY");
+          }
+          if ((sample.rssBytes || 0) >= memoryLimitBytes) {
+            err(
+              `ABORTED — memory ceiling: aggregate active process-forest RSS ${formatMemorySize(
+                sample.rssBytes,
+              )} across ${sample.processCount || 0} process(es) reached the ${formatMemorySize(
+                memoryLimitBytes,
+              )} limit; terminating every registered process tree. No gate verdict was produced.`,
+            );
+            await abortAll("MEMORY");
             return;
           }
         } else {
           memorySampleFailures += 1;
-          memorySampleFailureDetail =
-            sample && sample.detail ? sample.detail : "unknown sampler failure";
+          memorySampleFailureDetail = sample?.detail || "unknown sampler failure";
           if (memorySampleFailures >= memorySampleFailureLimit) {
             err(
               `ABORTED — memory safety monitor unavailable after ${memorySampleFailures} consecutive ` +
-                `samples (${memorySampleFailureDetail}); terminating the contained process tree rather than ` +
-                "running without an enforceable ceiling. No gate verdict was produced.",
+                `samples (${memorySampleFailureDetail}); terminating every registered process tree rather ` +
+                "than running without an enforceable ceiling. No gate verdict was produced.",
             );
-            reapNow("MEMORY_MONITOR");
+            await abortAll("MEMORY_MONITOR");
             return;
           }
         }
       }
-      // Whole-gate hard deadline.
+
       if (deadlineMs > 0 && cur >= deadlineMs) {
-        reapNow("TIMEOUT");
+        await abortAll("TIMEOUT");
         return;
       }
-      // Stall.
+
       if (stallMs > 0) {
-        const size = totalBytes;
-        let artifact = "";
-        if (phase === "build") artifact = artifactSignature(targetDir);
-        if (size !== lastSize || artifact !== lastArtifact) {
-          lastSize = size;
-          lastArtifact = artifact;
-          lastGrowthMs = cur;
-        } else if (cur - lastGrowthMs >= stallMs) {
-          reapNow("STALL");
+        const vector = [...active.values()]
+          .map((entry) => {
+            const artifact = entry.phase === "build" ? artifactSignatureFn(entry.targetDir) : "";
+            return `${entry.tokenId}:${entry.totalBytes}:${artifact}`;
+          })
+          .sort()
+          .join("|");
+        if (vector !== progressFingerprint) {
+          progressFingerprint = vector;
+          lastProgressMs = cur;
+        } else if (cur - lastProgressMs >= stallMs) {
+          await abortAll("STALL");
         }
       }
-    },
-    memoryLimitBytes > 0 ? Math.max(50, Math.min(1000, memoryPollMs)) : 1000,
-  );
-
-  // `spawnError` distinguishes "the OS could not launch the command at all" (ENOENT / EACCES — a
-  // setup/usage condition, exit 127) from "the command RAN and exited non-zero" (a real build/test
-  // failure). A bare non-zero close code MUST NOT be conflated with a launch failure: a cargo build that
-  // compiled and FAILED can exit with any code (including 127 of its own), and that is a GATE FAILURE
-  // (exit 1), not a setup error. The caller keys its 127-vs-1 mapping on this flag, never on the code.
-  let spawnError = false;
-  // When the child is terminated by a SIGNAL (close `code === null` + a signal name), the synthesized exit
-  // code is 128 — but that 128 is NOT a real exit code the program chose, it is a stand-in for "killed by a
-  // signal". Capture the signal NAME so a caller can report e.g. "terminated by signal SIGABRT" instead of
-  // the misleading "exit 128" (a flaky test binary SIGABRTing during `--list` is a signal-kill, not a
-  // nextest exit 128). Empty when the child exited normally.
-  let signalName = "";
-  const code = await new Promise((resolve) => {
-    child.on("error", () => {
-      spawnError = true;
-      resolve(127);
-    });
-    child.on("close", (c, signal) => {
-      if (c === null && signal) {
-        signalName = signal;
-        resolve(128);
-      } else {
-        resolve(c === null ? 1 : c);
-      }
-    });
-  });
-
-  clearInterval(watchdog);
-  // If the watchdog fired (reapNow set reapPromise), let its reap — the grace loop + SIGKILL + verification
-  // poll + provenance sweep — settle before we read its flags or return. This is the SINGLE authoritative
-  // teardown: the tree is fully torn down here and watchdogSignaledLive/reapConfirmedDead are final.
-  if (reapPromise) {
-    try {
-      await reapPromise;
-    } catch {
-      /* best-effort reap */
+    } finally {
+      watchdogRunning = false;
     }
-  }
-  // One-tick race vs a REAL trapped-SIGTERM exit-0. The watchdog can set an abort `reason` in the
-  // same tick the child resolves `close`. Two cases must be told apart:
-  //   (a) PURE RACE — the child had ALREADY finished (cleanly, code 0) before the reap signaled, so the
-  //       reap found NOTHING live (watchdogSignaledLive=false). The step genuinely completed in time; the
-  //       watchdog reason is spurious and must be cleared.
-  //   (b) REAL REAP, trapped-exit-0 — the watchdog fired on a genuine deadline/stall and found a LIVE
-  //       process group (watchdogSignaledLive=true), but that process TRAPPED SIGTERM and exit(0)'d before
-  //       SIGKILL. The close code is 0, yet this was a REAL watchdog abort — the verdict STANDS.
-  // Keying on `code === 0` alone (the prior logic) masked case (b) as a PASS. TIMEOUT/STALL key on whether
-  // the reap actually found a live target: clear those reasons only for the proven no-op race. MEMORY and
-  // MEMORY_MONITOR are different: the sampler already observed the unsafe fact, so their abort survives
-  // even if the process exits between that observation and the signal probe.
-  if ((reason === "TIMEOUT" || reason === "STALL") && code === 0 && !watchdogSignaledLive) {
-    reason = "";
-  }
-
-  // The step is fully settled (the child closed and any watchdog reap completed), so retire the active-step
-  // handle: the teardown must not reap a torn-down tree, nor a later/unrelated child's pid. Only clear OUR
-  // own registration in case a concurrent step (there is none today, steps are sequential) replaced it.
-  if (ACTIVE_STEP && ACTIVE_STEP.pid === child.pid) ACTIVE_STEP = null;
-
-  const durationMs = nowMs() - startMs;
-  return {
-    code,
-    reason,
-    durationMs,
-    stdout: stdoutBuf,
-    stderr: stderrBuf,
-    spawnError,
-    reapConfirmedDead,
-    signalName,
-    peakRssBytes,
-    memoryLimitBytes,
-    // The process count AT the peakRssBytes sample — use this alongside peakRssBytes when reporting
-    // "peak RSS X across N process(es)". memoryProcessCount is the LAST sample's count (used internally by
-    // the abort message, where last-sample and peak-sample coincide by construction) and is kept for
-    // callers that specifically want "what was alive most recently", not "what was alive at the peak".
-    peakRssProcessCount,
-    memoryProcessCount,
-    memorySampleFailures,
-    memorySampleFailureDetail,
   };
+
+  const intervalMs = memoryLimitBytes > 0 ? Math.max(50, Math.min(1000, memoryPollMs)) : 1000;
+  const watchdog = setIntervalFn(watchdogTick, intervalMs);
+
+  const supervisor = {
+    runStep(laneId, stepOptions) {
+      const deniedReason =
+        closing || globalAbortReason
+          ? globalAbortReason || "CANCELLED"
+          : cancelledLanes.has(laneId)
+            ? "CANCELLED"
+            : deadlineMs > 0 && now() >= deadlineMs
+              ? "TIMEOUT"
+              : "";
+      if (deniedReason) {
+        return Promise.resolve(
+          cancelledStepResult(
+            deniedReason === "TIMEOUT" ? "TIMEOUT" : "CANCELLED",
+            cancelledLanes.get(laneId) || globalAbortReason || "SUPERVISOR_CLOSED",
+          ),
+        );
+      }
+
+      const tokenId = nextTokenId++;
+      const {
+        cmd = stepOptions.command,
+        args = [],
+        cwd,
+        env,
+        phase = "test",
+        targetDir,
+        captureStdoutSeparately = false,
+        windowsVerbatimArguments = false,
+        mirrorOutput = true,
+      } = stepOptions;
+      let child;
+      const startMs = now();
+      try {
+        child = spawnFn(cmd, args, {
+          cwd,
+          env,
+          shell: false,
+          detached: !IS_WINDOWS,
+          windowsHide: true,
+          windowsVerbatimArguments,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (error) {
+        return Promise.resolve({
+          ...cancelledStepResult("", ""),
+          code: 127,
+          spawnError: true,
+          stderr: error?.message || String(error),
+          reapConfirmedDead: undefined,
+        });
+      }
+
+      const identityPending = processIdentityFn === null;
+      let identityProbe = "";
+      if (!identityPending) {
+        try {
+          identityProbe = child.pid ? processIdentityFn(child.pid) : "";
+        } catch {
+          identityProbe = "";
+        }
+      }
+      const rootIdentity = String(identityProbe || "");
+
+      const entry = {
+        tokenId,
+        laneId,
+        name: stepOptions.name || cmd,
+        pid: child.pid,
+        // The exact ChildProcess is pending admission authority until the first gate-owned process-table
+        // snapshot publishes its start identity. No numeric PID signal is permitted while it is pending;
+        // every later snapshot/reap must match the published identity.
+        rootIdentity,
+        ownedIdentities: [],
+        identityPending,
+        identityPublished: false,
+        identityPublication: null,
+        terminalBeforeIdentity: false,
+        child,
+        phase,
+        targetDir,
+        killGraceMs: stepOptions.killGraceMs ?? killGraceMs,
+        stdoutBuf: "",
+        stderrBuf: "",
+        totalBytes: 0,
+        peakRssBytes: 0,
+        peakRssProcessCount: 0,
+        memoryProcessCount: 0,
+        reason: "",
+        cancellationReason: "",
+        watchdogSignaledLive: false,
+        reapConfirmedDead: undefined,
+        abortPromise: null,
+        childClosed: false,
+      };
+      active.set(tokenId, entry);
+      forests.set(tokenId, entry);
+      ensureLane(laneId);
+      lastProgressMs = now();
+      progressFingerprint = "";
+
+      child.stdout?.on("data", (data) => {
+        const value = data.toString();
+        entry.totalBytes += data.length;
+        entry.stdoutBuf += value;
+        if (mirrorOutput && !captureStdoutSeparately) process.stderr.write(value);
+      });
+      child.stderr?.on("data", (data) => {
+        const value = data.toString();
+        entry.totalBytes += data.length;
+        entry.stderrBuf += value;
+        if (mirrorOutput) process.stderr.write(value);
+      });
+
+      let spawnError = false;
+      let signalName = "";
+      let resolved = false;
+      const completion = new Promise((resolve) => {
+        const finish = (code) => {
+          if (resolved) return;
+          resolved = true;
+          resolve(code);
+        };
+        child.on("error", () => {
+          spawnError = true;
+          entry.childClosed = true;
+          refuseUnpublishedTerminal(entry);
+          finish(127);
+        });
+        child.on("close", (code, signal) => {
+          entry.childClosed = true;
+          refuseUnpublishedTerminal(entry);
+          if (code === null && signal) {
+            signalName = signal;
+            finish(128);
+          } else {
+            finish(code === null ? 1 : code);
+          }
+        });
+      });
+
+      const publishIdentity = async () => {
+        let published = entry.rootIdentity;
+        const terminal = exactChildTerminal(entry) || !child.pid || !processAliveFn(child.pid);
+        if (published && !terminal) {
+          entry.rootIdentity = published;
+          entry.identityPublished = true;
+          knownRegistrations.set(tokenId, entry);
+          return;
+        }
+        if (terminal) {
+          // The exact admitted ChildProcess finished before identity publication. It can report its real
+          // status, but it never becomes numeric-PID reaper or provenance authority.
+          refuseUnpublishedIdentity(entry);
+          return;
+        }
+        globalAbortReason = "MEMORY_MONITOR";
+        closing = true;
+        memorySampleFailures = Math.max(memorySampleFailures, memorySampleFailureLimit);
+        memorySampleFailureDetail = `spawned live root pid ${entry.pid || "<missing>"} has no checkable process identity`;
+        queueMicrotask(() => abortAll("MEMORY_MONITOR"));
+      };
+      entry.identityPublication = entry.identityPending ? Promise.resolve() : publishIdentity();
+
+      entry.settled = (async () => {
+        const code = await completion;
+        if (!entry.terminalBeforeIdentity) await entry.identityPublication;
+        if (entry.abortPromise) {
+          try {
+            await entry.abortPromise;
+          } catch {
+            /* best effort reap */
+          }
+        }
+        if (
+          (entry.reason === "TIMEOUT" || entry.reason === "STALL") &&
+          code === 0 &&
+          !entry.watchdogSignaledLive
+        ) {
+          entry.reason = "";
+        }
+        retire(entry);
+        return {
+          code,
+          reason: entry.reason,
+          cancellationReason: entry.cancellationReason,
+          durationMs: now() - startMs,
+          stdout: entry.stdoutBuf,
+          stderr: entry.stderrBuf,
+          spawnError,
+          reapConfirmedDead: entry.reapConfirmedDead,
+          signalName,
+          peakRssBytes: entry.peakRssBytes,
+          memoryLimitBytes,
+          peakRssProcessCount: entry.peakRssProcessCount,
+          memoryProcessCount: entry.memoryProcessCount,
+          memorySampleFailures,
+          memorySampleFailureDetail,
+        };
+      })();
+      return entry.settled;
+    },
+
+    async cancelLane(laneId, reason = "LANE_CANCELLED") {
+      cancelledLanes.set(laneId, reason);
+      const entries = [...forests.values()].filter((entry) => entry.laneId === laneId);
+      const outcomes = await Promise.all(
+        entries.map((entry) => requestAbort(entry, "CANCELLED", reason)),
+      );
+      return {
+        laneId,
+        reason,
+        reaped: outcomes.some((outcome) => outcome.reaped),
+        confirmedDead: outcomes.every((outcome) => outcome.confirmedDead),
+      };
+    },
+
+    closeAndReapAll(reason = "SUPERVISOR_CLOSED") {
+      if (closePromise) return closePromise;
+      closing = true;
+      closePromise = (async () => {
+        if (beforeCloseSnapshot) await beforeCloseSnapshot();
+        const entries = [...active.values()];
+        const outcomes = await Promise.all(
+          entries.map((entry) => requestAbort(entry, "CANCELLED", reason)),
+        );
+        await Promise.allSettled(entries.map((entry) => entry.settled));
+        for (const entry of forests.values()) {
+          if (!entry.pid) continue;
+          const outcome = await requestAbort(entry, "CANCELLED", reason);
+          outcomes.push(outcome);
+        }
+        const targets = new Map(
+          [...knownOwnershipRoots].map(([key, targetDir]) => [
+            key,
+            { targetDir, graceMs: killGraceMs },
+          ]),
+        );
+        for (const entry of knownRegistrations.values()) {
+          if (!entry.targetDir) continue;
+          const normalized = normalizedProvenanceRoot(entry.targetDir, IS_WINDOWS);
+          if (targets.has(normalized.key)) continue;
+          targets.set(normalized.key, {
+            targetDir: normalized.path,
+            graceMs: entry.killGraceMs,
+          });
+        }
+        const minimizedTargets = minimizeProvenanceRoots(
+          [...targets.values()].map(({ targetDir }) => targetDir),
+        );
+        for (const targetDir of minimizedTargets) {
+          const { key } = normalizedProvenanceRoot(targetDir, IS_WINDOWS);
+          const { graceMs } = targets.get(key);
+          try {
+            await provenanceSweepFn(targetDir, graceMs);
+          } catch {
+            /* best effort within each exact runner-owned target root */
+          }
+        }
+        clearIntervalFn(watchdog);
+        return {
+          reason,
+          reaped: outcomes.some((outcome) => outcome.reaped),
+          confirmedDead: outcomes.every((outcome) => outcome.confirmedDead),
+        };
+      })();
+      return closePromise;
+    },
+
+    snapshotTelemetry() {
+      return {
+        closing,
+        globalAbortReason,
+        deadlineMs,
+        stallMs,
+        memoryLimitBytes,
+        aggregatePeakRssBytes,
+        aggregatePeakProcessCount,
+        aggregatePeakPerLane: structuredClone(aggregatePeakPerLane),
+        perLane: structuredClone(perLane),
+        memorySampleFailures,
+        memorySampleFailureDetail,
+        active: [...active.values()].map((entry) => ({
+          tokenId: entry.tokenId,
+          laneId: entry.laneId,
+          pid: entry.pid,
+          name: entry.name,
+          rootIdentity: entry.rootIdentity,
+        })),
+        forests: [...forests.values()].map((entry) => ({
+          tokenId: entry.tokenId,
+          laneId: entry.laneId,
+          rootPid: entry.pid,
+          rootIdentity: entry.rootIdentity,
+          childClosed: entry.childClosed,
+          ownedIdentityCount: entry.ownedIdentities.length,
+        })),
+        cancelledLanes: Object.fromEntries(cancelledLanes),
+      };
+    },
+  };
+
+  return supervisor;
 }
 
-// ----------------------------------------------------------------------------------------------------
+// Compatibility/self-test entry point over the same multi-registration engine.
+export async function runContainedStep(opts) {
+  const {
+    deadlineMs = 0,
+    stallMs = 0,
+    memoryLimitBytes = 0,
+    memoryPollMs = 1000,
+    memorySampleFailureLimit = 3,
+    memorySampler = sampleProcessTreeRssBytes,
+    killGraceMs = 5000,
+    memoryKillGraceMs = MEMORY_KILL_GRACE_MS,
+    processIdentityFn = null,
+    processAliveFn = pidAlive,
+  } = opts;
+  const sampleProcessForestRssFn =
+    memorySampler === sampleProcessTreeRssBytes
+      ? sampleProcessForestRssBytes
+      : (roots) => {
+          const root = roots[0];
+          const sample = memorySampler(root?.pid);
+          if (!sample?.ok) return sample;
+          const perRoot = root
+            ? [{ ...root, rssBytes: sample.rssBytes || 0, processCount: sample.processCount || 0 }]
+            : [];
+          return {
+            ok: true,
+            rssBytes: sample.rssBytes || 0,
+            processCount: sample.processCount || 0,
+            perRoot,
+            perLane: root
+              ? {
+                  [root.laneId]: {
+                    rssBytes: sample.rssBytes || 0,
+                    processCount: sample.processCount || 0,
+                  },
+                }
+              : {},
+          };
+        };
+  const supervisor = createGateRunSupervisor({
+    deadlineMs,
+    stallMs,
+    memoryLimitBytes,
+    memoryPollMs,
+    memorySampleFailureLimit,
+    killGraceMs,
+    memoryKillGraceMs,
+    sampleProcessForestRssFn,
+    processIdentityFn,
+    processAliveFn,
+  });
+  try {
+    return await supervisor.runStep("single-step", opts);
+  } finally {
+    await supervisor.closeAndReapAll("SINGLE_STEP_FINALLY");
+  }
+}
+
 // nextest result-line parsing.
 //
 // nextest prints one terminal status per test: "    <STATUS> [   0.123s] <binary> <test::path::name>".
@@ -3220,6 +4719,799 @@ export function analyzeNextestSurface(text, code, freshnessToleranceAllowed = fa
 // wall time from output the gate was already capturing and then discarding, instead of asking nextest for
 // a second (JUnit) output format or re-running anything.
 // ----------------------------------------------------------------------------------------------------
+export const GATE_TELEMETRY_SCHEMA = "verter-gate-telemetry/v1";
+export const GATE_TELEMETRY_SCHEMA_VERSION = 1;
+
+export const GATE_TELEMETRY_PHASE_IDS = Object.freeze([
+  "build-prerequisite",
+  "oracle-cache",
+  "harness-smoke-vapor",
+  "harness-smoke-typescript",
+  "freshness-tooling",
+  "vue-macro-oracle-check",
+  "vue-macro-oracle-tests",
+  "dev-archive",
+  "dev-list",
+  "surface-1",
+  "shipped-check",
+  "shipped-contract",
+  "advisory",
+  "teardown",
+]);
+
+export const PREPARE_TELEMETRY_PHASE_IDS = Object.freeze([
+  "dev-archive",
+  "dev-list",
+  "prepare-warm",
+  "advisory",
+  "teardown",
+]);
+
+// A deliberately small, pure accumulator. The live gate owns all scheduling and verdict decisions; this
+// object only records observations handed to it. Tests inject a fake clock, and live callers may discard
+// any telemetry exception without changing the gate's existing exit code.
+export function createGateTelemetry({
+  mode = "gate",
+  now = nowMs,
+  startedUtc = new Date().toISOString(),
+  expectedPhaseIds = mode === "prepare" ? PREPARE_TELEMETRY_PHASE_IDS : GATE_TELEMETRY_PHASE_IDS,
+} = {}) {
+  const startMs = now();
+  return {
+    schema: GATE_TELEMETRY_SCHEMA,
+    schemaVersion: GATE_TELEMETRY_SCHEMA_VERSION,
+    mode,
+    startedUtc,
+    environment: null,
+    lanes: null,
+    cargoTimings: [],
+    nextest: {},
+    warnings: [],
+    _reportingPartial: false,
+    _now: now,
+    _startMs: startMs,
+    _expectedPhaseIds: Array.from(expectedPhaseIds),
+    _phaseMap: new Map(),
+    _aggregateForestPeak: null,
+  };
+}
+
+export function recordGatePhase(
+  telemetry,
+  phaseId,
+  {
+    status = "ok",
+    startedAtMs = null,
+    durationMs = null,
+    peakRssBytes = 0,
+    peakRssProcessCount = 0,
+    detail = null,
+  } = {},
+) {
+  if (!telemetry || !(telemetry._phaseMap instanceof Map)) {
+    throw new TypeError("invalid GateTelemetry accumulator");
+  }
+  if (telemetry._phaseMap.has(phaseId)) {
+    throw new RangeError(`gate telemetry phase recorded twice: ${phaseId}`);
+  }
+  const saneDuration = Number.isFinite(durationMs)
+    ? Math.max(0, durationMs)
+    : Number.isFinite(startedAtMs)
+      ? Math.max(0, telemetry._now() - startedAtMs)
+      : null;
+  const row = {
+    id: phaseId,
+    status,
+    durationMs: saneDuration,
+    peakRssBytes: Number.isFinite(peakRssBytes) ? Math.max(0, peakRssBytes) : 0,
+    peakRssProcessCount: Number.isFinite(peakRssProcessCount)
+      ? Math.max(0, peakRssProcessCount)
+      : 0,
+    ...(detail ? { detail: String(detail) } : {}),
+  };
+  telemetry._phaseMap.set(phaseId, row);
+  return row;
+}
+
+export function gatePhaseStatusFromStep(result) {
+  if (result && result.reason) return "aborted";
+  return result && result.code === 0 ? "ok" : "failed";
+}
+
+// Capture the supervisor's highest same-snapshot sum. This is additive/report-only: the lane-local phase
+// observations remain intact, while the whole-gate peak can no longer under-report two concurrent forests
+// by selecting only the larger child peak.
+export function recordGateAggregateForestPeak(telemetry, snapshot) {
+  if (!telemetry || !(telemetry._phaseMap instanceof Map)) {
+    throw new TypeError("invalid GateTelemetry accumulator");
+  }
+  const rssBytes = Number.isFinite(snapshot?.aggregatePeakRssBytes)
+    ? Math.max(0, snapshot.aggregatePeakRssBytes)
+    : 0;
+  const processCount = Number.isFinite(snapshot?.aggregatePeakProcessCount)
+    ? Math.max(0, snapshot.aggregatePeakProcessCount)
+    : 0;
+  const laneContributions = {};
+  for (const [laneId, contribution] of Object.entries(snapshot?.aggregatePeakPerLane || {})) {
+    if (
+      !contribution ||
+      typeof contribution !== "object" ||
+      !Number.isFinite(contribution.rssBytes) ||
+      contribution.rssBytes < 0 ||
+      !Number.isFinite(contribution.processCount) ||
+      contribution.processCount < 0
+    ) {
+      continue;
+    }
+    laneContributions[laneId] = {
+      rssBytes: contribution.rssBytes,
+      processCount: contribution.processCount,
+    };
+  }
+  telemetry._aggregateForestPeak = {
+    observation: "supervisor-same-snapshot",
+    rssBytes,
+    processCount,
+    laneContributions,
+  };
+  return telemetry._aggregateForestPeak;
+}
+
+export function summarizeGateTelemetry(
+  telemetry,
+  { terminalReached = false, exitCode = null, endMs = telemetry._now() } = {},
+) {
+  const expected = telemetry._expectedPhaseIds;
+  const phases = expected.map(
+    (id) =>
+      telemetry._phaseMap.get(id) || {
+        id,
+        status: "not-run",
+        durationMs: null,
+        peakRssBytes: 0,
+        peakRssProcessCount: 0,
+      },
+  );
+  for (const [id, row] of telemetry._phaseMap) {
+    if (!expected.includes(id)) phases.push(row);
+  }
+
+  let peak = { phaseId: null, rssBytes: 0, processCount: 0 };
+  for (const row of phases) {
+    // Ties intentionally use the latest phase, mirroring runContainedStep's latest-sample tie behavior.
+    if (row.peakRssBytes >= peak.rssBytes && row.peakRssBytes > 0) {
+      peak = {
+        phaseId: row.id,
+        rssBytes: row.peakRssBytes,
+        processCount: row.peakRssProcessCount,
+      };
+    }
+  }
+  const aggregate = telemetry._aggregateForestPeak;
+  if (aggregate && aggregate.rssBytes >= peak.rssBytes && aggregate.rssBytes > 0) {
+    peak = {
+      phaseId: "supervisor-aggregate",
+      observation: aggregate.observation,
+      rssBytes: aggregate.rssBytes,
+      processCount: aggregate.processCount,
+      laneContributions: structuredClone(aggregate.laneContributions),
+    };
+  }
+  const measuredEveryApplicablePhase = phases.every(
+    (row) => row.status !== "not-run" && row.status !== "aborted",
+  );
+  const completeness =
+    terminalReached && measuredEveryApplicablePhase && !telemetry._reportingPartial
+      ? "complete"
+      : "partial";
+  return {
+    schema: GATE_TELEMETRY_SCHEMA,
+    schemaVersion: GATE_TELEMETRY_SCHEMA_VERSION,
+    mode: telemetry.mode,
+    completeness,
+    startedUtc: telemetry.startedUtc,
+    terminal: { reached: Boolean(terminalReached), exitCode },
+    whole: {
+      elapsedMs: Math.max(0, endMs - telemetry._startMs),
+      containedChildTreePeak: peak,
+    },
+    environment: telemetry.environment,
+    lanes: telemetry.lanes ? structuredClone(telemetry.lanes) : null,
+    phases,
+    cargoTimings: telemetry.cargoTimings.map((entry) => ({ ...entry })),
+    nextest: { ...telemetry.nextest },
+    warnings: telemetry.warnings.slice(),
+  };
+}
+
+export function formatGateTelemetryText(summary) {
+  const lines = [
+    `GATE TELEMETRY: schema ${summary.schemaVersion}, measurement ${summary.completeness}; whole elapsed ${(
+      summary.whole.elapsedMs / 1000
+    ).toFixed(3)}s`,
+  ];
+  const peak = summary.whole.containedChildTreePeak;
+  lines.push(
+    `GATE TELEMETRY: whole monitored contained-child-tree peak RSS ${formatMemorySize(
+      peak.rssBytes,
+    )} across ${peak.processCount} process(es) in phase ${peak.phaseId || "none"}` +
+      (peak.laneContributions
+        ? `; lane contributions ${JSON.stringify(peak.laneContributions)}`
+        : ""),
+  );
+  if (summary.environment) {
+    lines.push(`GATE ENVIRONMENT: ${JSON.stringify(summary.environment)}`);
+  }
+  for (const row of summary.phases) {
+    lines.push(
+      `GATE PHASE [${row.id}]: status=${row.status}, duration=${
+        row.durationMs === null ? "unavailable" : `${(row.durationMs / 1000).toFixed(3)}s`
+      }, peak RSS ${formatMemorySize(row.peakRssBytes)} across ${row.peakRssProcessCount} process(es)`,
+    );
+  }
+  for (const artifact of summary.cargoTimings) {
+    lines.push(
+      `CARGO TIMING [${artifact.phaseId}]: ${artifact.available ? `available at ${artifact.relativePath}` : `unavailable (${artifact.status}: ${artifact.error})`}`,
+    );
+  }
+  return lines.join("\n");
+}
+
+// Bounded command probe. No error message or executable path is returned: the fingerprint reports only a
+// small availability classification and bounded stdout, never usernames/paths from a spawn exception.
+export const GATE_TELEMETRY_PROBE_KILL_SIGNAL = "SIGKILL";
+export const GATE_TELEMETRY_PROBE_MAX_MS = 2_000;
+// All synchronous startup reporting probes share this one allowance. The canonical build/test timeout is
+// established only after startup collection settles, so report-only work is bounded without spending any
+// of the verdict-bearing gate budget.
+export const GATE_TELEMETRY_STARTUP_MAX_MS = 2_000;
+
+export function runBoundedVersionProbe(
+  command,
+  args,
+  {
+    spawnSyncFn = spawnSync,
+    timeoutMs = GATE_TELEMETRY_PROBE_MAX_MS,
+    deadlineMs = Number.POSITIVE_INFINITY,
+    now = nowMs,
+  } = {},
+) {
+  const remainingMs = deadlineMs - now();
+  const effectiveTimeoutMs = Number.isFinite(remainingMs)
+    ? Math.min(timeoutMs, remainingMs)
+    : timeoutMs;
+  // Node treats a non-positive spawnSync timeout as "no timeout". Once the parent deadline is spent,
+  // refuse before spawning instead of converting the expired gate into an unbounded mutex-held probe.
+  if (!(effectiveTimeoutMs > 0)) {
+    return { available: false, stdout: "", error: "timeout" };
+  }
+  try {
+    const result = spawnSyncFn(command, args, {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: effectiveTimeoutMs,
+      // A version/help probe owns no transaction or buffered result worth a graceful shutdown. SIGTERM is
+      // catchable on POSIX and can leave spawnSync blocked after its timeout; SIGKILL maps to direct,
+      // unignorable termination on supported platforms and never broadens the kill beyond this child.
+      killSignal: GATE_TELEMETRY_PROBE_KILL_SIGNAL,
+      maxBuffer: 1024 * 1024,
+    });
+    if (result.error) {
+      return {
+        available: false,
+        stdout: "",
+        error: result.error.code === "ETIMEDOUT" ? "timeout" : "spawn-unavailable",
+      };
+    }
+    if (result.status !== 0) {
+      return { available: false, stdout: "", error: `exit-${result.status ?? "unknown"}` };
+    }
+    return {
+      available: true,
+      stdout: String(result.stdout || result.stderr || "").trim(),
+      error: null,
+    };
+  } catch {
+    return { available: false, stdout: "", error: "probe-error" };
+  }
+}
+
+function probeSummary(probe, { host = false } = {}) {
+  if (!probe || !probe.available) {
+    return {
+      available: false,
+      version: null,
+      ...(host ? { host: null } : {}),
+      error: probe?.error || "unavailable",
+    };
+  }
+  const lines = String(probe.stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const release = lines.find((line) => /^release:\s*/.test(line));
+  const hostLine = lines.find((line) => /^host:\s*/.test(line));
+  return {
+    available: true,
+    version: release ? release.replace(/^release:\s*/, "") : lines[0] || "unknown",
+    ...(host ? { host: hostLine ? hostLine.replace(/^host:\s*/, "") : null } : {}),
+    error: null,
+  };
+}
+
+function sumNumericLeaves(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (!value || typeof value !== "object") return 0;
+  return Object.values(value).reduce((sum, child) => sum + sumNumericLeaves(child), 0);
+}
+
+function sccacheHitRate(probe) {
+  if (!probe || !probe.available) return null;
+  try {
+    const parsed = JSON.parse(probe.stdout);
+    const stats = parsed.stats || parsed;
+    const hits = sumNumericLeaves(stats.cache_hits ?? stats.cacheHits);
+    const misses = sumNumericLeaves(stats.cache_misses ?? stats.cacheMisses);
+    return hits + misses > 0 ? hits / (hits + misses) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function classifyGateTargetState(
+  targetDir,
+  { existsFn = existsSync, readdirFn = readdirSync } = {},
+) {
+  try {
+    if (!existsFn(targetDir)) return "absent";
+    return readdirFn(targetDir).length === 0 ? "empty" : "nonempty";
+  } catch {
+    return "unavailable";
+  }
+}
+
+export function collectEnvironmentFingerprint({
+  instantUtc = new Date().toISOString(),
+  os = {
+    type: osType(),
+    platform: osPlatform(),
+    arch: osArch(),
+    release: osRelease(),
+    version: typeof osVersion === "function" ? osVersion() : "unavailable",
+    cpuModel: cpus()[0]?.model || "unavailable",
+    logicalCpuCount: cpus().length,
+    availableCpuCount:
+      typeof availableParallelism === "function" ? availableParallelism() : cpus().length,
+    totalMemoryBytes: totalmem(),
+  },
+  node = { version: process.version, v8: process.versions.v8 },
+  targetState = "unavailable",
+  resources = {},
+  env = {},
+  runVersionProbe = (command, args) => runBoundedVersionProbe(command, args),
+} = {}) {
+  const safeProbe = (command, args) => {
+    try {
+      return runVersionProbe(command, args);
+    } catch {
+      return { available: false, stdout: "", error: "probe-error" };
+    }
+  };
+  const rustc = probeSummary(safeProbe("rustc", ["--version", "--verbose"]), { host: true });
+  const cargo = probeSummary(safeProbe("cargo", ["--version", "--verbose"]), { host: true });
+  const cargoNextest = probeSummary(safeProbe("cargo", ["nextest", "--version"]));
+
+  const rawWrapper = typeof env.RUSTC_WRAPPER === "string" ? env.RUSTC_WRAPPER : "";
+  const wrapperName = rawWrapper ? basename(rawWrapper.replace(/^['"]|['"]$/g, "")) : null;
+  const wrapperIsSccache = Boolean(wrapperName && /^sccache(?:\.exe)?$/i.test(wrapperName));
+  const sccacheVersion = safeProbe("sccache", ["--version"]);
+  const sccacheStats =
+    wrapperIsSccache || sccacheVersion.available
+      ? safeProbe("sccache", ["--show-stats", "--stats-format", "json"])
+      : { available: false, stdout: "", error: "not-present" };
+
+  return {
+    instantUtc,
+    os: {
+      type: os.type,
+      platform: os.platform,
+      arch: os.arch,
+      release: os.release,
+      version: os.version,
+    },
+    cpu: {
+      model: os.cpuModel,
+      logicalCount: os.logicalCpuCount,
+      availableCount: os.availableCpuCount,
+    },
+    totalMemoryBytes: os.totalMemoryBytes,
+    node: { version: node.version, v8: node.v8 },
+    rustc,
+    cargo,
+    cargoNextest,
+    targetState,
+    resources: {
+      buildJobs: resources.buildJobs ?? null,
+      testThreads: resources.testThreads ?? null,
+      memoryLimitBytes: resources.memoryLimitBytes ?? null,
+      profiles: Array.isArray(resources.profiles) ? resources.profiles.slice() : [],
+      nextestProfile: typeof env.NEXTEST_PROFILE === "string" ? env.NEXTEST_PROFILE : "default",
+    },
+    incremental:
+      env.CARGO_INCREMENTAL === "0"
+        ? "disabled"
+        : env.CARGO_INCREMENTAL === "1"
+          ? "enabled"
+          : "cargo-default",
+    wrapper: { present: wrapperName !== null, basename: wrapperName },
+    sccache: {
+      present: wrapperIsSccache || Boolean(sccacheVersion.available),
+      hitRate: sccacheHitRate(sccacheStats),
+      statsError: sccacheStats.available ? null : sccacheStats.error || "unavailable",
+    },
+  };
+}
+
+export function collectCargoTimingCapabilities(
+  runProbe = (command, args) => runBoundedVersionProbe(command, args),
+) {
+  const one = (args) => {
+    let probe;
+    try {
+      probe = runProbe("cargo", args);
+    } catch {
+      probe = { available: false, stdout: "", error: "probe-error" };
+    }
+    if (!probe || !probe.available) {
+      return { supported: false, error: probe?.error || "probe-unavailable" };
+    }
+    if (!String(probe.stdout || "").includes("--timings")) {
+      return { supported: false, error: "flag-not-advertised" };
+    }
+    return { supported: true, error: null };
+  };
+  return {
+    devArchive: one(["nextest", "archive", "--help"]),
+    shippedCheck: one(["check", "--help"]),
+    shippedContract: one(["nextest", "run", "--help"]),
+  };
+}
+
+export function cargoTimingArtifactPaths(runnerTarget, gateDir) {
+  const cargoTimingDir = join(gateDir, "cargo-timings");
+  return {
+    source: join(runnerTarget, "cargo-timings", "cargo-timing.html"),
+    destinations: {
+      "dev-archive": join(cargoTimingDir, "dev-nextest-archive.html"),
+      "shipped-check": join(cargoTimingDir, "shipped-cfg-check.html"),
+      "shipped-contract": join(cargoTimingDir, "shipped-cfg-contract.html"),
+    },
+  };
+}
+
+// Clears only the one Cargo-owned overwrite target and the one phase-owned prior snapshot. No directory
+// deletion is performed. Failures are retained as warnings and never thrown to a verdict caller.
+export function prepareCargoTimingArtifact({
+  source,
+  destination,
+  now = Date.now,
+  rmFileFn = (path) => rmSync(path, { force: true }),
+  existsFn = existsSync,
+  statFn = statSync,
+  readFileFn = readFileSync,
+} = {}) {
+  const warnings = [];
+  let priorSourceIdentity = null;
+  try {
+    if (existsFn(source)) {
+      const sourceStat = statFn(source);
+      if (sourceStat?.isFile?.()) {
+        const bytes = readFileFn(source);
+        priorSourceIdentity = {
+          size: sourceStat.size,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        };
+      }
+    }
+  } catch {
+    warnings.push("source-identity-unavailable-before-clear");
+  }
+  let sourceCleared = false;
+  try {
+    rmFileFn(source);
+  } catch {
+    warnings.push("source-clear-failed");
+  }
+  try {
+    sourceCleared = !existsFn(source);
+    if (!sourceCleared) warnings.push("source-still-present-after-clear");
+  } catch {
+    warnings.push("source-absence-check-failed");
+  }
+  try {
+    rmFileFn(destination);
+  } catch {
+    warnings.push("destination-clear-failed");
+  }
+  return {
+    source,
+    destination,
+    relativePath: `cargo-timings/${basename(destination)}`,
+    preparedAtMs: now(),
+    sourceCleared,
+    priorSourceIdentity,
+    warnings,
+  };
+}
+
+export function snapshotCargoTimingArtifact(
+  capture,
+  {
+    existsFn = existsSync,
+    statFn = statSync,
+    readFileFn = readFileSync,
+    mkdirFn = (path) => mkdirSync(path, { recursive: true }),
+    copyFileFn = copyFileSync,
+  } = {},
+) {
+  const unavailable = (status, error) => ({
+    phaseId: null,
+    available: false,
+    status,
+    relativePath: capture.relativePath,
+    error,
+    warnings: capture.warnings.slice(),
+  });
+  try {
+    if (!existsFn(capture.source))
+      return unavailable("missing", "Cargo timing source was not produced");
+    const sourceStat = statFn(capture.source);
+    if (!sourceStat || !sourceStat.isFile?.() || sourceStat.size <= 0) {
+      return unavailable("invalid", "Cargo timing source is not a non-empty file");
+    }
+    if (!capture.sourceCleared) {
+      let currentSourceIdentity = null;
+      try {
+        const bytes = readFileFn(capture.source);
+        currentSourceIdentity = {
+          size: sourceStat.size,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        };
+      } catch {
+        capture.warnings.push("source-identity-unavailable-after-command");
+      }
+      const prior = capture.priorSourceIdentity;
+      const identityChanged = Boolean(
+        prior &&
+        currentSourceIdentity &&
+        (prior.size !== currentSourceIdentity.size ||
+          prior.sha256 !== currentSourceIdentity.sha256),
+      );
+      if (!identityChanged) {
+        capture.warnings.push("source-identity-unchanged-or-ambiguous-after-failed-clear");
+        return unavailable(
+          "stale",
+          "Cargo timing source clear was not proven and its file identity did not change",
+        );
+      }
+    }
+    // Two-second tolerance accommodates coarse filesystem timestamp resolution. Clearing the exact source
+    // before launch remains the identity root; an older mtime cannot be reused as this command's report.
+    if (!Number.isFinite(sourceStat.mtimeMs) || sourceStat.mtimeMs + 2000 < capture.preparedAtMs) {
+      return unavailable("stale", "Cargo timing source predates the producing command");
+    }
+    mkdirFn(dirname(capture.destination));
+    copyFileFn(capture.source, capture.destination);
+    const destinationStat = statFn(capture.destination);
+    if (
+      !destinationStat ||
+      !destinationStat.isFile?.() ||
+      destinationStat.size !== sourceStat.size
+    ) {
+      return unavailable("copy-invalid", "Cargo timing snapshot identity/size validation failed");
+    }
+    return {
+      phaseId: null,
+      available: true,
+      status: "fresh",
+      relativePath: capture.relativePath,
+      error: null,
+      sizeBytes: destinationStat.size,
+      warnings: capture.warnings.slice(),
+    };
+  } catch {
+    return unavailable("copy-failed", "Cargo timing snapshot could not be copied or validated");
+  }
+}
+
+const CARGO_TIMING_CAPABILITY_KEYS = Object.freeze({
+  "dev-archive": "devArchive",
+  "shipped-check": "shippedCheck",
+  "shipped-contract": "shippedContract",
+});
+
+function markGateTelemetryReportingPartial(telemetry, detail) {
+  if (!telemetry) return;
+  telemetry._reportingPartial = true;
+  telemetry.warnings.push(detail);
+}
+
+// The production report-only orchestration boundary. Gate code talks to telemetry through this object;
+// reporting failures are converted to warnings + partial measurement and never receive the canonical
+// failures/tolerance accumulator that determines the gate verdict.
+export function createGateTelemetryReporter({
+  telemetry,
+  deadlineMs,
+  targetState,
+  resources = {},
+  env = {},
+  runnerTarget,
+  gateDir,
+  now = nowMs,
+  warnFn = warn,
+  logFn = log,
+  runVersionProbeFn = runBoundedVersionProbe,
+  collectCargoTimingCapabilitiesFn = collectCargoTimingCapabilities,
+  collectEnvironmentFingerprintFn = collectEnvironmentFingerprint,
+  prepareCargoTimingArtifactFn = prepareCargoTimingArtifact,
+  snapshotCargoTimingArtifactFn = snapshotCargoTimingArtifact,
+} = {}) {
+  let cargoTimingCapabilities = {
+    devArchive: { supported: false, error: "probe-error" },
+    shippedCheck: { supported: false, error: "probe-error" },
+    shippedContract: { supported: false, error: "probe-error" },
+  };
+
+  const reportingFailure = (detail, operatorMessage = detail) => {
+    markGateTelemetryReportingPartial(telemetry, detail);
+    warnFn(operatorMessage);
+  };
+  const boundedProbe = (command, args) => {
+    let probe;
+    try {
+      probe = runVersionProbeFn(command, args, {
+        deadlineMs,
+        now,
+        timeoutMs: GATE_TELEMETRY_PROBE_MAX_MS,
+      });
+    } catch {
+      probe = { available: false, stdout: "", error: "probe-error" };
+    }
+    if (!probe || !probe.available) {
+      const error = probe?.error || "unavailable";
+      reportingFailure(
+        `version probe ${command} ${args.join(" ")}: ${error}`,
+        `GATE TELEMETRY WARNING: ${command} probe unavailable (${error}); gate verdict unchanged`,
+      );
+    }
+    return probe;
+  };
+
+  const collectStartup = () => {
+    try {
+      cargoTimingCapabilities = collectCargoTimingCapabilitiesFn(boundedProbe);
+    } catch {
+      reportingFailure(
+        "cargo timing capability probes unavailable",
+        "GATE TELEMETRY WARNING: Cargo timing capability probes unavailable; old argv retained",
+      );
+    }
+
+    try {
+      telemetry.environment = collectEnvironmentFingerprintFn({
+        targetState,
+        resources,
+        env,
+        runVersionProbe: boundedProbe,
+      });
+      telemetry.environment.cargoTimingCapabilities = cargoTimingCapabilities;
+    } catch {
+      telemetry.environment = {
+        available: false,
+        error: "fingerprint-unavailable",
+        cargoTimingCapabilities,
+      };
+      reportingFailure(
+        "environment fingerprint unavailable",
+        "GATE TELEMETRY WARNING: environment fingerprint unavailable; gate verdict unchanged",
+      );
+    }
+    return { cargoTimingCapabilities, environment: telemetry.environment };
+  };
+
+  const cargoTimingEnabled = (phaseId) => {
+    const key = CARGO_TIMING_CAPABILITY_KEYS[phaseId];
+    return Boolean(cargoTimingCapabilities?.[key]?.supported);
+  };
+
+  const beginCargoTiming = (phaseId, sourceTargetDir = runnerTarget) => {
+    const key = CARGO_TIMING_CAPABILITY_KEYS[phaseId];
+    const capability = cargoTimingCapabilities?.[key];
+    const paths = cargoTimingArtifactPaths(sourceTargetDir, gateDir);
+    if (!capability?.supported) {
+      const error = capability?.error || "capability probe unavailable";
+      telemetry?.cargoTimings.push({
+        phaseId,
+        available: false,
+        status: "unsupported",
+        relativePath: `cargo-timings/${basename(paths.destinations[phaseId])}`,
+        error,
+      });
+      warnFn(
+        `CARGO TIMING [${phaseId}] unavailable: ${error}; --timings omitted and the historical command argv retained`,
+      );
+      return null;
+    }
+    let capture;
+    try {
+      capture = prepareCargoTimingArtifactFn({
+        source: paths.source,
+        destination: paths.destinations[phaseId],
+      });
+    } catch {
+      reportingFailure(
+        `cargo timing ${phaseId}: prepare-failed`,
+        `CARGO TIMING [${phaseId}] WARNING: timing source could not be prepared`,
+      );
+      return null;
+    }
+    for (const warning of capture.warnings) {
+      telemetry?.warnings.push(`cargo timing ${phaseId}: ${warning}`);
+      warnFn(`CARGO TIMING [${phaseId}] WARNING: ${warning}`);
+    }
+    return capture;
+  };
+
+  const finishCargoTiming = (phaseId, capture) => {
+    if (!capture) return;
+    let artifact;
+    try {
+      artifact = snapshotCargoTimingArtifactFn(capture);
+    } catch {
+      artifact = {
+        phaseId,
+        available: false,
+        status: "copy-failed",
+        relativePath: capture.relativePath,
+        error: "Cargo timing snapshot could not be copied or validated",
+        warnings: capture.warnings?.slice() || [],
+      };
+    }
+    artifact.phaseId = phaseId;
+    telemetry?.cargoTimings.push(artifact);
+    if (artifact.available) {
+      logFn(`CARGO TIMING [${phaseId}]: available at ${artifact.relativePath}`);
+    } else {
+      const detail = `${artifact.status}: ${artifact.error}`;
+      reportingFailure(
+        `cargo timing ${phaseId}: ${detail}`,
+        `CARGO TIMING [${phaseId}] unavailable: ${detail}`,
+      );
+    }
+  };
+
+  const recordPhase = (phaseId, observation) => {
+    try {
+      return recordGatePhase(telemetry, phaseId, observation);
+    } catch (error) {
+      const detail = `phase ${phaseId} could not be recorded (${error?.message || "unknown"})`;
+      reportingFailure(detail, `GATE TELEMETRY WARNING: ${detail}`);
+      return null;
+    }
+  };
+
+  return {
+    collectStartup,
+    cargoTimingEnabled,
+    beginCargoTiming,
+    finishCargoTiming,
+    recordPhase,
+    get cargoTimingCapabilities() {
+      return cargoTimingCapabilities;
+    },
+  };
+}
+
 const NEXTEST_STATUS_LINE_TIMED = /^(.{12}) \[([^\]]*)\]\s+(.+)$/;
 
 function parseTimingBracket(bracket) {
@@ -3287,31 +5579,41 @@ export function summarizeNextestTimings(timings, allSuites, topN = 50) {
   let totalSec = 0;
   let timedCount = 0;
   const bump = (map, key, durationSec) => {
-    const cur = map.get(key) || { count: 0, totalSec: 0 };
-    cur.count++;
-    cur.totalSec += durationSec;
+    const cur = map.get(key) || { processCount: 0, timedCount: 0, count: 0, totalSec: 0 };
+    cur.processCount++;
+    if (durationSec !== null) {
+      cur.timedCount++;
+      cur.count++; // legacy alias: count has always meant parseably timed tests.
+      cur.totalSec += durationSec;
+    }
     map.set(key, cur);
   };
   for (const t of timings) {
-    if (t.durationSec === null) continue;
-    timedCount++;
-    totalSec += t.durationSec;
     const pkg = binaryToPackage.get(t.binaryId) || t.binaryId || "?";
     bump(perBinary, t.binaryId || "?", t.durationSec);
     bump(perPackage, pkg, t.durationSec);
     bump(perFamily, testFamilyKey(t.binaryId, t.name), t.durationSec);
+    if (t.durationSec === null) continue;
+    timedCount++;
+    totalSec += t.durationSec;
   }
   const sortDesc = (map) =>
     Array.from(map.entries())
       .map(([key, v]) => ({ key, ...v }))
-      .sort((a, b) => b.totalSec - a.totalSec);
+      .sort((a, b) => b.totalSec - a.totalSec || a.key.localeCompare(b.key));
+  const perPackageRows = sortDesc(perPackage);
+  const perFamilyRows = sortDesc(perFamily);
   return {
     totalTests: timings.length,
+    processCount: timings.length,
     timedCount,
+    count: timedCount,
     totalSec,
     perBinary: sortDesc(perBinary),
-    perPackage: sortDesc(perPackage),
-    topFamilies: sortDesc(perFamily).slice(0, topN),
+    perPackage: perPackageRows,
+    perCrate: perPackageRows,
+    perFamily: perFamilyRows,
+    topFamilies: perFamilyRows.slice(0, topN),
   };
 }
 
@@ -3352,12 +5654,13 @@ export function parseLibtestSummary(text) {
   return { found, ok, passed, failed };
 }
 
-// SURFACE-2 (direct libtest binary) verdict — shared by the live gate and the in-process classifier so the
-// testable path is byte-identical to the live one. Given a binary's combined stdout+stderr `text`, its
+// Legacy Surface-2 (direct libtest binary) verdict retained only as a selftest regression fixture;
+// production gate.mjs no longer calls it. Given a binary's combined stdout+stderr `text`, its
 // process exit `code`, and the suite `binaryId` (for name qualification), returns:
 //   { verdict: "pass" | "tolerated" | "fail", failures: [{ surface, name }], toleratedNames: [name…] }
 //
-// A tolerated SURFACE-2 failure is admitted ONLY under NORMAL libtest failure semantics. Concretely, ALL of:
+// A tolerated failure in this legacy classifier is admitted ONLY under NORMAL libtest failure semantics.
+// Concretely, ALL of:
 //   - the process exited with code 101 — libtest's canonical "some tests failed" exit. A SIGNAL/ABORT
 //     (SIGABRT/SIGSEGV/… surface as code 128+signal here, or any non-101 code) is a CRASH, never tolerated;
 //   - a `test result: FAILED. P passed; M failed` summary line WAS parsed (a missing summary means the run
@@ -3528,8 +5831,8 @@ export function countTestAttributesInDir(root, maxDepth = 16) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// Shipped-cfg guard: the expected-vs-selected test-count VERDICT, pulled out of `runShippedCfgGuard`
-// (gate.mjs) as the SOLE place this comparison is made. `runShippedCfgGuard` calls this function directly
+// Shipped-cfg guard: the expected-vs-selected test-count VERDICT, pulled out of `runShippedCfgLane`
+// (gate.mjs) as the SOLE place this comparison is made. `runShippedCfgLane` calls this function directly
 // rather than inlining the comparison — so a regression that "reverts the live guard's check back to a
 // bare `runCount !== 0`" necessarily reverts THIS function (there is no separate inline copy left in
 // gate.mjs to revert instead while leaving `countTestAttributesInDir` and this decision untouched, which
@@ -3540,7 +5843,7 @@ export function countTestAttributesInDir(root, maxDepth = 16) {
 // regression class this guard exists to catch.
 //
 // Returns `null` when the counts are reconcilable (proceed); otherwise `{ exit, message }` — the exact
-// exit code and error text `runShippedCfgGuard` reports via `err()` and returns as the guard's exit.
+// exit code and error text `runShippedCfgLane` records in its structured receipt.
 // ----------------------------------------------------------------------------------------------------
 export function decideShippedCfgGuardExpectedCountMatch(runCount, expectedTestCount) {
   if (expectedTestCount === 0) {
@@ -3866,12 +6169,9 @@ export function buildCargoEnv(baseEnv, runnerTarget, windows = IS_WINDOWS, build
 }
 
 // ----------------------------------------------------------------------------------------------------
-// Per-suite package identity, derived ENTIRELY from the nextest archive list JSON we already parsed inside
-// the contained/watchdogged list step — `package-name` and `package-id` (the part after `#` is the
-// semver). This deliberately avoids a SEPARATE `cargo metadata` subprocess: a second synchronous cargo
-// call would run OUTSIDE the whole-gate watchdog, the process containment, and the scrubbed/runner-owned
-// cargo env, so a hang in it would bypass the gate deadline. The list JSON already carries everything the
-// direct-libtest env needs.
+// Dormant legacy Surface-2 helper retained alongside the selftest classifier; production gate.mjs does not
+// call it. It derives per-suite package identity from archive list JSON without a separate `cargo metadata`
+// subprocess, preserving the retired direct-libtest fixture's original environment construction.
 // ----------------------------------------------------------------------------------------------------
 export function deriveSuitePkgInfo(suite) {
   const name = suite["package-name"] || "";
@@ -3893,14 +6193,12 @@ export function deriveSuitePkgInfo(suite) {
 }
 
 // ----------------------------------------------------------------------------------------------------
-// SURFACE-2 suite selection + integrity gate (shared by the live gate and the in-process classifier). The
-// filter mirrors `cargo test -p verter_session --tests`: the lib unit-test binary + every `tests/*.rs`
-// integration binary, i.e. kind ∈ {lib, test}; bins/benches are excluded. SURFACE 2 IS the shared-process
-// surface — the whole reason this gate exists — so a filter/archive regression that finds NOTHING must NOT
-// let the gate quietly pass on surface 1 alone. Returns `{ suites, lib, test, error }`: `error` is a
-// non-null setup-failure message when zero suites are found OR a kind is missing (verter_session always
-// has exactly one `lib` plus its integration `test` targets, so we assert >=1 of EACH — a partial filter
-// that keeps only one kind is surfaced as a regression, not passed as a half-covered surface).
+// Legacy Surface-2 suite-selection selftest fixture. Production gate.mjs no longer calls this helper; the
+// current shared-process contracts are ordinary tests inside archive-backed Surface 1. The retained frozen
+// classifier mirrors the retired `cargo test -p verter_session --tests` selection: the lib unit-test binary
+// plus every `tests/*.rs` integration binary, excluding bins/benches. It returns `{ suites, lib, test,
+// error }` so gate-selftest.mjs can preserve the historical zero/partial-selection regression proof without
+// implying that a second live surface still exists.
 // ----------------------------------------------------------------------------------------------------
 export function selectSessionSuites(allSuites) {
   const suites = (allSuites || []).filter(
@@ -3911,17 +6209,18 @@ export function selectSessionSuites(allSuites) {
   let error = null;
   if (suites.length === 0) {
     error =
-      "zero verter_session lib/test suites found in the archive listing — the shared-process surface " +
-      "would be silently skipped. Refusing to pass on surface 1 alone.";
+      "zero verter_session lib/test suites found in the archive listing — the retired shared-process " +
+      "surface would have been silently skipped. Legacy classifier refuses the selection.";
   } else if (lib < 1 || test < 1) {
     error =
       `verter_session suite filter is incomplete (lib=${lib}, test=${test}; expected >=1 of each). ` +
-      "A partial filter would under-cover the shared-process surface. Refusing to pass.";
+      "A partial filter would have under-covered the retired shared-process surface. Legacy classifier refuses.";
   }
   return { suites, lib, test, error };
 }
 
-// Per-package Cargo env for a DIRECTLY-executed test binary. This injects the runtime Cargo env the
+// Dormant legacy Surface-2 helper; production gate.mjs does not call it. Per-package Cargo env for the
+// retired directly executed test binary. This injects the runtime Cargo env the
 // verter_session integration tests ACTUALLY read — CARGO_MANIFEST_DIR and CARGO_TARGET_DIR — verified
 // complete for this suite (the only runtime `std::env::var(_os)` Cargo lookups in the verter_session test
 // sources are `CARGO_MANIFEST_DIR` and `CARGO_TARGET_DIR`; `CARGO_TARGET_DIR` is already forced on the base
@@ -4090,7 +6389,7 @@ export function shellInvocation(cmdString) {
 // the production gate can reach it. `steps` is an array of "<name>|<cmdString>" specs.
 // ----------------------------------------------------------------------------------------------------
 export async function runMultiStepSeam(ctx) {
-  const { steps, cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs } = ctx;
+  const { steps, cargoEnv, repoRealpath, runnerTarget, deadlineMs, supervisor } = ctx;
   const specs = (steps || []).filter((l) => String(l).trim());
   let overall = EXIT_PASS;
   for (const spec of specs) {
@@ -4104,14 +6403,13 @@ export async function runMultiStepSeam(ctx) {
       break;
     }
     const inv = shellInvocation(cmdStr);
-    const res = await runContainedStep({
+    const res = await supervisor.runStep("selftest-seam", {
       cmd: inv.cmd,
       args: inv.args,
       cwd: repoRealpath,
       env: cargoEnv,
       phase: "test",
       deadlineMs,
-      stallMs,
       targetDir: runnerTarget,
     });
     log(

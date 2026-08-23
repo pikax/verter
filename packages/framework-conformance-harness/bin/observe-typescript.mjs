@@ -23,13 +23,15 @@
 //
 // Exit codes: 0 = an observation was produced (which may itself contain
 // diagnostics — that is a RESULT, not a failure); 2 = the invocation was
-// malformed; 3 = the observation was REFUSED (unresolved module references),
-// with the refusal printed as JSON on stdout so a caller can report it.
+// malformed; 3 = the observation was REFUSED (unresolved modules, a missing
+// workspace domain, or ambiguous virtual-file identities), with the refusal
+// printed as JSON on stdout so a caller can report it.
 
 import { readFileSync } from "node:fs";
 
 import {
   ModuleResolutionError,
+  VirtualFileIdentityError,
   WorkspaceDomainError,
   observeTypeScript,
 } from "../src/typescript-observe.mjs";
@@ -93,6 +95,12 @@ try {
   }
   if (error instanceof WorkspaceDomainError) {
     process.stdout.write(JSON.stringify({ refused: "workspace-domain", missing: error.missing }));
+    process.exit(3);
+  }
+  if (error instanceof VirtualFileIdentityError) {
+    process.stdout.write(
+      JSON.stringify({ refused: "virtual-file-identity", collisions: error.collisions }),
+    );
     process.exit(3);
   }
   throw error;
