@@ -42,6 +42,8 @@ let SHA_DANGLING, TREE_DANGLING;
 // from any ref), this fixture's whole point is to BE ref-reachable.
 const WIP_A0_BRANCH = "wip-a0";
 let WIP_A0_SHA;
+// Fixed-landing-order rehearsal fixtures — see before() for how each is built.
+let SHA_LANDED, TREE_LANDED, SHA_TRUNK_TIP, TREE_TRUNK_TIP, SHA_ALT, TREE_ALT;
 const SHA_NONEXISTENT = "abcdef1234567890abcdef1234567890abcdef12"; // well-formed, never committed
 
 function git(args, cwd, input) {
@@ -90,6 +92,40 @@ before(() => {
   git(["add", "-A"], gitRoot);
   git(["commit", "-q", "-m", "wip-a0"], gitRoot);
   WIP_A0_SHA = git(["rev-parse", "HEAD"], gitRoot);
+  git(["checkout", "-q", "main"], gitRoot);
+
+  // Fixed-landing-order rehearsal fixtures (verifyConcurrentLandingSafety's
+  // already-landed shortcut + the genuine-conflict-still-fails case it must
+  // not swallow). SHA_LANDED introduces shared.txt="v1" off SHA_BASE;
+  // SHA_TRUNK_TIP continues that SAME lineage, editing shared.txt="v2" — so
+  // SHA_LANDED is a real ancestor of SHA_TRUNK_TIP, but replaying SHA_LANDED's
+  // own base_sha..candidate delta (SHA_BASE..SHA_LANDED, an add of
+  // shared.txt="v1") onto a cumulative tree already at SHA_TRUNK_TIP
+  // (shared.txt="v2") is an add/add shape that WOULD conflict if actually
+  // replayed — exactly the false-conflict-on-an-already-landed-block defect
+  // this fix addresses. SHA_ALT branches off SHA_BASE independently, adding
+  // shared.txt="v3" — a genuine, never-landed sibling delta that authentically
+  // conflicts with SHA_LANDED's own add when the two are rehearsed in
+  // landing_order sequence from a trunk that has NOT yet advanced past
+  // SHA_BASE.
+  git(["checkout", "-q", "-b", "rehearsal-trunk", SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "shared.txt"), "v1\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "landed"], gitRoot);
+  SHA_LANDED = git(["rev-parse", "HEAD"], gitRoot);
+  TREE_LANDED = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+  writeFileSync(join(gitRoot, "shared.txt"), "v2\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "trunk continues"], gitRoot);
+  SHA_TRUNK_TIP = git(["rev-parse", "HEAD"], gitRoot);
+  TREE_TRUNK_TIP = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+  git(["branch", "rehearsal-base-trunk", SHA_BASE], gitRoot);
+  git(["checkout", "-q", "-b", "rehearsal-alt", SHA_BASE], gitRoot);
+  writeFileSync(join(gitRoot, "shared.txt"), "v3\n");
+  git(["add", "-A"], gitRoot);
+  git(["commit", "-q", "-m", "alt sibling"], gitRoot);
+  SHA_ALT = git(["rev-parse", "HEAD"], gitRoot);
+  TREE_ALT = git(["rev-parse", "HEAD^{tree}"], gitRoot);
   git(["checkout", "-q", "main"], gitRoot);
 });
 
@@ -2297,4 +2333,364 @@ untracked_count = 0
     ),
   );
   assert.doesNotMatch(r.out, /^OK:/);
+});
+
+// ── MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md grandfathers ──────────
+// A DAG shaped like the real ledger's grandfathered rows: BV2 (root) with
+// B5, CM1, and a control block XX9 each as direct (non-chained) successors
+// — so every non-root block's sequencing is satisfied by BV2 alone, and the
+// context_packet_digest/review-mandate grandfathers (which key on literal
+// block ID, not DAG shape) can be tested in isolation.
+const DAG_GF = `schema = 1
+revision = 11
+entry_gate = "BV2"
+final_gate = "XX9"
+
+[[block]]
+id = "BV2"
+name = "root"
+class = "foundational"
+predecessors = []
+
+[[block]]
+id = "B5"
+name = "b5"
+class = "foundational"
+predecessors = ["BV2"]
+
+[[block]]
+id = "CM1"
+name = "cm1"
+class = "foundational"
+predecessors = ["BV2"]
+
+[[block]]
+id = "XX9"
+name = "control"
+class = "foundational"
+predecessors = ["BV2"]
+`;
+const DAG_GF_DIGEST = createHash("sha256").update(DAG_GF).digest("hex");
+
+test("context_packet_digest LEGACY-GAP grandfather is narrow: BV2/B5/CM1 pass without it, a fourth REVIEW block does not", () => {
+  const dag = write("dag-gf.toml", DAG_GF);
+  // BV2 is the accepted root, present to satisfy the DAG's predecessor
+  // requirement AND to exercise ITS OWN grandfather exemption: unlike the
+  // prior version of this fixture (which gave BV2 a real digest via
+  // acceptedBlock's default, so BV2's exemption was declared but never
+  // actually tripped), BV2 here leaves context_packet_digest empty too —
+  // exactly the grandfathered legacy-gap shape, on the ACCEPTED status BV2
+  // actually reaches (EVIDENCE_BOUND covers ACCEPTED same as REVIEW). B5,
+  // CM1, and control block XX9 reach REVIEW with EVERY required
+  // EVIDENCE_BOUND field populated EXCEPT context_packet_digest, which all
+  // three leave empty. Only XX9 is not in
+  // CONTEXT_PACKET_DIGEST_LEGACY_GAP_GRANDFATHER.
+  const reviewFields = {
+    base_sha: SHA,
+    candidate_sha: SHA,
+    candidate_tree: TREE,
+    charter_digest: DIGEST,
+    context_packet_digest: "", // the gap under test
+    evidence_digest: DIGEST,
+  };
+  const state = write(
+    "state-gf-context-packet.toml",
+    header({ status: "ACTIVE", current: "B5", repoSha: SHA, dagDigest: DAG_GF_DIGEST }) +
+      acceptedBlock("BV2", { entry_lock_digest: DIGEST, context_packet_digest: "" }) +
+      "\n" +
+      block("B5", "REVIEW", reviewFields) +
+      "\n" +
+      block("CM1", "REVIEW", reviewFields) +
+      "\n" +
+      block("XX9", "REVIEW", reviewFields),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "the control block XX9 must still fail on the true legacy gap");
+  assert.doesNotMatch(
+    r.err,
+    /state block (BV2|B5|CM1) is \w+ but context_packet_digest is not/,
+    `BV2/B5/CM1 must be exempt, got:\n${r.err}`,
+  );
+  assert.match(
+    r.err,
+    /state block XX9 is REVIEW but context_packet_digest is not a non-empty 64-char lowercase SHA-256/,
+  );
+});
+
+// NOT a discriminator for this branch's changes: the production diff near
+// review-mandate handling here is comment-only (MAINTAINER-RULING-2026-08-
+// 22-CODE-OVER-LEDGER.md §4 explicitly leaves review mandates untouched —
+// there was never a code override to remove or gate). This test passes
+// identically against the tree before and after that diff; it is a
+// REGRESSION CONTROL against a future accidental review-mandate override
+// for CM1 (or any block), not evidence of new behaviour landed by this
+// branch. Do not count it as coverage for a code change.
+test("regression control (non-discriminating): a BLOCKING verdict fails ACCEPTED for CM1 same as any other block — no review-mandate override exists", () => {
+  const dag = write("dag-gf2.toml", DAG_GF);
+  // CM1 and control block XX9 are byte-identical except for their ID, both
+  // ACCEPTED with all three review mandates BLOCKING — both must fail
+  // identically; CM1 gets no special treatment.
+  const blockingAccepted = (id) =>
+    acceptedBlock(id, {
+      context_packet_digest: DIGEST, // not the gap under test here
+      conformance_review: "BLOCKING",
+      conformance_reviewed_sha: "",
+      architecture_review: "BLOCKING",
+      architecture_reviewed_sha: "",
+      adversarial_review: "BLOCKING",
+      adversarial_reviewed_sha: "",
+    });
+  const state = write(
+    "state-gf-review-override.toml",
+    header({ status: "ACTIVE", current: "CM1", repoSha: SHA, dagDigest: DAG_GF_DIGEST }) +
+      acceptedBlock("BV2", { entry_lock_digest: DIGEST }) +
+      "\n" +
+      acceptedBlock("B5") +
+      "\n" +
+      blockingAccepted("CM1") +
+      "\n" +
+      blockingAccepted("XX9"),
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "both CM1 and XX9 must fail on a non-PASS review mandate");
+  assert.match(r.err, /state block CM1 is ACCEPTED but conformance_review is "BLOCKING"/);
+  assert.match(r.err, /state block CM1 is ACCEPTED but architecture_review is "BLOCKING"/);
+  assert.match(r.err, /state block CM1 is ACCEPTED but adversarial_review is "BLOCKING"/);
+  assert.match(r.err, /state block XX9 is ACCEPTED but conformance_review is "BLOCKING"/);
+  assert.match(r.err, /state block XX9 is ACCEPTED but architecture_review is "BLOCKING"/);
+  assert.match(r.err, /state block XX9 is ACCEPTED but adversarial_review is "BLOCKING"/);
+});
+
+// ── Fixed-landing-order rehearsal: already-landed shortcut ─────────────────
+// R1 and R2 are both direct (non-chained) successors of the same accepted
+// root R0 — sequencing for either REVIEW block is satisfied by R0 alone,
+// independent of the other, so both can be concurrently active without one
+// gating the other.
+const DAG_REHEARSAL = `schema = 1
+revision = 11
+entry_gate = "R0"
+final_gate = "R2"
+
+[[block]]
+id = "R0"
+name = "root"
+class = "foundational"
+predecessors = []
+
+[[block]]
+id = "R1"
+name = "r1"
+class = "foundational"
+predecessors = ["R0"]
+
+[[block]]
+id = "R2"
+name = "r2"
+class = "foundational"
+predecessors = ["R0"]
+`;
+const DAG_REHEARSAL_DIGEST = createHash("sha256").update(DAG_REHEARSAL).digest("hex");
+
+// Fixture-level add/add against a pin that already contains the landed
+// candidate — not a claim that the live rehearsal is globally accurate.
+test("fixed-landing-order rehearsal: an already-landed block's shortcut suppresses a false conflict", () => {
+  const dag = write("dag-rehearsal-shortcut.toml", DAG_REHEARSAL);
+  // Trunk is pinned at SHA_TRUNK_TIP, which already contains SHA_LANDED as a
+  // real ancestor (SHA_LANDED introduced shared.txt="v1"; SHA_TRUNK_TIP
+  // continued that same lineage, editing it to "v2"). R1 claims candidate
+  // SHA_LANDED, base SHA_BASE — already landed. Replaying SHA_BASE..
+  // SHA_LANDED (an add of shared.txt="v1") onto a cumulative tree already at
+  // SHA_TRUNK_TIP (shared.txt="v2") is an add/add shape that WOULD conflict
+  // if actually rehearsed — the shortcut must recognize R1 as already landed
+  // and skip the replay instead of reporting that conflict. R2 is a second,
+  // trivially-landed concurrently-active block (required for
+  // verifyConcurrentLandingSafety to run at all: active.length >= 2).
+  const state = write(
+    "state-rehearsal-shortcut.toml",
+    header({
+      status: "ACTIVE",
+      current: "R1",
+      repoSha: SHA_TRUNK_TIP,
+      dagDigest: DAG_REHEARSAL_DIGEST,
+      integrationBranch: "rehearsal-trunk",
+      integrationHeadSha: SHA_TRUNK_TIP,
+    }) +
+      acceptedBlock("R0", {
+        entry_lock_digest: DIGEST,
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_BASE,
+        candidate_tree: TREE_BASE,
+        accepted_sha: SHA_BASE,
+        accepted_tree: TREE_BASE,
+        conformance_reviewed_sha: SHA_BASE,
+        architecture_reviewed_sha: SHA_BASE,
+        adversarial_reviewed_sha: SHA_BASE,
+      }) +
+      "\n" +
+      block("R1", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_LANDED,
+        candidate_tree: TREE_LANDED,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("R2", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_TRUNK_TIP,
+        candidate_tree: TREE_TRUNK_TIP,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 2,
+      }) +
+      "\n",
+  );
+  const r = run(dag, state, "live");
+  assert.equal(r.status, 0, `expected pass (shortcut suppresses the conflict), got:\n${r.err}\n${r.out}`);
+  assert.match(
+    r.err,
+    new RegExp(
+      `NOTE: block R1 \\(landing_order 1\\) candidate ${SHA_LANDED} is already an ancestor of the pinned trunk ${SHA_TRUNK_TIP} — it has already landed; skipping its rehearsal replay`,
+    ),
+  );
+});
+
+test("fixed-landing-order rehearsal: the already-landed shortcut does not bypass mandatory base_sha ancestry validation", () => {
+  const dag = write("dag-rehearsal-shortcut-invalid-base.toml", DAG_REHEARSAL);
+  // Same already-landed shape as the shortcut test above — R1 claims
+  // candidate SHA_LANDED, which IS already an ancestor of the pinned trunk
+  // SHA_TRUNK_TIP, so the shortcut fires and skips the replay. But R1's
+  // declared base_sha is SHA_ALT here, not SHA_BASE — SHA_ALT is a sibling
+  // of SHA_LANDED off the SAME SHA_BASE (both add shared.txt, to different
+  // content), so SHA_ALT is NOT an ancestor of SHA_LANDED. The contract
+  // (base_sha must be an ancestor of every rehearsal candidate) is violated
+  // regardless of whether the block already landed. Before the fix, the
+  // shortcut's `continue` ran before this ancestry check, so this invalid
+  // base_sha was never validated and the run reported SUCCESS despite it —
+  // this test fails against that tree and passes once the ancestry check
+  // runs unconditionally, ahead of the shortcut.
+  const state = write(
+    "state-rehearsal-shortcut-invalid-base.toml",
+    header({
+      status: "ACTIVE",
+      current: "R1",
+      repoSha: SHA_TRUNK_TIP,
+      dagDigest: DAG_REHEARSAL_DIGEST,
+      integrationBranch: "rehearsal-trunk",
+      integrationHeadSha: SHA_TRUNK_TIP,
+    }) +
+      acceptedBlock("R0", {
+        entry_lock_digest: DIGEST,
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_BASE,
+        candidate_tree: TREE_BASE,
+        accepted_sha: SHA_BASE,
+        accepted_tree: TREE_BASE,
+        conformance_reviewed_sha: SHA_BASE,
+        architecture_reviewed_sha: SHA_BASE,
+        adversarial_reviewed_sha: SHA_BASE,
+      }) +
+      "\n" +
+      block("R1", "REVIEW", {
+        base_sha: SHA_ALT, // NOT an ancestor of candidate SHA_LANDED — the invalid base
+        candidate_sha: SHA_LANDED,
+        candidate_tree: TREE_LANDED,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("R2", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_TRUNK_TIP,
+        candidate_tree: TREE_TRUNK_TIP,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 2,
+      }) +
+      "\n",
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(
+    r.status,
+    0,
+    `expected failure (invalid base_sha must not be masked by the already-landed shortcut), got:\n${r.err}\n${r.out}`,
+  );
+  assert.match(
+    r.err,
+    new RegExp(
+      `block R1 declared base_sha ${SHA_ALT} is not an ancestor of its rehearsal candidate ${SHA_LANDED}`,
+    ),
+  );
+});
+
+test("fixed-landing-order rehearsal: anti-overbreadth control — a genuine conflict between two not-yet-landed active blocks still fails", () => {
+  const dag = write("dag-rehearsal-conflict.toml", DAG_REHEARSAL);
+  // Trunk is pinned at SHA_BASE itself — neither R1 nor R2 has landed yet, so
+  // the already-landed shortcut's ancestor check never fires here and this
+  // replays exactly as it would have BEFORE that shortcut existed. This is
+  // NOT a discriminator for the shortcut (it does not prove the shortcut
+  // does anything); it is an anti-overbreadth control proving the shortcut
+  // did not accidentally widen into suppressing a real conflict. R1
+  // (landing_order 1) claims candidate SHA_LANDED (adds shared.txt="v1"
+  // relative to SHA_BASE) — not yet landed, replays cleanly as a fast-
+  // forward onto the still-at-SHA_BASE cumulative tree. R2 (landing_order 2)
+  // claims candidate SHA_ALT, an independent sibling of SHA_LANDED off the
+  // SAME SHA_BASE that adds shared.txt="v3" — a genuine add/add conflict
+  // against the cumulative tree R1 just produced. This must still fail: the
+  // already-landed shortcut must not swallow a real conflict between two
+  // blocks that have not actually landed.
+  //
+  // The live branch is rehearsal-trunk (tip SHA_TRUNK_TIP) while the pin is
+  // SHA_BASE — pin lags the live tip, SHA_LANDED is an ancestor of the tip
+  // but not of the pin. A liveTip shortcut would skip R1 and then R2 would
+  // replay cleanly onto SHA_BASE (no conflict). The pin predicate still
+  // replays R1 and R2 still conflicts. That is the dropped live-tip
+  // mechanism's discriminator; pin==tip fixtures cannot catch it.
+  const state = write(
+    "state-rehearsal-conflict.toml",
+    header({
+      status: "ACTIVE",
+      current: "R1",
+      repoSha: SHA_BASE,
+      dagDigest: DAG_REHEARSAL_DIGEST,
+      integrationBranch: "rehearsal-trunk",
+      integrationHeadSha: SHA_BASE,
+    }) +
+      acceptedBlock("R0", { entry_lock_digest: DIGEST, base_sha: SHA_BASE, candidate_sha: SHA_BASE, candidate_tree: TREE_BASE, accepted_sha: SHA_BASE, accepted_tree: TREE_BASE, conformance_reviewed_sha: SHA_BASE, architecture_reviewed_sha: SHA_BASE, adversarial_reviewed_sha: SHA_BASE }) +
+      "\n" +
+      block("R1", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_LANDED,
+        candidate_tree: TREE_LANDED,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("R2", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_ALT,
+        candidate_tree: TREE_ALT,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 2,
+      }) +
+      "\n",
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a genuine unrelated-lineage conflict must still fail");
+  assert.match(
+    r.err,
+    new RegExp(
+      `block R2 \\(landing_order 2\\) does not land cleanly onto the cumulative result of every prior block in the fixed landing order`,
+    ),
+  );
 });

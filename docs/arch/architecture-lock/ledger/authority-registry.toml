@@ -532,3 +532,25 @@ documents = ["B6-CHARTER", "AMD-011-C2-B6-PREDECESSOR-EDGE"]
 ratified_by = "maintainer"
 ratified_at = "2026-08-22"
 scope = "Authorises B6 to execute now that its sole predecessor B5 is ACCEPTED. B6 exposes B5's accepted algorithms through prepared-first, prepared-repeat and direct-batch compiler-core routes, and owns the preparation/batch lifecycle and reuse. It owns no framework semantics: prepared state may not change request defaults, compatibility, products, helpers, diagnostics, mappings or publication meaning. Exit requires proof of direct/prepared/batch result identity, stable reuse without stale inputs, atomic per-request results, zero unrequested work, bounded memory, and the BF1-locked route-overhead cells. C4 stays LOCKED until B6 is accepted."
+
+# BV2/B5/CM1's context_packet_digest legacy gap is grandfathered by name in
+# scripts/validate-program-state.mjs citing this document — see the ruling's
+# own §1-§3. This document row exists for citability/digest-binding only; it
+# does not introduce a new [[authorization]] for any block already authorized
+# above (BV2/B5 via RULING-2026-08-22-BV2-B5-J1, CM1 via BETA4-REGRESSION-
+# INTAKE/CM1-FINDINGS-BC).
+#
+# CORRECTION: an earlier version of this row claimed CM1's D3-gap repair
+# (450abbc4c) "lands under this ruling". That commit is NOT an ancestor of
+# any branch this ruling's own ledger correction lands on — it was dropped
+# from block/ledger-subordinate-to-code (that branch carries docs/ and
+# scripts/ changes only). The D3/D1/eval-classification repair is owned by
+# block/binding-index-owner-and-eval, an independent implementation (not a
+# descendant of 450abbc4c) touching the same files with a strict superset of
+# changes, not yet landed or reviewed. See program-state.toml's CM1 row
+# FOLLOW-ON note for the current ownership record.
+[[document]]
+id = "RULING-2026-08-22-CODE-OVER-LEDGER"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md"
+sha256 = "17c9b2711eac55ae17f0a4d61978adf344a8f435b3bb870526af746ea5b572c1"

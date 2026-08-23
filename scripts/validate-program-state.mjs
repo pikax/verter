@@ -814,6 +814,27 @@ function verifyEntryLockRecordBinding(state, dagRoots, stateById, resolvedRoots,
 // walk is skipped entirely for the whole active set (a partially-
 // trustworthy order proves nothing about the untrustworthy part).
 //
+//   6. before replaying a block's delta, checks whether its OWN rehearsal
+//      candidate is already an ancestor of the pinned trunk — i.e. it has
+//      already landed for real. When it has, the replay step is SKIPPED
+//      (logged, not silently dropped) rather than attempted: a block whose
+//      commits already sit in trunk's real history has nothing left to
+//      rehearse, and attempting the replay anyway is actively wrong, not
+//      merely redundant — `base_sha..candidate` is the block's own
+//      declared delta at DISPATCH time, and trunk's real landing of that
+//      block frequently does not correspond to that literal range (a
+//      squash, a rebase, or — as observed for CM1 — a declared base_sha
+//      that predates unrelated intervening commits, fusing them into the
+//      replayed diff). Replaying that stale range against a cumulative
+//      tree that already contains the block's (differently-shaped) landed
+//      change produces conflicts on files the block never touched, which
+//      reads as a real landing hazard but is actually a modeling error:
+//      the check was being asked to prove something git's own history
+//      already settled. This does not weaken the rehearsal for a block
+//      that has NOT yet landed — for those, ancestry-against-trunk is
+//      false and the full replay below still runs and still fails on a
+//      genuine conflict.
+//
 // One named, unresolved limit remains (recorded, not hidden — see AMD-013
 // §8): a single stack window legally holding up to six open REVIEW layers
 // at once (A6, contracts/stacked-prs.md §4) could, on its own, approach or
@@ -1090,6 +1111,15 @@ function verifyConcurrentLandingSafety(
   let cumulative = pinnedTrunk;
 
   for (const e of entries) {
+    // Mandatory ancestry validation (contract point 784: base_sha must be an
+    // ancestor of every rehearsal candidate) runs UNCONDITIONALLY, before the
+    // already-landed short-circuit below. The short-circuit only excuses this
+    // loop from REPLAYING an already-landed block's delta (the merge-tree
+    // step past this point) — it must never excuse validating that the
+    // block's declared delta was ancestry-sound in the first place. Checking
+    // ancestry only inside the not-yet-landed branch let an already-landed
+    // row with a bogus base_sha (e.g. a sibling's SHA instead of its own
+    // true ancestor) skip validation entirely and still report SUCCESS.
     const anc = runGit(["merge-base", "--is-ancestor", e.base, e.candidate], cwd);
     if (anc.status !== 0 && anc.status !== 1) {
       v(
@@ -1102,6 +1132,28 @@ function verifyConcurrentLandingSafety(
         `block ${e.id} declared base_sha ${e.base} is not an ancestor of its rehearsal candidate ${e.candidate} — the declared delta cannot be trusted for the fixed-landing-order rehearsal`,
       );
       return;
+    }
+    // Already-landed short-circuit (point 6 above): if this block's own
+    // rehearsal candidate is already an ancestor of the REAL pinned trunk
+    // (not the synthetic `cumulative` this loop is building — that would
+    // let an earlier skip mask a later, genuinely unlanded block), its
+    // landing already happened and is directly observable in git history.
+    // `cumulative` starts at `pinnedTrunk` and only ever gains synthetic
+    // replay commits, so an already-landed block's effect is already
+    // present in `cumulative` from the start — skip the REPLAY without
+    // touching it. Ancestry was already validated above, unconditionally.
+    const landed = runGit(["merge-base", "--is-ancestor", e.candidate, pinnedTrunk], cwd);
+    if (landed.status !== 0 && landed.status !== 1) {
+      v(
+        `block ${e.id} candidate ${e.candidate} ancestry against the pinned trunk ${pinnedTrunk} could not be checked: ${gitFailureReason(landed)}`,
+      );
+      return;
+    }
+    if (landed.status === 0) {
+      process.stderr.write(
+        `NOTE: block ${e.id} (landing_order ${e.order}) candidate ${e.candidate} is already an ancestor of the pinned trunk ${pinnedTrunk} — it has already landed; skipping its rehearsal replay (nothing left to prove, and replaying its declared base_sha..candidate delta against already-landed content risks a false conflict — see the block comment above)\n`,
+      );
+      continue;
     }
     // No --quiet: --quiet "allows merge-tree ... to avoid writing most
     // objects created by merges" and suppresses the toplevel-tree-OID
@@ -1622,6 +1674,26 @@ function main() {
   //                                (well-formed landing_equivalence_digest;
   //                                governance.md:283,
   //                                contracts/stacked-prs.md:140).
+  // context_packet_digest LEGACY-GAP grandfather (MAINTAINER-RULING-2026-08-22-
+  // CODE-OVER-LEDGER.md): a NARROW, ENUMERATED exemption for the exact three
+  // block IDs whose dispatch predates this ledger ever producing a
+  // context-packet.md — BV2, B5, CM1 (BV2 and CM1 dispatched directly off the
+  // maintainer's beta.4 regression-intake directive; B5 by a distinct route,
+  // retroactively authorised once its predecessor set was satisfied — see
+  // each row's own `notes`/inline comment for why no honest digest can be
+  // produced after the fact, for either reason). This is NOT a downgrade of
+  // the check: it names exactly these three IDs, nothing else, so a fourth
+  // block can never join it silently, and every other field this block
+  // validates (base_sha, candidate_sha/tree, charter_digest, evidence_digest,
+  // acceptance identity) remains fully enforced for BV2/B5/CM1 same as any
+  // other block — only context_packet_digest is exempted, and only for these
+  // three. Review mandates are NOT touched by this ruling (MAINTAINER-RULING-
+  // 2026-08-22-CODE-OVER-LEDGER.md §4: "review mandates ... are ... untouched")
+  // — there is no review-mandate override for any block, CM1 included. A
+  // block reaching REVIEW/ACCEPTANCE_RECOMMENDED/ACCEPTED/PRIVATE_CHECKPOINT
+  // from here forward still fails this check without a real context-packet.md
+  // digest, exactly as before this exemption.
+  const CONTEXT_PACKET_DIGEST_LEGACY_GAP_GRANDFATHER = new Set(["BV2", "B5", "CM1"]);
   {
     const EVIDENCE_BOUND = new Set([
       "REVIEW",
@@ -1649,7 +1721,9 @@ function main() {
       requireSha("candidate_sha");
       requireSha("candidate_tree");
       requireDigest("charter_digest");
-      requireDigest("context_packet_digest");
+      if (!CONTEXT_PACKET_DIGEST_LEGACY_GAP_GRANDFATHER.has(id)) {
+        requireDigest("context_packet_digest");
+      }
       requireDigest("evidence_digest");
       // Entry-lock binding for the program's ENTRY block. The DAG's single
       // root (the one block with `predecessors = []`) owns the entry lock —
@@ -1700,6 +1774,12 @@ function main() {
         // a subsystem-class block; every foundational* class requires all three
         // mandates (governance.md:106,277). Missing/unknown class fails closed.
         const blockClass = typeof dagById.get(id)?.class === "string" ? dagById.get(id).class : "";
+        // No review-mandate override exists for any block, including CM1
+        // (MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md §4: review
+        // mandates are explicitly untouched by that ruling). Every mandate
+        // must be a genuine PASS (or a permitted NOT_REQUIRED, below) before
+        // a block may reach ACCEPTANCE_RECOMMENDED, ACCEPTED, or
+        // PRIVATE_CHECKPOINT — no exceptions.
         for (const field of REVIEW_FIELDS) {
           const val = b[field];
           if (val !== "PASS" && val !== "NOT_REQUIRED") {
