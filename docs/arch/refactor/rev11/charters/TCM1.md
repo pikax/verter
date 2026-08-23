@@ -140,6 +140,9 @@ into the compiler-core type.
   any consumer's active code path beyond the mechanical string→typed migration of item 2).
 - No topology work, no distributed-lifecycle-owner implementation (`distributed-lifecycle-contract.md` —
   TCM1 has no lifecycle-owner code at all).
+- No queue, flight, coalescer, or protocol-admission surface. The four-part timing taxonomy in
+  `architecture.md` §1.6 adds no TCM1 concurrency criteria. The 300 ms background-diagnostics quiet
+  window remains H3's `SyncCoordinator` policy; TCM1 must not widen it (already a material bound).
 
 ## 4. Numbered exit criteria
 

@@ -100,6 +100,25 @@ fallback: an unknown future contract fails closed until Verter is updated (steer
 - No feature-ownership decisions beyond emitting the mask `projection-class-contract.md` already
   specifies — TCM2 encodes the ratified policy, it does not re-derive ownership.
 
+## 3a. Timing taxonomy
+
+Every TCM2 timing-sensitive mechanism is classified using `architecture.md` §1.6.
+
+- The `@verter/typescript-content-mapper` JSON-RPC/stdio boundary is **external liveness**: protocol
+  completion plus one independent real monotonic watchdog. Completion is never inferred from sleep,
+  handler idle, or pseudo-idle, and is never discovered by polling when a protocol frame or OS
+  completion exists.
+- Bounded queue admission (owned-scope item 7: message size, queue depth, outstanding work, handles,
+  caches) sits inside cancellation and one absolute deadline. Admission, execution, and response share
+  that deadline; no second timeout begins after dequeue.
+- TCM2 is the sole acceptance and cutover owner of mapper-protocol admission, cancellation, and
+  deadline. G3 may supply a reusable bounded-admission primitive that this path consumes; G3 does not
+  implement, accept, or delete the mapper JSON-RPC path. This is the same single-owner split as H2's
+  `ClientHandle::request`, not a second admission owner beside G3.
+- TCM2 does not introduce a generic coordinator duplicating G2's `FlightCell`. Mapper-process
+  `MapperProcessProjectState` queues are TCM2-owned protocol admission, not a second query-runtime
+  flight cell.
+
 ## 4. Numbered exit criteria
 
 1. **Exactly one codec ships.** Evidence: a negative test asserting no second codec path, versioned/
@@ -140,6 +159,12 @@ fallback: an unknown future contract fails closed until Verter is updated (steer
     handle, and cache bounds are enforced, not merely intended.
 11. **Cross-project-reference/monorepo/build/watch/incremental/declaration conformance fixtures** pass, per
     steering's "Required conformance coverage" list, scoped to TCM2's projection-plane responsibilities.
+12. **Mapper-protocol admission is inside cancellation and one absolute deadline.** Evidence: a test that
+    fails if reservation of a full mapper queue starts a second timeout after dequeue, or if a waiter
+    cancelled before admission is still charged a slot. G3 tests do not accept this path.
+13. **JSON-RPC completion is external liveness.** Evidence: real-process mapper tests use protocol
+    completion plus one independent real monotonic watchdog; a test fails if sleep, idle, or polling
+    substitutes for a protocol frame.
 
 ## 5. Forbidden
 
@@ -157,6 +182,9 @@ fallback: an unknown future contract fails closed until Verter is updated (steer
   before TCM4.
 - A second parallel supplemental-output convention alongside the protocol's native `SupplementalOutput`
   field.
+- Inferring mapper-protocol completion from sleep, handler idle, or pseudo-idle; starting a second
+  timeout after queue admission; G3 implementing mapper JSON-RPC admission; a local duplicate of G2's
+  `FlightCell` inside the mapper process.
 
 ## 6. Material bounds
 

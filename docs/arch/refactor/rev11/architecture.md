@@ -113,6 +113,21 @@ Constitutional rules—such as one semantic authority, honest completeness, dire
 
 A6 accepts an architecture premise ledger. Falsified premises stop affected work, preserve independently valid work, and trigger refresh, rescope, or ADR amendment according to their class.
 
+## 1.6 Progress, time, liveness, and measurement
+
+Revision 11 uses four non-interchangeable timing categories:
+
+1. **Owned causal progress.** Completion is represented by a durable predicate, exact receipt, generation-stamped state, channel, `watch`, correctly used `Notify`, or an equivalent event-driven primitive. Interest is registered before the durable state is rechecked.
+2. **Semantic time.** Quiet windows, backoff, fairness periods, and scheduled policy are legitimate time. They must use monotonic Tokio time and deterministic paused-time tests.
+3. **External liveness.** Subprocesses and other systems Verter does not control expose protocol or OS completion whenever possible, are resource-isolated from other tests, and are surrounded by one independent real monotonic watchdog. Every real-process shared-provider test is serialized. The watchdog detects missing progress; it is not the progress mechanism.
+4. **Performance measurement.** Latency budgets live in controlled benchmark/performance lanes and do not act as correctness assertions in ordinary gates. Measurements use repeated distributions and retain enough work/output evidence to distinguish a fast stale or incomplete answer from a correct one.
+
+Internal correctness must not depend on fixed sleeps, repeated `yield_now`, atomic or refcount polling, “counters unchanged for N milliseconds,” elapsed-time assertions, global-idle heuristics, or retry loops that substitute time for an exact readiness signal. Polling is permitted only when Verter does not control the external system and no event, protocol receipt, OS primitive, or callback exists. Every permitted poll has a written boundary-specific justification and a real outer watchdog.
+
+The timing architecture does not introduce a global clock trait, global event bus, universal workspace-generation cache key, global idle/readiness service, global duration registry, event log that becomes the production state machine, or another generic coordinator duplicating `FlightCell`. Timing policy stays with its semantic domain and is not flattened into one duration table: `verter_lsp` owns quiet windows and scanner fairness; `verter_type_runtime` owns provider lifecycle, recovery, silence health, and request-hop margins; `verter_tsgo_api` owns relay/attach/process lifecycle bounds; `verter_workspace` owns external-tool execution policy; TCM2 owns mapper-process JSON-RPC queue bounds and stdio-protocol liveness; TCM3 owns oracle-client snapshot and query lifetime. The composition root may assemble those policies; it does not become a global duration registry. Event and audit logs are observers; durable receipts and generation-stamped state remain production authority.
+
+Same-key coalescers (singleflight cells, in-flight maps, pending/submission queues, lease or generation guards admitting one producer) are inventoried by NAME, and the full disposition table lives in `charters/K3.md`. Each named cell is dispositioned there with its final owner. **An unnamed same-key coalescer is NOT a close failure, and no search is required to prove absence**: the maintainer ruled that K3 closes when everything named is dispositioned and that we do not keep testing for unnamed cells (`rulings/MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md`). That is also what `CLAUDE.md` requires — landed enforcement of an invariant is structural, never a name/text/grep scanner over the source tree — and an earlier version of this line required exactly such a scanner. The documented search in `charters/K3.md` is retained as evidence of how the inventory was built, not as a gate; independent adversarial searches may still add rows, and a clean search is not acceptance evidence. The durable confinement rail is an unforgeable publication/commit capability on the authoritative effect, owned by G2/H2. TCM0 and TCM1 own no live coalescer surface; TCM2 mapper-protocol admission and TCM3 oracle flights are bound by this same taxonomy and must not become a second generic `FlightCell`.
+
 # 2. Product and capability model
 
 ## 2.1 Framework citizenship and maturity
@@ -299,6 +314,8 @@ A digest encodes identity; it is not identity authority by itself. Collision-sen
 Deadlines, cancellation tokens, trace IDs, priorities, queue classes, and ordinary work/time/memory budgets are not reusable query identity. Semantic/output/presentation/serialization profile values remain in their named profile IDs; `ResultContractId` does not duplicate them. It represents operation/product shape, required exactness/completeness, capability and unsupported/degradation policy, required mapping/diagnostic/serialization outcome at the typed boundary, and explicitly requested approximation mode. Waiter-local limits remain in `ExecutionPolicy`; budget exhaustion yields partial/failure rather than a weaker complete result.
 
 `EngineRevision` orders commits and captures snapshots. It is not a universal cache key.
+
+An exact immutable input basis identifies only the observations that can affect the derived fact: the exact document revision; relevant source-root/project revision; configuration/resolver epoch; provider/program-applied generation when provider state is observed; and dependency read-set or dependency stamp where applicable. These are typed, non-interchangeable dimensions. `InputBasisId` is their exact captured basis, not an opaque workspace generation. Unrelated edits neither change an unrelated basis nor invalidate unrelated facts.
 
 ## 3.2 Semantic, output, presentation, serialization, and execution profiles
 
@@ -848,10 +865,17 @@ Vacant
 
 Rules:
 
-- each waiter has an independent result channel, deadline, cancellation, priority, and validation basis;
-- cancelling the first waiter removes only that waiter;
-- while at least one waiter remains, flight/engine policy controls producer cancellation;
-- all waiters gone triggers cooperative cancellation and removal after finalization;
+- one useful producer flight exists per key and exact basis;
+- producer lifetime is independent of any request handler;
+- multiple waiters join the same producer;
+- foreground demand can promote an existing background flight;
+- cancelling one waiter does not cancel production still useful to other waiters or to an owner-approved background consumer;
+- each waiter has an independent result channel, absolute deadline, cancellation, priority, and validation basis;
+- the absolute deadline covers queue admission, execution, and response; queue admission cannot start a second timeout budget;
+- completion publishes durable `ReadyAt { basis, artifact/read-set stamp }` state before waking waiters;
+- waiters subscribe before rechecking that durable state, so a wake between check and await cannot be lost;
+- obsolete results are rejected before publication;
+- all waiters gone triggers cooperative cancellation only when flight/engine policy also proves that production has no remaining useful consumer, followed by removal after finalization;
 - only `Running` accepts new waiters; once budget exhaustion, cancellation, failure, or completion moves the cell to `Finalizing`, a later request starts or joins a successor flight rather than attaching to an irreversible outcome;
 - ordinary execution budget may stop work but may not select a semantic approximation or discard required state while the flight remains `Running`; an explicit approximation mode belongs in `ResultContractId`;
 - effective producer work/memory budget is a bounded monotonic maximum over active waiter requests, not their sum; priority may rise and later lower within owner policy;
@@ -864,6 +888,8 @@ Rules:
 
 There is no public “producer transfer” protocol; producer lifetime is flight-owned.
 
+The existing host/LSP IDE-repair, import-publication, provider-resync, external-TS query-dedupe (`external_ts_sync::{QueryDedupeRegistry, QueryAdmission, InflightSlot}`), carrier-publication lanes (`CarrierPublicationStore::{lanes, PublicationLane}`), shared-tsgo carrier-sync (`CarrierSyncState` / `PendingSubmission`), declaration-overlay serialization (`DeclOverlayOwner`), shared-overlay establishment (`LazyTransport` / `LazyOverlayCore`), keyed tsserver/`LazyManagedTypeProvider` activation, and similar local singleflight cells are migration inputs. G2 converges only their reusable exact-basis production semantics (one producer per key and exact basis, joined waiters, independent deadlines, durable `ReadyAt`). The IDE-repair map, lease, lane, and generation helpers are one H2 lifecycle cutover, not G2 waiter declarations. Cross-basis lifecycle serialization and latest-generation protocol coalescing — including tsserver carrier-refresh and the shared-tsgo `CarrierSyncState` sibling, `DeclOverlayOwner` path serialization, and `LazyTransport` establishment — are not `FlightCell` semantics; H2 owns those as `ProviderHub` lifecycle. H3 owns when LSP demand invokes them. None of these cells is independently extended into a second generic coordinator. The authoritative inventory is the enumeration in `charters/K3.md`.
+
 ## 10.5 Placement and scheduling
 
 Two placement classes exist:
@@ -874,6 +900,8 @@ Two placement classes exist:
 AST/arena state never crosses. Affinity is not a second scheduler or semantic graph.
 
 Hits/tiny dependent work run inline. Many tiny independent items are chunked. Coarse independent parse/compile/projection work may fork through structured execution. Provider/I/O actors remain separate. Every fork family declares measured grain, fan-out, cancellation/budget inheritance, priority, queue bound, stack/recursion behavior, and structured lifetime. Mature process-local execution is used before custom runtime design.
+
+Execution queues are bounded, priority-aware, and reserve foreground/interactive capacity. Background work coalesces latest-wins with explicit supersession, and admitted or retained background work is bounded by active keys/documents rather than edit count. Background work runs when capacity permits; whole-server handler-idle or arbitrary global-quiet heuristics are not readiness or admission authority.
 
 # 11. Incremental compilation
 
@@ -970,11 +998,17 @@ A binding is selected from current capability evidence, project TypeScript/SDK, 
 
 A request does not switch provider mid-flight. A transition creates a new epoch and supersedes older answers.
 
+Provider readiness is causal. The provider actor exposes an exact applied-generation or “Program ready for basis” receipt. Queue admission is inside each waiter's cancellation and absolute-deadline scope. Racing bounded-channel reservation against cancellation and that one absolute deadline is a single `ProviderHub` operation; H2 is the sole acceptance and cutover owner of the provider-request call (`verter_tsgo_api::actor::ClientHandle::request` and `Actor::serve_one`). G3 may supply a reusable bounded-admission primitive that H2 consumes; G3 does not implement that call. Foreground demand awaits or promotes the exact prerequisite; transport completion is never inferred from a sleep or pseudo-idle state. A provider protocol may require reopening after it acknowledges the exact applied basis; in that case one retry after that exact receipt is permitted. Completion backoff sequences such as 50 ms + 150 ms + 300 ms are forbidden. `ProviderHub` also owns serialized provider lifecycle and cross-basis protocol coalescing (open/close/reopen/repair, pending-rerun resync folding, latest-generation tsserver carrier refresh, shared-tsgo `CarrierSyncState` latest-pending coalescing, `DeclOverlayOwner` overlay serialization with preserved stale-pass high-water, `LazyTransport` establishment, keyed tsserver/`LazyManagedTypeProvider` activation, membership-recovery cooldown). Those are not G2 `FlightCell` joins. Mapper-process JSON-RPC admission is TCM2, not `ProviderHub`; oracle-client snapshot flights consume G2 and are TCM3.
+
+The shared-overlay 20-second fallback bound is an unsettled serving-policy duration, not a watchdog. It is not reclassified, retargeted, shortened, or deleted without a separate architecture ruling and exact timer tests.
+
 ## 14.3 Readiness and publication
 
 Readiness is per demanded artifact. A partial IDE companion is never delivered as complete.
 
 Interactive requests wait only for the target document/version, selected provider epoch, project validity, exact companion/mapping revision, and dependencies the route actually needs. They do not wait for unrelated workspace warmup.
+
+Foreground hover, completion, navigation, references, rename, code actions, semantic tokens, inlay hints, and equivalent user requests do not wait for an edit debounce. They immediately join or promote the exact producer flight. Background diagnostics and indexing may use a quiet window with latest-wins coalescing, but each background quiet-window domain has exactly one lifecycle owner and does not spawn a detached sleeping task per edit. LSP debounce and edit-triggered import publication share one quiet-window policy and one lifecycle owner.
 
 Publication carries a compact typed stamp over only observed dimensions, including as relevant:
 
@@ -986,6 +1020,8 @@ Publication carries a compact typed stamp over only observed dimensions, includi
 - dependency read set.
 
 The adapter validates the stamp immediately before publication. Unrelated edits do not invalidate a result.
+
+Cross-file edits causally invalidate the exact dependent read sets. Replies and publications are stamped and discarded when superseded. A fast stale response is a correctness failure, never a latency success.
 
 Mutation handlers validate/commit state and schedule minimal work. They do not synchronously perform full compilation, TypeInfo expansion, workspace indexing, or provider-wide synchronization on the transport loop.
 

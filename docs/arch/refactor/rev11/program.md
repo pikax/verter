@@ -55,6 +55,36 @@ A non-local block is `BLOCK_READY` only when:
 - abort/rescope conditions and independent reviews are assigned;
 - one immutable context packet, writable worktree/branch, and stack-window/layer disposition are recorded.
 
+## 3.1 Program-wide timing law
+
+Every block classifies a timing-sensitive mechanism as **owned causal progress**, **semantic time**, **external liveness**, or **performance measurement**, using `architecture.md` §1.6. Internal correctness cannot use fixed sleeps, repeated `yield_now`, atomic/refcount polling, counters unchanged for a duration, elapsed-time assertions, global-idle heuristics, or time-substituting retry loops. External polling is admitted only with a written proof that no event, receipt, OS primitive, or callback exists and with one real outer watchdog.
+
+No block may introduce a global clock trait, global event bus, universal workspace-generation cache key, global idle/readiness service, global duration registry, production-state-machine event log, or generic coordinator duplicating G2's `FlightCell`.
+
+This four-part taxonomy binds every DAG block that owns a timing-sensitive surface, including the TypeScript content-mapper train (`TCM0`–`TCM4`). TCM0 is lock-only and TCM1 is mapping-product geometry; neither owns a live coalescer, queue, or protocol-admission surface, and they receive no extra concurrency criteria. TCM2's JSON-RPC/stdio mapper boundary is external liveness (protocol completion plus one independent real monotonic watchdog) and TCM2 is the sole owner of mapper-protocol admission inside cancellation and one absolute deadline; G3 may supply a reusable bounded-admission primitive and must not implement that path. TCM3's snapshot-bound oracle is owned causal progress; its bounded concurrent queries consume G2 `FlightCell` and must not ship a second generic coordinator. TCM4's atomic activation is owned causal progress of the cutover; the Project-Bound External-TS rule remains in force and TCM4's performance obligation is not waived. Same-key coalescers are inventoried BY NAME in `charters/K3.md` and each named cell is dispositioned with its final owner; an unnamed cell is NOT a close failure and no search is required to prove absence (`rulings/MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md`: K3 closes when everything named is dispositioned, and we do not keep testing for unnamed cells). The search recorded in that charter is evidence of how the inventory was built, not a gate — which is also what `CLAUDE.md`'s structural-enforcement rule requires.
+
+## 3.2 Bounded `block/deterministic-tests` scope
+
+`block/deterministic-tests` is a prerequisite correction branch, not a new DAG block and not the G/H runtime redesign. It is limited to:
+
+- deterministic test infrastructure;
+- exact timer tests;
+- direct lost-wake and lifecycle corrections discovered while removing timing assumptions;
+- production/test topology alignment needed to test those mechanisms;
+- removal of newly added or directly touched polling and elapsed-time correctness checks.
+
+It must not add a permanent readiness coordinator or generic flight system. Those responsibilities remain G2/G3/G5/H2/H3. A narrow urgent latency bridge may land before those blocks only when all seven conditions hold:
+
+- it remains private and narrow;
+- it uses an existing producer-owned applied-generation receipt;
+- it is keyed by an exact `DocumentRevisionId` or typed basis;
+- it permits foreground promotion;
+- each waiter has independent cancellation;
+- it publishes only while the basis remains current;
+- it names the exact G2 or H3 block that will delete it, with K3 responsible for final residual-deletion verification, before landing.
+
+A bridge is not approved merely to improve current benchmark results. Public `LspConfig` switches `suppress_edit_debounced_import_publication` and `suppress_sync_coordinator_signal` are not timing architecture; they create a non-production topology and must not land as production configuration. If they exist on the branch, they name H3 as deletion owner before landing; K3 verifies residual deletion. Gate-performance work stays a separate, independently measurable landing unit; deterministic correctness cannot depend on that experiment landing. Its evidence includes single-gate idle and concurrent-gate contention measurements on the target M3/24GB machine; p50/p95/p99 wall time per lane; CPU, memory, queue/blocked time, and cache misses where available; timeout/retry/flake rate; critical-path attribution; per-lane stall detection; and narrow resource classes instead of unnecessarily broad serialization. Removing sleeps alone is not evidence of a material gate reduction, and external watchdogs are not lowered until measurements establish safe bounds.
+
 # 4. Gate 0 — Implementation Lock (`A0`–`A6`)
 
 ## A0 — Adopt Revision 11 and freeze the exact checkout
@@ -316,13 +346,17 @@ Implement generation/cohort-safe handles, explicit pins, selective promotion, sc
 
 **Predecessors:** `A6`, `B6`, `C4`, `D2`.
 
-Reconcile current VFS/registered-source/workspace publication into one authority; use short immutable-root commits; keep parse/compile/provider work outside the write critical section; preserve ordered document mutation.
+Reconcile current VFS/registered-source/workspace publication into one authority; use short immutable-root commits; keep parse/compile/provider work outside the write critical section; preserve ordered document mutation. The committed snapshot exposes typed exact immutable dimensions for document revision, relevant source-root/project revision, and configuration/resolver epoch. It provides the capture seam for a provider/program-applied generation and dependency read-set/stamp without collapsing them into one workspace counter.
+
+**Timing/basis exit:** `EngineRevision` remains a commit-order/capture aid, never a universal invalidation or cache key. An edit changes only the bases it causally affects; unrelated edits do not invalidate unrelated facts.
 
 ## F2 — InputBasis, load waves, negative facts, and retry
 
 **Predecessors:** `F1`, `C2`.
 
-Implement exact `InputBasisId`, normalized batched `LoadSet`, stable positive/negative observations, conditional coherent commits, no-progress and resource bounds, and clean preloaded equivalence.
+Implement exact `InputBasisId`, normalized batched `LoadSet`, stable positive/negative observations, conditional coherent commits, no-progress and resource bounds, and clean preloaded equivalence. Every derived fact records, as applicable, exact document revision, relevant source-root/project revision, configuration/resolver epoch, provider/program-applied generation, and dependency read-set or stamp. Provider generation is accepted only as a producer-owned exact receipt; F2 does not invent provider readiness.
+
+**Timing/basis exit:** value-side validation compares the typed relevant dimensions, not a universal `EngineRevision` or workspace generation. Unrelated edits preserve reusable unrelated facts.
 
 # 10. Track G — QueryRuntime, FlightCell, executor, and cache convergence
 
@@ -338,11 +372,13 @@ Implement snapshot-independent `QueryIdentity`, exact-basis `SemanticFlightKey`,
 
 Implement content and semantic flight classes, exact input-basis scoping, independent waiters, policy aggregation, cancellation, panic/shutdown/finalization, follower validation, and no leader-owned lifetime.
 
+**Acceptance:** `FlightCell` owns one useful producer flight per key and exact basis; producer lifetime is independent of any request handler; multiple waiters join; foreground demand promotes an existing background flight; cancelling one waiter does not cancel production still useful to other waiters; each waiter has an independent absolute deadline; that deadline covers queue admission, execution, and response; completion durably publishes `ReadyAt { basis, artifact/read-set stamp }`; waiters subscribe before rechecking durable state; and obsolete results are rejected before publication. `FlightCell` does not serialize heterogeneous lifecycle transitions or coalesce across bases. G2 absorbs exact-basis production from `ImportSyncMemo` flight mechanics, `external_ts_sync::{QueryDedupeRegistry, QueryAdmission, InflightSlot}` (not `cache_runtime` `InflightSlot`), `CarrierPublicationStore::{lanes, PublicationLane}`, `MetaRuntimeImpl.pendingEngines`, and, if retained, the hover-provenance producer. For IDE-repair, `ResyncCoordinator`, `TsserverCarrierRefresh`, shared-tsgo `CarrierSyncState`/`PendingSubmission`, `DeclOverlayOwner` serialization, `LazyTransport` establishment, `ProjectTsserverProvider`/`LazyManagedTypeProvider` activation, and membership-recovery cooldown, G2 absorbs only exact-basis waiter-join production. H2 owns and deletes the entire IDE-repair mixed cutover (`ide_sync_repair_locks`, `IdeSyncRepairLease`, `IdeSyncRepairLane`, generation ABA helpers) plus serialized `ProviderHub` lifecycle and cross-basis protocol coalescing; H3 owns when LSP demand invokes those mechanisms. G2 deletes displaced exact-basis flight fields as they migrate; H2 deletes the displaced lifecycle/coalescing coordinators; K3 verifies and removes any residue before closing. None survives as a second generic coordinator. The coalescer inventory is the enumeration in `charters/K3.md`, not a recalled list.
+
 ## G3 — Bounded CPU execution and owner-affine commands
 
 **Predecessors:** `B2`, `G2`.
 
-Keep hits/tiny dependent work inline; fork/chunk only coarse owned work; schedule compact commands to owner-affine parse/semantic state; bound queues/fan-out/stacks; reserve interactive capacity; support local/WASM execution without semantic divergence.
+Keep hits/tiny dependent work inline; fork/chunk only coarse owned work; schedule compact commands to owner-affine parse/semantic state; bound queues/fan-out/stacks; reserve foreground/interactive capacity; support local/WASM execution without semantic divergence. Admission is priority-aware; background work coalesces latest-wins with explicit supersession, and total work is bounded by active keys/documents rather than edit count. Whole-server handler-idle is not readiness or admission authority. G3 may provide a reusable bounded-admission primitive; it does not own, accept, or cut over `verter_tsgo_api::actor::ClientHandle::request`. That provider-request reservation, cancellation, and absolute deadline belong solely to H2. Mapper-process JSON-RPC admission belongs solely to TCM2; G3 does not implement that path either.
 
 ## G4 — Cache/store convergence and bounded retention
 
@@ -354,7 +390,7 @@ Classify each current store, preserve correct value-side validation, remove dupl
 
 **Predecessors:** `G3`, `G4`.
 
-Delete semantic DAG duplication, duplicate pools/dedupe/task taxonomies, and transitional generation machinery only after complete replacement. Preserve ordered mutation and external protocol actors in their real owners.
+Delete semantic DAG duplication, duplicate pools/dedupe/task taxonomies, and transitional generation machinery only after complete replacement. Preserve ordered mutation and external protocol actors in their real owners. The surviving runtime uses bounded queues, reserved foreground capacity, priority-aware admission, latest-wins background coalescing, active-key/document work bounds, and explicit supersession. G5 deletes global-handler-idle scheduling and tsserver interactive-idle scheduling as readiness/admission mechanisms, including their wait/counter call sites and the timing policies `DISCOVERY_IDLE_GRACE`, `BACKGROUND_MAX_DEFER`, and `BACKGROUND_IDLE_GRACE`; background work runs when capacity permits rather than after arbitrary whole-server idleness. K3 verifies no host/LSP bridge retains the removed scheduling policy.
 
 # 11. Track H — Managed incrementality, providers, and publication
 
@@ -370,11 +406,21 @@ Apply ordered edits, reconcile logical units, reuse unchanged stage artifacts, r
 
 Implement explicit capability-declared provider routes/epochs, no racing or silent semantic fallback, demand-scoped companions, controlled transitions, and orthogonal native enrichment. Keep `verter_tsc` a narrow batch-checker boundary.
 
+**Readiness acceptance:** providers mint exact applied-generation or “Program ready for basis” receipts. Queue admission is inside cancellation and the one absolute deadline; no new deadline begins after admission. H2 is the sole acceptance and cutover owner of that provider-request operation, including replacing `verter_tsgo_api::actor::ClientHandle::request` admission-before-select, the post-dequeue timeout in `Actor::serve_one`, and the 2 ms `wait_cancelled` atomic poll with exact event-driven cancellation and one admission-through-response deadline. G3 may supply a reusable bounded-admission primitive that H2 consumes; G3 does not implement this call. Foreground demand awaits or promotes the exact prerequisite. H2 owns serialized `ProviderHub` lifecycle and cross-basis protocol coalescing (the entire IDE-repair mixed cutover of `ide_sync_repair_locks` / `IdeSyncRepairLease` / `IdeSyncRepairLane` open/close/reopen/repair and generation ABA, `ResyncCoordinator` pending-rerun folding, `TsserverCarrierRefresh` latest-generation runner, shared-tsgo `CarrierSyncState`/`PendingSubmission` latest-pending coalescing, `DeclOverlayOwner` overlay serialization with preserved `root_reconcile_epochs` stale-pass high-water, `LazyTransport`/`LazyOverlayCore` establishment singleflight, `ProjectTsserverProvider` keyed `OnceCell` spawn, `LazyManagedTypeProvider` activation, membership-recovery cooldown); G2 supplies only exact-basis production waiters those operations join. Mapper-process JSON-RPC admission is TCM2, not H2. H2 deletes the completion backoff sequence in `server/nav_features.rs` (`[50, 150, 300]` milliseconds), converts `provider_query_with_bounded_recovery` and its receipt-less `Future<Output = ()>` resync callers to exact applied-receipt authorization, and removes `recover_companion_membership` plus the `recovery_attempts < 2`/`yield_now` hover and diagnostics retry loops. At most one retry may follow an exact provider-applied receipt where the protocol genuinely requires reopening; transport completion is never inferred from sleep or pseudo-idle. The shared-overlay 20-second fallback bound is an unsettled serving-policy duration; H2 does not reclassify, retarget, shorten, or delete it without a separate architecture ruling and exact timer tests. Real-process shared-provider tests are serialized, resource-isolated, protocol-ready, and bounded by one independent real watchdog. G2 owns and deletes reusable exact-basis flight mechanics, H2 owns and deletes the displaced lifecycle/coalescing and retry/admission mechanisms, G5 deletes pseudo-idle scheduling, and K3 verifies residual closure.
+
+**Readiness-protocol cutover:** `VerterReady`/`VerterReadyParams` (`$/verter/ready`) and `TypeProviderSyncComplete`/`TypeProviderSyncCompleteParams` (`$/verter/typeProviderSyncComplete`) are transitional global signals, not final readiness. Their `gen` fields currently mix initialization generations from `background_init` and `sync_orchestration::notify_editor_carrier_store_changed` with per-document content-transition generations from `SyncCoordinator`; those incompatible meanings cannot authorize a query. H2 supplies the exact provider-applied basis, H3 cuts every producer and consumer over to per-demand settlement, and K3 deletes the old protocol/latch/wiring ladder after that cutover.
+
 ## H3 — Atomic readiness and stale-safe publication
 
 **Predecessors:** `F1`, `H1`, `H2`.
 
 Publish generated companion and required `SourceProjectionMap` atomically; wait only for requested facts; validate observed document/project/config/provider/mapping/dependency stamps; bound channels and protect interactive capacity.
+
+**Settlement acceptance:** foreground hover, completion, navigation, references, rename, code actions, semantic tokens, inlay hints, and similar user requests never wait for edit debounce; they join or promote the exact producer flight immediately. Background diagnostics/indexing may use a quiet window with latest-wins coalescing. Each background quiet-window domain has one lifecycle owner; LSP debounce and edit-triggered import publication share one quiet-window policy and one lifecycle owner (`SyncCoordinator`); no detached sleeping task is spawned per edit. Cross-file edits causally invalidate exact dependents. Replies/publications carry their basis and are discarded when superseded. A fast stale response is a correctness failure, never a latency success. Unrelated edits do not invalidate unrelated requests.
+
+H3 refines the current `SyncCoordinator` as the one lifecycle owner of the LSP quiet-window domain. LSP debounce and edit-triggered import publication share that one quiet-window policy and this one owner; H3 converges the duplicate import-publication edit quiet window into `SyncCoordinator` and does not retain a second owner for that duration. It deletes detached import-publication and `DocumentRegistry::{schedule_semantic_analysis,spawn_semantic_analysis}` per-edit sleeping paths, `semantic_serial` scheduling, `last_change_ms`/`is_typing_cooldown` foreground gates, capture-without-join publication behavior, displaced IDE-repair call paths, and public `LspConfig` topology switches `suppress_edit_debounced_import_publication` and `suppress_sync_coordinator_signal`. The current unjoined `HoverProvenanceCache` producer either migrates through G2 on an F1/F2 exact document-plus-dependency basis with current-basis validation immediately before insert and use, or is deleted; stale behavior is not retained as compatibility.
+
+H3 also cuts all writers, latches, and consumers of `$/verter/ready` and `$/verter/typeProviderSyncComplete` over to exact per-demand receipts, including `background_init` scanner/announcement latches, `sync_orchestration`, `SyncCoordinator`, `packages/language-shared`, `packages/vue-vscode`, `packages/dx-harness`, and benchmark/E2E wiring. K3 is the actual deletion owner for that obsolete global protocol ladder after consumer cutover and the residual-verification owner for all H3 removals.
 
 # 12. Track J — CSS least-work convergence
 
@@ -422,19 +468,55 @@ Keep shared axes truly shared; make framework-private requests typed; remove fin
 
 Extract each invariant only after its final owner exists, migrate all consumers, delete sideways mutable access and dependency cycles, and retain only a small stable facade where product compatibility requires it.
 
+**Deletion acceptance:** after G2/G3/G5/H2/H3 install their final owners and perform their assigned deletions, K3 verifies every named transitional host/LSP readiness bridge in `charters/K3.md` is absent and deletes any missed residue before closing. K3 directly deletes the old global `$/verter/ready` / `$/verter/typeProviderSyncComplete` notification, latch, writer, and consumer ladder after H2/H3 cut over to exact per-basis settlement. This residual inventory includes the IDE-repair mixed map/lease/lane lifecycle (H2; G2 supplies only exact-basis production waiters a repair joins), `external_ts_sync` query-dedupe flight and `CarrierPublicationStore` publication lanes (G2), import-publication flights and duplicate quiet-window paths, provider-resync / tsserver carrier-refresh / shared-tsgo `CarrierSyncState` / `DeclOverlayOwner` serialization / `LazyTransport` establishment / keyed tsserver `OnceCell` spawn / lazy-managed activation / membership-recovery coalescers (H2), public suppress-topology `LspConfig` switches (H3), global handler-idle and tsserver interactive-idle scheduling, receipt-less provider retry, and the tsgo admission/deadline/cancellation path (H2 solely). Binding ruling fences in `charters/K3.md` — including the shared-overlay 20-second fallback — are not residue. K3 close dispositions every NAMED row in `charters/K3.md`; it does not re-run a search and an unnamed same-key coalescer is not a close failure (`rulings/MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md`). Dropping a K3 deletion row while G2/H2 still names the cell is a close failure. No unnamed “temporary” coordinator survives.
+
+# 13a. TypeScript content-mapper train (`TCM0`–`TCM4`)
+
+These blocks already exist in `program-dag.toml`. This section does not add or remove a DAG block or a ledger row, does not change TCM status, and does not reopen TCM0's recorded open gaps. It binds the four-part timing taxonomy to the surfaces those charters already own.
+
+## TCM0 — Current TypeScript contract and dual-plane architecture lock
+
+**Predecessors:** `A6`. Read-only lock. Owns no live queue, flight, coalescer, or protocol-admission surface. No extra timing-taxonomy acceptance criteria.
+
+## TCM1 — Compact mapping products inside `CodeTransform`
+
+**Predecessor:** `TCM0`. Mapping-product geometry under CodeTransform-is-sole-authority. Owns no coalescer. The 300 ms background-diagnostics quiet window remains H3's `SyncCoordinator` policy; TCM1 must not widen it. No extra concurrency criteria.
+
+## TCM2 — Content-mapper projection plane
+
+**Predecessors:** `TCM0`, `TCM1`. Dormant until TCM4.
+
+**Timing acceptance:** the `@verter/typescript-content-mapper` JSON-RPC/stdio boundary is external liveness — protocol completion plus one independent real monotonic watchdog; never polling and never inferred from sleep or pseudo-idle. Bounded queue admission (message size, queue depth, outstanding work, handles, caches) sits inside cancellation and one absolute deadline. TCM2 is the sole owner of that mapper-protocol admission; G3 may supply a reusable bounded-admission primitive and must not implement, accept, or delete the path. TCM2 does not introduce a generic coordinator duplicating G2's `FlightCell`.
+
+## TCM3 — TypeScript semantic capability closure
+
+**Predecessors:** `TCM0`, `TCM1`. Dormant until TCM4.
+
+**Timing acceptance:** snapshot acquire/query/release is owned causal progress (generation-validated, snapshot-bound). Bounded concurrent oracle queries consume G2 `FlightCell`; TCM3 owns snapshot scope, cancellation-by-fresh-snapshot, and stale-generation rejection, and does not ship a second generic flight system. The TypeProvider closure remains TCM3/TCM4.
+
+## TCM4 — Atomic activation and deletion
+
+**Predecessors:** `TCM0`, `TCM1`, `TCM2`, `TCM3`.
+
+**Timing acceptance:** activation and deletion land as one owned causal-progress cutover; no dual-path intermediate. The Project-Bound External-TS CRITICAL rule remains in force. Performance obligations are performance measurement and are not waived because the API is new. Creating an unnamed same-key coalescer on the activated path remains FORBIDDEN as a design rule, but proving its absence by search is not required and TCM4 close does not re-run the K3 enumeration (`rulings/MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md`: closure is disposition of the named inventory).
+
 # 14. Track L — Soak, performance, tuning, and final lock
 
 ## L1 — Long-churn bounded-memory soak
 
 **Predecessors:** `E4`, `G4`, `H3`, `J4`, `K3`.
 
-Run the `A6`-locked edit/create/delete/rename/move/open/close, project/config/provider restart, query-storm, pressure, cancellation, idle, and quiescence campaigns. Prove clean equivalence, attributable pins, owner plateaus, no monotonic count growth, and no restart cleanup.
+Run the `A6`-locked edit/create/delete/rename/move/open/close, project/config/provider restart, query-storm, pressure, cancellation, idle, and quiescence campaigns. Prove clean equivalence, attributable pins, owner plateaus, no monotonic count growth, and that no process restart is required for cleanup.
+
+**Timing/convergence proof:** prove no stale publication after a newer revision; bounded work during rapid edits; foreground bypass of background quiet windows; independent waiter cancellation; exact cross-file convergence; and no correctness dependency on host scheduling. Correctness evidence uses causal receipts/state/work counts, not elapsed thresholds or retry-until-time-passes loops.
 
 ## L2 — Final equivalent-work performance decision
 
 **Predecessors:** `B6`, `C4`, `D8`, `E4`, `H3`, `J4`, `K3`, `L1`.
 
 Run every locked absolute SLO, self no-regression, work/copy/allocation, boundary, and competitor/Pareto cell. The primary direct suite must meet its locked best-in-class target. A miss is blocking; it cannot be waived by a post-result ADR. If the product/equivalent-work premise was materially wrong, amend the architecture and Implementation Lock Record under the blind recalibration rule, invalidate the affected candidate evidence, and restart the cell/block.
+
+**Timing benchmark contract:** report distributions rather than one hard timing threshold and distinguish first response, first non-empty response, first correct response, convergence, work started, work superseded, work published, and work discarded. Every latency distribution is paired with exact content/correctness predicates and work attribution, so a fast stale response cannot count as success. Gate-performance changes remain independently measured and are not credited to runtime readiness work without controlled evidence.
 
 ## L3 — Optional post-architecture micro-optimization
 

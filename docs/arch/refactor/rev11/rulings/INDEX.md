@@ -21,6 +21,7 @@ program orchestrator (RULING 1), not performed here.
 |---|---|---|---|---|
 | [`STEERING-TCM-CONTENT-MAPPERS`](MAINTAINER-STEERING-TCM-CONTENT-MAPPERS.md) | maintainer-directive | 2026-08-22 | TCM0, TCM1, TCM2, TCM3, TCM4 | — |
 | [`TCM-PACKAGE-CERTIFICATION-SETTLED`](MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md) | maintainer-ruling | 2026-08-23 | TCM0, TCM1, TCM2, TCM3, TCM4 | — |
+| [`COALESCER-CLOSURE-IS-NAMED-DISPOSITION`](MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md) | maintainer-ruling | 2026-08-23 | K3, G2, H2, TCM4 | — |
 | [`CSS-WORK-REACHES-J1`](MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md) | maintainer-ruling | 2026-08-23 | J1 | — |
 | [`CODE-OVER-LEDGER`](MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md) | maintainer-ruling | 2026-08-22 | BV2, B5, CM1, scripts/validate-program-state.mjs, ledger bookkeeping protocol | — |
 | [`HARDEN-ORCHESTRATION`](MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION.md) | maintainer-directive | 2026-08-20 | program-wide orchestration machinery | — |

@@ -84,6 +84,32 @@ is no fourth fallback tier.
    or keep TCM4 blocked. No fifth outcome (silently degrading a feature, or quietly routing it through a
    private protocol) is legal.
 
+## 2a. Timing taxonomy
+
+Every TCM3 timing-sensitive mechanism is classified using `architecture.md` §1.6.
+
+- Snapshot acquire/query/release is **owned causal progress**: generation-validated, snapshot-bound
+  receipts. Interest is registered before durable snapshot state is rechecked.
+- Bounded concurrent oracle queries consume G2 `FlightCell` (one producer per key and exact snapshot
+  basis, joined waiters, independent cancellation and deadlines, durable `ReadyAt`). TCM3 owns snapshot
+  scope, cancellation-by-fresh-snapshot (the certified candidate has no server cancel), and
+  stale-generation rejection. TCM3 does not ship a second generic flight system, a local duplicate
+  `SingleflightGroup`, or a TypeProvider-shaped IPC that coalesces queries beside G2.
+- The TypeProvider closure remains TCM3/TCM4. A surviving `TypeProvider` relay that still coalesces
+  concurrent demand for the same query identity is a G2/K3 inventory row, not an unnamed TCM3 cell.
+- **Recorded precondition gap — not a TCM3 decision, and not resolved here.** The G2 dependency stated
+  above and exit criterion 8 both bind TCM3 to G2's `FlightCell` and forbid a local duplicate, but
+  `program-dag.toml` gives TCM3 predecessors `["TCM0", "TCM1"]` only. On that DAG, TCM3 can become
+  dependency-eligible before G2 exists, and exit criterion 8 is then unsatisfiable by construction:
+  TCM3 could only ship the forbidden local duplicate or fail to close. TCM3 does not fix this and no
+  block may fix it unilaterally — adding `G2` as a predecessor is a DAG edge change, which requires a
+  formal DAG amendment (`AMD-*`) ratified through the architecture-consult route and recorded by the
+  program orchestrator, exactly as `rulings/ARCH-RULING-C2-FIVE-FORKS.md` fork B required for
+  `B6 -> C2`. The state block set must equal the DAG block set, and `scripts/validate-program-state.mjs`
+  enforces that pairing, so an edge added outside that route is a validator violation rather than a fix.
+  This bullet records the gap so it is visible at dispatch time; it creates no scheduling rule of its own
+  and changes no status.
+
 ## 3. Owned-scope boundary (what TCM3 does NOT own)
 
 - No `MapperProcessProjectState` implementation — that is TCM2's.
@@ -139,7 +165,8 @@ this correctly; no edge change is required.
    oracle boundary (not merely at the `Program`/`Checker` type-state layer of exit criterion 2).
 8. **Bounded-concurrency and cleanup tests**: a fixed ceiling on concurrent outstanding queries; project-
    handle and derived-cache state released on session close, with no leak across repeated open/close
-   cycles.
+   cycles. Concurrent identical snapshot-bound queries join one G2 `FlightCell`; a test fails if a second
+   generic coordinator or a local duplicate `SingleflightGroup` produces that join.
 9. **Semantic-plane conformance fixtures pass**, per steering's "Required conformance coverage" list,
    scoped to TCM3's semantic-capability-plane responsibilities: configured/inferred project trust states,
    snapshot correctness across cancellation/regeneration, and the oracle-boundary Unicode/large-file
@@ -160,6 +187,9 @@ this correctly; no edge change is required.
   relies on one is forbidden.
 - Deferring the rows #25-26 disposition past this block's own completion (TCM3-EC-G1 is blocking, not
   advisory).
+- A second generic flight system, a local duplicate of `FlightCell`/`SingleflightGroup`, or coalescing
+  concurrent oracle demand beside G2. Snapshot completion inferred from sleep, idle, or polling when a
+  snapshot receipt exists.
 
 ## 7. Material bounds
 

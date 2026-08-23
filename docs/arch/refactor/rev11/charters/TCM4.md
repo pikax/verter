@@ -86,6 +86,24 @@ carrier architecture.
 10. **TCM3-EC-G1 gate respected**: TCM4 may delete `feature-ownership-ledger.md` rows #25-26's code only
     after the maintainer ruling TCM3's exit criterion 5 requires is recorded.
 
+## 2a. Timing taxonomy
+
+Every TCM4 timing-sensitive mechanism is classified using `architecture.md` §1.6.
+
+- Activation and deletion in one accepted transition is **owned causal progress** of the cutover. There
+  is no dual-path intermediate whose completion is inferred from time.
+- The Project-Bound External-TS CRITICAL rule remains in force: production external-TypeScript results
+  require a resolved `ProjectBinding` and `BoundProject` witness. TCM4 does not reintroduce an inferred
+  backend, a path-only project, or a coalescer that joins work across unbound projects.
+- Performance obligations in §6 are **performance measurement**. They are not waived because the API is
+  new.
+- Creating an unnamed same-key coalescer on the activated path remains FORBIDDEN as a design rule (see
+  §5). Proving its ABSENCE by search is not required and is not a close condition: the maintainer ruled
+  that closure is disposition of the named inventory and that we do not keep testing for unnamed cells
+  (`rulings/MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md`),
+  and `charters/K3.md`'s recorded search is evidence of how that inventory was built, not a gate. If an
+  independent adversarial search does surface a new cell, classify it in `charters/K3.md` as usual.
+
 ## 3. Owned-scope boundary (what TCM4 does NOT own)
 
 - No new feature-ownership decisions — TCM4 activates and deletes per TCM0's ratified ledger; it does not
@@ -93,6 +111,7 @@ carrier architecture.
 - No new mapping-product design — TCM1's typed `SourceProjectionMap` and TCM2's terminal-view adapter are
   consumed as-is.
 - No new oracle-client design — TCM3's `TypeSemanticOracle` is consumed as-is.
+- Editor-side `typescriptPluginRefreshScheduler` and Native Preview `transition` promise are TCM4 deletion/activation surfaces (`ProviderHub` is LSP-only and does not own them). `activationGate` is TCM4 extension-activation join; `tsPluginPromise` dies when TCM4 deletes `@verter/typescript-plugin`, and so does that package's own in-plugin sibling of the scheduler — the per-`projectKey` `refreshScheduled` + `pendingScriptInfoReloads` + `pendingResolutionCacheClear` fold into one pending `setImmediate` (`packages/typescript-plugin/src/index.ts:544-546`, folding at `:636-639`), which exit criterion 8's absence check must cover and not only the editor-side scheduler.
 - Deletion of a neutral compiler/query facility with a demonstrated surviving owner is explicitly OUT of
   scope (`deletion-closure.md`'s "Survives" table is authoritative; TCM4 does not second-guess it without
   a new finding routed through the program orchestrator).
@@ -138,6 +157,12 @@ carrier architecture.
     list, scoped to TCM4's activation/deletion responsibilities: missing/malformed/duplicate mapper
     detection, multi-installation monorepos, project references, and mapper/API crash and
     shutdown-cleanup fixtures.
+11. **Same-key coalescer inventory holds on the activated tree.** Evidence: every row in
+    `charters/K3.md` that names a cell on the activated path is dispositioned — absent, or converged with
+    its recorded owner — and no second generic `FlightCell` was introduced. This is NOT a re-run of that
+    charter's search: absence of unnamed cells is neither claimed nor required
+    (`rulings/MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md`). Mapper
+    JSON-RPC admission remains TCM2; oracle snapshot flights remain G2 consumed by TCM3.
 
 ## 5. Forbidden
 
@@ -150,6 +175,8 @@ carrier architecture.
 - Deleting a neutral facility with a demonstrated surviving owner (`deletion-closure.md`'s "Survives"
   table).
 - Waiving a performance gate because the API is new.
+- An unnamed same-key coalescer on the activated path; a second generic `FlightCell`; inferred-backend
+  fallback that the Project-Bound External-TS rule forbids.
 - Bypassing a TypeScript trust refusal through a private Verter channel; automatically enabling arbitrary
   third-party external code.
 
