@@ -1505,10 +1505,9 @@ landing_order = 2
 # not to a candidate awaiting review — J1 remains IN_PROGRESS and this field
 # is not validator-required at that status (EVIDENCE_BOUND excludes
 # IN_PROGRESS). Two slices have landed under the 4-slice split
-# (eadec2dc0, 120eede71); block/css-cutover, block/svelte-css-grammar,
-# block/css-closing-items remain to land. J1's acceptance is complete only
-# once all 41 acceptance IDs are covered (MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md
-# §3) — the landed slices do not by themselves constitute acceptance.
+# (eadec2dc0, 120eede71). Remaining CSS work integrates into
+# block/j1-integration (MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md);
+# J1's acceptance is complete only once all 41 acceptance IDs are covered.
 candidate_sha = "120eede711dd4358c75ad225430f4df349d47a74"
 candidate_tree = "10828574b1e6b4d394c031eade9541740813115d"
 accepted_sha = ""
@@ -1526,7 +1525,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = ""
-notes = "MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §3: J1 is PERMITTED to land as slices — the 4-slice split the orchestrator ratified on its own authority (which it had no authority to do) is now ratified explicitly by the maintainer, specific to J1 and not a general licence to split an acceptance unit. Two slices landed so far: eadec2dc0 (refactor(core): converge the CSS readers on one shared parse) and 120eede71 (fix(core): bring style_planner to parity with the legacy CSS route); the remaining slices (block/css-cutover, block/svelte-css-grammar, block/css-closing-items) land under the same permission. Acceptance is not recorded on this row until every one of J1's 41 acceptance IDs is covered — the landed slices alone do not constitute acceptance. Single independent review lane (ratified for BV2/B5/J1/CM1 only) applies once acceptance review begins."
+notes = "MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md: remaining CSS work integrates into branch block/j1-integration, which lands on the protected trunk as the single J1 block. No new DAG blocks; J1's 41 acceptance IDs are unchanged. Forced slice order into block/j1-integration (CSS-ALLOCATION-OWNERSHIP-2026-08-23 landing sequence): (1) Svelte grammar convergence (block/svelte-css-grammar); (2) verter_css_syntax allocation predecessor (block/css-parser-allocation); (3) verter_compiler arena-lifecycle predecessor (block/css-arena-lifecycle); (4) cutover reconstructed on the cumulative result (css-cutover-squashed). block/css-closing-items is a DONOR ONLY and is never landed; its worktree is already removed; the branch is retained at afc2ddbd3 because remaining A9/A12/A13/A14 hunks are not yet proven rehomed and must be transplanted into the cutover. A slice landing into the integration branch is not an acceptance event. Two slices already on trunk: eadec2dc0 (converge the CSS readers on one shared parse) and 120eede71 (bring style_planner to parity with the legacy CSS route). MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md §3: J1 remains one acceptance unit of 41 IDs; acceptance is not recorded on this row until every ID is covered. Single independent review lane (ratified for BV2/B5/J1/CM1 only) applies once acceptance review begins."
 
 [[block]]
 id = "J2"

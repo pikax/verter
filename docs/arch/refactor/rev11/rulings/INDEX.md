@@ -15,12 +15,13 @@ model. Do not treat `superseded_by = —` as proof a ruling is uncontested; it m
 ruling's own text names it as superseded. Ledger `digest` binding is a separate step owned by the
 program orchestrator (RULING 1), not performed here.
 
-## Maintainer directives (27)
+## Maintainer directives (28)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
 | [`STEERING-TCM-CONTENT-MAPPERS`](MAINTAINER-STEERING-TCM-CONTENT-MAPPERS.md) | maintainer-directive | 2026-08-22 | TCM0, TCM1, TCM2, TCM3, TCM4 | — |
 | [`TCM-PACKAGE-CERTIFICATION-SETTLED`](MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md) | maintainer-ruling | 2026-08-23 | TCM0, TCM1, TCM2, TCM3, TCM4 | — |
+| [`CSS-WORK-REACHES-J1`](MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md) | maintainer-ruling | 2026-08-23 | J1 | — |
 | [`HARDEN-ORCHESTRATION`](MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION.md) | maintainer-directive | 2026-08-20 | program-wide orchestration machinery | — |
 | [`CSS-CLEAN-CUTOVER`](MAINTAINER-DIRECTIVE-CSS-CLEAN-CUTOVER.md) | maintainer-directive | 2026-08-20 | Track J (J1-J4), CSS/style pipeline architecture | — |
 | [`NO-LIGHTNINGCSS`](MAINTAINER-RULING-NO-LIGHTNINGCSS.md) | maintainer-directive | 2026-08-17 | Track J / J1, BCSS0 (superseded within this document), CSS/style pipeline | CSS-CLEAN-CUTOVER |
