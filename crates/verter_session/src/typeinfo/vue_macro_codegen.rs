@@ -1364,11 +1364,11 @@ impl VerterHost {
         let mut ref_names: FxHashSet<String> = FxHashSet::default();
         for (field_index, field) in mac.expose_fields.iter().enumerate() {
             let member_type = match &field.referenced_binding {
-                Some(binding_name) => {
+                Some(binding_key) => {
                     let key = dispatch.typeof_key_for(
                         ValueRootKey {
-                            scope: ScopeId::file(Arc::from(owner_canonical), mac.owner),
-                            name: Arc::from(binding_name.as_str()),
+                            scope: ScopeId::file(Arc::from(owner_canonical), binding_key.owner),
+                            name: Arc::clone(&binding_key.name),
                         },
                         ProjectionReductionContext::published(ProjectionMode::Expanded),
                     );

@@ -89,6 +89,7 @@ pub(crate) fn project_emits(
             surface_member_to_expanded_field(
                 query_engine,
                 file,
+                mac.owner,
                 &admitted,
                 None,
                 None,

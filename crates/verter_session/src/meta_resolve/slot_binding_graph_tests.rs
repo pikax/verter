@@ -2136,6 +2136,101 @@ defineSlots<{ default(props: SlotProps): any }>()
     );
 }
 
+/// Production publication path: two same-owner `defineSlots` macros publish
+/// the same `default.item` name with different types. Join identity keeps
+/// `macro_index`, but the published field name is global to the component,
+/// so declaration-order first-wins — the first macro's type is the published
+/// row and the second must not overwrite it. Calls `get_component_meta` /
+/// `evaluate_types` (which run `publish_merged_bindings`), not the parser
+/// index helper.
+#[test]
+fn same_owner_two_macros_same_slot_binding_name_publication_is_declaration_order_first_wins() {
+    let host = build_test_host();
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+defineSlots<{ default(props: { item: number }): any }>()
+defineSlots<{ default(props: { item: string }): any }>()
+</script>
+<template><div /></template>
+"#,
+    );
+
+    let evaluated = host
+        .evaluate_types("/src/Comp.vue")
+        .expect("evaluated types should exist");
+    let published: Vec<_> = evaluated
+        .slot_bindings
+        .iter()
+        .filter(|field| field.name == "default.item")
+        .collect();
+    assert_eq!(
+        published.len(),
+        1,
+        "a published field name is global to the component: two same-owner \
+         macros must not emit two rows both named default.item; got {:?}",
+        published
+            .iter()
+            .map(|field| (field.name.as_str(), field.owner))
+            .collect::<Vec<_>>(),
+    );
+
+    let published_source = published[0]
+        .authority
+        .source()
+        .expect("published default.item must carry a typed source");
+    let published_ty = crate::test_only::semantic_source_probe::demand_type_expr(
+        &host,
+        "/src/Comp.vue",
+        published_source,
+    )
+    .expect("published default.item source must demand-materialize");
+    assert_eq!(
+        published_ty,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+        "the published default.item row must carry the FIRST macro's number \
+         type (declaration-order first-wins), never the second macro's string"
+    );
+    assert_ne!(
+        published_ty,
+        TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        "the second same-owner macro must not overwrite the winner's type"
+    );
+
+    let meta = host
+        .get_component_meta("/src/Comp.vue")
+        .expect("component meta");
+    let item_bindings: Vec<_> = meta
+        .slots
+        .iter()
+        .filter(|slot| slot.name == "default")
+        .flat_map(|slot| {
+            slot.bindings
+                .iter()
+                .filter(|binding| binding.name == "item")
+        })
+        .collect();
+    assert!(
+        !item_bindings.is_empty(),
+        "extract must surface the winning default.item binding"
+    );
+    for binding in &item_bindings {
+        let demanded = demand_binding_type(&host, "/src/Comp.vue", binding);
+        assert_eq!(
+            demanded,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "every extracted default.item must keep the first macro's number, \
+             never the second macro's string; got {demanded:?}"
+        );
+        assert_ne!(
+            demanded,
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            "the second same-owner macro must not overwrite the winner's type"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // External-corpus tests — gated behind `external-corpus`.
 // ---------------------------------------------------------------------------

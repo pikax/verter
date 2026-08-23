@@ -54,7 +54,7 @@
 //!   single most common real-world Vue SFC shape — it still binds and
 //!   resolves normally, with `Local` results attributed to the sole
 //!   instance owner instead (see `resolve_from_program_root` /
-//!   `owner_of_scope`).
+//!   `BuiltState::owner_for_symbol`).
 //!
 //! Correlation between the clone's bound `IdentifierReference`s and the
 //! CALLER's original retained AST nodes is by BYTE SPAN, never by node
@@ -66,8 +66,8 @@ use oxc_allocator::{Allocator, CloneIn};
 use oxc_ast::ast::*;
 use oxc_ast::{AstBuilder, NONE};
 use oxc_ast_visit::{walk, Visit, VisitMut};
-use oxc_semantic::{ReferenceId, ScopeId, Scoping, SemanticBuilder};
-use oxc_span::SourceType;
+use oxc_semantic::{ReferenceId, ScopeId, Scoping, SemanticBuilder, SymbolFlags, SymbolId};
+use oxc_span::{GetSpan, SourceType};
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TopLevelOwnerKind};
 
@@ -152,20 +152,87 @@ struct BuiltState {
     /// degenerate; that case never reaches `Built` at all (see `build`).
     module_owner: Option<TopLevelOwnerId>,
     instance_owner: Option<TopLevelOwnerId>,
+    /// Authored owner for a Program-root-landing binding, keyed by the bound
+    /// symbol's OWN `SymbolId` (never by name text — two distinct bindings
+    /// can share a spelling, and a name-keyed map cannot tell them apart)
+    /// and populated by BYTE-SPAN correlation, never by statement/import
+    /// kind: every symbol `iter_bindings_in` `program_root_scope_id` has its
+    /// declaring identifier's span (`Scoping::symbol_span`) matched against
+    /// whichever ORIGINAL top-level statement span contains it
+    /// (`root_statement_owners` in [`build_and_bind`]), and that statement's
+    /// OWN authored owner wins — never `module_owner` by default. This
+    /// covers every root-landing statement kind uniformly (an
+    /// Instance-owned import lands at Program root and keeps its Instance
+    /// owner even beside a Module region; a Frontmatter-owned declaration
+    /// keeps Frontmatter; Module-owned declarations resolve to Module,
+    /// matching the old default) and is self-erasure-safe: a type-only
+    /// import the runtime-survival projection erases before binding
+    /// produces no `SymbolId` at all, so it never enters this map. A lookup
+    /// miss (a symbol with no mapped statement, unreachable in practice)
+    /// falls through to `module_owner.or(instance_owner)`. Both resolution
+    /// arms (`resolve_from_program_root` AND `resolve_natural`) consult this
+    /// SAME map keyed by the SAME `SymbolId` — there is exactly one owner-
+    /// attribution strategy for a Program-root-bound symbol, not one per
+    /// arm.
+    root_binding_owner_by_symbol: FxHashMap<SymbolId, TopLevelOwnerId>,
+    /// Program-root symbols whose declaration + every recorded
+    /// `Scoping::symbol_redeclarations` span resolve to MORE THAN ONE
+    /// distinct owner (e.g. a Module-owned and an Instance-owned import
+    /// sharing a local name, merged by OXC's binder onto one canonical
+    /// `SymbolId` that keeps only the FIRST declaration's `symbol_span`).
+    /// A same-owner redeclaration (`var Custom = 1; var Custom = 2;` in the
+    /// same script) is legal and NOT recorded here — only a genuine
+    /// cross-owner collision is, and querying this set first fails closed
+    /// to `Indeterminate` rather than guessing among the conflicting
+    /// owners. Consulted by BOTH resolution arms — an ambiguous symbol
+    /// fails closed regardless of which `StartScope` reached it.
+    root_ambiguous_binding_symbols: FxHashSet<SymbolId>,
     program_root_scope_id: ScopeId,
     /// The synthetic instance wrapper's function scope, when an instance
     /// side exists.
     wrapper_scope_id: Option<ScopeId>,
-    /// Scopes that DIRECTLY (not via descendant propagation) contain a
-    /// non-optional call to the bare name `eval`, where that exact scope is
-    /// sloppy (non-strict) mode. A strict-mode direct eval can never leak a
-    /// binding outward and is never recorded here.
+    /// The nearest VARIABLE-environment scope (function, Program root,
+    /// class-static-block, or `declare namespace` block — see
+    /// `ScopeFlags::is_var`) enclosing a non-optional call whose callee is a
+    /// Reference named `eval` (an identifier, possibly wrapped in grouping
+    /// parentheses or TypeScript type-assertion forms that compile away),
+    /// where that variable-environment scope is sloppy (non-strict) mode.
+    /// Sloppy direct `eval`'s `var`/function-declaration leak attaches to
+    /// that nearest variable environment, not the exact lexical block
+    /// containing the call, so marking the block itself would miss sibling
+    /// references outside it but still within the same function/program. A
+    /// strict-mode direct eval can never leak a binding outward, and a
+    /// locally shadowed `eval` name is an ordinary function call with no
+    /// scope-injection power — neither is recorded here. Optional-call and
+    /// comma-expression callees are spec-indirect and are not recorded.
     sloppy_eval_scopes: FxHashSet<ScopeId>,
 }
 
 struct ReferenceEntry {
     name: String,
     reference_id: ReferenceId,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Thread-local, not a process-global static: the assertions that read
+    /// it are exact equalities against zero, so a concurrently-running test
+    /// building an index of its own would turn them into intermittent false
+    /// failures under threaded libtest. `build` runs on its caller's thread
+    /// (its `&Program` is arena-bound and never crosses one), so a
+    /// thread-local counter observes exactly the builds the reading test
+    /// caused.
+    static BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_build_count() -> usize {
+    BUILD_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_build_count() {
+    BUILD_COUNT.with(|count| count.set(0));
 }
 
 impl RootBindingIndex {
@@ -175,6 +242,8 @@ impl RootBindingIndex {
     /// index).
     #[must_use]
     pub fn build(program: &Program<'_>, owners: &TopLevelOwnerTable, parse_errors: bool) -> Self {
+        #[cfg(test)]
+        BUILD_COUNT.with(|count| count.set(count.get() + 1));
         if parse_errors {
             return Self {
                 state: IndexState::Degenerate,
@@ -268,23 +337,74 @@ impl RootBindingIndex {
             StartScope::OwnerNaturalScope => state.resolve_natural(entry),
         }
     }
+
+    /// Test-only introspection: how many scopes are recorded as containing a
+    /// possible direct `eval`. A `with`-shadowed eval callee's
+    /// classification is unobservable through [`Self::resolve_value_identifier`]
+    /// for ANY consuming reference physically inside (or nested within) the
+    /// `with` block, because that same query is already forced
+    /// `Indeterminate` by the independent `with`-ancestor check above —
+    /// this exposes the internal record directly so a regression that makes
+    /// a with-shadowed callee wrongly "provably safe" (and so never
+    /// recorded here at all) still fails a test.
+    #[cfg(test)]
+    pub(crate) fn sloppy_eval_scope_count(&self) -> usize {
+        match &self.state {
+            IndexState::Built(state) => state.sloppy_eval_scopes.len(),
+            IndexState::Degenerate => 0,
+        }
+    }
 }
 
 impl BuiltState {
+    /// The ONE owner-attribution strategy for a resolved `SymbolId`, shared
+    /// by both `StartScope` arms. A Program-root-bound symbol (present in
+    /// `root_binding_owner_by_symbol`) uses its span-correlated AUTHORED
+    /// owner, gated first by `root_ambiguous_binding_symbols` (a genuine
+    /// cross-owner collision fails closed regardless of caller). A symbol
+    /// declared exactly at the synthetic instance wrapper's OWN top-level
+    /// function scope (a genuine `<script setup>` top-level declaration —
+    /// there is only ever one instance owner, so this can never collide)
+    /// attributes to the sole instance owner.
+    ///
+    /// Every OTHER declaring scope — anything nested one level deeper than
+    /// either top level (a function/block-local inside `mod()`/`fm()`/
+    /// `setup()`), and anything under a non-wrapped owner kind (e.g.
+    /// Frontmatter, which lands at Program root only for its OWN top-level
+    /// statements, never for locals nested inside one) — fails closed.
+    /// `DeclBindingKey` names a TOP-LEVEL owner declaration (the entry the
+    /// general authored-value-reference route looks up); a nested local has
+    /// no such top-level entry, so returning `owner_of_scope`'s old binary
+    /// module-vs-instance guess here would either collide two distinct
+    /// nested bindings sharing a name onto the SAME `(owner, name)` key, or
+    /// (for a non-wrapped owner kind) silently mislabel a Frontmatter-owned
+    /// nested local as Module. Never guess: fail closed instead.
+    fn owner_for_symbol(&self, symbol_id: SymbolId) -> Option<TopLevelOwnerId> {
+        if self.root_ambiguous_binding_symbols.contains(&symbol_id) {
+            return None;
+        }
+        if let Some(owner) = self.root_binding_owner_by_symbol.get(&symbol_id) {
+            return Some(*owner);
+        }
+        let declaring_scope = self.scoping.symbol_scope_id(symbol_id);
+        if self.wrapper_scope_id == Some(declaring_scope) {
+            return self.instance_owner.or(self.module_owner);
+        }
+        None
+    }
+
     fn resolve_from_program_root(&self, name: &str) -> BindingResolution {
         match self
             .scoping
             .find_binding(self.program_root_scope_id, name.into())
         {
-            // Found at Program root. Its true owner is the module owner
-            // when one exists; when there is none (a `<script setup>`-only
-            // SFC), the ONLY statements that can still land at Program
-            // root are imports, which always land there regardless of
-            // owner kind — so the sole instance owner is the correct tag.
-            // Neither existing is unreachable in a genuinely degenerate
-            // topology (build() never reaches Built() there), but this
-            // fails closed rather than fabricating an owner if it ever is.
-            Some(_symbol_id) => match self.module_owner.or(self.instance_owner) {
+            // Found at Program root — attribute through the SAME
+            // symbol-keyed owner authority `resolve_natural` uses (see
+            // `owner_for_symbol`). `None` covers both a genuine cross-owner
+            // ambiguity and the practically-unreachable case neither
+            // `module_owner` nor `instance_owner` exists — either way this
+            // fails closed rather than fabricating an owner.
+            Some(symbol_id) => match self.owner_for_symbol(symbol_id) {
                 Some(owner) => {
                     BindingResolution::Local(DeclBindingKey::new(owner, name.to_string()))
                 }
@@ -297,13 +417,22 @@ impl BuiltState {
     fn resolve_natural(&self, entry: &ReferenceEntry) -> BindingResolution {
         let reference = self.scoping.get_reference(entry.reference_id);
         match reference.symbol_id() {
-            Some(symbol_id) => {
-                let decl_scope = self.scoping.symbol_scope_id(symbol_id);
-                BindingResolution::Local(DeclBindingKey::new(
-                    self.owner_of_scope(decl_scope),
-                    entry.name.clone(),
-                ))
-            }
+            // Attribute through the SAME symbol-keyed owner authority
+            // `resolve_from_program_root` uses — a Program-root-bound
+            // symbol reached via its natural lexical scope (e.g. a module
+            // variable referenced from inside the instance wrapper) gets
+            // the SAME authored owner and the SAME ambiguity gate as when
+            // reached from `ProgramRoot` mode; a genuine instance
+            // top-level symbol (declared directly in the wrapper's own
+            // function scope) attributes to the sole instance owner; any
+            // more deeply nested local fails closed (see
+            // `owner_for_symbol`).
+            Some(symbol_id) => match self.owner_for_symbol(symbol_id) {
+                Some(owner) => {
+                    BindingResolution::Local(DeclBindingKey::new(owner, entry.name.clone()))
+                }
+                None => BindingResolution::Indeterminate,
+            },
             None => BindingResolution::Global,
         }
     }
@@ -317,30 +446,6 @@ impl BuiltState {
         self.scoping.scope_ancestors(from).any(|scope| {
             self.scoping.scope_flags(scope).is_with() || self.sloppy_eval_scopes.contains(&scope)
         })
-    }
-
-    /// Module-vs-instance owner attribution for a declaring scope: instance
-    /// iff the scope IS the wrapper's function scope or a descendant of it;
-    /// module otherwise — falling back to instance (a `<script setup>`-only
-    /// SFC's import) when there is no module owner at all, and to the
-    /// ordinary-file placeholder only in the practically unreachable case
-    /// neither exists.
-    fn owner_of_scope(&self, scope: ScopeId) -> TopLevelOwnerId {
-        if let Some(wrapper) = self.wrapper_scope_id {
-            if self
-                .scoping
-                .scope_ancestors(scope)
-                .any(|ancestor| ancestor == wrapper)
-            {
-                return self
-                    .instance_owner
-                    .or(self.module_owner)
-                    .unwrap_or(TopLevelOwnerId::ordinary_file());
-            }
-        }
-        self.module_owner
-            .or(self.instance_owner)
-            .unwrap_or(TopLevelOwnerId::ordinary_file())
     }
 }
 
@@ -359,6 +464,11 @@ fn build_and_bind(
 
     let mut root_body = ast.vec();
     let mut wrapper_body_stmts = ast.vec();
+    // One entry per ORIGINAL top-level statement that lands at Program root
+    // (import or not), recording its own authored owner. Statements are
+    // sibling AST nodes, so their spans never overlap — a bound symbol's
+    // declaring-identifier span is contained in exactly one of these below.
+    let mut root_statement_owners: Vec<(oxc_span::Span, TopLevelOwnerId)> = Vec::new();
     for (index, stmt) in program.body.iter().enumerate() {
         let is_import = matches!(
             stmt,
@@ -369,6 +479,7 @@ fn build_and_bind(
         if !is_import && instance_owner.is_some() && owner.kind() == TopLevelOwnerKind::Instance {
             wrapper_body_stmts.push(cloned);
         } else {
+            root_statement_owners.push((stmt.span(), owner));
             root_body.push(cloned);
         }
     }
@@ -439,6 +550,63 @@ fn build_and_bind(
 
     let program_root_scope_id = clone.scope_id.get().unwrap_or(scoping.root_scope_id());
 
+    // Authored owner per Program-root-bound `SymbolId` (never per name text
+    // — see `BuiltState::root_binding_owner_by_symbol`), by span containment
+    // against `root_statement_owners`. A symbol whose erased source
+    // statement never made it into the clone (a type-only import) never
+    // appears in `iter_bindings_in` at all — self-erasure-safe by
+    // construction, no separate erasure check needed here. A REDECLARED
+    // symbol (`symbol_redeclarations` non-empty — e.g. `var Custom = 1; var
+    // Custom = 2;`, or two conflicting imports under different owners)
+    // merges onto ONE canonical `SymbolId` in OXC's binder, keeping only
+    // the FIRST declaration's span as `symbol_span`. Trusting that alone
+    // would silently attribute whichever declaration the binder happened
+    // to keep first — instead, every declaration span (the primary one
+    // plus each redeclaration's own recorded span) is resolved to its own
+    // owner and the OWNER SET decides: a same-owner redeclaration (legal,
+    // ordinary) still resolves normally, and only a genuine CROSS-owner
+    // collision marks the symbol ambiguous (see
+    // `BuiltState::root_ambiguous_binding_symbols`). Every declaration span
+    // for a Program-root-bound symbol is expected to fall inside exactly
+    // one `root_statement_owners` entry — but a span that fails to map is
+    // treated as ambiguous too, never silently dropped from the set: an
+    // owner computed from a PARTIAL span set is not an authored owner, it
+    // is a guess with a gap in it, and this module never guesses.
+    let owner_of_span = |span: oxc_span::Span| {
+        root_statement_owners
+            .iter()
+            .find_map(|&(stmt_span, owner)| {
+                (stmt_span.start <= span.start && span.end <= stmt_span.end).then_some(owner)
+            })
+    };
+    let mut root_binding_owner_by_symbol = FxHashMap::default();
+    let mut root_ambiguous_binding_symbols = FxHashSet::default();
+    for symbol_id in scoping.iter_bindings_in(program_root_scope_id) {
+        let mut owners: Vec<TopLevelOwnerId> = Vec::new();
+        let mut every_span_mapped = true;
+        for span in std::iter::once(scoping.symbol_span(symbol_id)).chain(
+            scoping
+                .symbol_redeclarations(symbol_id)
+                .iter()
+                .map(|redeclaration| redeclaration.span),
+        ) {
+            match owner_of_span(span) {
+                Some(owner) => owners.push(owner),
+                None => every_span_mapped = false,
+            }
+        }
+        owners.sort_unstable();
+        owners.dedup();
+        match owners.as_slice() {
+            [owner] if every_span_mapped => {
+                root_binding_owner_by_symbol.insert(symbol_id, *owner);
+            }
+            _ => {
+                root_ambiguous_binding_symbols.insert(symbol_id);
+            }
+        }
+    }
+
     // The synthetic wrapper, when built, is always the LAST root-body
     // statement (appended after every module-owned statement) — locate it
     // structurally, never by name/text.
@@ -454,9 +622,92 @@ fn build_and_bind(
 
     let mut sloppy_eval_scopes = FxHashSet::default();
     for reference_id in collector.eval_callee_reference_ids {
-        let scope_id = scoping.get_reference(reference_id).scope_id();
-        if !scoping.scope_flags(scope_id).is_strict_mode() {
-            sloppy_eval_scopes.insert(scope_id);
+        let reference = scoping.get_reference(reference_id);
+        let scope_id = reference.scope_id();
+        // A `with` object can supply its OWN `eval` property at runtime,
+        // intercepting the lookup before it ever reaches the statically
+        // resolved binding below — OXC documents walking past `with`
+        // scopes as a known resolution limitation
+        // (`oxc_semantic::is_global_reference`), so a callee lexically
+        // resolved to a local symbol can still be the real intrinsic
+        // `%eval%` at runtime (`with ({ eval: trueEval }) { eval(...) }`).
+        // Every provable-safety argument below assumes the resolved
+        // symbol is what actually runs, which does not hold once a
+        // `with` sits anywhere on the callee's own physical scope chain
+        // — checked unconditionally, before any other shortcut.
+        let with_shadow_possible = scoping
+            .scope_ancestors(scope_id)
+            .any(|scope| scoping.scope_flags(scope).is_with());
+        // The spec's direct-eval test is a VALUE-identity check (is the
+        // resolved value `SameValue` as the intrinsic `%eval%`), not an
+        // "is this name bound" check — `var eval = window.eval; eval(...)`
+        // is still direct eval despite `eval` being a local binding, and
+        // that can never be proven statically. A FUNCTION declaration's OWN
+        // value is a fresh function object, never referentially equal to
+        // `%eval%` — but only as long as no OTHER declaration/assignment
+        // could still reach this binding with a different value:
+        // `symbol_is_mutated` covers every ordinary write REFERENCE
+        // anywhere in the program (`eval = window.eval;`, regardless of
+        // call-site order), but a `var`/function REDECLARATION with its own
+        // initializer (`var eval = trueEval;`) is a declaration, not a
+        // `Reference`, and `symbol_is_mutated` cannot see it — requiring
+        // `symbol_redeclarations` to be empty too closes that gap.
+        // `symbol_is_mutated`/`symbol_redeclarations` only ever see writes
+        // that are themselves `Reference`s to this identifier. A
+        // declaration sitting at the OUTERMOST scope of a real classic
+        // (`ModuleKind::Script`) script is ALSO installed as a property of
+        // the global object (Annex B `GlobalDeclarationInstantiation`), so
+        // its storage is shared with `globalThis`/`window`/any other alias
+        // of the global object — a property WRITE through one of those
+        // aliases mutates the very binding an unqualified `eval` resolves
+        // to without ever emitting a `Reference` to the `eval` identifier
+        // itself, which no identifier-based check can see. This is
+        // `is_script()` specifically, not merely "not a module": an ES
+        // Module's top-level bindings are never global-object-aliased, and
+        // neither is CommonJS's (the whole file body is wrapped in a
+        // function at load time), so both stay exempt. Any declaration
+        // nested inside a function (never reachable via a global-object
+        // property write, regardless of module kind) carries no such risk
+        // either and stays provable. Every other local binding kind
+        // (var/let/const/param/class/import/catch), any mutated function
+        // binding, any redeclared one, and any callee reachable through a
+        // `with` falls through and still gets recorded — fail closed
+        // rather than guess.
+        let declared_at_global_aliasable_scope = |symbol_id: SymbolId| {
+            program.source_type.is_script()
+                && scoping.symbol_scope_id(symbol_id) == program_root_scope_id
+        };
+        if !with_shadow_possible {
+            if let Some(symbol_id) = reference.symbol_id() {
+                let flags = scoping.symbol_flags(symbol_id);
+                let provably_safe = flags.contains(SymbolFlags::Function)
+                    && !scoping.symbol_is_mutated(symbol_id)
+                    && scoping.symbol_redeclarations(symbol_id).is_empty()
+                    && !declared_at_global_aliasable_scope(symbol_id);
+                if provably_safe {
+                    continue;
+                }
+            }
+        }
+        // Direct eval from a STRICT caller (class body, class field
+        // initializer, strict function) gets a fresh variable environment
+        // (ECMA-262 PerformEval) and MUST NOT leak `var` into a surrounding
+        // sloppy variable environment. Check the CALL SITE's own
+        // strictness first — climbing to the nearest `is_var()` ancestor
+        // and then reading THAT scope's flags would walk past a strict
+        // non-var class body into a sloppy Program and wrongly record it.
+        // Only a sloppy caller then climbs to the nearest variable
+        // environment, which is the leak target.
+        let call_scope = reference.scope_id();
+        if scoping.scope_flags(call_scope).is_strict_mode() {
+            continue;
+        }
+        let var_scope_id = scoping
+            .scope_ancestors(call_scope)
+            .find(|&scope| scoping.scope_flags(scope).is_var())
+            .unwrap_or(call_scope);
+        if !scoping.scope_flags(var_scope_id).is_strict_mode() {
+            sloppy_eval_scopes.insert(var_scope_id);
         }
     }
 
@@ -465,6 +716,8 @@ fn build_and_bind(
         references: collector.references,
         module_owner,
         instance_owner,
+        root_binding_owner_by_symbol,
+        root_ambiguous_binding_symbols,
         program_root_scope_id,
         wrapper_scope_id,
         sloppy_eval_scopes,
@@ -474,11 +727,29 @@ fn build_and_bind(
 /// Read-only, post-bind walk collecting: (1) every `IdentifierReference`'s
 /// SFC-absolute span (== byte span, since the clone was parsed/cloned from
 /// the same source text) paired with its bound reference identity, and (2)
-/// every non-optional `eval(...)` call's callee reference id (used to derive
-/// [`BuiltState::sloppy_eval_scopes`] post-bind).
+/// every non-optional call whose callee is a Reference named `eval` (used
+/// to derive [`BuiltState::sloppy_eval_scopes`] post-bind). Grouping
+/// parentheses and TypeScript type-assertion wrappers preserve that
+/// Reference; comma-expressions and optional-call forms do not.
 struct ReferenceCollector {
     references: FxHashMap<verter_span::Span, ReferenceEntry>,
     eval_callee_reference_ids: Vec<ReferenceId>,
+}
+
+/// Spec-direct eval's callee is a Reference whose referenced name is
+/// `"eval"` (EvaluateCall). The grouping operator does not apply GetValue,
+/// so nested parentheses still yield that Reference. TypeScript `as` /
+/// `satisfies` / `!` / type-assertion / instantiation wrappers compile
+/// away and likewise preserve it (`Expression::get_inner_expression`
+/// peels exactly those forms). Sequence expressions, member access, and
+/// every other GetValue-forcing wrapper return `None` — those are
+/// spec-indirect. Optional-call is gated separately on
+/// `CallExpression::optional` (a different Call production).
+fn eval_callee_reference<'a>(callee: &'a Expression<'a>) -> Option<&'a IdentifierReference<'a>> {
+    match callee.get_inner_expression() {
+        Expression::Identifier(ident) if ident.name == "eval" => Some(ident),
+        _ => None,
+    }
 }
 
 impl<'a> Visit<'a> for ReferenceCollector {
@@ -496,11 +767,9 @@ impl<'a> Visit<'a> for ReferenceCollector {
 
     fn visit_call_expression(&mut self, expr: &CallExpression<'a>) {
         if !expr.optional {
-            if let Expression::Identifier(callee) = &expr.callee {
-                if callee.name == "eval" {
-                    if let Some(reference_id) = callee.reference_id.get() {
-                        self.eval_callee_reference_ids.push(reference_id);
-                    }
+            if let Some(callee) = eval_callee_reference(&expr.callee) {
+                if let Some(reference_id) = callee.reference_id.get() {
+                    self.eval_callee_reference_ids.push(reference_id);
                 }
             }
         }

@@ -27,29 +27,31 @@ pub use cold_resolver::resolve_component_meta_parts;
 pub(crate) use direct_macro::imported_registry_seed_can_skip_refresh;
 
 /// Collect owner-qualified lexical demands for bindings exposed by macros.
-/// The owner is the `defineExpose` use scope; admission resolves it to the
-/// exact visible declaration owner before expansion.
+/// Each demand is the analyzer-resolved `DeclBindingKey` stored on the
+/// field — the exact `(owner, name)` `RootBindingIndex` proved at
+/// `OwnerNaturalScope`, not the `defineExpose` use-scope. An instance
+/// exposure that names a module parent therefore demands that parent, not
+/// a fabricated instance-owned key that admission would have to remap.
 ///
 /// Demands the field's REFERENCED LOCAL BINDING
-/// (`AnalyzedExposeField::resolved_binding_name`), never the exposed
+/// (`AnalyzedExposeField::resolved_binding_key`), never the exposed
 /// property key: `defineExpose({ public: local })` must demand `local` (the
 /// value expression's identifier), which is the only one of the two that
 /// can actually resolve to a visible declaration — `public` is not itself a
-/// local binding. A field with NO referenced binding (a method, or any
-/// other non-identifier value expression) demands nothing at all — never a
-/// demand keyed on the property key, which could accidentally collide with
-/// an unrelated same-named binding elsewhere in scope.
+/// local binding. A field with NO referenced binding (a method, a
+/// non-identifier value, or a `Global`/`Indeterminate` identifier) demands
+/// nothing at all — never a demand keyed on the property key, which could
+/// accidentally collide with an unrelated same-named binding elsewhere in
+/// scope.
 pub fn collect_requested_binding_demands(
     macros: &[AnalyzedMacro],
 ) -> BTreeSet<verter_type_expr::DeclBindingKey> {
     macros
         .iter()
         .flat_map(|mac| {
-            mac.expose_fields.iter().filter_map(|field| {
-                field.resolved_binding_name().map(|binding_name| {
-                    verter_type_expr::DeclBindingKey::new(mac.owner, binding_name)
-                })
-            })
+            mac.expose_fields
+                .iter()
+                .filter_map(|field| field.resolved_binding_key().cloned())
         })
         .collect()
 }

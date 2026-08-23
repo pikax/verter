@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use verter_span::Span;
 use verter_type_expr::facts::ResolvedLocalShape;
 use verter_type_expr::locators::MacroPayloadLocator;
-use verter_type_expr::{TopLevelOwnerId, TopLevelOwnerKind, TypeExprScope};
+use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TopLevelOwnerKind, TypeExprScope};
 
 /// Truncated SHA-256 hash (first 16 bytes). Used for content-based change detection.
 pub type Hash16 = [u8; 16];
@@ -1582,18 +1582,19 @@ pub struct AnalyzedExposeField {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_expr_scope: Option<TypeExprScope>,
     /// The local binding this runtime-object member's value expression names,
-    /// captured STRUCTURALLY from the OXC `Identifier` node — never sliced
-    /// from source text or guessed from a name pattern. `Some` for a
-    /// shorthand member (`{ foo }`, whose OXC value node is itself an
-    /// `Identifier` naming `foo`) or an explicit non-method member whose
-    /// value is a bare identifier (`{ myVal: val }` → `"val"`). `None` for a
-    /// method (`focus() {}`), a non-identifier value expression, or a field
-    /// normalized from a `defineExpose<T>()` type-argument surface (whose
-    /// type comes from `payload`/`type_expr_scope` instead). Consumers
-    /// resolve this name's real type through the shared `TypeOf` dispatch;
+    /// captured STRUCTURALLY from the OXC `Identifier` node and resolved
+    /// through `RootBindingIndex` at `OwnerNaturalScope`. `Some(key)` only
+    /// when that resolution is `Local` — the exact `(owner, name)` pair, so
+    /// an instance exposure that names a module parent keeps that parent's
+    /// owner rather than the `defineExpose` use-scope. `None` for a method
+    /// (`focus() {}`), a non-identifier value, a `defineExpose<T>()`
+    /// type-argument member, or an identifier whose resolution is `Global`
+    /// or `Indeterminate` (neither is a local declaration; a name-only
+    /// fallback would first-name-join an unrelated same-spelling row).
+    /// Consumers resolve this key through the shared `TypeOf` dispatch;
     /// this field never carries a type itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub referenced_binding: Option<String>,
+    pub referenced_binding: Option<DeclBindingKey>,
     /// JSDoc description from the leading `/** ... */` block on the field
     /// key, captured at extraction exactly like runtime prop fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1604,22 +1605,26 @@ pub struct AnalyzedExposeField {
 }
 
 impl AnalyzedExposeField {
-    /// The local value binding this exposed field's type must resolve
-    /// from: `referenced_binding` when the analyzer structurally captured
-    /// one (a plain identifier value — shorthand `{ foo }` and
-    /// explicit-identifier `{ public: local }` both capture it; OXC
+    /// The resolved `(owner, name)` key of the local value binding this
+    /// exposed field's type must resolve from, when the analyzer captured a
+    /// `Local` identifier (a plain identifier value — shorthand `{ foo }`
+    /// and explicit-identifier `{ public: local }` both capture it; OXC
     /// normalizes a shorthand property's `value` to the same identifier as
-    /// its key, so `referenced_binding` is populated for both forms), else
-    /// `None`. NEVER falls back to `name` (the exposed property key): a
-    /// method (`{ foo() {} }`) or any other non-identifier value expression
-    /// (`{ public: local.foo }`) genuinely has NO referenced local
-    /// binding, and the property key is not itself a local declaration —
-    /// substituting it would resolve an unrelated same-named binding, if
+    /// its key, so `referenced_binding` is populated for both forms).
+    ///
+    /// This key is the join authority: consumers join `.bindings` or demand
+    /// a value type through it. A name alone is ambiguous across owners.
+    ///
+    /// Returns `None` rather than falling back to `name` (the exposed
+    /// property key): a method (`{ foo() {} }`) or any other non-identifier
+    /// value expression (`{ public: local.foo }`) genuinely has no referenced
+    /// local binding, and the property key is not itself a local declaration
+    /// — substituting it would resolve an unrelated same-named binding, if
     /// one happens to exist in scope, rather than reporting the honest
     /// "no resolvable binding" outcome.
     #[must_use]
-    pub fn resolved_binding_name(&self) -> Option<&str> {
-        self.referenced_binding.as_deref()
+    pub fn resolved_binding_key(&self) -> Option<&DeclBindingKey> {
+        self.referenced_binding.as_ref()
     }
 }
 

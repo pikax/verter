@@ -94,10 +94,10 @@ pub(crate) enum SlotBindingSource {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedSlotBinding {
     /// Provenance back to the macro invocation that produced this row.
-    /// Retained for diagnostic correlation and future per-macro audit
-    /// payload emission; the publication merge does not currently
-    /// consume it.
-    #[allow(dead_code)]
+    /// `owner_macro.owner.owner` is part of the dedup/publication join key
+    /// (see [`GraphNativeBindingEntry`]) — two `defineSlots` macros under
+    /// different owners publishing the same slot/binding name must never
+    /// merge onto one row.
     pub owner_macro: SlotMacroIdentity,
     pub slot_name: Arc<str>,
     pub binding_name: Arc<str>,
@@ -140,12 +140,22 @@ pub(crate) struct SynthesisResult {
     pub should_suppress: bool,
 }
 
-/// Declaration-ordered (slot_name, binding_name) → resolved binding
-/// staging type for the graph-native synthesis pass. A `Vec` preserves
-/// the synthesis-time iteration order (declaration order of the slot's
-/// function parameter object) through to `publish_merged_bindings`,
-/// which walks the slice without sorting.
-type GraphNativeBindingEntry = ((Arc<str>, Arc<str>), ResolvedSlotBinding);
+/// Join identity for one slot-binding row: `(owner, macro_index, slot_name,
+/// binding_name)`. `macro_index` is required so two `defineSlots` macros
+/// under the SAME owner that publish the same slot/binding NAME stay
+/// distinct through graph dedup, parser indexing, and the merge join.
+type SlotBindingJoinKey = (verter_type_expr::TopLevelOwnerId, usize, Arc<str>, Arc<str>);
+
+/// Declaration-ordered join-key → resolved binding staging type for the
+/// graph-native synthesis pass. A `Vec` preserves the synthesis-time
+/// iteration order (declaration order of the slot's function parameter
+/// object) through to `publish_merged_bindings`, which walks the slice
+/// without sorting. The key is [`SlotBindingJoinKey`]: two different
+/// `<script>`/`<script setup>` macros, or two same-owner `defineSlots`
+/// invocations, can independently publish the same slot/binding NAME,
+/// and without owner+macro_index in the key, dedup and the parser-path
+/// join below would treat those as the same row.
+type GraphNativeBindingEntry = (SlotBindingJoinKey, ResolvedSlotBinding);
 
 /// Owner declaration sentinel used for SFC `<script setup>` macro
 /// identities. Every macro invocation in an SFC's `<script setup>`
@@ -689,10 +699,8 @@ pub(crate) fn resolve_slot_bindings_graph_native(
     // members and binding-row members in surface order, which is the
     // declaration order of the slot's function parameter object. A Vec
     // preserves that order through to `publish_merged_bindings`; the
-    // (slot_name, binding_name) tuple is the dedup key for distinct
-    // macro invocations that surface the same slot/binding combination
-    // (the dedup is rare in practice — a single `defineSlots<T>()`
-    // typically owns the slot surface).
+    // [`SlotBindingJoinKey`] is the dedup key for distinct macro
+    // invocations that surface the same slot/binding combination.
     let mut graph_native_bindings: Vec<GraphNativeBindingEntry> = Vec::new();
 
     'macro_loop: for (macro_index, mac) in snapshot.macros.iter().enumerate() {
@@ -858,12 +866,27 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 binding = %binding.binding_name,
                 "graph_native_binding_collected",
             );
-            let key = (binding.slot_name.clone(), binding.binding_name.clone());
+            let key = (
+                binding.owner_macro.owner.owner,
+                binding.owner_macro.macro_index,
+                binding.slot_name.clone(),
+                binding.binding_name.clone(),
+            );
             // Linear-scan dedup: prefer the earlier-arrival binding
             // (declaration order takes precedence). Distinct macro
-            // invocations rarely collide on the same (slot, binding);
-            // when they do, the FIRST observation wins to preserve the
-            // declaration-order rule.
+            // invocations collide on the same (owner, macro_index, slot,
+            // binding) only when the same invocation emitted the row
+            // twice; when they do, the FIRST observation wins to
+            // preserve the declaration-order rule. Owner AND macro_index
+            // ride in the key so two DIFFERENT owners — or two same-owner
+            // `defineSlots` invocations — publishing the same slot/binding
+            // NAME never dedup onto one row here. Published field names
+            // are global to the component: `publish_merged_bindings`
+            // first-wins on the rendered `slot.binding` string, so two
+            // same-owner macros (or two owners) that share that name
+            // keep the earlier declaration's parser/graph metadata and
+            // never last-wins steal. Two published rows both named
+            // `default.item` would break name-keyed consumers.
             if graph_native_bindings
                 .iter()
                 .all(|(existing, _)| existing != &key)
@@ -886,6 +909,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
     publish_merged_bindings(
         ctx.ctx,
         owner_canonical,
+        snapshot,
         &dispatch,
         &graph_native_bindings,
         resolved_macros,
@@ -1523,9 +1547,496 @@ fn node_reaches_non_owner_ref(
     }
 }
 
+/// Parser-path slot-binding row indexed by [`SlotBindingJoinKey`] —
+/// `(owner, macro_index, slot_name, binding_name)`. Owner AND the
+/// producing `defineSlots` `macro_index` ride IN THE KEY so two different
+/// owners, or two same-owner macros, publishing the same slot/binding NAME
+/// never collide: insertion can never overwrite one row with another, and
+/// a lookup can never join a graph-native row with parser metadata from a
+/// different invocation. A fallback publication (the parser-only loop
+/// below) reads the real owner straight off the key.
+type ParserBindingIndex<'a> =
+    FxHashMap<SlotBindingJoinKey, &'a verter_semantic::analysis::AnalyzedSlotFieldBinding>;
+
+/// Build the parser-path binding index from every `defineSlots` macro's own
+/// `(owner, macro_index, slot fields)` triple. Owner and macro_index ride
+/// in the key: two macros under DIFFERENT owners, or two same-owner
+/// macros, that both declare the same slot/binding name insert as two
+/// distinct entries — neither insertion overwrites the other.
+fn build_parser_binding_index<'a>(
+    slot_field_sets: &'a [(
+        verter_type_expr::TopLevelOwnerId,
+        usize,
+        Vec<verter_semantic::analysis::AnalyzedSlotField>,
+    )],
+) -> ParserBindingIndex<'a> {
+    let mut parser_index: ParserBindingIndex<'_> = FxHashMap::default();
+    for (owner, macro_index, slots) in slot_field_sets {
+        for slot in slots {
+            for binding in &slot.bindings {
+                parser_index.insert(
+                    (
+                        *owner,
+                        *macro_index,
+                        Arc::from(slot.name.as_str()),
+                        Arc::from(binding.name.as_str()),
+                    ),
+                    binding,
+                );
+            }
+        }
+    }
+    parser_index
+}
+
+#[cfg(test)]
+mod parser_binding_index_tests {
+    use super::build_parser_binding_index;
+    use std::sync::Arc;
+    use verter_semantic::analysis::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
+    use verter_type_expr::TopLevelOwnerId;
+
+    fn binding(name: &str) -> AnalyzedSlotFieldBinding {
+        AnalyzedSlotFieldBinding {
+            name: name.to_string(),
+            type_annotation: Some(name.to_string()),
+            payload: None,
+            binding_expr_scope: None,
+            span: verter_span::Span::default(),
+        }
+    }
+
+    fn slot(name: &str, bindings: Vec<AnalyzedSlotFieldBinding>) -> AnalyzedSlotField {
+        AnalyzedSlotField {
+            name: name.to_string(),
+            is_required: true,
+            span: verter_span::Span::default(),
+            bindings,
+            props_anchor: Default::default(),
+            return_type: None,
+            payload: None,
+            return_expr_scope: None,
+            description: None,
+            tags: Vec::new(),
+        }
+    }
+
+    /// Two `defineSlots` macros under DIFFERENT owners both declaring
+    /// `default.item` must retain BOTH rows in the index, each carrying its
+    /// OWN owner's `type_annotation` — the exact cross-owner join the
+    /// review's counterexample exploited: "module- and instance-owned
+    /// `defineSlots` macros both publishing `default.item`, but with
+    /// different raw types". Before keying by owner, the second insertion
+    /// (last-wins on a bare `(slot, binding)` key) silently overwrote the
+    /// first owner's row; a lookup under the FIRST owner's key would then
+    /// wrongly return the SECOND owner's `AnalyzedSlotFieldBinding`.
+    #[test]
+    fn cross_owner_same_slot_binding_name_never_overwrites() {
+        let module = TopLevelOwnerId::module(0);
+        let instance = TopLevelOwnerId::instance(0);
+        let mut module_item = binding("item");
+        module_item.type_annotation = Some("number".to_string());
+        let mut instance_item = binding("item");
+        instance_item.type_annotation = Some("string".to_string());
+        let slot_field_sets = vec![
+            (module, 0, vec![slot("default", vec![module_item])]),
+            (instance, 1, vec![slot("default", vec![instance_item])]),
+        ];
+
+        let index = build_parser_binding_index(&slot_field_sets);
+
+        assert_eq!(
+            index.len(),
+            2,
+            "both owners' rows must survive, not collapse to one"
+        );
+        let module_row = index
+            .get(&(module, 0, Arc::from("default"), Arc::from("item")))
+            .expect("module-owned row must be retrievable under the module owner");
+        assert_eq!(
+            module_row.type_annotation.as_deref(),
+            Some("number"),
+            "the module owner's key must never resolve to the instance owner's binding"
+        );
+        let instance_row = index
+            .get(&(instance, 1, Arc::from("default"), Arc::from("item")))
+            .expect("instance-owned row must be retrievable under the instance owner");
+        assert_eq!(
+            instance_row.type_annotation.as_deref(),
+            Some("string"),
+            "the instance owner's key must never resolve to the module owner's binding"
+        );
+    }
+
+    /// Same owner, TWO `defineSlots` macros, same slot name + same binding
+    /// name, different `macro_index`. They must remain two rows and must
+    /// not steal each other's parser metadata. A key that omits
+    /// `macro_index` last-wins the second insertion onto the first.
+    #[test]
+    fn same_owner_two_macros_same_slot_binding_name_never_overwrites() {
+        let instance = TopLevelOwnerId::instance(0);
+        let mut first = binding("item");
+        first.type_annotation = Some("number".to_string());
+        let mut second = binding("item");
+        second.type_annotation = Some("string".to_string());
+        let slot_field_sets = vec![
+            (instance, 0, vec![slot("default", vec![first])]),
+            (instance, 1, vec![slot("default", vec![second])]),
+        ];
+
+        let index = build_parser_binding_index(&slot_field_sets);
+
+        assert_eq!(
+            index.len(),
+            2,
+            "both macros' rows must survive, not collapse onto one (owner, slot, binding) key"
+        );
+        let first_row = index
+            .get(&(instance, 0, Arc::from("default"), Arc::from("item")))
+            .expect("first macro's row must be retrievable");
+        assert_eq!(
+            first_row.type_annotation.as_deref(),
+            Some("number"),
+            "the first macro's metadata must not be overwritten by the second"
+        );
+        let second_row = index
+            .get(&(instance, 1, Arc::from("default"), Arc::from("item")))
+            .expect("second macro's row must be retrievable");
+        assert_eq!(
+            second_row.type_annotation.as_deref(),
+            Some("string"),
+            "the second macro's metadata must stay distinct from the first"
+        );
+    }
+}
+
+#[cfg(test)]
+mod publish_order_tests {
+    use super::*;
+    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use crate::resolver_core::component_meta::ResolvedMacroMeta;
+    use crate::resolver_core::{
+        with_bare_host_ctx_for_test, ResolvedDeclarationKind, ResolvedTypeDeclaration,
+    };
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+    use crate::types::{FileLanguage, HostConfig, UpsertRequest};
+    use crate::VerterHost;
+    use rustc_hash::FxHashSet;
+    use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+    use verter_type_expr::facts::SemanticTypeSource;
+    use verter_type_expr::TopLevelOwnerId;
+
+    const OWNER: &str = "/src/Comp.vue";
+
+    fn host_with_vue(src: &str) -> Arc<VerterHost> {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: None,
+                input_id: OWNER.to_string(),
+                source: Arc::from(src),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert vue");
+        host
+    }
+
+    fn dummy_slots_meta(macro_index: usize, owner: TopLevelOwnerId) -> ResolvedMacroMeta {
+        ResolvedMacroMeta {
+            macro_index,
+            macro_kind: AnalyzedMacroKind::DefineSlots,
+            type_name: String::new(),
+            import_source: String::new(),
+            surface_is_authoritative: false,
+            declaration: ResolvedTypeDeclaration {
+                requested_name: String::new(),
+                declaration_id: None,
+                resolved_name: String::new(),
+                canonical_source: String::new(),
+                owner,
+                span: verter_span::Span::default(),
+                kind: ResolvedDeclarationKind::Unknown,
+                text: None,
+            },
+            native_props: Vec::new(),
+            jsdoc: None,
+        }
+    }
+
+    fn binding_annotation<'a>(
+        dtos: &'a crate::typeinfo::framework_surface::MacroSurfaceDtos,
+        slot: &str,
+        binding: &str,
+    ) -> Option<&'a str> {
+        dtos.slot_fields()
+            .iter()
+            .find(|field| field.name == slot)?
+            .bindings
+            .iter()
+            .find(|row| row.name == binding)?
+            .type_annotation
+            .as_deref()
+    }
+
+    /// Same owner, two `defineSlots` macros, same rendered `default.item`.
+    /// Macro 0 is parser-only (`item: number`, no graph-native row); macro 1
+    /// is graph-native (`item: string`). Publication must be globally
+    /// declaration-order first-wins across source classes — the first
+    /// declaration wins the name, and the later graph type is absent.
+    ///
+    /// Drives `publish_merged_bindings` (the production merge), not only
+    /// `build_parser_binding_index`. The existing all-graph discriminator
+    /// cannot catch this mixed-source ordering defect.
+    #[test]
+    fn mixed_source_same_owner_publication_is_declaration_order_first_wins() {
+        let host = host_with_vue(
+            r#"<script setup lang="ts">
+defineSlots<{ default(props: { item: number }): any }>()
+defineSlots<{ default(props: { item: string }): any }>()
+</script>
+<template><div /></template>
+"#,
+        );
+
+        with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let indexed = ctx
+                .ensure_indexed_ready_serve(OWNER)
+                .expect("owner is indexed")
+                .indexed;
+            let snapshot = Arc::clone(&indexed.snapshot);
+            let slots_macros: Vec<(usize, TopLevelOwnerId)> = snapshot
+                .macros
+                .iter()
+                .enumerate()
+                .filter(|(_, mac)| mac.kind == AnalyzedMacroKind::DefineSlots)
+                .map(|(index, mac)| (index, mac.owner))
+                .collect();
+            assert_eq!(
+                slots_macros.len(),
+                2,
+                "fixture must produce two defineSlots macros"
+            );
+            let (first_index, first_owner) = slots_macros[0];
+            let (second_index, second_owner) = slots_macros[1];
+            assert_eq!(first_index, 0);
+            assert_eq!(second_index, 1);
+            assert_eq!(
+                first_owner, second_owner,
+                "mixed-source discriminator is same-owner"
+            );
+
+            let first_dtos =
+                typeinfo_macro_dtos(ctx, OWNER, first_index, AnalyzedMacroKind::DefineSlots);
+            let second_dtos =
+                typeinfo_macro_dtos(ctx, OWNER, second_index, AnalyzedMacroKind::DefineSlots);
+            assert_eq!(
+                binding_annotation(&first_dtos, "default", "item"),
+                Some("number"),
+                "macro 0 parser metadata must carry item: number"
+            );
+            assert_eq!(
+                binding_annotation(&second_dtos, "default", "item"),
+                Some("string"),
+                "macro 1 parser metadata must carry item: string"
+            );
+
+            let dispatch = ProjectSemanticDispatch::new(ctx);
+            let string_node = ctx
+                .project_type_store()
+                .semantic_graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+            let graph_native = vec![(
+                (
+                    second_owner,
+                    second_index,
+                    Arc::from("default"),
+                    Arc::from("item"),
+                ),
+                ResolvedSlotBinding {
+                    owner_macro: SlotMacroIdentity {
+                        owner: build_owner_decl_identity(ctx, OWNER, second_owner),
+                        macro_index: second_index,
+                        type_args: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    slot_name: Arc::from("default"),
+                    binding_name: Arc::from("item"),
+                    value_node: string_node,
+                    value_use_site: None,
+                    optional: false,
+                    readonly: false,
+                    source: SlotBindingSource::GraphNative,
+                },
+            )];
+
+            let resolved_macros = vec![
+                dummy_slots_meta(first_index, first_owner),
+                dummy_slots_meta(second_index, second_owner),
+            ];
+            let mut expanded = ExpandedComponentTypes::default();
+            let mut existing_names = FxHashSet::default();
+            publish_merged_bindings(
+                ctx,
+                OWNER,
+                snapshot.as_ref(),
+                &dispatch,
+                &graph_native,
+                &resolved_macros,
+                &mut expanded,
+                &mut existing_names,
+            );
+
+            let published: Vec<_> = expanded
+                .slot_bindings
+                .iter()
+                .filter(|field| field.name == "default.item")
+                .collect();
+            assert_eq!(
+                published.len(),
+                1,
+                "a published field name is global to the component: mixed-source \
+                 macros must not emit two rows both named default.item; got {:?}",
+                published
+                    .iter()
+                    .map(|field| (field.name.as_str(), field.owner))
+                    .collect::<Vec<_>>(),
+            );
+
+            match published[0].authority.source() {
+                None => {}
+                Some(SemanticTypeSource::SyntheticSlotBinding(carrier)) => {
+                    panic!(
+                        "the published default.item row must be the FIRST macro's \
+                         parser-only number declaration, never the later graph-native \
+                         string; stole graph carrier {carrier:?}"
+                    );
+                }
+                Some(other) => {
+                    let demanded = crate::test_only::semantic_source_probe::demand_type_expr(
+                        host.as_ref(),
+                        OWNER,
+                        other,
+                    );
+                    panic!(
+                        "the published default.item row must be the FIRST macro's \
+                         parser-only number declaration, never the later graph-native \
+                         string; observed source {other:?} demanded {demanded:?}"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Two parser-only rows under DIFFERENT owners, same rendered
+    /// `default.item`. First-wins must follow snapshot declaration order
+    /// (the earlier macro in `snapshot.macros`), not `(owner, macro_index)`
+    /// tuple sort — `Module` sorts before `Instance` regardless of source
+    /// order.
+    #[test]
+    fn parser_only_cross_owner_publication_is_declaration_order_first_wins() {
+        let host = host_with_vue(
+            r#"<script setup lang="ts">
+defineSlots<{ default(props: { item: number }): any }>()
+</script>
+<script lang="ts">
+defineSlots<{ default(props: { item: string }): any }>()
+</script>
+<template><div /></template>
+"#,
+        );
+
+        with_bare_host_ctx_for_test(host.as_ref(), |ctx| {
+            let indexed = ctx
+                .ensure_indexed_ready_serve(OWNER)
+                .expect("owner is indexed")
+                .indexed;
+            let snapshot = Arc::clone(&indexed.snapshot);
+            let slots_macros: Vec<(usize, TopLevelOwnerId)> = snapshot
+                .macros
+                .iter()
+                .enumerate()
+                .filter(|(_, mac)| mac.kind == AnalyzedMacroKind::DefineSlots)
+                .map(|(index, mac)| (index, mac.owner))
+                .collect();
+            assert_eq!(
+                slots_macros.len(),
+                2,
+                "fixture must produce two defineSlots macros"
+            );
+            let (first_index, first_owner) = slots_macros[0];
+            let (second_index, second_owner) = slots_macros[1];
+            assert_ne!(
+                first_owner, second_owner,
+                "cross-owner discriminator needs two authored owners; got \
+                 first={first_owner:?} second={second_owner:?}"
+            );
+            assert!(
+                first_owner > second_owner,
+                "tuple sort of (owner, macro_index) would disagree with \
+                 snapshot.macros order only when the earlier owner sorts \
+                 AFTER the later one; first=({first_index},{first_owner:?}) \
+                 second=({second_index},{second_owner:?})"
+            );
+
+            let first_dtos =
+                typeinfo_macro_dtos(ctx, OWNER, first_index, AnalyzedMacroKind::DefineSlots);
+            assert_eq!(
+                binding_annotation(&first_dtos, "default", "item"),
+                Some("number"),
+                "the earlier macro's parser metadata must carry item: number"
+            );
+
+            let dispatch = ProjectSemanticDispatch::new(ctx);
+            let resolved_macros = vec![
+                dummy_slots_meta(first_index, first_owner),
+                dummy_slots_meta(second_index, second_owner),
+            ];
+            let mut expanded = ExpandedComponentTypes::default();
+            let mut existing_names = FxHashSet::default();
+            publish_merged_bindings(
+                ctx,
+                OWNER,
+                snapshot.as_ref(),
+                &dispatch,
+                &[],
+                &resolved_macros,
+                &mut expanded,
+                &mut existing_names,
+            );
+
+            let published: Vec<_> = expanded
+                .slot_bindings
+                .iter()
+                .filter(|field| field.name == "default.item")
+                .collect();
+            assert_eq!(
+                published.len(),
+                1,
+                "parser-only cross-owner collision must still emit one \
+                 default.item; got {:?}",
+                published
+                    .iter()
+                    .map(|field| (field.name.as_str(), field.owner))
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                published[0].owner, first_owner,
+                "parser-only first-wins follows snapshot.macros declaration \
+                 order (owner {first_owner:?}), not (owner, macro_index) tuple \
+                 sort that would prefer {second_owner:?}"
+            );
+            assert_ne!(
+                published[0].owner, second_owner,
+                "the later owner's parser-only row must not win via tuple sort"
+            );
+        });
+    }
+}
+
 pub(crate) fn publish_merged_bindings(
     ctx: &dyn ResolverContext,
     owner_canonical: &str,
+    snapshot: &FileAnalysisSnapshot,
     dispatch: &ProjectSemanticDispatch<'_>,
     graph_native: &[GraphNativeBindingEntry],
     resolved_macros: &[ResolvedMacroMeta],
@@ -1535,48 +2046,62 @@ pub(crate) fn publish_merged_bindings(
     // Materialise each `defineSlots` macro's slot member set through the
     // typeinfo Vue surface (`vue_macro_dtos`, FullMetadata) -- the sole slots
     // authority (function-like members + first-param binding extraction).
-    // Keyed on `(owner, resolved.macro_index, DefineSlots)`. The owned vector
-    // outlives the borrowed `parser_index` below.
-    let slot_field_sets: Vec<Vec<verter_semantic::analysis::AnalyzedSlotField>> = resolved_macros
+    // Keyed on `(owner, resolved.macro_index, DefineSlots)`. `macro_index` is
+    // the admitted index into THIS file's `snapshot.macros` (see
+    // `ResolvedMacroMeta`'s doc comment), so it is a valid lookup key for the
+    // macro's authored `TopLevelOwnerId`. The owned vector outlives the
+    // borrowed `parser_index` below.
+    let slot_field_sets: Vec<(
+        verter_type_expr::TopLevelOwnerId,
+        usize,
+        Vec<verter_semantic::analysis::AnalyzedSlotField>,
+    )> = resolved_macros
         .iter()
         .filter(|r| r.macro_kind == AnalyzedMacroKind::DefineSlots)
         .map(|resolved| {
-            typeinfo_macro_dtos(
-                ctx,
-                owner_canonical,
+            let owner = snapshot
+                .macros
+                .get(resolved.macro_index)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "ResolvedMacroMeta.macro_index {} out of bounds for \
+                         snapshot.macros (len {}) — macro_index is admitted \
+                         from this same snapshot, so an out-of-bounds index \
+                         is a producer defect, not an owner-less binding",
+                        resolved.macro_index,
+                        snapshot.macros.len(),
+                    )
+                })
+                .owner;
+            (
+                owner,
                 resolved.macro_index,
-                AnalyzedMacroKind::DefineSlots,
+                typeinfo_macro_dtos(
+                    ctx,
+                    owner_canonical,
+                    resolved.macro_index,
+                    AnalyzedMacroKind::DefineSlots,
+                )
+                .slot_fields()
+                .to_vec(),
             )
-            .slot_fields()
-            .to_vec()
         })
         .collect();
 
-    // Index parser-path bindings by `(slot_name, binding_name)`.
-    let mut parser_index: FxHashMap<
-        (Arc<str>, Arc<str>),
-        &verter_semantic::analysis::AnalyzedSlotFieldBinding,
-    > = FxHashMap::default();
-    for slots in &slot_field_sets {
-        for slot in slots {
-            for binding in &slot.bindings {
-                parser_index.insert(
-                    (
-                        Arc::from(slot.name.as_str()),
-                        Arc::from(binding.name.as_str()),
-                    ),
-                    binding,
-                );
-            }
-        }
-    }
+    let mut parser_index = build_parser_binding_index(&slot_field_sets);
 
-    // Publish each graph-native binding in declaration order, merging
-    // parser-path metadata when present. The slice walk preserves the
-    // insertion order set by `compute_bindings_via_graph` — declaration
-    // order of the slot's function parameter object. No alphabetic
-    // sort here (the previous FxHashMap-keyed iteration needed a sort
-    // for determinism; the Vec source is already deterministic).
+    // Publish each binding in snapshot-macro declaration order so a
+    // rendered `slot.binding` name is globally first-wins across
+    // graph-native and parser-only source classes. For each macro:
+    // graph-native rows first (graph authority wins WITHIN the same
+    // join key, merging matching parser metadata), then leftover
+    // parser-only rows of that same macro. A later graph row must not
+    // steal a name already claimed by an earlier parser-only
+    // declaration. The graph-native slice walk preserves the insertion
+    // order set by `compute_bindings_via_graph` — declaration order of
+    // the slot's function parameter object. No alphabetic sort of graph
+    // rows (the previous FxHashMap-keyed iteration needed a sort for
+    // determinism; the Vec source is already deterministic).
     //
     // Shallow-publication invariant ([[component-meta-shallow-by-default-rule]],
     // [[shallow-first-class-universal-cache]]): the published `r#type`
@@ -1619,205 +2144,230 @@ pub(crate) fn publish_merged_bindings(
     // content-free synthetic-binding identity
     // (`ShapeCacheKey::synthetic_binding_whole`) — the graph `value_node`
     // arena ordinal stays value-side provenance, never cache identity.
-    for (key, gb) in graph_native.iter() {
-        let (slot_name, binding_name) = key.clone();
-        let field_name = format!("{}.{}", slot_name, binding_name);
-        if !existing_names.insert(field_name.clone()) {
-            continue;
-        }
-
-        // Remove the matching parser row so its locator/text can accompany
-        // the graph-owned authority as atomic authored evidence. Residual
-        // parser-only rows are handled by the fallback loop below.
-        let parser_path = parser_index.remove(&(slot_name.clone(), binding_name.clone()));
-
-        let (r#type, is_session_raised) = {
-            // Graph-authority branch — a SESSION-RAISED binding row (the graph
-            // walk off the macro payload's Shallow surface produced
-            // `gb.value_node`). Differentiated source selection:
-            //
-            //   - A CLOSED symbolic indexed-access route (a literal
-            //     string index path over a named declaration body slot)
-            //     publishes the honest closed fact
-            //     (`Closed(IndexedAccess)`), so the shallow view shows
-            //     the concrete member-path form (`AppProps['avatar']`)
-            //     consumers re-resolve on demand — no body expansion,
-            //     path-precise per the shallow-by-default rule.
-            //
-            //   - Everything else (open generic, non-indexed,
-            //     unrepresentable, concrete-inline) publishes the
-            //     FIRST-CLASS synthetic binding carrier: the
-            //     content-free `(scope, slot, binding)` identity plus
-            //     the value-side `value_node` provenance seed.
-            //     Publishing the whole macro TYPE-ARGUMENT position here
-            //     discarded the `(slot, binding)` precision the graph
-            //     walk already had — the raise could only return the
-            //     whole `defineSlots<T>` payload. A consumer deepening
-            //     THIS binding's value routes through the content-free
-            //     synthetic-binding identity
-            //     (`ShapeCacheKey::synthetic_binding_whole_with_context`
-            //     through `ShapeCacheDb`), cold-reducing from the
-            //     same-generation `value_node` seed. Downstream
-            //     publication loops recognise the synthetic-source
-            //     identity and never reduce a parent shell per row.
-            if let Some(closed) =
-                closed_member_path_route_source(dispatch, owner_canonical, gb.value_node)
-            {
-                (closed, true)
-            } else if let Some(slot) = gb.value_use_site.as_ref() {
-                // An ARGUMENT-BEARING named-reference value (`message:
-                // MessageBase<string>`) publishes the arg-preserving
-                // authored USE-SITE carrier staged by the walk: the
-                // declaring decl's member-value slot, whose deref
-                // replays the instantiation WITH its type arguments
-                // through the one shared dispatch (`Instantiate`
-                // re-derives the substitution on demand). Content-free
-                // and NON-EXECUTED — never a serialized graph node,
-                // never an eager expansion. The argument-less
-                // `Closed(Leaf(Ref))` fallback below would destroy
-                // both the substitution and the declaring scope.
-                (
-                    verter_type_expr::facts::SemanticTypeSource::Authored(
-                        verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
-                    ),
-                    true,
-                )
-            } else if let Some(named) = named_reference_carrier_source(dispatch, gb.value_node) {
-                // A NAMED reference value (`message: MessageBase<T>` — a
-                // `DeclRef` / `InstantiationRef` / bare-ref head) publishes
-                // the shallow named-reference carrier: the published
-                // shallow shape is the re-resolvable `Ref` (shallow-by-
-                // default), never the synthetic stand-in and never a
-                // flattened surface.
-                (named, true)
-            } else {
-                let carrier = verter_type_expr::SyntheticCarrierKey {
-                    scope_canonical_id: Arc::from(gb.owner_macro.owner.canonical_id.as_ref()),
-                    surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-                    slot_name: Some(Arc::clone(&slot_name)),
-                    binding_name: Arc::clone(&binding_name),
-                    value_node: gb.value_node.0,
-                };
-                (
-                    verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(Arc::new(
-                        carrier,
-                    )),
-                    true,
-                )
+    for (walk_macro_index, _) in snapshot.macros.iter().enumerate() {
+        for (key, gb) in graph_native.iter() {
+            let (owner, macro_index, slot_name, binding_name) = key.clone();
+            if macro_index != walk_macro_index {
+                continue;
             }
-        };
+            let field_name = format!("{}.{}", slot_name, binding_name);
+            // Name-global first-wins: join identity includes `macro_index`,
+            // but the rendered name is unique per component. A later same-
+            // owner (or cross-owner) row with this name is skipped so it
+            // cannot last-wins steal the first macro's parser metadata.
+            if !existing_names.insert(field_name.clone()) {
+                continue;
+            }
 
-        let exactness = compute_exactness_for_node(dispatch, gb.value_node);
-        let raw_type = parser_path.and_then(|p| p.type_annotation.clone());
+            // Remove the matching parser row so its locator/text can accompany
+            // the graph-owned authority as atomic authored evidence. Keyed by
+            // the SAME (owner, macro_index) as this graph row — never a
+            // different invocation's parser metadata for a same-named
+            // slot/binding. Residual parser-only rows of THIS macro are
+            // handled immediately after its graph rows, still in
+            // declaration order.
+            let parser_path =
+                parser_index.remove(&(owner, macro_index, slot_name.clone(), binding_name.clone()));
 
-        tracing::trace!(
-            target: "verter::meta_resolve::slot_binding",
-            field_name = %field_name,
-            exactness = ?exactness,
-            has_raw_type = raw_type.is_some(),
-            has_parser_typed = parser_path.is_some(),
-            is_session_raised = is_session_raised,
-            "publish_slot_binding",
-        );
+            let (r#type, is_session_raised) = {
+                // Graph-authority branch — a SESSION-RAISED binding row (the graph
+                // walk off the macro payload's Shallow surface produced
+                // `gb.value_node`). Differentiated source selection:
+                //
+                //   - A CLOSED symbolic indexed-access route (a literal
+                //     string index path over a named declaration body slot)
+                //     publishes the honest closed fact
+                //     (`Closed(IndexedAccess)`), so the shallow view shows
+                //     the concrete member-path form (`AppProps['avatar']`)
+                //     consumers re-resolve on demand — no body expansion,
+                //     path-precise per the shallow-by-default rule.
+                //
+                //   - Everything else (open generic, non-indexed,
+                //     unrepresentable, concrete-inline) publishes the
+                //     FIRST-CLASS synthetic binding carrier: the
+                //     content-free `(scope, slot, binding)` identity plus
+                //     the value-side `value_node` provenance seed.
+                //     Publishing the whole macro TYPE-ARGUMENT position here
+                //     discarded the `(slot, binding)` precision the graph
+                //     walk already had — the raise could only return the
+                //     whole `defineSlots<T>` payload. A consumer deepening
+                //     THIS binding's value routes through the content-free
+                //     synthetic-binding identity
+                //     (`ShapeCacheKey::synthetic_binding_whole_with_context`
+                //     through `ShapeCacheDb`), cold-reducing from the
+                //     same-generation `value_node` seed. Downstream
+                //     publication loops recognise the synthetic-source
+                //     identity and never reduce a parent shell per row.
+                if let Some(closed) =
+                    closed_member_path_route_source(dispatch, owner_canonical, gb.value_node)
+                {
+                    (closed, true)
+                } else if let Some(slot) = gb.value_use_site.as_ref() {
+                    // An ARGUMENT-BEARING named-reference value (`message:
+                    // MessageBase<string>`) publishes the arg-preserving
+                    // authored USE-SITE carrier staged by the walk: the
+                    // declaring decl's member-value slot, whose deref
+                    // replays the instantiation WITH its type arguments
+                    // through the one shared dispatch (`Instantiate`
+                    // re-derives the substitution on demand). Content-free
+                    // and NON-EXECUTED — never a serialized graph node,
+                    // never an eager expansion. The argument-less
+                    // `Closed(Leaf(Ref))` fallback below would destroy
+                    // both the substitution and the declaring scope.
+                    (
+                        verter_type_expr::facts::SemanticTypeSource::Authored(
+                            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
+                        ),
+                        true,
+                    )
+                } else if let Some(named) = named_reference_carrier_source(dispatch, gb.value_node)
+                {
+                    // A NAMED reference value (`message: MessageBase<T>` — a
+                    // `DeclRef` / `InstantiationRef` / bare-ref head) publishes
+                    // the shallow named-reference carrier: the published
+                    // shallow shape is the re-resolvable `Ref` (shallow-by-
+                    // default), never the synthetic stand-in and never a
+                    // flattened surface.
+                    (named, true)
+                } else {
+                    let carrier = verter_type_expr::SyntheticCarrierKey {
+                        scope_canonical_id: Arc::from(gb.owner_macro.owner.canonical_id.as_ref()),
+                        surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
+                        slot_name: Some(Arc::clone(&slot_name)),
+                        binding_name: Arc::clone(&binding_name),
+                        value_node: gb.value_node.0,
+                    };
+                    (
+                        verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
+                            Arc::new(carrier),
+                        ),
+                        true,
+                    )
+                }
+            };
 
-        let authored_evidence = parser_path
-            .and_then(|binding| binding.payload.as_ref())
-            .zip(raw_type.as_deref())
-            .map(|(locator, text)| {
-                // SAFETY: both values come from this parser-produced binding.
-                let mint = unsafe { verter_type_expr::AuthoredSourceMint::new_unchecked() };
-                verter_type_expr::AuthoredTypeEvidence::from_macro_payload(
-                    &mint,
-                    locator,
-                    Arc::from(text),
-                )
-            });
-        expanded
-            .slot_bindings
-            .push(ExpandedField::from_source_position(
-                field_name,
-                verter_type_expr::facts::SourcePosition::Present(r#type),
-                authored_evidence,
-                gb.optional,
-                exactness,
-                ExpansionExecutionStatus::Completed,
-                Vec::new(),
-                // Slot bindings are positional parameters of a slot's
-                // function signature, not declared members of the macro
-                // T's own body. The fact applies at the slot level (the
-                // slot's name in `defineSlots<T>`'s T), not the binding
-                // level — `false` is the structural truth.
-                false,
-                verter_type_expr::ResolutionProvenance::SessionProjector,
-            ));
-    }
+            let exactness = compute_exactness_for_node(dispatch, gb.value_node);
+            let raw_type = parser_path.and_then(|p| p.type_annotation.clone());
 
-    // Publish parser-path-only bindings (those without a graph-native
-    // counterpart). Live truth: analyzer assembly leaves
-    // `AnalyzedSlotFieldBinding.payload: None` (flat locators cannot
-    // address nested `(slot, binding)` positions). These rows keep
-    // `ExactConcrete` exactness from the display `type_annotation` when
-    // present; the published source is either a residual stamped
-    // MacroPayload position or the centralized unannotated
-    // schema-absence — never a synthetic carrier.
-    let mut parser_only_keys: Vec<(Arc<str>, Arc<str>)> = parser_index.keys().cloned().collect();
-    parser_only_keys.sort();
-    for key in parser_only_keys {
-        let pb = match parser_index.get(&key) {
-            Some(pb) => *pb,
-            None => continue,
-        };
-        let (slot_name, binding_name) = key;
-        let field_name = format!("{}.{}", slot_name, binding_name);
-        if !existing_names.insert(field_name.clone()) {
-            continue;
-        }
-        let raw_type = pb.type_annotation.clone();
-        // Live analyzer assembly leaves `payload: None` for nested
-        // bindings; a residual stamped payload (if ever present) is
-        // re-raised through the one shared dispatch. No reparse of
-        // `type_annotation`. A payload-less parser-only row is a PROVEN
-        // unannotated schema absence — centralized typed `unknown`,
-        // never a fabricated reference and never a failure.
-        let shallow_source = pb
-            .payload
-            .clone()
-            .map(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload);
-        let published_source = shallow_source
-            .clone()
-            .map(verter_type_expr::facts::SemanticTypeSource::Authored)
-            .map(verter_type_expr::facts::SourcePosition::Present)
-            .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
-        let authored_evidence =
-            shallow_source
-                .as_ref()
+            tracing::trace!(
+                target: "verter::meta_resolve::slot_binding",
+                field_name = %field_name,
+                exactness = ?exactness,
+                has_raw_type = raw_type.is_some(),
+                has_parser_typed = parser_path.is_some(),
+                is_session_raised = is_session_raised,
+                "publish_slot_binding",
+            );
+
+            let authored_evidence = parser_path
+                .and_then(|binding| binding.payload.as_ref())
                 .zip(raw_type.as_deref())
                 .map(|(locator, text)| {
-                    // SAFETY: both values come from this projected member row.
+                    // SAFETY: both values come from this parser-produced binding.
                     let mint = unsafe { verter_type_expr::AuthoredSourceMint::new_unchecked() };
-                    verter_type_expr::AuthoredTypeEvidence::from_authored_body(
+                    verter_type_expr::AuthoredTypeEvidence::from_macro_payload(
                         &mint,
                         locator,
                         Arc::from(text),
                     )
                 });
-        expanded
-            .slot_bindings
-            .push(ExpandedField::from_source_position(
-                field_name,
-                published_source,
-                authored_evidence,
-                false,
-                ExpansionExactness::ExactConcrete,
-                ExpansionExecutionStatus::Completed,
-                Vec::new(),
-                // Slot bindings are positional parameters of a slot's
-                // function signature, not declared members of the macro
-                // T's own body — `false` is the structural truth (see
-                // companion comment in `graph_native` push above).
-                false,
-                verter_type_expr::ResolutionProvenance::SessionProjector,
-            ));
+            expanded
+                .slot_bindings
+                .push(ExpandedField::from_source_position(
+                    field_name,
+                    gb.owner_macro.owner.owner,
+                    verter_type_expr::facts::SourcePosition::Present(r#type),
+                    authored_evidence,
+                    gb.optional,
+                    exactness,
+                    ExpansionExecutionStatus::Completed,
+                    Vec::new(),
+                    // Slot bindings are positional parameters of a slot's
+                    // function signature, not declared members of the macro
+                    // T's own body. The fact applies at the slot level (the
+                    // slot's name in `defineSlots<T>`'s T), not the binding
+                    // level — `false` is the structural truth.
+                    false,
+                    verter_type_expr::ResolutionProvenance::SessionProjector,
+                ));
+        }
+
+        // Publish parser-path-only bindings of THIS macro (those without a
+        // graph-native counterpart). Live truth: analyzer assembly leaves
+        // `AnalyzedSlotFieldBinding.payload: None` (flat locators cannot
+        // address nested `(slot, binding)` positions). These rows keep
+        // `ExactConcrete` exactness from the display `type_annotation` when
+        // present; the published source is either a residual stamped
+        // MacroPayload position or the centralized unannotated
+        // schema-absence — never a synthetic carrier. Keys are sorted only
+        // for HashMap-iteration determinism WITHIN the current macro —
+        // cross-macro order is snapshot declaration order, never
+        // `(owner, macro_index)` tuple sort.
+        let mut parser_only_keys: Vec<SlotBindingJoinKey> = parser_index
+            .keys()
+            .filter(|key| key.1 == walk_macro_index)
+            .cloned()
+            .collect();
+        parser_only_keys.sort();
+        for key in parser_only_keys {
+            let pb = match parser_index.get(&key) {
+                Some(entry) => *entry,
+                None => continue,
+            };
+            let (owner, _macro_index, slot_name, binding_name) = key;
+            let field_name = format!("{}.{}", slot_name, binding_name);
+            // Same name-global first-wins gate as the graph-native loop.
+            if !existing_names.insert(field_name.clone()) {
+                continue;
+            }
+            let raw_type = pb.type_annotation.clone();
+            // Live analyzer assembly leaves `payload: None` for nested
+            // bindings; a residual stamped payload (if ever present) is
+            // re-raised through the one shared dispatch. No reparse of
+            // `type_annotation`. A payload-less parser-only row is a PROVEN
+            // unannotated schema absence — centralized typed `unknown`,
+            // never a fabricated reference and never a failure.
+            let shallow_source = pb
+                .payload
+                .clone()
+                .map(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload);
+            let published_source = shallow_source
+                .clone()
+                .map(verter_type_expr::facts::SemanticTypeSource::Authored)
+                .map(verter_type_expr::facts::SourcePosition::Present)
+                .unwrap_or_else(verter_type_expr::facts::SourcePosition::unannotated);
+            let authored_evidence =
+                shallow_source
+                    .as_ref()
+                    .zip(raw_type.as_deref())
+                    .map(|(locator, text)| {
+                        // SAFETY: both values come from this projected member row.
+                        let mint = unsafe { verter_type_expr::AuthoredSourceMint::new_unchecked() };
+                        verter_type_expr::AuthoredTypeEvidence::from_authored_body(
+                            &mint,
+                            locator,
+                            Arc::from(text),
+                        )
+                    });
+            expanded
+                .slot_bindings
+                .push(ExpandedField::from_source_position(
+                    field_name,
+                    owner,
+                    published_source,
+                    authored_evidence,
+                    false,
+                    ExpansionExactness::ExactConcrete,
+                    ExpansionExecutionStatus::Completed,
+                    Vec::new(),
+                    // Slot bindings are positional parameters of a slot's
+                    // function signature, not declared members of the macro
+                    // T's own body — `false` is the structural truth (see
+                    // companion comment in `graph_native` push above).
+                    false,
+                    verter_type_expr::ResolutionProvenance::SessionProjector,
+                ));
+        }
     }
 }
 

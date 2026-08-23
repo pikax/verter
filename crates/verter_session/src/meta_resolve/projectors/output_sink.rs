@@ -700,9 +700,11 @@ fn admit_member_shape_if_possible(
 /// thread-local accumulator, and any dispatch fence
 /// `MacroExpansionDiagnostics` flow through the same accumulator
 /// the projector's other dispatches use.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn surface_member_to_expanded_field(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
     admitted: &super::publication_authority::AdmittedPublishedMember<'_>,
     raw_type: Option<String>,
     shallow_payload: Option<verter_type_expr::locators::MacroPayloadLocator>,
@@ -896,6 +898,7 @@ pub(crate) fn surface_member_to_expanded_field(
             });
     ExpandedField::from_source_position(
         member_name.to_string(),
+        owner,
         r#type,
         authored_evidence,
         member.optional,
@@ -1127,6 +1130,7 @@ pub(crate) fn project_model(
 
     Some(ExpandedField::from_source_position(
         name,
+        mac.owner,
         r#type,
         None,
         false,

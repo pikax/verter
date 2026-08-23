@@ -323,6 +323,7 @@ fn flat_evaluated_props_contribute_metadata_not_the_source() {
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "label".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_leaf(PrimitiveName::String)),
@@ -381,6 +382,7 @@ fn props_preserve_expansion_metadata_when_available() {
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "label".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("Missing")),
@@ -435,6 +437,7 @@ fn flat_evaluated_types_never_shadow_the_row_source() {
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "label".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_leaf(PrimitiveName::String)),
@@ -1090,6 +1093,7 @@ fn evaluated_slots_take_bindings_from_the_per_binding_channel_only() {
         }],
         slot_bindings: vec![
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "leading.item".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_leaf(PrimitiveName::String)),
@@ -1103,6 +1107,7 @@ fn evaluated_slots_take_bindings_from_the_per_binding_channel_only() {
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "leading.open".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_leaf(PrimitiveName::Boolean)),
@@ -1179,6 +1184,7 @@ fn test_slot_binding(
     primitive: PrimitiveName,
 ) -> crate::analysis::type_expand::ExpandedField {
     crate::analysis::type_expand::ExpandedField {
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         name: format!("{slot}.{binding}"),
         authority: test_authority(
             SourcePosition::Present(closed_leaf(primitive)),
@@ -1504,6 +1510,7 @@ fn incomplete_per_binding_evaluation_keeps_authority_and_evidence_separate() {
         emits: Vec::new(),
         define_slots: Vec::new(),
         slot_bindings: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "default.ui".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("ComponentUI")),
@@ -1595,6 +1602,7 @@ fn define_slots_prefer_exact_evaluated_slot_bindings_over_authored_sources() {
         emits: Vec::new(),
         define_slots: Vec::new(),
         slot_bindings: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "default.ui".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("ButtonUi")),
@@ -1733,6 +1741,7 @@ fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_c
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "ui".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -1798,6 +1807,7 @@ fn optional_prop_raw_type_prefers_source_annotation_without_adding_undefined() {
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "modelValue".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -1863,6 +1873,7 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
         exposed: Vec::new(),
         props: vec![
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "labelKey".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_leaf(PrimitiveName::Any)),
@@ -1876,6 +1887,7 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "trailingIcon".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_leaf(PrimitiveName::Any)),
@@ -1969,6 +1981,7 @@ fn small_partial_props_keep_resolved_authority_and_authored_evidence() {
         exposed: Vec::new(),
         props: vec![
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "to".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -1985,6 +1998,7 @@ fn small_partial_props_keep_resolved_authority_and_authored_evidence() {
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "href".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -2099,6 +2113,7 @@ fn partial_identifier_props_keep_resolved_authority_and_authored_evidence() {
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "as".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("ton")),
@@ -2169,6 +2184,7 @@ fn partial_object_props_keep_resolved_authority_and_authored_evidence() {
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "ui".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -2245,6 +2261,7 @@ fn large_partial_props_keep_resolved_authority_and_authored_evidence() {
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "mention".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -2349,6 +2366,7 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
         define_props: Vec::new(),
         define_emits: Vec::new(),
         emits: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "update:modelValue".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -2413,6 +2431,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
         props: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "modelValue".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -2447,6 +2466,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         }],
         define_emits: Vec::new(),
         emits: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "update:modelValue".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -2508,6 +2528,7 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
         define_props: Vec::new(),
         define_emits: Vec::new(),
         emits: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "update:modelValue".to_string(),
             authority: test_authority(
                 SourcePosition::Present(closed_ref("EvaluatedShape")),
@@ -3072,6 +3093,7 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
         exposed: Vec::new(),
         props: vec![
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "modelValue".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_leaf(PrimitiveName::String)),
@@ -3085,6 +3107,7 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "label".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_leaf(PrimitiveName::String)),
@@ -3127,6 +3150,7 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
         }],
         define_emits: Vec::new(),
         emits: vec![crate::analysis::type_expand::ExpandedField {
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "update:modelValue".to_string(),
             authority: test_authority(
                 SourcePosition::Present(synthesized_tuple(&[(
@@ -3222,6 +3246,207 @@ fn extracts_exposed_from_define_expose() {
 
     assert_eq!(result.exposed.len(), 1);
     assert_eq!(result.exposed[0].name, "focus");
+}
+
+/// `.bindings` holds TWO same-spelling rows of different owners. The
+/// expose consumer must join on `(owner, name)` — the same match
+/// constructors already use — never first-name. The module-owned
+/// constructor shadow is listed FIRST so a name-only `find` would
+/// publish its type.
+#[test]
+fn extract_exposed_matches_resolved_binding_owner_not_first_name() {
+    let instance = verter_type_expr::TopLevelOwnerId::instance(0);
+    let module = verter_type_expr::TopLevelOwnerId::module(0);
+    let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
+        kind: AnalyzedMacroKind::DefineExpose,
+        owner: instance,
+        expose_fields: vec![AnalyzedExposeField {
+            name: "String".to_string(),
+            span: Some(verter_span::Span::new(0, 6)),
+            payload: None,
+            type_expr_scope: None,
+            referenced_binding: Some(verter_type_expr::DeclBindingKey::new(instance, "String")),
+            description: None,
+            tags: Vec::new(),
+        }],
+        ..make_define_props(vec![])
+    }];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        bindings: vec![
+            crate::analysis::type_expand::ExpandedField {
+                owner: module,
+                name: "String".to_string(),
+                authority: test_authority(
+                    SourcePosition::Present(closed_leaf(PrimitiveName::String)),
+                    crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                ),
+                authored_evidence: test_authored_evidence(None, None),
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+                declared_in_macro_type_arg: false,
+            },
+            crate::analysis::type_expand::ExpandedField {
+                owner: instance,
+                name: "String".to_string(),
+                authority: test_authority(
+                    SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+                    crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                ),
+                authored_evidence: test_authored_evidence(None, None),
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+                declared_in_macro_type_arg: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+
+    let result = extract_component_meta(input);
+    assert_eq!(result.exposed.len(), 1);
+    assert_eq!(
+        result.exposed[0].type_source.present(),
+        Some(&closed_leaf(PrimitiveName::Number)),
+        "expose must pick the instance-owned same-name binding, not the \
+         first name match (the module constructor's string type)"
+    );
+    assert_ne!(
+        result.exposed[0].type_source.present(),
+        Some(&closed_leaf(PrimitiveName::String)),
+        "the module-owned constructor of the same spelling must not type \
+         the instance-owned exposure"
+    );
+}
+
+/// Type-argument-only `defineExpose<T>()` has no object-literal counterpart
+/// and therefore no stored `DeclBindingKey`. Expansion metadata must come
+/// from the `(macro_index, name)` exposed lane, never a first-name
+/// `.bindings` lookup: a module-owned constructor of the same spelling is
+/// listed FIRST in `.bindings` so a name-only `find` would publish its
+/// Incomplete expansion (and its diagnostic) onto the type-arg member.
+#[test]
+fn extract_exposed_type_arg_only_expansion_ignores_same_spelling_bindings_row() {
+    let instance = verter_type_expr::TopLevelOwnerId::instance(0);
+    let module = verter_type_expr::TopLevelOwnerId::module(0);
+    let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
+        kind: AnalyzedMacroKind::DefineExpose,
+        owner: instance,
+        expose_fields: Vec::new(),
+        ..make_define_props(vec![])
+    }];
+    let ctor_diagnostic = crate::analysis::type_expand::ExpansionDiagnostic {
+        reason: crate::analysis::type_expand::ExpansionStopReason::UnresolvedReference,
+        context: "module-ctor-shadow".to_string(),
+        property_name: Some("String".to_string()),
+    };
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        bindings: vec![
+            crate::analysis::type_expand::ExpandedField {
+                owner: module,
+                name: "String".to_string(),
+                authority: test_authority(
+                    SourcePosition::Present(closed_leaf(PrimitiveName::String)),
+                    crate::analysis::type_expand::ExpansionExactness::Incomplete,
+                ),
+                authored_evidence: test_authored_evidence(None, None),
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::Incomplete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: vec![ctor_diagnostic.clone()],
+                declared_in_macro_type_arg: false,
+            },
+            crate::analysis::type_expand::ExpandedField {
+                owner: instance,
+                name: "String".to_string(),
+                authority: test_authority(
+                    SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+                    crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                ),
+                authored_evidence: test_authored_evidence(None, None),
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+                declared_in_macro_type_arg: false,
+            },
+        ],
+        exposed: vec![crate::analysis::type_expand::ExpandedMacroExposed {
+            macro_index: 0,
+            fields: vec![crate::analysis::type_expand::ExpandedField {
+                owner: instance,
+                name: "String".to_string(),
+                authority: test_authority(
+                    SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+                    crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                ),
+                authored_evidence: test_authored_evidence(None, None),
+                optional: false,
+                exactness: crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status: crate::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: Vec::new(),
+                declared_in_macro_type_arg: true,
+            }],
+        }],
+        ..Default::default()
+    };
+    let resolved_macros = vec![ResolvedMacroInput {
+        macro_index: 0,
+        exposed: vec![crate::analysis::component_meta::ResolvedExposeInput {
+            field: AnalyzedExposeField {
+                name: "String".to_string(),
+                span: None,
+                payload: None,
+                type_expr_scope: None,
+                referenced_binding: None,
+                description: None,
+                tags: Vec::new(),
+            },
+            type_source: SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+        }],
+        ..Default::default()
+    }];
+    let mut input = empty_input(&macros);
+    input.evaluated_types = Some(&evaluated);
+    input.resolved_macros = &resolved_macros;
+
+    let result = extract_component_meta(input);
+    assert_eq!(result.exposed.len(), 1);
+    assert_eq!(
+        result.exposed[0].type_source.present(),
+        Some(&closed_leaf(PrimitiveName::Number)),
+        "type-arg-only expose publishes the resolved type-argument source, \
+         never a .bindings lookup"
+    );
+    let expansion = result.exposed[0]
+        .type_expansion
+        .as_ref()
+        .expect("type-arg-only expansion metadata must come from the exposed lane");
+    assert_eq!(
+        expansion.exactness,
+        crate::analysis::type_expand::ExpansionExactness::ExactConcrete,
+        "expansion must be the exposed-lane ExactConcrete, not the \
+         first-name .bindings constructor's Incomplete"
+    );
+    assert!(
+        expansion.diagnostics.is_empty(),
+        "the module constructor's expansion diagnostic must not contaminate \
+         the type-arg-only member, got {:?}",
+        expansion.diagnostics
+    );
+    assert!(
+        !expansion
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.context == "module-ctor-shadow"),
+        "the other owner's expansion must be absent from the published member"
+    );
 }
 
 #[test]
@@ -4805,6 +5030,7 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
         exposed: Vec::new(),
         props: vec![
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "foo".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_leaf(PrimitiveName::String)),
@@ -4818,6 +5044,7 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
                 declared_in_macro_type_arg: false,
             },
             crate::analysis::type_expand::ExpandedField {
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 name: "bar".to_string(),
                 authority: test_authority(
                     SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
@@ -5386,7 +5613,16 @@ fn test_expanded_field(
     name: &str,
     position: SourcePosition,
 ) -> crate::analysis::type_expand::ExpandedField {
+    test_expanded_field_owned(verter_type_expr::TopLevelOwnerId::module(0), name, position)
+}
+
+fn test_expanded_field_owned(
+    owner: verter_type_expr::TopLevelOwnerId,
+    name: &str,
+    position: SourcePosition,
+) -> crate::analysis::type_expand::ExpandedField {
     crate::analysis::type_expand::ExpandedField {
+        owner,
         name: name.to_string(),
         authority: test_authority(
             position,
@@ -5466,25 +5702,91 @@ fn constructor_array_mixing_local_with_anything_else_fails_closed() {
 }
 
 #[test]
-fn constructor_local_ambiguous_cross_owner_name_collision_fails_closed() {
-    // `ExpandedComponentTypes.bindings` is keyed by name only. Two entries
-    // sharing the constructor's shadowing name (e.g. a module-owned
-    // constructor shadow admitted alongside an unrelated instance-owned
-    // `defineExpose` binding of the same name) must never let the lookup
-    // silently pick one.
+fn constructor_local_ambiguous_same_owner_name_collision_fails_closed() {
+    // NOT a discriminator of the owner-aware `(name, owner)` filter itself
+    // — both entries below already share the SAME owner, so a hypothetical
+    // name-only matcher would see the identical two candidates and fail
+    // closed identically. What this DOES discriminate is the SEPARATE
+    // post-filter multiplicity check (`matching.next().is_some()` in
+    // `constructor_binding_source_position`): deleting just that check
+    // silently picks the FIRST matching entry (`Present(Number)`) instead
+    // of failing closed — verified by temporarily deleting it and
+    // confirming this test goes RED, then restoring it and confirming
+    // GREEN again. Two `.bindings` entries sharing BOTH the constructor's
+    // shadowing name AND its owner (never expected in practice — a single
+    // owner cannot legally bind one name to two different declarations)
+    // must still never let the lookup silently pick one.
     let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
     let bindings = vec![local_entry("String", module_owner, "String")];
     let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
         bindings: vec![
-            test_expanded_field(
+            test_expanded_field_owned(
+                module_owner,
                 "String",
                 SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
             ),
-            test_expanded_field(
+            test_expanded_field_owned(
+                module_owner,
                 "String",
                 SourcePosition::Present(closed_leaf(PrimitiveName::Boolean)),
             ),
         ],
+        ..Default::default()
+    };
+    let position = constructor_binding_source_position(&bindings, Some(&evaluated));
+    assert_eq!(position, Some(unrepresentable_failure()));
+}
+
+#[test]
+fn constructor_local_cross_owner_same_name_disambiguates_by_owner() {
+    // `ExpandedComponentTypes.bindings` can admit a module-owned constructor
+    // shadow alongside an unrelated instance-owned `defineExpose` binding of
+    // the SAME name. `key.owner` — the SAME owner `RootBindingIndex` proved
+    // this identifier resolves under — narrows the match to the correct
+    // entry instead of failing closed on a same-name collision that is not
+    // actually ambiguous once owner is consulted.
+    let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
+    let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
+    let bindings = vec![local_entry("String", module_owner, "String")];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        bindings: vec![
+            test_expanded_field_owned(
+                module_owner,
+                "String",
+                SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+            ),
+            test_expanded_field_owned(
+                instance_owner,
+                "String",
+                SourcePosition::Present(closed_leaf(PrimitiveName::Boolean)),
+            ),
+        ],
+        ..Default::default()
+    };
+    let position = constructor_binding_source_position(&bindings, Some(&evaluated));
+    assert_eq!(
+        position,
+        Some(SourcePosition::Present(closed_leaf(PrimitiveName::Number)))
+    );
+}
+
+#[test]
+fn constructor_local_absent_evaluated_authority_fails_closed() {
+    // A PROVEN `Local` binding whose evaluated authority came back `Absent`
+    // must fail closed (`Failed`), never `None` — `None` from this function
+    // means "no closed-fact position, fall back to the caller's own
+    // display-text route", which for a proven-local spelling (e.g.
+    // `"String"`) would treat it as if it might still be the global
+    // constructor, exactly the false-global fold this gate exists to
+    // prevent.
+    let owner = verter_type_expr::TopLevelOwnerId::module(0);
+    let bindings = vec![local_entry("String", owner, "String")];
+    let evaluated = crate::analysis::type_expand::ExpandedComponentTypes {
+        bindings: vec![test_expanded_field_owned(
+            owner,
+            "String",
+            SourcePosition::unannotated(),
+        )],
         ..Default::default()
     };
     let position = constructor_binding_source_position(&bindings, Some(&evaluated));
@@ -5510,4 +5812,27 @@ fn constructor_empty_bindings_is_no_position() {
 fn constructor_global_nonprimitive_keeps_display_only_route() {
     let bindings = vec![global_entry("Array")];
     assert_eq!(constructor_binding_source_position(&bindings, None), None);
+}
+
+#[test]
+fn constructor_array_null_element_folds_to_primitive_null_union() {
+    // `[String, null]` publishes `string | null` — confirmed against
+    // `@vue/runtime-core`'s own `assertType`/`getType`, see
+    // `resolve_runtime_constructor_array`'s doc comment.
+    let bindings = vec![global_entry("String"), global_entry("null")];
+    let position = constructor_binding_source_position(&bindings, None);
+    assert_eq!(
+        position,
+        Some(SourcePosition::Present(
+            verter_type_expr::facts::SemanticTypeSource::Closed(
+                verter_type_expr::facts::ClosedTypeFact::LeafUnion(
+                    vec![
+                        verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
+                        verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::Null),
+                    ]
+                    .into(),
+                )
+            )
+        ))
+    );
 }

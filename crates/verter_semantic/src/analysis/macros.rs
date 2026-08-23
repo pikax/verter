@@ -562,39 +562,27 @@ impl<'program> RoleWalk<'program, '_> {
 /// macro-ordinal / field-ordinal addressing engine. The deref-side field
 /// replay ([`lower_macro_field_payload_at`]) calls it over the retained
 /// snapshot so the mint side and the deref side cannot drift.
+///
+/// `binding_index` is the outer analysis driver's ONE per-parse index.
+/// Replay passes `None`: constructor-binding extraction is skipped,
+/// locators still stamp, and the index is never rebuilt.
 #[cfg(test)]
 fn analyze_macros_from_program(program: &Program<'_>, source: &str) -> Vec<AnalyzedMacro> {
     let owners = TopLevelOwnerTable::ordinary_file(program.body.len());
-    analyze_macros_from_program_with_owners(program, source, &owners)
+    // Full-analysis test helper: ONE build, passed in. Locator replay
+    // (`lower_macro_field_payload_at*`) still passes `None`.
+    let binding_index =
+        crate::analysis::root_binding_index::RootBindingIndex::build(program, &owners, false);
+    analyze_macros_from_program_with_owners(program, source, &owners, Some(&binding_index))
 }
 
 fn analyze_macros_from_program_with_owners(
     program: &Program<'_>,
     source: &str,
     owners: &TopLevelOwnerTable,
+    binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
 ) -> Vec<AnalyzedMacro> {
     let mut macros = Vec::new();
-    // This whole function is a deterministic REPLAY of the analyzer's own
-    // macro assembly over the same retained `(program, owners)` pair the
-    // initial shallow analysis already ran against — never a second,
-    // independently-implemented engine. Rebuilding the binding index here
-    // is therefore pure recompute of the same pinned inputs (never a
-    // diverging resolution), and the deref-side caller
-    // (`lower_macro_field_payload_at_with_owners`) never reads the
-    // constructor-binding outcome this replay recomputes — it only inspects
-    // `AnalyzedPropField::type_expr_scope`/`span` on the target field, per
-    // the "deterministic macro replay" note in the design doc. `parse_errors`
-    // is `false` here regardless of the ORIGINAL parse's actual cleanliness
-    // (the initial analysis still publishes fields from an error-recovered
-    // parse — a degenerate binding index there does not suppress
-    // publication, only forces `Indeterminate` constructor bindings): this
-    // is safe ONLY because, again, this replay's recomputed constructor
-    // bindings are never read. If a future caller of this replay ever
-    // starts reading `constructor_bindings` off its output, this hardcoded
-    // `false` must be replaced with the original parse's real cleanliness
-    // signal.
-    let binding_index =
-        crate::analysis::root_binding_index::RootBindingIndex::build(program, owners, false);
 
     for (statement_index, stmt) in program.body.iter().enumerate() {
         let owner = owners.statement(statement_index).owner;
@@ -606,7 +594,7 @@ fn analyze_macros_from_program_with_owners(
                     source,
                     &program.comments,
                     owner,
-                    &binding_index,
+                    binding_index,
                 );
             }
             Statement::VariableDeclaration(var_decl) => {
@@ -617,7 +605,7 @@ fn analyze_macros_from_program_with_owners(
                         source,
                         &program.comments,
                         owner,
-                        &binding_index,
+                        binding_index,
                     );
                 }
             }
@@ -742,9 +730,9 @@ pub enum MacroFieldPayloadLowering {
 /// of the position a [`MacroPayloadPosition::Field`] payload locator
 /// addresses.
 ///
-/// Replays the analyzer's OWN macro assembly ([`analyze_macros_from_program_with_owners`]
-/// — the one macro-ordinal / field-ordinal addressing engine, so the mint
-/// side and the deref side cannot drift), selects the field family by the
+/// Replays the analyzer's OWN locator assembly ([`analyze_macros_from_program_with_owners`]
+/// with no binding index — constructor outcomes are not recomputed) so the
+/// mint side and the deref side cannot drift. Selects the field family by the
 /// macro's kind (props for `defineProps` / `defineModel`, emits, slots), and
 /// lowers the field's authored node through the same `lower_ts_type`
 /// producer the analyzer fingerprints. The authored node is re-located by
@@ -791,7 +779,7 @@ pub fn lower_macro_field_payload_at_with_owners(
     macro_index: u32,
     field_index: u32,
 ) -> MacroFieldPayloadLowering {
-    let macros = analyze_macros_from_program_with_owners(program, source, owners);
+    let macros = analyze_macros_from_program_with_owners(program, source, owners, None);
     let Some(mac) = macros.get(macro_index as usize) else {
         return MacroFieldPayloadLowering::NoField;
     };
@@ -2538,7 +2526,7 @@ pub(crate) fn try_extract_macro_from_expr(
     source: &str,
     comments: &[Comment],
     owner: TopLevelOwnerId,
-    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
+    binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
 ) {
     if let Some(m) = try_extract_macro(expression, None, source, comments, owner, binding_index) {
         if m.kind == AnalyzedMacroKind::WithDefaults {
@@ -2556,7 +2544,7 @@ pub(crate) fn try_extract_macro_from_var_decl(
     source: &str,
     comments: &[Comment],
     owner: TopLevelOwnerId,
-    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
+    binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
 ) {
     if let Some(ref init) = decl.init {
         let binding_name = if let BindingPattern::BindingIdentifier(id) = &decl.id {
@@ -2583,7 +2571,7 @@ fn try_extract_inner_macro(
     source: &str,
     comments: &[Comment],
     owner: TopLevelOwnerId,
-    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
+    binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
 ) {
     if let Expression::CallExpression(call) = expr {
         if let Some(first_arg) = call.arguments.first() {
@@ -2625,7 +2613,7 @@ fn try_extract_macro(
     source: &str,
     comments: &[Comment],
     owner: TopLevelOwnerId,
-    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
+    binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
 ) -> Option<AnalyzedMacro> {
     match expr {
         Expression::CallExpression(call) => {
@@ -2722,7 +2710,7 @@ fn try_extract_macro(
             };
 
             let expose_fields = if kind == AnalyzedMacroKind::DefineExpose {
-                extract_expose_fields(call, comments, source)
+                extract_expose_fields(call, comments, source, binding_index)
             } else {
                 Vec::new()
             };
@@ -2939,7 +2927,7 @@ fn extract_prop_fields(
     call: &CallExpression<'_>,
     source: &str,
     comments: &[Comment],
-    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
+    binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
 ) -> PropFieldExtraction {
     // Type-based: extract from type parameters
     if let Some(ref type_args) = call.type_arguments {
@@ -3079,11 +3067,19 @@ pub(crate) fn resolve_runtime_constructor_identifier(
 }
 
 /// Resolve a constructor-array position (`name: [String, Number]`), one
-/// element per authored array entry. A `null` element is DEFERRED — Vue's
-/// own runtime semantics for a nullable constructor entry are unconfirmed
-/// (see the design doc's "Nullable constructor-array element" note) — it
-/// routes through the same `Indeterminate`-shaped failure channel as an
-/// unresolvable identifier rather than guessing an interpretation.
+/// element per authored array entry. A `null` element is a LITERAL, never an
+/// identifier — it cannot be locally shadowed, so it is never gated through
+/// `binding_index` at all, and it always resolves `Global` with spelling
+/// `"null"`. This is confirmed directly against `@vue/runtime-core`'s own
+/// prop-validation source (`getType`/`assertType` in
+/// `packages/runtime-core/src/componentProps.ts`): `getType(null)` returns
+/// the string `"null"`, and `assertType` special-cases
+/// `expectedType === "null"` as `valid = value === null` — i.e. `[String,
+/// null]` means "this prop accepts a `String`-typed value OR the literal
+/// value `null`", the ordinary nullable-constructor idiom. The fold below
+/// (`primitive_of` in `component_meta.rs`) publishes it as
+/// `PrimitiveName::Null` alongside any other `Global`-resolved spelling in
+/// the same array.
 pub(crate) fn resolve_runtime_constructor_array(
     arr: &ArrayExpression<'_>,
     binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
@@ -3102,7 +3098,7 @@ pub(crate) fn resolve_runtime_constructor_array(
             }
             ArrayExpressionElement::NullLiteral(_) => verter_type_expr::ConstructorBindingEntry {
                 spelling: std::sync::Arc::from("null"),
-                resolution: verter_type_expr::ConstructorBindingOutcome::Indeterminate,
+                resolution: verter_type_expr::ConstructorBindingOutcome::Global,
             },
             _ => verter_type_expr::ConstructorBindingEntry {
                 spelling: std::sync::Arc::from("<unrecognized>"),
@@ -3120,7 +3116,7 @@ fn extract_prop_fields_from_runtime(
     expr: &Expression<'_>,
     source: &str,
     comments: &[Comment],
-    binding_index: &crate::analysis::root_binding_index::RootBindingIndex,
+    binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
 ) -> RuntimePropExtraction {
     match expr {
         Expression::ObjectExpression(obj) => {
@@ -3148,16 +3144,15 @@ fn extract_prop_fields_from_runtime(
                     Vec::new();
 
                 // Check if value is a constructor (shorthand: `name: String`)
-                if let Expression::Identifier(id) = &p.value {
-                    let (display, entry) =
-                        resolve_runtime_constructor_identifier(id, binding_index);
+                if let (Some(index), Expression::Identifier(id)) = (binding_index, &p.value) {
+                    let (display, entry) = resolve_runtime_constructor_identifier(id, index);
                     type_annotation = display;
                     constructor_bindings.push(entry);
                 }
 
                 // Shorthand constructor array: `name: [String, Number]`.
-                if let Expression::ArrayExpression(arr) = &p.value {
-                    constructor_bindings = resolve_runtime_constructor_array(arr, binding_index);
+                if let (Some(index), Expression::ArrayExpression(arr)) = (binding_index, &p.value) {
+                    constructor_bindings = resolve_runtime_constructor_array(arr, index);
                 }
 
                 // Check if value is an expanded object: `name: { type: String, default: 'Hello' }`
@@ -3202,23 +3197,26 @@ fn extract_prop_fields_from_runtime(
                                                 .filter(|t| !t.is_empty())
                                         });
                                         has_authored_prop_type = true;
-                                    } else if let Expression::Identifier(id) = &ts_as.expression {
+                                    } else if let (Some(index), Expression::Identifier(id)) =
+                                        (binding_index, &ts_as.expression)
+                                    {
                                         let (display, entry) =
-                                            resolve_runtime_constructor_identifier(
-                                                id,
-                                                binding_index,
-                                            );
+                                            resolve_runtime_constructor_identifier(id, index);
                                         type_annotation = display;
                                         constructor_bindings = vec![entry];
                                     }
-                                } else if let Expression::Identifier(id) = &sp.value {
+                                } else if let (Some(index), Expression::Identifier(id)) =
+                                    (binding_index, &sp.value)
+                                {
                                     let (display, entry) =
-                                        resolve_runtime_constructor_identifier(id, binding_index);
+                                        resolve_runtime_constructor_identifier(id, index);
                                     type_annotation = display;
                                     constructor_bindings = vec![entry];
-                                } else if let Expression::ArrayExpression(arr) = &sp.value {
+                                } else if let (Some(index), Expression::ArrayExpression(arr)) =
+                                    (binding_index, &sp.value)
+                                {
                                     constructor_bindings =
-                                        resolve_runtime_constructor_array(arr, binding_index);
+                                        resolve_runtime_constructor_array(arr, index);
                                 }
                             }
                             "required" => {
@@ -3606,6 +3604,7 @@ fn extract_expose_fields(
     call: &CallExpression<'_>,
     comments: &[Comment],
     source: &str,
+    binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
 ) -> Vec<AnalyzedExposeField> {
     let Some(first_arg) = call.arguments.first() else {
         return Vec::new();
@@ -3629,11 +3628,30 @@ fn extract_expose_fields(
                 // carry an `Expression::Identifier` value node in OXC — a
                 // method (`p.method`) or any other expression shape yields
                 // `None`, the honest "nothing structurally recoverable" case.
+                // A captured identifier is then resolved at
+                // `OwnerNaturalScope`: only a `Local` outcome stores a
+                // `DeclBindingKey`. `Global` and `Indeterminate` store
+                // `None` — they are not local declarations, and a
+                // name-only fallback would first-name-join an unrelated
+                // same-spelling `.bindings` row.
                 let referenced_binding = if p.method {
                     None
                 } else {
-                    match &p.value {
-                        Expression::Identifier(ident) => Some(ident.name.to_string()),
+                    match (binding_index, &p.value) {
+                        (Some(index), Expression::Identifier(ident)) => {
+                            use crate::analysis::root_binding_index::{
+                                BindingResolution, StartScope,
+                            };
+                            match index.resolve_value_identifier(
+                                ident.span.into(),
+                                StartScope::OwnerNaturalScope,
+                            ) {
+                                BindingResolution::Local(key) => Some(key),
+                                BindingResolution::Global | BindingResolution::Indeterminate => {
+                                    None
+                                }
+                            }
+                        }
                         _ => None,
                     }
                 };

@@ -6532,6 +6532,115 @@ defineExpose({ shared, moduleOnly })
     );
 }
 
+/// Constructor demand and expose demand share the `.bindings` lane, so a
+/// module-owned constructor-bound `String` and an instance-owned `String`
+/// exposure coexist there. End-to-end: the exposure publishes the
+/// instance-owned authored body, and the prop keeps the constructor's type.
+///
+/// This is a positive end-to-end check, NOT the negative control for the
+/// `(owner, name)` join. The demand vector's order is not a contract (it
+/// reaches the `evaluateTypes` payload verbatim), so this fixture must not
+/// force the wrong row to sort first to manufacture a name-only failure.
+/// `extract_exposed_matches_resolved_binding_owner_not_first_name`
+/// (verter_semantic) builds the colliding lane directly with the module row
+/// first and is what actually discriminates a first-name join.
+#[test]
+fn expose_does_not_inherit_same_spelling_module_constructor_type() {
+    let project = make_project();
+    project
+        .upsert_base(
+            "/CtorExposeCollision.vue",
+            r#"<script lang="ts">
+const String: string = 'module-ctor-shadow'
+</script>
+<script setup lang="ts">
+defineProps({ label: String })
+const String = 1
+defineExpose({ String })
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let evaluated = project
+        .host()
+        .evaluate_types("/CtorExposeCollision.vue")
+        .expect("evaluated types should exist");
+    let string_owners: Vec<_> = evaluated
+        .bindings
+        .iter()
+        .filter(|field| field.name == "String")
+        .map(|field| field.owner)
+        .collect();
+    assert!(
+        string_owners.contains(&verter_type_expr::TopLevelOwnerId::module(0))
+            && string_owners.contains(&verter_type_expr::TopLevelOwnerId::instance(0)),
+        "fixture premise: `.bindings` must contain BOTH same-spelling \
+         owners so the join has two lanes to tell apart; got {string_owners:?}"
+    );
+
+    let meta = project
+        .host()
+        .get_component_meta("/CtorExposeCollision.vue")
+        .expect("component meta resolves");
+    let exposed = meta
+        .exposed
+        .iter()
+        .find(|field| field.name == "String")
+        .expect("instance String must still be exposed under its property key");
+    match &exposed.type_source {
+        verter_type_expr::facts::SourcePosition::Present(
+            verter_type_expr::facts::SemanticTypeSource::Authored(
+                verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot),
+            ),
+        ) => {
+            assert_eq!(
+                slot.anchor.owner,
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                "expose must resolve the instance-owned String, not the \
+                 module constructor of the same spelling"
+            );
+            assert_eq!(slot.anchor.symbol.as_ref(), "String");
+        }
+        other => panic!(
+            "expose must publish the instance-owned authored String body, \
+             never the module constructor's string type; got {other:?}"
+        ),
+    }
+    assert!(
+        !matches!(
+            exposed.type_source.present(),
+            Some(verter_type_expr::facts::SemanticTypeSource::Closed(
+                verter_type_expr::facts::ClosedTypeFact::Leaf(
+                    verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String)
+                )
+            ))
+        ),
+        "the module constructor's closed string type must not type the \
+         instance-owned exposure, got {:?}",
+        exposed.type_source
+    );
+
+    let (analysis, _resolution, types) = project
+        .host()
+        .get_component_meta_output("/CtorExposeCollision.vue")
+        .expect("component-meta output should materialize")
+        .expect("component should resolve")
+        .into_parts();
+    let lanes = types.into_lanes();
+    let label_idx = analysis
+        .props
+        .iter()
+        .position(|prop| prop.name == "label")
+        .expect("constructor-bound label prop must still publish");
+    assert_eq!(
+        published_type(&lanes.props[label_idx]),
+        &TypeExpr::Primitive(PrimitiveName::String),
+        "the module constructor still types the prop — the expose join \
+         must not have stolen or inverted that lane"
+    );
+}
+
 #[test]
 fn get_component_meta_resolves_workspace_only_barrel_dependencies_for_define_props() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -23821,6 +23930,7 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
         props: vec![
             verter_semantic::analysis::type_expand::ExpandedField::from_source_position(
                 "label".to_string(),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 verter_type_expr::facts::SourcePosition::Present(
                     verter_type_expr::facts::SemanticTypeSource::Closed(
                         verter_type_expr::facts::ClosedTypeFact::Leaf(

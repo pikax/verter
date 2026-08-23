@@ -10,7 +10,7 @@ use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
 use verter_type_expr::facts::{NarrowTypeParam, SemanticTypeSource, SourcePosition};
 use verter_type_expr::{
     AuthoredTypeEvidence, ResolutionDiagnostic, ResolutionDiagnosticKind, ResolutionExactness,
-    ResolutionProvenance, ResolvedTypeAuthority,
+    ResolutionProvenance, ResolvedTypeAuthority, TopLevelOwnerId,
 };
 
 pub type ExpansionExactness = SolverExactness;
@@ -329,6 +329,19 @@ pub struct ExpandedMacroExposed {
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedField {
     pub name: String,
+    /// Authored top-level owner (module/instance/frontmatter) this field's
+    /// value binding is scoped to — populated from the SAME owner-aware
+    /// source that produced the request (`BindingExpansionEntry::owner` for
+    /// `.bindings`; the enclosing macro's `AnalyzedMacro.owner` for
+    /// `.props`/`.emits`/`.slot_bindings`/`.exposed`). Lets a `.bindings`-lane
+    /// consumer (constructor-binding shadow resolution) discriminate a
+    /// same-name/different-owner collision by owner instead of matching by
+    /// name text alone. Every producer supplies the REAL authored owner —
+    /// `ExpandedField::from_source_position` takes no default and fabricates
+    /// none; a caller with no owner available is a producer defect to fix,
+    /// not a placeholder to invent.
+    #[serde(default)]
+    pub owner: TopLevelOwnerId,
     /// Immutable resolved authority for the field value. Authored spelling
     /// never overwrites this outcome.
     pub authority: ResolvedTypeAuthority,
@@ -360,6 +373,7 @@ impl ExpandedField {
     #[must_use]
     pub fn from_source_position(
         name: String,
+        owner: TopLevelOwnerId,
         source: SourcePosition,
         authored_evidence: Option<AuthoredTypeEvidence>,
         optional: bool,
@@ -386,6 +400,11 @@ impl ExpandedField {
         );
         Self {
             name,
+            // The caller's authored owner — never fabricated. A same-name
+            // collision across owners (e.g. a constructor-binding shadow)
+            // depends on this being the real owner the identifier resolved
+            // under, not a placeholder.
+            owner,
             authority,
             authored_evidence,
             optional,

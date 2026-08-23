@@ -9627,3 +9627,111 @@ const model = defineModel<string>()
         );
     }
 }
+
+/// End-to-end proof that the runtime-constructor binding owner threads all
+/// the way from `RootBindingIndex` through the SESSION-level producer
+/// (`compute_evaluated_types_from_owner_context_with_ctx` in
+/// `host_manage/eval_env.rs`, which stamps `BindingExpansionEntry::owner`
+/// straight from `DeclBindingKey.owner` — `verter_type_expr::ConstructorBindingOutcome::
+/// Local(key)` — for every constructor-binding demand) to the FINAL
+/// published prop type — driven through the real `VerterHost::get_component_meta`
+/// pipeline, not a hand-built `ExpandedComponentTypes`/`DeclBindingKey` pair
+/// (the gap the review's "no test proves producer owner propagation" finding
+/// named: `component_meta_tests.rs`'s cross-owner matcher test constructs
+/// both owners by hand, and `query_db_self_root_tests.rs`'s seam test
+/// discards the field it produces).
+///
+/// `InstanceThing` is declared in a SEPARATE file and reached only through
+/// an `<script setup>` IMPORT — imports always keep their authored Instance
+/// owner even though they land at Program root (`hoisted_setup_import_
+/// keeps_instance_owner_not_module_owner`), and an Instance owner is never
+/// `ordinary_file()` (`ordinary_file() == Module(0)`, per
+/// `TopLevelOwnerId::ordinary_file`'s own doc comment) — so a producer that
+/// silently swapped the real owner for the fabricated default is
+/// OBSERVABLE here: `(Module(0), "InstanceThing")` has no entry in this
+/// file's binding table at all, so the swap fails the lookup outright.
+///
+/// Mutation-proven: hardcoding the `owner: key.owner` line in
+/// `compute_evaluated_types_from_owner_context_with_ctx` to
+/// `TopLevelOwnerId::ordinary_file()` (replacing the producer's real owner
+/// with the fabricated default the review specifically named) makes this
+/// test go RED — the constructor demand can no longer be admitted under its
+/// real `(Instance, "InstanceThing")` key, so resolution falls to the
+/// fail-closed `unrepresentable_failure()` position instead of the
+/// imported class's real materialized shape.
+#[test]
+fn constructor_binding_owner_propagates_end_to_end_through_session_pipeline() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: "/local-thing.ts".to_string(),
+            source: Arc::from("export class InstanceThing {\n  instanceOnly: number = 0;\n}\n"),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert local-thing.ts");
+
+    let _ = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: None,
+            input_id: "/Comp.vue".to_string(),
+            source: Arc::from(
+                "<script setup lang=\"ts\">\n\
+                 import { InstanceThing } from './local-thing'\n\
+                 defineProps({ label: InstanceThing })\n\
+                 </script>\n\
+                 <template><div /></template>\n",
+            ),
+            file_language: crate::FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .expect("upsert Comp.vue");
+
+    let meta = host
+        .get_component_meta("/Comp.vue")
+        .expect("component meta");
+    let label = meta
+        .props
+        .iter()
+        .find(|p| p.name == "label")
+        .expect("defineProps must publish the `label` prop");
+    let source = label
+        .publication
+        .result()
+        .selected_source()
+        .unwrap_or_else(|| {
+            panic!(
+                "a resolved runtime-constructor local must publish a typed source; \
+             observed source_position={:?}",
+                label.publication.result().source_position()
+            )
+        });
+    // The published source carries an `AuthoredAnchor` naming the SAME
+    // symbol + owner `RootBindingIndex` proved `Local` under
+    // (`collect_local_constructor_binding_keys` → `BindingExpansionEntry` →
+    // `expand_macro_types_impl_with_expander`'s decl-body anchor). This is
+    // the direct, observable end of the owner-propagation chain: the real
+    // authored Instance owner, not the fabricated `ordinary_file()`
+    // (`Module(0)`) default a broken producer would substitute.
+    match source {
+        verter_type_expr::facts::SemanticTypeSource::Authored(
+            verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot),
+        ) => {
+            assert_eq!(
+                slot.anchor.symbol.as_ref(),
+                "InstanceThing",
+                "unexpected anchor symbol: {slot:?}"
+            );
+            assert_eq!(
+                slot.anchor.owner,
+                verter_type_expr::TopLevelOwnerId::instance(0),
+                "the constructor binding's published anchor must carry the REAL \
+                 authored Instance owner the RootBindingIndex proved, not a \
+                 fabricated ordinary_file()/Module(0) default: {slot:?}"
+            );
+        }
+        other => panic!("expected an Authored(DeclBody(..)) source; got {other:?}"),
+    }
+}
