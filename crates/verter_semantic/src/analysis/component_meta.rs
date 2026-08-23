@@ -2149,14 +2149,21 @@ fn constructor_binding_source_position(
                 SemanticSourceFailure::UnrepresentableRequiredMemberValue,
             ));
         };
-        // `ExpandedComponentTypes.bindings` is keyed by NAME ONLY (no
-        // owner) — the same lane `defineExpose` resolves through. A module
-        // declaration and an unrelated same-name instance declaration can
-        // both be admitted into it (e.g. this constructor's module-owned
-        // shadow alongside a `defineExpose`-requested instance-owned
-        // binding of the same name). Never silently pick one: an ambiguous
-        // name match fails closed exactly like an unresolvable one.
-        let mut matching = eval.bindings.iter().filter(|f| f.name == key.name.as_ref());
+        // `ExpandedComponentTypes.bindings` is the SAME lane `defineExpose`
+        // resolves through, and can admit a module declaration alongside an
+        // unrelated same-name instance declaration (e.g. this constructor's
+        // module-owned shadow beside a `defineExpose`-requested
+        // instance-owned binding of the same name). `key.owner` — the SAME
+        // owner `RootBindingIndex` proved this identifier resolves under —
+        // narrows the match first; a lookup that is still ambiguous after
+        // matching BOTH owner and name (never expected in practice, since a
+        // single owner cannot legally bind one name to two different
+        // declarations) fails closed exactly like an unresolvable one,
+        // never silently picking one.
+        let mut matching = eval
+            .bindings
+            .iter()
+            .filter(|f| f.name == key.name.as_ref() && f.owner == key.owner);
         let Some(field) = matching.next() else {
             return Some(SourcePosition::Failed(
                 SemanticSourceFailure::UnrepresentableRequiredMemberValue,
@@ -2175,22 +2182,35 @@ fn constructor_binding_source_position(
                 let verter_type_expr::TypedResolutionFailure::SourceConstruction(failure) = failure;
                 SourcePosition::Failed(*failure)
             }
+            // A PROVEN `Local` binding whose evaluated authority came back
+            // `Absent` is NOT "no closed-fact position, defer to the
+            // caller's own route" — that route (the display-text-only
+            // fallback) would treat the ORIGINAL spelling (e.g. `"String"`)
+            // as if it might still be the global runtime constructor,
+            // exactly the false-global fold this whole gate exists to
+            // prevent. Fail closed like every other branch in this
+            // function rather than returning `None` (which the caller
+            // reads as "fall back to the unannotated/display-text route").
             ResolvedTypeOutcome::Absent { .. } => {
-                return None;
+                SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredMemberValue)
             }
         });
     }
 
-    // Every entry resolved `Global`: fold String/Number/Boolean spellings to
-    // the closed primitive fact (a union of primitives for a multi-element
-    // constructor array); any other spelling keeps its existing
-    // display-text-only route — no closed-fact plumbing for the other seven
-    // spellings.
+    // Every entry resolved `Global`: fold String/Number/Boolean/null
+    // spellings to the closed primitive fact (a union of primitives for a
+    // multi-element constructor array); any other spelling keeps its
+    // existing display-text-only route — no closed-fact plumbing for the
+    // other seven constructor spellings. `"null"` is the literal-`null`
+    // array-element spelling from `resolve_runtime_constructor_array`
+    // (confirmed against `@vue/runtime-core`'s own `assertType`/`getType`:
+    // `[String, null]` means "String-typed value OR literal `null`").
     fn primitive_of(spelling: &str) -> Option<PrimitiveName> {
         match spelling {
             "String" => Some(PrimitiveName::String),
             "Number" => Some(PrimitiveName::Number),
             "Boolean" => Some(PrimitiveName::Boolean),
+            "null" => Some(PrimitiveName::Null),
             _ => None,
         }
     }
@@ -2845,7 +2865,7 @@ fn extract_exposed_from_macro(
         // property key: `defineExpose({ public: local })` must look up
         // `local` (the value expression's identifier), not `public` (the
         // published name), which may not exist as a local declaration at
-        // all. `resolved_binding_name` returns `referenced_binding` ONLY
+        // all. `resolved_binding_key` returns `referenced_binding` ONLY
         // when the analyzer structurally captured one — a method or any
         // other non-identifier value expression (`{ public: local.foo }`)
         // has NO referenced binding at all, and must NOT fall back to
@@ -2853,8 +2873,8 @@ fn extract_exposed_from_macro(
         // unrelated same-named binding elsewhere in scope must never be
         // substituted for it.
         let type_source = field
-            .resolved_binding_name()
-            .and_then(|binding_name| resolve_exposed_type(binding_name, bindings, evaluated))
+            .resolved_binding_key()
+            .and_then(|key| resolve_exposed_type(key, bindings, evaluated))
             .or_else(|| resolved_field.map(|candidate| candidate.type_source.clone()))
             .unwrap_or_else(SourcePosition::unannotated);
         // Docs pair by name: the object-literal field's own leading JSDoc
@@ -2875,13 +2895,17 @@ fn extract_exposed_from_macro(
             name: field.name.clone(),
             type_source,
             type_expansion: field
-                .resolved_binding_name()
-                .and_then(|binding_name| {
+                .resolved_binding_key()
+                .and_then(|key| {
                     evaluated.and_then(|eval| {
-                        eval.bindings
-                            .iter()
-                            .find(|binding| binding.name == binding_name)
-                            .map(field_expansion_metadata)
+                        let mut matching = eval.bindings.iter().filter(|binding| {
+                            binding.name == key.name.as_ref() && binding.owner == key.owner
+                        });
+                        let field = matching.next()?;
+                        if matching.next().is_some() {
+                            return None;
+                        }
+                        Some(field_expansion_metadata(field))
                     })
                 })
                 .or_else(|| {
@@ -2915,17 +2939,8 @@ fn extract_exposed_from_macro(
         out.push(ExposedAnalysis {
             name: candidate.field.name.clone(),
             type_source: candidate.type_source.clone(),
-            type_expansion: evaluated
-                .and_then(|eval| {
-                    eval.bindings
-                        .iter()
-                        .find(|binding| binding.name == candidate.field.name)
-                        .map(field_expansion_metadata)
-                })
-                .or_else(|| {
-                    exposed_lane_field(evaluated, macro_index, &candidate.field.name)
-                        .map(field_expansion_metadata)
-                }),
+            type_expansion: exposed_lane_field(evaluated, macro_index, &candidate.field.name)
+                .map(field_expansion_metadata),
             description: candidate.field.description.clone(),
             tags: candidate.field.tags.clone(),
         });
@@ -2950,12 +2965,27 @@ fn exposed_lane_field<'a>(
 }
 
 fn resolve_exposed_type(
-    name: &str,
+    key: &verter_type_expr::DeclBindingKey,
     bindings: &[AnalyzedBinding],
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
 ) -> Option<SourcePosition> {
     if let Some(eval) = evaluated {
-        if let Some(f) = eval.bindings.iter().find(|f| f.name == name) {
+        // Same `(owner, name)` join constructors already use. A leftover
+        // first-name match would type an instance exposure from a
+        // module-owned constructor of the same spelling sitting in the
+        // shared `.bindings` lane. Still-ambiguous after matching both
+        // (a single owner cannot legally bind one name twice) fails
+        // closed, never silently picking one.
+        let mut matching = eval
+            .bindings
+            .iter()
+            .filter(|f| f.name == key.name.as_ref() && f.owner == key.owner);
+        if let Some(f) = matching.next() {
+            if matching.next().is_some() {
+                return Some(SourcePosition::Failed(
+                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+                ));
+            }
             return match f.authority.outcome() {
                 ResolvedTypeOutcome::Present { source, .. } => {
                     Some(SourcePosition::Present(source.as_ref().clone()))

@@ -149,11 +149,23 @@ describe("P3: Default Values", () => {
     });
   });
 
-  test("runtime defineProps object syntax preserves defaults without raw display authority", async () => {
+  test("runtime defineProps object syntax resolves the runtime constructor's primitive type", async () => {
+    // Formerly a documented gap (`type: "unknown | undefined"`): the
+    // `String` runtime-constructor identifier resolves to the closed
+    // primitive fact, matching vue-component-meta/real Vue behavior instead
+    // of falling back to the unresolved-display placeholder.
+    //
+    // NOTE: this fixture's `String` is entirely UNSHADOWED — no local
+    // declaration of that name exists anywhere in the file — so it
+    // resolves `Global` and hits the well-known-spelling primitive fold
+    // regardless of `RootBindingIndex`'s owner-attribution logic (CM1).
+    // This is a regression test for the primitive-fold path itself, not a
+    // discriminator of the owner-aware Local-vs-Global classification;
+    // that is covered at the Rust level in `root_binding_index_tests.rs`.
     const prop = await getProp("StringPropDefault.vue", "hello");
     expect(prop).toBeDefined();
     expect(prop).toMatchObject({
-      type: "unknown | undefined",
+      type: "string | undefined",
       default: '"Hello"',
     });
   });

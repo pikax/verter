@@ -29,7 +29,10 @@ use super::{
 #[derive(Default)]
 struct BindingAdmissionResult {
     admitted: Vec<verter_semantic::analysis::type_eval_build::BindingExpansionEntry>,
-    failed: Vec<String>,
+    /// Owner carried alongside the name (never name-only) so the published
+    /// `ExpandedField.owner` this failure produces below stays consistent
+    /// with the owner-aware `.bindings` lane every other entry populates.
+    failed: Vec<verter_type_expr::DeclBindingKey>,
 }
 
 impl VerterHost {
@@ -987,7 +990,7 @@ impl VerterHost {
                         ?failure,
                         "defineExpose binding preparation failed; publishing as a typed Failed source"
                     );
-                    result.failed.push(binding.name.to_string());
+                    result.failed.push(binding.clone());
                 }
             }
         }
@@ -1075,6 +1078,10 @@ impl VerterHost {
             );
             self.component_meta_binding_type_entries(ctx, canonical, &requested_bindings)
         };
+        // Appended, never spliced to the front: this vector's order carries
+        // through the expander into `ExpandedComponentTypes.bindings`, which
+        // the `evaluateTypes` NAPI method serializes verbatim. The array
+        // order is externally observable, so it is not a free knob to tune.
         for key in &constructor_binding_keys {
             let entry = verter_semantic::analysis::type_eval_build::BindingExpansionEntry {
                 name: key.name.to_string(),
@@ -1717,12 +1724,13 @@ impl VerterHost {
         // sync with the audit capture buffers: each failed binding never
         // dispatched, so its captured node id is `None`, the same value
         // every non-dispatching closure branch records.
-        for name in &binding_entries.failed {
+        for key in &binding_entries.failed {
             binding_node_ids.borrow_mut().push(None);
             result
                 .bindings
                 .push(verter_semantic::analysis::type_expand::ExpandedField {
-                    name: name.clone(),
+                    name: key.name.to_string(),
+                    owner: key.owner,
                     authority: verter_type_expr::ResolvedTypeAuthority::failed(
                         verter_type_expr::TypedResolutionFailure::SourceConstruction(
                             verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,

@@ -5297,6 +5297,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     let _field_a = surface_member_to_expanded_field(
         &mut engine,
         seam_scope,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         &admitted_a,
         None,
         None,
@@ -5323,6 +5324,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     let _field_b = surface_member_to_expanded_field(
         &mut engine,
         seam_scope,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         &admitted_b,
         None,
         None,
@@ -5349,6 +5351,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     let _field_other = surface_member_to_expanded_field(
         &mut engine,
         seam_scope,
+        verter_type_expr::TopLevelOwnerId::ordinary_file(),
         &admitted_other,
         None,
         None,
@@ -5444,6 +5447,7 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
         let _ = surface_member_to_expanded_field(
             &mut engine,
             scope,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             &admitted,
             None,
             None,
@@ -5579,6 +5583,7 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
         let _ = surface_member_to_expanded_field(
             &mut engine,
             scope,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             &admitted,
             None,
             None,
@@ -5919,6 +5924,7 @@ mod fenced_gate_arm_admission_tests {
         let _ = surface_member_to_expanded_field(
             &mut engine,
             scope,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
             &admitted,
             None,
             None,

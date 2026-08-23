@@ -2748,6 +2748,132 @@ mod field_payload_deref_replay {
     }
 }
 
+/// Locator-only replay must not recompute constructor outcomes and must not
+/// call `RootBindingIndex::build`. A recovered parse (`parse_errors = true`)
+/// makes the initial-analysis constructors `Indeterminate`; a fabricated
+/// `parse_errors = false` rebuild of the same program would invent `Local`.
+mod locator_only_macro_replay {
+    use super::*;
+    use crate::analysis::root_binding_index::{
+        reset_test_build_count, test_build_count, RootBindingIndex,
+    };
+    use crate::analysis::scope::AnalysisScope;
+    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use verter_type_expr::ConstructorBindingOutcome;
+
+    fn parse_source<'a>(alloc: &'a Allocator, source: &'a str) -> oxc_parser::ParserReturn<'a> {
+        Parser::new(alloc, source, SourceType::ts())
+            .with_options(ParseOptions::default())
+            .parse()
+    }
+
+    #[test]
+    fn recovered_parse_replay_does_not_invent_constructor_outcomes() {
+        let source = "const String = 1;\ndefineProps({ label: String });";
+        let alloc = Allocator::new();
+        let parsed = parse_source(&alloc, source);
+        assert!(!parsed.panicked, "fixture must parse: {source}");
+        let owners = TopLevelOwnerTable::ordinary_file(parsed.program.body.len());
+
+        // Force the recovered-parse degenerate index: every constructor is
+        // Indeterminate, regardless of whether this fixture actually
+        // recovered. The real initial-analysis path is the only authority.
+        let snap = crate::analysis::build_script_analysis_with_scope_from_program_with_owners(
+            source,
+            SourceType::ts(),
+            &parsed.program,
+            AnalysisScope::all(),
+            &owners,
+            true,
+        );
+        let initial = snap
+            .macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .expect("defineProps present");
+        assert_eq!(
+            initial.prop_fields[0]
+                .constructor_bindings
+                .iter()
+                .map(|e| e.resolution.clone())
+                .collect::<Vec<_>>(),
+            vec![ConstructorBindingOutcome::Indeterminate],
+            "recovered parse must keep constructors Indeterminate"
+        );
+
+        reset_test_build_count();
+        let replayed =
+            analyze_macros_from_program_with_owners(&parsed.program, source, &owners, None);
+        assert_eq!(
+            test_build_count(),
+            0,
+            "locator replay must not call RootBindingIndex::build"
+        );
+        let replay_mac = replayed
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineProps)
+            .expect("replay must still extract defineProps");
+        assert_eq!(replay_mac.prop_fields.len(), 1);
+        assert_eq!(replay_mac.prop_fields[0].name, "label");
+        assert!(
+            replay_mac.prop_fields[0].constructor_bindings.is_empty(),
+            "replay is locator-only — constructor fields stay unpopulated, \
+             never a Local/Global invented by a fabricated-clean rebuild; got {:?}",
+            replay_mac.prop_fields[0].constructor_bindings
+        );
+
+        // Contrast: a fabricated-clean rebuild of the same program WOULD
+        // invent Local. This pins the discrimination.
+        let fabricated = RootBindingIndex::build(&parsed.program, &owners, false);
+        let ident_span = {
+            let needle = source.rfind("String").expect("constructor ident") as u32;
+            verter_span::Span::new(needle, needle + "String".len() as u32)
+        };
+        assert!(
+            matches!(
+                fabricated.resolve_value_identifier(
+                    ident_span,
+                    crate::analysis::root_binding_index::StartScope::ProgramRoot,
+                ),
+                crate::analysis::root_binding_index::BindingResolution::Local(_)
+            ),
+            "the fabricated-clean rebuild of this program would invent Local \
+             — that is exactly the outcome replay must not produce"
+        );
+
+        // Positive control for the counter itself. The zero-count assertion
+        // above only means "replay built nothing" if a real build is
+        // actually observable; the direct build just above is that
+        // observation. Without this, a counter wired to never increment
+        // would satisfy every assertion in this module vacuously.
+        assert_eq!(
+            test_build_count(),
+            1,
+            "the direct RootBindingIndex::build above must be counted — \
+             an uncounted build makes the zero-count assertions vacuous"
+        );
+    }
+
+    #[test]
+    fn field_payload_replay_entry_does_not_build_binding_index() {
+        let source = "defineProps<{ count: number }>();";
+        let alloc = Allocator::new();
+        let parsed = parse_source(&alloc, source);
+        assert!(!parsed.panicked, "fixture must parse: {source}");
+        reset_test_build_count();
+        let lowering = lower_macro_field_payload_at(&parsed.program, source, 0, 0);
+        assert_eq!(
+            test_build_count(),
+            0,
+            "lower_macro_field_payload_at must not rebuild RootBindingIndex"
+        );
+        assert!(
+            matches!(lowering, MacroFieldPayloadLowering::Payload(_)),
+            "locator replay must still return the field payload, got {lowering:?}"
+        );
+    }
+}
+
 // =====================================================================
 // props_root_binding — the ONE props-root selection accessor
 // =====================================================================

@@ -503,7 +503,7 @@ defineExpose({ public: local })
 
 /// A NON-IDENTIFIER exposed value (`defineExpose({ public: local.foo })`)
 /// carries NO `referenced_binding` at all (a member expression has no
-/// single referenced binding) — `resolved_binding_name()` must NOT fall
+/// single referenced binding) — `resolved_binding_key()` must NOT fall
 /// back to the exposed property key `public`, even when `public` happens
 /// to ALSO be an unrelated in-scope binding name. A pre-fix fallback
 /// resolves that unrelated top-level `public` binding and publishes its

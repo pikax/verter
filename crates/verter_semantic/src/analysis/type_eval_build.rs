@@ -5296,6 +5296,7 @@ where
                     );
                     result.props.push(ExpandedField {
                         name: field.name.clone(),
+                        owner: m.owner,
                         authority: expanded_field_authority(
                             expanded.value.expr.clone(),
                             expanded.exactness,
@@ -5357,6 +5358,7 @@ where
                     );
                     result.emits.push(ExpandedField {
                         name: field.name.clone(),
+                        owner: m.owner,
                         authority: expanded_field_authority(
                             expanded.value.expr.clone(),
                             expanded.exactness,
@@ -5431,6 +5433,7 @@ where
                             );
                             result.slot_bindings.push(ExpandedField {
                                 name: slot_binding_target,
+                                owner: m.owner,
                                 authority: expanded_field_authority(
                                     expanded.value.expr.clone(),
                                     expanded.exactness,
@@ -5505,6 +5508,7 @@ where
             // and no analyzer-side authored shallow source exists).
             result.bindings.push(ExpandedField {
                 name: name.clone(),
+                owner: entry.owner,
                 authority: expanded_field_authority(
                     expanded.value.expr.clone(),
                     expanded.exactness,

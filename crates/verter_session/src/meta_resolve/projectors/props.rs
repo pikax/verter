@@ -109,6 +109,7 @@ pub(crate) fn project_props(
             surface_member_to_expanded_field(
                 query_engine,
                 file,
+                mac.owner,
                 &admitted,
                 raw_type,
                 shallow_payload,

@@ -470,7 +470,7 @@ fn build_script_analysis_inner(
                     content,
                     &program.comments,
                     owner,
-                    &binding_index,
+                    Some(&binding_index),
                 );
                 try_extract_vue_api_call(&expr_stmt.expression, &import_map, &mut vue_api_calls);
                 try_extract_dom_query(&expr_stmt.expression, &mut dom_query_calls);
@@ -518,7 +518,7 @@ fn build_script_analysis_inner(
                         content,
                         &program.comments,
                         owner,
-                        &binding_index,
+                        Some(&binding_index),
                     );
 
                     let (initializer, is_reactive, mut reactivity_kind) =
