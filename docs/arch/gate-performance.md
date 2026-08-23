@@ -8,21 +8,31 @@ for the ratified plan this document reports evidence against.
 
 ## Local and exhaustive execution policies
 
-`node scripts/gate.mjs` is the local fail-fast policy. Surface 1 and the small shipped-contract nextest run
-omit `--no-fail-fast`. After the one archive/list and all post-list preconditions, Surface 1 and the
-shipped-cfg lane start concurrently — unless `deriveGateLaneResourceSplit` finds the configured build-jobs/
+`node scripts/gate.mjs` is the local fail-fast policy. Surface 1 omits `--no-fail-fast`. After the one
+archive/list and all post-list preconditions, Surface 1 is the gate verdict.
+
+TODO: re-enable the shipped-cfg lane (`SHIPPED_CFG_LANE_ENABLED` in `scripts/gate-internals.mjs`)
+before the program closes. Until then the gate does not execute tests with `debug_assertions` /
+overflow-checks off. That is the only path that catches a state mutation written inside a
+`debug_assert!` argument — a silent no-op in every shipped build, while compiling and passing in
+debug. `cargo check --workspace --release` compiles the shipped cfg but runs nothing, so it does
+not cover this class. The skip is disclosed on every run in the verdict line and the summary; a
+PASS means Surface 1 passed.
+
+When the lane is restored: Surface 1 and the small shipped-contract nextest run omit `--no-fail-fast`.
+They start concurrently — unless `deriveGateLaneResourceSplit` finds the configured build-jobs/
 test-threads ceiling too small to split across both lanes without oversubscribing it (either axis below 2),
 in which case the lanes run serially instead (Surface 1 first, then shipped-cfg), still under the same
-fail-fast/cancellation rules.
-When Surface 1 produces a hard receipt, the runner cancels a live shipped step and prevents the lane's
-not-yet-admitted contract. Required coverage is then incomplete, so the invocation can never emit PASS or
-PASS-WITH-TOLERATED. A shipped-first failure never cancels Surface 1. A green local run completes every
-required receipt and has the ordinary canonical PASS contract.
+fail-fast/cancellation rules. When Surface 1 produces a hard receipt, the runner cancels a live shipped
+step and prevents the lane's not-yet-admitted contract. Required coverage is then incomplete, so the
+invocation can never emit PASS or PASS-WITH-TOLERATED. A shipped-first failure never cancels Surface 1.
+A green local run completes every required receipt and has the ordinary canonical PASS contract.
 
-`node scripts/gate.mjs --exhaustive` preserves the historical CI/diagnostic policy: Surface 1 and the small
-shipped-contract nextest run add `--no-fail-fast`, both post-list lanes are awaited despite ordinary hard
-failures, and the shipped lane remains serial (`check -> contract`, with contract admitted only after a
-successful check). CI, release,
+`node scripts/gate.mjs --exhaustive` currently also skips the shipped-cfg lane; it changes Surface 1
+failure collection only (`--no-fail-fast`). When the lane is restored it preserves the historical
+CI/diagnostic policy: Surface 1 and the small shipped-contract nextest run add `--no-fail-fast`, both
+post-list lanes are awaited despite ordinary hard failures, and the shipped lane remains serial
+(`check -> contract`, with contract admitted only after a successful check). CI, release,
 cached full gates, complete diagnostics, and comparable performance runs must pass the flag explicitly.
 This choice is argv-only; no ambient CI environment variable changes it.
 

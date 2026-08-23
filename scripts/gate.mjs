@@ -2,7 +2,9 @@
 // Canonical Rust gate CLI.
 //
 // SECURITY: this binary runs only the real gate (prerequisites → real harness smokes → archive/list →
-// Surface + shipped-cfg lanes, concurrent when the ceiling allows it, serial otherwise → verdict).
+// Surface 1 → verdict). The shipped-cfg lane stays implemented but is currently SKIPPED
+// (`SHIPPED_CFG_LANE_ENABLED` in gate-internals.mjs). When that flag is true, Surface + shipped-cfg
+// lanes run concurrently when the ceiling allows it, serial otherwise.
 // `--prepare` is a warm utility,
 // never a gate PASS. No test-seam, classifier hook, custom-command
 // mode, or env var can make this CLI return the success contract without
@@ -13,11 +15,11 @@
 //   `exit 0` means "the requested OPERATION succeeded" — it is scoped to the mode you ran, NOT a blanket
 //   gate pass. Concretely:
 //     * `node scripts/gate.mjs` and `node scripts/gate.mjs --exhaustive` are THE GATE. Their exit 0 means
-//       the FULL test suite built
-//       AND passed (except the env-only typeinfo freshness PAIR, by exact name, AND only when the freshness-
-//       tooling preflight below proves `pnpm` is not resolvable AND `buf` is not resolvable — the condition
-//       under which the Rust byte-pin test skips; see FRESHNESS-TOOLING PREFLIGHT). That, and only that, is
-//       the gate-pass contract.
+//       Surface 1 built AND passed (except the env-only typeinfo freshness PAIR, by exact name, AND only
+//       when the freshness-tooling preflight below proves `pnpm` is not resolvable AND `buf` is not
+//       resolvable — the condition under which the Rust byte-pin test skips; see FRESHNESS-TOOLING
+//       PREFLIGHT). The shipped-cfg guard is currently SKIPPED and is not part of this contract — a PASS
+//       is Surface 1 only. That, and only that, is the gate-pass contract.
 //     * `--prepare` is a WARM-PASS only. Its exit 0 means PREPARED (the archive built + the first-launch
 //       assessment was warmed) — tests were NOT run, so it is NEVER a gate pass. Its success output carries
 //       the `PREPARED_NOT_GATE` marker and contains no `PASS` token precisely so a CI `grep PASS` cannot
@@ -37,13 +39,15 @@
 //   many operations sequentially (create/use/drop/recreate; multiple hosts alive at once; repeated edits;
 //   scheduler shutdown+restart; `OnceLock` lifecycle; failure then recovery) inside the ONE process
 //   nextest gives that test — not a second archive, not a second run.
-//   After archive/list and every post-list precondition, Surface 1 overlaps a small serial SHIPPED-CFG
-//   GUARD (see below) — NOT a second whole-workspace archive/run — covering behaviour that can
-//   differ only because `debug_assertions` / `overflow-checks`
-//   are off. Every build command issued is a `--workspace` archive build (for surface 1) or a tiny
-//   package-scoped build (for the guard), so the gate NEVER issues the package-scoped
-//   `cargo test -p verter_session` resolution and so structurally cannot incur the recompile that
-//   resolution caused (see "Canonical feature set" below).
+//   After archive/list and every post-list precondition, Surface 1 is the gate verdict. The shipped-cfg
+//   lane described below stays implemented but is currently SKIPPED (temporary; flip
+//   `SHIPPED_CFG_LANE_ENABLED` to restore it). When restored, Surface 1 overlaps that small serial
+//   SHIPPED-CFG GUARD — NOT a second whole-workspace archive/run — covering behaviour that can differ
+//   only because `debug_assertions` / `overflow-checks` are off. Every build command issued is a
+//   `--workspace` archive build (for surface 1) or, when the lane is enabled, a tiny package-scoped
+//   build (for the guard), so the gate NEVER issues the package-scoped `cargo test -p verter_session`
+//   resolution and so structurally cannot incur the recompile that resolution caused (see "Canonical
+//   feature set" below).
 //
 // SHIPPED-CFG GUARD — WHAT IT COVERS AND WHAT IT DOES NOT
 //   `debug_assert!` does NOT evaluate its argument when `debug_assertions` is off, and
@@ -80,6 +84,14 @@
 //   scope. `verter_shipped_cfg_contract` covers only the code paths its own tests exercise, not the whole
 //   workspace — a `debug_assertions`-dependent regression outside that crate's reach is not covered by
 //   the guard (though `cargo check --profile no-debug-assertions --all-targets` still compiles it).
+//
+// SHIPPED-CFG LANE — TEMPORARY SKIP
+//   The lane above stays implemented and re-enablable (`SHIPPED_CFG_LANE_ENABLED` in gate-internals.mjs).
+//   It is currently SKIPPED: a PASS means Surface 1 passed. Every run discloses the skip in the verdict
+//   line and in the summary.
+//   TODO: re-enable. Until then the gate does not execute tests with debug_assertions / overflow-checks
+//   off, so a state mutation written inside a debug_assert! argument is a silent no-op in every shipped
+//   build and is uncovered. cargo check --workspace --release compiles the shipped cfg but runs nothing.
 //
 // CANONICAL WORKSPACE RESOLUTION (why no `-p verter_session`)
 //   Surface 1 consumes the one `cargo nextest archive --workspace` universe. The retired package-scoped
@@ -119,9 +131,10 @@
 //      developer's interactive cargo / rust-analyzer (which carry the repo root but write target/debug) is
 //      never touched.
 //   5. Whole-gate hard timeout (default 80m, --timeout) — a deadline for the ENTIRE gate, not per-step. It
-//      covers the archive build, surface 1, and the shipped-cfg guard. It is absolute across both post-list
-//      lanes (concurrent or serial, per deriveGateLaneResourceSplit's `concurrent` flag) and the shipped
-//      check→contract transition. On expiry every registered forest is reaped; exit 124.
+//      covers the archive build and surface 1 (the shipped-cfg guard is currently skipped). When the lane
+//      is restored it is also absolute across both post-list lanes (concurrent or serial, per
+//      deriveGateLaneResourceSplit's `concurrent` flag) and the shipped check→contract transition. On
+//      expiry every registered forest is reaped; exit 124.
 //   6. Aggregate stall detector with SEPARATE build vs test phases:
 //        BUILD phase (the archive build): progress = stdout/stderr byte growth OR runner-owned target-tree
 //          artifact growth (file-count + newest-mtime, bounded scan). A long silent rustc is NOT a stall.
@@ -265,17 +278,19 @@
 //   `count` remains the timed-count alias. No telemetry observation is consulted by a verdict branch.
 //
 // EXECUTION POLICY
-//   A bare gate is local fail-fast: nextest stops scheduling after its first failure, and any hard Surface-1
-//   receipt cancels a live shipped step or prevents its remaining contract. The final verdict records that
-//   guard as incomplete and is always FAIL.
-//   `--exhaustive` changes fail-fast policy only: Surface 1 and the small shipped contract receive
-//   `--no-fail-fast`, and both isolated post-list lanes are awaited after ordinary test failures.
-//   A green bare run still completes every required stage and carries the same canonical PASS contract.
+//   A bare gate is local fail-fast: nextest stops scheduling after its first failure. A PASS means
+//   Surface 1 passed; the shipped-cfg guard is currently SKIPPED and is disclosed on every run. When
+//   the lane is restored, a hard Surface-1 receipt cancels a live shipped step or prevents its remaining
+//   contract, and the final verdict records that guard as incomplete and is always FAIL.
+//   `--exhaustive` changes fail-fast policy only: Surface 1 receives `--no-fail-fast`. When the shipped-cfg
+//   lane is restored, the small shipped contract also receives `--no-fail-fast` and both isolated post-list
+//   lanes are awaited after ordinary test failures.
 //
 // USAGE
 //   node scripts/gate.mjs [--timeout 80m] [--stall 12m] [--target-dir <DIR>] [--exhaustive]
 //                         [--build-jobs N] [--test-threads N] [--memory-limit 12GiB]
-//                                                           # THE GATE — exit 0 = suite built + passed.
+//                                                           # THE GATE — exit 0 = Surface 1 built + passed
+//                                                           # (shipped-cfg guard currently SKIPPED).
 //   node scripts/gate.mjs --prepare [--target-dir <DIR>] [--timeout 80m] [--stall 12m]
 //                         [--build-jobs N] [--memory-limit 12GiB]
 //                                             # warm-pass: archive + list (+ a one-shot warm of the macOS
@@ -324,6 +339,9 @@ import {
   orchestrateGateLanes,
   reduceGateLaneReceipts,
   canonicalGateLaneTranscriptSegments,
+  SHIPPED_CFG_LANE_ENABLED,
+  SHIPPED_CFG_SKIP_SUMMARY,
+  SHIPPED_CFG_SKIP_VERDICT_NOTE,
   // logging + time
   log,
   warn,
@@ -930,17 +948,23 @@ async function main() {
 
   const token = `${process.pid}.${nowMs()}.${Math.floor(Math.random() * 1e9)}`;
   const cargoEnv = buildCargoEnv(process.env, runnerTarget, undefined, opts.buildJobs);
-  // Surface 1 and the shipped-cfg lane run CONCURRENTLY once past archive/list ONLY when the ceiling
-  // splits on both resource axes (`deriveGateLaneResourceSplit(...).concurrent === true`; see runGate
-  // below); otherwise they run serially, shipped after Surface settles — see the note at the
-  // orchestrateGateLanes call site. Sizing both lanes to the SAME opts.buildJobs/opts.testThreads ceiling
-  // would request 2x that ceiling from the host for the whole overlap window when they do overlap, so
-  // `deriveGateLaneResourceSplit` partitions the ONE ceiling across the two lanes so their COMBINED demand
-  // never exceeds it — the front archive/list phase above is sequential (no lane overlap yet) and keeps
-  // the full `opts.buildJobs` ceiling via `cargoEnv`.
+  // When the shipped-cfg lane is enabled, Surface 1 and that lane run CONCURRENTLY once past archive/list
+  // ONLY when the ceiling splits on both resource axes (`deriveGateLaneResourceSplit(...).concurrent ===
+  // true`; see runGate below); otherwise they run serially, shipped after Surface settles. Sizing both
+  // lanes to the SAME opts.buildJobs/opts.testThreads ceiling would request 2x that ceiling from the host
+  // for the whole overlap window, so `deriveGateLaneResourceSplit` partitions the ONE ceiling across the
+  // two lanes so their COMBINED demand never exceeds it. While the lane is skipped, Surface 1 keeps the
+  // full ceiling — there is no second cargo to share with. The front archive/list phase is sequential
+  // (no lane overlap yet) and keeps the full `opts.buildJobs` ceiling via `cargoEnv`.
   const laneResourceSplit =
     opts.mode === "gate"
-      ? deriveGateLaneResourceSplit({ buildJobs: opts.buildJobs, testThreads: opts.testThreads })
+      ? SHIPPED_CFG_LANE_ENABLED
+        ? deriveGateLaneResourceSplit({ buildJobs: opts.buildJobs, testThreads: opts.testThreads })
+        : {
+            surface: { buildJobs: opts.buildJobs, testThreads: opts.testThreads },
+            shippedCfg: { buildJobs: opts.buildJobs, testThreads: opts.testThreads },
+            concurrent: false,
+          }
       : null;
   const surfaceCargoEnv =
     opts.mode === "gate"
@@ -1153,17 +1177,25 @@ async function main() {
       `active child-tree RSS=${formatMemorySize(opts.memoryLimitBytes)}`,
   );
   if (opts.mode === "gate") {
-    const laneScheduling = laneResourceSplit.concurrent
-      ? "the two post-list lanes run concurrently"
-      : "the ceiling is too small to run both lanes at once without oversubscribing it — the two " +
-        "post-list lanes run SERIALLY instead (shipped-cfg starts only after Surface 1 settles)";
-    log(
-      `lane resource partition (combined demand bounded to the ceiling above — ${laneScheduling}): ` +
-        `surface-1 build-jobs=${laneResourceSplit.surface.buildJobs} ` +
-        `test-threads=${laneResourceSplit.surface.testThreads}; ` +
-        `shipped-cfg build-jobs=${laneResourceSplit.shippedCfg.buildJobs} ` +
-        `test-threads=${laneResourceSplit.shippedCfg.testThreads}`,
-    );
+    if (!SHIPPED_CFG_LANE_ENABLED) {
+      log(
+        `lane resource partition: Surface 1 only (${SHIPPED_CFG_SKIP_VERDICT_NOTE}) — ` +
+          `surface-1 build-jobs=${laneResourceSplit.surface.buildJobs} ` +
+          `test-threads=${laneResourceSplit.surface.testThreads}`,
+      );
+    } else {
+      const laneScheduling = laneResourceSplit.concurrent
+        ? "the two post-list lanes run concurrently"
+        : "the ceiling is too small to run both lanes at once without oversubscribing it — the two " +
+          "post-list lanes run SERIALLY instead (shipped-cfg starts only after Surface 1 settles)";
+      log(
+        `lane resource partition (combined demand bounded to the ceiling above — ${laneScheduling}): ` +
+          `surface-1 build-jobs=${laneResourceSplit.surface.buildJobs} ` +
+          `test-threads=${laneResourceSplit.surface.testThreads}; ` +
+          `shipped-cfg build-jobs=${laneResourceSplit.shippedCfg.buildJobs} ` +
+          `test-threads=${laneResourceSplit.shippedCfg.testThreads}`,
+      );
+    }
     log(`execution policy: ${opts.exhaustive ? "exhaustive" : "local fail-fast"}`);
   }
 
@@ -1888,7 +1920,10 @@ async function runShippedCfgLane(opts, ctx, { allSuites, commandPlan }) {
 }
 
 function replayGateLaneTranscript(receipts, ctx, allSuites) {
-  for (const segment of canonicalGateLaneTranscriptSegments(receipts)) {
+  const segments = SHIPPED_CFG_LANE_ENABLED
+    ? canonicalGateLaneTranscriptSegments(receipts)
+    : canonicalGateLaneTranscriptSegments(receipts).filter((segment) => segment.phaseId === "surface-1");
+  for (const segment of segments) {
     log(segment.header);
     if (segment.output) {
       process.stderr.write(segment.output.endsWith("\n") ? segment.output : `${segment.output}\n`);
@@ -1970,15 +2005,16 @@ async function runHarnessSmokeChecks(ctx) {
 //   0. Verify the non-cargo BUILD PREREQUISITES the suite loads from disk.
 //   1. Verify the pinned Vue macro oracle and its extractor.
 //   2. archive (build ONCE, dev profile) + list (parse rust-suites).
-//   3. POST-LIST LANES — Surface 1 nextest from the archive overlaps the serial shipped check and contract
-//      when the build-jobs/test-threads ceiling can be split across both without oversubscribing it;
-//      otherwise the two lanes run serially instead (see deriveGateLaneResourceSplit's `concurrent` flag).
-//      Surface includes deliberate shared-process
-//      coverage (verter_session/tests/cases/shared_process_contract.rs) as ordinary tests in this ONE run
-//      — see SINGLE-TEST-UNIVERSE at the top of this file.
-//      The shipped lane is a compile-only check under `no-debug-assertions` plus, only after check success,
-//      a small package-scoped nextest run of `verter_shipped_cfg_contract`. NOT a second workspace archive.
-//   4. Reduce fixed receipt slots; tolerated-only complete coverage => PASS-WITH-TOLERATED.
+//   3. POST-LIST LANES — Surface 1 nextest from the archive. When SHIPPED_CFG_LANE_ENABLED is true it
+//      overlaps the serial shipped check and contract when the build-jobs/test-threads ceiling can be
+//      split across both without oversubscribing it; otherwise the two lanes run serially instead (see
+//      deriveGateLaneResourceSplit's `concurrent` flag). Currently that lane is skipped. Surface includes
+//      deliberate shared-process coverage (verter_session/tests/cases/shared_process_contract.rs) as
+//      ordinary tests in this ONE run — see SINGLE-TEST-UNIVERSE at the top of this file.
+//      The shipped lane (when enabled) is a compile-only check under `no-debug-assertions` plus, only
+//      after check success, a small package-scoped nextest run of `verter_shipped_cfg_contract`. NOT a
+//      second workspace archive.
+//   4. Reduce fixed receipt slots; tolerated-only complete Surface 1 coverage => PASS-WITH-TOLERATED.
 // ----------------------------------------------------------------------------------------------------
 async function runGate(opts, ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
@@ -2160,9 +2196,10 @@ async function runGate(opts, ctx) {
   const vueMacroOracleResult = await runVueMacroOracleChecks(ctx);
   if (vueMacroOracleResult !== EXIT_PASS) return vueMacroOracleResult;
 
-  // This CLI has NO self-test seam and NO ambient-env divert: runGate ALWAYS issues the real archive/list,
-  // archive-backed Surface 1, and isolated serialized shipped check/contract lane. Reusable seams live in
-  // gate-internals.mjs and are driven ONLY by selftests in-process — never reachable from this CLI.
+  // This CLI has NO self-test seam and NO ambient-env divert: runGate ALWAYS issues the real archive/list
+  // and archive-backed Surface 1. The isolated serialized shipped check/contract lane stays implemented
+  // but is currently skipped (`SHIPPED_CFG_LANE_ENABLED`). Reusable seams live in gate-internals.mjs and
+  // are driven ONLY by selftests in-process — never reachable from this CLI.
   const out = await archiveAndList(ctx);
   if (out.error) {
     err(`gate setup failed at the ${out.where} step`);
@@ -2221,22 +2258,40 @@ async function runGate(opts, ctx) {
   });
 
   // ---------- POST-LIST LANES ----------
-  // When ctx.laneResourceSplit.concurrent is true, both promises are admitted together before either
-  // receipt is observed. When the ceiling is too small to split (either axis below 2), orchestrateGateLanes
-  // runs them serially instead — see its `concurrent` option. Shipped remains internally serial in either
-  // case (check -> contract), while Surface consumes the immutable front archive through its own extract root.
-  const receipts = await orchestrateGateLanes({
-    exhaustive: opts.exhaustive,
-    concurrent: ctx.laneResourceSplit.concurrent,
-    runSurfaceLane: () =>
-      runSurface1Lane(opts, ctx, {
-        allSuites,
-        commandPlan,
-        freshnessToleranceAllowed,
-      }),
-    runShippedLane: () => runShippedCfgLane(opts, ctx, { allSuites, commandPlan }),
-    cancelLane: (laneId, reason) => ctx.supervisor.cancelLane(laneId, reason),
-  });
+  // When SHIPPED_CFG_LANE_ENABLED is true and ctx.laneResourceSplit.concurrent is true, both promises
+  // are admitted together before either receipt is observed. When the ceiling is too small to split
+  // (either axis below 2), orchestrateGateLanes runs them serially instead — see its `concurrent` option.
+  // Shipped remains internally serial in either case (check -> contract), while Surface consumes the
+  // immutable front archive through its own extract root. While the lane is skipped, only Surface 1 runs.
+  const runSurfaceLane = () =>
+    runSurface1Lane(opts, ctx, {
+      allSuites,
+      commandPlan,
+      freshnessToleranceAllowed,
+    });
+  let receipts;
+  if (SHIPPED_CFG_LANE_ENABLED) {
+    receipts = await orchestrateGateLanes({
+      exhaustive: opts.exhaustive,
+      concurrent: ctx.laneResourceSplit.concurrent,
+      runSurfaceLane,
+      runShippedLane: () => runShippedCfgLane(opts, ctx, { allSuites, commandPlan }),
+      cancelLane: (laneId, reason) => ctx.supervisor.cancelLane(laneId, reason),
+    });
+  } else {
+    log(SHIPPED_CFG_SKIP_SUMMARY);
+    recordTelemetryPhaseSafe(ctx, "shipped-check", {
+      status: "skipped",
+      durationMs: 0,
+      detail: "SHIPPED_CFG_LANE_ENABLED=false",
+    });
+    recordTelemetryPhaseSafe(ctx, "shipped-contract", {
+      status: "skipped",
+      durationMs: 0,
+      detail: "SHIPPED_CFG_LANE_ENABLED=false",
+    });
+    receipts = { surface: await runSurfaceLane(), shipped: null };
+  }
   replayGateLaneTranscript(receipts, ctx, allSuites);
 
   // Always stated at the tail of the run, regardless of verdict, so a reader who only reads the last few
@@ -2247,12 +2302,21 @@ async function runGate(opts, ctx) {
       "disposition — not deleted, not feature-gated, still runnable directly) from surface 1; " +
       `see the "TRYBUILD EXCLUSION" lines above for exact counts.`,
   );
+  if (!SHIPPED_CFG_LANE_ENABLED) {
+    log(SHIPPED_CFG_SKIP_SUMMARY);
+  }
 
   // ---------- Aggregate verdict ----------
+  receipts.shippedCfgLaneEnabled = SHIPPED_CFG_LANE_ENABLED;
   const decision = reduceGateLaneReceipts(receipts);
+  const skipVerdictSuffix = SHIPPED_CFG_LANE_ENABLED ? "" : `; ${SHIPPED_CFG_SKIP_VERDICT_NOTE}`;
   if (decision.exitCode !== null) return decision.exitCode;
   if (decision.verdict === "FAIL") {
-    err(`VERDICT: FAIL — ${decision.failures.length} non-tolerated failure(s):`);
+    err(
+      `VERDICT: FAIL — ${decision.failures.length} non-tolerated failure(s)` +
+        (SHIPPED_CFG_LANE_ENABLED ? "" : ` (${SHIPPED_CFG_SKIP_VERDICT_NOTE})`) +
+        ":",
+    );
     for (const f of decision.failures.slice(0, 50)) err(`  [${f.surface}] ${f.name}`);
     // Do NOT re-run the gate on any other branch to decide whether this pre-existed — the working branch's
     // gate is green by invariant, never by comparison. Triage each named failure in isolation instead:
@@ -2269,11 +2333,16 @@ async function runGate(opts, ctx) {
         "is not resolvable, so the pair is tolerated. This is the LATENT-net path: the normal buf-less runner " +
         "SKIPS the Rust byte-pin (no FAIL line) and reaches the ordinary PASS below — this branch fires only " +
         "when the pair somehow FAILED despite buf being absent. When the tools are present/installed this pair " +
-        "is a HARD failure)",
+        "is a HARD failure" +
+        `${skipVerdictSuffix})`,
     );
     return EXIT_PASS;
   }
-  log("VERDICT: PASS (surface 1 + the shipped-cfg guard both green)");
+  log(
+    SHIPPED_CFG_LANE_ENABLED
+      ? "VERDICT: PASS (surface 1 + the shipped-cfg guard both green)"
+      : `VERDICT: PASS (surface 1 green; ${SHIPPED_CFG_SKIP_VERDICT_NOTE})`,
+  );
   return EXIT_PASS;
 }
 

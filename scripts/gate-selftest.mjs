@@ -277,6 +277,9 @@ import {
   decideShippedCfgGuardExpectedCountMatch,
   // local fail-fast / explicit exhaustive policy and coverage-complete receipt verdict (GB17).
   reduceGateLaneReceipts,
+  SHIPPED_CFG_LANE_ENABLED,
+  SHIPPED_CFG_SKIP_SUMMARY,
+  SHIPPED_CFG_SKIP_VERDICT_NOTE,
   // trybuild exclusion (interim, pending maintainer disposition) — GB13.
   TRYBUILD_EXCLUDED_SUITES,
   buildTrybuildExclusionFilterExpr,
@@ -1658,6 +1661,34 @@ async function main() {
         ok = false;
       }
     }
+    const skippedPass = reduceGateLaneReceipts({
+      surface: completeSurface,
+      shipped: null,
+      shippedCfgLaneEnabled: false,
+    });
+    if (skippedPass.verdict !== "PASS" || skippedPass.coverageComplete !== true) {
+      fail(
+        `(GB17.5) Surface-1-only skip must PASS from a complete Surface receipt without a shipped lane, ` +
+          `got ${JSON.stringify(skippedPass)}`,
+      );
+      ok = false;
+    }
+    const skippedIncomplete = reduceGateLaneReceipts({
+      surface: { ...completeSurface, coverage: { parseable: false, complete: false } },
+      shipped: null,
+      shippedCfgLaneEnabled: false,
+    });
+    if (
+      skippedIncomplete.verdict !== "FAIL" ||
+      skippedIncomplete.coverageComplete !== false ||
+      !skippedIncomplete.failures.some((row) => row.surface === "gate/incomplete")
+    ) {
+      fail(
+        `(GB17.5) Surface-1-only skip must still FAIL on an incomplete Surface receipt, ` +
+          `got ${JSON.stringify(skippedIncomplete)}`,
+      );
+      ok = false;
+    }
 
     const strictCases = [
       ["retired gate flag", ["--no-fail-fast"]],
@@ -1780,7 +1811,10 @@ async function main() {
       firstPassVerdictAt <= finalizerAt ||
       !shippedFnBody.includes("guard.summary.initialCount") ||
       !shippedFnBody.includes("guard.summary.unrun === 0") ||
-      !shippedFnBody.includes('runStep("shipped-cfg"')
+      !shippedFnBody.includes('runStep("shipped-cfg"') ||
+      !runGateBody.includes("SHIPPED_CFG_LANE_ENABLED") ||
+      !runGateBody.includes("SHIPPED_CFG_SKIP_SUMMARY") ||
+      !runGateBody.includes("SHIPPED_CFG_SKIP_VERDICT_NOTE")
     ) {
       fail(
         `(GB17.7) production runGate must wire the tested argv/transition/completion/finalizer helpers: ` +
@@ -1869,17 +1903,14 @@ async function main() {
 
   // --------------------------------------------------------------------------------------------------
   // (GB20) LANE RESOURCE SPLIT VALUE WIRING — BEHAVIORAL. GB19 proves the STRUCTURE (one layout, one
-  // supervisor, two envs) is wired; this proves the actual `deriveGateLaneResourceSplit` VALUES reach
-  // the real per-lane `cargo` invocations rather than, say, `opts.buildJobs`/`opts.testThreads` (the
-  // pre-fix ceiling, applied twice). This does NOT scan gate.mjs's source text for identifier spellings
-  // (a comment or a dead occurrence would satisfy a text scan without proving anything reaches a real
-  // process) — it drives the REAL production CLI end-to-end against a controlled `cargo` stand-in on
-  // PATH and asserts the exact env (`CARGO_BUILD_JOBS`) and argv (`--test-threads N`) each of the THREE
-  // real per-lane cargo processes (Surface 1's `nextest run`, the shipped-cfg `check`, and the shipped-
-  // cfg `nextest run -p verter_shipped_cfg_contract`) actually receives. `--build-jobs 8 --test-threads
-  // 8` forces a genuinely non-degenerate, non-symmetric split (surface=6/6, shipped=2/2 —
-  // `SHIPPED_CFG_LANE_SHARE=0.25`), so a regression back to the un-split ceiling (both lanes seeing 8/8)
-  // fails this check by comparing REAL observed values, not by grepping source.
+  // supervisor, two envs) is wired; this proves the actual per-lane cargo VALUES reach the real
+  // production CLI rather than, say, a comment or a dead occurrence. It drives the REAL production CLI
+  // end-to-end against a controlled `cargo` stand-in on PATH. Production currently skips the shipped-cfg
+  // lane (`SHIPPED_CFG_LANE_ENABLED=false`): Surface 1 must receive the full `--build-jobs 8` /
+  // `--test-threads 8` ceiling, shipped-cfg cargo must never be invoked, and the skip must be disclosed
+  // in the captured output. Flipping the constant back to true MUST restore the previous 6/6 vs 2/2
+  // split assertions (surface=6, shipped=2 via `SHIPPED_CFG_LANE_SHARE=0.25`) and require all three
+  // cargo invocations.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(GB20) LANE RESOURCE SPLIT VALUE WIRING\n");
   posix_gb20: {
@@ -2022,41 +2053,76 @@ fi
         `shipped-contract build-jobs=${shippedContractBuildJobs} test-threads=${shippedContractTestThreads}`,
     );
 
-    const allInvoked = surfaceRaw !== "" && shippedCheckRaw !== "" && shippedContractRaw !== "";
-    const EXPECT_SURFACE = "6";
-    const EXPECT_SHIPPED = "2";
-    if (!allInvoked) {
-      fail(
-        "(GB20) LANE RESOURCE SPLIT VALUE WIRING: the real per-lane cargo invocation(s) were never " +
-          `observed (surface-invoked=${surfaceRaw !== ""} shipped-check-invoked=${shippedCheckRaw !== ""} ` +
-          `shipped-contract-invoked=${shippedContractRaw !== ""}) — the gate did not reach the lanes under ` +
-          `test (rc=${r.code}). Tail of captured output:\n${r.out.slice(-4000)}`,
-      );
-    } else if (
-      surfaceBuildJobs !== EXPECT_SURFACE ||
-      surfaceTestThreads !== EXPECT_SURFACE ||
-      shippedCheckBuildJobs !== EXPECT_SHIPPED ||
-      shippedContractBuildJobs !== EXPECT_SHIPPED ||
-      shippedContractTestThreads !== EXPECT_SHIPPED
-    ) {
-      fail(
-        "(GB20) production must thread deriveGateLaneResourceSplit's actual per-lane VALUES into the " +
-          "REAL cargo env (CARGO_BUILD_JOBS) and command line (--test-threads) each lane's own cargo " +
-          "process actually receives — not opts.buildJobs/opts.testThreads (the pre-fix un-split ceiling, " +
-          `applied twice): expected surface=${EXPECT_SURFACE}/${EXPECT_SURFACE}, ` +
-          `shipped=${EXPECT_SHIPPED}/${EXPECT_SHIPPED}; observed surface build-jobs=${surfaceBuildJobs} ` +
-          `test-threads=${surfaceTestThreads}, shipped-check build-jobs=${shippedCheckBuildJobs}, ` +
-          `shipped-contract build-jobs=${shippedContractBuildJobs} test-threads=${shippedContractTestThreads}`,
-      );
+    if (SHIPPED_CFG_LANE_ENABLED) {
+      const allInvoked = surfaceRaw !== "" && shippedCheckRaw !== "" && shippedContractRaw !== "";
+      const EXPECT_SURFACE = "6";
+      const EXPECT_SHIPPED = "2";
+      if (!allInvoked) {
+        fail(
+          "(GB20) LANE RESOURCE SPLIT VALUE WIRING: the real per-lane cargo invocation(s) were never " +
+            `observed (surface-invoked=${surfaceRaw !== ""} shipped-check-invoked=${shippedCheckRaw !== ""} ` +
+            `shipped-contract-invoked=${shippedContractRaw !== ""}) — the gate did not reach the lanes under ` +
+            `test (rc=${r.code}). Tail of captured output:\n${r.out.slice(-4000)}`,
+        );
+      } else if (
+        surfaceBuildJobs !== EXPECT_SURFACE ||
+        surfaceTestThreads !== EXPECT_SURFACE ||
+        shippedCheckBuildJobs !== EXPECT_SHIPPED ||
+        shippedContractBuildJobs !== EXPECT_SHIPPED ||
+        shippedContractTestThreads !== EXPECT_SHIPPED
+      ) {
+        fail(
+          "(GB20) production must thread deriveGateLaneResourceSplit's actual per-lane VALUES into the " +
+            "REAL cargo env (CARGO_BUILD_JOBS) and command line (--test-threads) each lane's own cargo " +
+            "process actually receives — not opts.buildJobs/opts.testThreads (the pre-fix un-split ceiling, " +
+            `applied twice): expected surface=${EXPECT_SURFACE}/${EXPECT_SURFACE}, ` +
+            `shipped=${EXPECT_SHIPPED}/${EXPECT_SHIPPED}; observed surface build-jobs=${surfaceBuildJobs} ` +
+            `test-threads=${surfaceTestThreads}, shipped-check build-jobs=${shippedCheckBuildJobs}, ` +
+            `shipped-contract build-jobs=${shippedContractBuildJobs} test-threads=${shippedContractTestThreads}`,
+        );
+      } else {
+        pass(
+          "(GB20) LANE RESOURCE SPLIT VALUE WIRING: driving the REAL gate.mjs CLI against a controlled " +
+            "cargo stand-in (--build-jobs 8 --test-threads 8, a concurrent, non-degenerate split) proves the " +
+            "ACTUAL per-lane cargo invocations receive deriveGateLaneResourceSplit's split values — surface " +
+            "CARGO_BUILD_JOBS=6/--test-threads 6, shipped-cfg CARGO_BUILD_JOBS=2/--test-threads 2 — never the " +
+            "un-split 8/8 ceiling applied twice; a behavioral proof over the real command/env each lane's " +
+            "cargo process is actually handed, discriminating regardless of gate.mjs's source text",
+        );
+      }
     } else {
-      pass(
-        "(GB20) LANE RESOURCE SPLIT VALUE WIRING: driving the REAL gate.mjs CLI against a controlled " +
-          "cargo stand-in (--build-jobs 8 --test-threads 8, a concurrent, non-degenerate split) proves the " +
-          "ACTUAL per-lane cargo invocations receive deriveGateLaneResourceSplit's split values — surface " +
-          "CARGO_BUILD_JOBS=6/--test-threads 6, shipped-cfg CARGO_BUILD_JOBS=2/--test-threads 2 — never the " +
-          "un-split 8/8 ceiling applied twice; a behavioral proof over the real command/env each lane's " +
-          "cargo process is actually handed, discriminating regardless of gate.mjs's source text",
-      );
+      const EXPECT_SURFACE = "8";
+      const skipDisclosed =
+        r.out.includes(SHIPPED_CFG_SKIP_SUMMARY) && r.out.includes(SHIPPED_CFG_SKIP_VERDICT_NOTE);
+      if (surfaceRaw === "") {
+        fail(
+          "(GB20) Surface 1 cargo was never invoked while the shipped-cfg lane is skipped " +
+            `(rc=${r.code}). Tail of captured output:\n${r.out.slice(-4000)}`,
+        );
+      } else if (shippedCheckRaw !== "" || shippedContractRaw !== "") {
+        fail(
+          "(GB20) shipped-cfg cargo must not run while SHIPPED_CFG_LANE_ENABLED is false: " +
+            `shipped-check-invoked=${shippedCheckRaw !== ""} shipped-contract-invoked=${shippedContractRaw !== ""}`,
+        );
+      } else if (surfaceBuildJobs !== EXPECT_SURFACE || surfaceTestThreads !== EXPECT_SURFACE) {
+        fail(
+          "(GB20) while the shipped-cfg lane is skipped, Surface 1 must receive the full " +
+            `--build-jobs/--test-threads ceiling (expected ${EXPECT_SURFACE}/${EXPECT_SURFACE}), not a ` +
+            `split leftover: observed build-jobs=${surfaceBuildJobs} test-threads=${surfaceTestThreads}`,
+        );
+      } else if (!skipDisclosed) {
+        fail(
+          "(GB20) a skipped shipped-cfg lane must disclose the skip in the captured output " +
+            `(missing ${JSON.stringify(SHIPPED_CFG_SKIP_SUMMARY)} and/or ` +
+            `${JSON.stringify(SHIPPED_CFG_SKIP_VERDICT_NOTE)})\n${r.out.slice(-4000)}`,
+        );
+      } else {
+        pass(
+          "(GB20) shipped-cfg lane skip is behavioral: driving the REAL gate.mjs CLI against a " +
+            "controlled cargo stand-in (--build-jobs 8 --test-threads 8) invokes Surface 1 at the full " +
+            "8/8 ceiling, never launches shipped-cfg cargo, and discloses the skip in the verdict/summary",
+        );
+      }
     }
   }
 
@@ -9459,7 +9525,7 @@ fi
       ok = false;
     }
     const passParsed = parseGateVerdict(
-      "[gate] VERDICT: PASS (surface 1 + the shipped-cfg guard both green)\n",
+      `[gate] VERDICT: PASS (surface 1 green; ${SHIPPED_CFG_SKIP_VERDICT_NOTE})\n`,
     );
     if (passParsed.kind !== "pass") {
       fail(`(GB14.1) PASS verdict must parse kind=pass, got ${JSON.stringify(passParsed)}`);
