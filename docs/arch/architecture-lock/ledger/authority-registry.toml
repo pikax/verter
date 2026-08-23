@@ -560,3 +560,12 @@ id = "RULING-2026-08-22-CODE-OVER-LEDGER"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md"
 sha256 = "17c9b2711eac55ae17f0a4d61978adf344a8f435b3bb870526af746ea5b572c1"
+
+# Timing architecture: production time, waits, durations, and the test
+# mechanism that governs them. Document-only — it authorises no DAG block.
+# Transcribes the 2026-08-23 architecture consult under delegated authority.
+[[document]]
+id = "RULING-2026-08-23-TIMING-ARCHITECTURE"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-TIMING-ARCHITECTURE.md"
+sha256 = "b4076f19e90646c9fe1c609a22078ae1179fbd5740ad033728a26ea7d0ab712d"
