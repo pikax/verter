@@ -57,7 +57,6 @@ import {
   buildCargoEnv,
   Mutex,
   runContainedStep,
-  reapActiveStep,
   provenanceSweep,
   parseDuration,
   parseMemorySize,
@@ -317,11 +316,11 @@ async function runTriage(opts) {
     if (teardownPromise) return teardownPromise;
     teardownPromise = (async () => {
       if (acquired) {
-        try {
-          await reapActiveStep();
-        } catch {
-          /* best-effort */
-        }
+        // Each runContainedStep call owns and reaps its own step-scoped supervisor in its own `finally`
+        // (see gate-internals.mjs) — there is no cross-call "active step" handle to reap externally. On a
+        // forced SIGINT/SIGTERM mid-step that in-flight reap may not get to run before we exit, so fall
+        // back to the same general orphan sweep gate.mjs itself relies on: scan for any build-tool process
+        // whose cmdline references our target dir and terminate it.
         try {
           await provenanceSweep(runnerTarget, mutex.KILL_GRACE_MS);
         } catch {

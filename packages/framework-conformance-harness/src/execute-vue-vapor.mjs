@@ -96,21 +96,55 @@ async function ensureDom() {
 
 /**
  * Installs the shared jsdom's globals; returns a restore thunk that puts
- * every previous global back exactly (deleting the ones that were absent).
+ * every previous descriptor back exactly (deleting the ones that were absent).
  */
 function installDomGlobals(sharedDom) {
-  const previous = new Map(DOM_GLOBAL_KEYS.map((key) => [key, globalThis[key]]));
-  globalThis.window = sharedDom.window;
-  for (const key of DOM_GLOBAL_KEYS) {
-    if (key !== "window" && sharedDom.window[key] !== undefined)
-      globalThis[key] = sharedDom.window[key];
-  }
-  return () => {
-    for (const [key, value] of previous) {
-      if (value === undefined) delete globalThis[key];
-      else globalThis[key] = value;
+  const previous = new Map();
+  const installed = [];
+
+  const restore = () => {
+    const errors = [];
+    for (const key of installed.toReversed()) {
+      try {
+        const descriptor = previous.get(key);
+        if (descriptor === undefined) delete globalThis[key];
+        else Object.defineProperty(globalThis, key, descriptor);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) {
+      throw new AggregateError(errors, "failed to restore Vue Vapor DOM globals");
     }
   };
+
+  try {
+    for (const key of DOM_GLOBAL_KEYS) {
+      const value = key === "window" ? sharedDom.window : sharedDom.window[key];
+      if (value === undefined) continue;
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+      previous.set(key, descriptor);
+      Object.defineProperty(globalThis, key, {
+        configurable: true,
+        enumerable: descriptor?.enumerable ?? true,
+        writable: true,
+        value,
+      });
+      installed.push(key);
+    }
+  } catch (error) {
+    try {
+      restore();
+    } catch (restoreError) {
+      throw new AggregateError(
+        [error, restoreError],
+        "Vue Vapor DOM global installation rollback failed",
+      );
+    }
+    throw error;
+  }
+  return restore;
 }
 
 /**

@@ -74,6 +74,26 @@ export class ModuleResolutionError extends Error {
 }
 
 /**
+ * Thrown when multiple caller artifacts collapse to one virtual host identity.
+ *
+ * Refusal is required: choosing either artifact would make inputs, query
+ * identity, module exports, and diagnostics describe only the winner.
+ */
+export class VirtualFileIdentityError extends Error {
+  constructor(collisions) {
+    super(
+      "TypeScript observation refused: multiple artifacts have the same canonical virtual " +
+        "file identity:\n" +
+        collisions
+          .map(({ fileNames }) => `  ${fileNames.map(JSON.stringify).join(" aliases ")}`)
+          .join("\n"),
+    );
+    this.name = "VirtualFileIdentityError";
+    this.collisions = collisions;
+  }
+}
+
+/**
  * Workspace observation domain: this repo's `@verter/*` declaration packages.
  *
  * Observation domain is the realized, pinned closure that gives module
@@ -190,28 +210,72 @@ function compilerOptionsFor(checkDeclarationFiles, domain) {
   return options;
 }
 
+const canonicalFileName = ts.createGetCanonicalFileName(ts.sys.useCaseSensitiveFileNames);
+
+/**
+ * One separator- and filesystem-case-aware identity for every virtual host
+ * insertion and lookup. Compiler-facing spelling retains case but uses the
+ * separator TypeScript normalizes host callbacks to.
+ */
+function virtualPathIdentity(fileName) {
+  return canonicalFileName(compilerPath(fileName));
+}
+
+function compilerPath(fileName) {
+  return path.posix.normalize(fileName.replaceAll("\\", "/"));
+}
+
+function virtualDirectoryName(fileName) {
+  const normalized = compilerPath(fileName);
+  const separator = normalized.lastIndexOf("/");
+  if (separator < 0) return ".";
+  if (separator === 0) return "/";
+  return normalized.slice(0, separator);
+}
+
+function virtualReferenceIdentity(containingFile, reference) {
+  const referencePath = compilerPath(reference);
+  const absolute = referencePath.startsWith("/") || /^[A-Za-z]:\//.test(referencePath);
+  return virtualPathIdentity(
+    absolute ? referencePath : `${virtualDirectoryName(containingFile)}/${referencePath}`,
+  );
+}
+
 function inMemoryHost(fileMap, compilerOptions) {
   const base = ts.createCompilerHost(compilerOptions, true);
+  const virtualFile = (fileName) => fileMap.get(virtualPathIdentity(fileName));
+  const virtualDirectoryExists = (directoryName) => {
+    const prefix = `${virtualPathIdentity(directoryName).replace(/\/$/, "")}/`;
+    for (const identity of fileMap.keys()) {
+      if (identity.startsWith(prefix)) return true;
+    }
+    return false;
+  };
   return {
     ...base,
     getSourceFile(fileName, languageVersion, ...rest) {
-      const code = fileMap.get(fileName);
-      if (code !== undefined) return ts.createSourceFile(fileName, code, languageVersion, true);
+      const file = virtualFile(fileName);
+      if (file !== undefined) {
+        return ts.createSourceFile(fileName, file.code, languageVersion, true);
+      }
       return base.getSourceFile(fileName, languageVersion, ...rest);
     },
     readFile(fileName) {
-      return fileMap.get(fileName) ?? base.readFile(fileName);
+      return virtualFile(fileName)?.code ?? base.readFile(fileName);
     },
     fileExists(fileName) {
-      return fileMap.has(fileName) || base.fileExists(fileName);
+      return virtualFile(fileName) !== undefined || base.fileExists(fileName);
     },
     directoryExists(directoryName) {
       // A virtual artifact's directory need not exist on disk; other
       // directory questions are the real filesystem's.
-      for (const fileName of fileMap.keys()) {
-        if (path.dirname(fileName) === directoryName) return true;
-      }
+      if (virtualDirectoryExists(directoryName)) return true;
       return base.directoryExists ? base.directoryExists(directoryName) : false;
+    },
+    realpath(fileName) {
+      const file = virtualFile(fileName);
+      if (file !== undefined) return file.compilerFileName;
+      return base.realpath ? base.realpath(fileName) : fileName;
     },
     writeFile() {
       throw new Error("TypeScript observation is read-only: nothing is ever emitted");
@@ -277,31 +341,35 @@ const KNOWN_LIB_NAMES = new Set((ts.libs ?? []).map((name) => String(name).toLow
  */
 function assertModulesResolve(fileMap, host, compilerOptions) {
   const unresolved = [];
-  const fileIdentities = new Set([...fileMap.keys()].map(toIdentityPath));
-  for (const [fileName, code] of fileMap.entries()) {
+  for (const file of fileMap.values()) {
+    const { compilerFileName: fileName, reportFileName, code } = file;
     const { modules, typeDirectives, pathReferences, libReferences } = moduleReferencesOf(code);
     for (const specifier of modules) {
       const resolved = ts.resolveModuleName(specifier, fileName, compilerOptions, host);
-      if (resolved.resolvedModule === undefined) unresolved.push({ fileName, specifier });
+      if (resolved.resolvedModule === undefined) {
+        unresolved.push({ fileName: reportFileName, specifier });
+      }
     }
     for (const directive of typeDirectives) {
       const resolved = ts.resolveTypeReferenceDirective(directive, fileName, compilerOptions, host);
       if (resolved.resolvedTypeReferenceDirective === undefined) {
-        unresolved.push({ fileName, specifier: directive });
+        unresolved.push({ fileName: reportFileName, specifier: directive });
       }
     }
     // `path` references are relative files whose content affects checker
     // output; a disk-only target would let an input absent from observation
     // identity change the result.
     for (const reference of pathReferences) {
-      const targetIdentity = toIdentityPath(path.resolve(path.dirname(fileName), reference));
-      if (!fileIdentities.has(targetIdentity)) unresolved.push({ fileName, specifier: reference });
+      const targetIdentity = virtualReferenceIdentity(fileName, reference);
+      if (!fileMap.has(targetIdentity)) {
+        unresolved.push({ fileName: reportFileName, specifier: reference });
+      }
     }
     // `lib` references name built-in `lib.<name>.d.ts`; a miss is
     // diagnostic-only unless gated here.
     for (const reference of libReferences) {
       if (!KNOWN_LIB_NAMES.has(reference.toLowerCase())) {
-        unresolved.push({ fileName, specifier: reference });
+        unresolved.push({ fileName: reportFileName, specifier: reference });
       }
     }
   }
@@ -327,13 +395,13 @@ function messageChain(messageText) {
   return chain;
 }
 
-function canonicalTsDiagnostic(diagnostic) {
+function canonicalTsDiagnostic(diagnostic, reportFileName) {
   const file = diagnostic.file;
   return {
     kind: ts.DiagnosticCategory[diagnostic.category].toLowerCase(),
     code: diagnostic.code,
     message: messageChain(diagnostic.messageText),
-    source: file?.fileName ?? null,
+    source: file === undefined ? null : reportFileName(file.fileName),
     start: file ? positionAt(file, diagnostic.start) : null,
     end:
       file && diagnostic.start !== undefined && diagnostic.length !== undefined
@@ -341,7 +409,7 @@ function canonicalTsDiagnostic(diagnostic) {
         : null,
     related: (diagnostic.relatedInformation ?? []).map((info) => ({
       message: messageChain(info.messageText),
-      source: info.file?.fileName ?? null,
+      source: info.file === undefined ? null : reportFileName(info.file.fileName),
       start: info.file ? positionAt(info.file, info.start) : null,
       end:
         info.file && info.start !== undefined && info.length !== undefined
@@ -526,10 +594,30 @@ export function observeTypeScript(artifacts, options = {}) {
   // between artifacts are unaffected.
   const relocate = (fileName) =>
     domain.root === "/" ? fileName : path.join(domain.root, fileName.replace(/^\/+/, ""));
-  const fileMap = new Map(artifacts.map(({ fileName, code }) => [relocate(fileName), code]));
+  const filesByIdentity = new Map();
+  for (const { fileName, code } of artifacts) {
+    const compilerFileName = compilerPath(relocate(fileName));
+    const identity = virtualPathIdentity(compilerFileName);
+    const files = filesByIdentity.get(identity) ?? [];
+    files.push({ compilerFileName, reportFileName: fileName, code });
+    filesByIdentity.set(identity, files);
+  }
+  const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+  const collisions = [...filesByIdentity.entries()]
+    .filter(([, files]) => files.length > 1)
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([, files]) => ({
+      fileNames: files.map(({ reportFileName }) => reportFileName).sort(compareText),
+    }));
+  if (collisions.length > 0) throw new VirtualFileIdentityError(collisions);
+  const fileMap = new Map([...filesByIdentity].map(([identity, [file]]) => [identity, file]));
   const compilerOptions = compilerOptionsFor(options.checkDeclarationFiles === true, domain);
   const host = inMemoryHost(fileMap, compilerOptions);
-  const program = ts.createProgram([...fileMap.keys()], compilerOptions, host);
+  const program = ts.createProgram(
+    [...fileMap.values()].map((file) => file.compilerFileName),
+    compilerOptions,
+    host,
+  );
   // Fail-closed before any type is read: an unresolvable module refuses.
   assertModulesResolve(fileMap, host, compilerOptions);
   const checker = program.getTypeChecker();
@@ -543,8 +631,10 @@ export function observeTypeScript(artifacts, options = {}) {
   // make two machines incomparable.
   const unrelocate = (fileName) =>
     domain.root === "/" ? fileName : toIdentityPath(path.relative(domain.root, fileName));
-  const inputs = [...fileMap.entries()]
-    .map(([fileName, code]) => ({ fileName: unrelocate(fileName), sha256: sha256(code) }))
+  const reportFileName = (fileName) =>
+    fileMap.get(virtualPathIdentity(fileName))?.reportFileName ?? unrelocate(fileName);
+  const inputs = [...fileMap.values()]
+    .map(({ reportFileName: fileName, code }) => ({ fileName, sha256: sha256(code) }))
     .sort((a, b) => a.fileName.localeCompare(b.fileName));
   // Domain is part of observation identity: different closures are not the
   // same query.
@@ -572,12 +662,8 @@ export function observeTypeScript(artifacts, options = {}) {
 
   const diagnostics = ts
     .getPreEmitDiagnostics(program)
-    .filter((d) => d.file === undefined || fileMap.has(d.file.fileName))
-    .map(canonicalTsDiagnostic)
-    .map((diagnostic) => ({
-      ...diagnostic,
-      source: diagnostic.source === null ? null : unrelocate(diagnostic.source),
-    }))
+    .filter((d) => d.file === undefined || fileMap.has(virtualPathIdentity(d.file.fileName)))
+    .map((diagnostic) => canonicalTsDiagnostic(diagnostic, reportFileName))
     .sort((a, b) =>
       `${a.source}:${a.start?.line}:${a.start?.column}:${a.code}`.localeCompare(
         `${b.source}:${b.start?.line}:${b.start?.column}:${b.code}`,
@@ -585,9 +671,9 @@ export function observeTypeScript(artifacts, options = {}) {
     );
 
   const modules = {};
-  for (const fileName of fileMap.keys()) {
-    const observedName = unrelocate(fileName);
-    const sourceFile = program.getSourceFile(fileName);
+  for (const file of fileMap.values()) {
+    const observedName = file.reportFileName;
+    const sourceFile = program.getSourceFile(file.compilerFileName);
     const moduleSymbol = sourceFile ? checker.getSymbolAtLocation(sourceFile) : undefined;
     const exports = {};
     if (moduleSymbol !== undefined) {

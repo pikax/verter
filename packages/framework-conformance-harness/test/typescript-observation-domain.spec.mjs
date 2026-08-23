@@ -21,8 +21,9 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import ts from "typescript";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import {
   ModuleResolutionError,
@@ -271,36 +272,29 @@ describe("TypeScript observation domain — the pinned framework closure", () =>
 
   // @ai-generated - Proves Windows path resolution cannot diverge from portable map identity.
   it("(3e) a Windows path reference admits only its portable mapped identity", () => {
-    const apiPath = "/Api.d.ts";
-    const targetPath = "/external.d.ts";
+    const apiPath = "C:\\Api.d.ts";
+    const targetPath = "C:\\external.d.ts";
     const apiCode =
       '/// <reference path="./external.d.ts" />\n' + "export declare const observed: External;\n";
     const targetCode = 'interface External { value: "mapped"; }\n';
 
-    expect(path.win32.resolve(path.win32.dirname(apiPath), "./external.d.ts")).toBe(
-      "\\external.d.ts",
-    );
-    const hostResolve = vi.spyOn(path, "resolve").mockImplementation(path.win32.resolve);
-    try {
-      const mapped = observeTypeScript([
-        { fileName: apiPath, code: apiCode },
-        { fileName: targetPath, code: targetCode },
-      ]);
-      expect(mapped.modules[apiPath].exports.observed.type.members.value.display).toBe('"mapped"');
+    expect(path.win32.resolve(path.win32.dirname(apiPath), "./external.d.ts")).toBe(targetPath);
+    const mapped = observeTypeScript([
+      { fileName: apiPath, code: apiCode },
+      { fileName: targetPath, code: targetCode },
+    ]);
+    expect(mapped.modules[apiPath].exports.observed.type.members.value.display).toBe('"mapped"');
 
-      let refusal;
-      try {
-        observeTypeScript([{ fileName: apiPath, code: apiCode }]);
-      } catch (error) {
-        refusal = error;
-      }
-      expect(refusal, "an untracked Windows-shaped target was admitted").toBeInstanceOf(
-        ModuleResolutionError,
-      );
-      expect(refusal.unresolved).toEqual([{ fileName: apiPath, specifier: "./external.d.ts" }]);
-    } finally {
-      hostResolve.mockRestore();
+    let refusal;
+    try {
+      observeTypeScript([{ fileName: apiPath, code: apiCode }]);
+    } catch (error) {
+      refusal = error;
     }
+    expect(refusal, "an untracked Windows-shaped target was admitted").toBeInstanceOf(
+      ModuleResolutionError,
+    );
+    expect(refusal.unresolved).toEqual([{ fileName: apiPath, specifier: "./external.d.ts" }]);
   });
 
   it("(3f) a WINDOWS-SHAPED path normalizes to a backslash-free identity", () => {
@@ -320,6 +314,177 @@ describe("TypeScript observation domain — the pinned framework closure", () =>
     expect(toIdentityPath("pkg/sub/Comp.svelte.d.ts")).toBe(identity);
     // Repeated and mixed separators collapse the same way.
     expect(toIdentityPath("pkg\\\\sub//Comp.svelte.d.ts")).toBe(identity);
+  });
+
+  // @ai-generated - Proves the real compiler host loads Windows-spelled virtual roots and imports.
+  it("(3g) Windows-spelled virtual files load and retain their caller report identity", () => {
+    const apiPath = "C:\\verter-virtual\\Api.ts";
+    const dependencyPath = "C:\\verter-virtual\\Dependency.ts";
+    const observation = observeTypeScript([
+      {
+        fileName: apiPath,
+        code: 'export { observed } from "./Dependency";\n',
+      },
+      {
+        fileName: dependencyPath,
+        code: 'export const observed = "windows-root-loaded" as const;\n',
+      },
+    ]);
+
+    expect(observation.diagnostics.some((diagnostic) => diagnostic.code === 6053)).toBe(false);
+    expect(observation.diagnostics).toEqual([]);
+    expect(observation.inputs.map((input) => input.fileName)).toEqual([apiPath, dependencyPath]);
+    expect(Object.keys(observation.modules)).toEqual([apiPath, dependencyPath]);
+    expect(observation.modules[apiPath].exports.observed.type.display).toBe(
+      '"windows-root-loaded"',
+    );
+    expect(observation.modules[apiPath.replaceAll("\\", "/")]).toBeUndefined();
+  });
+
+  // @ai-generated - Proves separator aliases cannot silently overwrite a virtual artifact.
+  it("(3h) separator aliases REFUSE an ambiguous canonical virtual identity", () => {
+    const fileNames = ["C:\\alias\\Api.ts", "C:/alias/Api.ts"];
+    let observation;
+    let refusal;
+    try {
+      observation = observeTypeScript([
+        { fileName: fileNames[0], code: 'export const selected = "backslash" as const;\n' },
+        { fileName: fileNames[1], code: 'export const selected = "slash" as const;\n' },
+      ]);
+    } catch (error) {
+      refusal = error;
+    }
+
+    expect(observation, "one alias silently replaced the other").toBeUndefined();
+    expect(refusal).toMatchObject({ name: "VirtualFileIdentityError" });
+    expect(refusal.collisions).toEqual([{ fileNames: [...fileNames].sort() }]);
+    expect(refusal.message).toContain(JSON.stringify(fileNames[0]));
+    expect(refusal.message).toContain(JSON.stringify(fileNames[1]));
+  });
+
+  // @ai-generated - Proves case aliases follow the compiler host's filesystem semantics.
+  it("(3i) case aliases are refused only when the host identity is case-insensitive", async () => {
+    const fileNames = ["/virtual/Case.ts", "/virtual/case.ts"];
+    const artifacts = [
+      { fileName: fileNames[0], code: 'export const upper = "upper" as const;\n' },
+      { fileName: fileNames[1], code: 'export const lower = "lower" as const;\n' },
+    ];
+
+    const hostCaseSensitivity = ts.sys.useCaseSensitiveFileNames;
+    ts.sys.useCaseSensitiveFileNames = true;
+    let caseSensitiveObservation;
+    try {
+      const { observeTypeScript: caseSensitiveObserveTypeScript } =
+        await import("../src/typescript-observe.mjs?case-sensitive-host");
+      caseSensitiveObservation = caseSensitiveObserveTypeScript(artifacts);
+    } finally {
+      ts.sys.useCaseSensitiveFileNames = hostCaseSensitivity;
+    }
+    expect(caseSensitiveObservation.inputs.map(({ fileName }) => fileName)).toEqual(
+      [...fileNames].sort((left, right) => left.localeCompare(right)),
+    );
+    const observedModuleNames = Object.keys(caseSensitiveObservation.modules);
+    expect(observedModuleNames).toHaveLength(fileNames.length);
+    expect(new Set(observedModuleNames)).toEqual(new Set(fileNames));
+    expect(caseSensitiveObservation.modules[fileNames[0]].exports.upper.type.display).toBe(
+      '"upper"',
+    );
+    expect(caseSensitiveObservation.modules[fileNames[1]].exports.lower.type.display).toBe(
+      '"lower"',
+    );
+    expect(caseSensitiveObservation.modules[fileNames[0]].exports.lower).toBeUndefined();
+    expect(caseSensitiveObservation.modules[fileNames[1]].exports.upper).toBeUndefined();
+
+    if (hostCaseSensitivity) {
+      return;
+    }
+
+    let observation;
+    let refusal;
+    try {
+      observation = observeTypeScript(artifacts);
+    } catch (error) {
+      refusal = error;
+    }
+    expect(observation, "one case alias silently replaced the other").toBeUndefined();
+    expect(refusal).toMatchObject({ name: "VirtualFileIdentityError" });
+    expect(refusal.collisions).toEqual([{ fileNames: [...fileNames].sort() }]);
+  });
+
+  // @ai-generated - Proves absolute path references stay absolute while relative references stay local.
+  it("(3j) mapped root-, drive-, and relative path references resolve by canonical identity", () => {
+    const rootApi = "/rooted/Api.ts";
+    const driveApi = "C:\\drive\\Api.ts";
+    const observation = observeTypeScript([
+      {
+        fileName: rootApi,
+        code:
+          '/// <reference path="/shared/root.d.ts" />\n' +
+          '/// <reference path="./relative.d.ts" />\n' +
+          "export declare const rooted: RootAbsolute;\n" +
+          "export declare const relative: RelativeTarget;\n",
+      },
+      {
+        fileName: driveApi,
+        code:
+          '/// <reference path="C:\\shared\\drive.d.ts" />\n' +
+          "export declare const driven: DriveAbsolute;\n",
+      },
+      {
+        fileName: "/shared/root.d.ts",
+        code: 'interface RootAbsolute { value: "root"; }\n',
+      },
+      {
+        fileName: "/rooted/relative.d.ts",
+        code: 'interface RelativeTarget { value: "relative"; }\n',
+      },
+      {
+        fileName: "C:\\shared\\drive.d.ts",
+        code: 'interface DriveAbsolute { value: "drive"; }\n',
+      },
+    ]);
+
+    expect(observation.diagnostics).toEqual([]);
+    expect(observation.modules[rootApi].exports.rooted.type.members.value.display).toBe('"root"');
+    expect(observation.modules[rootApi].exports.relative.type.members.value.display).toBe(
+      '"relative"',
+    );
+    expect(observation.modules[driveApi].exports.driven.type.members.value.display).toBe('"drive"');
+    expect(observation.modules["/rooted/shared/root.d.ts"]).toBeUndefined();
+    expect(observation.modules["C:\\drive\\C:\\shared\\drive.d.ts"]).toBeUndefined();
+  });
+
+  // @ai-generated - Proves every diagnostic source retains caller identity after relocation.
+  it("(3k) related diagnostic locations retain Windows-shaped caller identities", () => {
+    const apiPath = "C:\\caller\\Api.ts";
+    const dependencyPath = "C:\\caller\\Dependency.ts";
+    const observation = observeTypeScript(
+      [
+        {
+          fileName: apiPath,
+          code:
+            'import type { Config } from "./Dependency";\n' +
+            "export const config: Config = { value: 123 };\n",
+        },
+        {
+          fileName: dependencyPath,
+          code: "export interface Config { value: string; }\n",
+        },
+      ],
+      { frameworkDomain: "svelte" },
+    );
+
+    expect(observation.diagnostics).toHaveLength(1);
+    const diagnostic = observation.diagnostics[0];
+    expect(diagnostic.code).toBe(2322);
+    expect(diagnostic.source).toBe(apiPath);
+    expect(diagnostic.related).toHaveLength(1);
+    expect(diagnostic.related[0].source).toBe(dependencyPath);
+    const serialized = JSON.stringify(diagnostic);
+    expect(serialized).not.toContain(apiPath.replaceAll("\\", "/"));
+    expect(serialized).not.toContain(dependencyPath.replaceAll("\\", "/"));
+    expect(serialized).not.toContain(".oracle-installs");
+    expect(serialized).not.toContain("__verter_observed__");
   });
 
   it("(4) PLANTED CONTROL: a correct prop surface and an empty one observe DIFFERENTLY", () => {

@@ -202,7 +202,7 @@ function printTextReport(result, changedFiles) {
     }
     process.stdout.write("\nRun: cargo nextest run --workspace\n");
     process.stdout.write(
-      "(or, for the real landing verdict: node scripts/gate.mjs — see the banner above)\n",
+      "(or, for the exhaustive landing verdict: node scripts/gate.mjs --exhaustive — see the banner above)\n",
     );
     return;
   }

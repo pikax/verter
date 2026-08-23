@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// gate-selftest.mjs — proves the safety properties of the gate using ONLY sleep/echo stand-ins.
+// gate-selftest.mjs — proves the safety properties of the gate using stand-ins except for GB15's real
+// production CLI and Vapor/TypeScript harness paths, which run with Cargo/tool stand-ins.
 //
 // HOW IT DRIVES THE GATE PRIMITIVES (no magic flag on the production gate).
 //   The classifier / verdict / sweep-matcher / suite-selection scenarios call the REAL gate functions
@@ -8,10 +9,12 @@
 //   containment / timeout / stall / teardown / seam scenarios — which genuinely need a real subprocess and
 //   a real process group — spawn the SELF-TEST-ONLY runner `gate-selftest-runner.mjs`, which imports the
 //   same gate primitives and runs them against `sleep`/`echo` stand-ins. The production gate (`gate.mjs`)
-//   is exercised ONLY where the test asserts it has NO bypass mode (scenario U-P0).
+//   is exercised by the no-bypass assertions (scenario U-P0) and by GB15, which invokes the real
+//   Vapor/TypeScript harness paths with Cargo/tool stand-ins.
 //
-// NO workspace cargo runs here. Every contained command is a `sleep`/`echo` stand-in, so the build lock is
-// never touched. Each test uses a UNIQUE lock dir (an os.tmpdir() mkdtemp) so a developer's real lock is
+// NO workspace Cargo builds/tests run here. GB15 replaces Cargo and auxiliary tools with stand-ins; other
+// contained commands use `sleep`/`echo` stand-ins as applicable, so the build lock is never touched.
+// Each test uses a UNIQUE lock dir (an os.tmpdir() mkdtemp) so a developer's real lock is
 // safe. The process-containment scenarios are POSIX-only (they assert the process-group containment that
 // only exists on POSIX); the PLATFORM-INDEPENDENT classifier/sweep-matcher/argv/sentinel scenarios run on
 // EVERY platform including Windows. On Windows, the POSIX-only process-management scenarios emit a TRUE
@@ -81,7 +84,8 @@
 //                           hook; the tolerated baseline stays PASS-WITH-TOLERATED.
 //   (x)    FAIL-CLOSED MUTEX — an alive holder with an EMPTY/uncheckable start-identity REFUSES (126); a
 //                           dead holder with empty identity still reclaims + PASSes (discriminating).
-//   (xi)   SURFACE-2 GATE — zero / partial verter_session suite selection FAILS SETUP (127); a proper
+//   (xi)   LEGACY SURFACE-2 CLASSIFIER — zero / partial verter_session suite selection returns setup failure
+//          (127); a proper
 //                           1-lib + N-test listing passes (discriminating).
 //   (xii)  WINDOWS .exe SWEEP — rustc.exe / cargo-nextest.exe / mixed-case CARGO.EXE referencing the runner
 //                           target MATCH the provenance matcher; a repo-root-only dev cargo.exe does NOT.
@@ -196,6 +200,8 @@ import {
   mkdirSync,
   realpathSync,
   statSync,
+  copyFileSync,
+  chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -211,8 +217,12 @@ import {
   ensureRequiredWindowsDebugSidecars,
   isBuildTool,
   targetDirMatches,
+  classifyProcessIdentityComparison,
+  normalizeWindowsWmicCreationDate,
   preparedSuccessLines,
   PREPARE_SUCCESS_MARKER,
+  buildPrepareWarmSpawnEnv,
+  classifyPrepareWarmResult,
   // freshness-tooling preflight + platform-aware shim resolution (verdict-gating authority)
   resolveLocalBinShim,
   resolvePathShim,
@@ -243,6 +253,12 @@ import {
   BUILD_PREREQUISITE_COMMAND,
   BUILD_PREREQUISITE_MARKER,
   TSSERVER_ENV_DENYLIST_SOURCE_SEGMENTS,
+  // real conformance-harness gate smokes (GB15/GB16).
+  HARNESS_SMOKE_MARKER,
+  HARNESS_SMOKE_MODES,
+  harnessSmokeCommand,
+  decideHarnessSmokeResult,
+  formatHarnessSmokeFailure,
   // oracle-cache prerequisite preflight — the offline Svelte/Vue oracle npm cache the bf2-authoritative
   // conformance suites realize from (GB11).
   checkOracleCachePrerequisite,
@@ -255,8 +271,12 @@ import {
   // shipped-cfg archive-build feature wiring + independent expected-test-inventory scan (GB12).
   ARCHIVE_FEATURES,
   buildNextestArchiveArgs,
+  buildSurface1RunArgs,
+  buildShippedCfgContractArgs,
   countTestAttributesInDir,
   decideShippedCfgGuardExpectedCountMatch,
+  // local fail-fast / explicit exhaustive policy and coverage-complete receipt verdict (GB17).
+  reduceGateLaneReceipts,
   // trybuild exclusion (interim, pending maintainer disposition) — GB13.
   TRYBUILD_EXCLUDED_SUITES,
   buildTrybuildExclusionFilterExpr,
@@ -281,8 +301,8 @@ import {
 } from "./triage-gate-internals.mjs";
 
 const SELFTEST_DIR = dirname(fileURLToPath(import.meta.url));
-// The PRODUCTION gate CLI — exercised ONLY by the U-P0 "no bypass mode" scenario (to assert every removed
-// mode exits non-zero). All contained-command / seam / mutex scenarios use the self-test-only runner below.
+// The PRODUCTION gate CLI — exercised by the U-P0 "no bypass mode" scenario and by GB15, which invokes
+// the real Vapor/TypeScript harness paths with Cargo/tool stand-ins. Other scenarios use stand-ins as applicable.
 const GATE = join(SELFTEST_DIR, "gate.mjs");
 // The SELF-TEST-ONLY subprocess runner (mutex + containment + timeout/stall + teardown + seam, against
 // sleep/echo stand-ins). It imports the same gate primitives; production never runs it.
@@ -291,6 +311,9 @@ const RUNNER = join(SELFTEST_DIR, "gate-selftest-runner.mjs");
 // process-table RSS parsers / real MEMORY-MONITOR reap behavior). Run as a subprocess below so it is part
 // of this same canonical self-test entrypoint instead of sitting unreferenced.
 const MEMORY_SELFTEST = join(SELFTEST_DIR, "gate-memory-selftest.mjs");
+// The multi-registration containment supervisor self-test. Its scripted cases prove aggregate authority
+// and race semantics; its native cases prove exact cleanup of every registered process forest.
+const LANE_SELFTEST = join(SELFTEST_DIR, "gate-lane-selftest.mjs");
 
 // The gate-owned lock sentinel file name — must match GATE_LOCK_SENTINEL in gate.mjs. A lockdir is
 // reclaimable ONLY if it carries this marker (proving the gate created it); the crafted-lock scenarios
@@ -410,13 +433,27 @@ function runGate(args, env) {
 // output. Used by (GB9), which drives the real CLI against a SYNTHETIC repo root so it can observe the
 // build-prerequisite refusal in both directions without mutating the developer's tree. Returns
 // { code, out } where `out` is stdout+stderr concatenated.
-function runGateCapture(gatePath, args, env) {
+function runGateCapture(gatePath, args, env, { cwd } = {}) {
   const child = { ...process.env, ...env };
+  // A caller-provided PATH is an exact security boundary. On Windows, inherited case variants such as
+  // `Path` and an override named `PATH` denote the same OS variable but can otherwise survive as two JS
+  // object keys and make the spawned child's effective lookup path ambiguous. Collapse them before spawn.
+  if (Object.hasOwn(env, "PATH")) {
+    if (IS_WINDOWS) {
+      for (const key of Object.keys(child)) {
+        if (key.toUpperCase() === "PATH") delete child[key];
+      }
+    } else {
+      delete child.PATH;
+    }
+    child.PATH = env.PATH;
+  }
   // The gate honors VERTER_GATE_TARGET_DIR; every (GB9) leg passes --target-dir explicitly, so drop the
   // ambient value rather than let a developer's export decide where the synthetic run writes.
   delete child.VERTER_GATE_TARGET_DIR;
   const r = spawnSync(process.execPath, [gatePath, ...args], {
     env: child,
+    cwd,
     encoding: "utf8",
     timeout: 300_000,
   });
@@ -508,7 +545,7 @@ function verdictNextestRunFile(code, file, freshnessToleranceAllowed = true) {
   return verdictNextestRun(code, readFileSync(file, "utf8"), freshnessToleranceAllowed);
 }
 
-// SURFACE-2 libtest verdict — mirrors the old `--selftest-libtest`.
+// Legacy Surface-2 libtest verdict fixture — mirrors the old `--selftest-libtest`.
 function verdictLibtest(code, binaryId, text, freshnessToleranceAllowed = true) {
   const r = analyzeLibtestSurface(text, code, binaryId, freshnessToleranceAllowed);
   if (r.verdict === "fail") return "FAIL";
@@ -519,7 +556,7 @@ function verdictLibtestFile(code, binaryId, file, freshnessToleranceAllowed = tr
   return verdictLibtest(code, binaryId, readFileSync(file, "utf8"), freshnessToleranceAllowed);
 }
 
-// SURFACE-2 suite-selection gate — mirrors the old `--selftest-surface2`. Returns the same { code, out }
+// Legacy Surface-2 suite-selection fixture — mirrors the old `--selftest-surface2`. Returns the same { code, out }
 // shape the hook produced: 127 (USAGE/SETUP) on a tripped integrity gate, 0 + "OK lib=<n> test=<n>" else.
 function verdictSurface2(allSuites) {
   const sel = selectSessionSuites(allSuites);
@@ -645,9 +682,37 @@ function freshTmpDir(prefix) {
   return d;
 }
 
+// Return PATH with every component capable of resolving `tool` removed. GB15 uses this to make pnpm
+// unresolvable while retaining the developer's git/process-inspection tools. The tested gate receives
+// temporary buf/oxfmt shims before this remainder, so freshness preparation cannot install or lock the
+// developer checkout even when its local node_modules shims are absent.
+function pathWithoutTool(pathValue, tool) {
+  const delimiter = pathDelimiterFor(IS_WINDOWS);
+  return String(pathValue || "")
+    .split(delimiter)
+    .filter(
+      (dir) =>
+        dir !== "" && resolveExecutableShim(appendPathComponentRaw(dir, tool, IS_WINDOWS)) === null,
+    )
+    .join(delimiter);
+}
+
+function writeSuccessfulToolShim(dir, tool) {
+  if (IS_WINDOWS) {
+    const shim = join(dir, `${tool}.CMD`);
+    writeFileSync(shim, "@ECHO OFF\r\n@EXIT /B 0\r\n");
+    return shim;
+  }
+  const shim = join(dir, tool);
+  writeFileSync(shim, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  return shim;
+}
+
 // ====================================================================================================
 async function main() {
-  process.stderr.write("=== gate.mjs self-test (sleep/echo stand-ins only; NO cargo) ===\n");
+  process.stderr.write(
+    "=== gate.mjs self-test (GB15: real production CLI + Vapor/TypeScript harness paths with Cargo/tool stand-ins; other scenarios use stand-ins as applicable) ===\n",
+  );
   process.stderr.write(`gate: ${GATE}\n`);
   process.stderr.write(`run-tag: ${RUN_TAG}\n`);
 
@@ -1149,6 +1214,853 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
+  // (GB15) REAL CONFORMANCE-HARNESS COMMANDS + PRODUCTION ORDERING. Command construction is pure and
+  //        launches the harness-owned executable through the current Node binary, once for each exact
+  //        mode. The production call-site must place the orchestration after the oracle-cache realization
+  //        and before freshness tooling/archive work.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB15) REAL CONFORMANCE-HARNESS COMMANDS + PRODUCTION ORDERING\n");
+  {
+    let ok = true;
+    if (JSON.stringify(HARNESS_SMOKE_MODES) !== JSON.stringify(["vapor", "typescript"])) {
+      fail(
+        `(GB15.1) smoke modes must be exactly vapor/typescript; got ${JSON.stringify(HARNESS_SMOKE_MODES)}`,
+      );
+      ok = false;
+    }
+    for (const mode of ["vapor", "typescript"]) {
+      let command;
+      try {
+        command = harnessSmokeCommand(REPO_REALPATH, mode);
+      } catch (error) {
+        // Keep constructor validation strict, but never let it abort GB15 before the production-CLI
+        // negative control below. An omitted production mode must be proven through the mutated real CLI.
+        fail(`(GB15.1) ${mode} command construction failed: ${error.message}`);
+        ok = false;
+        continue;
+      }
+      const expectedScript = join(
+        REPO_REALPATH,
+        "packages",
+        "framework-conformance-harness",
+        "bin",
+        "gate-smoke.mjs",
+      );
+      if (
+        command.cmd !== process.execPath ||
+        JSON.stringify(command.args) !== JSON.stringify([expectedScript, mode]) ||
+        command.cwd !== REPO_REALPATH
+      ) {
+        fail(
+          `(GB15.1) ${mode} command did not target the harness-owned executable: ${JSON.stringify(command)}`,
+        );
+        ok = false;
+      }
+    }
+
+    const gateSource = readFileSync(GATE, "utf8");
+    const oracleAt = gateSource.indexOf("const oraclePrereq = checkOracleCachePrerequisite(");
+    const smokeAt = gateSource.indexOf("const harnessSmokesOk = await runHarnessSmokeChecks(ctx);");
+    const freshnessAt = gateSource.indexOf("const preflight = await preflightFreshnessTooling(");
+    const archiveAt = gateSource.indexOf("const out = await archiveAndList(ctx);", smokeAt);
+    if (!(oracleAt >= 0 && oracleAt < smokeAt && smokeAt < freshnessAt && smokeAt < archiveAt)) {
+      fail(
+        `(GB15.2) production order must be oracle realization -> both harness smokes -> freshness -> cargo archive; ` +
+          `got oracle=${oracleAt} smoke=${smokeAt} freshness=${freshnessAt} archive=${archiveAt}`,
+      );
+      ok = false;
+    }
+    const stubDir = freshTmpDir("gatetest-harness-smoke-cargostub-");
+    const stubName = IS_WINDOWS ? "cargo.exe" : "cargo";
+    const stubPath = join(stubDir, stubName);
+    if (IS_WINDOWS) {
+      // A copied Node launcher is a spawnable .exe stand-in. Cargo's first arg (`nextest`) is not a JS
+      // file, so it fails immediately without reaching the real Cargo binary later on PATH.
+      copyFileSync(process.execPath, stubPath);
+    } else {
+      writeFileSync(stubPath, "#!/bin/sh\nexit 9\n", { mode: 0o755 });
+    }
+    const bufShim = writeSuccessfulToolShim(stubDir, "buf");
+    const oxfmtShim = writeSuccessfulToolShim(stubDir, "oxfmt");
+    const delimiter = pathDelimiterFor(IS_WINDOWS);
+    const hermeticPath = `${stubDir}${delimiter}${pathWithoutTool(process.env.PATH, "pnpm")}`;
+    const smokeEnv = { PATH: hermeticPath };
+    const pnpmPath = resolvePnpm(smokeEnv);
+    const resolvedBuf = resolvePathShim("buf", smokeEnv);
+    const resolvedOxfmt = resolvePathShim("oxfmt", smokeEnv);
+    if (pnpmPath !== null || resolvedBuf !== bufShim || resolvedOxfmt !== oxfmtShim) {
+      fail(
+        `(GB15.3) hermetic smoke environment invalid: pnpm=${JSON.stringify(pnpmPath)} ` +
+          `buf=${JSON.stringify(resolvedBuf)} oxfmt=${JSON.stringify(resolvedOxfmt)}`,
+      );
+      ok = false;
+    }
+    const smokeTarget = freshTmpDir("gatetest-harness-smoke-target-");
+    const smokeLock = freshLock();
+    // Fail closed without launching the real CLI if the no-installer proof above ever regresses.
+    const live =
+      pnpmPath === null && resolvedBuf === bufShim && resolvedOxfmt === oxfmtShim
+        ? runGateCapture(
+            GATE,
+            ["--timeout", "120s", "--stall", "60s", "--target-dir", smokeTarget],
+            { ...smokeEnv, VERTER_GATE_LOCK: smokeLock },
+          )
+        : { code: 1, out: "GB15 hermetic environment refused before production launch" };
+    const vaporDone = live.out.indexOf("HARNESS-SMOKE [vapor]: SATISFIED");
+    const typescriptDone = live.out.indexOf("HARNESS-SMOKE [typescript]: SATISFIED");
+    const cargoStarted = live.out.indexOf(
+      "archiving workspace test universe (dev profile) (cargo nextest archive --workspace)",
+    );
+    const freshnessWasNonInstalling =
+      live.out.includes("freshness-tooling preflight: already-present") ||
+      live.out.includes("freshness-tooling preflight: path-fallback");
+    if (!freshnessWasNonInstalling || live.out.includes("freshness-tooling preflight: installed")) {
+      fail(
+        `(GB15.3) production smoke leg must prove a non-installing freshness path; output:\n${live.out}`,
+      );
+      ok = false;
+    }
+    if (vaporDone >= 0 && typescriptDone < 0 && cargoStarted > vaporDone) {
+      fail(
+        `(GB15.3) PRODUCTION BYPASS PROVEN: the real CLI omitted TypeScript smoke and improperly reached ` +
+          `Cargo (vapor=${vaporDone} typescript=${typescriptDone} cargo=${cargoStarted})`,
+      );
+      ok = false;
+    } else if (!(vaporDone >= 0 && vaporDone < typescriptDone && typescriptDone < cargoStarted)) {
+      fail(
+        `(GB15.3) the real production CLI must complete both real harness smokes before attempting Cargo; ` +
+          `got vapor=${vaporDone} typescript=${typescriptDone} cargo=${cargoStarted}:\n${live.out}`,
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(GB15) commands target the harness-owned executable in exact vapor/typescript modes, and the " +
+          "production gate invokes both after oracle realization but before freshness tooling and Cargo",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB16) FAIL-CLOSED SMOKE RECEIPTS. Drive the exact result decider used by runHarnessSmokeChecks over
+  //        every incomplete shape: real non-zero smoke, timeout, signal, spawn failure, missing/invalid/
+  //        mismatched receipt. Only an exact mode-bound receipt is accepted.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB16) FAIL-CLOSED CONFORMANCE-HARNESS SMOKE RECEIPTS\n");
+  {
+    let ok = true;
+    const receipt = (mode) => JSON.stringify({ schema: "verter-harness-smoke/v1", mode, ok: true });
+    for (const mode of ["vapor", "typescript"]) {
+      const accepted = decideHarnessSmokeResult(mode, {
+        code: 0,
+        reason: "",
+        signalName: "",
+        spawnError: false,
+        stdout: receipt(mode),
+      });
+      if (!accepted.ok) {
+        fail(`(GB16) exact ${mode} receipt must pass: ${JSON.stringify(accepted)}`);
+        ok = false;
+      }
+    }
+    const rejected = [
+      ["vapor", { code: 3, reason: "", signalName: "", spawnError: false, stdout: "" }, "exit"],
+      [
+        "typescript",
+        { code: 3, reason: "", signalName: "", spawnError: false, stdout: "" },
+        "exit",
+      ],
+      [
+        "vapor",
+        { code: 0, reason: "TIMEOUT", signalName: "", spawnError: false, stdout: receipt("vapor") },
+        "TIMEOUT",
+      ],
+      [
+        "typescript",
+        {
+          code: 0,
+          reason: "STALL",
+          signalName: "",
+          spawnError: false,
+          stdout: receipt("typescript"),
+        },
+        "STALL",
+      ],
+      [
+        "vapor",
+        { code: 0, reason: "MEMORY", signalName: "", spawnError: false, stdout: receipt("vapor") },
+        "MEMORY",
+      ],
+      [
+        "typescript",
+        {
+          code: 0,
+          reason: "MEMORY_MONITOR",
+          signalName: "",
+          spawnError: false,
+          stdout: receipt("typescript"),
+        },
+        "MEMORY_MONITOR",
+      ],
+      [
+        "typescript",
+        { code: 128, reason: "", signalName: "SIGABRT", spawnError: false, stdout: "" },
+        "SIGABRT",
+      ],
+      [
+        "typescript",
+        { code: 1, reason: "", signalName: "", spawnError: true, stdout: "" },
+        "spawn",
+      ],
+      ["vapor", { code: 0, reason: "", signalName: "", spawnError: false, stdout: "" }, "missing"],
+      [
+        "vapor",
+        { code: 0, reason: "", signalName: "", spawnError: false, stdout: "not-json" },
+        "invalid",
+      ],
+      [
+        "vapor",
+        { code: 0, reason: "", signalName: "", spawnError: false, stdout: receipt("typescript") },
+        "mode",
+      ],
+      [
+        "typescript",
+        {
+          code: 0,
+          reason: "",
+          signalName: "",
+          spawnError: false,
+          stdout: JSON.stringify({ schema: "wrong", mode: "typescript", ok: true }),
+        },
+        "schema",
+      ],
+      [
+        "typescript",
+        {
+          code: 0,
+          reason: "",
+          signalName: "",
+          spawnError: false,
+          stdout: JSON.stringify({
+            schema: "verter-harness-smoke/v1",
+            mode: "typescript",
+            ok: false,
+          }),
+        },
+        "receipt",
+      ],
+      [
+        "vapor",
+        {
+          code: 0,
+          reason: "",
+          signalName: "",
+          spawnError: false,
+          stdout: JSON.stringify({
+            schema: "verter-harness-smoke/v1",
+            mode: "vapor",
+            ok: true,
+            extra: "must be rejected",
+          }),
+        },
+        "keys",
+      ],
+      ["vapor", { code: 0, reason: "", signalName: "", spawnError: false, stdout: "[]" }, "object"],
+      [
+        "vapor",
+        { code: 0, reason: "", signalName: "", spawnError: false, stdout: "null" },
+        "object",
+      ],
+      [
+        "typescript",
+        { code: 0, reason: "", signalName: "", spawnError: false, stdout: '"receipt"' },
+        "object",
+      ],
+      [
+        "typescript",
+        { code: 0, reason: "", signalName: "", spawnError: false, stdout: "42" },
+        "object",
+      ],
+      [
+        "typescript",
+        { code: 0, reason: "", signalName: "", spawnError: false, stdout: "true" },
+        "object",
+      ],
+    ];
+    for (const [mode, result, marker] of rejected) {
+      const decision = decideHarnessSmokeResult(mode, result);
+      if (decision.ok || !decision.detail.includes(marker)) {
+        fail(
+          `(GB16) ${mode}/${marker} must fail closed with an actionable detail: ${JSON.stringify(decision)}`,
+        );
+        ok = false;
+      }
+      const attributed = formatHarnessSmokeFailure(mode, decision);
+      const otherMode = mode === "vapor" ? "typescript" : "vapor";
+      if (
+        !attributed.startsWith(`${HARNESS_SMOKE_MARKER} [${mode}]:`) ||
+        attributed.includes(`${HARNESS_SMOKE_MARKER} [${otherMode}]:`)
+      ) {
+        fail(`(GB16) failure marker must attribute exact mode ${mode}: ${attributed}`);
+        ok = false;
+      }
+    }
+    const gateSource = readFileSync(GATE, "utf8");
+    const fnStart = gateSource.indexOf("async function runHarnessSmokeChecks(ctx)");
+    const fnEnd = gateSource.indexOf("\n}\n", fnStart);
+    const body = fnStart < 0 || fnEnd < 0 ? "" : gateSource.slice(fnStart, fnEnd);
+    if (
+      !body.includes("decideHarnessSmokeResult(mode, result)") ||
+      !body.includes("formatHarnessSmokeFailure(mode, decision)")
+    ) {
+      fail(
+        "(GB16) production runHarnessSmokeChecks must use the verified decider and exact mode formatter",
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(GB16) only exact-key, mode-bound object receipts pass; every watchdog outcome, non-zero real " +
+          "smoke, signal, spawn failure, and missing/invalid/mismatched receipt fails with exact mode attribution",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB17) LOCAL FAIL-FAST / EXPLICIT EXHAUSTIVE POLICY. Pure argv, transition and verdict helpers are the
+  //        primary behavior contract; the final bounded source check proves the production CLI wires those
+  //        tested helpers rather than keeping an inline second authority. No Cargo command runs here.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB17) LOCAL FAIL-FAST / EXPLICIT EXHAUSTIVE GATE POLICY\n");
+  {
+    let ok = true;
+    const surfaceBase = {
+      archiveFile: "C:/synthetic/dev.tar.zst",
+      extractDir: "C:/synthetic/extract",
+      repoRealpath: "C:/synthetic/repo",
+      filterExpr: buildTrybuildExclusionFilterExpr(),
+      testThreads: 7,
+    };
+    const localSurface = buildSurface1RunArgs(surfaceBase);
+    const exhaustiveSurface = buildSurface1RunArgs({ ...surfaceBase, exhaustive: true });
+    const expectedLocalSurface = [
+      "nextest",
+      "run",
+      "--archive-file",
+      surfaceBase.archiveFile,
+      "--extract-to",
+      surfaceBase.extractDir,
+      "--extract-overwrite",
+      "--workspace-remap",
+      surfaceBase.repoRealpath,
+      "-E",
+      buildTrybuildExclusionFilterExpr(),
+      "--test-threads",
+      "7",
+    ];
+    const expectedExhaustiveSurface = expectedLocalSurface.slice();
+    expectedExhaustiveSurface.splice(expectedExhaustiveSurface.length - 2, 0, "--no-fail-fast");
+    if (JSON.stringify(localSurface) !== JSON.stringify(expectedLocalSurface)) {
+      fail(
+        `(GB17.1) bare/local Surface-1 argv must preserve selection and omit --no-fail-fast; got ` +
+          JSON.stringify(localSurface),
+      );
+      ok = false;
+    }
+    if (JSON.stringify(exhaustiveSurface) !== JSON.stringify(expectedExhaustiveSurface)) {
+      fail(
+        `(GB17.2) exhaustive Surface-1 argv must differ only by one --no-fail-fast; got ` +
+          JSON.stringify(exhaustiveSurface),
+      );
+      ok = false;
+    }
+
+    const contractBase = { timingsEnabled: true, testThreads: 7 };
+    const localContract = buildShippedCfgContractArgs(contractBase);
+    const exhaustiveContract = buildShippedCfgContractArgs({ ...contractBase, exhaustive: true });
+    if (localContract.includes("--no-fail-fast")) {
+      fail(`(GB17.3) bare/local shipped contract must omit --no-fail-fast: ${localContract}`);
+      ok = false;
+    }
+    if ((exhaustiveContract.filter((arg) => arg === "--no-fail-fast").length ?? 0) !== 1) {
+      fail(
+        `(GB17.3) exhaustive shipped contract must carry exactly one --no-fail-fast: ` +
+          exhaustiveContract,
+      );
+      ok = false;
+    }
+    if (
+      JSON.stringify(localContract) !==
+      JSON.stringify(exhaustiveContract.filter((arg) => arg !== "--no-fail-fast"))
+    ) {
+      fail(
+        "(GB17.3) execution policy must not change shipped package/profile/thread/timing selection",
+      );
+      ok = false;
+    }
+
+    const completeSurface = {
+      hardFailure: false,
+      failures: [],
+      toleratedOccurred: false,
+      coverage: { parseable: true, complete: true },
+    };
+    const completeShipped = {
+      hardFailure: false,
+      failures: [],
+      check: { status: "ok" },
+      contract: { status: "ok", parseable: true, complete: true },
+      parity: { complete: true, matches: true },
+    };
+    const receiptRows = [
+      [{ surface: completeSurface, shipped: completeShipped }, "PASS", true],
+      [
+        { surface: { ...completeSurface, toleratedOccurred: true }, shipped: completeShipped },
+        "PASS-WITH-TOLERATED",
+        true,
+      ],
+      [
+        {
+          surface: {
+            ...completeSurface,
+            hardFailure: true,
+            failures: [{ surface: "nextest", name: "cases::real_failure" }],
+          },
+          shipped: completeShipped,
+        },
+        "FAIL",
+        true,
+      ],
+      [{ surface: completeSurface, shipped: null }, "FAIL", false],
+      [
+        {
+          surface: completeSurface,
+          shipped: {
+            ...completeShipped,
+            contract: { status: "not-run", parseable: false, complete: false },
+          },
+        },
+        "FAIL",
+        false,
+      ],
+    ];
+    for (const [receipts, expectedVerdict, expectedCoverage] of receiptRows) {
+      const decision = reduceGateLaneReceipts(receipts);
+      if (
+        decision.verdict !== expectedVerdict ||
+        decision.coverageComplete !== expectedCoverage ||
+        (!expectedCoverage && !decision.failures.some((row) => row.surface === "gate/incomplete"))
+      ) {
+        fail(
+          `(GB17.5) receipt coverage row expected ${expectedVerdict}/${expectedCoverage}, got ` +
+            JSON.stringify(decision),
+        );
+        ok = false;
+      }
+    }
+
+    const strictCases = [
+      ["retired gate flag", ["--no-fail-fast"]],
+      ["prepare + exhaustive", ["--prepare", "--exhaustive"]],
+      ["help + exhaustive", ["--help", "--exhaustive"]],
+      ["exhaustive + unknown", ["--exhaustive", "--bad"]],
+    ];
+    for (const [label, argv] of strictCases) {
+      const result = runGate(argv, {});
+      if (result.code !== EXIT_USAGE) {
+        fail(`(GB17.6) ${label} must exit 127; got ${result.code}`);
+        ok = false;
+      }
+    }
+    const parseRoot = freshTmpDir("gatetest-exhaustive-argv-");
+    let parseGit = true;
+    try {
+      execFileSync("git", ["init", "-q", parseRoot], { stdio: "ignore" });
+    } catch {
+      parseGit = false;
+    }
+    if (!parseGit) {
+      skip("(GB17.6) positive --exhaustive production parse skipped because git is unavailable");
+    } else {
+      const parseScripts = join(parseRoot, "scripts");
+      mkdirSync(parseScripts, { recursive: true });
+      for (const name of ["gate.mjs", "gate-internals.mjs"]) {
+        writeFileSync(join(parseScripts, name), readFileSync(join(SELFTEST_DIR, name)));
+      }
+      const accepted = runGateCapture(
+        join(parseScripts, "gate.mjs"),
+        ["--exhaustive", "--target-dir", join(parseRoot, "target", "gate-runner")],
+        { VERTER_GATE_LOCK: join(parseRoot, "gate.lock.d") },
+      );
+      if (
+        accepted.code !== EXIT_USAGE ||
+        !accepted.out.includes(BUILD_PREREQUISITE_MARKER) ||
+        accepted.out.includes("unknown argument")
+      ) {
+        fail(
+          `(GB17.6) positive --exhaustive must parse and reach the synthetic prerequisite refusal: ` +
+            `rc=${accepted.code}\n${accepted.out}`,
+        );
+        ok = false;
+      }
+
+      const noToolsPath = join(parseRoot, "no-tools-on-path");
+      mkdirSync(noToolsPath, { recursive: true });
+      const gateValueFlags = [
+        "--timeout",
+        "--stall",
+        "--target-dir",
+        "--build-jobs",
+        "--test-threads",
+        "--memory-limit",
+      ];
+      const prepareValueFlags = gateValueFlags.filter((flag) => flag !== "--test-threads");
+      const malformedValueCases = [
+        ...gateValueFlags.flatMap((flag) => [
+          [`gate ${flag} missing value`, [flag]],
+          [`gate ${flag} before policy flag`, [flag, "--exhaustive"]],
+        ]),
+        ...prepareValueFlags.flatMap((flag) => [
+          [`prepare ${flag} missing value`, ["--prepare", flag]],
+          [`prepare ${flag} before policy flag`, ["--prepare", flag, "--exhaustive"]],
+        ]),
+        ["gate target-dir before retired flag", ["--target-dir", "--no-fail-fast"]],
+        ["prepare target-dir before retired flag", ["--prepare", "--target-dir", "--no-fail-fast"]],
+        ["target-dir before prepare mode", ["--target-dir", "--prepare"]],
+        ["gate target-dir before value flag", ["--target-dir", "--test-threads", "4"]],
+      ];
+      for (const [label, argv] of malformedValueCases) {
+        const malformed = runGateCapture(join(parseScripts, "gate.mjs"), argv, {
+          PATH: noToolsPath,
+          VERTER_GATE_LOCK: join(parseRoot, "malformed.lock.d"),
+        });
+        if (
+          malformed.code !== EXIT_USAGE ||
+          !malformed.out.includes("ARGUMENT VALUE ERROR") ||
+          malformed.out.includes(BUILD_PREREQUISITE_MARKER)
+        ) {
+          fail(
+            `(GB17.6) ${label} must fail at strict value parsing before setup/Cargo: ` +
+              `rc=${malformed.code}\n${malformed.out}`,
+          );
+          ok = false;
+        }
+      }
+    }
+
+    const gateSource = readFileSync(GATE, "utf8");
+    const runGateStart = gateSource.indexOf("async function runGate(opts, ctx)");
+    const runGateEnd = gateSource.indexOf("\n}\n", runGateStart);
+    const runGateBody =
+      runGateStart < 0 || runGateEnd < 0 ? "" : gateSource.slice(runGateStart, runGateEnd);
+    const commandPlanAt = runGateBody.indexOf("buildGateLaneCommandPlan({");
+    const commandPlanEnd = runGateBody.indexOf("\n  });", commandPlanAt);
+    const commandPlanCall =
+      commandPlanAt < 0 || commandPlanEnd < 0
+        ? ""
+        : runGateBody.slice(commandPlanAt, commandPlanEnd);
+    const continuationAt = runGateBody.indexOf("await orchestrateGateLanes({");
+    const shippedAt = runGateBody.indexOf(
+      "runShippedCfgLane(opts, ctx, { allSuites, commandPlan })",
+    );
+    const finalizerAt = runGateBody.indexOf("reduceGateLaneReceipts(receipts)");
+    const passVerdictCount = (runGateBody.match(/"VERDICT: PASS/g) || []).length;
+    const firstPassVerdictAt = runGateBody.indexOf('"VERDICT: PASS');
+    const shippedFnStart = gateSource.indexOf("async function runShippedCfgLane(");
+    const shippedFnEnd = gateSource.indexOf("\n}\n", shippedFnStart);
+    const shippedFnBody =
+      shippedFnStart < 0 || shippedFnEnd < 0 ? "" : gateSource.slice(shippedFnStart, shippedFnEnd);
+    if (
+      commandPlanAt < 0 ||
+      !commandPlanCall.includes("exhaustive: opts.exhaustive") ||
+      !commandPlanCall.includes("filterExpr: SURFACE_1_FILTER") ||
+      !(continuationAt >= 0 && continuationAt < shippedAt) ||
+      finalizerAt < shippedAt ||
+      passVerdictCount !== 2 ||
+      firstPassVerdictAt <= finalizerAt ||
+      !shippedFnBody.includes("guard.summary.initialCount") ||
+      !shippedFnBody.includes("guard.summary.unrun === 0") ||
+      !shippedFnBody.includes('runStep("shipped-cfg"')
+    ) {
+      fail(
+        `(GB17.7) production runGate must wire the tested argv/transition/completion/finalizer helpers: ` +
+          `plan=${commandPlanAt} continuation=${continuationAt} shipped=${shippedAt} ` +
+          `finalizer=${finalizerAt} pass-sites=${passVerdictCount}/${firstPassVerdictAt} ` +
+          `shipped-body=${shippedFnBody.length}`,
+      );
+      ok = false;
+    }
+    if (ok) {
+      pass(
+        "(GB17) bare/local argv omits --no-fail-fast, exhaustive argv adds it to both nextest runs " +
+          "without changing selection; local stops the shipped guard after hard failures; missing required " +
+          "coverage defeats empty and tolerated-only PASS paths; argv is strict; production wires the tested helpers",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB19) PARALLEL-LANE PRODUCTION WIRING. This is deliberately a bounded call-site check, not a broad
+  // source mirror: the pure lane self-test owns behavior, while this proves the production gate invokes
+  // that tested orchestration once after the one unchanged archive/list front half.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB19) PARALLEL-LANE PRODUCTION WIRING\n");
+  {
+    const gateSource = readFileSync(GATE, "utf8");
+    const runGateStart = gateSource.indexOf("async function runGate(opts, ctx)");
+    const runGateEnd = gateSource.indexOf("\n}\n\nmain().catch", runGateStart);
+    const runGateBody =
+      runGateStart < 0 || runGateEnd < 0 ? "" : gateSource.slice(runGateStart, runGateEnd);
+    const archiveCalls = (runGateBody.match(/await archiveAndList\(ctx\)/g) || []).length;
+    const orchestrationCalls = (runGateBody.match(/await orchestrateGateLanes\(\{/g) || []).length;
+    const surfaceLaneCalls = (runGateBody.match(/runSurface1Lane\(/g) || []).length;
+    const shippedLaneCalls = (runGateBody.match(/runShippedCfgLane\(/g) || []).length;
+    const reductionCalls = (runGateBody.match(/reduceGateLaneReceipts\(/g) || []).length;
+    const replayCalls = (runGateBody.match(/replayGateLaneTranscript\(/g) || []).length;
+    const layoutAt = gateSource.indexOf("deriveGateLaneLayout(runnerTarget, gateDir)");
+    const supervisorCount = (gateSource.match(/createGateRunSupervisor\(\{/g) || []).length;
+    const supervisorAt = gateSource.indexOf("createGateRunSupervisor({");
+    const supervisorEnd = gateSource.indexOf("\n  });", supervisorAt);
+    const supervisorCall =
+      supervisorAt < 0 || supervisorEnd < 0 ? "" : gateSource.slice(supervisorAt, supervisorEnd);
+    const mutexOwnedProvenanceUmbrella = /ownershipRoots:\s*\[runnerTarget\]/.test(supervisorCall);
+    const separateSurfaceEnv =
+      gateSource.includes("const surfaceCargoEnv =") &&
+      gateSource.includes("laneLayout.surface1.targetDir");
+    const separateShippedEnv =
+      gateSource.includes("const shippedCargoEnv =") &&
+      gateSource.includes("laneLayout.shippedCfg.targetDir");
+    const localCancellation = runGateBody.includes("ctx.supervisor.cancelLane(laneId, reason)");
+    const closeAt = gateSource.indexOf('supervisor.closeAndReapAll("GATE_TEARDOWN")');
+    const mutexReleaseAt = gateSource.indexOf("mutex.release();", closeAt);
+    if (
+      archiveCalls !== 1 ||
+      orchestrationCalls !== 1 ||
+      surfaceLaneCalls !== 1 ||
+      shippedLaneCalls !== 1 ||
+      reductionCalls !== 1 ||
+      replayCalls !== 1 ||
+      layoutAt < 0 ||
+      supervisorCount !== 1 ||
+      !mutexOwnedProvenanceUmbrella ||
+      !separateSurfaceEnv ||
+      !separateShippedEnv ||
+      !localCancellation ||
+      !(closeAt >= 0 && closeAt < mutexReleaseAt)
+    ) {
+      fail(
+        `(GB19) production must derive one disjoint layout, keep one archive/list and one supervisor, ` +
+          `then invoke one Surface lane, one shipped lane, one concurrent orchestrator, one fixed-order ` +
+          `reducer and one canonical replay: archive=${archiveCalls} orchestrate=${orchestrationCalls} ` +
+          `surface=${surfaceLaneCalls} shipped=${shippedLaneCalls} reduce=${reductionCalls} ` +
+          `replay=${replayCalls} layout=${layoutAt} supervisors=${supervisorCount} ` +
+          `provenance-umbrella=${mutexOwnedProvenanceUmbrella} ` +
+          `envs=${separateSurfaceEnv}/${separateShippedEnv} cancel=${localCancellation} ` +
+          `teardown=${closeAt}/${mutexReleaseAt}`,
+      );
+    } else {
+      pass(
+        "(GB19) production wires the tested disjoint layout and one-supervisor concurrent lane boundary " +
+          "exactly once after the unchanged single archive/list front half, with the mutex-owned runner " +
+          "target as its sole configured provenance umbrella",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB20) LANE RESOURCE SPLIT VALUE WIRING — BEHAVIORAL. GB19 proves the STRUCTURE (one layout, one
+  // supervisor, two envs) is wired; this proves the actual `deriveGateLaneResourceSplit` VALUES reach
+  // the real per-lane `cargo` invocations rather than, say, `opts.buildJobs`/`opts.testThreads` (the
+  // pre-fix ceiling, applied twice). This does NOT scan gate.mjs's source text for identifier spellings
+  // (a comment or a dead occurrence would satisfy a text scan without proving anything reaches a real
+  // process) — it drives the REAL production CLI end-to-end against a controlled `cargo` stand-in on
+  // PATH and asserts the exact env (`CARGO_BUILD_JOBS`) and argv (`--test-threads N`) each of the THREE
+  // real per-lane cargo processes (Surface 1's `nextest run`, the shipped-cfg `check`, and the shipped-
+  // cfg `nextest run -p verter_shipped_cfg_contract`) actually receives. `--build-jobs 8 --test-threads
+  // 8` forces a genuinely non-degenerate, non-symmetric split (surface=6/6, shipped=2/2 —
+  // `SHIPPED_CFG_LANE_SHARE=0.25`), so a regression back to the un-split ceiling (both lanes seeing 8/8)
+  // fails this check by comparing REAL observed values, not by grepping source.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB20) LANE RESOURCE SPLIT VALUE WIRING\n");
+  posix_gb20: {
+    if (IS_WINDOWS) {
+      skip(
+        "(GB20) LANE RESOURCE SPLIT VALUE WIRING — POSIX bash cargo-stub + PATH override (no portable " +
+          "Windows cargo-stub stand-in here)",
+      );
+      break posix_gb20;
+    }
+    // Same precondition discipline as (xix): this drives the REAL gate against the REAL repo root, so it
+    // must reach past the build-prerequisite preflight before it can reach cargo at all. See (xix) above
+    // for the full rationale on the module-not-found-only skip vs. any-other-failure fail.
+    const gb20Prereq = checkBuildPrerequisites({ repoRoot: REPO_REALPATH });
+    if (!gb20Prereq.ok && gb20Prereq.reason === "module-not-found") {
+      skip(
+        "(GB20) LANE RESOURCE SPLIT VALUE WIRING — SKIPPED: this tree's build prerequisites are absent, " +
+          `so the real gate exits 127 before reaching cargo (${gb20Prereq.detail.split("\n")[0]}). Build ` +
+          `them with \`${BUILD_PREREQUISITE_COMMAND}\` and re-run to exercise this scenario.`,
+      );
+      break posix_gb20;
+    }
+    if (!gb20Prereq.ok) {
+      fail(
+        `(GB20) the build-prerequisite probe could not ANSWER (reason=${gb20Prereq.reason}): ` +
+          `${gb20Prereq.detail.split("\n")[0]}. That is an infrastructure failure, not a missing build, ` +
+          "so this scenario must FAIL rather than skip.",
+      );
+      break posix_gb20;
+    }
+
+    const stubDir = freshTmpDir("gatetest-gb20-cargostub-");
+    const stubPath = join(stubDir, "cargo");
+    const listJsonPath = join(stubDir, "list.json");
+    const surfaceMarker = join(stubDir, "surface.marker");
+    const shippedCheckMarker = join(stubDir, "shipped-check.marker");
+    const shippedContractMarker = join(stubDir, "shipped-contract.marker");
+
+    // A minimal but VALID `cargo nextest list --message-format json` fixture: one testcase per
+    // TRYBUILD_EXCLUDED_SUITES row, so archiveAndList's own trybuild-coverage guard
+    // (verifyTrybuildExclusionCoverage) is satisfied for real — this exercises the gate's REAL post-list
+    // wiring rather than a shortcut around it.
+    const suitesJson = {};
+    TRYBUILD_EXCLUDED_SUITES.forEach((row, i) => {
+      suitesJson[`${row.package}::bin${i}`] = {
+        "package-name": row.package,
+        "binary-id": `${row.package}::bin${i}`,
+        "binary-path": join(stubDir, `bin${i}`),
+        testcases: { [`${row.modulePrefix}dummy`]: {} },
+      };
+    });
+    writeFileSync(
+      listJsonPath,
+      JSON.stringify({
+        "rust-build-meta": { "target-directory": stubDir },
+        "rust-suites": suitesJson,
+      }),
+      "utf8",
+    );
+
+    // The stub dispatches on the REAL argv shape each production call site builds (buildNextestArchiveArgs
+    // / the list step / buildSurface1RunArgs / buildShippedCfgCheckArgs / buildShippedCfgContractArgs) and
+    // records the ACTUAL env + argv each per-lane invocation receives, then fails fast (archive/list
+    // succeed so the gate reaches the lanes; the lane invocations themselves exit non-zero once recorded,
+    // since only their observed inputs — never the overall verdict — are under test here).
+    writeFileSync(
+      stubPath,
+      `#!/usr/bin/env bash
+if [ "$1" = "nextest" ] && [ "$2" = "archive" ]; then
+  prev=""
+  archfile=""
+  for a in "$@"; do
+    if [ "$prev" = "--archive-file" ]; then archfile="$a"; fi
+    prev="$a"
+  done
+  : > "$archfile"
+  exit 0
+elif [ "$1" = "nextest" ] && [ "$2" = "list" ]; then
+  cat "${listJsonPath}"
+  exit 0
+elif [ "$1" = "nextest" ] && [ "$2" = "run" ] && [ "$3" = "--archive-file" ]; then
+  { printf 'CARGO_BUILD_JOBS=%s\\n' "$CARGO_BUILD_JOBS"; printf 'ARGS %s\\n' "$*"; } >> "${surfaceMarker}"
+  exit 1
+elif [ "$1" = "check" ]; then
+  { printf 'CARGO_BUILD_JOBS=%s\\n' "$CARGO_BUILD_JOBS"; printf 'ARGS %s\\n' "$*"; } >> "${shippedCheckMarker}"
+  exit 0
+elif [ "$1" = "nextest" ] && [ "$2" = "run" ] && [ "$3" = "-p" ]; then
+  { printf 'CARGO_BUILD_JOBS=%s\\n' "$CARGO_BUILD_JOBS"; printf 'ARGS %s\\n' "$*"; } >> "${shippedContractMarker}"
+  exit 1
+else
+  exit 0
+fi
+`,
+      { mode: 0o755 },
+    );
+    try {
+      chmodSync(stubPath, 0o755);
+    } catch {
+      /* ignore */
+    }
+
+    const stubPATH = `${stubDir}:${process.env.PATH || ""}`;
+    const lk = freshLock();
+    const tgt = freshTmpDir("gatetest-gb20-target-");
+    const r = runGateCapture(
+      GATE,
+      [
+        "--build-jobs",
+        "8",
+        "--test-threads",
+        "8",
+        "--memory-limit",
+        "4GiB",
+        "--target-dir",
+        tgt,
+        "--timeout",
+        "180s",
+        "--stall",
+        "90s",
+      ],
+      { PATH: stubPATH, VERTER_GATE_LOCK: lk },
+    );
+
+    const surfaceRaw = existsSync(surfaceMarker) ? readFileSync(surfaceMarker, "utf8") : "";
+    const shippedCheckRaw = existsSync(shippedCheckMarker)
+      ? readFileSync(shippedCheckMarker, "utf8")
+      : "";
+    const shippedContractRaw = existsSync(shippedContractMarker)
+      ? readFileSync(shippedContractMarker, "utf8")
+      : "";
+    const surfaceBuildJobs = (surfaceRaw.match(/CARGO_BUILD_JOBS=(\d+)/) || [])[1];
+    const surfaceTestThreads = (surfaceRaw.match(/--test-threads (\d+)/) || [])[1];
+    const shippedCheckBuildJobs = (shippedCheckRaw.match(/CARGO_BUILD_JOBS=(\d+)/) || [])[1];
+    const shippedContractBuildJobs = (shippedContractRaw.match(/CARGO_BUILD_JOBS=(\d+)/) || [])[1];
+    const shippedContractTestThreads = (shippedContractRaw.match(/--test-threads (\d+)/) || [])[1];
+
+    note(
+      `real gate + cargo-stub dispatcher => rc=${r.code}; surface build-jobs=${surfaceBuildJobs} ` +
+        `test-threads=${surfaceTestThreads}; shipped-check build-jobs=${shippedCheckBuildJobs}; ` +
+        `shipped-contract build-jobs=${shippedContractBuildJobs} test-threads=${shippedContractTestThreads}`,
+    );
+
+    const allInvoked = surfaceRaw !== "" && shippedCheckRaw !== "" && shippedContractRaw !== "";
+    const EXPECT_SURFACE = "6";
+    const EXPECT_SHIPPED = "2";
+    if (!allInvoked) {
+      fail(
+        "(GB20) LANE RESOURCE SPLIT VALUE WIRING: the real per-lane cargo invocation(s) were never " +
+          `observed (surface-invoked=${surfaceRaw !== ""} shipped-check-invoked=${shippedCheckRaw !== ""} ` +
+          `shipped-contract-invoked=${shippedContractRaw !== ""}) — the gate did not reach the lanes under ` +
+          `test (rc=${r.code}). Tail of captured output:\n${r.out.slice(-4000)}`,
+      );
+    } else if (
+      surfaceBuildJobs !== EXPECT_SURFACE ||
+      surfaceTestThreads !== EXPECT_SURFACE ||
+      shippedCheckBuildJobs !== EXPECT_SHIPPED ||
+      shippedContractBuildJobs !== EXPECT_SHIPPED ||
+      shippedContractTestThreads !== EXPECT_SHIPPED
+    ) {
+      fail(
+        "(GB20) production must thread deriveGateLaneResourceSplit's actual per-lane VALUES into the " +
+          "REAL cargo env (CARGO_BUILD_JOBS) and command line (--test-threads) each lane's own cargo " +
+          "process actually receives — not opts.buildJobs/opts.testThreads (the pre-fix un-split ceiling, " +
+          `applied twice): expected surface=${EXPECT_SURFACE}/${EXPECT_SURFACE}, ` +
+          `shipped=${EXPECT_SHIPPED}/${EXPECT_SHIPPED}; observed surface build-jobs=${surfaceBuildJobs} ` +
+          `test-threads=${surfaceTestThreads}, shipped-check build-jobs=${shippedCheckBuildJobs}, ` +
+          `shipped-contract build-jobs=${shippedContractBuildJobs} test-threads=${shippedContractTestThreads}`,
+      );
+    } else {
+      pass(
+        "(GB20) LANE RESOURCE SPLIT VALUE WIRING: driving the REAL gate.mjs CLI against a controlled " +
+          "cargo stand-in (--build-jobs 8 --test-threads 8, a concurrent, non-degenerate split) proves the " +
+          "ACTUAL per-lane cargo invocations receive deriveGateLaneResourceSplit's split values — surface " +
+          "CARGO_BUILD_JOBS=6/--test-threads 6, shipped-cfg CARGO_BUILD_JOBS=2/--test-threads 2 — never the " +
+          "un-split 8/8 ceiling applied twice; a behavioral proof over the real command/env each lane's " +
+          "cargo process is actually handed, discriminating regardless of gate.mjs's source text",
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
   // (viii) WHOLE-GATE TIMEOUT. The --timeout is a WHOLE-gate budget for the ENTIRE multi-step sequence,
   //        NOT per-step (per-step would allow ~N×--timeout). We drive the REAL multi-step seam via the
   //        self-test runner (`--st-seam`): THREE separate steps, each a 4s argv-tagged sleep (12s of work
@@ -1357,6 +2269,37 @@ async function main() {
   //     holder, not a blanket refusal (discrimination).
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(x) FAIL-CLOSED MUTEX (alive holder, empty start-identity)\n");
+  {
+    const rawWmic = "CreationDate=20260822160000.000000+060";
+    const normalizedWmic = normalizeWindowsWmicCreationDate(rawWmic);
+    const migration = classifyProcessIdentityComparison("08/22/2026 16:00:00", normalizedWmic);
+    const reused = classifyProcessIdentityComparison("win-start-ms:63923007600001", normalizedWmic);
+    const same = classifyProcessIdentityComparison("win-start-ms:63923007600000", normalizedWmic);
+    const rawWmicSameProcess = classifyProcessIdentityComparison("08/22/2026 16:00:00", rawWmic);
+    if (
+      normalizedWmic !== "win-start-ms:63923007600000" ||
+      migration.comparable ||
+      migration.provesReuse ||
+      rawWmicSameProcess.comparable ||
+      rawWmicSameProcess.provesReuse ||
+      !reused.comparable ||
+      !reused.provesReuse ||
+      !same.matches ||
+      same.provesReuse
+    ) {
+      fail(
+        "(x-idfmt) mutex identity migration: a legacy/current-format pair must refuse as " +
+          "incomparable, raw WMIC must never prove reuse, and compatible different identities prove " +
+          "reuse while equal identities match",
+      );
+    } else {
+      pass(
+        "(x-idfmt) MUTEX IDENTITY MIGRATION: a legacy live owner and current-format identity are " +
+          "incomparable (never stolen as reused), raw WMIC cannot prove reuse; compatible-format " +
+          "difference proves reuse and equality proves the same holder",
+      );
+    }
+  }
   posix_x: {
     if (IS_WINDOWS) {
       skip(
@@ -1642,14 +2585,14 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
-  // (xi) SURFACE-2 ZERO-SUITES / PARTIAL-FILTER SETUP GATE. If the verter_session lib/test suite filter
-  //      finds nothing (a filter regression / archive-shape change) the gate must FAIL SETUP (127), NOT
-  //      pass on surface 1 alone. We drive the REAL selectSessionSuites() gate IN-PROCESS. Zero session
+  // (xi) LEGACY SURFACE-2 ZERO-SUITES / PARTIAL-FILTER CLASSIFIER. This is a retained selftest regression
+  //      fixture, not a production gate stage: gate.mjs no longer calls selectSessionSuites(). We drive the
+  //      frozen classifier IN-PROCESS. Zero session
   //      suites => 127; a lib-only filter (missing the integration `test` kind) => 127; a proper 1-lib +
   //      N-test listing => OK/0 (discrimination). Pre-fix: runGate had NO zero-suite guard — an empty
   //      filter produced an empty loop and reached the green aggregate verdict.
   // --------------------------------------------------------------------------------------------------
-  process.stderr.write("\n(xi) SURFACE-2 zero-suites / partial-filter setup gate\n");
+  process.stderr.write("\n(xi) LEGACY SURFACE-2 zero-suites / partial-filter classifier\n");
   {
     const fixDir = freshTmpDir("gatetest-s2fix-");
     const zero = join(fixDir, "zero.json");
@@ -1704,8 +2647,8 @@ async function main() {
     }
     if (ok) {
       pass(
-        "(xi) SURFACE-2 GATE: zero session suites => 127, lib-only (missing test kind) => 127, " +
-          "1-lib+2-test => 0 (discriminating; a silent surface-2 skip is now a SETUP failure)",
+        "(xi) LEGACY SURFACE-2 CLASSIFIER: zero session suites => 127, lib-only (missing test kind) => 127, " +
+          "1-lib+2-test => 0 (discriminating retained selftest fixture; not a production gate stage)",
       );
     }
   }
@@ -1727,6 +2670,9 @@ async function main() {
     const source = "C:\\gate\\runner\\debug\\deps\\verter_napi-deadbeef.pdb";
     const destination = "C:\\gate\\extract\\target\\debug\\deps\\verter_napi-deadbeef.pdb";
     const copied = [];
+    const isolatedCopied = [];
+    const isolatedMkdir = [];
+    const isolatedPresent = new Set([source]);
     // `--extract-overwrite` does not remove files omitted by the new archive. Model a destination PDB left
     // behind by an earlier gate run: it must never suppress copying the current matching build sidecar.
     const present = new Set([source, destination]);
@@ -1752,6 +2698,19 @@ async function main() {
         throw new Error("copy must not run without the source PDB");
       },
     });
+    const isolated = ensureRequiredWindowsDebugSidecars({
+      allSuites: [suite],
+      runnerTarget: "C:\\gate\\runner",
+      extractDir: "C:\\gate\\extract",
+      destinationExtractDir: "C:\\gate\\surface-extract",
+      windows: true,
+      existsFn: (path) => isolatedPresent.has(path),
+      mkdirFn: (path) => isolatedMkdir.push(path),
+      copyFileFn: (from, to) => {
+        isolatedCopied.push([from, to]);
+        isolatedPresent.add(to);
+      },
+    });
     const nonWindowsCopies = [];
     const nonWindows = ensureRequiredWindowsDebugSidecars({
       allSuites: [suite],
@@ -1767,6 +2726,12 @@ async function main() {
       copied.length !== 1 ||
       copied[0][0] !== source ||
       copied[0][1] !== destination ||
+      isolated.error ||
+      isolated.copied !== 1 ||
+      isolatedMkdir[0] !== "C:\\gate\\surface-extract\\target\\debug\\deps" ||
+      isolatedCopied[0]?.[0] !== source ||
+      isolatedCopied[0]?.[1] !==
+        "C:\\gate\\surface-extract\\target\\debug\\deps\\verter_napi-deadbeef.pdb" ||
       !missing.error ||
       nonWindows.error ||
       nonWindows.copied !== 0 ||
@@ -2321,7 +3286,7 @@ async function main() {
   //          * a bare `--help` => 0 (the legit non-gate mode still works — discriminating control).
   //          * `--prepare trailingjunk` => 127 (a positional after --prepare is rejected).
   //          * `--prepare --selftest-x` => 127 (an unknown flag after --prepare is rejected).
-  //          * `--prepare --no-fail-fast` => 127 (a GATE-ONLY flag after --prepare is rejected — pre-fix it
+  //          * `--prepare --exhaustive` => 127 (a GATE-ONLY flag after --prepare is rejected — pre-fix it
   //            was SILENTLY ACCEPTED and the warm-pass ran, the strongest discriminator for the prepare
   //            mutual-exclusion).
   // --------------------------------------------------------------------------------------------------
@@ -2350,7 +3315,7 @@ async function main() {
       { argv: ["--prepare", "trailingjunk"], why: "positional after --prepare" },
       { argv: ["--prepare", "--selftest-x"], why: "unknown flag after --prepare" },
       {
-        argv: ["--prepare", "--no-fail-fast"],
+        argv: ["--prepare", "--exhaustive"],
         why: "gate-only flag after --prepare (pre-fix: accepted)",
       },
     ];
@@ -2372,7 +3337,7 @@ async function main() {
     if (ok) {
       pass(
         "(U-P1) STRICT ARGV: --help --bad-flag => 127 (bare --help => 0); --prepare trailingjunk / " +
-          "--prepare --selftest-x / --prepare --no-fail-fast each => 127 — the exit-0 non-gate modes are " +
+          "--prepare --selftest-x / --prepare --exhaustive each => 127 — the exit-0 non-gate modes are " +
           "mutually exclusive and unreachable with junk argv (discriminating)",
       );
     }
@@ -2602,7 +3567,9 @@ async function main() {
   }
 
   // --------------------------------------------------------------------------------------------------
-  // (xviii) SURFACE-2 CRASHED/ABNORMAL LIBTEST IS A HARD FAIL. A direct-libtest failure is tolerated ONLY
+  // (xviii) LEGACY SURFACE-2 CRASHED/ABNORMAL LIBTEST CLASSIFIER. This retained selftest-only fixture proves
+  //         the retired direct-libtest classifier remains fail-closed; production gate.mjs does not call it.
+  //         A direct-libtest failure is tolerated ONLY
   //         under NORMAL libtest failure semantics: exit 101 + a parsed `test result: FAILED` summary whose
   //         `failed` count EXACTLY equals the parsed FAILED names + every name allowlisted. We drive the REAL
   //         `analyzeLibtestSurface` IN-PROCESS. Discriminators —
@@ -2618,7 +3585,7 @@ async function main() {
   //           (e) a NON-tolerated FAILED name under a clean 101 + matching summary => HARD FAIL;
   //           (f) a clean run (exit 0, no FAILED) => PASS.
   // --------------------------------------------------------------------------------------------------
-  process.stderr.write("\n(xviii) SURFACE-2 crashed/abnormal libtest hard-fail\n");
+  process.stderr.write("\n(xviii) LEGACY SURFACE-2 crashed/abnormal libtest classifier\n");
   {
     const fixDir = freshTmpDir("gatetest-libtest-");
     const TOL =
@@ -2707,7 +3674,7 @@ async function main() {
     }
     if (ok) {
       pass(
-        "(xviii) SURFACE-2 CRASH GATE: SIGABRT(134), exit-101-without-summary, and summary-count-mismatch ALL " +
+        "(xviii) LEGACY SURFACE-2 CRASH CLASSIFIER: SIGABRT(134), exit-101-without-summary, and summary-count-mismatch ALL " +
           "=> FAIL even with a tolerated name; a proper exit-101 + matching summary + allowlisted name tolerates; " +
           "a real non-tolerated failure FAILs; a clean run PASSes (discriminating)",
       );
@@ -4954,8 +5921,9 @@ async function main() {
   // (F3) VERDICT GATING — the durable invariant at the verdict boundary. The exact freshness-pair name is
   //      tolerated ONLY when `freshnessToleranceAllowed === true`. We drive the REAL classifiers IN-PROCESS
   //      with the flag set both ways. Each case DISCRIMINATES against the pre-change signatures: pre-change
-  //      `analyzeLibtestSurface(text, code, binaryId)` had NO tolerance gate and ALWAYS returned `tolerated`
-  //      for the pair — so "pair + tolerance-disabled => FAIL" cannot pass against today's code.
+  //      the legacy selftest-only `analyzeLibtestSurface(text, code, binaryId)` had NO tolerance gate and
+  //      ALWAYS returned `tolerated` for the pair — so "pair + tolerance-disabled => FAIL" cannot pass
+  //      against today's retained classifier.
   //        (1) nextest classifier: pair-only + tolerance=false => FAIL; + tolerance=true => PASS-WITH-TOLERATED.
   //        (2) nextest live-agg (exit 100, summary failed=1): pair + false => FAIL; + true => PASS-WITH-TOLERATED.
   //        (3) libtest analyzer (exit 101 + matching summary): pair + false => FAIL; + true => PASS-WITH-TOLERATED.
@@ -6959,7 +7927,15 @@ async function main() {
       }
       const synthGate = join(synthScripts, "gate.mjs");
       const synthTarget = join(synthRoot, "target", "gate-runner");
-      const gateArgs = ["--timeout", "120s", "--stall", "60s", "--target-dir", synthTarget];
+      const commonGateArgs = ["--timeout", "120s", "--stall", "60s", "--target-dir", synthTarget];
+      const gateArgs = [...commonGateArgs, "--build-jobs", "7", "--test-threads", "9"];
+      const memoryTierGateArgs = [
+        ...commonGateArgs,
+        "--memory-limit",
+        "12GiB",
+        "--test-threads",
+        "9",
+      ];
       const gateEnv = { VERTER_GATE_LOCK: join(synthRoot, "gate.lock.d") };
 
       // Freshness shims, so the freshness preflight resolves "already-present" and never attempts a
@@ -6986,6 +7962,22 @@ async function main() {
         "export function ensureOracleDomain(framework) {\n" +
           '  return { installDir: "/synthetic-oracle/" + framework, realizedClosureSha256: "stub" };\n' +
           "}\n",
+      );
+
+      // This GB9 synthetic root is scoped to build-prerequisite discrimination. Give the newly-required
+      // harness-smoke phase a receipt-only stand-in so the successful GB9 leg can continue to the freshness
+      // marker it owns; GB15 executes both REAL harness modes through the production CLI.
+      const synthSmoke = join(
+        synthRoot,
+        "packages",
+        "framework-conformance-harness",
+        "bin",
+        "gate-smoke.mjs",
+      );
+      mkdirSync(dirname(synthSmoke), { recursive: true });
+      writeFileSync(
+        synthSmoke,
+        'const mode = process.argv[2];\nprocess.stdout.write(JSON.stringify({ schema: "verter-harness-smoke/v1", mode, ok: true }));\n',
       );
 
       // The MINIATURE package graph. Every edge the real chain has, and nothing else:
@@ -7097,7 +8089,7 @@ async function main() {
       ];
       for (const [id, label, present] of refusalLegs) {
         plant(label, present);
-        const run = runGateCapture(synthGate, gateArgs, gateEnv);
+        const run = runGateCapture(synthGate, id === "3" ? memoryTierGateArgs : gateArgs, gateEnv);
         if (run.code !== EXIT_USAGE || !run.out.includes(BUILD_PREREQUISITE_MARKER)) {
           fail(
             `(GB9.${id}) with ${label} the gate must FAIL SETUP (127) carrying the marker; got ` +
@@ -7105,8 +8097,30 @@ async function main() {
           );
           ok = false;
         }
+        if (
+          id === "3" &&
+          !run.out.includes(
+            "resource ceiling: cargo build jobs=8, test threads=9, active child-tree RSS=12.00 GiB",
+          )
+        ) {
+          fail(
+            `(GB9.3) an omitted build-job value must follow the explicit 12-GiB memory tier while the ` +
+              `test-thread override remains independent; output was:\n${run.out}`,
+          );
+          ok = false;
+        }
         if (!run.out.includes(probeDir) || !run.out.includes(BUILD_PREREQUISITE_COMMAND)) {
           fail(`(GB9.${id}) the refusal must name the probe target and the producer command`);
+          ok = false;
+        }
+        if (
+          id === "2" &&
+          !run.out.includes("resource ceiling: cargo build jobs=7, test threads=9,")
+        ) {
+          fail(
+            `(GB9.2) the real production CLI must preserve explicit resource overrides before its ` +
+              `cargo-free prerequisite refusal; output was:\n${run.out}`,
+          );
           ok = false;
         }
         // The refusal must be about a MISSING MODULE, not about the probe being unable to answer. Without
@@ -7153,6 +8167,134 @@ async function main() {
         ok = false;
       }
       assertUnchanged("6", allEmitted);
+
+      // @ai-generated - Drives the real production CLI to prove startup reporting owns a deadline that
+      // is separate from the canonical build/test timeout and cannot replace the canonical exit verdict.
+      // The first Cargo capability probe is a real SIGTERM-trapping process. It must consume the ONE
+      // aggregate startup-reporting allowance, be hard-killed and reaped, and leave every later startup
+      // probe unavailable without spawning. Only AFTER collectStartup settles may the production gate
+      // establish its canonical --timeout deadline and reach the deliberately failing archive build.
+      // Deleting the startup deadline launches all three 2s probe plants; moving the canonical deadline
+      // back above collectStartup exhausts it before the build-prerequisite probe. Both mutations fail.
+      const telemetryBin = join(synthRoot, "telemetry-bin");
+      mkdirSync(telemetryBin, { recursive: true });
+      const fakeCargo = join(telemetryBin, IS_WINDOWS ? "cargo.exe" : "cargo");
+      copyFileSync(process.execPath, fakeCargo);
+      if (!IS_WINDOWS) chmodSync(fakeCargo, 0o755);
+      const telemetryProbeLog = join(synthRoot, "telemetry-probes.log");
+      const telemetryProbePid = join(synthRoot, "telemetry-probe.pid");
+      const archiveStarted = join(synthRoot, "archive-started.marker");
+      const trappingProbeBody =
+        'const { appendFileSync, writeFileSync } = require("node:fs");\n' +
+        `const probeLog = ${JSON.stringify(telemetryProbeLog)};\n` +
+        `const pidFile = ${JSON.stringify(telemetryProbePid)};\n` +
+        `const archiveMarker = ${JSON.stringify(archiveStarted)};\n` +
+        "const args = process.argv.slice(2);\n" +
+        'if (args.includes("--help")) {\n' +
+        '  appendFileSync(probeLog, `PROBE ${Date.now()} ${args.join(" ")}\\n`);\n' +
+        "  writeFileSync(pidFile, String(process.pid));\n" +
+        '  process.on("SIGTERM", () => {});\n' +
+        "  setInterval(() => {}, 1000);\n" +
+        "} else {\n" +
+        '  appendFileSync(probeLog, `BUILD ${Date.now()} ${args.join(" ")}\\n`);\n' +
+        '  writeFileSync(archiveMarker, "started\\n");\n' +
+        "  process.exit(9);\n" +
+        "}\n";
+      writeFile(join(synthRoot, "nextest"), trappingProbeBody);
+      writeFile(join(synthRoot, "check"), trappingProbeBody);
+      // This leg owns startup telemetry ordering, so keep the already-separately-tested Vue macro oracle
+      // checks as successful production-path stand-ins and let the run reach the archive discriminator.
+      writeFile(
+        join(synthRoot, "scripts", "gen-vue-macro-runtime-oracle.mjs"),
+        "process.exit(0);\n",
+      );
+      writeFile(
+        join(synthRoot, "scripts", "vue-macro-runtime-oracle", "oracle.test.mjs"),
+        "process.exit(0);\n",
+      );
+      rmSync(telemetryProbeLog, { force: true });
+      rmSync(telemetryProbePid, { force: true });
+      rmSync(archiveStarted, { force: true });
+      const telemetryPath = `${telemetryBin}${pathDelimiterFor(IS_WINDOWS)}${process.env.PATH || ""}`;
+      const telemetryStartedAtMs = Date.now();
+      const telemetryRun = runGateCapture(
+        synthGate,
+        // The trapping startup probe consumes >2.5s, so a wrongly early canonical deadline still expires
+        // before the archive marker. Two seconds leaves deterministic headroom for the synthetic
+        // prerequisite/oracle/harness front half after the correctly delayed deadline starts; the previous
+        // 1s bound raced that legitimate front half on a loaded Windows host and produced rc=124 instead of
+        // reaching the deliberate archive exit 9.
+        ["--timeout", "2s", "--stall", "60s", "--target-dir", synthTarget],
+        {
+          ...gateEnv,
+          PATH: telemetryPath,
+        },
+        { cwd: synthRoot },
+      );
+      const telemetryElapsedMs = Date.now() - telemetryStartedAtMs;
+      const telemetryProbeLines = existsSync(telemetryProbeLog)
+        ? readFileSync(telemetryProbeLog, "utf8").trim().split(/\r?\n/).filter(Boolean)
+        : [];
+      const probeStarts = telemetryProbeLines.filter((line) => line.startsWith("PROBE "));
+      const buildStarts = telemetryProbeLines.filter((line) => line.startsWith("BUILD "));
+      const firstProbeAtMs = Number.parseInt(probeStarts[0]?.split(" ")[1] || "", 10);
+      const firstBuildAtMs = Number.parseInt(buildStarts[0]?.split(" ")[1] || "", 10);
+      const startupToBuildMs = firstBuildAtMs - firstProbeAtMs;
+      const trappedPid = existsSync(telemetryProbePid)
+        ? Number.parseInt(readFileSync(telemetryProbePid, "utf8"), 10)
+        : null;
+      note(
+        `(GB9.7) startup telemetry isolation => rc=${telemetryRun.code}, elapsed=${telemetryElapsedMs}ms, ` +
+          `probeStarts=${probeStarts.length}, buildStarts=${buildStarts.length}, ` +
+          `startupToBuild=${startupToBuildMs}ms, trappedPid=${trappedPid}`,
+      );
+      if (
+        telemetryRun.code !== EXIT_FAIL ||
+        !telemetryRun.out.includes("workspace did not compile")
+      ) {
+        fail(
+          `(GB9.7) unavailable startup telemetry must not replace the deliberate archive-build verdict ` +
+            `(exit 1); got rc=${telemetryRun.code}:\n${telemetryRun.out}`,
+        );
+        ok = false;
+      }
+      if (!existsSync(archiveStarted) || buildStarts.length !== 1) {
+        fail(
+          `(GB9.7) startup reporting must consume ZERO milliseconds from the canonical --timeout: the ` +
+            `real gate must still reach exactly one archive build; marker=${existsSync(archiveStarted)} ` +
+            `buildStarts=${JSON.stringify(buildStarts)}`,
+        );
+        ok = false;
+      }
+      if (probeStarts.length !== 1 || !probeStarts[0].includes("archive --help")) {
+        fail(
+          `(GB9.7) all startup probes must share one hard aggregate deadline: only the first trapping ` +
+            `probe may spawn; got ${JSON.stringify(probeStarts)}`,
+        );
+        ok = false;
+      }
+      if ((telemetryRun.out.match(/GATE TELEMETRY WARNING:/g) || []).length < 2) {
+        fail(
+          `(GB9.7) timed-out and then unavailable startup probes must remain report-only warnings:\n` +
+            telemetryRun.out,
+        );
+        ok = false;
+      }
+      if (!Number.isFinite(startupToBuildMs) || startupToBuildMs >= 5_500) {
+        fail(
+          `(GB9.7) aggregate startup reporting exceeded its hard bound before the canonical build ` +
+            `started (${startupToBuildMs}ms); ` +
+            `three independent 2s probe budgets were likely serialized`,
+        );
+        ok = false;
+      }
+      if (!Number.isInteger(trappedPid) || pidAlive(trappedPid)) {
+        fail(
+          `(GB9.7) the SIGTERM-trapping startup telemetry probe must be hard-killed and leave no ` +
+            `survivor; pid=${trappedPid}`,
+        );
+        ok = false;
+      }
     }
 
     if (ok) {
@@ -7166,8 +8308,10 @@ async function main() {
           "on a synthetic miniature of the package graph — nothing built / plugin entry missing / " +
           "language-shared missing / helper missing => 127 before the freshness preflight and before " +
           "cargo; everything built => SATISFIED and the run proceeds — plus every fail-closed probe shape " +
-          "(spawn error, signal, timeout, unparseable output) in-process. Every plant is stat-proven " +
-          "applied and re-stated after the run.",
+          "(spawn error, signal, timeout, unparseable output) in-process. A seventh real-production leg " +
+          "proves slow/trapping/unavailable startup telemetry is aggregate-bounded, reaped, report-only, " +
+          "and consumes none of the canonical build/test timeout. Every plant is stat-proven applied and " +
+          "re-stated after the run.",
       );
     }
   }
@@ -7193,6 +8337,346 @@ async function main() {
       fail(
         `(GB10) gate-memory-selftest.mjs exited ${r.status === null ? `signal ${r.signal}` : r.status} — ` +
           `memory-ceiling assertions failed:\n${r.stdout || ""}${r.stderr || ""}`,
+      );
+    }
+  }
+
+  // --------------------------------------------------------------------------------------------------
+  // (GB18) MEASURED RESOURCE + PREPARE RUNTIME ENVIRONMENT — cargo-free behavioral authorities for the
+  // memory-tiered build cap / independent 12-thread cap, immutable nextest serialization lanes, and the
+  // Windows proc-macro first-launch
+  // environment. Proc-macro suites are REAL test suites (41 tests in the measured archive), so the helper
+  // must keep them warmable and prepend nextest's listed host libdir rather than filtering/tolerating them.
+  // --------------------------------------------------------------------------------------------------
+  process.stderr.write("\n(GB18) MEASURED RESOURCE + WINDOWS PREPARE RUNTIME ENVIRONMENT\n");
+  {
+    let ok = true;
+    const hostLibdir = "C:\\Rust\\host-lib";
+    const rustBuildMeta = {
+      platforms: {
+        host: { libdir: { status: "available", path: hostLibdir } },
+      },
+    };
+    const procMacroIds = [
+      "verter_no_storedspan_derive",
+      "verter_no_typeexpr_derive",
+      "verter_session_oracle_macro",
+      "future_derive",
+    ];
+    for (const binaryId of procMacroIds) {
+      const baseEnv = {
+        PaTh: "E:\\decoy",
+        PATH: "D:\\tools\\bin",
+        KEEP: `keep-${binaryId}`,
+      };
+      const result = buildPrepareWarmSpawnEnv({
+        suite: {
+          "binary-id": binaryId,
+          kind: "proc-macro",
+          "build-platform": "host",
+        },
+        rustBuildMeta,
+        baseEnv,
+        windows: true,
+      });
+      const pathKeys = result.ok
+        ? Object.keys(result.env).filter((key) => key.toUpperCase() === "PATH")
+        : [];
+      if (
+        !result.ok ||
+        result.env.PATH !== `${hostLibdir};D:\\tools\\bin` ||
+        pathKeys.length !== 1 ||
+        pathKeys[0] !== "PATH" ||
+        result.env.KEEP !== `keep-${binaryId}`
+      ) {
+        fail(
+          `(GB18.1) ${binaryId} must remain warmable with one canonical PATH, metadata host libdir ` +
+            `prepended exactly once; got ${JSON.stringify(result)}`,
+        );
+        ok = false;
+      }
+    }
+
+    const deduplicated = buildPrepareWarmSpawnEnv({
+      suite: {
+        "binary-id": "future_derive",
+        kind: "proc-macro",
+        "build-platform": "host",
+      },
+      rustBuildMeta,
+      baseEnv: { PATH: "c:\\rust\\HOST-LIB;D:\\tools\\bin", KEEP: "yes" },
+      windows: true,
+    });
+    if (
+      !deduplicated.ok ||
+      deduplicated.env.PATH !== `${hostLibdir};D:\\tools\\bin` ||
+      deduplicated.env.KEEP !== "yes"
+    ) {
+      fail(
+        `(GB18.2) metadata libdir must be first and de-duplicated case-insensitively; got ` +
+          JSON.stringify(deduplicated),
+      );
+      ok = false;
+    }
+
+    const ordinaryBase = { PATH: "D:\\tools\\bin", KEEP: "ordinary" };
+    const ordinary = buildPrepareWarmSpawnEnv({
+      suite: { "binary-id": "ordinary", kind: "lib", "build-platform": "target" },
+      rustBuildMeta,
+      baseEnv: ordinaryBase,
+      windows: true,
+    });
+    const posixProcMacro = buildPrepareWarmSpawnEnv({
+      suite: {
+        "binary-id": "future_derive",
+        kind: "proc-macro",
+        "build-platform": "host",
+      },
+      rustBuildMeta,
+      baseEnv: ordinaryBase,
+      windows: false,
+    });
+    if (
+      !ordinary.ok ||
+      ordinary.env !== ordinaryBase ||
+      !posixProcMacro.ok ||
+      posixProcMacro.env !== ordinaryBase
+    ) {
+      fail(
+        `(GB18.3) non-proc-macro and non-Windows warm environments must remain byte-owned by the ` +
+          `constructed base env; got ordinary=${JSON.stringify(ordinary)} posix=${JSON.stringify(posixProcMacro)}`,
+      );
+      ok = false;
+    }
+
+    const invalidMetadata = [
+      ["missing-platform", { platforms: {} }],
+      [
+        "unavailable",
+        { platforms: { host: { libdir: { status: "unavailable", path: hostLibdir } } } },
+      ],
+      ["empty", { platforms: { host: { libdir: { status: "available", path: "" } } } }],
+      [
+        "relative",
+        { platforms: { host: { libdir: { status: "available", path: "relative\\lib" } } } },
+      ],
+      [
+        "drive-relative",
+        { platforms: { host: { libdir: { status: "available", path: "C:relative" } } } },
+      ],
+      [
+        "root-relative",
+        { platforms: { host: { libdir: { status: "available", path: "\\relative" } } } },
+      ],
+    ];
+    for (const [label, meta] of invalidMetadata) {
+      const result = buildPrepareWarmSpawnEnv({
+        suite: {
+          "binary-id": `invalid-${label}`,
+          kind: "proc-macro",
+          "build-platform": "host",
+        },
+        rustBuildMeta: meta,
+        baseEnv: ordinaryBase,
+        windows: true,
+      });
+      if (result.ok || !result.detail?.includes(`invalid-${label}`) || "env" in result) {
+        fail(
+          `(GB18.4) malformed ${label} proc-macro metadata must fail closed before spawn with suite ` +
+            `attribution; got ${JSON.stringify(result)}`,
+        );
+        ok = false;
+      }
+    }
+
+    const childSpec = buildPrepareWarmSpawnEnv({
+      suite: {
+        "binary-id": "child-receipt",
+        kind: "proc-macro",
+        "build-platform": "host",
+      },
+      rustBuildMeta,
+      baseEnv: { ...process.env, PaTh: "E:\\decoy", PATH: "D:\\tools\\bin" },
+      windows: true,
+    });
+    const expectedChildPath = `${hostLibdir};D:\\tools\\bin`;
+    const child = childSpec.ok
+      ? spawnSync(
+          process.execPath,
+          ["-e", `if (process.env.PATH !== ${JSON.stringify(expectedChildPath)}) process.exit(23)`],
+          { env: childSpec.env, encoding: "utf8" },
+        )
+      : { status: null, signal: null };
+    if (!childSpec.ok || child.status !== 0) {
+      fail(
+        `(GB18.5) a real cargo-free child must receive the helper-produced PATH exactly; ` +
+          `spec=${JSON.stringify(childSpec)} status=${child.status} signal=${child.signal}`,
+      );
+      ok = false;
+    }
+
+    const cleanSuccesses = [
+      classifyPrepareWarmResult({ status: 0, signal: null, error: null }),
+      classifyPrepareWarmResult({ status: 0 }),
+    ];
+    const contradictoryZeroFailures = [
+      [classifyPrepareWarmResult({ status: 0, signal: "SIGTERM" }), "exit 0; signal SIGTERM"],
+      [
+        classifyPrepareWarmResult({ status: 0, signal: null, error: new Error("boom") }),
+        "exit 0; spawn error boom",
+      ],
+    ];
+    const strictFailures = [
+      classifyPrepareWarmResult({ status: 3221225781, signal: null }),
+      classifyPrepareWarmResult({ status: 1, signal: null }),
+      classifyPrepareWarmResult({ status: null, signal: null }),
+      classifyPrepareWarmResult({ status: null, signal: "SIGTERM" }),
+      classifyPrepareWarmResult(undefined),
+    ];
+    if (
+      cleanSuccesses.some((result) => !result.ok) ||
+      contradictoryZeroFailures.some(
+        ([result, expectedDetail]) => result.ok || result.detail !== expectedDetail,
+      ) ||
+      strictFailures.some((result) => result.ok || !result.detail)
+    ) {
+      fail(
+        `(GB18.6) only exact status 0 with no signal/spawn error may count as warmed; ` +
+          `successes=${JSON.stringify(cleanSuccesses)} contradictory=${JSON.stringify(
+            contradictoryZeroFailures,
+          )} failures=${JSON.stringify(strictFailures)}`,
+      );
+      ok = false;
+    }
+
+    const nextestToml = readFileSync(join(REPO_REALPATH, ".config", "nextest.toml"), "utf8");
+    const count = (pattern) => (nextestToml.match(pattern) || []).length;
+    const expectedSharedFilter =
+      "test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|" +
+      "shared_provider_serves_dual_claimant_carrier_with_real_types|" +
+      "shared_provider_carrier_never_leaks_to_editor|" +
+      "shared_provider_reconnect_mints_fresh_engine_no_split_brain|" +
+      "composite_overlays_shared_diagnostics_via_live_resolver|" +
+      "composite_successful_shared_route_never_activates_managed_fallback)$/)";
+    const overrideRows = [];
+    const overrideRe =
+      /\[\[profile\.(default|ci)\.overrides\]\]\s*\r?\n([\s\S]*?)(?=\r?\n\[\[|\r?\n\[(?!\[)|$)/g;
+    for (const match of nextestToml.matchAll(overrideRe)) {
+      const filter = /^filter\s*=\s*'([^']+)'\s*$/m.exec(match[2])?.[1] || null;
+      const testGroup = /^test-group\s*=\s*'([^']+)'\s*$/m.exec(match[2])?.[1] || null;
+      const slowTimeout = /^slow-timeout\s*=\s*(\{[^\r\n]+\})\s*$/m.exec(match[2])?.[1] || null;
+      overrideRows.push({ profile: match[1], filter, testGroup, slowTimeout });
+    }
+    const exactOverrideCount = (profile, filter, testGroup, slowTimeout = null) =>
+      overrideRows.filter(
+        (row) =>
+          row.profile === profile &&
+          row.filter === filter &&
+          row.testGroup === testGroup &&
+          row.slowTimeout === slowTimeout,
+      ).length;
+    const configOk =
+      count(/^shared-provider-live\s*=\s*\{\s*max-threads\s*=\s*1\s*\}\s*$/gm) === 1 &&
+      count(/^lsp-server-unit\s*=\s*\{\s*max-threads\s*=\s*1\s*\}\s*$/gm) === 1 &&
+      exactOverrideCount("default", expectedSharedFilter, "shared-provider-live") === 1 &&
+      exactOverrideCount("ci", expectedSharedFilter, "shared-provider-live") === 1 &&
+      exactOverrideCount("default", "test(/^server::server_tests::/)", "lsp-server-unit") === 1 &&
+      exactOverrideCount("ci", "test(/^server::server_tests::/)", "lsp-server-unit") === 1 &&
+      exactOverrideCount(
+        "default",
+        "test(/^cases::g_compile::compile_fail::/)",
+        null,
+        '{ period = "120s", terminate-after = 3 }',
+      ) === 1 &&
+      exactOverrideCount(
+        "ci",
+        "test(/^cases::g_compile::compile_fail::/)",
+        null,
+        '{ period = "120s", terminate-after = 3 }',
+      ) === 1;
+    if (!configOk) {
+      fail(
+        `(GB18.7) raising global test concurrency must preserve both serialized nextest groups, their ` +
+          `exact default/ci selectors, and both trybuild timeout overrides; parsed rows=` +
+          JSON.stringify(overrideRows),
+      );
+      ok = false;
+    }
+
+    const gateSource = readFileSync(join(SELFTEST_DIR, "gate.mjs"), "utf8");
+    const prepareStart = gateSource.indexOf("async function runPrepare(ctx)");
+    const prepareEnd = gateSource.indexOf("\nasync function ", prepareStart + 1);
+    const prepareSource =
+      prepareStart >= 0 && prepareEnd > prepareStart
+        ? gateSource.slice(prepareStart, prepareEnd)
+        : "";
+    if (
+      !prepareSource.includes("for (const s of suites)") ||
+      prepareSource.includes("suites.filter(") ||
+      !prepareSource.includes("const warmEnvResult = buildPrepareWarmSpawnEnv({") ||
+      !prepareSource.includes("baseEnv: ctx.cargoEnv") ||
+      !prepareSource.includes("if (!warmEnvResult.ok)") ||
+      !prepareSource.includes("warmFailures++") ||
+      !prepareSource.includes("env: warmEnv")
+    ) {
+      fail(
+        `(GB18.8) production runPrepare must keep the full suite loop, fail closed on warm-env errors, ` +
+          `and pass the helper-produced env to the real spawnSync; bounded source was:\n${prepareSource}`,
+      );
+      ok = false;
+    }
+
+    const laneSelftest = spawnSync(process.execPath, [LANE_SELFTEST], {
+      env: process.env,
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (laneSelftest.status !== 0 || laneSelftest.error) {
+      fail(
+        `(GB18.9) gate-lane-selftest.mjs must prove multi-root accounting, one aggregate watchdog, ` +
+          `admission/cancellation fencing, ABA-safe completion, and exact native tree cleanup; ` +
+          `status=${laneSelftest.status} signal=${laneSelftest.signal} error=${laneSelftest.error?.message || "none"}\n` +
+          `${laneSelftest.stdout || ""}${laneSelftest.stderr || ""}`,
+      );
+      ok = false;
+    }
+
+    const supervisorFactoryCount = (gateSource.match(/createGateRunSupervisor\(\{/g) || []).length;
+    const productionRunStepCount = (gateSource.match(/\.supervisor\.runStep\(/g) || []).length;
+    const teardownStart = gateSource.indexOf("const teardown = () => {");
+    const teardownEnd = gateSource.indexOf("const installSignalTraps", teardownStart);
+    const teardownSource =
+      teardownStart >= 0 && teardownEnd > teardownStart
+        ? gateSource.slice(teardownStart, teardownEnd)
+        : "";
+    if (
+      supervisorFactoryCount !== 1 ||
+      productionRunStepCount !== 8 ||
+      gateSource.includes("await runContainedStep({") ||
+      !gateSource.includes('ctx.supervisor.runStep("surface-1", {') ||
+      !gateSource.includes('ctx.supervisor.runStep("shipped-cfg", {') ||
+      !teardownSource.includes('await supervisor.closeAndReapAll("GATE_TEARDOWN")') ||
+      teardownSource.indexOf("await supervisor.closeAndReapAll") >
+        teardownSource.indexOf("mutex.release()")
+    ) {
+      fail(
+        `(GB18.10) production must construct exactly one supervisor, route all eight currently ` +
+          `sequential contained commands through it (including Surface 1/shipped lanes), and await its ` +
+          `close before mutex release; factory=${supervisorFactoryCount} runStep=${productionRunStepCount}`,
+      );
+      ok = false;
+    }
+
+    if (ok) {
+      pass(
+        "(GB18) measured build resources are CPU/memory-tiered while the independent 12-thread cap " +
+          "remains CPU-clamped and both stay explicitly overrideable; both " +
+          "serialized nextest groups/selectors are pinned; every Windows proc-macro suite (including a " +
+          "novel future id) remains warmable with its listed host libdir prepended to one canonical PATH; " +
+          "malformed metadata and every non-zero/no-status/signal outcome fail closed; a real cargo-free " +
+          "child receives the environment; production wires it into the unfiltered suite loop; the `gate-lane` " +
+          "authority proves aggregate containment and exact multi-forest cleanup.",
       );
     }
   }
@@ -7496,7 +8980,7 @@ async function main() {
   // count. A genuine before/after mutation on a synthetic fixture directory proves the scanner tracks the
   // actual `#[test]` count, not a value baked in at some earlier read.
   //
-  // GB12.3 — decideShippedCfgGuardExpectedCountMatch: the actual comparison `runShippedCfgGuard` (gate.mjs)
+  // GB12.3 — decideShippedCfgGuardExpectedCountMatch: the actual comparison `runShippedCfgLane` (gate.mjs)
   // branches on, exercised directly (not reimplemented) against GB12.2's own fixture-derived count. Round-2
   // review finding: GB12.2 alone tested only the independent SCANNER, never the VERDICT gate.mjs derives
   // from it — reverting the live guard's comparison back to `runCount === 0` while leaving the scanner
@@ -7595,14 +9079,14 @@ async function main() {
         ok = false;
       }
 
-      // GB12.3: decideShippedCfgGuardExpectedCountMatch — the actual VERDICT `runShippedCfgGuard` (gate.mjs)
+      // GB12.3: decideShippedCfgGuardExpectedCountMatch — the actual VERDICT `runShippedCfgLane` (gate.mjs)
       // branches on, extracted into gate-internals.mjs as the SOLE place the comparison is made (no inline
       // copy left in gate.mjs). Exercised directly against `after` (4), the SAME count GB12.2 just proved
       // `countTestAttributesInDir` tracks live — not a hand-picked number disconnected from the scanner.
       //
-      // THE REGRESSION THIS CATCHES (round-2 review counterexample): reverting `runShippedCfgGuard`'s check
+      // THE REGRESSION THIS CATCHES (round-2 review counterexample): reverting `runShippedCfgLane`'s check
       // back to a bare `runCount === 0` while leaving `countTestAttributesInDir` untouched. Because
-      // `runShippedCfgGuard` now has no inline comparison of its own — it only calls this function — that
+      // `runShippedCfgLane` now has no inline comparison of its own — it only calls this function — that
       // revert IS a revert of this function, and GB12.3 calls it directly.
       if (decideShippedCfgGuardExpectedCountMatch(after, after) !== null) {
         fail(
@@ -7696,7 +9180,7 @@ async function main() {
 
   // --------------------------------------------------------------------------------------------------
   // (GB12.4) WIRING PROOF — GB12.3 above proves `decideShippedCfgGuardExpectedCountMatch` behaves
-  // correctly, but calling it directly never touches gate.mjs's real call site (`runShippedCfgGuard`,
+  // correctly, but calling it directly never touches gate.mjs's real call site (`runShippedCfgLane`,
   // around the `const parityFailure = decideShippedCfgGuardExpectedCountMatch(...)` line). THE REGRESSION
   // THIS CATCHES: someone reverts that ONE call site back to an inline `runCount === 0` (or any other
   // inline) comparison while leaving `decideShippedCfgGuardExpectedCountMatch` itself untouched — GB12.3
@@ -7704,7 +9188,7 @@ async function main() {
   // would mean faking BOTH `cargo check --profile no-debug-assertions` and
   // `cargo nextest run -p verter_shipped_cfg_contract` behind a synthetic `cargo` on PATH — disproportionate
   // for proving one call site invokes one named function. Instead this statically scans the PRODUCTION
-  // gate.mjs source for `runShippedCfgGuard`'s function body and asserts (a) it calls
+  // gate.mjs source for `runShippedCfgLane`'s function body and asserts (a) it calls
   // `decideShippedCfgGuardExpectedCountMatch(` and (b) it contains no inline `runCount` comparison
   // (`===`/`!==`/`==`/`!=` against `0`) that could stand in for that call — the two-sided check a
   // one-sided "does it call the function" assertion would miss (the revert keeps the call in scope
@@ -7714,11 +9198,9 @@ async function main() {
   process.stderr.write("\n(GB12.4) SHIPPED-CFG GUARD CALL-SITE WIRING (static source scan)\n");
   {
     const gateSource = readFileSync(GATE, "utf8");
-    const fnStart = gateSource.indexOf("async function runShippedCfgGuard(");
+    const fnStart = gateSource.indexOf("async function runShippedCfgLane(");
     if (fnStart === -1) {
-      fail(
-        "(GB12.4) could not find `async function runShippedCfgGuard(` in gate.mjs — has it been renamed?",
-      );
+      fail("(GB12.4) could not find `async function runShippedCfgLane(` in gate.mjs");
     } else {
       // The function ends at the next top-level `\n}\n` followed by a blank line — bounded by scanning for
       // the next line that is exactly `}` at column 0 after fnStart (functions in this file are not
@@ -7726,7 +9208,7 @@ async function main() {
       const afterStart = gateSource.slice(fnStart);
       const closeMatch = afterStart.match(/\n}\n/);
       if (!closeMatch) {
-        fail("(GB12.4) could not find the closing `}` of runShippedCfgGuard in gate.mjs");
+        fail("(GB12.4) could not find the closing `}` of runShippedCfgLane in gate.mjs");
       } else {
         const fnBody = afterStart.slice(0, closeMatch.index);
         const callsExtracted = fnBody.includes("decideShippedCfgGuardExpectedCountMatch(");
@@ -7746,19 +9228,19 @@ async function main() {
         const hasInlineComparison = /runCount\s*[=!]==?\s*0\b/.test(fnBodyCodeOnly);
         if (!callsExtracted) {
           fail(
-            "(GB12.4) runShippedCfgGuard's body in gate.mjs no longer calls " +
+            "(GB12.4) runShippedCfgLane's body in gate.mjs no longer calls " +
               "decideShippedCfgGuardExpectedCountMatch(...) — the extracted function GB12.3 verifies is no " +
               "longer wired to the real call site.",
           );
         } else if (hasInlineComparison) {
           fail(
-            "(GB12.4) runShippedCfgGuard's body in gate.mjs contains an inline `runCount ... 0` comparison " +
+            "(GB12.4) runShippedCfgLane's body in gate.mjs contains an inline `runCount ... 0` comparison " +
               "in addition to (or instead of) calling decideShippedCfgGuardExpectedCountMatch(...) — this is " +
               "exactly the round-2 regression: an inline check that bypasses the verified extracted function.",
           );
         } else {
           pass(
-            "(GB12.4) runShippedCfgGuard's real call site in gate.mjs calls " +
+            "(GB12.4) runShippedCfgLane's real call site in gate.mjs calls " +
               "decideShippedCfgGuardExpectedCountMatch(...) directly with no inline runCount comparison " +
               "standing in for it.",
           );
@@ -7820,7 +9302,7 @@ async function main() {
     }
 
     // The filterset: `not (...)`, one `(package(pkg) and test(/^prefix/))` arm per row, parenthesized so
-    // composing it with another filter (Surface 3's SHIPPED_CFG_FILTER) via `and` cannot change precedence.
+    // composing it into the current Surface-1 filter via `and` cannot change precedence.
     const filterExpr = buildTrybuildExclusionFilterExpr();
     if (!filterExpr.startsWith("not (") || !filterExpr.endsWith(")")) {
       fail(`(GB13.2) the filter must be a single negated group "not (...)"; got '${filterExpr}'`);
@@ -7834,7 +9316,8 @@ async function main() {
       }
     }
 
-    // Per-package skip args (SURFACE 2's direct-libtest mechanism — it has no `-E`, only `--skip <prefix>`).
+    // Legacy Surface-2 selftest fixture: direct libtest had no `-E`, only `--skip <prefix>`; gate.mjs no
+    // longer uses this helper.
     const sessionSkip = trybuildSkipArgsForPackage("verter_session");
     if (
       sessionSkip.length !== 2 ||
@@ -7975,7 +9458,9 @@ async function main() {
       fail(`(GB14.1) FAIL-verdict parse mismatch: ${JSON.stringify(failParsed)}`);
       ok = false;
     }
-    const passParsed = parseGateVerdict("[gate] VERDICT: PASS (all three surfaces green)\n");
+    const passParsed = parseGateVerdict(
+      "[gate] VERDICT: PASS (surface 1 + the shipped-cfg guard both green)\n",
+    );
     if (passParsed.kind !== "pass") {
       fail(`(GB14.1) PASS verdict must parse kind=pass, got ${JSON.stringify(passParsed)}`);
       ok = false;
@@ -8226,7 +9711,7 @@ async function main() {
     // (GB14.5) SURFACE SEGMENTATION — a nextest recap for a given test-name is read ONLY from that test's
     // OWNING surface segment, never from a different surface's (which could name the same test string
     // under a DIFFERENT profile/outcome and silently cross-contaminate binary-id recovery).
-    // Header/body text matched byte-for-byte against what gate.mjs's log()/`runShippedCfgGuard` actually
+    // Header/body text matched byte-for-byte against what gate.mjs's log()/`runShippedCfgLane` actually
     // print (log() prefixes every line with "[gate] ") — NOT the deleted SURFACE 2 / old package-filtered
     // SURFACE 3 shape. A stale fixture here would pass against itself while the real regex silently never
     // matches a real gate log — the failure mode this test exists to catch.

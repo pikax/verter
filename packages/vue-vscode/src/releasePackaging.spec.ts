@@ -303,7 +303,9 @@ describe("release gating", () => {
   it("defines a test job that runs the canonical Rust gate and the JS suite", () => {
     expect(release, "release.yml must define a `test:` job").toMatch(/^ {2}test:$/m);
     const body = release.match(/^ {2}test:\n([\s\S]*?)(?=^ {2}\S|\Z)/m)?.[1] ?? "";
-    expect(body, "the test job must run the canonical Rust gate").toContain("scripts/gate.mjs");
+    expect(body, "the release test job must run the exhaustive canonical Rust gate").toContain(
+      "node scripts/gate.mjs --exhaustive",
+    );
     expect(body, "the test job must run clippy with -D warnings").toMatch(
       /clippy[\s\S]*-D warnings/,
     );

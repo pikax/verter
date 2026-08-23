@@ -6,6 +6,249 @@ Working notes for `node scripts/gate.mjs`, the canonical Rust gate. See
 and [`MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`](refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md)
 for the ratified plan this document reports evidence against.
 
+## Local and exhaustive execution policies
+
+`node scripts/gate.mjs` is the local fail-fast policy. Surface 1 and the small shipped-contract nextest run
+omit `--no-fail-fast`. After the one archive/list and all post-list preconditions, Surface 1 and the
+shipped-cfg lane start concurrently — unless `deriveGateLaneResourceSplit` finds the configured build-jobs/
+test-threads ceiling too small to split across both lanes without oversubscribing it (either axis below 2),
+in which case the lanes run serially instead (Surface 1 first, then shipped-cfg), still under the same
+fail-fast/cancellation rules.
+When Surface 1 produces a hard receipt, the runner cancels a live shipped step and prevents the lane's
+not-yet-admitted contract. Required coverage is then incomplete, so the invocation can never emit PASS or
+PASS-WITH-TOLERATED. A shipped-first failure never cancels Surface 1. A green local run completes every
+required receipt and has the ordinary canonical PASS contract.
+
+`node scripts/gate.mjs --exhaustive` preserves the historical CI/diagnostic policy: Surface 1 and the small
+shipped-contract nextest run add `--no-fail-fast`, both post-list lanes are awaited despite ordinary hard
+failures, and the shipped lane remains serial (`check -> contract`, with contract admitted only after a
+successful check). CI, release,
+cached full gates, complete diagnostics, and comparable performance runs must pass the flag explicitly.
+This choice is argv-only; no ambient CI environment variable changes it.
+
+## Post-list overlap and isolation
+
+The overlap boundary is deliberately narrow. Build-prerequisite, oracle, harness, freshness, Vue-macro,
+the single dev archive, its one list, sidecar restoration, suite inventory, and trybuild coverage all settle
+before fan-out. Surface 1 then reads that immutable archive using
+`<runnerTarget>/lanes/surface-1/target` and `gate-work/lanes/surface-1/{work,extract,output.log}`. The shipped
+check and contract use `<runnerTarget>/lanes/shipped-cfg/target` and
+`gate-work/lanes/shipped-cfg/{work,output.log}`. These mutable roots are validated as absolute,
+runner-contained, and pairwise disjoint before creation. Command `cwd` remains the repository. The shipped
+target is intentionally cold relative to the front archive target; its check warms its following contract.
+
+One supervisor owns both lanes. Its deadline remains the original whole-gate absolute deadline, its stall
+clock observes one aggregate live-progress vector, and one same-snapshot sum of every disjoint registered
+process forest is compared with the unchanged memory ceiling. Deadline, stall, memory-monitor failure, or
+setup abort closes admission and reaps every exact registered process forest. Before mutex release,
+teardown also runs a provenance backstop over the minimized mutex-owned `runnerTarget` umbrella (nested
+historical registration roots are deduplicated); that sweep is distinct from exact identity-bound forest
+reaping. Raw per-lane output (concurrent or serial, per `deriveGateLaneResourceSplit`'s `concurrent` flag)
+is buffered lane-locally and replayed exactly once under the existing Surface/check/contract headers, so
+parseable nextest rows remain deterministic.
+
+## Measured resource defaults and prepare warm environment
+
+Build jobs and test threads are independent policies even though their current
+measured winners match on the reference host. Omitted test threads default to
+`min(12, availableParallelism())`. Omitted build jobs are CPU-clamped and use
+the effective child-tree memory ceiling: 12 jobs at `>=16GiB`, 8 jobs at
+`>=12GiB`, and 4 below that. An explicit positive `--build-jobs` or
+`--test-threads` value remains exact and is not clamped. The child-tree memory
+ceiling itself stays `max(512MiB, 50% of physical RAM)` unless explicitly set.
+
+The Windows reference host had 32 available logical CPUs and 127.17 GiB RAM.
+All cold archive runs began with an absent, distinct target and produced the
+same 804 MiB archive / 86 listed binaries:
+
+| build jobs | dev archive | peak RSS |
+|---:|---:|---:|
+| 4 | 422.775s | 7.72 GiB |
+| 8 | 283.920s | 9.90 GiB |
+| 12 | **234.792s** | 11.60 GiB |
+
+The Surface-1 comparison held revision, selection, nextest groups, inventory
+(24,843 run / 597 configured skips / none unrun), and terminal outcome constant
+(24,837 passed / the same 6 Windows-only failures outside this slice and outside
+the canonical verdict / no timeout or exec failure):
+
+| test threads | Surface 1 | nextest wall | peak RSS |
+|---:|---:|---:|---:|
+| 4 | 695.769s | 683.990s | 1.85 GiB |
+| 8 | 426.028s | 416.015s | 3.08 GiB |
+| 12 | **357.825s** | **347.571s** | 3.84 GiB |
+
+These Windows measurement runs were red and are scheduling evidence, not gate-pass receipts. The original
+baseline was red, while the later macOS canonical run is proven green. The six Windows product/test
+failures remain non-canonical and outside this harness-performance work; they are not tolerated or fixed
+here. The Windows measurements do establish
+twelve as the fastest tested point on both controlled axes with ample memory
+headroom on the 127.17-GiB host. They do **not** establish twelve build jobs as
+portable on the documented 24-GiB host: its default ceiling is 12 GiB, only
+0.40 GiB above the measured 11.60-GiB peak. That host therefore defaults to
+eight jobs (9.90-GiB measured peak, 2.10-GiB headroom); twelve remains available
+as an explicit override, or by default once the effective ceiling reaches 16
+GiB. The test-thread axis remains twelve because its measured peak is only 3.84
+GiB. `.config/nextest.toml` continues to serialize
+`shared-provider-live` and `lsp-server-unit` at `max-threads = 1` under their
+exact default/CI selectors; global concurrency never widens those lanes.
+
+On Windows, the three listed `kind: "proc-macro"`, `build-platform: "host"`
+suites contain 41 real tests and remain in the full warm loop. Their standalone
+test harnesses dynamically load Rust host libraries. Before the fix, nextest
+ran them successfully but `--prepare`'s direct `spawnSync(..., ["--list"] )`
+inherited no host-libdir PATH and each exited `0xC0000135`
+(`STATUS_DLL_NOT_FOUND`). The prepare launcher now reads
+`rust-build-meta.platforms[suite.build-platform].libdir`, requires available
+CWD-independent absolute metadata, and prepends that directory to the already-
+sanitized per-child PATH. It still accepts only status 0. Missing metadata,
+missing binaries, signals, timeouts, and every non-zero exit fail setup; no
+proc-macro name is allowlisted, filtered, skipped, or tolerated.
+
+## Lane resource partition (post-list concurrency, not per-lane sizing)
+
+`deriveGateResourceLimits` sizes ONE build-jobs/test-threads ceiling from the host's CPU count and memory
+tier (above). That ceiling used to be handed to Surface 1 and the shipped-cfg lane INDEPENDENTLY — each
+lane's `cargo`/`nextest` invocation was sized to the full ceiling, even on a ceiling wide enough that the
+two lanes run CONCURRENTLY after archive/list ("Post-list overlap and isolation" above; today the split
+falls back to serial only when the ceiling is too small on either axis — see below). On an 8-core host this
+logged
+`resource ceiling: cargo build jobs=8, test threads=8` and then ran both lanes at that width AT THE SAME
+TIME — an 8-core host requesting 16 cores' worth of concurrent work for the whole overlap window. Surface
+1's nextest run (test-threads=8) overlapped the shipped-cfg lane's own cold `cargo check --workspace
+--all-targets` compile (build-jobs=8) and then its `nextest run` build+execute (build-jobs=8, then
+test-threads=8). This means self-competition for the machine's cores was POSSIBLE for the entire duration
+of the longer lane — **it is a hypothesis, not a proven finding, that this self-competition caused the
+specific timeouts and Surface-1 wall-clock inflation observed earlier**: no controlled Cargo-backed
+before/after comparison has been run to isolate self-competition from other variance (host load, disk
+cache state, thermal throttling). Treat "tests that pass in 2-85s standalone lost budget to a gate
+competing with itself for the machine" as the leading explanatory theory, not a measured conclusion, until
+such a comparison exists.
+
+`deriveGateLaneResourceSplit` (`scripts/gate-internals.mjs`) fixes the oversubscription itself (which IS
+directly measured, independent of the causal hypothesis above) by partitioning the ONE ceiling across the
+two lanes instead of handing each lane the whole thing: Surface 1 (the full workspace test universe) gets
+the majority share, the shipped-cfg lane (a small package-scoped contract — ten-ish tests, whose own
+wall-clock matters far less than Surface 1's) gets a minority share (`SHIPPED_CFG_LANE_SHARE = 0.25`,
+floored at 1 core). Both the build-jobs axis and the test-threads axis are split independently, so the
+COMBINED demand on either axis never exceeds the ceiling `deriveGateResourceLimits` derived from the host —
+**including at a ceiling of 1**, where a numeric per-lane split can't give both lanes >= 1 unit while still
+summing to 1 (a lane cannot run `cargo`/`nextest` with 0 build jobs or 0 test threads). At that ceiling the
+split function reports `concurrent: false` and `orchestrateGateLanes` runs the two lanes SERIALLY instead
+of admitting them together — shipped-cfg's `runShippedLane` is not even invoked until Surface 1 has
+settled, so only one lane's `cargo`/`nextest` invocation is ever live and the combined demand at any
+instant stays at the ceiling, never double it. The split — including the `concurrent` flag and which
+scheduling mode ran — is logged explicitly (`lane resource partition (combined demand bounded to the
+ceiling above — …): surface-1 build-jobs=… test-threads=…; shipped-cfg build-jobs=… test-threads=…`) and
+recorded on `telemetry.lanes.resourceSplit` (plus per-lane `buildJobs`/`testThreads` fields on
+`telemetry.lanes.surface1` / `.shippedCfg`), so a telemetry artifact proves the combined demand fit the
+ceiling rather than asserting it. The front archive/list phase (before either lane starts) is sequential
+and keeps the full, unsplit ceiling — there is no concurrent consumer to share it with at that point.
+
+Stall detection remains a SEPARATE, still-open gap: the supervisor observes one aggregate live-progress
+vector across both lanes ("Post-list overlap and isolation" above), so a hung shipped-cfg lane can hide
+behind Surface 1's throughput advancing the aggregate vector. Splitting resource sizing does not change
+that; per-lane stall detection is unaddressed follow-up work, not folded into this fix.
+
+## Comparable gate telemetry
+
+After acquiring the single-flight mutex, the gate starts a report-only `GateTelemetry` accumulator and
+gives all startup reporting probes one separate hard aggregate deadline. The canonical build/test deadline
+is established only after startup collection settles, so telemetry consumes none of that budget. Its
+whole elapsed time ends only after the oversize-source advisory and teardown. Stable gate phase IDs are
+`build-prerequisite`, `oracle-cache`, `harness-smoke-vapor`, `harness-smoke-typescript`,
+`freshness-tooling`, `vue-macro-oracle-check`, `vue-macro-oracle-tests`, `dev-archive`, `dev-list`,
+`surface-1`, `shipped-check`, `shipped-contract`, `advisory`, and `teardown`. A failed command remains in
+the table; an unreached or watchdog-aborted phase makes measurement completeness `partial`. A fully
+executed red test run can still have complete measurement, because completeness describes observations,
+not correctness.
+
+A local fail-fast cancellation marks a live shipped phase `aborted` and any unadmitted remainder `not-run`,
+so measurement is `partial`. That is corroborating telemetry only: the pure receipt reducer independently
+requires a complete parseable Surface result, successful shipped check, complete contract analysis, and
+expected-count parity before either green verdict.
+
+Each phase retains its lane-local `peakRssBytes` and process count. The whole monitored RSS value also
+consumes the supervisor's highest same-snapshot aggregate across every live forest, including its total
+process count and per-lane `{ rssBytes, processCount }` contributions; it is never `max(surface, shipped)`
+and never a sum of peaks from different times. Synchronous prerequisite probes are timed but are not
+sampled by the contained-child watchdog, so their RSS row is zero rather than an invented estimate.
+
+The bounded environment fingerprint contains UTC instant; OS type/platform/architecture/release/version;
+CPU model plus logical and available counts; total RAM; Node/V8; rustc and Cargo versions/hosts;
+cargo-nextest; initial target state (`absent`, `empty`, or `nonempty`); configured jobs, threads, memory and
+profiles; `NEXTEST_PROFILE`; incremental mode; wrapper basename; and sccache presence/hit rate when safely
+available. It excludes hostname, username, full wrapper paths, and broad environment dumps. Every command
+probe has a short timeout clamped to the remaining aggregate startup-reporting time, refuses to spawn when
+that allowance is spent, and uses direct unignorable termination rather than catchable `SIGTERM`. A probe
+failure reports
+`unavailable`, warns, marks measurement partial, and cannot affect the gate verdict/failure accumulator.
+
+Terminal text telemetry is mirrored to `gate-work/gate-telemetry-v1.log`, with additive schema-v1 JSON at
+`gate-work/gate-telemetry-v1.json`. Cargo capability probes add stable HTML `--timings` to exactly the dev
+nextest archive, shipped-cfg check, and shipped-cfg contract. Before each producer the runner removes only
+its exact producing target's `cargo-timings/cargo-timing.html` source and that phase's old destination, then
+validates and snapshots the settled report immediately to the paths below. Proven pre-launch absence is the
+normal freshness root. If an exact-file clear fails, the snapshot is accepted only when a pre/post SHA-256
+content identity proves that the producer replaced the old report; unchanged or ambiguous identity warns,
+marks measurement partial, and is refused even when the mtime is within filesystem tolerance.
+The dev archive reads the front target source; shipped check and contract read the isolated shipped target
+source sequentially. The three final artifact identities remain unchanged.
+
+- `gate-work/cargo-timings/dev-nextest-archive.html`
+- `gate-work/cargo-timings/shipped-cfg-check.html`
+- `gate-work/cargo-timings/shipped-cfg-contract.html`
+
+Archive-backed Surface 1 never receives `--timings` because it performs no Cargo build. Unsupported help
+output retains the old argv. Missing, stale, unreadable, or uncopyable reports emit explicit warnings and
+never cause a retry, second archive/run, or verdict change.
+
+Nextest attribution counts every final terminal identity as `processCount` and every parseable duration as
+`timedCount`; `totalSec` sums only timed identities. The total, package/crate, binary and family rows all
+carry those fields. Legacy `count` remains exactly equal to `timedCount`, and `perPackage`, `perBinary`, and
+`topFamilies` remain present. Retry/progress events still use the existing final-status supersession rule.
+The shipped contract uses the same summarizer and the already parsed dev archive package map—no new list or
+test subprocess.
+
+## Canonical conformance-harness preflight
+
+The gate now detects two broad JavaScript harness incompatibility classes
+before the expensive Rust archive build. After the build-prerequisite load
+and pinned oracle-cache realization succeed, and before freshness tooling or
+Cargo, it runs `packages/framework-conformance-harness/bin/gate-smoke.mjs`
+in two explicit modes:
+
+- `vapor` calls the harness's exported `ensureVaporRuntimePreloaded()` path,
+  including its real jsdom bootstrap and pinned with-vapor runtime import.
+- `typescript` calls the exported `observeTypeScript()` over a small
+  multi-file, in-memory workspace-domain graph, then asserts the intended
+  export and zero relevant diagnostics. This exercises the canonical virtual
+  host rather than a mirrored TypeScript setup.
+
+Each mode runs separately through `runContainedStep`, so the existing whole-
+gate deadline, stall detection, process-tree RSS ceiling, and teardown apply.
+Each also emits its own duration/peak-RSS telemetry line. Success requires the
+exact-key, mode-bound JSON object receipt
+`{"schema":"verter-harness-smoke/v1","mode":"<mode>","ok":true}`,
+which the executable writes only after the real work and assertions complete.
+A non-zero exit, timeout, stall, memory ceiling/monitor abort, signal, spawn
+failure, or missing/invalid/mismatched/extra-key receipt fails setup with exit 127 and
+`HARNESS-SMOKE FAILED [<mode>]`; neither mode can warn, skip, or degrade.
+
+`gate-selftest.mjs` drives this ordering through the real production CLI but
+cannot install into the developer checkout: its child PATH makes `pnpm`
+unresolvable and provides temporary executable `buf`/`oxfmt` shims. The leg
+refuses to launch unless those facts are proven, and accepts only the
+production preflight's non-installing `already-present` or `path-fallback`
+outcome before the Cargo stand-in is reached. Its omission plant continues
+past strict command-constructor refusal and proves the mutated real CLI omits
+TypeScript while improperly reaching Cargo.
+
+Oracle-cache realization alone therefore proves only that the pinned install
+closure is usable. It is not evidence that Vapor's DOM-sensitive bootstrap or
+the workspace TypeScript virtual host is compatible with the current Node and
+harness environment; the two real smokes own those claims.
+
 ## Memory ceiling — measured, not assumed (step 1)
 
 `parsePosixProcessTableRss` used to sum RSS by POSIX process-GROUP membership,

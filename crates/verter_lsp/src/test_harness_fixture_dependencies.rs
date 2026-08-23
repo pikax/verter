@@ -578,6 +578,12 @@ fn copy_type_package_with_dependencies(source: &std::path::Path, node_modules: &
         node_modules: &std::path::Path,
         visited: &mut std::collections::HashSet<String>,
     ) {
+        let source = std::fs::canonicalize(source).unwrap_or_else(|error| {
+            panic!(
+                "canonicalize real-provider fixture dependency {}: {error}",
+                source.display()
+            )
+        });
         let manifest_path = source.join("package.json");
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&manifest_path).unwrap_or_else(|error| {
@@ -602,12 +608,12 @@ fn copy_type_package_with_dependencies(source: &std::path::Path, node_modules: &
             return;
         }
 
-        copy_type_package_atomically(source, &node_modules.join(name));
+        copy_type_package_atomically(&source, &node_modules.join(name));
         let Some(dependencies) = manifest["dependencies"].as_object() else {
             return;
         };
         for dependency in dependencies.keys() {
-            let dependency_source = resolve_dependency_source(source, dependency)
+            let dependency_source = resolve_dependency_source(&source, dependency)
                 .unwrap_or_else(|| {
                     panic!(
                         "real-provider fixture transitive dependency `{dependency}` must resolve from {}",
@@ -618,13 +624,7 @@ fn copy_type_package_with_dependencies(source: &std::path::Path, node_modules: &
         }
     }
 
-    let source = std::fs::canonicalize(source).unwrap_or_else(|error| {
-        panic!(
-            "canonicalize real-provider fixture dependency {}: {error}",
-            source.display()
-        )
-    });
-    visit(&source, node_modules, &mut std::collections::HashSet::new());
+    visit(source, node_modules, &mut std::collections::HashSet::new());
 }
 
 fn resolve_dependency_source(
@@ -779,6 +779,81 @@ mod tests {
         }
     }
 
+    fn write_test_type_package(package_root: &std::path::Path, name: &str, dependencies: &[&str]) {
+        std::fs::create_dir_all(package_root).expect("create test type package");
+        let dependencies = dependencies
+            .iter()
+            .map(|dependency| ((*dependency).to_string(), serde_json::json!("1.0.0")))
+            .collect::<serde_json::Map<_, _>>();
+        let manifest = serde_json::json!({
+            "name": name,
+            "types": "index.d.ts",
+            "dependencies": dependencies,
+        });
+        std::fs::write(
+            package_root.join("package.json"),
+            serde_json::to_vec(&manifest).expect("serialize test type package manifest"),
+        )
+        .expect("write test type package manifest");
+        std::fs::write(
+            package_root.join("index.d.ts"),
+            "export interface Surface {}\n",
+        )
+        .expect("write test type package declaration");
+    }
+
+    #[cfg(windows)]
+    fn link_test_package(target: &std::path::Path, link: &std::path::Path) {
+        use std::process::{Command, Stdio};
+
+        std::fs::create_dir_all(link.parent().expect("test package link has a parent"))
+            .expect("create test package link parent");
+        let junction = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if junction
+            .as_ref()
+            .is_ok_and(std::process::ExitStatus::success)
+        {
+            return;
+        }
+        std::os::windows::fs::symlink_dir(target, link).unwrap_or_else(|symlink_error| {
+            panic!(
+                "create test package link {} -> {}: junction={junction:?}; \
+                 symlink={symlink_error}",
+                link.display(),
+                target.display()
+            )
+        });
+    }
+
+    #[cfg(not(windows))]
+    fn link_test_package(target: &std::path::Path, link: &std::path::Path) {
+        std::fs::create_dir_all(link.parent().expect("test package link has a parent"))
+            .expect("create test package link parent");
+        std::os::unix::fs::symlink(target, link).unwrap_or_else(|error| {
+            panic!(
+                "create test package symlink {} -> {}: {error}",
+                link.display(),
+                target.display()
+            )
+        });
+    }
+
+    fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+        match panic.downcast::<String>() {
+            Ok(message) => *message,
+            Err(panic) => match panic.downcast::<&'static str>() {
+                Ok(message) => (*message).to_string(),
+                Err(_) => "non-string panic payload".to_string(),
+            },
+        }
+    }
+
     /// Plant a shadowing package in the AUTHORED fixture's `node_modules` and
     /// prove the production seam — `fixture_workspace_root`, the one function
     /// every consumer resolves a fixture through — hands back a root that does
@@ -882,6 +957,95 @@ mod tests {
             authored.join("node_modules").join("vue").exists(),
             "materialization must not write into the authored tree: {}",
             authored.join("node_modules").display()
+        );
+    }
+
+    /// A dependency reached through a linked package must resolve its own
+    /// dependencies from its physical install location. pnpm places those
+    /// dependencies beside the physical package target, not beside the logical
+    /// link through which its parent reached it.
+    #[test]
+    fn linked_transitive_packages_resolve_dependencies_from_their_physical_targets() {
+        let temporary = tempfile::tempdir().expect("create linked dependency fixture");
+        let root_target = temporary
+            .path()
+            .join("store/root-install/node_modules/root-package");
+        let linked_target = temporary
+            .path()
+            .join("store/linked-install/node_modules/linked-package");
+        let leaf_target = temporary
+            .path()
+            .join("store/linked-install/node_modules/leaf-package");
+        let unrelated_target = temporary
+            .path()
+            .join("store/linked-install/node_modules/unrelated-package");
+        write_test_type_package(&root_target, "root-package", &["linked-package"]);
+        write_test_type_package(&linked_target, "linked-package", &["leaf-package"]);
+        write_test_type_package(&leaf_target, "leaf-package", &[]);
+        write_test_type_package(&unrelated_target, "unrelated-package", &[]);
+
+        let root_install = root_target
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("root package has an install root");
+        let linked_install = root_install.join("node_modules/linked-package");
+        link_test_package(&linked_target, &linked_install);
+        let logical_root = temporary.path().join("workspace/node_modules/root-package");
+        link_test_package(&root_target, &logical_root);
+        assert_eq!(
+            std::fs::canonicalize(&linked_install).expect("resolve linked package plant"),
+            std::fs::canonicalize(&linked_target).expect("resolve linked package target"),
+            "the recursive dependency plant must be a real link to its physical target"
+        );
+        assert!(
+            leaf_target.join("package.json").is_file(),
+            "the leaf dependency must exist only beside the physical linked target"
+        );
+        assert!(
+            !root_install
+                .join("node_modules/leaf-package/package.json")
+                .exists(),
+            "the logical install must not accidentally carry the leaf dependency"
+        );
+
+        let staged_node_modules = temporary.path().join("staged/node_modules");
+        copy_type_package_with_dependencies(&logical_root, &staged_node_modules);
+
+        for package in ["root-package", "linked-package", "leaf-package"] {
+            assert!(
+                staged_node_modules
+                    .join(package)
+                    .join("package.json")
+                    .is_file(),
+                "the complete declared closure must copy `{package}`"
+            );
+        }
+        assert!(
+            !staged_node_modules.join("unrelated-package").exists(),
+            "an undeclared package beside the physical target must not enter the copied closure"
+        );
+    }
+
+    #[test]
+    fn dependency_copy_refuses_a_declared_dependency_that_cannot_resolve() {
+        let temporary = tempfile::tempdir().expect("create missing dependency fixture");
+        let package = temporary.path().join("store/node_modules/root-package");
+        write_test_type_package(&package, "root-package", &["missing-package"]);
+        let staged_node_modules = temporary.path().join("staged/node_modules");
+
+        let panic = std::panic::catch_unwind(|| {
+            copy_type_package_with_dependencies(&package, &staged_node_modules);
+        })
+        .expect_err("a declared dependency with no resolvable package must abort copying");
+        let message = panic_message(panic);
+
+        assert!(
+            message.contains("transitive dependency `missing-package` must resolve"),
+            "the refusal must name the missing declared dependency, got: {message}"
+        );
+        assert!(
+            !staged_node_modules.join("missing-package").exists(),
+            "a missing dependency must not be silently represented by an empty package"
         );
     }
 

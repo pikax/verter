@@ -144,9 +144,28 @@ Outside the orchestration landing-train lifecycle — a local change NOT driven 
 
 Any change driven THROUGH the landing-train lifecycle — including a single substantial train (even a one-slice train) — uses the tiered gating: during slice implementation and fix cycles, targeted runs (changed tests + affected crates + a conservative reverse-dependency closure) are ITERATION EVIDENCE ONLY, and a selector that cannot prove the affected closure MUST fall back to full-workspace coverage for that run (still iteration evidence, never landing evidence); the canonical pair runs at exactly the two lifecycle points — after the final content change on the rebased, landing-frozen train tree, and again independently at post-land confirm. Targeted success is never landing evidence, and the standalone clause above never lets a train-driven change skip the frozen-tree final gate.
 
+The canonical gate's omitted resource defaults are independently measured.
+Test threads are `min(12, available CPUs)`. Build jobs are additionally clamped
+by the effective memory ceiling: 12 jobs from 16 GiB, 8 jobs from 12 GiB, and 4
+jobs below that, always capped by available CPUs. This keeps the documented
+24-GiB host at 8 build jobs under its unchanged 12-GiB default ceiling; the
+measured 12-job peak was 11.60 GiB and is too close to call portable there.
+Explicit positive overrides remain exact. Raising global test
+concurrency does not widen `.config/nextest.toml`'s `shared-provider-live` or
+`lsp-server-unit` groups: both remain `max-threads = 1` under the default and CI
+profiles, with their existing selectors. The cargo-free gate self-test pins
+both group assignments as well as the default/override matrix.
+
+On Windows, `--prepare` still warm-lists every archived suite and accepts only
+an exact status 0. Proc-macro suites are real test suites, not filterable
+compiler artifacts; their direct first launch prepends the suite's listed
+`rust-build-meta.platforms[build-platform].libdir` to the already-sanitized
+child PATH so the Rust host DLLs resolve. Missing, unavailable, or non-absolute
+libdir metadata fails setup; no suite is skipped or tolerated.
+
 The canonical full verification pass:
 
-1. `node scripts/gate.mjs` — CANONICAL Rust gate. SINGLE-TEST-UNIVERSE: builds the test universe ONCE via `cargo nextest archive --workspace` (dev profile) and runs it with `cargo nextest run` (per-test process isolation, every workspace test target including the ~25 verter_session integration binaries — this is SURFACE 1). Deliberate shared-process coverage (a leaked static, TLS surviving a test, a global cache mutated by one test changing another's result) lives INSIDE that one run as ordinary `#[test]`s in `verter_session/tests/cases/shared_process_contract.rs`, not a second archive or a second run. After surface 1, the gate runs the SHIPPED-CFG GUARD: `cargo check --workspace --all-targets --profile no-debug-assertions` (compile-only — catches an item wrongly hidden behind `cfg(debug_assertions)`), then a small package-scoped `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions` — the ONLY tests in the repo that execute with `debug_assertions`/overflow-checks off, run against an independently-verified expected `#[test]` count (never a bare "selected zero tests" check) — see "Shipped-cfg guard" below. Before the archive build it runs a freshness-tooling preflight: it ensures the workspace `buf` + `oxfmt` binaries are present (auto-running `pnpm install --frozen-lockfile` inside the mutex/timeout/stall machinery when the `node_modules/.bin` shims are missing), then VERDICT-GATES the `cases::typeinfo_proto_ts_freshness::*` byte-pin tolerance on that outcome — tooling present/installed ⇒ tolerance OFF, so a freshness failure is a HARD gate failure (exit 1), NOT PASS-WITH-TOLERATED; a deterministic install failure (e.g. frozen-lockfile mismatch) ⇒ a LOUD setup failure (exit 127), never silently tolerated (when an install is attempted — both `node_modules/.bin/{buf,oxfmt}` shims already present ⇒ the preflight returns already-present and no install runs); when pnpm is not resolvable AND `buf` is not resolvable the Rust byte-pin pair SKIPS gracefully and PASSES, so the gate reports an ORDINARY PASS (no FAIL line) — the verdict-gated tolerance flips ON there only as a LATENT safety net that would surface PASS-WITH-TOLERATED solely in the unusual case the pair emitted a tolerated FAIL despite `buf` being absent. `oxfmt` absence NEVER grants tolerance — with `buf` present, a missing `oxfmt` is a LOUD setup failure (exit 127), not a degraded run. Run it with `node_modules` present (the normal path) so the byte-pin runs GENUINELY: with the tooling present a freshness failure is a HARD FAIL (a real stale-binding regression to regenerate + commit) — PASS-WITH-TOLERATED is NEVER the regression signal on a normal machine, and on a buf-less runner the pair yields an ordinary PASS via the skip, not PASS-WITH-TOLERATED. See `docs/arch/gate-performance.md` and `docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`.
+1. `node scripts/gate.mjs` — CANONICAL local Rust gate. It builds/lists the SINGLE TEST UNIVERSE once, settles every post-list precondition, then starts archive-backed Surface 1 and the serial shipped-cfg lane concurrently in pairwise-disjoint runner-owned target/work/extract roots. Both nextest invocations retain local fail-fast argv. A hard Surface-1 receipt cancels a live shipped step or prevents its remaining contract, producing a loud incomplete FAIL; a shipped-first failure never cancels Surface. A bare PASS is possible only with complete parseable Surface, successful shipped check, complete contract analysis, and expected-count parity. Use `node scripts/gate.mjs --exhaustive` for CI, release, complete failure diagnostics, and comparable benchmarks: both nextest invocations receive `--no-fail-fast` and both lanes are awaited despite ordinary Surface hard failures. Surface 1 remains the one archive-backed workspace run with per-test process isolation, including `verter_session/tests/cases/shared_process_contract.rs`. The shipped lane remains the exact `cargo check --workspace --all-targets --profile no-debug-assertions` followed only on success by package-scoped `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions`, with its independent expected-test-count check; it is never a second whole-workspace archive. One supervisor owns the absolute deadline, aggregate stall vector, same-snapshot aggregate RSS ceiling, cancellation, and teardown for both lanes. Raw output is buffered and replayed once in Surface/check/contract order. The freshness-tooling preflight and its verdict-gated `cases::typeinfo_proto_ts_freshness::*` tolerance are unchanged: present/installed buf+oxfmt makes freshness failures hard, neither pnpm nor buf resolving makes the Rust pair skip, oxfmt absence alone never grants tolerance, and deterministic install failure is a loud setup failure. Run with `node_modules` present. See `docs/arch/gate-performance.md` and `docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`.
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo check --workspace --release` — the only thing in the loop that compiles the REAL release profile (opt-level 3 + fat LTO); the gate's shipped-cfg guard uses the cheap `no-debug-assertions` profile and surface 1 is debug. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. It is a CHECK and RUNS NO TESTS, so it cannot observe the runtime half of that class — a state mutation written inside a `debug_assert!` argument compiles fine and silently never executes in a shipped build. The gate's SHIPPED-CFG GUARD (`verter_shipped_cfg_contract`, run under `no-debug-assertions`) is what covers that half — the ONLY tests in the repo that execute with `debug_assertions` off. Mirrored in CI by the `rust-build-configs` job.
 4. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — host clippy cannot see target-gated code, and the `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE `extensions/lapce` + `extensions/zed` manifests, not this one. Same `rust-build-configs` job in CI.
@@ -159,6 +178,30 @@ Confirm `cargo clippy --version` reports the `rust-toolchain.toml`-pinned versio
 The gate runner also emits an advisory warning for each non-exempt production Rust source above 1,500
 lines, formatted as `path (N lines)`. This scan is informational only: its findings do not enter either
 surface analyzer, the failure accumulator, or the final gate verdict.
+
+**Gate telemetry is report-only.** From immediately after mutex acquisition through advisory and teardown,
+the runner records stable lane-local phase durations/peaks plus the supervisor's highest same-snapshot
+aggregate live-forest RSS, total process count, and per-lane contributions. It emits a bounded host/tool fingerprint and
+paired `gate-work/gate-telemetry-v1.{log,json}` artifacts. `complete` means every applicable phase was
+measured and terminal handling ran; partial or watchdog-aborted runs stay `partial`, while a fully executed
+red test run may still be measurement-complete. Bounded version/help probes share a separate hard aggregate
+startup-reporting deadline and hard-terminate their direct child; the canonical build/test deadline starts
+only after startup collection settles. Failed reporting warns and makes telemetry partial.
+Cargo timing snapshots require either proven pre-launch absence or a changed pre/post content identity when
+exact-file deletion fails. These paths never select tests, add a retry/run, alter the failure accumulator,
+or affect exit status.
+
+A local fail-fast cancellation marks a live shipped phase `aborted` and any unadmitted remainder `not-run`,
+so telemetry is `partial`; the coverage-aware receipt reducer independently emits FAIL and never consults
+telemetry. Exhaustive benchmark runs
+must pass `--exhaustive` explicitly or their wall time is deliberately truncated and not comparable.
+
+Cargo stable HTML timings are capability-gated on the dev archive, shipped compile check, and shipped
+contract only, then copied immediately from the producing target's overwrite source to three distinct
+`gate-work/cargo-timings/` files. Archive-backed Surface 1 gets no Cargo timings flag. Nextest reports count
+final process identities separately from parseable timing identities at total/package(crate)/binary/family
+levels; legacy `count` remains the timed-count alias. See `docs/arch/gate-performance.md` for phase IDs,
+fingerprint fields, schema, and artifact names.
 
 **Build-prerequisite preflight — fail-closed, and the FIRST step of gate mode.** Parts of the Rust suite
 load artifacts cargo does not build. The real-provider suites spawn the pinned tsserver with
@@ -240,6 +283,23 @@ producer command.
   other class — EPERM, timeout, an unrelated plugin throw, an unreadable launcher — FAILS, because
   `finish()` exits 0 whenever FAIL is zero, so skipping on an infrastructure failure would silently retire a
   scenario whose artifacts are present.
+
+**Conformance-harness preflight — real work, before Cargo.** After the build-prerequisite load and pinned
+oracle-cache realization are confirmed, but before freshness tooling or the archive build, the gate runs
+the harness-owned `packages/framework-conformance-harness/bin/gate-smoke.mjs` in `vapor` and `typescript`
+modes. Vapor calls the real exported `ensureVaporRuntimePreloaded()` path; TypeScript calls the real exported
+`observeTypeScript()` with a multi-file in-memory observation in the `workspace` domain and asserts its
+export plus zero relevant diagnostics. No DOM or virtual-host logic is copied into the gate. Each mode runs
+separately through `runContainedStep`, emits separately-attributed duration/RSS telemetry, and succeeds only
+with the exact-key, mode-bound `verter-harness-smoke/v1` object receipt emitted after the work completes.
+Non-zero exit, timeout/stall/memory ceiling or monitor abort, signal, spawn failure, or a missing/invalid/
+mismatched/extra-key receipt is setup failure 127 with exact `HARNESS-SMOKE FAILED [<mode>]` attribution;
+there is no skip, warning, or tolerance. GB15's real-production-CLI self-test leg makes `pnpm` unresolvable,
+provides temporary executable `buf`/`oxfmt` shims, refuses to launch without that proof, and requires the
+production freshness preflight to report a non-installing outcome, so it cannot install or lock the developer
+checkout. Its smoke-omission mutation must continue past strict constructor refusal and prove the mutated real
+CLI omitted the mode while improperly reaching Cargo. A successful oracle-cache load therefore does not claim
+that DOM bootstrap or virtual TypeScript observation works.
 
 **Shipped-cfg guard — what it covers, and what it does not.**
 
@@ -345,7 +405,7 @@ Every new `CRITICAL` architecture rule must land with primary EXECUTABLE enforce
 
 ### Test Hermeticity (MANDATORY)
 
-Default-run tests must depend only on locally-vendored fixtures. The canonical run (`node scripts/gate.mjs`, i.e. its two underlying surfaces `cargo nextest run --workspace` + `cargo test -p verter_session --tests`) must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
+Default-run tests must depend only on locally-vendored fixtures. The canonical run (`node scripts/gate.mjs`: one workspace archive/list, then archive-backed Surface 1 overlapping the isolated serialized shipped check/contract lane) must compile and pass on a fresh checkout without any `.integration-tests/repos/<third-party>/...` clones, sibling repositories, or other external corpora present alongside the workspace.
 
 When needing fixtures from a third-party project (e.g., `nuxt-ui` Vue corpus), vendor a snapshot into the consuming crate's `tests/<feature>/fixtures/` and refer to them with `include_str!("./fixtures/...")` or path-based loaders. Preserve upstream license attribution in sibling `LICENSE.md` and `README.md` for provenance.
 
