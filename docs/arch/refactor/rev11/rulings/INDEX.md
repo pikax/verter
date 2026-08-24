@@ -15,7 +15,7 @@ model. Do not treat `superseded_by = —` as proof a ruling is uncontested; it m
 ruling's own text names it as superseded. Ledger `digest` binding is a separate step owned by the
 program orchestrator (RULING 1), not performed here.
 
-## Maintainer directives (29)
+## Maintainer directives (43)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
@@ -24,6 +24,19 @@ program orchestrator (RULING 1), not performed here.
 | [`COALESCER-CLOSURE-IS-NAMED-DISPOSITION`](MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md) | maintainer-ruling | 2026-08-23 | K3, G2, H2, TCM4 | — |
 | [`CSS-WORK-REACHES-J1`](MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md) | maintainer-ruling | 2026-08-23 | J1 | — |
 | [`CODE-OVER-LEDGER`](MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md) | maintainer-ruling | 2026-08-22 | BV2, B5, CM1, scripts/validate-program-state.mjs, ledger bookkeeping protocol | — |
+| [`BV2-B5-J1-RATIFICATION`](MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md) | maintainer-ruling | 2026-08-22 | BV2, B5, J1, review-mandate protocol | — |
+| [`LSP-CSS-READERS-CONSUME-SEMANTICS`](MAINTAINER-ADDENDUM-LSP-CSS-READERS-CONSUME-SEMANTICS.md) | maintainer-ruling | 2026-08-21 | J1 | — |
+| [`SEMANTIC-CSS-EXTRACTION-CONSUMERS`](MAINTAINER-ADDENDUM-SEMANTIC-CSS-EXTRACTION-CONSUMERS.md) | maintainer-ruling | 2026-08-21 | J1 | — |
+| [`BUILD-LANE-SEPARATION`](MAINTAINER-DIRECTIVE-BUILD-LANE-SEPARATION.md) | maintainer-directive | 2026-08-21 | build architecture, release pipeline, developer workflow | — |
+| [`GATE-BLOCK-DEFERS-VERIFICATION`](MAINTAINER-DIRECTIVE-GATE-BLOCK-DEFERS-VERIFICATION.md) | maintainer-directive | 2026-08-21 | gate architecture, verification infrastructure | — |
+| [`GATE-PERFORMANCE-BLOCK`](MAINTAINER-DIRECTIVE-GATE-PERFORMANCE-BLOCK.md) | maintainer-directive | 2026-08-21 | gate architecture, verification infrastructure | — |
+| [`ONE-BUILD-ONE-RUN`](MAINTAINER-DIRECTIVE-ONE-BUILD-ONE-RUN.md) | maintainer-directive | 2026-08-21 | gate architecture, verification infrastructure | — |
+| [`SINGLE-TEST-UNIVERSE`](MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md) | maintainer-directive | 2026-08-21 | gate architecture, verification infrastructure | — |
+| [`J-TRAIN-SCOPE-IS-PARSING-ONLY`](MAINTAINER-RULING-J-TRAIN-SCOPE-IS-PARSING-ONLY.md) | maintainer-ruling | 2026-08-21 | J1, J2, J3, J4, CSS/style pipeline architecture | — |
+| [`NO-COMPAT-OR-LEGACY-CODE`](MAINTAINER-RULING-NO-COMPAT-OR-LEGACY-CODE.md) | maintainer-ruling | 2026-08-21 | all blocks, all crates, all packages | — |
+| [`ONE-CSS-PARSER-PARSE-ONCE`](MAINTAINER-RULING-ONE-CSS-PARSER-PARSE-ONCE.md) | maintainer-ruling | 2026-08-21 | J1, J2, J3, J4, CSS/style pipeline architecture | — |
+| [`VUE-DOUBLE-PIN-DISPOSITION`](MAINTAINER-RULING-VUE-DOUBLE-PIN-DISPOSITION.md) | maintainer-ruling | 2026-08-21 | Vue oracle pinning, conformance infrastructure | — |
+| [`PRE-ENFORCEMENT-ACCEPTANCES`](MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES.md) | maintainer-ruling | 2026-08-20 | BF1, BF2, B2, B3, B4 | — |
 | [`HARDEN-ORCHESTRATION`](MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION.md) | maintainer-directive | 2026-08-20 | program-wide orchestration machinery | — |
 | [`CSS-CLEAN-CUTOVER`](MAINTAINER-DIRECTIVE-CSS-CLEAN-CUTOVER.md) | maintainer-directive | 2026-08-20 | Track J (J1-J4), CSS/style pipeline architecture | — |
 | [`NO-LIGHTNINGCSS`](MAINTAINER-RULING-NO-LIGHTNINGCSS.md) | maintainer-directive | 2026-08-17 | Track J / J1, BCSS0 (superseded within this document), CSS/style pipeline | CSS-CLEAN-CUTOVER |
@@ -50,12 +63,17 @@ program orchestrator (RULING 1), not performed here.
 | [`PARALLEL-REVIEW-SEATS`](MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md) | maintainer-directive | 2026-08-18 | program-wide review-seat protocol | — |
 | [`REVIEW-BUDGET-BY-ARTIFACT-CLASS`](MAINTAINER-RULING-REVIEW-BUDGET.md) | maintainer-directive | 2026-08-17 | program-wide review protocol | — |
 
-## Architecture rulings (14)
+## Architecture rulings (19)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`SIX-WAY-B6-CM1-2026-08-24`](ARCHITECT-RULING-2026-08-24-SIX-WAY-B6-CM1.md) | architecture-ruling | 2026-08-24 | B6, BF1, CM1, governance.md, performance-gates.toml | — |
+| [`CM1-CONTROL-AXIS-AMENDMENT-2026-08-24`](ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md) | architecture-ruling | 2026-08-24 | CM1 | — |
 | [`B6-ROUTE-OVERHEAD-CELL-LOCK-2026-08-23`](ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md) | architecture-ruling | 2026-08-23 | B6, BF1, performance-gates.toml | — |
 | [`TIMING-ARCHITECTURE-2026-08-23`](ARCHITECT-RULING-2026-08-23-TIMING-ARCHITECTURE.md) | architecture-ruling | 2026-08-23 | program-wide timing architecture (production and tests) | — |
+| [`CSS-ALLOCATION-OWNERSHIP-2026-08-23`](ARCHITECT-RULING-2026-08-23-CSS-ALLOCATION-OWNERSHIP.md) | architecture-ruling | 2026-08-23 | J1 | — |
+| [`CSS-FRAMEWORK-CONSTRUCT-VALIDITY`](ARCH-RULING-CSS-FRAMEWORK-CONSTRUCT-VALIDITY.md) | architecture-ruling | 2026-08-21 | J1, J4, CSS/style pipeline architecture | — |
+| [`J-TRAIN-FIVE-FORKS`](ARCH-RULING-J-TRAIN-FIVE-FORKS.md) | architecture-ruling | 2026-08-20 | J1, J2, J3, J4 | — |
 | [`C1-FOUR-FORKS`](ARCH-RULING-C1-FOUR-FORKS.md) | architecture-ruling | 2026-08-20 | C1 | — |
 | [`C1-THREE-GAPS-ADDENDUM`](ARCH-ADDENDUM-C1-THREE-GAPS.md) | architecture-ruling | 2026-08-20 | C1 | — |
 | [`D1-SIX-FORKS`](ARCH-RULING-D1-SIX-FORKS.md) | architecture-ruling | 2026-08-20 | D1 | C1-D1-FLOW-FILE-RECONCILIATION |
@@ -83,4 +101,9 @@ program orchestrator (RULING 1), not performed here.
 | [`B4-C1-SERIALIZE`](DISPOSITION-B4-C1-SERIALIZE.md) | disposition | unknown | B4, C1 | — |
 | [`BS1-SERIALIZE-BEHIND-BV1`](DISPOSITION-BS1-SERIALIZE.md) | disposition | unknown | BS1, BV1 | — |
 | [`TYPECHECK-POC-TO-H-TRAIN`](DISPOSITION-TYPECHECK-POC-TO-H-TRAIN.md) | disposition | 2026-08-18 | H2, H3 (future Track H blocks) | — |
-| [`CSS-ALLOCATION-OWNERSHIP-2026-08-23`](ARCHITECT-RULING-2026-08-23-CSS-ALLOCATION-OWNERSHIP.md) | architecture-ruling | 2026-08-23 | J1 | — |
+
+## Procedures (1)
+
+| ID | Type | Date | Binds | Superseded by |
+|---|---|---|---|---|
+| [`CONTEXT-PACKET-DISPATCH-PROCEDURE`](context-packet-dispatch-procedure.md) | procedure | 2026-08-22 | — | — |
