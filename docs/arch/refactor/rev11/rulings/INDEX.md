@@ -3,12 +3,15 @@
 One row per document in this directory. The original corpus was migrated from the session scratchpad
 under RULING 2 of [`ORCHESTRATION-AUTHORITY-MODEL`](ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md);
 documents added after that migration are listed here too. Each document carries a typed YAML
-frontmatter header (`ruling_id`, `type`, `date`, `date_source`, `binds`, `source_file`,
-`summary`, `supersedes`, `superseded_by`, `contradicts`, `notes`) prepended to the verbatim original
-text — body content was not rewritten, only the frontmatter and a mechanical `<MACHINE_ROOT>` path
-substitution were applied. `supersedes`/`superseded_by` are per-CLAIM, not per-document: a ruling can
-supersede one claim of another while the rest of that document remains binding — see each document's
-own frontmatter for the exact claim text.
+frontmatter header. Nine keys are on every document — `ruling_id`, `type`, `date`, `date_source`,
+`binds`, `summary`, `supersedes`, `superseded_by`, `contradicts`; `source_file` and `notes` are usual
+but not universal, omitted by two documents. The corpus is the authority for this schema, not the
+reverse — read the keys off the documents rather than assuming this list. For the migrated documents
+the header was prepended to the verbatim original text — body content was not rewritten, only the
+frontmatter and a mechanical `<MACHINE_ROOT>` path substitution were applied.
+`supersedes`/`superseded_by` are per-CLAIM, not per-document: a ruling can supersede one claim of
+another while the rest of that document remains binding — see each document's own frontmatter for the
+exact claim text.
 
 **Built since this migration:** the effective-state generator and authority registry described in RULING
 1/3 of `ORCHESTRATION-AUTHORITY-MODEL` now exist, at `scripts/effective-state.mjs` and
