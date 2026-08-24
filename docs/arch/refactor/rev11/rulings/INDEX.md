@@ -68,10 +68,11 @@ ruling is uncontested; it means no OTHER migrated ruling's own text names it as 
 | [`PARALLEL-REVIEW-SEATS`](MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md) | maintainer-directive | 2026-08-18 | program-wide review-seat protocol | — |
 | [`REVIEW-BUDGET-BY-ARTIFACT-CLASS`](MAINTAINER-RULING-REVIEW-BUDGET.md) | maintainer-directive | 2026-08-17 | program-wide review protocol | — |
 
-## Architecture rulings (22)
+## Architecture rulings (23)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`LSP-DURABLE-FENCE-OWNERSHIP-2026-08-24`](ARCHITECT-RULING-2026-08-24-LSP-DURABLE-FENCE-OWNERSHIP.md) | architecture-ruling | 2026-08-24 | H2, H3, K3 | — |
 | [`C1-CHARTER-RATIFICATION-2026-08-24`](ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFICATION.md) | architecture-ruling | 2026-08-24 | C1 | — |
 | [`C1-CHARTER-RATIFIABILITY-2026-08-24`](ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFIABILITY.md) | architecture-ruling | 2026-08-24 | C1 | — |
 | [`TCM0-DECISIONS-2026-08-24`](ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md) | architecture-ruling | 2026-08-24 | TCM0, TCM2, TCM3, TCM4 | — |
