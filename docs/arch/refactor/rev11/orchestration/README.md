@@ -67,7 +67,8 @@ Deterministic mechanics belong in tooling, not in prompts:
 
 Each result must be structurally sound and bound to its lane and reviewed tree. The results directory
 is named for that sha, so a leftover file from an earlier freeze cannot answer for a lane that
-produced nothing. Exit 0 sound, 1 otherwise, 2 usage. Absent, truncated or inconclusive is BLOCKED.
+produced nothing. Exit 0 sound, 1 otherwise, 2 usage — `<sha>` must be the full 40 characters even
+when that directory is named with the short form. Absent, truncated or inconclusive is BLOCKED.
 
     rust-lock.sh <name> -- <command>
 

@@ -19,6 +19,11 @@ Spawns one manager and resumes it while it remains effective, priming it with th
 architecture and current slice — not the whole doctrine. Validates scope and completion without
 duplicating code review. Sends compact events upward. Never implements.
 
+**A block never authorises itself.** A block branch carries no authority-registry delta — the registry
+is authored trunk-side by its owner and inherited byte-for-byte through rebase, so a branch-local
+registry edit is dropped rather than repaired. The ledger's `base_sha` and everything under
+`repository.*` are orchestrator-owned in the same way.
+
 ## Manager — owns delivery
 
 Dispatches implementation, selects risk-appropriate review lanes, adjudicates and deduplicates
@@ -105,9 +110,14 @@ Read-only review work may run in parallel. Write work runs only in isolated owne
     rust-lock.sh <name> -- <command>
 
 Host-provided, on `PATH`; verify `command -v rust-lock.sh` before the first dispatch that needs it.
-It bounds concurrent builds host-wide and passes through re-entrantly, so a nested call cannot
-deadlock on a slot its own tree holds. A "wait until no cargo is running, then start" check is not
-mutual exclusion — every waiter sees idle at once and they all start together.
+It bounds concurrent builds host-wide — not memory — and passes through re-entrantly, so a nested call
+cannot deadlock on a slot its own tree holds. A "wait until no cargo is running, then start" check is
+not mutual exclusion — every waiter sees idle at once and they all start together.
+
+A gate carries its own memory ceiling and aborts its child tree on breach; a bare `cargo nextest`
+under the semaphore carries none, so shed that unprotected workload first. Steer on swap used, not
+free RAM — macOS keeps free pages near zero by design, and `vm_stat` reports its own page size, which
+is not 4096 on Apple Silicon. Take two `loadavg` samples before calling a trend.
 
 Cargo waiting on a target lock is not progress; do not read it as a stalled agent. Run the full gate
 only on the final landing candidate; workers run targeted affected checks.

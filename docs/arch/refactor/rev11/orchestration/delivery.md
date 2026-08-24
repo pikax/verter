@@ -95,6 +95,20 @@ then four hours of silence. Nothing in its account looked false; it was simply u
 A block's own acceptance evidence is exactly the kind of claim this exists to check — including this
 one.
 
+**Ask what a branch changed with `git diff <merge-base> <branch>`, never `git diff <trunk> <branch>`.**
+On a branch that is behind, the second reports files trunk added as files the branch deleted.
+
+**Rebase integrity is not row equivalence.** A clean rebase preserves the branch's intent, which is
+the failure when that intent is stale: patch-ids 1:1 and a clean tree are both consistent with a
+branch silently reverting a field its owner corrected upstream. Before a squash, field-diff every
+ledger row the branch touches, baselined on the merge-base, and surface a collision where both sides
+moved the same field.
+
+**A clean merge is not a correct merge.** Two changes each correct alone can auto-merge without
+conflict and still produce a defect — one narrowing what an inventory collects, the other deriving a
+fact from that inventory. Conflict markers do not detect semantic conflict, so integration is
+verified on its own.
+
 ## One trap worth stating
 
 **A check that enumerates or matches from the same source it validates proves nothing.** A totality
