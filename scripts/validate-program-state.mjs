@@ -1693,7 +1693,16 @@ function main() {
   // block reaching REVIEW/ACCEPTANCE_RECOMMENDED/ACCEPTED/PRIVATE_CHECKPOINT
   // from here forward still fails this check without a real context-packet.md
   // digest, exactly as before this exemption.
-  const CONTEXT_PACKET_DIGEST_LEGACY_GAP_GRANDFATHER = new Set(["BV2", "B5", "CM1"]);
+  // B6 joined this set on 2026-08-24 by
+  // docs/arch/refactor/rev11/amendments/AMD-014-b6-context-packet-legacy-gap.md
+  // — the explicit amendment §1 of the ruling above requires before a fourth
+  // id may join (resemblance to BV2/B5/CM1 is expressly not grounds). B6's own
+  // gap: no context packet was produced when it was dispatched and none
+  // survives, and writing one now, after implementation, would be a fabricated
+  // input artifact backdated to look like a dispatch record. The exemption is
+  // still field- and id-scoped exactly as above — only context_packet_digest,
+  // only these four ids.
+  const CONTEXT_PACKET_DIGEST_LEGACY_GAP_GRANDFATHER = new Set(["BV2", "B5", "CM1", "B6"]);
   {
     const EVIDENCE_BOUND = new Set([
       "REVIEW",

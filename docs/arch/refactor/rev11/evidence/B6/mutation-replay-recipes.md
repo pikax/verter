@@ -438,3 +438,51 @@ failure mode this file exists to prevent.
   sub-millisecond operation, process-start jitter dominates and a green wall number is
   close to unfalsifiable. The discriminating evidence there is the measured
   carrier-parse counters and the cross-route digest equality.
+
+## The batch grouping key and the batch result order
+
+Two discriminators were added after every cycle above had been executed, and neither was
+covered by the rows already in this file. They are recorded as their own cycle. Command
+for all four runs in this section:
+
+```
+~/.claude/bin/rust-lock.sh <name> -- cargo nextest run -p verter_compiler --lib \
+  -E 'test(batch_group_key_eq_and_hash_both_see_parse_identity_digest) or \
+      test(compile_batch_results_follow_input_order_not_group_order)' \
+  --no-fail-fast --color never
+```
+
+The selector matched 2 tests. It was `2 tests run: 2 passed` before the first plant and
+`2 tests run: 2 passed` again after every restore, and each plant produced
+`2 tests run: 1 passed, 1 failed` — reddening only its own test, never the other.
+
+| Plant | Marker | Target test | Observed |
+|---|---|---|---|
+| Replace the derived `PartialEq` with a hand-written one matching on `source_digest` only (`..` swallows `parse_identity_digest`), keeping `Eq`/`Hash` derived | `PLANTED_EQ_DROPS_PARSE_IDENTITY` | `batch_group_key_eq_and_hash_both_see_parse_identity_digest` | RED on the `Eq` assertion, alone — `assertion left != right failed: Eq must discriminate on parse_identity_digest`, the two `Vue` keys printed with `parse_identity_digest` `[1; 32]` and `[2; 32]`. The ordering test stayed GREEN. |
+| Replace the derived `Hash` with a hand-written one writing a discriminant byte and `source_digest` only, keeping `PartialEq`/`Eq` derived | `PLANTED_HASH_DROPS_PARSE_IDENTITY` | same | RED on the `Hash` assertion, alone — `assertion left != right failed: Hash must discriminate on parse_identity_digest`, `left: 11988672972409539166`, `right: 11988672972409539166`. The `Eq` assertion above it passed, so the two halves are bound independently. The ordering test stayed GREEN. |
+| Permute `results` into group-major order before returning from `compile_batch` — sort the slot indices by each item's `group_index` entry with a stable `sort_by_key`, then take the slots in that order | `PLANTED_BATCH_RESULTS_GROUP_MAJOR` | `compile_batch_results_follow_input_order_not_group_order` | RED on `results[i] must be item i's own outcome, in input order`. The observed sequence is the group-major one the test's own second assertion constructs; the expected is the input-ordered one. The key test stayed GREEN. |
+
+**Why the key test is planted from both halves separately.** `compile_batch`'s
+`group_index` probe calls `Eq` only on a hash collision, so the two halves fail
+independently: a field dropped from `Hash` alone merges distinct groups without `Eq` ever
+being consulted, and a field dropped from `Eq` alone merges them on the collisions that do
+occur. A single plant against one half would leave the other unbound, which is exactly the
+asymmetry the test's two assertions exist to close. Both halves are derived on the live
+tree; each plant replaces one derive with the hand-written version that drops the field,
+which is the shape the type's own doc comment warns about ("no hand-written comparison").
+
+**The ordering plant is group-major, not a swap.** A swap of two slots would redden the
+first assertion without touching what the test is named for. Sorting by group index is the
+regression the test describes — the shape a map-ordered replacement for the carrier `Vec`
+invites — and it reddens the assertion with the group-major sequence visible in the
+failure output.
+
+**One plant in this section failed to apply and reported nothing.** The first attempt used
+`perl -0777 -pe` with the target inside `\Q...\E`, which quotes the embedded `\n` as a
+literal backslash-`n`, so the pattern could not match. Perl exited 0, the shell reported
+success, and the file was untouched. It was caught by the marker check — occurrences in
+the file came back `0` — and not by any exit status. The plants above were then applied by
+a script that reads the old and new text from files, counts literal occurrences with
+`index`, and dies unless the count is exactly 1. This is the discipline at the top of this
+file working as intended, recorded because a silent non-application is the failure mode
+that makes a green planted run look like a passing test.

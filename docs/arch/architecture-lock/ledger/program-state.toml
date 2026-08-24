@@ -739,7 +739,7 @@ notes = "Exposes the already-accepted BV1/BS1 framework algorithms through one b
 [[block]]
 id = "B6"
 status = "LOCKED"
-charter_digest = ""
+charter_digest = "da1d10efe380e5e01a67a7627d6af574179f0e5a926fcc3aa092aefe9b9f1a9b"
 context_packet_digest = ""
 base_sha = "c37da0ed9a2883b2e86f4c10d070f88ecb7e2644"
 candidate_sha = "90a91d076511ed2378c68de198855dab5b93e5c3"

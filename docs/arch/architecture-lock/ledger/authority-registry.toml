@@ -538,6 +538,22 @@ kind = "AMENDMENT"
 path = "docs/arch/refactor/rev11/amendments/AMD-011-c2-b6-predecessor-edge.md"
 sha256 = "55ff4afedc4a5ef8cf020932ba9644a0791f1c6583d08405c4bbf1d123888003"
 
+# B6's context_packet_digest legacy gap. No immutable context packet was
+# produced when B6 was dispatched and none survives; writing one now would be
+# a fabricated input artifact backdated to look like a dispatch record. This
+# amendment is the explicit instrument MAINTAINER-RULING-2026-08-22-CODE-OVER-
+# LEDGER.md §1 requires before a fourth id joins its enumerated exemption, and
+# is ratified by RULING-2026-08-24-SIX-WAY-B6-CM1 Q1. It exempts only the
+# context_packet_digest field, only for B6; it accepts no block, amends no
+# charter, and adds no DAG/ledger block. Registered here for citability and
+# digest-binding — B6's [[authorization]] record below is unchanged and no
+# second one is created.
+[[document]]
+id = "AMD-014-B6-CONTEXT-PACKET-LEGACY-GAP"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-014-b6-context-packet-legacy-gap.md"
+sha256 = "f4dcd43929558d326d327a9a550608b27462df733caf85b3c380541aa70b3e82"
+
 [[authorization]]
 block = "B6"
 documents = ["B6-CHARTER", "AMD-011-C2-B6-PREDECESSOR-EDGE"]
