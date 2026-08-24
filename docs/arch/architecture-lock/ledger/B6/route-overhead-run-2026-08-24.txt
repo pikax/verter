@@ -1,0 +1,610 @@
+==============================================================
+B6 route-overhead measurement — locked-machine session
+==============================================================
+binary: /Users/carlosrodrigues/Documents/dev/verter/target/release/examples/compiler_route_overhead
+binary_sha256: 55b0820018cd3e338c0fc34179cbdde3ebaa8e941b87b0be92474f310cad4976
+binary_mtime: 2026-08-24T19:03:32+0100
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo: cargo 1.97.1 (c980f4866 2026-06-30)
+node: v20.20.2
+os: Darwin 25.6.0 arm64  cpu: Apple M3  logical_cpus: 8  memory_bytes: 25769803776
+head_commit: 3ae319a2367a35cda0ade86de7e72dec62d8fa16
+worktree_clean_at_start: yes
+
+TREE IDENTITY — START
+head_commit: 3ae319a2367a35cda0ade86de7e72dec62d8fa16
+worktree_porcelain_lines: 0
+worktree_blob fda6bb0a5f868e4ef870c5c36364a324728f9d35 crates/verter_bench/examples/compiler_route_overhead.rs
+worktree_blob 022c9a379aa5e73f4cae18eaaeb83423f172495d crates/verter_compiler/src/standalone.rs
+worktree_blob 8d8b339d17d85af7b7d12a58b59c3a6ff0a14b24 crates/verter_compiler/src/assembly/publish.rs
+worktree_blob 286b52d4a21096c7208bd05fe243d8d4a93240db crates/verter_parser/src/ast/types.rs
+worktree_blob cd894acb2d184a35e74fcfa8efd1f51fce4a5006 crates/verter_parser/src/parser/types.rs
+worktree_blob 8cbc75de2ec91b304de3c9c411d15c5b9f73ef0e crates/verter_compiler/src/svelte/parser/retained_weight.rs
+worktree_blob 73667b9fa92ef86ec49b5c87b32de6945d8b7e82 crates/verter_bench/examples/route_overhead_baseline.rs
+measured_samples: 30   control_invocations_per_side: 8
+VERTER_ROUTE_OVERHEAD_REPEATS: <unset, harness default 5>
+power: Now drawing from 'AC Power'
+lowpowermode: 0
+thermal: Note: No thermal warning level has been recorded
+
+==============================================================
+MACHINE CONDITION — BEFORE
+==============================================================
+timestamp: 2026-08-24T19:07:02+0100
+uptime: 19:07  up 2 days, 20:12, 7 users, load averages: 2.41 2.93 3.52
+page_size_bytes: 16384
+vm_stat_free_gib: 0.07
+vm_stat_active_gib: 7.99
+vm_stat_inactive_gib: 8.63
+vm_stat_speculative_gib: 0.20
+vm_stat_wired_gib: 3.07
+swap: total = 3072.00M  used = 1787.44M  free = 1284.56M  (encrypted)
+cpu: CPU usage: 33.68% user, 23.15% sys, 43.15% idle 
+cpu: CPU usage: 18.48% user, 9.71% sys, 71.80% idle 
+cpu: CPU usage: 17.50% user, 7.79% sys, 74.70% idle 
+cargo_procs: 0
+rustc_procs: 0
+nextest_procs: 0
+claude_procs: 3
+codex_procs: 0
+node_procs: 15
+top_cpu_consumers:
+   %CPU COMM
+   22.7 /Applications/RustDesk.app/Contents/MacOS/RustDesk
+   11.7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+    8.4 /usr/libexec/spotlightknowledged.updater
+    4.9 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+    3.3 /usr/libexec/trustd
+
+==============================================================
+SUPPLEMENTARY SYNTHETIC CONTROL — START
+==============================================================
+control START 1 221.6435 288858369
+control START 2 221.463834 288858369
+control START 3 221.997833 288858369
+control START 4 221.700916 288858369
+control START 5 221.502833 288858369
+control START 6 221.829292 288858369
+control START 7 221.749042 288858369
+control START 8 221.571916 288858369
+control START 9 221.952708 288858369
+control START 10 223.033958 288858369
+control START 11 222.217708 288858369
+
+==============================================================
+PROTOCOL CONTROL — START (the measured binary itself)
+==============================================================
+#SEGMENT control-start
+#RUN control-start 1/8 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":3.961,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.206,"rss_before_bytes":7471104,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.851,"rss_before_bytes":7766016,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.903,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-start 1 0
+#RUN control-start 2/8 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.794,"rss_before_bytes":1769472,"rss_after_bytes":7421952,"rss_peak_bytes":7405568,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.102,"rss_before_bytes":7421952,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.421,"rss_before_bytes":7766016,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.204,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-start 2 0
+#RUN control-start 3/8 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.805,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.135,"rss_before_bytes":7471104,"rss_after_bytes":7831552,"rss_peak_bytes":7815168,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.446,"rss_before_bytes":7831552,"rss_after_bytes":8028160,"rss_peak_bytes":8011776,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.811,"rss_before_bytes":8028160,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-start 3 0
+#RUN control-start 4/8 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.797,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.100,"rss_before_bytes":7487488,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.415,"rss_before_bytes":7766016,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.802,"rss_before_bytes":8011776,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-start 4 0
+#RUN control-start 5/8 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.749,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.092,"rss_before_bytes":7471104,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.411,"rss_before_bytes":7766016,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.797,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-start 5 0
+#RUN control-start 6/8 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":2.078,"rss_before_bytes":1769472,"rss_after_bytes":7438336,"rss_peak_bytes":7421952,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.145,"rss_before_bytes":7438336,"rss_after_bytes":7733248,"rss_peak_bytes":7716864,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.460,"rss_before_bytes":7733248,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.812,"rss_before_bytes":7995392,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-start 6 0
+#RUN control-start 7/8 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.771,"rss_before_bytes":1769472,"rss_after_bytes":7454720,"rss_peak_bytes":7438336,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.125,"rss_before_bytes":7454720,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.457,"rss_before_bytes":7798784,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.814,"rss_before_bytes":8011776,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-start 7 0
+#RUN control-start 8/8 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.903,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.487,"rss_before_bytes":7487488,"rss_after_bytes":7716864,"rss_peak_bytes":7700480,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.754,"rss_before_bytes":7716864,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.850,"rss_before_bytes":7946240,"rss_after_bytes":8077312,"rss_peak_bytes":8060928,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-start 8 0
+
+==============================================================
+MEASURED SESSION — 30 cold invocations
+==============================================================
+#SEGMENT measure
+#RUN measure 1/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.777,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.132,"rss_before_bytes":7471104,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.461,"rss_before_bytes":7766016,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.809,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 1 0
+#RUN measure 2/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.723,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.261,"rss_before_bytes":7487488,"rss_after_bytes":7716864,"rss_peak_bytes":7700480,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.521,"rss_before_bytes":7716864,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.827,"rss_before_bytes":7946240,"rss_after_bytes":8077312,"rss_peak_bytes":8060928,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 2 0
+#RUN measure 3/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.752,"rss_before_bytes":1769472,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.103,"rss_before_bytes":7405568,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.419,"rss_before_bytes":7766016,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.793,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 3 0
+#RUN measure 4/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.746,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.116,"rss_before_bytes":7471104,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.727,"rss_before_bytes":7766016,"rss_after_bytes":7979008,"rss_peak_bytes":7962624,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.185,"rss_before_bytes":7979008,"rss_after_bytes":8093696,"rss_peak_bytes":8077312,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 4 0
+#RUN measure 5/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.687,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.111,"rss_before_bytes":7471104,"rss_after_bytes":7831552,"rss_peak_bytes":7815168,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.610,"rss_before_bytes":7831552,"rss_after_bytes":8028160,"rss_peak_bytes":8011776,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.805,"rss_before_bytes":8028160,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 5 0
+#RUN measure 6/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.756,"rss_before_bytes":1769472,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.133,"rss_before_bytes":7405568,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.483,"rss_before_bytes":7782400,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.827,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 6 0
+#RUN measure 7/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.754,"rss_before_bytes":1769472,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.119,"rss_before_bytes":7405568,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.456,"rss_before_bytes":7798784,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.808,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 7 0
+#RUN measure 8/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.735,"rss_before_bytes":1769472,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.116,"rss_before_bytes":7405568,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.428,"rss_before_bytes":7782400,"rss_after_bytes":7962624,"rss_peak_bytes":7946240,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.814,"rss_before_bytes":7962624,"rss_after_bytes":8093696,"rss_peak_bytes":8077312,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 8 0
+#RUN measure 9/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.795,"rss_before_bytes":1769472,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.122,"rss_before_bytes":7405568,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.466,"rss_before_bytes":7782400,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.810,"rss_before_bytes":8011776,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 9 0
+#RUN measure 10/30 start=19:07:08
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.811,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.127,"rss_before_bytes":7471104,"rss_after_bytes":7831552,"rss_peak_bytes":7815168,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.450,"rss_before_bytes":7831552,"rss_after_bytes":8028160,"rss_peak_bytes":8011776,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.794,"rss_before_bytes":8028160,"rss_after_bytes":8159232,"rss_peak_bytes":8142848,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 10 0
+### MID-RUN CONDITION PROBE after measure run 10
+### timestamp: 2026-08-24T19:07:08+0100
+### uptime: 19:07  up 2 days, 20:12, 7 users, load averages: 2.54 2.95 3.52
+### page_size_bytes: 16384
+### vm_stat_free_gib: 0.06
+### vm_stat_active_gib: 8.03
+### vm_stat_inactive_gib: 8.63
+### vm_stat_speculative_gib: 0.17
+### vm_stat_wired_gib: 3.05
+### swap: total = 3072.00M  used = 1787.44M  free = 1284.56M  (encrypted)
+### cpu: CPU usage: 17.58% user, 17.58% sys, 64.83% idle 
+### cpu: CPU usage: 17.33% user, 8.19% sys, 74.46% idle 
+### cpu: CPU usage: 17.24% user, 7.47% sys, 75.27% idle 
+### cargo_procs: 0
+### rustc_procs: 0
+### nextest_procs: 0
+### claude_procs: 3
+### codex_procs: 0
+### node_procs: 15
+### top_cpu_consumers:
+###    %CPU COMM
+###    20.6 /Applications/RustDesk.app/Contents/MacOS/RustDesk
+###     6.7 /usr/libexec/spotlightknowledged.updater
+###     6.6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+###     5.6 /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal
+###     4.6 claude
+#RUN measure 11/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.762,"rss_before_bytes":1769472,"rss_after_bytes":7389184,"rss_peak_bytes":7372800,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.106,"rss_before_bytes":7389184,"rss_after_bytes":7815168,"rss_peak_bytes":7798784,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.411,"rss_before_bytes":7815168,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.798,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 11 0
+#RUN measure 12/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.797,"rss_before_bytes":1769472,"rss_after_bytes":7438336,"rss_peak_bytes":7421952,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.148,"rss_before_bytes":7438336,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.476,"rss_before_bytes":7782400,"rss_after_bytes":7962624,"rss_peak_bytes":7946240,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.849,"rss_before_bytes":7962624,"rss_after_bytes":8093696,"rss_peak_bytes":8077312,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 12 0
+#RUN measure 13/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.756,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.109,"rss_before_bytes":7471104,"rss_after_bytes":7831552,"rss_peak_bytes":7815168,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.428,"rss_before_bytes":7831552,"rss_after_bytes":8028160,"rss_peak_bytes":8011776,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.164,"rss_before_bytes":8028160,"rss_after_bytes":8159232,"rss_peak_bytes":8142848,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 13 0
+#RUN measure 14/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.776,"rss_before_bytes":1769472,"rss_after_bytes":7421952,"rss_peak_bytes":7405568,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.112,"rss_before_bytes":7421952,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.709,"rss_before_bytes":7766016,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.859,"rss_before_bytes":7946240,"rss_after_bytes":8060928,"rss_peak_bytes":8044544,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 14 0
+#RUN measure 15/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.766,"rss_before_bytes":1769472,"rss_after_bytes":7389184,"rss_peak_bytes":7372800,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.140,"rss_before_bytes":7389184,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.481,"rss_before_bytes":7798784,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.220,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 15 0
+#RUN measure 16/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.841,"rss_before_bytes":1769472,"rss_after_bytes":7421952,"rss_peak_bytes":7405568,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.123,"rss_before_bytes":7421952,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.450,"rss_before_bytes":7766016,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.800,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 16 0
+#RUN measure 17/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.758,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.111,"rss_before_bytes":7487488,"rss_after_bytes":7716864,"rss_peak_bytes":7700480,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.453,"rss_before_bytes":7716864,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.812,"rss_before_bytes":7946240,"rss_after_bytes":8077312,"rss_peak_bytes":8060928,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 17 0
+#RUN measure 18/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.788,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.333,"rss_before_bytes":7487488,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.578,"rss_before_bytes":7766016,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.840,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 18 0
+#RUN measure 19/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.754,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.121,"rss_before_bytes":7471104,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.690,"rss_before_bytes":7798784,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.842,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 19 0
+#RUN measure 20/30 start=19:07:11
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.758,"rss_before_bytes":1769472,"rss_after_bytes":7438336,"rss_peak_bytes":7421952,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.110,"rss_before_bytes":7438336,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.424,"rss_before_bytes":7782400,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.800,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 20 0
+### MID-RUN CONDITION PROBE after measure run 20
+### timestamp: 2026-08-24T19:07:11+0100
+### uptime: 19:07  up 2 days, 20:12, 7 users, load averages: 2.41 2.92 3.51
+### page_size_bytes: 16384
+### vm_stat_free_gib: 0.07
+### vm_stat_active_gib: 8.05
+### vm_stat_inactive_gib: 8.63
+### vm_stat_speculative_gib: 0.15
+### vm_stat_wired_gib: 3.05
+### swap: total = 3072.00M  used = 1787.44M  free = 1284.56M  (encrypted)
+### cpu: CPU usage: 25.0% user, 28.26% sys, 46.73% idle 
+### cpu: CPU usage: 18.47% user, 10.23% sys, 71.29% idle 
+### cpu: CPU usage: 17.9% user, 8.48% sys, 74.42% idle 
+### cargo_procs: 0
+### rustc_procs: 0
+### nextest_procs: 0
+### claude_procs: 3
+### codex_procs: 0
+### node_procs: 15
+### top_cpu_consumers:
+###    %CPU COMM
+###    35.9 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor
+###    17.8 /Applications/RustDesk.app/Contents/MacOS/RustDesk
+###    13.0 /usr/libexec/spotlightknowledged.updater
+###    11.1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+###     7.6 /usr/libexec/sysmond
+#RUN measure 21/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.809,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.111,"rss_before_bytes":7487488,"rss_after_bytes":7716864,"rss_peak_bytes":7700480,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.455,"rss_before_bytes":7716864,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.819,"rss_before_bytes":7946240,"rss_after_bytes":8077312,"rss_peak_bytes":8060928,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 21 0
+#RUN measure 22/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.756,"rss_before_bytes":1769472,"rss_after_bytes":7438336,"rss_peak_bytes":7421952,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.102,"rss_before_bytes":7438336,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.419,"rss_before_bytes":7782400,"rss_after_bytes":7979008,"rss_peak_bytes":7962624,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.801,"rss_before_bytes":7979008,"rss_after_bytes":8093696,"rss_peak_bytes":8077312,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 22 0
+#RUN measure 23/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.712,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.097,"rss_before_bytes":7471104,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.441,"rss_before_bytes":7766016,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.808,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 23 0
+#RUN measure 24/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.702,"rss_before_bytes":1769472,"rss_after_bytes":7421952,"rss_peak_bytes":7405568,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.106,"rss_before_bytes":7421952,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.903,"rss_before_bytes":7782400,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.915,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 24 0
+#RUN measure 25/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.750,"rss_before_bytes":1769472,"rss_after_bytes":7454720,"rss_peak_bytes":7438336,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.112,"rss_before_bytes":7454720,"rss_after_bytes":7749632,"rss_peak_bytes":7733248,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.457,"rss_before_bytes":7749632,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.820,"rss_before_bytes":7995392,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 25 0
+#RUN measure 26/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.760,"rss_before_bytes":1769472,"rss_after_bytes":7438336,"rss_peak_bytes":7421952,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.120,"rss_before_bytes":7438336,"rss_after_bytes":7733248,"rss_peak_bytes":7716864,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.454,"rss_before_bytes":7733248,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.814,"rss_before_bytes":7946240,"rss_after_bytes":8093696,"rss_peak_bytes":8077312,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 26 0
+#RUN measure 27/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.729,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.080,"rss_before_bytes":7487488,"rss_after_bytes":7716864,"rss_peak_bytes":7700480,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.411,"rss_before_bytes":7716864,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.197,"rss_before_bytes":7946240,"rss_after_bytes":8077312,"rss_peak_bytes":8060928,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 27 0
+#RUN measure 28/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.759,"rss_before_bytes":1769472,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.137,"rss_before_bytes":7405568,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.467,"rss_before_bytes":7766016,"rss_after_bytes":8011776,"rss_peak_bytes":7995392,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.809,"rss_before_bytes":8011776,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 28 0
+#RUN measure 29/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.775,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.119,"rss_before_bytes":7487488,"rss_after_bytes":7733248,"rss_peak_bytes":7716864,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.474,"rss_before_bytes":7733248,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.192,"rss_before_bytes":7946240,"rss_after_bytes":8077312,"rss_peak_bytes":8060928,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 29 0
+#RUN measure 30/30 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.730,"rss_before_bytes":1769472,"rss_after_bytes":7438336,"rss_peak_bytes":7421952,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.108,"rss_before_bytes":7438336,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.401,"rss_before_bytes":7798784,"rss_after_bytes":7979008,"rss_peak_bytes":7962624,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.793,"rss_before_bytes":7979008,"rss_after_bytes":8093696,"rss_peak_bytes":8077312,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT measure 30 0
+
+==============================================================
+PROTOCOL CONTROL — END (the measured binary itself)
+==============================================================
+#SEGMENT control-end
+#RUN control-end 1/8 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.785,"rss_before_bytes":1769472,"rss_after_bytes":7503872,"rss_peak_bytes":7487488,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.114,"rss_before_bytes":7503872,"rss_after_bytes":7749632,"rss_peak_bytes":7733248,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.483,"rss_before_bytes":7749632,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.821,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-end 1 0
+#RUN control-end 2/8 start=19:07:13
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.702,"rss_before_bytes":1769472,"rss_after_bytes":7389184,"rss_peak_bytes":7372800,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.102,"rss_before_bytes":7389184,"rss_after_bytes":7749632,"rss_peak_bytes":7733248,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.414,"rss_before_bytes":7749632,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.192,"rss_before_bytes":7995392,"rss_after_bytes":8159232,"rss_peak_bytes":8142848,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-end 2 0
+#RUN control-end 3/8 start=19:07:14
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.748,"rss_before_bytes":1769472,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.116,"rss_before_bytes":7405568,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.412,"rss_before_bytes":7782400,"rss_after_bytes":7962624,"rss_peak_bytes":7946240,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.811,"rss_before_bytes":7962624,"rss_after_bytes":8110080,"rss_peak_bytes":8093696,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-end 3 0
+#RUN control-end 4/8 start=19:07:14
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.777,"rss_before_bytes":1769472,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.131,"rss_before_bytes":7405568,"rss_after_bytes":7782400,"rss_peak_bytes":7766016,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.463,"rss_before_bytes":7782400,"rss_after_bytes":7962624,"rss_peak_bytes":7946240,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.819,"rss_before_bytes":7962624,"rss_after_bytes":8093696,"rss_peak_bytes":8077312,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-end 4 0
+#RUN control-end 5/8 start=19:07:14
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.813,"rss_before_bytes":1769472,"rss_after_bytes":7421952,"rss_peak_bytes":7405568,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.134,"rss_before_bytes":7421952,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.478,"rss_before_bytes":7766016,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.196,"rss_before_bytes":7946240,"rss_after_bytes":8077312,"rss_peak_bytes":8060928,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-end 5 0
+#RUN control-end 6/8 start=19:07:14
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.802,"rss_before_bytes":1769472,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.116,"rss_before_bytes":7487488,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.461,"rss_before_bytes":7798784,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.810,"rss_before_bytes":7995392,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-end 6 0
+#RUN control-end 7/8 start=19:07:14
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.715,"rss_before_bytes":1769472,"rss_after_bytes":7471104,"rss_peak_bytes":7454720,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.131,"rss_before_bytes":7471104,"rss_after_bytes":7831552,"rss_peak_bytes":7815168,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.439,"rss_before_bytes":7831552,"rss_after_bytes":8028160,"rss_peak_bytes":8011776,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.799,"rss_before_bytes":8028160,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-end 7 0
+#RUN control-end 8/8 start=19:07:14
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.746,"rss_before_bytes":1769472,"rss_after_bytes":7421952,"rss_peak_bytes":7405568,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.122,"rss_before_bytes":7421952,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.448,"rss_before_bytes":7766016,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.815,"rss_before_bytes":7995392,"rss_after_bytes":8110080,"rss_peak_bytes":8093696,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+#EXIT control-end 8 0
+
+==============================================================
+SUPPLEMENTARY SYNTHETIC CONTROL — END
+==============================================================
+control END 1 221.468708 288858369
+control END 2 221.457 288858369
+control END 3 221.984417 288858369
+control END 4 221.2795 288858369
+control END 5 221.596917 288858369
+control END 6 222.166875 288858369
+control END 7 221.742625 288858369
+control END 8 222.049208 288858369
+control END 9 221.454292 288858369
+control END 10 221.7865 288858369
+control END 11 222.598458 288858369
+
+==============================================================
+MACHINE CONDITION — AFTER
+==============================================================
+timestamp: 2026-08-24T19:07:16+0100
+uptime: 19:07  up 2 days, 20:12, 7 users, load averages: 2.46 2.92 3.50
+page_size_bytes: 16384
+vm_stat_free_gib: 0.07
+vm_stat_active_gib: 8.09
+vm_stat_inactive_gib: 8.63
+vm_stat_speculative_gib: 0.13
+vm_stat_wired_gib: 3.03
+swap: total = 3072.00M  used = 1787.44M  free = 1284.56M  (encrypted)
+cpu: CPU usage: 16.48% user, 16.48% sys, 67.3% idle 
+cpu: CPU usage: 17.78% user, 8.89% sys, 73.31% idle 
+cpu: CPU usage: 19.22% user, 10.34% sys, 70.43% idle 
+cargo_procs: 0
+rustc_procs: 0
+nextest_procs: 0
+claude_procs: 3
+codex_procs: 0
+node_procs: 15
+top_cpu_consumers:
+   %CPU COMM
+   29.5 /usr/libexec/spotlightknowledged.updater
+   21.8 /Applications/RustDesk.app/Contents/MacOS/RustDesk
+   16.0 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor
+   10.8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+    4.6 /usr/libexec/sysmond
+
+worktree_clean_at_end: yes
+TREE IDENTITY — END
+head_commit: 3ae319a2367a35cda0ade86de7e72dec62d8fa16
+worktree_porcelain_lines: 0
+worktree_blob fda6bb0a5f868e4ef870c5c36364a324728f9d35 crates/verter_bench/examples/compiler_route_overhead.rs
+worktree_blob 022c9a379aa5e73f4cae18eaaeb83423f172495d crates/verter_compiler/src/standalone.rs
+worktree_blob 8d8b339d17d85af7b7d12a58b59c3a6ff0a14b24 crates/verter_compiler/src/assembly/publish.rs
+worktree_blob 286b52d4a21096c7208bd05fe243d8d4a93240db crates/verter_parser/src/ast/types.rs
+worktree_blob cd894acb2d184a35e74fcfa8efd1f51fce4a5006 crates/verter_parser/src/parser/types.rs
+worktree_blob 8cbc75de2ec91b304de3c9c411d15c5b9f73ef0e crates/verter_compiler/src/svelte/parser/retained_weight.rs
+worktree_blob 73667b9fa92ef86ec49b5c87b32de6945d8b7e82 crates/verter_bench/examples/route_overhead_baseline.rs
+nonzero_exit_runs: 0
