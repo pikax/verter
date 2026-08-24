@@ -76,6 +76,26 @@ sealed traits — which added architecture for its own sake. The underlying ques
 edit would reintroduce this, and does it still compile? A fix leaving the defect trivially rewritable
 fixed an instance, not a class — but the answer need not be a type-level proof.
 
+## Rebasing is continuous because drift corrupts the question
+
+A branch left behind does not merely make its eventual merge expensive. A drift check compared
+against the recorded sha it was checking and read green throughout; a landing rehearsal against a
+stale pin reported conflicts that did not exist. Both produced confident false conclusions, which
+costs more than a hard merge. The first is the trap above in another guise, which is why that
+passage names a pinned baseline.
+
+The exception is anything being compared or measured against the branch, because a rebase moves the
+subject of the comparison: a frozen review candidate is one case, a failure triage comparing against
+a pre-candidate tree is another, and four completed measurement sessions were lost to a commit
+landing mid-run.
+
+## Three causes, one mechanism
+
+A live test mutation committed by `git add -A`; a killed plant left applied in the tree; a peer's
+staged work swept into an unrelated commit on a shared branch. Different causes, one mechanism — a
+staging command that captures the tree rather than a named set. So the check is mechanical: compare
+the staged set against the intended paths before every commit.
+
 ## Why the package was cut
 
 At 20 files and ~26,000 words it recreated the token cost and forgetting it exists to prevent:
