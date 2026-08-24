@@ -2815,6 +2815,59 @@ process.exit(res.status === null ? 1 : res.status);
   rmSync(shimDir, { recursive: true, force: true });
 });
 
+test("[PS] already-landed candidate ancestry check itself failing (broken git merge-base) is reported distinctly", () => {
+  // The rehearsal asks three merge-base questions per block, in order:
+  // (<base> <candidate>), (<base> <pin>), then (<candidate> <pin>) — the
+  // already-landed short-circuit. This shim fails ONLY the third argv shape,
+  // so the first two and resolvePinnedTrunk's own (<pin> <live tip>) call and
+  // checkImplementationRefBinding's (<candidate> <live tip>) call all reach
+  // real git. Without it that branch is an UNPROVEN check: it could be a
+  // no-op and this suite could not tell.
+  const shimDir = mkdtempSync(join(tmpdir(), "validate-mutation-suite-mergebase-landed-"));
+  const shimScript = join(shimDir, "git");
+  writeFileSync(
+    shimScript,
+    `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "merge-base" && args[2] === "${CONCURRENT_A}" && args[3] === "${SHA}") {
+  process.stderr.write("shim: simulated merge-base failure for the already-landed candidate check\\n");
+  process.exit(23);
+}
+const res = spawnSync(process.env.FAKE_GIT_REAL, args, { stdio: "inherit" });
+process.exit(res.status === null ? 1 : res.status);
+`,
+    "utf8",
+  );
+  chmodSync(shimScript, 0o755);
+
+  const dag = write("dag-lo7d.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo7d.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], {
+    env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, FAKE_GIT_REAL: realGitPath },
+  });
+  expectCheck(PS_FILE, "ancestry against the pinned trunk", r);
+  rmSync(shimDir, { recursive: true, force: true });
+});
+
 test("[PS] two concurrently active blocks with a real merge conflict are rejected", () => {
   const dag = write("dag-disj2.toml", TWO_CHILD_DAG);
   const state = write(
