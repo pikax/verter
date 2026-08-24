@@ -614,3 +614,19 @@ id = "RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md"
 sha256 = "ecd65254c7d5f3b14c5679ac7fb7165a108c8f2bb4513e5b49b3fb45bede43bf"
+
+# Eight-question architecture ruling taken on 6e1777b4c, TCM0's round-3
+# candidate (lane architecture-tcm0-decisions, RESULT: PASS): the candidate's
+# scoping, the projection/semantic topology-selection transfer to TCM2/TCM3,
+# the Scope-10 performance contract, feature-ownership-ledger rows 25-26, the
+# dead get_diagnostics_background surface and row 31, diagnostic-mapper
+# convergence ownership, package-transcript staleness, and the candidate's
+# program-state.toml hunk. It returns the candidate as wrongly scoped, ratifies
+# the topology transfer, and directs the corrected TCM0 ledger notes to be
+# authored on trunk. It accepts no block, re-pins no charter digest, and adds
+# no DAG/ledger block.
+[[document]]
+id = "RULING-2026-08-24-TCM0-DECISIONS"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md"
+sha256 = "881eaf4e4a11e5a346e5f28006f446ec116d709768ecfeff3ebaf01d2b663b2a"

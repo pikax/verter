@@ -68,10 +68,11 @@ ruling is uncontested; it means no OTHER migrated ruling's own text names it as 
 | [`PARALLEL-REVIEW-SEATS`](MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md) | maintainer-directive | 2026-08-18 | program-wide review-seat protocol | — |
 | [`REVIEW-BUDGET-BY-ARTIFACT-CLASS`](MAINTAINER-RULING-REVIEW-BUDGET.md) | maintainer-directive | 2026-08-17 | program-wide review protocol | — |
 
-## Architecture rulings (19)
+## Architecture rulings (20)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`TCM0-DECISIONS-2026-08-24`](ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md) | architecture-ruling | 2026-08-24 | TCM0, TCM2, TCM3, TCM4 | — |
 | [`SIX-WAY-B6-CM1-2026-08-24`](ARCHITECT-RULING-2026-08-24-SIX-WAY-B6-CM1.md) | architecture-ruling | 2026-08-24 | B6, BF1, CM1, governance.md, performance-gates.toml | — |
 | [`CM1-CONTROL-AXIS-AMENDMENT-2026-08-24`](ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md) | architecture-ruling | 2026-08-24 | CM1 | — |
 | [`B6-ROUTE-OVERHEAD-CELL-LOCK-2026-08-23`](ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md) | architecture-ruling | 2026-08-23 | B6, BF1, performance-gates.toml | — |
