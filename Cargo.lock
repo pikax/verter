@@ -3691,6 +3691,7 @@ dependencies = [
 name = "verter_bench"
 version = "0.0.1-beta.3"
 dependencies = [
+ "blake3",
  "criterion",
  "glob",
  "hotpath",
@@ -3722,6 +3723,7 @@ version = "0.0.1-beta.3"
 dependencies = [
  "base64 0.22.1",
  "bitflags",
+ "blake3",
  "half",
  "hex",
  "hotpath",
@@ -3744,6 +3746,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallvec",
+ "static_assertions",
  "syn 2.0.117",
  "tempfile",
  "trybuild",

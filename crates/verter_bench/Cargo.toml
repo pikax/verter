@@ -41,6 +41,7 @@ verter_audit = { path = "../verter_audit" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
+blake3 = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 oxc_span = { workspace = true }
@@ -191,3 +192,16 @@ path = "examples/currency_phase_probe.rs"
 [[example]]
 name = "route_overhead_baseline"
 path = "examples/route_overhead_baseline.rs"
+
+[[example]]
+# Requires `attribution`: the whole point of this cell is to prove
+# `compile_prepared`/`compile_batch` skip re-parsing by reading the real
+# `compiler.carrier_parse.calls` counter (`verter_audit::attribution`).
+# Without the feature that counter does not exist in the build at all —
+# `verter_audit::attribution::{read, reset}` genuinely fail to resolve
+# (see that module's own doc: "There is no disabled stub returning
+# zero.") — so `required-features` makes an unmeasured run a hard build
+# error instead of a silently-passing no-op.
+name = "compiler_route_overhead"
+path = "examples/compiler_route_overhead.rs"
+required-features = ["attribution"]

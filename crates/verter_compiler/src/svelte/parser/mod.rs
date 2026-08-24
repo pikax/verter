@@ -13,6 +13,7 @@
 mod block_head;
 pub(crate) mod defect_order;
 pub mod options_custom_element;
+mod retained_weight;
 mod strict_facts;
 pub mod template_ast;
 #[cfg(test)]

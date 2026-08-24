@@ -98,3 +98,9 @@ Amendments live in [`amendments/`](amendments/) and bind the program:
 
 See [`PROVENANCE.md`](PROVENANCE.md) for exactly what is and is not attested about
 these files.
+
+## Orchestration
+
+[`orchestration/`](orchestration/) — normative doctrine for implementing, reviewing and landing
+program blocks: tier roles, round discipline, receipt validation, regression rails, escalation, and
+the landing checklist. Entry point: [`orchestration/README.md`](orchestration/README.md).

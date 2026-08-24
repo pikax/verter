@@ -183,6 +183,7 @@ pub use client::{
 pub use client_compile::compile_client;
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) use client_compile::compile_client;
+pub(crate) use client_compile::refuse_unproducible_runtime_surface;
 pub use client_compile::{ClientCompileError, GeneratedSourceMapInvalidReason};
 pub use compile_options::{
     resolve_svelte_compile_options, ResolvedSvelteCompileOptions, SvelteFragments, SvelteNamespace,

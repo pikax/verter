@@ -12,7 +12,7 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import process from "node:process";
 
 const SHORT_MIN = 30;
@@ -24,6 +24,12 @@ function usage() {
   process.stderr.write(
     "usage: run-session.mjs --bin <path> --out <dir> --invocations 30 --control <path> [--skip-idle-check]\n",
   );
+}
+
+// Commit a repository-relative path. `resolve` is for execution only;
+// writing the absolute path into session artifacts leaked a machine root.
+function recordedPath(p) {
+  return relative(process.cwd(), resolve(p)).split("\\").join("/");
 }
 
 function parseArgs(argv) {
@@ -236,13 +242,13 @@ function main() {
   const rssRel = Math.max(3.0, 2 * rssCv);
   const summary = {
     idle,
-    control_bin: resolve(args.control),
+    control_bin: recordedPath(args.control),
     control_start_wall_median_ms: controlStart,
     control_end_wall_median_ms: controlEnd,
     control_drift_percent: controlDriftPercent,
     max_control_drift_percent: MAX_CONTROL_DRIFT_PERCENT,
     invocations: args.invocations,
-    bin,
+    bin: recordedPath(args.bin),
     median_wall_ns: median(walls),
     min_wall_ns: Math.min(...walls),
     max_wall_ns: Math.max(...walls),

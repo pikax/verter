@@ -1,13 +1,13 @@
-//! The internal compiler's sole raw-source direct-compile boundary ("R1",
-//! the borrowed one-shot direct route): every caller supplies a canonical
+//! The internal compiler's sole raw-source direct-compile boundary — the
+//! borrowed one-shot direct route: every caller supplies a canonical
 //! [`crate::compile_request::CompileRequest`] (built through
 //! [`CompileRequest::new`](CompileRequest::new), which enforces every
 //! construction-time fail-closed rule) plus the framework-tagged
 //! [`DirectExecutionInputs`] carrier for resolved facts excluded from
 //! request identity, and gets back exactly one atomic
-//! [`crate::assembly::ArtifactSet`] — the SAME B4 publication boundary
+//! [`crate::assembly::ArtifactSet`] — the SAME publication boundary
 //! every host-backed route publishes through, never a second one — plus a
-//! [`DirectCompileOutput`] sibling for the two facts B4's sealed
+//! [`DirectCompileOutput`] sibling for the two facts the sealed
 //! `ProductKind`/`ArtifactContribution`/`publish()` model has no carrier
 //! for at all (style/CSS content, and non-fatal compile diagnostics): both
 //! are HOST-side siblings in every registered route (a virtual style file,
@@ -53,9 +53,13 @@ use crate::compile_request::{
 };
 use crate::framework_common::{RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeStyleBlock};
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
+#[cfg(test)]
+use crate::svelte::runtime::UnsupportedSvelteRuntimeSurface;
 use crate::svelte::runtime::{
-    compile_client, ClientCompileError, SvelteFragments, SvelteNamespace, SvelteRuntimeOptions,
+    compile_client, refuse_unproducible_runtime_surface, ClientCompileError, SvelteFragments,
+    SvelteNamespace, SvelteRuntimeOptions,
 };
+use crate::svelte::ParsedSvelte;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 
 /// Ephemeral, non-identity execution inputs for a Svelte compile — resolved
@@ -67,7 +71,7 @@ use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 /// official user `cssHash` callback's already-computed result, preserved
 /// byte-exact. Genuine Svelte semantic options (`runes`, `namespace`,
 /// `fragments`, …) live on [`crate::compile_request::SvelteCompileRequest`]
-/// per B3 and are never duplicated here.
+/// by the request layer and are never duplicated here.
 #[derive(Debug, Clone, Default)]
 pub struct SvelteExecutionInputs {
     pub css_hash_override: Option<String>,
@@ -79,6 +83,11 @@ pub struct SvelteExecutionInputs {
 /// ([`CompileRequest::framework`]) and this carrier's variant must agree —
 /// disagreement is a typed [`DirectCompileError::FrameworkMismatch`], never
 /// a panic.
+///
+/// `Clone`/`Copy`: every field is a borrowed reference, so duplicating a
+/// value is free — [`StandaloneCompiler::compile_batch`] needs to read one
+/// item's `inputs` out of a borrowed `&[BatchCompileItem]` slice entry.
+#[derive(Clone, Copy)]
 pub enum DirectExecutionInputs<'a> {
     Vue {
         execution: &'a VueExecutionInputs,
@@ -91,7 +100,7 @@ pub enum DirectExecutionInputs<'a> {
 
 /// [`StandaloneCompiler::compile`]'s successful result: the atomic
 /// [`ArtifactSet`] every planned product publishes into, plus two siblings
-/// B4's sealed publication model carries no slot for.
+/// the sealed publication model carries no slot for.
 ///
 /// `styles` is the style/CSS content a compiled `RuntimeClient`/
 /// `RuntimeServer` product's own `<style>` block(s) produce — in every
@@ -151,7 +160,7 @@ pub enum DirectCompileError {
     /// has no representation on the compiler-internal
     /// [`SvelteNamespace`] this route resolves into — neither this route
     /// nor the host route (which never round-trips this specific enum at
-    /// all, see the B5 fix-round evidence record) has ever had to answer
+    /// all) has ever had to answer
     /// what it means, so it fails closed rather than silently defaulting to
     /// HTML.
     UnsupportedSvelteNamespace,
@@ -165,12 +174,302 @@ pub enum DirectCompileError {
     /// `MissingPlannedArtifact` philosophy at this route's own boundary
     /// (before a plan even reaches `publish`).
     UnsupportedProduct(ProductKind),
+    /// [`StandaloneCompiler::compile_prepared`] was called with a
+    /// [`PreparedCarrier`] whose recorded digest(s) no longer match the
+    /// caller's `source`/`request` — never silently reused against stale
+    /// input.
+    StalePreparedInput { reason: StalePreparedReason },
+}
+
+/// Why [`DirectCompileError::StalePreparedInput`] was raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StalePreparedReason {
+    /// The caller's `source` no longer matches the digest
+    /// [`StandaloneCompiler::prepare`] recorded.
+    SourceChanged,
+    /// The Vue parse-affecting options (`delimiters`, `is_custom_element`)
+    /// recorded at prepare time no longer match `request.vue()`. Svelte
+    /// never raises this variant — [`crate::svelte::parse_svelte`] takes no
+    /// parse-affecting options.
+    ParseOptionsChanged,
 }
 
 impl From<AssemblyRefusal> for DirectCompileError {
     fn from(failure: AssemblyRefusal) -> Self {
         Self::Publish(failure)
     }
+}
+
+/// Zero-sized marker making a prepared carrier a single-owner value: it
+/// derives neither `Clone` nor `Copy`, so embedding it as a field makes
+/// `#[derive(Clone)]` on the embedding type a compile error.
+///
+/// The marker alone does not stop a HAND-WRITTEN `impl Clone`, which could
+/// simply construct a fresh `SingleOwner`. The `assert_not_impl_any!` lines
+/// below close that, and they are library code rather than `#[cfg(test)]`
+/// so both halves hold in every build. Together they make "not `Clone`" a
+/// structural fact rather than a doc-comment claim.
+#[derive(Debug)]
+struct SingleOwner;
+
+/// The Vue half of [`PreparedCarrier`] — a parsed SFC plus the digests
+/// [`StandaloneCompiler::compile_prepared`] revalidates on every reuse.
+///
+/// Not `Clone`: duplicating a retained parse is an explicit retention
+/// decision ([`StandaloneCompiler::prepare`] / [`StandaloneCompiler::prepare_owned`]),
+/// never a silent `clone()`. Enforced structurally by [`SingleOwner`].
+#[derive(Debug)]
+pub struct VuePreparedCarrier {
+    parsed: ParsedSfc,
+    source_digest: [u8; 32],
+    parse_identity_digest: [u8; 32],
+    /// Present only when this carrier was built by
+    /// [`StandaloneCompiler::prepare_owned`] — the caller-chosen owned
+    /// source, counted in [`PreparedCarrier::retained_weight`].
+    owned_source: Option<String>,
+    _single_owner: SingleOwner,
+}
+
+/// The Svelte half of [`PreparedCarrier`]. [`crate::svelte::parse_svelte`]
+/// takes no parse-affecting options, so there is no second identity digest
+/// to track — only `source_digest`.
+///
+/// Not `Clone`: see [`VuePreparedCarrier`].
+#[derive(Debug)]
+pub struct SveltePreparedCarrier {
+    parsed: ParsedSvelte,
+    source_digest: [u8; 32],
+    owned_source: Option<String>,
+    _single_owner: SingleOwner,
+}
+
+/// A single already-parsed source, produced by [`StandaloneCompiler::prepare`]
+/// and replayable through any number of [`StandaloneCompiler::compile_prepared`]
+/// calls — [`StandaloneCompiler::compile_batch`] uses this internally to
+/// share one parse across items with an identical `(framework, source,
+/// Vue parse-options)` group key. Framework-tagged so a mismatched
+/// [`CompileRequest`]/[`DirectExecutionInputs`] pairing is caught the same
+/// way [`StandaloneCompiler::compile`] already catches one — a typed
+/// [`DirectCompileError::FrameworkMismatch`], never a panic. Carries no
+/// product/request state of its own — no product selection, compatibility
+/// flag, helper choice, diagnostic policy, or mapping/publication
+/// preference. It DOES retain `source_digest` and (Vue only)
+/// `parse_identity_digest` — blake3 digests over the parse-affecting
+/// subset of the request ([`vue_parse_identity_digest`]'s own two fields)
+/// used ONLY for stale-input revalidation at [`StandaloneCompiler::compile_prepared`]
+/// time, never read for any semantic/product decision: prepared state may
+/// not change request defaults, compatibility, products, helpers,
+/// diagnostics, mappings, or publication meaning.
+///
+/// Not `Clone`: the retained parse is a single-owner value. Borrowed-source
+/// preparation is [`StandaloneCompiler::prepare`]; owned-source preparation
+/// is [`StandaloneCompiler::prepare_owned`]. Inspect retained bytes via
+/// [`Self::retained_weight`]; dropping the value releases them.
+#[derive(Debug)]
+pub enum PreparedCarrier {
+    Vue(VuePreparedCarrier),
+    Svelte(SveltePreparedCarrier),
+}
+
+// Single-owner reuse is a type-system fact, not prose: the embedded
+// `SingleOwner` marker already makes `#[derive(Clone)]` on either variant
+// type a compile error; these asserts also close a hand-written `impl
+// Clone` (which does not need its fields to be `Clone`) on any of the
+// three carrier types, and run in LIBRARY code (not `#[cfg(test)]`) so a
+// manual impl fails `cargo check -p verter_compiler`, not only `cargo
+// test`.
+static_assertions::assert_not_impl_any!(VuePreparedCarrier: Clone, Copy);
+static_assertions::assert_not_impl_any!(SveltePreparedCarrier: Clone, Copy);
+static_assertions::assert_not_impl_any!(PreparedCarrier: Clone, Copy);
+
+impl PreparedCarrier {
+    /// Bytes this carrier retains independently of any borrowed `&str` the
+    /// caller still holds: parsed inventory + revalidation digests +, when
+    /// built by [`StandaloneCompiler::prepare_owned`], the owned source.
+    /// Not a process-RSS measurement — that cell belongs to the separate
+    /// route-overhead lock, not this observability surface.
+    pub fn retained_weight(&self) -> usize {
+        match self {
+            Self::Vue(carrier) => vue_parsed_retained_bytes(&carrier.parsed)
+                .saturating_add(64)
+                .saturating_add(
+                    carrier
+                        .owned_source
+                        .as_ref()
+                        .map(String::capacity)
+                        .unwrap_or(0),
+                ),
+            Self::Svelte(carrier) => svelte_parsed_retained_bytes(&carrier.parsed)
+                .saturating_add(32)
+                .saturating_add(
+                    carrier
+                        .owned_source
+                        .as_ref()
+                        .map(String::capacity)
+                        .unwrap_or(0),
+                ),
+        }
+    }
+
+    /// The owned source [`StandaloneCompiler::prepare_owned`] retained, if
+    /// any. Borrowed [`StandaloneCompiler::prepare`] never stores source.
+    pub fn retained_source(&self) -> Option<&str> {
+        match self {
+            Self::Vue(carrier) => carrier.owned_source.as_deref(),
+            Self::Svelte(carrier) => carrier.owned_source.as_deref(),
+        }
+    }
+}
+
+/// One item of a [`StandaloneCompiler::compile_batch`] call — the exact
+/// borrowed triple [`StandaloneCompiler::compile`] takes, batched.
+pub struct BatchCompileItem<'a> {
+    pub source: &'a str,
+    pub request: &'a CompileRequest,
+    pub inputs: DirectExecutionInputs<'a>,
+}
+
+/// Refuses a request whose framework and whose [`DirectExecutionInputs`]
+/// variant disagree, before the item is grouped or its carrier prepared.
+///
+/// Only [`StandaloneCompiler::compile_batch`] calls this;
+/// [`StandaloneCompiler::compile`] reaches the same conclusion from the match
+/// it already performs on the pair. The product/capability preflight is a
+/// different function, [`refuse_unproducible_plan`].
+fn refuse_inputs_mismatch(
+    request: &CompileRequest,
+    inputs: DirectExecutionInputs<'_>,
+) -> Result<(), DirectCompileError> {
+    match (request.framework(), inputs) {
+        (FrameworkCompileRequest::Vue(_), DirectExecutionInputs::Vue { .. })
+        | (FrameworkCompileRequest::Svelte(_), DirectExecutionInputs::Svelte { .. }) => Ok(()),
+        (FrameworkCompileRequest::Vue(_), DirectExecutionInputs::Svelte { .. }) => {
+            Err(DirectCompileError::FrameworkMismatch {
+                expected: "Vue",
+                actual: "Svelte",
+            })
+        }
+        (FrameworkCompileRequest::Svelte(_), DirectExecutionInputs::Vue { .. }) => {
+            Err(DirectCompileError::FrameworkMismatch {
+                expected: "Svelte",
+                actual: "Vue",
+            })
+        }
+    }
+}
+
+/// The Vue product kinds the direct core can produce. This list is the
+/// DECLARATION; the completeness check at the end of `compile_vue_from_parsed`
+/// is the ENFORCEMENT — a kind named here with no branch that contributes an
+/// artifact still fails there, so the list cannot silently over-promise.
+const VUE_PRODUCIBLE_KINDS: &[ProductKind] = &[
+    ProductKind::RuntimeClient,
+    ProductKind::RuntimeServer,
+    ProductKind::IdeCompanion,
+    ProductKind::Declarations,
+];
+
+/// The Svelte runtime kinds the direct core admits, DERIVED from the runtime's
+/// own capability answer rather than restated beside it. When the runtime
+/// gains a server backend, `refuse_unproducible_runtime_surface` starts
+/// returning `Ok` and this list, the plan preflight, and the compile loop all
+/// follow from that one change — the loop below iterates this same function.
+fn svelte_producible_kinds() -> Vec<ProductKind> {
+    [ProductKind::RuntimeClient, ProductKind::RuntimeServer]
+        .into_iter()
+        .filter(|kind| {
+            refuse_unproducible_runtime_surface(*kind == ProductKind::RuntimeServer).is_ok()
+        })
+        .collect()
+}
+
+/// Refuse, before any parse, a plan the direct core cannot produce.
+///
+/// This preflight owns WHEN the question is asked, never the answer: the
+/// answer comes from the per-framework capability sources above, and an
+/// unproducible Svelte server surface carries the runtime's OWN typed
+/// refusal rather than a generic one, so the early refusal is the same value
+/// a late one would have been.
+fn refuse_unproducible_plan(request: &CompileRequest) -> Result<(), DirectCompileError> {
+    match request.framework() {
+        FrameworkCompileRequest::Vue(_) => {
+            for product in request.products() {
+                if !VUE_PRODUCIBLE_KINDS.contains(&product.kind()) {
+                    return Err(DirectCompileError::UnsupportedProduct(product.kind()));
+                }
+            }
+        }
+        FrameworkCompileRequest::Svelte(_) => {
+            let producible = svelte_producible_kinds();
+            for product in request.products() {
+                if producible.contains(&product.kind()) {
+                    continue;
+                }
+                // A kind the RUNTIME refuses reports the runtime's own typed
+                // error; anything else was never a Svelte runtime kind at all.
+                if product.kind() == ProductKind::RuntimeServer {
+                    refuse_unproducible_runtime_surface(true)
+                        .map_err(DirectCompileError::Svelte)?;
+                }
+                return Err(DirectCompileError::UnsupportedProduct(product.kind()));
+            }
+            if let Some(svelte) = request.svelte() {
+                // Same single-owner rule for namespace support: the mapping
+                // that `direct_svelte_runtime_options` uses to build the
+                // runtime options is the mapping consulted here, so refusing
+                // early cannot drift from refusing late.
+                resolve_svelte_namespace(svelte.namespace)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The single mapping from a requested Svelte namespace to the runtime
+/// namespace, and so the single place `Foreign` is refused. The plan
+/// preflight consults it to refuse before parsing;
+/// [`direct_svelte_runtime_options`] consults it to build the options.
+fn resolve_svelte_namespace(
+    requested: Option<crate::compile_request::svelte::SvelteNamespaceRequest>,
+) -> Result<Option<SvelteNamespace>, DirectCompileError> {
+    use crate::compile_request::svelte::SvelteNamespaceRequest;
+    match requested {
+        None => Ok(None),
+        Some(SvelteNamespaceRequest::Html) => Ok(Some(SvelteNamespace::Html)),
+        Some(SvelteNamespaceRequest::Svg) => Ok(Some(SvelteNamespace::Svg)),
+        Some(SvelteNamespaceRequest::MathMl) => Ok(Some(SvelteNamespace::Mathml)),
+        Some(SvelteNamespaceRequest::Foreign) => {
+            Err(DirectCompileError::UnsupportedSvelteNamespace)
+        }
+    }
+}
+
+fn vue_parsed_retained_bytes(parsed: &ParsedSfc) -> usize {
+    parsed.retained_bytes()
+}
+
+fn svelte_parsed_retained_bytes(parsed: &ParsedSvelte) -> usize {
+    parsed.retained_bytes()
+}
+
+/// [`StandaloneCompiler::compile_batch`]'s own accounting: `cold_build_count`
+/// is the number of [`StandaloneCompiler::prepare`] calls the batch actually
+/// performed (one per distinct group); `reuse_count` is the number of
+/// [`StandaloneCompiler::compile_prepared`] calls it performed. Items
+/// refused by the product/capability preflight never prepare and never
+/// compile, so they increment neither count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompileBatchReport {
+    pub cold_build_count: usize,
+    pub reuse_count: usize,
+}
+
+/// [`StandaloneCompiler::compile_batch`]'s result: one outcome per input
+/// item, in input order — a batch never reorders, and one item's `Err`
+/// never affects any other item's entry.
+pub struct BatchCompileOutput {
+    pub results: Vec<Result<DirectCompileOutput, DirectCompileError>>,
+    pub report: CompileBatchReport,
 }
 
 /// Stateless compiler for callers that do not participate in a registered
@@ -180,8 +479,11 @@ pub struct StandaloneCompiler;
 
 impl StandaloneCompiler {
     /// Compile borrowed standalone source into exactly the
-    /// [`DirectCompileOutput`] `request` plans — the internal compiler's
-    /// sole raw-source parser boundary; registered hosts consume their
+    /// [`DirectCompileOutput`] `request` plans — the sole `StandaloneCompiler`
+    /// entry that parses AND compiles in one call ([`Self::prepare`] also
+    /// takes raw source, but only parses; [`Self::compile_prepared`] takes it
+    /// as well, hashing it to revalidate the carrier and handing it to
+    /// codegen, but never re-parsing it); registered hosts consume their
     /// elected artifact through their own host-backed routes instead.
     ///
     /// Dispatches solely on `request.framework()`; `inputs`'s variant must
@@ -227,9 +529,38 @@ impl StandaloneCompiler {
         execution_inputs: &VueExecutionInputs,
         macro_semantics: &VueMacroSemanticInput,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
-        let allocator = Allocator::new();
-        let (parsed, mut result) = crate::compile::compile_with_parsed(
+        refuse_unproducible_plan(request)?;
+        let vue = request.vue().expect("dispatch already matched Vue");
+        let parsed = crate::compile::parse_sfc(
             source,
+            vue.delimiters
+                .as_ref()
+                .map(|(o, c)| (o.as_str(), c.as_str())),
+            Some(vue.is_custom_element.as_slice()),
+        );
+        self.compile_vue_from_parsed(source, &parsed, request, execution_inputs, macro_semantics)
+    }
+
+    /// The parsed-input core [`Self::compile_vue`] delegates to once it has
+    /// a [`ParsedSfc`] in hand — also [`Self::compile_prepared`]'s Vue
+    /// dispatch target, so a direct, prepared-first, prepared-repeat, or
+    /// batch compile of the same `(source, request, execution_inputs,
+    /// macro_semantics)` runs the IDENTICAL codegen from this point on;
+    /// only where/how often the parse itself happened differs between
+    /// routes.
+    fn compile_vue_from_parsed(
+        &self,
+        source: &str,
+        parsed: &ParsedSfc,
+        request: &CompileRequest,
+        execution_inputs: &VueExecutionInputs,
+        macro_semantics: &VueMacroSemanticInput,
+    ) -> Result<DirectCompileOutput, DirectCompileError> {
+        refuse_unproducible_plan(request)?;
+        let allocator = Allocator::new();
+        let mut result = crate::compile::compile_from_parsed(
+            source,
+            parsed,
             request,
             execution_inputs,
             macro_semantics,
@@ -308,11 +639,11 @@ impl StandaloneCompiler {
                 ProductKind::RuntimeClient
             };
             let vue_request = request.vue().expect("dispatch already matched Vue");
-            let dialect = direct_vue_dialect(&parsed, request.force_js());
+            let dialect = direct_vue_dialect(parsed, request.force_js());
             let want_maps = runtime_source_map_wanted(request, primary_kind);
 
             let bundle = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
-                source, &parsed, result,
+                source, parsed, result,
             );
             // Style content is ssr-mode-independent — taken from this
             // (primary) bundle only, never duplicated from a secondary
@@ -342,16 +673,20 @@ impl StandaloneCompiler {
                 let secondary_kind = ProductKind::RuntimeClient;
                 let secondary_request = single_runtime_product_request(request, secondary_kind)?;
                 let secondary_allocator = Allocator::new();
-                let (secondary_parsed, secondary_result) = crate::compile::compile_with_parsed(
+                // Reuses the SAME `parsed` as the primary compile — proven
+                // behavior-preserving (see this module's own doc): both
+                // sub-requests parse the identical source under identical
+                // options, and `compile_inner` never re-parses internally.
+                let secondary_result = crate::compile::compile_from_parsed(
                     source,
+                    parsed,
                     &secondary_request,
                     execution_inputs,
                     macro_semantics,
                     &secondary_allocator,
                 )
                 .map_err(DirectCompileError::Vue)?;
-                let secondary_dialect =
-                    direct_vue_dialect(&secondary_parsed, secondary_request.force_js());
+                let secondary_dialect = direct_vue_dialect(parsed, secondary_request.force_js());
                 let secondary_want_maps =
                     runtime_source_map_wanted(&secondary_request, secondary_kind);
                 let secondary_vue_request =
@@ -359,7 +694,7 @@ impl StandaloneCompiler {
                 let secondary_bundle =
                     crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
                         source,
-                        &secondary_parsed,
+                        parsed,
                         secondary_result,
                     );
                 let secondary_composed = compose_vue_runtime(
@@ -412,21 +747,32 @@ impl StandaloneCompiler {
         request: &CompileRequest,
         execution_inputs: &SvelteExecutionInputs,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
+        refuse_unproducible_plan(request)?;
+        let parsed = crate::svelte::parse_svelte(source);
+        self.compile_svelte_from_parsed(source, &parsed, request, execution_inputs)
+    }
+
+    /// The parsed-input core [`Self::compile_svelte`] delegates to once it
+    /// has a [`ParsedSvelte`] in hand — also [`Self::compile_prepared`]'s
+    /// Svelte dispatch target. Direct and batch entry points refuse
+    /// unproducible products/capabilities BEFORE this parse; an explicit
+    /// [`Self::prepare`] call may still parse, because preparation was then
+    /// the requested operation. This core still re-runs the same preflight
+    /// so a `compile_prepared` of an unproducible request never compiles.
+    fn compile_svelte_from_parsed(
+        &self,
+        source: &str,
+        parsed: &ParsedSvelte,
+        request: &CompileRequest,
+        execution_inputs: &SvelteExecutionInputs,
+    ) -> Result<DirectCompileOutput, DirectCompileError> {
+        refuse_unproducible_plan(request)?;
         let plan = ProductPlan::from_request(request);
-        for planned in plan.artifacts() {
-            if !matches!(
-                planned.kind,
-                ProductKind::RuntimeClient | ProductKind::RuntimeServer
-            ) {
-                return Err(DirectCompileError::UnsupportedProduct(planned.kind));
-            }
-        }
 
         let svelte_request = request.svelte().expect("dispatch already matched Svelte");
         let opts = direct_svelte_runtime_options(request, svelte_request, execution_inputs)?;
 
         let allocator = Allocator::default();
-        let parsed = crate::svelte::parse_svelte(source);
 
         struct PendingRuntime {
             kind: ProductKind,
@@ -439,19 +785,17 @@ impl StandaloneCompiler {
         let mut pending: Vec<PendingRuntime> = Vec::new();
         let mut styles: Vec<RuntimeStyleBlock> = Vec::new();
 
-        // Server checked first: when both kinds are planned together and
-        // SSR is requested, `compile_client(ssr: true)` fails closed
-        // immediately (the server backend has not landed) — failing fast
-        // avoids compiling the client half for nothing.
-        for kind in [ProductKind::RuntimeServer, ProductKind::RuntimeClient] {
+        // Iterate the SAME capability answer the plan preflight used, so a
+        // kind this loop can build and a kind the preflight admits cannot
+        // drift apart. A kind the runtime cannot produce never reaches here:
+        // the preflight already returned the runtime's own typed refusal.
+        for kind in svelte_producible_kinds() {
             if !plan.wants(kind) {
                 continue;
             }
             let ssr = kind == ProductKind::RuntimeServer;
             let want_maps = runtime_source_map_wanted(request, kind);
-            // SSR always fails closed here (`compile_client`'s own `ssr`
-            // gate) — this route never reinterprets that refusal.
-            let module = compile_client(source, &parsed, &opts, &allocator, ssr, want_maps)
+            let module = compile_client(source, parsed, &opts, &allocator, ssr, want_maps)
                 .map_err(DirectCompileError::Svelte)?;
 
             // The EXTERNAL scoped-css artifact — the Svelte analogue of
@@ -531,6 +875,201 @@ impl StandaloneCompiler {
             diagnostics: Vec::new(),
         })
     }
+
+    /// Parse `source` once under `request`'s framework and (Vue-only)
+    /// parse-affecting options, without compiling any product. The
+    /// returned [`PreparedCarrier`] can be replayed through
+    /// [`Self::compile_prepared`] any number of times —
+    /// [`Self::compile_batch`] uses this internally to share one parse
+    /// across items with an identical group key.
+    ///
+    /// Infallible: both [`crate::compile::parse_sfc`] and
+    /// [`crate::svelte::parse_svelte`] are infallible parsers — a malformed
+    /// source still parses, with its own diagnostics carried on the
+    /// returned [`ParsedSfc`]/[`ParsedSvelte`]; refusal only happens later,
+    /// at [`Self::compile_prepared`] time, exactly like the direct route.
+    pub fn prepare(&self, source: &str, request: &CompileRequest) -> PreparedCarrier {
+        match request.framework() {
+            FrameworkCompileRequest::Vue(_) => {
+                let vue = request.vue().expect("dispatch already matched Vue");
+                let parsed = crate::compile::parse_sfc(
+                    source,
+                    vue.delimiters
+                        .as_ref()
+                        .map(|(o, c)| (o.as_str(), c.as_str())),
+                    Some(vue.is_custom_element.as_slice()),
+                );
+                PreparedCarrier::Vue(VuePreparedCarrier {
+                    parsed,
+                    source_digest: source_digest(source),
+                    parse_identity_digest: vue_parse_identity_digest(vue),
+                    owned_source: None,
+                    _single_owner: SingleOwner,
+                })
+            }
+            FrameworkCompileRequest::Svelte(_) => {
+                let parsed = crate::svelte::parse_svelte(source);
+                PreparedCarrier::Svelte(SveltePreparedCarrier {
+                    parsed,
+                    source_digest: source_digest(source),
+                    owned_source: None,
+                    _single_owner: SingleOwner,
+                })
+            }
+        }
+    }
+
+    /// Owned-source preparation: the caller has already taken ownership of
+    /// the source bytes (FFI, or a caller that wants source lifetime to
+    /// follow the carrier). Parses the same way [`Self::prepare`] does,
+    /// then retains the `String` so [`PreparedCarrier::retained_weight`]
+    /// includes it and [`PreparedCarrier::retained_source`] can hand it
+    /// back. Does not copy a borrowed `&str` the way a `to_string()` inside
+    /// [`Self::prepare`] would.
+    pub fn prepare_owned(&self, source: String, request: &CompileRequest) -> PreparedCarrier {
+        let mut prepared = self.prepare(&source, request);
+        match &mut prepared {
+            PreparedCarrier::Vue(carrier) => carrier.owned_source = Some(source),
+            PreparedCarrier::Svelte(carrier) => carrier.owned_source = Some(source),
+        }
+        prepared
+    }
+
+    /// Compile `source` from an already-[`Self::prepare`]d carrier instead
+    /// of re-parsing. Three-way framework agreement is enforced —
+    /// `request.framework()`, `prepared`'s variant, and `inputs`'s variant
+    /// must all name the same framework, mirroring exactly the two-way
+    /// check [`Self::compile`] already performs (a `PreparedCarrier`
+    /// disagreeing with the pair is the SAME class of error as `inputs`
+    /// disagreeing with `request`, so it maps to the identical
+    /// [`DirectCompileError::FrameworkMismatch`] variant, never a new one).
+    ///
+    /// `source`/`request` are revalidated against the carrier's recorded
+    /// digests on every call — a stale carrier (a different `source`, or
+    /// different Vue `delimiters`/`is_custom_element`) is a typed
+    /// [`DirectCompileError::StalePreparedInput`], never a silently-wrong
+    /// compiled result. The carrier's retained parse is reused; the
+    /// request and inputs are always the caller's fresh values, exactly
+    /// like the direct route.
+    pub fn compile_prepared<'a>(
+        &self,
+        source: &'a str,
+        prepared: &PreparedCarrier,
+        request: &CompileRequest,
+        inputs: DirectExecutionInputs<'a>,
+    ) -> Result<DirectCompileOutput, DirectCompileError> {
+        match (request.framework(), inputs) {
+            (FrameworkCompileRequest::Vue(_), DirectExecutionInputs::Vue { execution, macros }) => {
+                let PreparedCarrier::Vue(carrier) = prepared else {
+                    return Err(DirectCompileError::FrameworkMismatch {
+                        expected: "Vue",
+                        actual: "Svelte",
+                    });
+                };
+                if carrier.source_digest != source_digest(source) {
+                    return Err(DirectCompileError::StalePreparedInput {
+                        reason: StalePreparedReason::SourceChanged,
+                    });
+                }
+                let vue = request.vue().expect("dispatch already matched Vue");
+                if carrier.parse_identity_digest != vue_parse_identity_digest(vue) {
+                    return Err(DirectCompileError::StalePreparedInput {
+                        reason: StalePreparedReason::ParseOptionsChanged,
+                    });
+                }
+                self.compile_vue_from_parsed(source, &carrier.parsed, request, execution, macros)
+            }
+            (FrameworkCompileRequest::Svelte(_), DirectExecutionInputs::Svelte { execution }) => {
+                let PreparedCarrier::Svelte(carrier) = prepared else {
+                    return Err(DirectCompileError::FrameworkMismatch {
+                        expected: "Svelte",
+                        actual: "Vue",
+                    });
+                };
+                if carrier.source_digest != source_digest(source) {
+                    return Err(DirectCompileError::StalePreparedInput {
+                        reason: StalePreparedReason::SourceChanged,
+                    });
+                }
+                self.compile_svelte_from_parsed(source, &carrier.parsed, request, execution)
+            }
+            (FrameworkCompileRequest::Vue(_), DirectExecutionInputs::Svelte { .. }) => {
+                Err(DirectCompileError::FrameworkMismatch {
+                    expected: "Vue",
+                    actual: "Svelte",
+                })
+            }
+            (FrameworkCompileRequest::Svelte(_), DirectExecutionInputs::Vue { .. }) => {
+                Err(DirectCompileError::FrameworkMismatch {
+                    expected: "Svelte",
+                    actual: "Vue",
+                })
+            }
+        }
+    }
+
+    /// Compile every item in `items`, sharing one [`PreparedCarrier`]
+    /// across items whose `(framework, source, Vue parse-options)` group
+    /// key matches — `report.cold_build_count` is the number of
+    /// [`Self::prepare`] calls actually performed (one per distinct
+    /// group), `report.reuse_count` is the number of
+    /// [`Self::compile_prepared`] calls. An item refused by the
+    /// product/capability preflight is recorded as `Err` in its original
+    /// slot and never prepared, so it increments neither count. Never
+    /// reorders: `results[i]` is always item `i`'s own outcome, and
+    /// one item's `Err` never affects any other item's entry — each
+    /// iteration only reads the shared, immutable group carrier and writes
+    /// its own `results` slot.
+    ///
+    /// An empty `items` returns immediately with zero counts and no
+    /// allocator/parse work at all. No persistent cache: this call's
+    /// grouping is local to the call — a second `compile_batch` call never
+    /// reuses a carrier a prior call built.
+    pub fn compile_batch(&self, items: &[BatchCompileItem<'_>]) -> BatchCompileOutput {
+        if items.is_empty() {
+            return BatchCompileOutput {
+                results: Vec::new(),
+                report: CompileBatchReport {
+                    cold_build_count: 0,
+                    reuse_count: 0,
+                },
+            };
+        }
+
+        let mut groups: Vec<(BatchGroupKey, PreparedCarrier)> = Vec::new();
+        let mut report = CompileBatchReport {
+            cold_build_count: 0,
+            reuse_count: 0,
+        };
+        let mut results = Vec::with_capacity(items.len());
+
+        for item in items {
+            if let Err(error) = refuse_inputs_mismatch(item.request, item.inputs) {
+                results.push(Err(error));
+                continue;
+            }
+            if let Err(error) = refuse_unproducible_plan(item.request) {
+                results.push(Err(error));
+                continue;
+            }
+            let key = batch_group_key(item.source, item.request);
+            let idx = match groups.iter().position(|(k, _)| *k == key) {
+                Some(idx) => idx,
+                None => {
+                    let carrier = self.prepare(item.source, item.request);
+                    groups.push((key, carrier));
+                    report.cold_build_count += 1;
+                    groups.len() - 1
+                }
+            };
+            let carrier = &groups[idx].1;
+            let result = self.compile_prepared(item.source, carrier, item.request, item.inputs);
+            report.reuse_count += 1;
+            results.push(result);
+        }
+
+        BatchCompileOutput { results, report }
+    }
 }
 
 /// This kind's own `RuntimeProductRequest.runtime_source_map` flag, read
@@ -558,7 +1097,7 @@ fn runtime_source_map_wanted(request: &CompileRequest, kind: ProductKind) -> boo
 /// A narrowed [`CompileRequest`] planning ONLY `kind`'s own product,
 /// carrying over its exact [`crate::compile_request::RuntimeProductRequest`]
 /// from `request`, plus every other framework-neutral field unchanged. Used
-/// to force `compile_with_parsed`'s single-`ssr`-mode-per-call derivation
+/// to force the compile core's single-`ssr`-mode-per-call derivation
 /// (`derive_legacy_vue_options`) onto the specific kind a caller needs when
 /// `request` itself planned both runtime kinds together.
 fn single_runtime_product_request(
@@ -690,8 +1229,7 @@ fn direct_vue_dialect(parsed: &ParsedSfc, force_js: bool) -> FragmentDialect {
 /// lowering's own `resolve_custom_element`
 /// (`svelte/runtime/custom_element.rs`) takes only a bare
 /// `custom_element_option: bool`, never a descriptor, when no inline
-/// `<svelte:options customElement>` exists. See the B5 fix-round evidence
-/// record for the full citation trail.
+/// `<svelte:options customElement>` exists.
 ///
 /// # Errors
 ///
@@ -707,19 +1245,9 @@ fn direct_svelte_runtime_options(
     svelte_request: &crate::compile_request::SvelteCompileRequest,
     execution_inputs: &SvelteExecutionInputs,
 ) -> Result<SvelteRuntimeOptions, DirectCompileError> {
-    use crate::compile_request::svelte::{
-        SvelteFragmentsRequest, SvelteNamespaceRequest, SvelteRunesRequest,
-    };
+    use crate::compile_request::svelte::{SvelteFragmentsRequest, SvelteRunesRequest};
 
-    let namespace = match svelte_request.namespace {
-        None => None,
-        Some(SvelteNamespaceRequest::Html) => Some(SvelteNamespace::Html),
-        Some(SvelteNamespaceRequest::Svg) => Some(SvelteNamespace::Svg),
-        Some(SvelteNamespaceRequest::MathMl) => Some(SvelteNamespace::Mathml),
-        Some(SvelteNamespaceRequest::Foreign) => {
-            return Err(DirectCompileError::UnsupportedSvelteNamespace)
-        }
-    };
+    let namespace = resolve_svelte_namespace(svelte_request.namespace)?;
 
     Ok(SvelteRuntimeOptions {
         filename: request.filename().map(str::to_string),
@@ -772,6 +1300,220 @@ impl CanonicalEncode for DirectSvelteFragmentTag<'_> {
         e.field_str(1, self.canonical_id);
         e.field_str(2, self.role);
     }
+}
+
+// ── Prepared/batch digests ─────────────────────────────────────────
+
+fn hash_len_prefixed_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn hash_len_prefixed_str(hasher: &mut blake3::Hasher, s: &str) {
+    hash_len_prefixed_bytes(hasher, s.as_bytes());
+}
+
+fn hash_len_prefixed_opt_str(hasher: &mut blake3::Hasher, s: Option<&str>) {
+    match s {
+        Some(s) => {
+            hasher.update(&[1u8]);
+            hash_len_prefixed_str(hasher, s);
+        }
+        None => {
+            hasher.update(&[0u8]);
+        }
+    }
+}
+
+fn hash_usize(hasher: &mut blake3::Hasher, n: usize) {
+    hasher.update(&(n as u64).to_le_bytes());
+}
+
+/// `blake3::hash(source.as_bytes())`, as a plain byte digest — the identity
+/// [`StandaloneCompiler::prepare`]/[`StandaloneCompiler::compile_prepared`]
+/// revalidate `source` against, and the first component of a
+/// [`BatchGroupKey`]. A raw `blake3::hash` call is enough here — this is a
+/// plain byte-digest binding check, not the canonical multi-field encoding
+/// [`verter_identity::encoding::CanonicalEncoder`] exists for.
+fn source_digest(source: &str) -> [u8; 32] {
+    *blake3::hash(source.as_bytes()).as_bytes()
+}
+
+/// Digest over exactly the two fields [`crate::compile::parse_sfc`] reads
+/// from a [`crate::compile_request::VueCompileRequest`] — `delimiters` and
+/// `is_custom_element` — the identity [`StandaloneCompiler::compile_prepared`]
+/// revalidates a Vue carrier's recorded parse options against. Every field
+/// is length-prefixed so no two distinct `(delimiters, is_custom_element)`
+/// pairs can hash to the same byte stream (no `Debug`-formatting
+/// ambiguity). `None` delimiters hash a length-8 sentinel that no `Some`
+/// pair can ever produce (every `Some` pair contributes at least two
+/// 8-byte length prefixes, i.e. at least 16 bytes, before this field ends).
+fn vue_parse_identity_digest(vue: &crate::compile_request::VueCompileRequest) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    match &vue.delimiters {
+        Some((open, close)) => {
+            hash_len_prefixed_str(&mut hasher, open);
+            hash_len_prefixed_str(&mut hasher, close);
+        }
+        None => {
+            hasher.update(&u64::MAX.to_le_bytes());
+        }
+    }
+    hash_usize(&mut hasher, vue.is_custom_element.len());
+    for prefix in &vue.is_custom_element {
+        hash_len_prefixed_str(&mut hasher, prefix);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// [`StandaloneCompiler::compile_batch`]'s grouping key — items sharing a
+/// key share one [`PreparedCarrier`]. The framework tag lives in the enum
+/// discriminant itself (a Vue item and a Svelte item never share a key even
+/// if their `source_digest`s happened to collide).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchGroupKey {
+    Vue {
+        source_digest: [u8; 32],
+        parse_identity_digest: [u8; 32],
+    },
+    Svelte {
+        source_digest: [u8; 32],
+    },
+}
+
+fn batch_group_key(source: &str, request: &CompileRequest) -> BatchGroupKey {
+    match request.framework() {
+        FrameworkCompileRequest::Vue(_) => {
+            let vue = request.vue().expect("dispatch already matched Vue");
+            BatchGroupKey::Vue {
+                source_digest: source_digest(source),
+                parse_identity_digest: vue_parse_identity_digest(vue),
+            }
+        }
+        FrameworkCompileRequest::Svelte(_) => BatchGroupKey::Svelte {
+            source_digest: source_digest(source),
+        },
+    }
+}
+
+/// Fixed, `Debug`-independent rank for [`ProductKind`] — a stable numeric
+/// identity to hash in [`direct_compile_output_digest`], so the digest does
+/// not depend on `Debug` output. It does NOT order the artifact walk: that
+/// walk follows publication order, which is observable. Never used to
+/// compare kinds for equality (that stays `==`).
+fn product_kind_rank(kind: ProductKind) -> u8 {
+    match kind {
+        ProductKind::RuntimeClient => 0,
+        ProductKind::RuntimeServer => 1,
+        ProductKind::IdeCompanion => 2,
+        ProductKind::PublicApi => 3,
+        ProductKind::Declarations => 4,
+        ProductKind::Analysis => 5,
+    }
+}
+
+/// Fixed, `Debug`-independent rank for [`FragmentDialect`] — folded into
+/// [`direct_compile_output_digest`]'s per-artifact hash input.
+fn fragment_dialect_rank(dialect: FragmentDialect) -> u8 {
+    match dialect {
+        FragmentDialect::JavaScript => 0,
+        FragmentDialect::Jsx => 1,
+        FragmentDialect::TypeScript => 2,
+        FragmentDialect::Tsx => 3,
+        FragmentDialect::Declaration => 4,
+    }
+}
+
+/// Hashes a [`RuntimeOutputDescriptor`]'s own structured fields — never its
+/// `Debug` formatting, per this module's own no-`Debug`-ambiguity
+/// convention (see [`vue_parse_identity_digest`]). Every field is content
+/// derived (`descriptor_hash` over `code`/the raw map/declared-source
+/// identity tokens), so this is defense-in-depth over what `code`/
+/// `source_map`/`scope_hash` already cover in the caller's digest, not a
+/// distinct observation — but it is hashed explicitly rather than assumed
+/// redundant, since a caller changing declared-source identity (a
+/// different `filename`) with byte-identical code/map would otherwise be
+/// invisible to the digest.
+fn hash_output_descriptor(hasher: &mut blake3::Hasher, descriptor: &RuntimeOutputDescriptor) {
+    hash_len_prefixed_str(hasher, &descriptor.source_space.token);
+    hasher.update(&[descriptor.source_space.kind as u8]);
+    hash_len_prefixed_str(hasher, &descriptor.source_space.source_token);
+    hash_len_prefixed_str(hasher, &descriptor.source_space.content_hash);
+    hash_usize(hasher, descriptor.source_space.utf8_byte_len as usize);
+    hash_len_prefixed_str(hasher, &descriptor.content_artifact.token);
+    hash_len_prefixed_str(hasher, &descriptor.content_artifact.source_space_token);
+    hash_len_prefixed_str(hasher, &descriptor.content_artifact.content_hash);
+    hash_usize(hasher, descriptor.content_artifact.utf8_byte_len as usize);
+    hash_len_prefixed_str(hasher, &descriptor.source_map.map_hash);
+    hash_len_prefixed_str(hasher, &descriptor.source_map.destination_space_token);
+    hash_usize(hasher, descriptor.source_map.declared_space_tokens.len());
+    for token in &descriptor.source_map.declared_space_tokens {
+        hash_len_prefixed_str(hasher, token);
+    }
+    hash_len_prefixed_opt_str(hasher, descriptor.source_map.raw_map.as_deref());
+    hasher.update(&[descriptor.source_map.fidelity as u8]);
+}
+
+/// A canonical, length-prefixed blake3 digest over every field
+/// [`AssembledArtifact`]/[`RuntimeStyleBlock`]/[`CompileDiagnostic`] actually
+/// expose: per-artifact `kind`/`code`/`dialect`/both source-map slots, hashed
+/// in the order [`crate::assembly::ArtifactSet::artifacts`] exposes them —
+/// publication order is part of the observable result, so a route that
+/// reordered artifacts must produce a different digest, not the same one, then
+/// `styles`' `code`/`source_map`/`lang`/`scope_hash`/`has_global`/
+/// `output_descriptor` (via [`hash_output_descriptor`] — itself derived
+/// purely from `code`/the raw map/declared-source identity, but hashed
+/// explicitly rather than assumed redundant), then `diagnostics`'
+/// `severity`/`code`/`message`/`span`. Lets a result-identity comparison
+/// across routes (direct / prepared-first / prepared-repeat / batch) report
+/// ONE short mismatching digest per fixture/route instead of a giant string
+/// diff. Shared verbatim by this module's own tests and the
+/// `compiler_route_overhead` bench harness — do not write a second copy of this
+/// logic anywhere else.
+pub fn direct_compile_output_digest(output: &DirectCompileOutput) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+
+    let artifacts = output.artifacts.artifacts();
+    hash_usize(&mut hasher, artifacts.len());
+    for artifact in artifacts {
+        hash_usize(&mut hasher, product_kind_rank(artifact.kind()) as usize);
+        hash_len_prefixed_str(&mut hasher, artifact.code());
+        hash_usize(
+            &mut hasher,
+            fragment_dialect_rank(artifact.dialect()) as usize,
+        );
+        hash_len_prefixed_opt_str(&mut hasher, artifact.source_projection_map());
+        hash_len_prefixed_opt_str(&mut hasher, artifact.runtime_source_map());
+    }
+
+    hash_usize(&mut hasher, output.styles.len());
+    for style in &output.styles {
+        hash_len_prefixed_str(&mut hasher, &style.code);
+        hash_len_prefixed_opt_str(&mut hasher, style.source_map.as_deref());
+        hash_len_prefixed_opt_str(&mut hasher, style.lang.as_deref());
+        hash_len_prefixed_opt_str(&mut hasher, style.scope_hash.as_deref());
+        hasher.update(&[style.has_global as u8]);
+        hash_output_descriptor(&mut hasher, &style.output_descriptor);
+    }
+
+    hash_usize(&mut hasher, output.diagnostics.len());
+    for diagnostic in &output.diagnostics {
+        hash_usize(&mut hasher, diagnostic.severity as usize);
+        hash_len_prefixed_str(&mut hasher, &diagnostic.code);
+        hash_len_prefixed_str(&mut hasher, &diagnostic.message);
+        match diagnostic.span {
+            Some(span) => {
+                hasher.update(&[1u8]);
+                hasher.update(&span.start.to_le_bytes());
+                hasher.update(&span.end.to_le_bytes());
+            }
+            None => {
+                hasher.update(&[0u8]);
+            }
+        }
+    }
+
+    *hasher.finalize().as_bytes()
 }
 
 #[cfg(test)]
@@ -1133,16 +1875,21 @@ mod tests {
             .compile(SVELTE_SOURCE, &request, svelte_inputs())
             .expect_err("Svelte SSR is not yet implemented and must fail closed");
         assert!(
-            matches!(error, DirectCompileError::Svelte(_)),
+            matches!(
+                error,
+                DirectCompileError::Svelte(ClientCompileError::Unsupported(
+                    UnsupportedSvelteRuntimeSurface::ServerGenerate { .. }
+                ))
+            ),
             "got {error:?}"
         );
     }
 
     #[test]
     fn svelte_dual_runtime_client_and_server_request_fails_closed_with_no_partial_output() {
-        // Both kinds requested together: the server half fails closed
-        // (SSR unsupported) — the WHOLE compile must refuse, never publish
-        // just the client half.
+        // Both kinds requested together: the server half is unproducible —
+        // the WHOLE compile must refuse before parse, never publish just
+        // the client half.
         let request = svelte_request(vec![
             CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
             CompileProduct::RuntimeServer(RuntimeProductRequest::default()),
@@ -1151,7 +1898,12 @@ mod tests {
             .compile(SVELTE_SOURCE, &request, svelte_inputs())
             .expect_err("the SSR half must refuse the whole compile");
         assert!(
-            matches!(error, DirectCompileError::Svelte(_)),
+            matches!(
+                error,
+                DirectCompileError::Svelte(ClientCompileError::Unsupported(
+                    UnsupportedSvelteRuntimeSurface::ServerGenerate { .. }
+                ))
+            ),
             "got {error:?}"
         );
     }
@@ -1218,3 +1970,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "standalone_prepared_tests.rs"]
+mod prepared_tests;

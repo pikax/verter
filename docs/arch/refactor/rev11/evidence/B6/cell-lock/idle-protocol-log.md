@@ -71,7 +71,7 @@ The maintainer authorised draining the host and the coordinator stopped the
 concurrent agents. The first drain still left the floor at 1-minute load 2.39:
 an adversarial review leg (`adversarial-review.sh b6-r7`, supervisor PID 56821,
 `grok` child PID 56967) was bursting `cargo-nextest` -> `cargo` -> `rustc` every
-30-40 s from `/Users/carlosrodrigues/Documents/dev/verter-adv-b6-r7`. Attribution
+30-40 s from worktree `verter-adv-b6-r7`. Attribution
 was not guessed: 67 of 67 compiler observations sampled over five minutes, across
 16 distinct PIDs, resolved by `lsof` to that one worktree. The bursts re-inflated
 the average before it could decay, so waiting could never have worked. The first

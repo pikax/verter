@@ -813,7 +813,16 @@ owner = "B6"
 # arm exists on the B5 tree this cell was locked from; the harness REFUSES the
 # other three rather than reporting a fabricated number for them.
 operation = "route_overhead_direct_prepared_first_prepared_repeat_batch; product=RuntimeClient; frameworks=vue+svelte"
-corpus_fingerprint = "git-blob:6c69bd6e6b0f674eec20d92aff9080aad0f877ad (crates/verter_bench/examples/route_overhead_baseline.rs); eight in-process sources (4 Vue, 4 Svelte), no fixture directory, no third-party corpus"
+# Re-pinned from git-blob:6c69bd6e6b0f674eec20d92aff9080aad0f877ad. The harness file
+# arrived unformatted and `cargo fmt --all --check` failed on it at trunk; formatting it
+# moved the blob without touching the corpus. The change is one `assert!` reflowed from
+# four lines onto one at :278 — no statement added, removed or reordered, and no
+# expression altered — so the recorded measurement below is UNCHANGED and was not
+# re-taken. This is a corpus-identity re-pin, not a re-measured cell. Ruling:
+# verify/B6F-2-ruling.md (program orchestrator, 2026-08-24), which also notes this is not
+# a precedent for re-pinning around a semantic corpus change; that would need a real
+# re-measurement.
+corpus_fingerprint = "git-blob:73667b9fa92ef86ec49b5c87b32de6945d8b7e82 (crates/verter_bench/examples/route_overhead_baseline.rs); eight in-process sources (4 Vue, 4 Svelte), no fixture directory, no third-party corpus"
 # SHA-256 over the literal request-identity string frozen in
 # evidence/B6/cell-lock/pre-measure-registration.md section 11 (no trailing newline).
 normalized_product_request_digest = "bf427b56a4f46a151d818c52e9493fd5817da4a7ac2e74352612962ea2f4ab80"

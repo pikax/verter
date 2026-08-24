@@ -77,6 +77,7 @@ verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 hotpath = { version = "0.23", optional = true }
+blake3 = { workspace = true }
 bitflags = "2.11"
 memchr = "2.8.0"
 # Arbitrary-precision integers for the Svelte client const-fold evaluator's BigInt
@@ -105,6 +106,10 @@ base64 = "0.22.1"
 sha2 = { workspace = true }
 hex = "0.4.3"
 lightningcss = { workspace = true }
+# Regular dependency, not dev-dependency: `assert_not_impl_any!` guards the
+# single-owner prepared-carrier types in library code (`standalone.rs`), so
+# the compile-time check runs on every build, not only `cargo test`.
+static_assertions = "1.1.0"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1.1"

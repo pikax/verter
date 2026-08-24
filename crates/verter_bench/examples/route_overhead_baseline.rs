@@ -278,10 +278,7 @@ fn main() {
         compile_calls = pass.compile_calls;
         artifact_count = pass.artifact_count;
         payload_bytes = pass.payload_bytes;
-        assert!(
-            payload_bytes > 0,
-            "RuntimeClient payload must be non-empty"
-        );
+        assert!(payload_bytes > 0, "RuntimeClient payload must be non-empty");
     }
 
     println!("sample\twall_ns");
