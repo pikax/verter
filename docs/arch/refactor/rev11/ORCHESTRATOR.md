@@ -25,6 +25,17 @@ The supplied Opus bootstrap requests fixed model ID `claude-opus-5`. Record the 
 
 If the actual runtime differs from the requested runtime, you may complete non-mutating package/repository inspection, but return `A0 BLOCKED` before representing the result as an Opus-governed Foundational outcome unless the designated maintainer records an explicit exception. Model brand does not replace role independence or evidence.
 
+# 2b. How to orchestrate
+
+[`orchestration/`](orchestration/) is normative for how blocks are implemented, reviewed and landed:
+tier roles and who may write code, round discipline and receipt validation, the regression rail every
+closed finding must carry, escalation when a leg did not run, and the landing checklist. Start at
+[`orchestration/README.md`](orchestration/README.md).
+
+Every rule there replaces an observed failure, and states it. Follow them to the letter; where one
+appears impossible, record a deviation for maintainer ratification rather than substituting a local
+decision.
+
 # 3. Read before acting
 
 Read, in this order:
