@@ -96,6 +96,25 @@ staged work swept into an unrelated commit on a shared branch. Different causes,
 staging command that captures the tree rather than a named set. So the check is mechanical: compare
 the staged set against the intended paths before every commit.
 
+## Landing is a sequence, and the landing agent authors nothing
+
+Each step gates the next so nothing lands with a caveat attached to an earlier one. The two cancels
+are one principle: a landing agent that resolves a conflict, or writes the commit message, is
+producing block-scoped content at landing time, unreviewed, and a green gate then certifies a tree
+nobody with the block's context ever read. The block holds why the code is shaped as it is and what
+the change did on its own terms; the landing agent holds neither. This is the landing-time case of
+the removed rebase agent below — a clean rebase is tooling, a conflicted one is a code decision.
+
+That is why the message is a field of the readiness report rather than something landing asks for.
+Drafted at verification, it is written where the understanding is; requested at landing, it would be
+written where the understanding is not, and every landing would carry a round trip to fetch what the
+block already knew.
+
+Provenance is content-bound for the same reason the sequence exists. Measured here: a squash
+preserves the tree exactly, a rebase does not, and in one observed case per-file blob identity held
+across a rebase while the tree moved because of an unrelated file — a blob-digest record survived
+where a commit-sha record did not. The failure mode is silence, not error.
+
 ## Why the package was cut
 
 At 20 files and ~26,000 words it recreated the token cost and forgetting it exists to prevent:
@@ -129,8 +148,10 @@ the operator picks.
 
 - **Rebase agent.** A clean rebase is mechanical tooling; a conflicted one is a code decision and
   goes to the implementer.
-- **Landing manager.** Mechanical checks belong in tooling, semantic acceptance to a fresh reviewer.
-  The role only relayed a checklist. **Its verification function survives** in `delivery.md`.
+- **Landing manager.** Removed because mechanical checks belong in tooling and semantic acceptance to
+  a fresh reviewer, leaving a role that only relayed a checklist. **Superseded** — the maintainer has
+  since specified a landing agent with an ordered sequence, in `delivery.md`, which is where its
+  verification function had survived.
 - **Recon.** Advisory output the implementer could discard; the block orchestrator already owns that
   context.
 - **`acceptance.md`.** Merged into `reviewer.md` as a mode — it shared inputs, calibration, severity
