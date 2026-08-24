@@ -68,10 +68,12 @@ ruling is uncontested; it means no OTHER migrated ruling's own text names it as 
 | [`PARALLEL-REVIEW-SEATS`](MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md) | maintainer-directive | 2026-08-18 | program-wide review-seat protocol | — |
 | [`REVIEW-BUDGET-BY-ARTIFACT-CLASS`](MAINTAINER-RULING-REVIEW-BUDGET.md) | maintainer-directive | 2026-08-17 | program-wide review protocol | — |
 
-## Architecture rulings (20)
+## Architecture rulings (22)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`C1-CHARTER-RATIFICATION-2026-08-24`](ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFICATION.md) | architecture-ruling | 2026-08-24 | C1 | — |
+| [`C1-CHARTER-RATIFIABILITY-2026-08-24`](ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFIABILITY.md) | architecture-ruling | 2026-08-24 | C1 | — |
 | [`TCM0-DECISIONS-2026-08-24`](ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md) | architecture-ruling | 2026-08-24 | TCM0, TCM2, TCM3, TCM4 | — |
 | [`SIX-WAY-B6-CM1-2026-08-24`](ARCHITECT-RULING-2026-08-24-SIX-WAY-B6-CM1.md) | architecture-ruling | 2026-08-24 | B6, BF1, CM1, governance.md, performance-gates.toml | — |
 | [`CM1-CONTROL-AXIS-AMENDMENT-2026-08-24`](ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md) | architecture-ruling | 2026-08-24 | CM1 | — |

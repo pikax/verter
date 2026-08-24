@@ -646,3 +646,52 @@ id = "RULING-2026-08-24-TCM0-DECISIONS"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md"
 sha256 = "881eaf4e4a11e5a346e5f28006f446ec116d709768ecfeff3ebaf01d2b663b2a"
+
+# C1's charter and the two rulings that decide its ratifiability, recorded
+# trunk-side because RULING-2026-08-24-C1-CHARTER-RATIFIABILITY Q3 rules that
+# a block branch may only inherit this registry byte-for-byte through rebase:
+# authorization is authored here, by the registry/ledger owner, never on the
+# block branch. The charter's own **Status:** header still reads DRAFT and is
+# deliberately unchanged — the ratification is the confirmation ruling plus
+# the digest binding below, and a CHARTER document is never classified by its
+# own Status prose. The digest is the charter's exact bytes as ratified at
+# 8799580e161, taken unmodified from block/module-resolver-core so the two
+# stay identical across that block's eventual landing.
+[[document]]
+id = "C1-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/C1.md"
+sha256 = "99c0beb6ac0c36fb56a0c9ae13228db7e5b84b11da21089b79508db17b3cfbff"
+
+# Three-question architecture ruling taken on ccda4256230 (lane
+# architecture-c1-charter, RESULT: FAIL, five P1 findings): the charter is not
+# ratifiable as written and needs one controlling sentence incorporating
+# ARCH-ADDENDUM-C1-THREE-GAPS; Stage 2 needs a separately ratified,
+# digest-bound execution plan and the branch's WIP commits are not dispatch
+# authority; the branch-local registry edits are dropped entirely. It accepts
+# no block, moves no status, and adds no DAG/ledger block.
+[[document]]
+id = "RULING-2026-08-24-C1-CHARTER-RATIFIABILITY"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFIABILITY.md"
+sha256 = "db47255aa1b1a5e5588bea42161c5d69d463feee26b50e63317cdc35263b098a"
+
+# The ratification of record for the C1 charter (lane
+# architecture-c1-charter-confirm, RESULT: PASS, findings none, reviewed
+# 8799580e161): the added controlling sentence exactly incorporates the
+# addendum's dispositions without overreach, and the charter is ratified at
+# the reviewed tip. Charter text only — it accepts no block, unlocks nothing,
+# and leaves the preceding ruling's Stage 2 and trunk-side-authorization
+# findings open. C1 stays LOCKED with an unsatisfied predecessor set.
+[[document]]
+id = "RULING-2026-08-24-C1-CHARTER-RATIFICATION"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFICATION.md"
+sha256 = "1e44da3d4104cb2866f75d267cf3cdf6cebc719c099ba890760f6b6c1c64a834"
+
+[[authorization]]
+block = "C1"
+documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION"]
+ratified_by = "architecture ruling seat under explicit maintainer delegation"
+ratified_at = "2026-08-24"
+scope = "Ratifies the C1 charter text — converging ModuleResolverCore and the non-flow TypeInfoCore — as digest-bound authority, with ARCH-ADDENDUM-C1-THREE-GAPS.md governing wherever it conflicts: sealing over semantic-owned snapshots with no foreign implementations, enumerated per-module move/stay/split dispositions in place of a literal relocation, and one closed non-overridable inherent gateway in place of the exhaustive-coverage proof C1-AC-5 specifies. It is charter authority ONLY and dispatches nothing: C1 stays LOCKED, its predecessor set is unsatisfied (CM1 is REVIEW, not ACCEPTED), and RULING-2026-08-24-C1-CHARTER-RATIFIABILITY leaves two findings open against it — Stage 2 requires a separately ratified, digest-bound execution plan binding an exact rebased baseline, caller/deletion inventory, Cargo-edge and guard transition and atomic abort conditions, and no block-branch registry delta may substitute for authorization authored here. Execution authority requires a further record."
