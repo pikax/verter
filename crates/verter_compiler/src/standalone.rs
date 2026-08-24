@@ -60,6 +60,8 @@ use crate::svelte::runtime::{
     SvelteNamespace, SvelteRuntimeOptions,
 };
 use crate::svelte::ParsedSvelte;
+use rustc_hash::FxHashMap;
+use std::collections::hash_map::Entry;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 
 /// Ephemeral, non-identity execution inputs for a Svelte compile — resolved
@@ -1036,7 +1038,13 @@ impl StandaloneCompiler {
             };
         }
 
-        let mut groups: Vec<(BatchGroupKey, PreparedCarrier)> = Vec::new();
+        // `carriers` alone owns group order — first appearance in `items`,
+        // which is also the order `prepare` runs in. `group_index` is a pure
+        // lookup: it turns the per-item search from a scan of every existing
+        // group (O(N x G), quadratic for a batch of all-distinct sources)
+        // into one hash probe, and never decides an order.
+        let mut carriers: Vec<PreparedCarrier> = Vec::new();
+        let mut group_index: FxHashMap<BatchGroupKey, usize> = FxHashMap::default();
         let mut report = CompileBatchReport {
             cold_build_count: 0,
             reuse_count: 0,
@@ -1053,16 +1061,16 @@ impl StandaloneCompiler {
                 continue;
             }
             let key = batch_group_key(item.source, item.request);
-            let idx = match groups.iter().position(|(k, _)| *k == key) {
-                Some(idx) => idx,
-                None => {
+            let idx = match group_index.entry(key) {
+                Entry::Occupied(slot) => *slot.get(),
+                Entry::Vacant(slot) => {
                     let carrier = self.prepare(item.source, item.request);
-                    groups.push((key, carrier));
+                    carriers.push(carrier);
                     report.cold_build_count += 1;
-                    groups.len() - 1
+                    *slot.insert(carriers.len() - 1)
                 }
             };
-            let carrier = &groups[idx].1;
+            let carrier = &carriers[idx];
             let result = self.compile_prepared(item.source, carrier, item.request, item.inputs);
             report.reuse_count += 1;
             results.push(result);
@@ -1370,7 +1378,12 @@ fn vue_parse_identity_digest(vue: &crate::compile_request::VueCompileRequest) ->
 /// key share one [`PreparedCarrier`]. The framework tag lives in the enum
 /// discriminant itself (a Vue item and a Svelte item never share a key even
 /// if their `source_digest`s happened to collide).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Hash` and `Eq` are both derived over the same discriminant and the same
+/// whole byte-digest fields, so they cannot disagree — every field is a
+/// plain `[u8; 32]` with no normalization, no interior mutability, and no
+/// hand-written comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum BatchGroupKey {
     Vue {
         source_digest: [u8; 32],
@@ -1967,6 +1980,34 @@ mod tests {
         assert_eq!(
             request.unwrap_err(),
             CompileRequestError::SsrVaporBackendUnsupported
+        );
+    }
+
+    /// `compile_batch`'s `group_index` map invokes `Eq` only on a hash
+    /// collision, so a `BatchGroupKey` whose `Eq` (or `Hash`) stopped
+    /// seeing a field would merge distinct groups without any batch test
+    /// noticing. Pin both halves on `parse_identity_digest`: two keys
+    /// differing only there must be unequal AND hash apart under the
+    /// exact hasher the map probes with.
+    #[test]
+    fn batch_group_key_eq_and_hash_both_see_parse_identity_digest() {
+        use std::hash::BuildHasher;
+
+        let a = BatchGroupKey::Vue {
+            source_digest: [7u8; 32],
+            parse_identity_digest: [1u8; 32],
+        };
+        let b = BatchGroupKey::Vue {
+            source_digest: [7u8; 32],
+            parse_identity_digest: [2u8; 32],
+        };
+        assert_ne!(a, b, "Eq must discriminate on parse_identity_digest");
+
+        let group_index: FxHashMap<BatchGroupKey, usize> = FxHashMap::default();
+        assert_ne!(
+            group_index.hasher().hash_one(a),
+            group_index.hasher().hash_one(b),
+            "Hash must discriminate on parse_identity_digest"
         );
     }
 }

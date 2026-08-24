@@ -1787,3 +1787,157 @@ fn compile_batch_of_no_items_returns_no_results_and_does_no_work() {
         "an empty batch must serve nothing"
     );
 }
+
+// ── Result order is input order, never group order ───────────────────
+
+/// `results` follows INPUT order; a group key only selects which shared
+/// carrier an item compiles against, and never contributes an ordering.
+///
+/// The batch below interleaves seven distinct `(source, request)` cases
+/// across six carrier groups so that its input order is deliberately NOT
+/// group-major. Both halves are asserted: every slot carries its own item's
+/// digest, AND that input-ordered sequence differs from the group-major one
+/// the same items would produce if results were emitted per group — the
+/// shape a map-ordered replacement for the carrier `Vec` invites. Without
+/// the second assertion the first could pass vacuously on an order that was
+/// already group-major.
+///
+/// Case `G` is `VUE_MEDIUM` with the runtime source map requested: it shares
+/// `B`'s carrier group (same source, same Vue parse options) while producing
+/// a different digest, so the grouped sequence genuinely reorders it away
+/// from its input slot.
+#[test]
+fn compile_batch_results_follow_input_order_not_group_order() {
+    let compiler = StandaloneCompiler;
+
+    let vue_client = vue_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+    let vue_ide = vue_request(vec![CompileProduct::IdeCompanion(
+        IdeProductRequest::default(),
+    )]);
+    let vue_client_mapped =
+        vue_request(vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+            runtime_source_map: true,
+            ..RuntimeProductRequest::default()
+        })]);
+    let svelte_client = svelte_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+
+    // (label, source, request, inputs) — index into this array is a case id.
+    let cases: [(&str, &str, &CompileRequest, DirectExecutionInputs<'static>); 7] = [
+        ("A", VUE_SIMPLE, &vue_client, vue_inputs()),
+        ("B", VUE_MEDIUM, &vue_client, vue_inputs()),
+        ("C", VUE_VAPOR, &vue_client, vue_inputs()),
+        ("D", VUE_LARGE, &vue_ide, vue_inputs()),
+        ("E", SVELTE_MARKUP_ONLY, &svelte_client, svelte_inputs()),
+        ("F", SVELTE_PROPS, &svelte_client, svelte_inputs()),
+        ("G", VUE_MEDIUM, &vue_client_mapped, vue_inputs()),
+    ];
+    /// Carrier group of each case id, hand-written: `G` shares `B`'s
+    /// (same source, same Vue parse options; `runtime_source_map` is not
+    /// part of the key). Asserted below against the grouping
+    /// `batch_group_key` actually produces, so a wrong row here fails
+    /// loudly instead of silently weakening the `assert_ne!` guard.
+    const GROUP_OF: [usize; 7] = [0, 1, 2, 3, 4, 5, 1];
+    {
+        let mut keys: Vec<BatchGroupKey> = Vec::new();
+        let derived: Vec<usize> = cases
+            .iter()
+            .map(|(_, source, request, _)| {
+                let key = batch_group_key(source, request);
+                match keys.iter().position(|k| *k == key) {
+                    Some(idx) => idx,
+                    None => {
+                        keys.push(key);
+                        keys.len() - 1
+                    }
+                }
+            })
+            .collect();
+        assert_eq!(
+            derived, GROUP_OF,
+            "GROUP_OF must match the grouping batch_group_key produces"
+        );
+    }
+
+    let expected: Vec<[u8; 32]> = cases
+        .iter()
+        .map(|(label, source, request, inputs)| {
+            let output = compiler
+                .compile(source, request, *inputs)
+                .unwrap_or_else(|e| panic!("{label}: single-compile oracle failed: {e:?}"));
+            direct_compile_output_digest(&output)
+        })
+        .collect();
+    for (i, (label_i, ..)) in cases.iter().enumerate() {
+        for (j, (label_j, ..)) in cases.iter().enumerate().skip(i + 1) {
+            assert_ne!(
+                expected[i], expected[j],
+                "{label_i} and {label_j} must be distinguishable by digest"
+            );
+        }
+    }
+
+    // C A F B E A D C G B F A E — not group-major, and not sorted.
+    const ORDER: [usize; 13] = [2, 0, 5, 1, 4, 0, 3, 2, 6, 1, 5, 0, 4];
+
+    let items: Vec<BatchCompileItem<'_>> = ORDER
+        .iter()
+        .map(|&case| {
+            let (_, source, request, inputs) = cases[case];
+            BatchCompileItem {
+                source,
+                request,
+                inputs,
+            }
+        })
+        .collect();
+    let batch = compiler.compile_batch(&items);
+    assert_eq!(batch.results.len(), ORDER.len());
+    assert_eq!(
+        batch.report.cold_build_count, 6,
+        "six distinct carrier groups, so six prepares"
+    );
+    assert_eq!(batch.report.reuse_count, ORDER.len());
+
+    let observed: Vec<[u8; 32]> = ORDER
+        .iter()
+        .enumerate()
+        .map(|(slot, &case)| {
+            let output = batch.results[slot].as_ref().unwrap_or_else(|e| {
+                panic!("{}@{slot}: batch compile failed: {e:?}", cases[case].0)
+            });
+            direct_compile_output_digest(output)
+        })
+        .collect();
+    let by_input: Vec<[u8; 32]> = ORDER.iter().map(|&case| expected[case]).collect();
+    assert_eq!(
+        observed, by_input,
+        "results[i] must be item i's own outcome, in input order"
+    );
+
+    // The same items emitted per group, in group first-appearance order —
+    // derived from ORDER and the verified GROUP_OF above, so it stays
+    // honest if either changes. `sort_by_key` is stable, so within a group
+    // the items keep their relative input order.
+    let mut group_first_seen: Vec<usize> = Vec::new();
+    for &case in ORDER.iter() {
+        if !group_first_seen.contains(&GROUP_OF[case]) {
+            group_first_seen.push(GROUP_OF[case]);
+        }
+    }
+    let mut group_major = ORDER;
+    group_major.sort_by_key(|&case| {
+        group_first_seen
+            .iter()
+            .position(|g| *g == GROUP_OF[case])
+            .expect("every group was recorded above")
+    });
+    let by_group: Vec<[u8; 32]> = group_major.iter().map(|&case| expected[case]).collect();
+    assert_ne!(
+        by_input, by_group,
+        "the fixture order is already group-major, so the assertion above proves nothing"
+    );
+}
