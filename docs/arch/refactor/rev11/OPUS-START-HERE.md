@@ -1,6 +1,6 @@
-# Start Verter Revision 11 with Claude Opus 5
+# Start Verter Revision 11
 
-Revision 11 is safe to hand to an Opus orchestrator **together with an actual Verter checkout and command access**. The architecture ZIP alone cannot inspect, modify, test, or review the repository.
+Revision 11 is safe to hand to a capable orchestrator runtime **together with an actual Verter checkout and command access**. The architecture ZIP alone cannot inspect, modify, test, or review the repository.
 
 **Normative entry:** `ORCHESTRATOR.md`. This guide, the bootstrap, and the role files are adapters; they cannot override the package contracts.
 
@@ -32,22 +32,25 @@ Do not continue on any checksum, manifest, live-self-test, validation, or extrac
 
 # 2. Launch the orchestrator from the Verter checkout
 
-First verify the Claude Code runtime:
+First verify the Claude Code runtime and record its exact version in A0 evidence:
 
 ```bash
 claude --version
 ```
 
-The `claude-opus-5` model ID requires Claude Code **2.1.219 or later**. Upgrade before continuing if the installed runtime is older, and record the exact runtime version in A0 evidence.
+Choose a runtime by capability, not identity — `ORCHESTRATOR.md` section 2 governs. Pin an exact
+model ID rather than a floating alias, so the recorded identity matches what ran.
 
 Place the extracted package beside the repository, then launch Claude Code from the repository root:
 
 ```bash
 cd /path/to/verter
-claude --model claude-opus-5 --add-dir ../verter-architecture-v11
+claude --model <pinned-model-id> --add-dir ../verter-architecture-v11
 ```
 
-The adapter requests the fixed model ID `claude-opus-5`, not the floating `opus` alias. At startup, record the actual model/provider shown by Claude Code. A fallback or substitution is reported and causes the Opus-specific handoff to stop unless the designated maintainer explicitly accepts that runtime.
+At startup, record the actual model/provider shown by Claude Code. A fallback or substitution is
+recorded in A0 evidence and stops the run only if the actual runtime lacks a capability the work
+needs.
 
 # 3. Paste the bootstrap prompt
 

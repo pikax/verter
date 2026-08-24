@@ -101,6 +101,9 @@ these files.
 
 ## Orchestration
 
-[`orchestration/`](orchestration/) — normative doctrine for implementing, reviewing and landing
-program blocks: tier roles, round discipline, receipt validation, regression rails, escalation, and
-the landing checklist. Entry point: [`orchestration/README.md`](orchestration/README.md).
+[`orchestration/`](orchestration/) — normative for implementing, reviewing and landing program
+blocks: the four-level topology and who may write code, the discovery/closure/acceptance review
+lifecycle, the code-quality and regression policy, and the compact block state record. Runtime
+prompts live in `orchestration/prompts/` and are the only material injected into an agent; the
+reasoning behind each rule is in `orchestration/design-notes.md`, which is never injected. Entry
+point: [`orchestration/README.md`](orchestration/README.md).

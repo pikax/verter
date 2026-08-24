@@ -1,94 +1,82 @@
-# Orchestration doctrine
+# Orchestration
 
-How Revision 11 work is implemented, reviewed and landed. These rules are **normative for anyone
-orchestrating program work** — they are inlined into every manager brief, and a block that ignores
-them produces evidence nobody can rely on.
+How program work is implemented, reviewed and landed.
 
-They were not designed up front. Every rule here replaces a specific, observed failure, and the
-failure is stated alongside the rule so a future reader can judge whether it still applies.
+Reliability comes from clear ownership, evidence, deterministic tooling and calibrated review — not
+from repeating rules or maximising ceremony.
 
-## The tiers
+## Runtime modes
 
-| Tier | Owns | Writes code |
-|---|---|---|
-| Program orchestrator | scope, sequencing, landing | no |
-| Block manager | one block: dispatch, freeze, collect, re-review to clean | no |
-| Implementer | the code and its tests. **Reused** across every fix round | yes, in the candidate worktree |
-| Review legs | independent analysis, one lens each. **Never reused** | no |
-| Adversarial leg | plants defects and proves the tests catch them | yes, in its own detached worktree |
-| Landing manager | the pre-merge checklist; may refuse | no |
-| Architect (codex) | rulings on design, scope and convergence | no |
+Two legitimate ways to host the Claude side. The operator picks per program; neither is the default.
 
-The asymmetry is deliberate: **reuse the implementer, never a reviewer.** The implementer holds why
-the code is shaped as it is, so a fresh fix agent discards that. A reviewer that already passed a
-tree is invested in that verdict, and one that saw the prior round anchors on its own findings —
-independence is per-round, not per-block.
+- **Split-pane Agent Team** — levels 1–2 as team lead and named teammates, workers as subagents.
+  Visible sessions in one window; teammates cannot run background subagents and do not survive
+  `/resume`.
+- **Supplied CLI pool** — the operator supplies external Claude CLI sessions and accounts, and owns
+  their liveness and cleanup. Multi-account routing and visible named terminals; sessions outlive
+  the parent.
+
+External tools (Codex, Grok) are external processes in either mode.
+
+## The four levels
+
+Seats are roles, not runtimes. In team mode only the top two form an Agent Team. **No nested Agent
+Teams** in any mode.
+
+| Level | Who | Owns | Writes code |
+|---|---|---|---|
+| 1 | Program orchestrator — team lead | DAG, sequencing, capacity, landing order | no |
+| 2 | Block orchestrator — named persistent teammate | charter, scope, architecture, slices, decisions | no |
+| 3 | Manager — ordinary subagent, one per block | delivery: dispatch, review lanes, finding closure | no |
+| 4 | Workers — nested subagents or external CLI | implementation, review, specialist analysis | implementers only |
+
+Every layer owns a distinct decision. A role that only relays text is removed.
+
+## Authority order
+
+1. Direct user or maintainer instruction.
+2. Canonical architecture and accepted decisions.
+3. Block charter and acceptance criteria.
+4. Current block state record.
+5. Orchestrator decisions.
+6. Reviewer findings and suggestions.
+
+No model is authoritative because of its identity. Codex is the preferred architecture agent, but
+every ruling cites the relevant invariant and concrete repository evidence. Ambiguity or conflict
+escalates; an agent may not silently invent architecture or override the user.
 
 ## The documents
 
-| File | What it governs |
-|---|---|
-| [manager-role.md](manager-role.md) | what a manager does and does not do; seat staffing; dispatch |
-| [round-discipline.md](round-discipline.md) | receipt validation, the frozen candidate, writer isolation, severity, the 3-round architect checkpoint |
-| [regression-prevention.md](regression-prevention.md) | the rail every closed finding must carry |
-| [escalation.md](escalation.md) | diagnosing a leg that did not run; when and how to escalate |
-| [adversarial-leg.md](adversarial-leg.md) | how the adversarial leg is briefed and what its evidence must show |
-| [landing-checks.md](landing-checks.md) | the pre-merge checklist, refusable |
+| File | What it governs | Injected into agents |
+|---|---|---|
+| [roles.md](roles.md) | ownership boundaries, communication contract, block state | by reference |
+| [review.md](review.md) | discovery → closure → acceptance, calibration, routing | by reference |
+| [delivery.md](delivery.md) | code quality, testing, regression prevention | by reference |
+| [prompts/](prompts/) | the dispatch prompt for each role | yes — these are the runtime prompts |
+| [design-notes.md](design-notes.md) | why these rules exist, and the failures behind them | **never** |
 
-## The four rules that matter most
+**Runtime prompts carry only role boundary, inputs, actions, output contract and stop conditions.**
+Rationale lives in `design-notes.md` and is never injected. Do not inline a document into a brief;
+point at a path.
 
-**1. A leg that produced no real output did not run.** Not a verdict, never a PASS. Four consecutive
-rounds on one block advanced on an adversarial leg emitting 1077, 1118, 683 and 0 bytes while the
-other legs produced megabytes each. Nobody checked. This is now a machine check, not a reminder —
-see *Receipt validation* below.
+## Tooling
 
-**2. Freeze the candidate for the round.** Nothing commits to it between dispatching legs and
-collecting them. Two reviewers have burned significant budget separating real defects from artifacts
-of commits made after they started reading, and both reported it unprompted.
+Deterministic mechanics belong in tooling, not in prompts:
 
-**3. A closed finding carries a rail.** Before closing, answer: *what edit would reintroduce this,
-and does it still compile?* If it compiles, an instance was fixed, not a class. See
-[regression-prevention.md](regression-prevention.md) for the tier ladder — and note that a test which
-only exercises the permitted route is not a rail. One such test asserted a capability gate that an
-adversary then showed was a single visibility edit from disappearing.
+    node scripts/orchestration/check-results.mjs <results-dir> <sha> <lane>...
 
-**4. Severity gates the round, not the finding.** P0/P1 block. **P2 and below are carried**, and a
-round whose findings are all P2-or-lower is a CLEAN round: land, carry, disposition at plan close.
+Each result must be structurally sound and bound to its lane and reviewed tree. The results directory
+is named for that sha, so a leftover file from an earlier freeze cannot answer for a lane that
+produced nothing. Exit 0 sound, 1 otherwise, 2 usage. Absent, truncated or inconclusive is BLOCKED.
 
-## Receipt validation
+    rust-lock.sh <name> -- <command>
 
-Prose said "no verdict is not a pass" long before anything enforced it, and it was skipped for four
-rounds. Before a round is acted on, every leg's receipt is machine-checked for:
-
-- a receipt file that exists;
-- exactly one terminal verdict, with **conflicting** verdicts rejected (identical repeats are fine —
-  agents echo their final message);
-- a `REVIEWED_SHA` matching the round's frozen SHA;
-- for an adversarial leg, an executed plant ledger with **observed RED and restored GREEN**.
-
-An INVALID leg is BLOCKED — diagnose the dispatch before re-running
-([escalation.md](escalation.md)), because a silently retried dispatch bug recurs on every later
-block.
-
-The check is **structural, not size-based**: three of the four missed legs above exceeded any
-reasonable byte threshold while containing no conclusion at all.
-
-## Known-good practice this doctrine does not yet fix
-
-An architecture consult on this process (2026-08-24) found the review loop does not converge on its
-own: fresh full-panel review after every fix is a randomised defect search that can surface a
-different finding each round while the code genuinely improves. Its recommended structure — one full
-three-lens **discovery** review, findings closed through **delta** reviews by the reviewer that
-raised them, then one fresh full **acceptance** review on the final frozen SHA — is not yet reflected
-in these documents. Until it is, the 3-round architect checkpoint in
-[round-discipline.md](round-discipline.md) is the circuit breaker.
-
-The same consult found that 40–120-commit candidates are failed decomposition, and that review cost
-grows faster than linearly with diff size.
+Every heavy Cargo workload — gate, build, mutation run — goes through this semaphore. It bounds
+concurrent builds host-wide and is re-entrant. **Host-provided, on `PATH`** — not shipped here;
+preflight `command -v rust-lock.sh` before the first dispatch that needs it, so a missing tool
+fails at dispatch, not mid-run.
 
 ## Placeholders
 
-`<repo>` is the repository checkout, `<worktree-root>/verter-<block>` a block worktree,
-`<agent-rules>` the orchestration rule directory inlined into briefs, and `<agent-bin>` the
-orchestration helper scripts. These live outside the repository because they are operator
-environment, not project source; this directory is the durable copy of the doctrine itself.
+`<repo>` is the repository checkout and `<worktree-root>/verter-<block>` a block worktree. These are
+operator environment, not project source.

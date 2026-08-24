@@ -1,0 +1,55 @@
+- File/log disagreement solely in plant evidence is detected—it is not.
+
+These omissions mean the validator validates a parseable subset, not the fixed receipt shape the doctrine claims.
+
+===VERTER-RECEIPT-BEGIN===
+LEG: architecture
+REVIEWED_SHA: 48f79dff5291ae594e23139a80261a7d667321b8
+FINDINGS: 13
+FINDING AR-01 | P1 | docs/arch/refactor/rev11/orchestration/templates/review-leg.md:44 | Unverified manager-controlled range, scope, and charter fields permit a predetermined review conclusion.
+FINDING AR-02 | P1 | docs/arch/refactor/rev11/orchestration/templates/architect-consult.md:35 | Proposition, invariant, position, and checkpoint-history fields provide direct priming channels.
+FINDING AR-03 | P1 | docs/arch/refactor/rev11/orchestration/templates/README.md:69 | Templates contradict doctrine by re-enabling retired Grok and bypassing required review wrappers.
+FINDING AR-04 | P1 | docs/arch/refactor/rev11/orchestration/templates/README.md:122 | Several roles lack an exact usable invocation, candidate cwd, receipt destination, or unwritable-path fallback.
+FINDING AR-05 | P1 | scripts/orchestration/validate-round.mjs:160 | Extraction accepts identical duplicate receipts and discards malformed delimiter state around a valid region.
+FINDING AR-06 | P1 | scripts/orchestration/validate-round.mjs:191 | Validation accepts empty or short SHAs, wrong leg and terminal kinds, PASS with blockers, P4, duplicate fields, and trailing junk.
+FINDING AR-07 | P1 | scripts/orchestration/validate-round.mjs:149 | Plant evidence is omitted from source comparison and zero observed or caught plant counts are accepted.
+FINDING AR-08 | P1 | scripts/orchestration/validate-round.test.mjs:196 | Tests codify weakened SHA and duplicate-receipt behavior while omitting critical semantic negative cases.
+FINDING AR-09 | P1 | docs/arch/refactor/rev11/orchestration/templates/landing-manager.md:65 | Landing receipt remains bound to the pre-rebase candidate SHA rather than the rebased and squashed landing tree.
+FINDING AR-10 | P1 | docs/arch/refactor/rev11/orchestration/templates/architect-checkpoint.md:44 | Checkpoint records receipt bytes instead of the doctrine-required full leg output size.
+FINDING AR-11 | P1 | docs/arch/refactor/rev11/orchestration/templates/fix-round.md:24 | The hard three-round prose ceiling is not enforced by the fillable fix-round dispatch.
+FINDING AR-12 | P2 | docs/arch/refactor/rev11/orchestration/templates/README.md:29 | Fill-in syntax and the claim that templates cite rather than restate doctrine are inconsistent across the template set.
+FINDING AR-13 | P2 | scripts/orchestration/validate-round.test.mjs:59 | The echoed-prompt fixture is synthetic rather than a captured portable real trace.
+VERDICT: FAIL
+===VERTER-RECEIPT-END===
+2026-08-24T10:41:38.755516Z ERROR codex_core::session: failed to record rollout items: thread 01a0334e-342b-7493-80e5-38557c258664 not found
+tokens used
+209 980
+2026-01-01T00:00:00Z INFO codex_core::session: turn complete
+tokens used
+209 980
+- File/log disagreement solely in plant evidence is detected—it is not.
+
+These omissions mean the validator validates a parseable subset, not the fixed receipt shape the doctrine claims.
+
+===VERTER-RECEIPT-BEGIN===
+LEG: architecture
+REVIEWED_SHA: 48f79dff5291ae594e23139a80261a7d667321b8
+FINDINGS: 13
+FINDING AR-01 | P1 | docs/arch/refactor/rev11/orchestration/templates/review-leg.md:44 | Unverified manager-controlled range, scope, and charter fields permit a predetermined review conclusion.
+FINDING AR-02 | P1 | docs/arch/refactor/rev11/orchestration/templates/architect-consult.md:35 | Proposition, invariant, position, and checkpoint-history fields provide direct priming channels.
+FINDING AR-03 | P1 | docs/arch/refactor/rev11/orchestration/templates/README.md:69 | Templates contradict doctrine by re-enabling retired Grok and bypassing required review wrappers.
+FINDING AR-04 | P1 | docs/arch/refactor/rev11/orchestration/templates/README.md:122 | Several roles lack an exact usable invocation, candidate cwd, receipt destination, or unwritable-path fallback.
+FINDING AR-05 | P1 | scripts/orchestration/validate-round.mjs:160 | Extraction accepts identical duplicate receipts and discards malformed delimiter state around a valid region.
+FINDING AR-06 | P1 | scripts/orchestration/validate-round.mjs:191 | Validation accepts empty or short SHAs, wrong leg and terminal kinds, PASS with blockers, P4, duplicate fields, and trailing junk.
+FINDING AR-07 | P1 | scripts/orchestration/validate-round.mjs:149 | Plant evidence is omitted from source comparison and zero observed or caught plant counts are accepted.
+FINDING AR-08 | P1 | scripts/orchestration/validate-round.test.mjs:196 | Tests codify weakened SHA and duplicate-receipt behavior while omitting critical semantic negative cases.
+FINDING AR-09 | P1 | docs/arch/refactor/rev11/orchestration/templates/landing-manager.md:65 | Landing receipt remains bound to the pre-rebase candidate SHA rather than the rebased and squashed landing tree.
+FINDING AR-10 | P1 | docs/arch/refactor/rev11/orchestration/templates/architect-checkpoint.md:44 | Checkpoint records receipt bytes instead of the doctrine-required full leg output size.
+FINDING AR-11 | P1 | docs/arch/refactor/rev11/orchestration/templates/fix-round.md:24 | The hard three-round prose ceiling is not enforced by the fillable fix-round dispatch.
+FINDING AR-12 | P2 | docs/arch/refactor/rev11/orchestration/templates/README.md:29 | Fill-in syntax and the claim that templates cite rather than restate doctrine are inconsistent across the template set.
+FINDING AR-13 | P2 | scripts/orchestration/validate-round.test.mjs:59 | The echoed-prompt fixture is synthetic rather than a captured portable real trace.
+VERDICT: FAIL
+===VERTER-RECEIPT-END===
+2026-08-24T10:41:38.755516Z ERROR codex_core::session: failed to record rollout items: thread 01a0334e-342b-7493-80e5-38557c258664 not found
+tokens used
+209 980
