@@ -1,0 +1,37 @@
+Reading prompt from stdin...
+OpenAI Codex v0.148.0
+--------
+workdir: <worktree>
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 00000000-0000-0000-0000-000000000000
+--------
+user
+# Architect checkpoint — one block, fifteen review rounds
+
+
+Repository: `<worktree>`, branch
+`block/prepared-direct-batch-closure`, HEAD `953570bab21b59784ab573a880390c43a093ca16`.
+Charter: `docs/arch/refactor/rev11/charters/B6.md`. Read-only.
+
+## What the block is
+
+...
+## Your receipt
+End your final message with exactly this block:
+
+===VERTER-RECEIPT-BEGIN===
+LEG: <architecture|conformance|adversarial|checkpoint|landing>
+REVIEWED_SHA: 953570bab21b59784ab573a880390c43a093ca16
+FINDINGS: <n, or the word none>
+FINDING <id> | <P0|P1|P2|P3> | <file>:<line> | <one-line summary>
+VERDICT: <PASS|FAIL>
+===VERTER-RECEIPT-END===
+
+codex
+I reviewed the packet. The block is not converging.
+
