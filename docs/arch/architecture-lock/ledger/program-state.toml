@@ -38,7 +38,7 @@ untracked_count = 0
 # refs/heads/program/architecture-lock's tip on every live-mode run; update
 # whenever that branch advances.
 integration_branch = "program/architecture-lock"
-integration_head_sha = "968f6ab8a3f68b124b5859ef19fbc48f031701de"
+integration_head_sha = "22b0af74a01846cf6934c9f6e65ae71d8f877b4c"
 
 [orchestration]
 maintainer = "Carlos Rodrigues <carlos@hypermob.co.uk> (GitHub: pikax)"
@@ -1496,9 +1496,9 @@ id = "J1"
 status = "IN_PROGRESS"
 charter_digest = "ad982473306df5a093526968de0d1c42fbe4f8f514372a35bb5d96e55791fa17"
 context_packet_digest = ""
-base_sha = "5f68515ba82efaa53d71a5facc78529d0e10db8d"
-implementation_candidate_sha = "f08b0275bdf27813a27df4e73cb17eb5b69420b5"
-implementation_ref = "refs/heads/block/j1"
+base_sha = "39dd20abb45b7bd5e8630d388282258baa8c5450"
+implementation_candidate_sha = "dc7aef31b4328405d71f976a9c40522c55aef031"
+implementation_ref = "refs/heads/block/j1-integration"
 landing_order = 2
 # candidate_sha/candidate_tree: pinned to the latest LANDED slice
 # (120eede71, "bring style_planner to parity with the legacy CSS route"),
