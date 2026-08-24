@@ -1,19 +1,21 @@
 # Rulings index
 
-One row per ruling document migrated from the session scratchpad under RULING 2 of
-[`ORCHESTRATION-AUTHORITY-MODEL`](ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md). Each document carries a
-typed YAML frontmatter header (`ruling_id`, `type`, `date`, `date_source`, `binds`, `source_file`,
+One row per document in this directory. The original corpus was migrated from the session scratchpad
+under RULING 2 of [`ORCHESTRATION-AUTHORITY-MODEL`](ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md);
+documents added after that migration are listed here too. Each document carries a typed YAML
+frontmatter header (`ruling_id`, `type`, `date`, `date_source`, `binds`, `source_file`,
 `summary`, `supersedes`, `superseded_by`, `contradicts`, `notes`) prepended to the verbatim original
 text — body content was not rewritten, only the frontmatter and a mechanical `<MACHINE_ROOT>` path
 substitution were applied. `supersedes`/`superseded_by` are per-CLAIM, not per-document: a ruling can
 supersede one claim of another while the rest of that document remains binding — see each document's
 own frontmatter for the exact claim text.
 
-**Not yet built by this migration:** the effective-state generator and authority registry described in
-RULING 1/3 of `ORCHESTRATION-AUTHORITY-MODEL` — this index is hand-curated, not a generated fail-closed
-model. Do not treat `superseded_by = —` as proof a ruling is uncontested; it means no OTHER migrated
-ruling's own text names it as superseded. Ledger `digest` binding is a separate step owned by the
-program orchestrator (RULING 1), not performed here.
+**Built since this migration:** the effective-state generator and authority registry described in RULING
+1/3 of `ORCHESTRATION-AUTHORITY-MODEL` now exist, at `scripts/effective-state.mjs` and
+`docs/arch/architecture-lock/ledger/authority-registry.toml`. This index is derived from neither: it
+remains hand-curated, not a generated fail-closed model. Do not treat `superseded_by = —` as proof a
+ruling is uncontested; it means no OTHER migrated ruling's own text names it as superseded. Ledger
+`digest` binding is a separate step owned by the program orchestrator (RULING 1), not performed here.
 
 ## Maintainer directives (43)
 
