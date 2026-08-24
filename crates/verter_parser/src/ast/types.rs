@@ -840,6 +840,95 @@ pub struct TemplateAst {
     pub root: RootNodeTemplate,
 }
 
+impl TemplateAst {
+    /// HEAP bytes this arena retains independently of the source `&str`:
+    /// collection buffers (by capacity) plus boxed element payloads and their
+    /// `props` buffers. Spans are not extra heap.
+    ///
+    /// The arena's own inline layout is deliberately excluded. A `TemplateAst`
+    /// lives inline inside its owning [`crate::ParsedSfc`], whose
+    /// `size_of::<Self>()` already covers it; counting it again here would
+    /// inflate every Vue carrier's reported weight by a constant.
+    pub fn retained_bytes(&self) -> usize {
+        let mut n = vec_cap_bytes(&self.nodes);
+        n = n.saturating_add(vec_cap_bytes(&self.root.attributes));
+        for prop in &self.root.attributes {
+            n = n.saturating_add(spilled_bytes_2(&prop.modifiers));
+        }
+        if let Some(content) = &self.root.content {
+            n = n.saturating_add(spilled_bytes_4(&content.children));
+            n = n.saturating_add(spilled_bytes_1(&content.v_if_chains));
+            for chain in &content.v_if_chains {
+                n = n.saturating_add(spilled_bytes_3(&chain.member_indices));
+            }
+        }
+        for node in &self.nodes {
+            if let AstNodeKind::Element(element) = &node.kind {
+                n = n.saturating_add(std::mem::size_of::<ElementNode>());
+                n = n.saturating_add(vec_cap_bytes(&element.props));
+                for prop in &element.props {
+                    n = n.saturating_add(spilled_bytes_2(&prop.modifiers));
+                }
+                if let Some(condition) = &element.v_condition {
+                    n = n.saturating_add(spilled_bytes_2(&condition.prop.modifiers));
+                }
+                n = n.saturating_add(optional_prop_spill(element.v_for.as_ref()));
+                n = n.saturating_add(optional_prop_spill(element.v_slot.as_ref()));
+                n = n.saturating_add(optional_prop_spill(element.v_once.as_ref()));
+                n = n.saturating_add(optional_prop_spill(element.v_ref.as_ref()));
+                if let Some(content) = &element.content {
+                    n = n.saturating_add(spilled_bytes_4(&content.children));
+                    n = n.saturating_add(spilled_bytes_1(&content.v_if_chains));
+                    for chain in &content.v_if_chains {
+                        n = n.saturating_add(spilled_bytes_3(&chain.member_indices));
+                    }
+                }
+            }
+        }
+        n
+    }
+}
+
+fn optional_prop_spill(prop: Option<&NodeProp>) -> usize {
+    prop.map(|p| spilled_bytes_2(&p.modifiers)).unwrap_or(0)
+}
+
+fn vec_cap_bytes<T>(items: &Vec<T>) -> usize {
+    items.capacity().saturating_mul(std::mem::size_of::<T>())
+}
+
+fn spilled_bytes_1<T>(items: &SmallVec<[T; 1]>) -> usize {
+    if items.spilled() {
+        items.capacity().saturating_mul(std::mem::size_of::<T>())
+    } else {
+        0
+    }
+}
+
+fn spilled_bytes_2<T>(items: &SmallVec<[T; 2]>) -> usize {
+    if items.spilled() {
+        items.capacity().saturating_mul(std::mem::size_of::<T>())
+    } else {
+        0
+    }
+}
+
+fn spilled_bytes_3<T>(items: &SmallVec<[T; 3]>) -> usize {
+    if items.spilled() {
+        items.capacity().saturating_mul(std::mem::size_of::<T>())
+    } else {
+        0
+    }
+}
+
+fn spilled_bytes_4<T>(items: &SmallVec<[T; 4]>) -> usize {
+    if items.spilled() {
+        items.capacity().saturating_mul(std::mem::size_of::<T>())
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 #[path = "types_tests.rs"]
 mod types_tests;

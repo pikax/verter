@@ -84,18 +84,40 @@ impl From<UnsupportedSvelteRuntimeSurface> for ClientCompileError {
     }
 }
 
+/// The single authority on which Svelte runtime surfaces this backend can
+/// produce. [`compile_client`] consults it at its own entry; a caller that
+/// needs to refuse an unproducible surface BEFORE parsing consults the same
+/// function rather than reconstructing the refusal, so "can Svelte emit a
+/// server module?" has exactly one answer in the tree.
+pub(crate) fn refuse_unproducible_runtime_surface(ssr: bool) -> Result<(), ClientCompileError> {
+    if ssr {
+        return Err(ClientCompileError::Unsupported(
+            UnsupportedSvelteRuntimeSurface::ServerGenerate {
+                span: Span::new(0, 0),
+            },
+        ));
+    }
+    Ok(())
+}
+
 /// Compile a parsed Svelte component into the `svelte/internal/client` JS module
 /// (the carrier-facing entry).
 ///
 /// Runs the full pipeline — runtime lowering → static-template planning →
 /// client-topology planning → [`emit_client_module`] — and returns the emitted
-/// module, or a typed [`ClientCompileError`] (a lowering failure, or an
-/// unsupported surface that fails closed). `ssr` requests the server backend
-/// (fails closed until the server backend lands). `want_source_map` is the
-/// css source-map demand (the carrier's `RuntimeCompileOptions::source_map`
-/// output axis, NOT a lowering option): the scoped render generates
-/// `css.map` from the same shared transform that produced `css.code` and the
-/// external artifact carries it.
+/// module or a typed [`ClientCompileError`]. Every arm of that error is
+/// reachable from here: a lowering failure, an unsupported surface, an
+/// official-reject rejection from the parity gate, and the two
+/// internal-codegen-invariant refusals for a generated module that does not
+/// parse or whose authored-to-generated mapping is invalid.
+///
+/// `ssr` requests the server backend (fails closed until the server backend
+/// lands). `want_source_map` is the carrier's
+/// `RuntimeCompileOptions::source_map` output axis rather than a lowering
+/// option, and it drives BOTH maps: the scoped render generates `css.map`
+/// from the same shared transform that produced `css.code`, and the same flag
+/// reaches [`emit_client_module`] through `ClientEmitOptions` to decide
+/// whether the emitted JS module carries its own map.
 pub fn compile_client<'a>(
     source: &'a str,
     parsed: &ParsedSvelte,
@@ -110,13 +132,7 @@ pub fn compile_client<'a>(
     // structurally impossible.
     //
     // (0) SSR requests the server backend (fails closed until it lands).
-    if ssr {
-        return Err(ClientCompileError::Unsupported(
-            UnsupportedSvelteRuntimeSurface::ServerGenerate {
-                span: Span::new(0, 0),
-            },
-        ));
-    }
+    refuse_unproducible_runtime_surface(ssr)?;
     // (1) `official_reject_gate` — the OFFICIAL-REJECT parity gate. Refuse the
     // MALFORMED-input classes official ALSO compile-errors (a duplicate / mis-context
     // `<script>`, a `$`-prefixed binding, a duplicate accepted declaration, a global

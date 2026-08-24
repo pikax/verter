@@ -1,0 +1,80 @@
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":7.282,"rss_before_bytes":1785856,"rss_after_bytes":7520256,"rss_peak_bytes":7503872,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":2.577,"rss_before_bytes":7520256,"rss_after_bytes":7749632,"rss_peak_bytes":7733248,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.777,"rss_before_bytes":7749632,"rss_after_bytes":7962624,"rss_peak_bytes":7946240,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.875,"rss_before_bytes":7962624,"rss_after_bytes":8159232,"rss_peak_bytes":8142848,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN1 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":2.036,"rss_before_bytes":1785856,"rss_after_bytes":7454720,"rss_peak_bytes":7438336,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.140,"rss_before_bytes":7454720,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.444,"rss_before_bytes":7798784,"rss_after_bytes":7979008,"rss_peak_bytes":7962624,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.818,"rss_before_bytes":7979008,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN2 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.800,"rss_before_bytes":1785856,"rss_after_bytes":7389184,"rss_peak_bytes":7372800,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.152,"rss_before_bytes":7389184,"rss_after_bytes":7749632,"rss_peak_bytes":7733248,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.980,"rss_before_bytes":7749632,"rss_after_bytes":7979008,"rss_peak_bytes":7962624,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.916,"rss_before_bytes":7979008,"rss_after_bytes":8175616,"rss_peak_bytes":8159232,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN3 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.752,"rss_before_bytes":1785856,"rss_after_bytes":7520256,"rss_peak_bytes":7503872,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.309,"rss_before_bytes":7520256,"rss_after_bytes":7847936,"rss_peak_bytes":7831552,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.924,"rss_before_bytes":7847936,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.089,"rss_before_bytes":7995392,"rss_after_bytes":8159232,"rss_peak_bytes":8142848,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN4 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.703,"rss_before_bytes":1785856,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.263,"rss_before_bytes":7487488,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.548,"rss_before_bytes":7798784,"rss_after_bytes":7946240,"rss_peak_bytes":7929856,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.882,"rss_before_bytes":7946240,"rss_after_bytes":8110080,"rss_peak_bytes":8093696,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN5 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.700,"rss_before_bytes":1785856,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.282,"rss_before_bytes":7405568,"rss_after_bytes":7733248,"rss_peak_bytes":7716864,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.468,"rss_before_bytes":7733248,"rss_after_bytes":7929856,"rss_peak_bytes":7913472,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.823,"rss_before_bytes":7929856,"rss_after_bytes":8060928,"rss_peak_bytes":8044544,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN6 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.738,"rss_before_bytes":1785856,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.127,"rss_before_bytes":7487488,"rss_after_bytes":7831552,"rss_peak_bytes":7815168,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.451,"rss_before_bytes":7831552,"rss_after_bytes":7979008,"rss_peak_bytes":7962624,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.200,"rss_before_bytes":7979008,"rss_after_bytes":8142848,"rss_peak_bytes":8126464,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN7 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.714,"rss_before_bytes":1785856,"rss_after_bytes":7503872,"rss_peak_bytes":7487488,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.264,"rss_before_bytes":7503872,"rss_after_bytes":7847936,"rss_peak_bytes":7831552,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.502,"rss_before_bytes":7847936,"rss_after_bytes":7995392,"rss_peak_bytes":7979008,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.840,"rss_before_bytes":7995392,"rss_after_bytes":8159232,"rss_peak_bytes":8142848,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN8 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.746,"rss_before_bytes":1785856,"rss_after_bytes":7405568,"rss_peak_bytes":7389184,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.279,"rss_before_bytes":7405568,"rss_after_bytes":7766016,"rss_peak_bytes":7749632,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":4.760,"rss_before_bytes":7766016,"rss_after_bytes":7979008,"rss_peak_bytes":7962624,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":1.950,"rss_before_bytes":7979008,"rss_after_bytes":8192000,"rss_peak_bytes":8175616,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN9 EXIT=0
+batch route: item_count=14 distinct_group_count=7 (independently known from corpus.len())
+{"route":"direct","cold_build_count":7,"reuse_count":0,"measured_carrier_parse_calls":7,"latency_ms":1.851,"rss_before_bytes":1785856,"rss_after_bytes":7487488,"rss_peak_bytes":7471104,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-first","cold_build_count":7,"reuse_count":7,"measured_carrier_parse_calls":7,"latency_ms":1.303,"rss_before_bytes":7487488,"rss_after_bytes":7798784,"rss_peak_bytes":7782400,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"prepared-repeat","cold_build_count":0,"reuse_count":35,"measured_carrier_parse_calls":0,"latency_ms":5.239,"rss_before_bytes":7798784,"rss_after_bytes":7962624,"rss_peak_bytes":7946240,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+{"route":"batch","cold_build_count":7,"reuse_count":14,"measured_carrier_parse_calls":7,"latency_ms":2.157,"rss_before_bytes":7962624,"rss_after_bytes":8126464,"rss_peak_bytes":8110080,"digest":"e5bb61c90a3eea9154593277e63f90633678382b1b251f9feff230218fa6204b"}
+all routes produced byte-identical output (7 fixtures)
+measured carrier_parse.calls — direct=7 prepared-first=7 prepared-repeat=0 batch=7 (n=7, repeats=5)
+RUN10 EXIT=0

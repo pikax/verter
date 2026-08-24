@@ -370,6 +370,70 @@ impl ParsedSfc {
     pub fn clone_diagnostics(&self) -> Vec<Diagnostic> {
         self.diagnostics.clone()
     }
+
+    /// Bytes this parse result retains independently of the source `&str`:
+    /// collection buffers by capacity, boxed script `lang` values, diagnostic
+    /// message buffers, and the template arena's own retained bytes.
+    pub fn retained_bytes(&self) -> usize {
+        let mut n = std::mem::size_of::<Self>();
+        if let Some(ast) = &self.template_ast {
+            n = n.saturating_add(ast.retained_bytes());
+        }
+        n = n.saturating_add(script_retained_bytes(self.script_node.as_ref()));
+        n = n.saturating_add(script_retained_bytes(self.script_setup_node.as_ref()));
+        n = n.saturating_add(vec_cap_bytes(&self.style_nodes));
+        for style in &self.style_nodes {
+            n = n.saturating_add(vec_cap_bytes(&style.attributes));
+            n = n.saturating_add(props_modifier_spill(&style.attributes));
+        }
+        n = n.saturating_add(vec_cap_bytes(&self.unknown_nodes));
+        for unknown in &self.unknown_nodes {
+            n = n.saturating_add(vec_cap_bytes(&unknown.attributes));
+            n = n.saturating_add(props_modifier_spill(&unknown.attributes));
+        }
+        n = n.saturating_add(vec_cap_bytes(&self.diagnostics));
+        for diagnostic in &self.diagnostics {
+            n = n.saturating_add(diagnostic.message.capacity());
+            n = n.saturating_add(vec_cap_bytes(&diagnostic.arguments));
+            for argument in &diagnostic.arguments {
+                if let verter_language::DiagnosticArg::Text(text) = argument {
+                    n = n.saturating_add(text.capacity());
+                }
+            }
+        }
+        n
+    }
+}
+
+fn vec_cap_bytes<T>(items: &Vec<T>) -> usize {
+    items.capacity().saturating_mul(std::mem::size_of::<T>())
+}
+
+fn script_retained_bytes(script: Option<&RootNodeScript>) -> usize {
+    let Some(script) = script else {
+        return 0;
+    };
+    let mut n = vec_cap_bytes(&script.attributes);
+    n = n.saturating_add(props_modifier_spill(&script.attributes));
+    if let Some(lang) = &script.lang_value {
+        n = n.saturating_add(lang.len());
+    }
+    n
+}
+
+fn props_modifier_spill(props: &[NodeProp]) -> usize {
+    props
+        .iter()
+        .map(|prop| {
+            if prop.modifiers.spilled() {
+                prop.modifiers
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<crate::common::Span>())
+            } else {
+                0
+            }
+        })
+        .fold(0usize, usize::saturating_add)
 }
 
 impl StyleLang {
