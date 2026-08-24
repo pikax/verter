@@ -589,3 +589,28 @@ id = "RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md"
 sha256 = "dccb05d01e6997d3ab1de6af99dc59d19c71c0671713c1bf1bc7b4f0fe06bf94"
+
+# Six-question architecture ruling taken on 4643edbaa (lane
+# architecture-sixway): B6's missing immutable context packet, the four-arm
+# route-overhead gate whose pinned harness refuses three arms, the rebinding
+# of the three B6 mandates, the registered B6 charter digest versus its stale
+# header prose, CM1's two ignored type captures, and the batch-by-compat
+# acceptance cell. It records four open P1 findings; it accepts no block,
+# amends no charter, and adds no DAG/ledger block.
+[[document]]
+id = "RULING-2026-08-24-SIX-WAY-B6-CM1"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-SIX-WAY-B6-CM1.md"
+sha256 = "1b8b52fa4706cdee7d3f59cf7dd0bb34226b466e31cfd824658f3a3083effafa"
+
+# Ratification of CM1 charter amendment A (lane architecture-cm1-amend,
+# RESULT: PASS): the green negative control is restricted to module-owned and
+# imported custom classes; PropType<T> and setup-local custom classes leave
+# that control and remain solely as the two settled ignored captures. It
+# amends CM1's acceptance text only — it does not accept CM1 or add a
+# DAG/ledger block.
+[[document]]
+id = "RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md"
+sha256 = "ecd65254c7d5f3b14c5679ac7fb7165a108c8f2bb4513e5b49b3fb45bede43bf"
