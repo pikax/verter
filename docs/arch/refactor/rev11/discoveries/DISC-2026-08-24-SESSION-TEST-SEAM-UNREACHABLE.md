@@ -26,6 +26,13 @@ assembled input. A test installing a content mutation there lands it inside the
 capture→compute window deterministically, which is precisely the overlap a
 compile-pipeline concurrency test needs to stage.
 
+**Noted, not fixed:** the field's own doc comment (`lib.rs:625-631`) says the
+seam fires "BEFORE the compile input is assembled", but it fires *after*
+`CacheMiss { compile_input, .. }` is constructed — the fire-site comment is the
+accurate one. Flagged for whoever owns the surface; correcting it is a
+production edit, which is precisely what this document says a test-focused
+effort must not make incidentally.
+
 Placement is not the problem. Reachability is.
 
 ## Two independent barriers, either sufficient alone
