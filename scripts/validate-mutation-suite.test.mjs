@@ -2734,6 +2734,87 @@ process.exit(res.status === null ? 1 : res.status);
   rmSync(shimDir, { recursive: true, force: true });
 });
 
+test("[PS] a declared base_sha the pinned trunk is not on is refused, not rehearsed", () => {
+  const dag = write("dag-lo7b.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo7b.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      // CONCURRENT_C is a real commit and a genuine ancestor of its own
+      // rehearsal candidate (itself), but it branches off SHA_BASE and the
+      // pinned trunk SHA is not on that line of history. Replaying onto a
+      // cumulative tree rooted at the pin would carry a spurious reverse
+      // delta, so the rehearsal must refuse this block rather than rule on it.
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_C,
+        implementation_ref: CONCURRENT_C_REF,
+        base_sha: CONCURRENT_C,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live");
+  expectCheck(PS_FILE, "is not an ancestor of the pinned integration trunk", r);
+});
+
+test("[PS] pinned-trunk base ancestry check itself failing (broken git merge-base) is reported distinctly", () => {
+  // Fails merge-base ONLY for the rehearsal's pin-ancestry argv shape
+  // (<base_sha> <pinned trunk>), so resolvePinnedTrunk's own pin-vs-live-tip
+  // call, the implementation_ref binding call and the base-vs-candidate call
+  // all reach real git — isolating the subprocess-failure branch from the
+  // stale-base violation above.
+  const shimDir = mkdtempSync(join(tmpdir(), "validate-mutation-suite-mergebase-pin-"));
+  const shimScript = join(shimDir, "git");
+  writeFileSync(
+    shimScript,
+    `#!/usr/bin/env node
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "merge-base" && args[2] === "${SHA_BASE}" && args[3] === "${SHA}") {
+  process.stderr.write("shim: simulated merge-base failure for the pinned-trunk base ancestry check\\n");
+  process.exit(19);
+}
+const res = spawnSync(process.env.FAKE_GIT_REAL, args, { stdio: "inherit" });
+process.exit(res.status === null ? 1 : res.status);
+`,
+    "utf8",
+  );
+  chmodSync(shimScript, 0o755);
+
+  const dag = write("dag-lo7c.toml", TWO_CHILD_DAG);
+  const state = write(
+    "state-lo7c.toml",
+    header({ current: "A0", dagDigest: TWO_CHILD_DAG_DIGEST }) +
+      rootAccepted() +
+      "\n" +
+      block("A0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_A,
+        implementation_ref: CONCURRENT_A_REF,
+        base_sha: SHA_BASE,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("B0", "IN_PROGRESS", {
+        implementation_candidate_sha: CONCURRENT_B,
+        implementation_ref: CONCURRENT_B_REF,
+        base_sha: SHA_BASE,
+        landing_order: 2,
+      }),
+  );
+  const r = runPS(dag, state, "live", [], {
+    env: { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, FAKE_GIT_REAL: realGitPath },
+  });
+  expectCheck(PS_FILE, "ancestry against the pinned integration trunk", r);
+  rmSync(shimDir, { recursive: true, force: true });
+});
+
 test("[PS] two concurrently active blocks with a real merge conflict are rejected", () => {
   const dag = write("dag-disj2.toml", TWO_CHILD_DAG);
   const state = write(
