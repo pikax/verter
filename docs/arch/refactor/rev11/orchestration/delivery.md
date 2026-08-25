@@ -136,10 +136,20 @@ identifier covered, the fresh review of the final frozen candidate by an agent t
 returned PASS, and no open finding. A block that cannot meet that does not land; it stays on its
 branch until it can.
 
-The deferred-acceptance landing looks cheap and is not. Work reaches the working branch owned by
-nobody, its obligations surface one at a time as later blocks become their first consumers, and the
-record says a block is in progress while its code is what everything else builds on. Two blocks
-landed that way before this rule, and both had to be reopened.
+**A half-landed block is a defect, not a trade-off.** It is not a faster route with a cost attached;
+there is no version of it that comes out ahead. Work reaches the working branch owned by nobody, its
+obligations surface one at a time as later blocks become their first consumers, and the record says a
+block is in progress while its code is what everything else builds on.
+
+The measured cost, from the two blocks that landed this way before the rule: one has fifteen of its
+thirty-eight criteria uncovered on the working branch, because two of its four slices never landed —
+so closing it now means implementing and landing them, with a four-block train blocked behind it and
+a dependent block parked. The other could not be accepted at all: six of its ten scope items open,
+two with no evidence in the tree, and its charter forbidding the round that would close them. Both
+were reported complete at the time.
+
+Neither was caught by a gate, a review or a conformance check. Every one of those passed. What was
+missing was anyone asking whether the block was finished.
 
 **A ready-and-verified report carries the candidate identity, the evidence, the squash message —
 subject and body — and the acceptance-coverage mapping.** The manager drafts both at verification,
