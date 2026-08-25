@@ -447,6 +447,16 @@ location, and unlike quoting the current text it cannot go stale as the field gr
 **A table is read as a shape before it is read as rows.** Where one row's healthy value differs from
 every other's, say so beside it — a reader scanning a column of zeros reads the one as the defect.
 
+**Never infer a value is protected because a sibling copy is.** One block's charter digest is held in
+two places: the registry copy is hashed against the document on every run and fails loudly when
+stale, while the ledger copy's correspondence check is gated on a set of statuses the block is not in,
+so a well-formed but wrong digest passes. Proved both ways — a shape-invalid digest fails, a
+shape-valid wrong one does not. A green run over two bindings is evidence about the one that is
+checked.
+
+**A gate's coverage can depend on the subject's status.** Ask which checks are active for the state
+the thing is actually in, not which exist.
+
 **A pin fixes drift, not contradiction.** Pinning content guarantees the bytes have not moved; it
 guarantees nothing about whether those bytes agree with the act. One act named an execution model
 while the document it pinned still described that model as unnamed and the choice as later work's —
