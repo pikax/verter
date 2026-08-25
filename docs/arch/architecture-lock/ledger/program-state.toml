@@ -288,7 +288,7 @@ notes = "Implementation Lock Record + locked performance-gates.toml (no placehol
 [[block]]
 id = "B1"
 status = "ACCEPTED"
-charter_digest = "ac60d191221fc5e5938e0343091c6809648a482960ca7c1a49596e547d3e28e1"
+charter_digest = "d7ee747f3adc1c045ccdc66f48c73f859d5d11d011886cb574c9e9a009967049"
 context_packet_digest = "e2fa4b9408c9cc6158c68790ecba5f7f35ec758736a219f549cec3a876411cdf"
 base_sha = "5c24d22a550ce90d369471ea1d00590a0e1b726a"
 candidate_sha = "6ac6ab4d21a1a1b4fbd4ec37f5eafc77fc66f55c"
