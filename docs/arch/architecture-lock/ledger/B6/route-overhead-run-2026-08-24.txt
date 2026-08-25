@@ -1,7 +1,7 @@
 ==============================================================
 B6 route-overhead measurement — locked-machine session
 ==============================================================
-binary: /Users/carlosrodrigues/Documents/dev/verter/target/release/examples/compiler_route_overhead
+binary: <MACHINE_ROOT>/Documents/dev/verter/target/release/examples/compiler_route_overhead
 binary_sha256: 55b0820018cd3e338c0fc34179cbdde3ebaa8e941b87b0be92474f310cad4976
 binary_mtime: 2026-08-24T19:03:32+0100
 rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
