@@ -494,11 +494,20 @@ presents as a prompt or model problem, which is how several were misdiagnosed. T
 notified on completion, so it must stay alive to receive that: a full yield ends the turn and the
 notification lands nowhere.
 
-**A receipt is final only once the producing process has exited.** Requiring a lane to emit its
-receipt first — so a dying run still produces one — makes it write a structurally valid, own-lane
-receipt carrying a real verdict token while it is still running. The receipt is genuine and not final,
-so a filled-result test is necessary and still not sufficient. Wait on the process, then take the LAST
-own-lane filled receipt. Both properties are wanted, so the predicate carries both conditions.
+**Never require a lane to emit its receipt before it has one. That instruction is retired.** It was
+adopted so a dying run would still produce a receipt, and it produced five distinct defects: a receipt
+echoed from the prompt, a genuine-but-not-final receipt mid-run, and finally three own-lane receipts
+that disagreed, which the shared validator correctly refused as inconclusive. Across two runs the
+provisional verdict was wrong in both directions — provisional pass to final fail, then provisional
+fail to final pass — so it was not even a conservative bound and carried no information.
+
+**The protection against death-before-verdict was always small output and waiting on process exit**,
+both of which were already required. Four patches were written for this, each aimed at the reader
+when the source was the instruction: **when a rule keeps producing new failure surfaces, retire the
+rule rather than hardening its readers.**
+
+**A receipt is final only once the producing process has exited.** Wait on the process, then take the
+last own-lane filled receipt.
 
 **A waiter exits on receipt OR process-gone, never receipt alone.** A receipt-only poll reports a
 dead run as in flight indefinitely, and silent death read as progress costs more than the death.
