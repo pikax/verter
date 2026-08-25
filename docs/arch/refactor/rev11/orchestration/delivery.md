@@ -361,6 +361,14 @@ landed pins nothing anyone can check. One act scoped that way expired itself —
 was the one recording its own expiry boundary, which fired on its own bytes while changing no
 disposition it had ratified.
 
+**Ratify last.** Evidence, then freeze the candidate, then issue the act against that frozen sha. An
+act issued before its own consequence is recorded either expires when the recording lands or
+contradicts the evidence it pins — the same defect on two surfaces, and both have happened.
+
+**An act whose own consequence must be recorded in the evidence it pins can never be self-consistent.**
+Record the consequence first, freeze, then pin. Re-pinning is cheap; an act that cannot be made
+consistent is not.
+
 **A narrow grant with a drifting referent is the worst pair:** it expires early and cannot be checked.
 Narrowness is right; it has to be pinned.
 
