@@ -133,6 +133,21 @@ slices. Sequential slices when ownership overlaps; parallel only for genuinely i
 A block that does not converge after targeted fix cycles is resliced or escalated, not reviewed
 harder.
 
+## Liveness
+
+**A worker stops when it reports and stays stopped.** That is correct for finished work and a defect
+for unfinished work, and nothing notices the difference on its own. Twice in one session a block sat
+idle with work owed, surfaced only because someone happened to ask.
+
+**Keep a roster, not a memory.** Every block is non-complete (live, or parked with the unblocking
+EVENT named so the check is on the event rather than the agent), or complete (stopping is correct;
+do not resume). Sweep it on a cadence: compare the roster against what is actually running, resume
+anything non-complete that stopped, and check whether a parked block's event has fired.
+
+**A standing check that depends on the checker surviving is not standing.** Write the roster to disk,
+where it outlives the session that maintains it; a schedule is ephemeral and the file is not. The
+successor's first act is to read it.
+
 ## Machine resources
 
 Read-only review work may run in parallel. Write work runs only in isolated ownership.
