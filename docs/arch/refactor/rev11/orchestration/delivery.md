@@ -157,13 +157,25 @@ rather than proceeding with a caveat.
        cargo check --workspace --release
 
    The pin check gates the rest: a lint result from an unpinned toolchain is not evidence about the
-   toolchain CI uses, and it reads exactly like a pass. Steps 3-5 may be skipped only when the delta,
-   **enumerated against the merge-base rather than accepted as a label**, touches none of `*.rs`,
-   `crates/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`, `.cargo/**` — a
-   docs-only change that edits a rustdoc comment is still a `.rs` file. Add
-   `pnpm install --frozen-lockfile` and `pnpm test` only when the delta touches `packages/` or the
-   lockfile. Any failure returns the block: this is production source, and a landing agent must not
-   fix it.
+   toolchain CI uses, and it reads exactly like a pass.
+
+   **Always run:** the pin check and both formatters. `cargo fmt --all --check` is a whole-workspace
+   check and costs nothing; `oxfmt --check` runs whenever the delta contains any `.ts`, `.js`, `.mjs`
+   or `.cjs` file, **wherever it lives** — the pre-commit hook does not care which directory a script
+   sits in.
+
+   **Skippable — the three cargo builds only** (wasm32 clippy, workspace clippy, release check), and
+   only when the delta, **enumerated against the merge-base rather than accepted as a label**,
+   touches none of `*.rs`, `crates/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+   `build.rs`, `.cargo/**` — a docs-only change that edits a rustdoc comment is still a `.rs` file.
+   The skippable set is named rather than numbered on purpose: it was once written as a line range,
+   and inserting one command into the list silently made a formatter skippable and a release build
+   mandatory, inverting both.
+
+   Add `pnpm install --frozen-lockfile` and `pnpm test` only when the delta touches `packages/` or
+   the lockfile — an install-and-test trigger, never the formatting trigger.
+
+   Any failure returns the block: this is production source, and a landing agent must not fix it.
 3. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
    candidate's sha, and the supplied message must comply — **in its body, not only its subject**.
    Naming the program, its revision or a block identifier, or a commit type `CLAUDE.md` does not
