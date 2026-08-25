@@ -47,6 +47,30 @@ production callers, so no test could fail and none did. Compilation proved only 
 well-formed. Where a block delivers something nothing yet uses, its acceptance states that plainly
 rather than resting on a green gate that never exercised it — and names what would exercise it.
 
+## Sub-blocks — decompose so a review can finish
+
+**A block too large to review in one pass is decomposed into sub-blocks before implementation, by an
+architecture consult.** The consult owns the decomposition: each sub-block digestible, independently
+reviewable, and bounded so a reviewer can hold all of it at once. A block orchestrator does not
+self-decompose — the point is a boundary drawn by someone who is not implementing it.
+
+**Up to three review rounds per sub-block.** Then it is done, or it is escalated — not carried into
+the next sub-block.
+
+**When every sub-block is complete, the manager runs one conformance and one adversarial pass over
+the whole block.** Sub-block reviews establish each part; that final pair establishes that the parts
+compose, and it is where cross-sub-block defects are caught. Neither pass substitutes for the other,
+and neither substitutes for the sub-block reviews.
+
+## Review churn — stop the reviewer prospecting
+
+**A reviewer may always find a new path.** But if two consecutive rounds surface previously-unexamined
+paths, the surface is not being enumerated and further rounds will keep finding more.
+
+**At that point, stop reviewing and dispatch a low-effort consult to enumerate the remaining paths.**
+Its output is the surface; review resumes against it. Enumeration is cheaper than discovery repeated
+per round, and it converts an unbounded sequence of rounds into a bounded one.
+
 ## Convergence
 
 **Default maximum: two substantive fix cycles per slice.** Not converging means stop and rescope,

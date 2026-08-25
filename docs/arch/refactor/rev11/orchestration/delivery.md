@@ -89,6 +89,10 @@ greps the tree for a spelled identifier, path or token, `syn`/AST scanning inclu
 
 ## Dispatch preflight — establish at the start what is otherwise found at the end
 
+**The preflight runs as a high-effort architecture consult, not as the block's own survey.** It is
+guidance the block builds on, produced by someone who is not about to implement it, and it is where
+the decomposition into sub-blocks is decided.
+
 Most rounds are spent rediscovering facts that were knowable before implementation began. A block
 establishes these **before its first line of work**, and reports them in its first message:
 
@@ -450,6 +454,13 @@ consistent is not.
 
 **A narrow grant with a drifting referent is the worst pair:** it expires early and cannot be checked.
 Narrowness is right; it has to be pinned.
+
+**A cutover may run the new path alongside the legacy one inside a sub-block. The block does not
+close until the legacy path is deleted and the cutover is clean.** Parallel paths are a reviewable
+intermediate state, not a shipping one: they let a sub-block be judged on the new path working rather
+than on everything moving at once. Carrying both past the block's own close is the dual-path outcome
+the architecture rules forbid, so the deletion is the block's last sub-block at the latest, never a
+follow-up.
 
 **Capture before delete.** A criterion that measures or rehomes something a pending cutover removes
 must have its capture and rehoming land *inside* that cutover, never after it. Land the deletion first
