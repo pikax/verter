@@ -309,6 +309,25 @@ conflict and still produce a defect — one narrowing what an inventory collects
 fact from that inventory. Conflict markers do not detect semantic conflict, so integration is
 verified on its own.
 
+## The trap under all the others
+
+**An asserted scope wider than the scope actually examined.** Nearly every stall, false claim and
+reopened block traces to it, and it is committed by every kind of participant — implementers,
+reviewers, block owners and the orchestrator alike. Treat it as environmental, not as a failing of
+whoever committed it most recently.
+
+Its instances look unrelated until named together: a structural-soundness report read as a verdict
+about outcomes; a net diff answering a question about intermediate commits; an exit status answering
+a question about whether the run completed; a gate's pass read as covering tests its own filter
+excluded; a compile-fail fixture proving two types differ while claiming the declaration uses them;
+a one-sided absence read as a two-sided fact; a check whose own command line contained the pattern it
+matched. Each was true of what it examined and asserted about something larger.
+
+The discipline that catches it is one question, asked of your own claim before anyone else reads it:
+**what exactly did this examine, and is that the same as what I am about to say?** Where the answer
+is uncertain, the claim is settled by the compiler, a tool, or an independent reader — self-review
+does not qualify, because self-review shares the premise.
+
 ## One trap worth stating
 
 **A check that enumerates or matches from the same source it validates proves nothing.** A totality
