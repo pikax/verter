@@ -1529,7 +1529,7 @@ landing_order = 2
 # validator-required at that status (EVIDENCE_BOUND excludes IN_PROGRESS).
 # The integration branch landed as one fast-forward commit and its branch and
 # worktree were then removed, so implementation_ref names the branch that now
-# carries the commit rather than a block ref that no longer resolves. Landing is not acceptance: J1's 41
+# carries the commit rather than a block ref that no longer resolves. Landing is not acceptance: J1's 38
 # acceptance IDs are still open, the cutover slice has not been reconstructed
 # onto this result, and one fresh review of the final candidate by an agent
 # that has not seen it remains owed.
