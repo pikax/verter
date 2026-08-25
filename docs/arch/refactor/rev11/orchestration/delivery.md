@@ -208,6 +208,23 @@ stops on the first errors never builds the later targets, so its output is a pre
 not an inventory of it — the same shape as a fail-fast gate. Re-run to green; do not treat the first
 list as the full set.
 
+**A rebase voids the carry-across.** A candidate that has been reformatted AND replayed onto a moved
+working branch differs from the gated tree in two ways, and only one of them is a formatting fix. Do
+not stretch the rule to cover the other; gate it.
+
+**The gate's verdict is read from its telemetry, not its exit status.** `completeness` and
+`terminal.reached` in the telemetry the runner writes under its target directory are the authority; a
+truncated log and a missing terminal summary are corroborating. Do not probe for a working directory
+at the repository root — nothing writes one there, so that check reports absence every time and looks
+like it is working.
+
+**Skipping the pre-commit hook at squash time is permitted only when the health check above passed on
+the exact tree being committed** — re-verify the tree hash immediately before committing rather than
+trusting it has held, and state in the report which path was taken and on which hash. The
+justification is redundancy: the hook runs the same formatters the health check already ran. If the
+health check was skipped, failed, or ran on a different tree, the hook is not a duplicate — it is the
+only thing checking — and it runs. Using it to get past a failure is a gate-bypass, not a skip.
+
 **A formatting-only fix does not invalidate a gate verdict**, so a green result carries across it.
 That is a statement about the class of change, not about which formatter produced it — it holds for
 `oxfmt` over JavaScript exactly as for `cargo fmt` over Rust. Nothing else does: a lint repair that
