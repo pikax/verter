@@ -478,7 +478,7 @@ sha256 = "4cabfde198cfc246f60e44393ac6b11ef9ef9969c3dca140ea07cf41df9d65b9"
 id = "J1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/J1.md"
-sha256 = "ad982473306df5a093526968de0d1c42fbe4f8f514372a35bb5d96e55791fa17"
+sha256 = "afa872a77ddc0f2c6185578b80cf89dbcfa88a80db451ea0ece364679cf2c205"
 
 [[document]]
 id = "RULING-2026-08-23-CSS-WORK-REACHES-J1"
@@ -491,7 +491,7 @@ block = "J1"
 documents = ["CSS-CLEAN-CUTOVER", "J-TRAIN-SCOPE-PARSING-ONLY", "ONE-CSS-PARSER-PARSE-ONCE", "J1-CHARTER", "RULING-2026-08-23-CSS-WORK-REACHES-J1", "AMD-016-J1-OPEN-OBLIGATIONS-BOUND", "AMD-019-J1-OPEN-OBLIGATIONS-PROOF-CONTRACT"]
 ratified_by = "designated maintainer (scope), codex architect (charter)"
 ratified_at = "2026-08-21"
-scope = "CSS owner reconciliation — parsing and Lightning CSS removal only, seven readers converging under one parse. Remaining CSS work reaches J1 through branch block/j1-integration as the single J1 candidate (RULING-2026-08-23-CSS-WORK-REACHES-J1); no new DAG blocks."
+scope = "CSS owner reconciliation — parsing and Lightning CSS removal only, the readers section 1.1 classifies in converging under one parse. Remaining CSS work reaches J1 through branch block/j1-integration as the single J1 candidate (RULING-2026-08-23-CSS-WORK-REACHES-J1); no new DAG blocks."
 
 # B5's dispatch predated its predecessor BV2's acceptance being recorded, and its
 # charter still reads "PROPOSED amendment / LOCKED" — an orchestration error, not
