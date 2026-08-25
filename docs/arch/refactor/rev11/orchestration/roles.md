@@ -19,6 +19,15 @@ Spawns one manager and resumes it while it remains effective, priming it with th
 architecture and current slice — not the whole doctrine. Validates scope and completion without
 duplicating code review. Sends compact events upward. Never implements.
 
+**A block owner gets its own rulings.** Design, wording, in-charter scope and evidence questions go
+to an architecture consult (`prompts/architect.md`) — read-only, question-shaped and unprimed, asking
+whether something violates a named invariant rather than asking for confirmation. That verdict is the
+recorded decision. Escalate to the program orchestrator only for landing order and the machine,
+ledger and authority-registry writes, cross-block conflicts, a charter scope change, or a consult
+that comes back inconclusive. Where the option set collapses to one survivor under a rule and a
+proven fact, decide and record it — a consult that cannot change the answer buys a record, not a
+decision.
+
 **Its role ends at reporting the block ready and verified** — the candidate identity, the evidence,
 and the manager's drafted squash message. That report is an input to landing confirmation, never a
 substitute for it: the program orchestrator, or the landing agent acting for it, confirms

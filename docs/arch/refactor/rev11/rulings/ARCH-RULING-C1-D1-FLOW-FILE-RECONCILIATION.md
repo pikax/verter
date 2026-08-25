@@ -36,10 +36,10 @@ Two binding ruling sets disagree about which files C1 moves. Both are already ra
 explicitly superseded — leaving it ambiguous stalls an implementer mid-extraction, which for a
 ~60-file cross-crate move is expensive to unwind.
 
-**C1's revised charter** (`<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md`, line ~286) lists `flow_slice_content` in its
+**C1's revised charter** (`<SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md`, line ~286) lists `flow_slice_content` in its
 **"Move into `verter_semantic`"** set.
 
-**The D1 ruling set** (`<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md`, Fork 2) states:
+**The D1 ruling set** (`<SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md`, Fork 2) states:
 > C1 MOVES `flow_return.rs`, `flow_return_callee.rs`, AND `dispatch_txn.rs`; **NOT**
 > `flow_slice_content.rs`.
 
@@ -50,11 +50,11 @@ disagreement; determine which.
 
 ## Also relevant
 
-- C1's own four-fork ruling (`<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md`) scoped C1 to
+- C1's own four-fork ruling (`<SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md`) scoped C1 to
   `ModuleResolverCore`, **non-flow** `TypeInfoCore`, `ProjectSemanticDispatch`, relation/node
   algorithms, dependency-neutral store/value types, immutable observation contracts, and
   `AttemptOutcome`/`LoadSet` — with flow explicitly EXCLUDED.
-- The C1 addendum (`<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md`) fixed the extraction's dependency
+- The C1 addendum (`<SESSION_SCRATCH>/scratchpad/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md`) fixed the extraction's dependency
   closure and sealing design.
 - D1 owns the private flow solver and must not merge independently of D2.
 
@@ -2155,12 +2155,12 @@ crates/verter_session/src/flow_slice_content.rs
 [35m[3mcodex[0m[0m
 The branch and tip match exactly. The repository’s current guidance confirms the governing split: reusable semantic computation belongs below the host, while `ProjectTypeStore`, store-view validation, loading, and scheduling remain session-owned (`CLAUDE.md:27-31,86`; `host-session/SKILL.md:8-28`). I’m now mapping every symbol in the four files to that boundary.
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc 'wc -l <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md && nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md && nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md'[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc 'wc -l <SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md <SESSION_SCRATCH>/scratchpad/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md && nl -ba <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md && nl -ba <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md'[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 0ms:[0m
-     701 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md
-   12360 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md
-   14472 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
-     145 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md
+     701 <SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md
+   12360 <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md
+   14472 <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
+     145 <SESSION_SCRATCH>/scratchpad/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md
    27678 total
      1	Reading prompt from stdin...
      2	OpenAI Codex v0.148.0
@@ -2179,7 +2179,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
     15	(branch program/architecture-lock, tip 6ab1000bd).
     16	
     17	Block D1 ("Private sole-solver foundation", program.md:225-233) has a drafted charter at
-    18	<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md whose author honestly flagged SIX open design forks rather than guessing.
+    18	<SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md whose author honestly flagged SIX open design forks rather than guessing.
     19	Your job is to RULE on each — decisively, from the code and the ratified documents, not from preference.
     20	Read the charter first, then answer.
     21	
@@ -2223,7 +2223,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
     59	[35m[3mcodex[0m[0m
     60	I’ll treat this as an architecture ruling, not an implementation review. I’m starting with the charter and the canonical architecture/program references, then I’ll trace each fork into the exact code and landed validator artifacts.
     61	[35m[3mexec[0m[0m
-    62	[1m/bin/zsh -lc "sed -n '1,260p' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md"[0m in <MACHINE_ROOT>/verter
+    62	[1m/bin/zsh -lc "sed -n '1,260p' <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md"[0m in <MACHINE_ROOT>/verter
     63	[32m succeeded in 15778ms:[0m
     64	# D1 — Private sole-flow-solver foundation
     65	
@@ -2487,10 +2487,10 @@ The branch and tip match exactly. The repository’s current guidance confirms t
    323	this list as its exit obligation; it is recorded here so `D2`'s charter does not have to
    324	
    325	[35m[3mexec[0m[0m
-   326	[1m/bin/zsh -lc 'ls -l <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md && wc -l <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md && /bin/cat <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md'[0m in <MACHINE_ROOT>/verter
+   326	[1m/bin/zsh -lc 'ls -l <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md && wc -l <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md && /bin/cat <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md'[0m in <MACHINE_ROOT>/verter
    327	[32m succeeded in 19364ms:[0m
-   328	-rw-r--r--@ 1 carlosrodrigues  wheel  39881 Aug 20 11:53 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md
-   329	     478 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md
+   328	-rw-r--r--@ 1 <user>  wheel  39881 Aug 20 11:53 <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md
+   329	     478 <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md
    330	# D1 — Private sole-flow-solver foundation
    331	
    332	**Status:** DRAFT pending maintainer ratification. **Class:** Foundational
@@ -2973,7 +2973,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
    809	[35m[3mcodex[0m[0m
    810	The draft’s core ambiguity is real, but one premise is already stale: it still describes AMD-001’s validator package as undelivered. I’m reading the omitted middle sections now before testing that and the other five premises against the ratified evidence.
    811	[35m[3mexec[0m[0m
-   812	[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md | sed -n '1,170p'; nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md | sed -n '171,340p'; nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md | sed -n '341,520p'"[0m in <MACHINE_ROOT>/verter
+   812	[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md | sed -n '1,170p'; nl -ba <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md | sed -n '171,340p'; nl -ba <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md | sed -n '341,520p'"[0m in <MACHINE_ROOT>/verter
    813	[32m succeeded in 11013ms:[0m
    814	     1	# D1 — Private sole-flow-solver foundation
    815	     2	
@@ -3455,7 +3455,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
   1291	   478	   implementer inferring it from ruling prose under time pressure.
   1292	
   1293	[35m[3mexec[0m[0m
-  1294	[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md | sed -n '205,265p'"[0m in <MACHINE_ROOT>/verter
+  1294	[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md | sed -n '205,265p'"[0m in <MACHINE_ROOT>/verter
   1295	[32m succeeded in 7760ms:[0m
   1296	   205	release artifact's hot path; that null result is itself part of D1-AC-2's proof, not a
   1297	   206	separate performance obligation. D1 may **not** request a new locked cell for
@@ -5134,9 +5134,9 @@ The branch and tip match exactly. The repository’s current guidance confirms t
   2970	docs/arch/architecture-lock/ledger/program-state.toml
   2971	
   2972	[35m[3mexec[0m[0m
-  2973	[1m/bin/zsh -lc "find docs/arch/refactor/rev11 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter -name 'ARCH-RULING-C1-FOUR-FORKS.md' -print 2>/dev/null; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '1,180p'; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '180,360p'; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '360,500p'"[0m in <MACHINE_ROOT>/verter
+  2973	[1m/bin/zsh -lc "find docs/arch/refactor/rev11 <SESSION_SCRATCH> -name 'ARCH-RULING-C1-FOUR-FORKS.md' -print 2>/dev/null; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '1,180p'; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '180,360p'; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '360,500p'"[0m in <MACHINE_ROOT>/verter
   2974	[32m succeeded in 10712ms:[0m
-  2975	<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
+  2975	<SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
   2976	     1	# C1 — Converge `ModuleResolverCore` and non-flow `TypeInfoCore`
   2977	     2	
   2978	     3	**Status:** DRAFT — authored for maintainer review; no AMD ratifies it yet. **Class:** Foundational
@@ -5592,7 +5592,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
   3428	   451	need a ruling to resolve.
   3429	
   3430	[35m[3mexec[0m[0m
-  3431	[1m/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '176,246p'; wc -l <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md; nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md | sed -n '1,260p'"[0m in <MACHINE_ROOT>/verter
+  3431	[1m/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '176,246p'; wc -l <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md; nl -ba <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md | sed -n '1,260p'"[0m in <MACHINE_ROOT>/verter
   3432	[32m succeeded in 16909ms:[0m
   3433	   176	new-lock-record path (mirroring `B1.md:169-171`); it may not reweight or reinterpret
   3434	   177	`A6_META_COMPILE_40_COLD_RUST` after measurement.
@@ -5665,7 +5665,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
   3501	   244	lifecycle can reuse the same resolution logic without being forced to block; it does not retrofit every
   3502	   245	existing call site to stop blocking — `HostResolverContext`/`SessionResolverContext` keep blocking by
   3503	   246	design.
-  3504	   14472 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
+  3504	   14472 <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
   3505	     1	Reading prompt from stdin...
   3506	     2	OpenAI Codex v0.148.0
   3507	     3	--------
@@ -5685,7 +5685,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
   3521	    17	heaviest fan-in node left in the DAG — C2, D3, D7 and two others depend on it.
   3522	    18	
   3523	    19	A charter draft exists at
-  3524	    20	<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md
+  3524	    20	<SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md
   3525	    21	Read it first. Its author honestly flagged four unresolved design forks rather than guessing. Your job is
   3526	    22	to KILL OR CONFIRM a specific proposed position on each — falsification, not fresh design. For each,
   3527	    23	answer VIOLATES (name the invariant and cite file:line) or DOES-NOT-VIOLATE, then give the ruling.
@@ -5738,7 +5738,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
   3574	    70	codex
   3575	    71	I’ll treat this as an architecture falsification review, not a redesign. I’ll read the draft and the canonical architecture/type-resolution/session references, then trace the cited APIs and C2/F1 dependencies to ground each verdict in exact lines.
   3576	    72	exec
-  3577	    73	/bin/zsh -lc "pwd && git branch --show-current && git rev-parse HEAD && wc -l CLAUDE.md .claude/skills/architecture/SKILL.md .claude/skills/type-resolution/SKILL.md .claude/skills/host-session/SKILL.md <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md && sed -n '1,260p' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md" in <MACHINE_ROOT>/verter
+  3577	    73	/bin/zsh -lc "pwd && git branch --show-current && git rev-parse HEAD && wc -l CLAUDE.md .claude/skills/architecture/SKILL.md .claude/skills/type-resolution/SKILL.md .claude/skills/host-session/SKILL.md <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md && sed -n '1,260p' <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md" in <MACHINE_ROOT>/verter
   3578	    74	 succeeded in 0ms:
   3579	    75	<MACHINE_ROOT>/verter
   3580	    76	program/architecture-lock
@@ -5747,7 +5747,7 @@ The branch and tip match exactly. The repository’s current guidance confirms t
   3583	    79	     230 .claude/skills/architecture/SKILL.md
   3584	    80	    1342 .claude/skills/type-resolution/SKILL.md
   3585	    81	     738 .claude/skills/host-session/SKILL.md
-  3586	    82	     314 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md
+  3586	    82	     314 <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md
   3587	    83	    3283 total
   3588	    84	# C1 — Converge `ModuleResolverCore` and non-flow `TypeInfoCore`
   3589	    85	
@@ -11426,7 +11426,7 @@ ke a missing one (`Ok(None)` from carrier preparation, no `svelte` rows) — nev
  12330	2564:        if self.ensure_loaded(canonical_id) {
  12331	
  12332	exec
- 12333	/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md | sed -n '1,260p'; nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md | sed -n '260,560p'" in <MACHINE_ROOT>/verter
+ 12333	/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md | sed -n '1,260p'; nl -ba <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md | sed -n '260,560p'" in <MACHINE_ROOT>/verter
  12334	 succeeded in 0ms:
  12335	     1	# C1 — Converge `ModuleResolverCore` and non-flow `TypeInfoCore`
  12336	     2	
@@ -13568,7 +13568,7 @@ ke a missing one (`Ok(None)` from carrier preparation, no `svelte` rows) — nev
  14472	FORK 4 — **VIOLATES — FULL-COVERAGE-REQUIRED for all non-flow projection-reachable operations.**
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc 'tail -n 220 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md | nl -ba -v 12141'[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc 'tail -n 220 <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md | nl -ba -v 12141'[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 0ms:[0m
  12141	   120	Inserting, dropping, folding, reordering, or unstacking a layer requires:
  12142	   121	
@@ -13792,7 +13792,7 @@ ke a missing one (`Ok(None)` from carrier preparation, no `svelte` rows) — nev
  12360	Fork 6 — **NOT A D1-START GATE; PRE-CHECKPOINT PREREQUISITE IS DELIVERED AND DISCHARGED.**
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc 'tail -n 150 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md | nl -ba -v 14323 && nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md'[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc 'tail -n 150 <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md | nl -ba -v 14323 && nl -ba <SESSION_SCRATCH>/scratchpad/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md'[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 0ms:[0m
  14323	    34	) -> Vec<String> {
  14324	    35	    let mut seen = HashSet::new();
@@ -14091,7 +14091,7 @@ ke a missing one (`Ok(None)` from carrier preparation, no `svelte` rows) — nev
    145	GAP 3 VERDICT — The exhaustive-`impl` proof is false; a closed inherent gateway proves boundary shape, but total internal I/O-freedom has no mechanically valid proof under the preserved existing-crate architecture.
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md | sed -n '250,390p' && nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md | sed -n '520,610p'"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md | sed -n '250,390p' && nl -ba <SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md | sed -n '520,610p'"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 0ms:[0m
    250	**Duplicated lifecycle-adapter boilerplate to collapse** (research-verified, not hypothesis; unaffected
    251	by GAP 1 — both structs and the trait they implement stay together in `verter_session`, so this
@@ -15508,7 +15508,7 @@ crates/verter_session/src/flow_slice_content.rs
 8341:            crate::flow_slice_content::SliceCall::Symbolic(ty) => {
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "rg -n 'flow_return|dispatch_txn|flow_slice_content|ProjectSemanticDispatch|cache-node|flow query|FlowReturn' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "rg -n 'flow_return|dispatch_txn|flow_slice_content|ProjectSemanticDispatch|cache-node|flow query|FlowReturn' <SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 26ms:[0m
 79:`verter_session::resolver_store`, `ProjectSemanticDispatch`, and `verter_workspace::resolver` — into the
 94:`ProjectSemanticDispatch`'s five query modes — those are `Preserve`, not `Converge`, dispositions, even
@@ -15527,7 +15527,7 @@ crates/verter_session/src/flow_slice_content.rs
 593:converged kernel (`ModuleResolverCore`, non-flow `TypeInfoCore`, `ProjectSemanticDispatch`, relation/node
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md | sed -n '220,249p' && nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md | sed -n '65,110p'"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md | sed -n '220,249p' && nl -ba <SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md | sed -n '65,110p'"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 0ms:[0m
    220	seam). Existing fan-out fuses (`resolver_core/fuses.rs:10-34`:
    221	`wildcard_route_fanout=500`, `imported_root_fanout=200`, `registry_deepening_fanout=300`,
@@ -20246,7 +20246,7 @@ crates/verter_session/src/flow_slice_content.rs:5066:                SliceExpr::
 7907:    fn eval_call(
 
 [35m[3mcodex[0m[0m
-The authoritative boundary is capability-based, not directory-based: dependency-neutral semantic compute moves to `verter_semantic`; live host observation, cache admission, retention, publication, audit, and I/O remain in `verter_session` ([ADR-015:16-32](<MACHINE_ROOT>/verter/docs/arch/refactor/rev11/decisions/ADR-015-binding-dependency-direction.md:16), [C1 revised:341-348](<<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md:341>)).
+The authoritative boundary is capability-based, not directory-based: dependency-neutral semantic compute moves to `verter_semantic`; live host observation, cache admission, retention, publication, audit, and I/O remain in `verter_session` ([ADR-015:16-32](<MACHINE_ROOT>/verter/docs/arch/refactor/rev11/decisions/ADR-015-binding-dependency-direction.md:16), [C1 revised:341-348](<<SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md:341>)).
 
 - `flow_slice_content.rs` — MOVES whole. Its complete surface—`FlowSliceSelection`, every `Slice*`/`Gated*`/`FrameShadowedName` type, `SignatureScope`, `Lowerer`, `build_function_type_param_clause`, `build_flow_slice_content`, and all lowering helpers—is owned, arena-free semantic IR/lowering over OXC and semantic/type-expression inputs; it contains no host, store, scheduler, cache, audit, or I/O authority ([flow_slice_content.rs:53-79](<MACHINE_ROOT>/verter/crates/verter_session/src/flow_slice_content.rs:53), [flow_slice_content.rs:81-159](<MACHINE_ROOT>/verter/crates/verter_session/src/flow_slice_content.rs:81), [flow_slice_content.rs:1471-1489](<MACHINE_ROOT>/verter/crates/verter_session/src/flow_slice_content.rs:1471)). Its being a sibling module is irrelevant to architectural ownership.
 
@@ -20258,7 +20258,7 @@ The authoritative boundary is capability-based, not directory-based: dependency-
 
 There is no cross-block ownership problem around `ObligationRuntime`. C1 relocates/separates the existing authority; D1, whose predecessor is C1, then extends that same semantic-owned symbol—never a peer ledger ([program.md:225-231](<MACHINE_ROOT>/verter/docs/arch/refactor/rev11/program.md:225), [dispatch_txn.rs:879-959](<MACHINE_ROOT>/verter/crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs:879)). D1 remains inseparable from D2 under ADR-014 ([ADR-014:13-19](<MACHINE_ROOT>/verter/docs/arch/refactor/rev11/decisions/ADR-014-atomic-flow-cutover-and-obligation-proof.md:13)).
 
-This changes no accepted ADR, DAG edge, or program outcome. Structural enforcement remains the crate dependency firewall and sealed/capability-limited boundaries, never a new name-keyed scanner ([C1 revised:362-364](<<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md:362>)).
+This changes no accepted ADR, DAG edge, or program outcome. Structural enforcement remains the crate dependency firewall and sealed/capability-limited boundaries, never a new name-keyed scanner ([C1 revised:362-364](<<SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md:362>)).
 
 ```text
 flow_return.rs         | SPLITS | semantic values/evaluator/SCC math → verter_semantic; capture/cache/admission/audit → verter_session
@@ -20266,10 +20266,10 @@ flow_return_callee.rs  | MOVES  | entire file → verter_semantic
 dispatch_txn.rs        | SPLITS | ObligationRuntime + semantic transaction state → verter_semantic; flight/root/publication carriers → verter_session
 flow_slice_content.rs  | MOVES  | entire file → verter_semantic
 ```
-SUPERSEDES — D1 Fork 2’s “NOT `flow_slice_content.rs`” and its whole-file “MOVES `flow_return.rs`/`dispatch_txn.rs`” claims; retains its whole-file move for `flow_return_callee.rs` and retains Fork 3’s “extend the same `ObligationRuntime`; no peer ledger” ruling ([D1 ruling:12356-12357](<<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md:12356>)).
+SUPERSEDES — D1 Fork 2’s “NOT `flow_slice_content.rs`” and its whole-file “MOVES `flow_return.rs`/`dispatch_txn.rs`” claims; retains its whole-file move for `flow_return_callee.rs` and retains Fork 3’s “extend the same `ObligationRuntime`; no peer ledger” ruling ([D1 ruling:12356-12357](<<SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md:12356>)).
 [2mtokens used[0m
 255 106
-The authoritative boundary is capability-based, not directory-based: dependency-neutral semantic compute moves to `verter_semantic`; live host observation, cache admission, retention, publication, audit, and I/O remain in `verter_session` ([ADR-015:16-32](<MACHINE_ROOT>/verter/docs/arch/refactor/rev11/decisions/ADR-015-binding-dependency-direction.md:16), [C1 revised:341-348](<<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md:341>)).
+The authoritative boundary is capability-based, not directory-based: dependency-neutral semantic compute moves to `verter_semantic`; live host observation, cache admission, retention, publication, audit, and I/O remain in `verter_session` ([ADR-015:16-32](<MACHINE_ROOT>/verter/docs/arch/refactor/rev11/decisions/ADR-015-binding-dependency-direction.md:16), [C1 revised:341-348](<<SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md:341>)).
 
 - `flow_slice_content.rs` — MOVES whole. Its complete surface—`FlowSliceSelection`, every `Slice*`/`Gated*`/`FrameShadowedName` type, `SignatureScope`, `Lowerer`, `build_function_type_param_clause`, `build_flow_slice_content`, and all lowering helpers—is owned, arena-free semantic IR/lowering over OXC and semantic/type-expression inputs; it contains no host, store, scheduler, cache, audit, or I/O authority ([flow_slice_content.rs:53-79](<MACHINE_ROOT>/verter/crates/verter_session/src/flow_slice_content.rs:53), [flow_slice_content.rs:81-159](<MACHINE_ROOT>/verter/crates/verter_session/src/flow_slice_content.rs:81), [flow_slice_content.rs:1471-1489](<MACHINE_ROOT>/verter/crates/verter_session/src/flow_slice_content.rs:1471)). Its being a sibling module is irrelevant to architectural ownership.
 
@@ -20281,7 +20281,7 @@ The authoritative boundary is capability-based, not directory-based: dependency-
 
 There is no cross-block ownership problem around `ObligationRuntime`. C1 relocates/separates the existing authority; D1, whose predecessor is C1, then extends that same semantic-owned symbol—never a peer ledger ([program.md:225-231](<MACHINE_ROOT>/verter/docs/arch/refactor/rev11/program.md:225), [dispatch_txn.rs:879-959](<MACHINE_ROOT>/verter/crates/verter_session/src/project_semantic_dispatch/dispatch_txn.rs:879)). D1 remains inseparable from D2 under ADR-014 ([ADR-014:13-19](<MACHINE_ROOT>/verter/docs/arch/refactor/rev11/decisions/ADR-014-atomic-flow-cutover-and-obligation-proof.md:13)).
 
-This changes no accepted ADR, DAG edge, or program outcome. Structural enforcement remains the crate dependency firewall and sealed/capability-limited boundaries, never a new name-keyed scanner ([C1 revised:362-364](<<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-REVISED.md:362>)).
+This changes no accepted ADR, DAG edge, or program outcome. Structural enforcement remains the crate dependency firewall and sealed/capability-limited boundaries, never a new name-keyed scanner ([C1 revised:362-364](<<SESSION_SCRATCH>/scratchpad/C1-CHARTER-REVISED.md:362>)).
 
 ```text
 flow_return.rs         | SPLITS | semantic values/evaluator/SCC math → verter_semantic; capture/cache/admission/audit → verter_session
@@ -20289,4 +20289,4 @@ flow_return_callee.rs  | MOVES  | entire file → verter_semantic
 dispatch_txn.rs        | SPLITS | ObligationRuntime + semantic transaction state → verter_semantic; flight/root/publication carriers → verter_session
 flow_slice_content.rs  | MOVES  | entire file → verter_semantic
 ```
-SUPERSEDES — D1 Fork 2’s “NOT `flow_slice_content.rs`” and its whole-file “MOVES `flow_return.rs`/`dispatch_txn.rs`” claims; retains its whole-file move for `flow_return_callee.rs` and retains Fork 3’s “extend the same `ObligationRuntime`; no peer ledger” ruling ([D1 ruling:12356-12357](<<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md:12356>)).
+SUPERSEDES — D1 Fork 2’s “NOT `flow_slice_content.rs`” and its whole-file “MOVES `flow_return.rs`/`dispatch_txn.rs`” claims; retains its whole-file move for `flow_return_callee.rs` and retains Fork 3’s “extend the same `ObligationRuntime`; no peer ledger” ruling ([D1 ruling:12356-12357](<<SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-D1-SIX-FORKS.md:12356>)).

@@ -87,6 +87,23 @@ merely to make every defect theoretically unrepresentable.
 Never land a new name-keyed source scanner: `CLAUDE.md`'s forward-only rule forbids a guard that
 greps the tree for a spelled identifier, path or token, `syn`/AST scanning included.
 
+## Health check at every write boundary
+
+**When an implementer or fix agent finishes, run `cargo fmt --all` and
+`cargo clippy --workspace --all-targets -- -D warnings` together, as one step, and commit the result
+before the candidate is frozen and review is dispatched.**
+
+Together, because run separately they surface as two failures on the same candidate discovered one
+after the other, each costing its own cycle. Whole-workspace, not narrowed to the crates you think
+you touched.
+
+Before review, because a formatting or lint commit landing afterwards moves the sha the reviewers'
+verdicts bind to — the review then no longer covers the candidate that goes forward. Reviewers see
+the formatted tree, and the reviewed sha is the one that lands.
+
+This is where the defect belongs: caught at the point the code was written, it never reaches a
+candidate. The landing-side check is a backstop for drift a rebase introduces, not a substitute.
+
 ## Rebasing
 
 **Rebase onto the working branch at every natural boundary** — after an implementer finishes, after a
@@ -127,15 +144,57 @@ rather than proceeding with a caveat.
 
 1. **Rebase** onto the working branch if the candidate is behind. **A dirty rebase cancels the
    landing** instead of being resolved.
-2. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
+2. **Run the health check**, after the rebase and before anything expensive. The block ran it too,
+   but that result binds to the pre-rebase tree; a rebase onto a moved working branch produces a
+   tree nobody has checked, and that tree is what the pre-commit hook judges at squash time. Order
+   is cheapest-first so a failure returns the block early:
+
+       cargo clippy --version                 # must match the rust-toolchain.toml pin
+       cargo fmt --all --check
+       cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
+       cargo clippy --workspace --all-targets -- -D warnings
+       cargo check --workspace --release
+
+   The pin check gates the rest: a lint result from an unpinned toolchain is not evidence about the
+   toolchain CI uses, and it reads exactly like a pass. Steps 3-5 may be skipped only when the delta,
+   **enumerated against the merge-base rather than accepted as a label**, touches none of `*.rs`,
+   `crates/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`, `.cargo/**` — a
+   docs-only change that edits a rustdoc comment is still a `.rs` file. Add
+   `pnpm install --frozen-lockfile` and `pnpm test` only when the delta touches `packages/` or the
+   lockfile. Any failure returns the block: this is production source, and a landing agent must not
+   fix it.
+3. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
    candidate's sha, and the supplied message must comply — **in its body, not only its subject**.
    Naming the program, its revision or a block identifier, or a commit type `CLAUDE.md` does not
    list, returns the block. Whoever checks did not produce that evidence — that is what makes the
    check worth anything — and may refuse.
-3. **Run the gate.**
+4. **Run the gate.**
 
 **On gate success only:** squash under the supplied message verbatim, then update the ledger, then
-land.
+land, then **remove the block's worktree, delete the merged branch and prune** — on a successful
+landing only, since a returned block needs its worktree intact.
+
+**The gate does not run `cargo fmt` or `cargo clippy`.** `CLAUDE.md` keeps them as separate
+end-of-change checks, so without step 2 a candidate can pass rebase, conformance and a full gate and
+still be rejected by the pre-commit hook at squash time — after the gate has been spent. The release
+check earns its place on a class the gate structurally cannot reach: `debug_assert!` gates on a
+runtime constant, so a `#[cfg(debug_assertions)]` helper called inside one is `E0425` in every
+release build while compiling clean in debug, and the gate's shipped-cfg lane that would otherwise
+cover it is currently skipped. It is a compile check and runs no tests — never report it as coverage
+of `debug_assert!` behaviour.
+
+**A failing lint run's error set is complete only for the targets it reached.** A clippy run that
+stops on the first errors never builds the later targets, so its output is a prefix of the problem,
+not an inventory of it — the same shape as a fail-fast gate. Re-run to green; do not treat the first
+list as the full set.
+
+**A formatting-only fix does not invalidate a gate verdict**, so a green result carries across it.
+Nothing else does: a lint repair that changes a signature or control flow produces a tree the gate
+never saw, and its verdict is void. Verify formatting-only by **recomputing** — apply `cargo fmt
+--all` to the pre-fix commit and compare blobs — never by reading the diff and judging it to look
+like formatting. `fmt` reorders imports, re-breaks expression chains and adds closure braces, so a
+whitespace-only test fails on a correct result and a non-formatting edit riding inside a reformatted
+hunk reads as formatting.
 
 **Artifact and binary provenance binds to content — a digest over the artifact's own inputs — never a
 commit sha.** Landing rebases and always squashes, so a sha a block recorded moves twice after the

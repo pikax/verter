@@ -31,7 +31,7 @@ C1 ("Converge `ModuleResolverCore` and non-flow `TypeInfoCore`", program.md:191-
 heaviest fan-in node left in the DAG — C2, D3, D7 and two others depend on it.
 
 A charter draft exists at
-<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md
+<SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md
 Read it first. Its author honestly flagged four unresolved design forks rather than guessing. Your job is
 to KILL OR CONFIRM a specific proposed position on each — falsification, not fresh design. For each,
 answer VIOLATES (name the invariant and cite file:line) or DOES-NOT-VIOLATE, then give the ruling.
@@ -84,7 +84,7 @@ Rules for your answer:
 codex
 I’ll treat this as an architecture falsification review, not a redesign. I’ll read the draft and the canonical architecture/type-resolution/session references, then trace the cited APIs and C2/F1 dependencies to ground each verdict in exact lines.
 exec
-/bin/zsh -lc "pwd && git branch --show-current && git rev-parse HEAD && wc -l CLAUDE.md .claude/skills/architecture/SKILL.md .claude/skills/type-resolution/SKILL.md .claude/skills/host-session/SKILL.md <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md && sed -n '1,260p' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md" in <MACHINE_ROOT>/verter
+/bin/zsh -lc "pwd && git branch --show-current && git rev-parse HEAD && wc -l CLAUDE.md .claude/skills/architecture/SKILL.md .claude/skills/type-resolution/SKILL.md .claude/skills/host-session/SKILL.md <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md && sed -n '1,260p' <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md" in <MACHINE_ROOT>/verter
  succeeded in 0ms:
 <MACHINE_ROOT>/verter
 program/architecture-lock
@@ -93,7 +93,7 @@ program/architecture-lock
      230 .claude/skills/architecture/SKILL.md
     1342 .claude/skills/type-resolution/SKILL.md
      738 .claude/skills/host-session/SKILL.md
-     314 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md
+     314 <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md
     3283 total
 # C1 — Converge `ModuleResolverCore` and non-flow `TypeInfoCore`
 
@@ -357,7 +357,7 @@ Foundational: three mandates, three independent contexts, one candidate SHA and 
 (`governance.md` §1, mirroring `B1.md:173-186`).
 
 exec
-/bin/zsh -lc "sed -n '261,360p' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md && sed -n '1,659p' CLAUDE.md" in <MACHINE_ROOT>/verter
+/bin/zsh -lc "sed -n '261,360p' <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md && sed -n '1,659p' CLAUDE.md" in <MACHINE_ROOT>/verter
  succeeded in 0ms:
 
 | mandate | scope |
@@ -12344,7 +12344,7 @@ exec
 2564:        if self.ensure_loaded(canonical_id) {
 
 exec
-/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md | sed -n '1,260p'; nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md | sed -n '260,560p'" in <MACHINE_ROOT>/verter
+/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md | sed -n '1,260p'; nl -ba <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md | sed -n '260,560p'" in <MACHINE_ROOT>/verter
  succeeded in 0ms:
      1	# C1 — Converge `ModuleResolverCore` and non-flow `TypeInfoCore`
      2	
