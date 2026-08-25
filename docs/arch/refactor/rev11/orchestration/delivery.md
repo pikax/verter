@@ -405,6 +405,16 @@ an act pinned to a whole tree that must record it unpins itself the moment it is
 the ratified set instead closes the loop, because recording the act elsewhere in the tree cannot
 touch it.
 
+**A pin fixes drift, not contradiction.** Pinning content guarantees the bytes have not moved; it
+guarantees nothing about whether those bytes agree with the act. One act named an execution model
+while the document it pinned still described that model as unnamed and the choice as later work's —
+true when written, left in the present tense afterwards, and the pin perfectly maintained throughout.
+Before issuing or re-pinning, read the pinned text and confirm it says what the act claims it
+ratifies.
+
+**A moved pin is not a process failure.** When review finds a defect, the pin moving is the correct
+consequence of fixing it. Treating the movement itself as the fault suppresses the fix.
+
 **Ratify last** remains the ordering — evidence, freeze, act — but it is no longer load-bearing on
 its own. An act issued before its own consequence is recorded either expires when the recording lands
 or contradicts the evidence it pins; that happened twice before the pinning was fixed, and a third
@@ -443,6 +453,12 @@ consult is killed at roughly ten minutes, so anything past that dies with no rec
 presents as a prompt or model problem, which is how several were misdiagnosed. The dispatcher is
 notified on completion, so it must stay alive to receive that: a full yield ends the turn and the
 notification lands nowhere.
+
+**A receipt is final only once the producing process has exited.** Requiring a lane to emit its
+receipt first — so a dying run still produces one — makes it write a structurally valid, own-lane
+receipt carrying a real verdict token while it is still running. The receipt is genuine and not final,
+so a filled-result test is necessary and still not sufficient. Wait on the process, then take the LAST
+own-lane filled receipt. Both properties are wanted, so the predicate carries both conditions.
 
 **A waiter exits on receipt OR process-gone, never receipt alone.** A receipt-only poll reports a
 dead run as in flight indefinitely, and silent death read as progress costs more than the death.
