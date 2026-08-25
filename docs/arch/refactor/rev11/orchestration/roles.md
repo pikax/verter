@@ -19,6 +19,21 @@ Spawns one manager and resumes it while it remains effective, priming it with th
 architecture and current slice — not the whole doctrine. Validates scope and completion without
 duplicating code review. Sends compact events upward. Never implements.
 
+**A block drives itself to ready. Everything inside its charter is its decision, including the
+authority instruments its own work needs.** It determines which instrument is required, authors it,
+obtains its ratification by consult — that verdict is the decision, not advice — performs the
+ratifying acts its own scope covers, and dispositions its own findings. It does not ask permission to
+proceed with work it owns.
+
+Instruments and evidence accumulate on the block's own line. **The program orchestrator places and
+registers them once, from the ready package, at landing** — not one at a time, mid-flight. A block
+that escalates each instrument as it is produced converts its own authority into a queue.
+
+**Escalate only four things:** a conflict with another block, a change to program structure or a
+dependency edge, an act on an artifact another block owns, or a consult returning inconclusive after
+one attempt. Everything else is the block's, and a question that could be settled by reading the
+charter or the tree is not an escalation.
+
 **A block owner gets its own rulings.** Design, wording, in-charter scope and evidence questions go
 to an architecture consult (`prompts/architect.md`) — read-only, question-shaped and unprimed, asking
 whether something violates a named invariant rather than asking for confirmation. That verdict is the
