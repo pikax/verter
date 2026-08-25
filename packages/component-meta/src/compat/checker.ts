@@ -1995,23 +1995,36 @@ export class ComponentMetaChecker {
       const fullNativeMeta = this._session.getComponentMeta(absPath) as
         | import("../native-component-meta.js").NativeComponentMetaResult
         | null;
-      const declaredNativeMeta = projectDeclaredOnlyNativeResult(fullNativeMeta);
-      if (!declaredNativeMeta) {
-        return {
-          type: 0,
-          props: [],
-          events: [],
-          slots: [],
-          exposed: [],
-        };
-      }
-      const typeRegistry = nativeTypeRegistryToMap(declaredNativeMeta);
-      const mappedMeta = nativeComponentMetaToComponentMeta(declaredNativeMeta);
-      const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
-      for (const prop of result.props) {
-        reorderCompatLiteralUnionTypeByDefaultValue(prop);
-      }
-      return result;
+      return this.projectNativeComponentMeta(fullNativeMeta);
+    }
+    throw new Error(
+      "ComponentMetaChecker requires a runtime session-backed native component-meta query. " +
+        "Use createChecker() or createCheckerByJson().",
+    );
+  }
+
+  /**
+   * Get component metadata for multiple files in Volar-compatible shape.
+   * Returns one slot per input in input order and performs one native dispatch
+   * for the whole batch, never N scalar component-meta calls. A missing
+   * canonical becomes the empty `VolarComponentMeta` default; a real per-id
+   * failure throws and fails the whole call, matching the scalar method.
+   * Non-missing items are projected through the same private helper used by
+   * `getComponentMeta`, so scalar and batch projection cannot drift.
+   */
+  async getComponentMetaBatch(filePaths: string[]): Promise<VolarComponentMeta[]> {
+    this.ensureActive();
+    const absPaths: string[] = [];
+    for (const filePath of filePaths) {
+      const absPath = runtimeResolvePath(this.projectRoot, filePath);
+      await this.ensureFile(absPath);
+      absPaths.push(absPath);
+    }
+    if (this._session) {
+      const fullNativeMetas = this._session.getComponentMetaBatch(absPaths) as Array<
+        import("../native-component-meta.js").NativeComponentMetaResult | null
+      >;
+      return fullNativeMetas.map((meta) => this.projectNativeComponentMeta(meta));
     }
     throw new Error(
       "ComponentMetaChecker requires a runtime session-backed native component-meta query. " +
@@ -2189,6 +2202,28 @@ export class ComponentMetaChecker {
     throw new Error(
       "getProgram() is not supported by Verter. Verter does not use a TypeScript Program.",
     );
+  }
+
+  private projectNativeComponentMeta(
+    fullNativeMeta: import("../native-component-meta.js").NativeComponentMetaResult | null,
+  ): VolarComponentMeta {
+    const declaredNativeMeta = projectDeclaredOnlyNativeResult(fullNativeMeta);
+    if (!declaredNativeMeta) {
+      return {
+        type: 0,
+        props: [],
+        events: [],
+        slots: [],
+        exposed: [],
+      };
+    }
+    const typeRegistry = nativeTypeRegistryToMap(declaredNativeMeta);
+    const mappedMeta = nativeComponentMetaToComponentMeta(declaredNativeMeta);
+    const result = mapComponentMeta(mappedMeta, this.options, typeRegistry);
+    for (const prop of result.props) {
+      reorderCompatLiteralUnionTypeByDefaultValue(prop);
+    }
+    return result;
   }
 
   private async ensureFile(absPath: string): Promise<void> {

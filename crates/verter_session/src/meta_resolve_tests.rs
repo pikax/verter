@@ -9649,7 +9649,19 @@ const model = defineModel<string>()
 /// `TopLevelOwnerId::ordinary_file`'s own doc comment) — so a producer that
 /// silently swapped the real owner for the fabricated default is
 /// OBSERVABLE here: `(Module(0), "InstanceThing")` has no entry in this
-/// file's binding table at all, so the swap fails the lookup outright.
+/// file's binding table at all, so the swap fails the lookup outright and
+/// the position never becomes an `Authored(DeclBody(..))` source at all —
+/// which the match's `other` arm below rejects.
+///
+/// The published ANCHOR names the module that actually owns the body. An
+/// import alias declares nothing in the importing file, so an anchor on
+/// `/Comp.vue` would address a value declaration that does not exist and
+/// could never be dereferenced; `authored_field_source` re-anchors it onto
+/// the exporting module through the shared owner-import authorities. The
+/// owner is `ordinary_file()` there because that is `/local-thing.ts`'s own
+/// real top-level owner — not a fabricated substitute for `/Comp.vue`'s.
+/// The `(Instance, "InstanceThing")` demand key that this test exists to
+/// prove is unchanged and still upstream of this anchor.
 ///
 /// Mutation-proven: hardcoding the `owner: key.owner` line in
 /// `compute_evaluated_types_from_owner_context_with_ctx` to
@@ -9708,17 +9720,29 @@ fn constructor_binding_owner_propagates_end_to_end_through_session_pipeline() {
                 label.publication.result().source_position()
             )
         });
-    // The published source carries an `AuthoredAnchor` naming the SAME
-    // symbol + owner `RootBindingIndex` proved `Local` under
+    // Reaching an `Authored(DeclBody(..))` source AT ALL is the
+    // owner-propagation proof: the constructor demand was admitted under
+    // its real `(Instance, "InstanceThing")` key
     // (`collect_local_constructor_binding_keys` → `BindingExpansionEntry` →
-    // `expand_macro_types_impl_with_expander`'s decl-body anchor). This is
-    // the direct, observable end of the owner-propagation chain: the real
-    // authored Instance owner, not the fabricated `ordinary_file()`
-    // (`Module(0)`) default a broken producer would substitute.
+    // `expand_macro_types_impl_with_expander`). A producer that substituted
+    // the fabricated `ordinary_file()` default finds no entry under
+    // `(Module(0), "InstanceThing")`, resolution falls to the fail-closed
+    // `unrepresentable_failure()` position, and the `other` arm fires.
     match source {
         verter_type_expr::facts::SemanticTypeSource::Authored(
             verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot),
         ) => {
+            // The anchor addresses the module that really declares the
+            // body, under its own top-level owner — an anchor left on
+            // `/Comp.vue` names an import alias, which declares no value
+            // body there and can never be dereferenced.
+            assert_eq!(
+                slot.anchor.canonical_id.as_ref(),
+                "/local-thing.ts",
+                "an imported constructor binding's anchor must name the EXPORTING \
+                 module, not the importing file where the alias declares nothing: \
+                 {slot:?}"
+            );
             assert_eq!(
                 slot.anchor.symbol.as_ref(),
                 "InstanceThing",
@@ -9726,10 +9750,9 @@ fn constructor_binding_owner_propagates_end_to_end_through_session_pipeline() {
             );
             assert_eq!(
                 slot.anchor.owner,
-                verter_type_expr::TopLevelOwnerId::instance(0),
-                "the constructor binding's published anchor must carry the REAL \
-                 authored Instance owner the RootBindingIndex proved, not a \
-                 fabricated ordinary_file()/Module(0) default: {slot:?}"
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "the re-anchored slot carries the EXPORTING module's own top-level \
+                 owner: {slot:?}"
             );
         }
         other => panic!("expected an Authored(DeclBody(..)) source; got {other:?}"),

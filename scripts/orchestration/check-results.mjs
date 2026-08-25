@@ -282,7 +282,15 @@ export function format(round) {
 export function parseArgv(argv) {
   const [dir, sha, ...names] = argv;
   if (!dir || !sha || names.length === 0) return { error: "missing directory, sha or name" };
-  if (!SHA_RE.test(sha)) return { error: `'${sha}' is not a full 40-character sha` };
+  // The results directory is named with the short form, so the abbreviation is
+  // the natural mistake here — but a short sha cannot bind a REVIEWED line
+  // (validate() proves the receipt names a prefix of THIS tree), so it stays a
+  // usage error. It just has to name the typo instead of reading as a dead lane.
+  if (!SHA_RE.test(sha)) {
+    return /^[0-9a-f]{1,39}$/i.test(sha)
+      ? { error: `'${sha}' is a ${sha.length}-character abbreviation — pass the full sha: git rev-parse ${sha}` }
+      : { error: `'${sha}' is not a full 40-character sha` };
+  }
   for (const n of names) if (!SAFE_NAME_RE.test(n)) return { error: `'${n}' is not a safe filename component` };
   return { dir, sha, names };
 }

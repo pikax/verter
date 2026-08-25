@@ -3680,7 +3680,7 @@ fn options_api_props_used_when_no_composition_props() {
             tags: Vec::new(),
             span: verter_span::Span::default(),
             constructor_bindings: vec![verter_type_expr::ConstructorBindingEntry {
-                spelling: std::sync::Arc::from("String"),
+                identity: verter_type_expr::RuntimeConstructorIdentity::String,
                 resolution: verter_type_expr::ConstructorBindingOutcome::Global,
             }],
         }],
@@ -3735,7 +3735,7 @@ fn options_api_prop_without_locator_does_not_fabricate_authored_evidence() {
             tags: Vec::new(),
             span: verter_span::Span::default(),
             constructor_bindings: vec![verter_type_expr::ConstructorBindingEntry {
-                spelling: std::sync::Arc::from("Object"),
+                identity: verter_type_expr::RuntimeConstructorIdentity::Object,
                 resolution: verter_type_expr::ConstructorBindingOutcome::Global,
             }],
         }],
@@ -5643,7 +5643,7 @@ fn local_entry(
     name: &str,
 ) -> verter_type_expr::ConstructorBindingEntry {
     verter_type_expr::ConstructorBindingEntry {
-        spelling: Arc::from(spelling),
+        identity: verter_type_expr::RuntimeConstructorIdentity::classify(spelling),
         resolution: verter_type_expr::ConstructorBindingOutcome::Local(
             verter_type_expr::DeclBindingKey::new(owner, name),
         ),
@@ -5652,7 +5652,21 @@ fn local_entry(
 
 fn global_entry(spelling: &str) -> verter_type_expr::ConstructorBindingEntry {
     verter_type_expr::ConstructorBindingEntry {
-        spelling: Arc::from(spelling),
+        identity: verter_type_expr::RuntimeConstructorIdentity::classify(spelling),
+        resolution: verter_type_expr::ConstructorBindingOutcome::Global,
+    }
+}
+
+/// The literal-`null` constructor-array element. NOT reachable through
+/// [`global_entry`]: `classify` reads IDENTIFIER spellings, and `null` is a
+/// literal, so `classify("null")` is deliberately `Other("null")` (no
+/// primitive fold). The producer
+/// (`macros::resolve_runtime_constructor_array`) mints
+/// `RuntimeConstructorIdentity::NullLiteral` for the literal element
+/// directly — this helper mirrors that producer exactly.
+fn global_null_literal_entry() -> verter_type_expr::ConstructorBindingEntry {
+    verter_type_expr::ConstructorBindingEntry {
+        identity: verter_type_expr::RuntimeConstructorIdentity::NullLiteral,
         resolution: verter_type_expr::ConstructorBindingOutcome::Global,
     }
 }
@@ -5796,7 +5810,7 @@ fn constructor_local_absent_evaluated_authority_fails_closed() {
 #[test]
 fn constructor_indeterminate_fails_closed_never_global() {
     let bindings = vec![verter_type_expr::ConstructorBindingEntry {
-        spelling: Arc::from("String"),
+        identity: verter_type_expr::RuntimeConstructorIdentity::String,
         resolution: verter_type_expr::ConstructorBindingOutcome::Indeterminate,
     }];
     let position = constructor_binding_source_position(&bindings, None);
@@ -5819,7 +5833,7 @@ fn constructor_array_null_element_folds_to_primitive_null_union() {
     // `[String, null]` publishes `string | null` — confirmed against
     // `@vue/runtime-core`'s own `assertType`/`getType`, see
     // `resolve_runtime_constructor_array`'s doc comment.
-    let bindings = vec![global_entry("String"), global_entry("null")];
+    let bindings = vec![global_entry("String"), global_null_literal_entry()];
     let position = constructor_binding_source_position(&bindings, None);
     assert_eq!(
         position,

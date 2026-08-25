@@ -193,13 +193,154 @@ pub enum ConstructorBindingOutcome {
     Indeterminate,
 }
 
-/// One runtime-constructor position's authored spelling paired with its
+/// The CLOSED runtime-constructor identity a Vue
+/// `defineProps`/`defineModel`/Options `props:` runtime-argument position
+/// names. Producer-owned: minted ONCE, at the analyzer's extraction
+/// boundary (`verter_semantic`'s `resolve_constructor_binding` /
+/// `resolve_runtime_constructor_array`), from the authored identifier's own
+/// source text. Downstream consumers match this enum EXHAUSTIVELY and never
+/// re-read the spelling: there is no second classifier, no `starts_with`,
+/// and no `match name { "String" => ... }` at any seam below the producer.
+///
+/// The ten named arms are exactly `@vue/runtime-core`'s recognised prop
+/// constructors; [`Self::NullLiteral`] is the literal `null` array element
+/// (`[String, null]`), which is a LITERAL rather than an identifier and so
+/// can never be locally shadowed.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    NoTypeExpr,
+    NoStoredSpan,
+)]
+pub enum RuntimeConstructorIdentity {
+    String,
+    Number,
+    Boolean,
+    Array,
+    Object,
+    Function,
+    Symbol,
+    Date,
+    RegExp,
+    Promise,
+    /// The literal `null` constructor-array element. `@vue/runtime-core`'s
+    /// `getType(null)` returns `"null"` and its `assertType` special-cases
+    /// that as `value === null`, so `[String, null]` means "a `String`-typed
+    /// value OR the literal `null`".
+    NullLiteral,
+    /// An identifier naming none of the ten recognised constructors — a
+    /// custom class, a `PropType`-asserted expression's base identifier, an
+    /// arbitrary local. Carries the authored spelling for DISPLAY and
+    /// diagnostics only; it is never re-classified downstream.
+    Other(Arc<str>),
+    /// A runtime-argument position that is not an identifier or `null` at
+    /// all (a spread element, a computed expression, an array elision).
+    /// Retained as its own array slot so a partial array is never published
+    /// as the author's complete constructor list.
+    Unclassifiable,
+}
+
+impl RuntimeConstructorIdentity {
+    /// The producer-side classifier — the SOLE place a runtime-constructor
+    /// spelling is read as text. Called at the analyzer's extraction
+    /// boundary; never downstream.
+    #[must_use]
+    pub fn classify(spelling: &str) -> Self {
+        match spelling {
+            "String" => Self::String,
+            "Number" => Self::Number,
+            "Boolean" => Self::Boolean,
+            "Array" => Self::Array,
+            "Object" => Self::Object,
+            "Function" => Self::Function,
+            "Symbol" => Self::Symbol,
+            "Date" => Self::Date,
+            "RegExp" => Self::RegExp,
+            "Promise" => Self::Promise,
+            other => Self::Other(Arc::from(other)),
+        }
+    }
+
+    /// The closed primitive fact this identity folds to, for the identities
+    /// that HAVE one. `None` means "no closed primitive fact exists for this
+    /// identity" — the caller keeps its existing display-text-only route.
+    /// Exhaustive over the enum: adding an arm is a compile error here.
+    #[must_use]
+    pub const fn primitive(&self) -> Option<PrimitiveName> {
+        match self {
+            Self::String => Some(PrimitiveName::String),
+            Self::Number => Some(PrimitiveName::Number),
+            Self::Boolean => Some(PrimitiveName::Boolean),
+            Self::NullLiteral => Some(PrimitiveName::Null),
+            Self::Array
+            | Self::Object
+            | Self::Function
+            | Self::Symbol
+            | Self::Date
+            | Self::RegExp
+            | Self::Promise
+            | Self::Other(_)
+            | Self::Unclassifiable => None,
+        }
+    }
+
+    /// The human-readable TS type text a `Global`-resolved runtime
+    /// constructor displays as. `None` for identities with no runtime
+    /// constructor semantics (`null`, an unrecognised identifier, an
+    /// unclassifiable position).
+    #[must_use]
+    pub const fn display_ts_type(&self) -> Option<&'static str> {
+        match self {
+            Self::String => Some("string"),
+            Self::Number => Some("number"),
+            Self::Boolean => Some("boolean"),
+            Self::Array => Some("Array<any>"),
+            Self::Object => Some("object"),
+            Self::Function => Some("Function"),
+            Self::Symbol => Some("symbol"),
+            Self::Date => Some("Date"),
+            Self::RegExp => Some("RegExp"),
+            Self::Promise => Some("Promise<any>"),
+            Self::NullLiteral | Self::Other(_) | Self::Unclassifiable => None,
+        }
+    }
+
+    /// The authored spelling this identity was minted from. `None` only for
+    /// [`Self::Unclassifiable`], which has no authored identifier at all.
+    /// Display/diagnostics only — never re-classified.
+    #[must_use]
+    pub fn spelling(&self) -> Option<&str> {
+        match self {
+            Self::String => Some("String"),
+            Self::Number => Some("Number"),
+            Self::Boolean => Some("Boolean"),
+            Self::Array => Some("Array"),
+            Self::Object => Some("Object"),
+            Self::Function => Some("Function"),
+            Self::Symbol => Some("Symbol"),
+            Self::Date => Some("Date"),
+            Self::RegExp => Some("RegExp"),
+            Self::Promise => Some("Promise"),
+            Self::NullLiteral => Some("null"),
+            Self::Other(spelling) => Some(spelling.as_ref()),
+            Self::Unclassifiable => None,
+        }
+    }
+}
+
+/// One runtime-constructor position's producer-minted
+/// [`RuntimeConstructorIdentity`] paired with its
 /// [`ConstructorBindingOutcome`]: a single entry for `foo: String`, or one
 /// entry per element (in authored order) for a constructor array
-/// (`foo: [String, Number]`). `spelling` is the identifier's own source
-/// text (e.g. `"String"`) — the raw name the shared runtime-constructor
-/// mapping keys on when `resolution` is `Global`; a `Local`/`Indeterminate`
-/// resolution never applies that mapping regardless of `spelling`.
+/// (`foo: [String, Number]`). The identity is what the shared
+/// runtime-constructor fold keys on when `resolution` is `Global`; a
+/// `Local`/`Indeterminate` resolution never applies that fold regardless of
+/// identity.
 #[derive(
     Debug,
     Clone,
@@ -212,8 +353,185 @@ pub enum ConstructorBindingOutcome {
     NoStoredSpan,
 )]
 pub struct ConstructorBindingEntry {
-    pub spelling: Arc<str>,
+    pub identity: RuntimeConstructorIdentity,
     pub resolution: ConstructorBindingOutcome,
+}
+
+#[cfg(test)]
+mod runtime_constructor_identity_tests {
+    use super::RuntimeConstructorIdentity as Id;
+    use crate::PrimitiveName;
+
+    /// The ten `@vue/runtime-core` constructors, paired with the arm
+    /// `classify` must produce for each.
+    const RECOGNISED: &[(&str, Id)] = &[
+        ("String", Id::String),
+        ("Number", Id::Number),
+        ("Boolean", Id::Boolean),
+        ("Array", Id::Array),
+        ("Object", Id::Object),
+        ("Function", Id::Function),
+        ("Symbol", Id::Symbol),
+        ("Date", Id::Date),
+        ("RegExp", Id::RegExp),
+        ("Promise", Id::Promise),
+    ];
+
+    #[test]
+    fn classify_maps_each_recognised_spelling_to_its_own_arm() {
+        for (spelling, expected) in RECOGNISED {
+            assert_eq!(
+                Id::classify(spelling),
+                *expected,
+                "`{spelling}` must classify to its own arm"
+            );
+            assert_eq!(
+                Id::classify(spelling).spelling(),
+                Some(*spelling),
+                "`{spelling}` must round-trip through the identity"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_never_invents_a_recognised_arm_for_an_arbitrary_identifier() {
+        for name in [
+            "Thing", "MyClass", "PropType", "string", "STRING", "", "String2",
+        ] {
+            let id = Id::classify(name);
+            assert_eq!(
+                id,
+                Id::Other(std::sync::Arc::from(name)),
+                "`{name}` is not one of the ten recognised constructors and must \
+                 classify to `Other`, carrying its spelling for display only"
+            );
+            assert_eq!(
+                id.primitive(),
+                None,
+                "`{name}` must never reach a closed primitive fact — a false \
+                 primitive fold here is exactly the defect the typed identity exists \
+                 to prevent"
+            );
+            assert_eq!(
+                id.display_ts_type(),
+                None,
+                "`{name}` has no runtime-constructor display mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn null_is_a_literal_identity_and_is_unreachable_from_classify() {
+        // `classify` reads IDENTIFIER spellings. `null` is a literal, so a
+        // caller holding the string "null" must NOT be able to conjure the
+        // literal-null identity — only the producer that actually saw a
+        // `NullLiteral` array element mints it.
+        assert_eq!(
+            Id::classify("null"),
+            Id::Other(std::sync::Arc::from("null")),
+            "`classify(\"null\")` must be `Other`, never `NullLiteral`"
+        );
+        assert_eq!(
+            Id::classify("null").primitive(),
+            None,
+            "a `null`-spelled IDENTIFIER must not fold to the null primitive"
+        );
+        // The producer-minted literal identity does carry the fold.
+        assert_eq!(Id::NullLiteral.primitive(), Some(PrimitiveName::Null));
+        assert_eq!(Id::NullLiteral.spelling(), Some("null"));
+        assert_eq!(Id::NullLiteral.display_ts_type(), None);
+    }
+
+    #[test]
+    fn exactly_four_identities_carry_a_closed_primitive_fact() {
+        let with_primitive: Vec<(Id, PrimitiveName)> = RECOGNISED
+            .iter()
+            .map(|(_, id)| id.clone())
+            .chain([
+                Id::NullLiteral,
+                Id::Unclassifiable,
+                Id::Other(std::sync::Arc::from("X")),
+            ])
+            .filter_map(|id| id.primitive().map(|p| (id, p)))
+            .collect();
+        assert_eq!(
+            with_primitive,
+            vec![
+                (Id::String, PrimitiveName::String),
+                (Id::Number, PrimitiveName::Number),
+                (Id::Boolean, PrimitiveName::Boolean),
+                (Id::NullLiteral, PrimitiveName::Null),
+            ],
+            "only String/Number/Boolean and the literal `null` fold to a closed \
+             primitive; every other identity keeps its display-text-only route"
+        );
+    }
+
+    #[test]
+    fn unclassifiable_has_no_spelling_and_no_display() {
+        // A spread, a computed expression or an elision has no authored
+        // identifier at all — it must not be given one.
+        assert_eq!(Id::Unclassifiable.spelling(), None);
+        assert_eq!(Id::Unclassifiable.display_ts_type(), None);
+        assert_eq!(Id::Unclassifiable.primitive(), None);
+    }
+
+    /// The display mapping is the ONLY published type text for the six
+    /// constructors that carry no closed primitive fact, so each one is
+    /// pinned to its EXACT string. Asserting `is_some()` would leave the
+    /// text itself uncovered: corrupting `Date`'s mapping to garbage would
+    /// pass, and nothing else in the workspace pins it either.
+    #[test]
+    fn display_mapping_covers_exactly_the_ten_constructors() {
+        const EXPECTED: &[(Id, &str)] = &[
+            (Id::String, "string"),
+            (Id::Number, "number"),
+            (Id::Boolean, "boolean"),
+            (Id::Array, "Array<any>"),
+            (Id::Object, "object"),
+            (Id::Function, "Function"),
+            (Id::Symbol, "symbol"),
+            (Id::Date, "Date"),
+            (Id::RegExp, "RegExp"),
+            (Id::Promise, "Promise<any>"),
+        ];
+        // The pinned table is exactly the recognised set — no constructor
+        // can be dropped from the pin and quietly lose its coverage.
+        assert_eq!(
+            EXPECTED.len(),
+            RECOGNISED.len(),
+            "every recognised constructor must have a pinned display string"
+        );
+        for ((spelling, recognised), (pinned, text)) in RECOGNISED.iter().zip(EXPECTED) {
+            assert_eq!(
+                recognised, pinned,
+                "the pinned display table must be in the same order as the \
+                 recognised table, so a new arm cannot shift the pairing"
+            );
+            assert_eq!(
+                recognised.display_ts_type(),
+                Some(*text),
+                "`{spelling}` must display EXACTLY as `{text}` — this text is the \
+                 published type for the constructors with no closed primitive fact"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_round_trips_through_serde_and_discriminates() {
+        for id in [
+            Id::String,
+            Id::NullLiteral,
+            Id::Unclassifiable,
+            Id::Other(std::sync::Arc::from("Thing")),
+        ] {
+            let json = serde_json::to_string(&id).expect("serialize identity");
+            let back: Id = serde_json::from_str(&json).expect("deserialize identity");
+            assert_eq!(back, id);
+        }
+        assert_ne!(Id::NullLiteral, Id::Other(std::sync::Arc::from("null")));
+        assert_ne!(Id::Unclassifiable, Id::Other(std::sync::Arc::from("")));
+    }
 }
 
 #[cfg(test)]

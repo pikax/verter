@@ -40,6 +40,7 @@ import * as ts from "typescript";
  */
 export const ALLOWED_NATIVE_SESSION_METHODS: readonly string[] = [
   "getComponentMeta",
+  "getComponentMetaBatch",
   "getEffectiveSource",
   "delete",
   "restoreBaseFile",

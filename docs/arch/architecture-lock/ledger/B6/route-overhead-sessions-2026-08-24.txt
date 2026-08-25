@@ -1,0 +1,100 @@
+B6 route-overhead — corroborating sessions, 2026-08-24
+======================================================
+
+Eight independent 30-sample sessions. Each is one invocation of the same
+runner: 8 control invocations, 30 measured cold invocations, 8 control
+invocations, with a machine-condition probe before, every 10 measured
+samples, and after.
+
+The two groups differ by the BINARY, not by the worktree. A commit landed
+at 18:43 while this measurement was in progress (3ae319a23, 'group batch
+items by map probe instead of a linear scan'), which rewrites compile_batch
+— the batch arm. Sessions A-D had already been run from a binary built at
+17:47 from the parent commit 323bc7fb4; by the time they ran, the WORKTREE
+was already at 3ae319a23, so a worktree check alone reports TREE-MATCH for
+them and does NOT catch the staleness. The binary SHA-256 is what separates
+the two groups, and it is recorded in every session's own header:
+  a972852d192317b9a2a7707724abe513bbe01c0b845a3b39470c62eced50cb09  parent 323bc7fb4 (sessions A-D)
+  55b0820018cd3e338c0fc34179cbdde3ebaa8e941b87b0be92474f310cad4976  HEAD   3ae319a23 (sessions H1-H4)
+
+The published session is H1, built from HEAD. Its complete unedited stdout
+is route-overhead-run-2026-08-24.txt. Sessions A-D are retained ONLY as the
+A/B against which the landed batch-grouping commit is judged below.
+
+Per-session certificate. 'drift' is the frozen 3.0% bound
+([runner].max_control_drift_percent) applied to BOTH the start-vs-end
+control medians and the first-10-vs-last-10 measured medians. 'load' is the
+frozen idle-machine conjunct (1-min load average < 2.00), which this host
+did not meet in any session — see the measurement record for why.
+  head-attempt-H1    binary=55b0820018cd EXCEEDS control=2.14 within=0.98 max_load1=2.54 max_build_procs=0 [drift=ok load=FAIL builds=ok]
+  head-attempt-H2    binary=55b0820018cd EXCEEDS control=5.61 within=10.89 max_load1=2.54 max_build_procs=0 [drift=FAIL load=FAIL builds=ok]
+  head-attempt-H3    binary=55b0820018cd EXCEEDS control=3.79 within=7.59 max_load1=2.38 max_build_procs=0 [drift=FAIL load=FAIL builds=ok]
+  head-attempt-H4    binary=55b0820018cd EXCEEDS control=3.29 within=3.57 max_load1=2.71 max_build_procs=0 [drift=FAIL load=FAIL builds=ok]
+  quiet-attempt-A    binary=a972852d1923 EXCEEDS control=7.31 within=3.68 max_load1=2.86 max_build_procs=0 [drift=FAIL load=FAIL builds=ok]
+  quiet-attempt-B    binary=a972852d1923 EXCEEDS control=2.54 within=1.44 max_load1=3.15 max_build_procs=0 [drift=ok load=FAIL builds=ok]
+  quiet-attempt-C    binary=a972852d1923 EXCEEDS control=10.61 within=11.26 max_load1=3.06 max_build_procs=0 [drift=FAIL load=FAIL builds=ok]
+  quiet-attempt-D    binary=a972852d1923 EXCEEDS control=7.60 within=1.25 max_load1=3.06 max_build_procs=0 [drift=FAIL load=FAIL builds=ok]
+
+=== HEAD 3ae319a23 (map-probe batch grouping) ===
+per-session MEDIAN latency_ms (independent 30-sample sessions)
+  session                             direct  prepared-first prepared-repeat           batch
+  head-attempt-H1.txt                  1.757           1.116           4.457           1.814
+  head-attempt-H2.txt                  1.760           1.118           4.465           1.829
+  head-attempt-H3.txt                  1.771           1.118           4.468           1.835
+  head-attempt-H4.txt                  1.761           1.131           4.526           1.836
+
+  spread across sessions (max-min)/min:
+    direct           0.80%   min=1.757 max=1.771
+    prepared-first   1.39%   min=1.116 max=1.131
+    prepared-repeat  1.56%   min=4.457 max=4.526
+    batch            1.19%   min=1.814 max=1.836
+
+per-session MEDIAN rss_peak_bytes
+  session                             direct  prepared-first prepared-repeat           batch
+  head-attempt-H1.txt                7421952         7757824         7979008         8110080
+  head-attempt-H2.txt                7421952         7782400         7979008         8110080
+  head-attempt-H3.txt                7413760         7766016         7995392         8110080
+  head-attempt-H4.txt                7421952         7749632         7987200         8110080
+    direct           spread 0.110%
+    prepared-first   spread 0.423%
+    prepared-repeat  spread 0.205%
+    batch            spread 0.000%
+
+=== parent 323bc7fb4 (linear-scan batch grouping) ===
+per-session MEDIAN latency_ms (independent 30-sample sessions)
+  session                             direct  prepared-first prepared-repeat           batch
+  quiet-attempt-A.txt                  1.738           1.106           4.498           1.833
+  quiet-attempt-B.txt                  1.715           1.110           4.466           1.829
+  quiet-attempt-C.txt                  1.747           1.117           4.482           1.825
+  quiet-attempt-D.txt                  1.728           1.103           4.454           1.813
+
+  spread across sessions (max-min)/min:
+    direct           1.87%   min=1.715 max=1.747
+    prepared-first   1.27%   min=1.103 max=1.117
+    prepared-repeat  0.99%   min=4.454 max=4.498
+    batch            1.08%   min=1.813 max=1.833
+
+per-session MEDIAN rss_peak_bytes
+  session                             direct  prepared-first prepared-repeat           batch
+  quiet-attempt-A.txt                7454720         7700480         7938048         8077312
+  quiet-attempt-B.txt                7438336         7700480         7946240         8077312
+  quiet-attempt-C.txt                7454720         7700480         7946240         8077312
+  quiet-attempt-D.txt                7438336         7700480         7946240         8077312
+    direct           spread 0.220%
+    prepared-first   spread 0.000%
+    prepared-repeat  spread 0.103%
+    batch            spread 0.000%
+
+=== A/B: parent vs HEAD, median of each group's four session medians ===
+arm              pre_med_of_meds  head_med_of_meds     delta%   pre_spread%  head_spread%
+direct                    1.7325            1.7603      +1.60          1.87          0.80
+prepared-first            1.1078            1.1178      +0.90          1.27          1.39
+prepared-repeat           4.4740            4.4665      -0.17          0.99          1.56
+batch                     1.8272            1.8320      +0.26          1.08          1.19
+
+Reading the A/B: the touched arm (batch) moved +0.26%, LESS than the two
+arms the commit does not touch (direct +1.60%, prepared-first +0.90%) and
+less than the 0.80-1.87% spread between sessions of the same binary. At this
+corpus size the change is below the method's resolution: 14 items over 7
+groups means the replaced linear scan did at most ~50 key comparisons for
+the whole batch. No claim either way is supported by these numbers.

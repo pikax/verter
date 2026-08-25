@@ -3,7 +3,7 @@
 ## Program orchestrator — thin scheduler and landing coordinator
 
 Owns the DAG, sequencing, dependencies, capacity and landing order. Spawns and steers block
-orchestrators only, and is the single landing authority.
+orchestrators and the landing agent — nothing else — and is the single landing authority.
 
 Never implements, runs a review-fix cycle, manages implementers or reviewers, or ingests raw worker
 logs, traces or review reports — it reads compact receipts only. Reacts to milestone, blocker,
@@ -19,11 +19,22 @@ Spawns one manager and resumes it while it remains effective, priming it with th
 architecture and current slice — not the whole doctrine. Validates scope and completion without
 duplicating code review. Sends compact events upward. Never implements.
 
+**Its role ends at reporting the block ready and verified** — the candidate identity, the evidence,
+and the manager's drafted squash message. That report is an input to landing confirmation, never a
+substitute for it: the program orchestrator, or the landing agent acting for it, confirms
+independently.
+
+**A block never authorises itself.** A block branch carries no authority-registry delta — the registry
+is authored trunk-side by its owner and inherited byte-for-byte through rebase, so a branch-local
+registry edit is dropped rather than repaired. The ledger's `base_sha` and everything under
+`repository.*` are orchestrator-owned in the same way.
+
 ## Manager — owns delivery
 
 Dispatches implementation, selects risk-appropriate review lanes, adjudicates and deduplicates
 findings, verifies a potentially blocking finding before it interrupts an implementer, dispatches the
-smallest sufficient fix, and manages targeted re-review and acceptance.
+smallest sufficient fix, and manages targeted re-review and acceptance. Drafts the squash message —
+subject and body — at verification, and sends it upward with the acceptance evidence.
 
 Stops when acceptance is met and no confirmed in-scope blocker remains. Escalates architecture, scope
 or non-convergence rather than buying more rounds. Never writes production code.
@@ -48,11 +59,12 @@ architecture paths; dependencies; available capacity; any binding user instructi
     RESULT: <one sentence>
     CANDIDATE_SHA: <the sha the evidence binds to, or none>
     EVIDENCE: <paths or commands>
+    SQUASH_MESSAGE: <subject and body — required on ready>
     DECISION_NEEDED: <only if blocked>
     NEXT: <next material action>
 
-**Manager → block:** outcome; changed scope if any; acceptance evidence; confirmed unresolved risks;
-required decision if any.
+**Manager → block:** outcome; changed scope if any; acceptance evidence; the drafted squash message;
+confirmed unresolved risks; required decision if any.
 
 **An idle notification is not completion.** A role sends its result before going idle.
 
@@ -105,9 +117,14 @@ Read-only review work may run in parallel. Write work runs only in isolated owne
     rust-lock.sh <name> -- <command>
 
 Host-provided, on `PATH`; verify `command -v rust-lock.sh` before the first dispatch that needs it.
-It bounds concurrent builds host-wide and passes through re-entrantly, so a nested call cannot
-deadlock on a slot its own tree holds. A "wait until no cargo is running, then start" check is not
-mutual exclusion — every waiter sees idle at once and they all start together.
+It bounds concurrent builds host-wide — not memory — and passes through re-entrantly, so a nested call
+cannot deadlock on a slot its own tree holds. A "wait until no cargo is running, then start" check is
+not mutual exclusion — every waiter sees idle at once and they all start together.
+
+A gate carries its own memory ceiling and aborts its child tree on breach; a bare `cargo nextest`
+under the semaphore carries none, so shed that unprotected workload first. Steer on swap used, not
+free RAM — macOS keeps free pages near zero by design, and `vm_stat` reports its own page size, which
+is not 4096 on Apple Silicon. Take two `loadavg` samples before calling a trend.
 
 Cargo waiting on a target lock is not progress; do not read it as a stalled agent. Run the full gate
 only on the final landing candidate; workers run targeted affected checks.

@@ -501,7 +501,7 @@ fn constructor_bindings_participates_in_fact_identity() {
     // owner-aware binding index is that these two outcomes must never
     // collapse to the same cached fact.
     let entry = |resolution: ConstructorBindingOutcome| ConstructorBindingEntry {
-        spelling: std::sync::Arc::from("String"),
+        identity: crate::facts::RuntimeConstructorIdentity::String,
         resolution,
     };
     let mut global = prop_field("label", true);

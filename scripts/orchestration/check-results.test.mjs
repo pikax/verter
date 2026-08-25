@@ -40,6 +40,15 @@ function exitCode(args) {
   }
 }
 
+function usageError(args) {
+  try {
+    execFileSync(process.execPath, [CLI, ...args], { stdio: "pipe" });
+    return "";
+  } catch (e) {
+    return String(e.stderr ?? "");
+  }
+}
+
 describe("a sound result", () => {
   it("passes, with its findings extracted", () => {
     put(
@@ -205,6 +214,23 @@ describe("usage", () => {
     expect(exitCode([])).toBe(2);
     expect(exitCode([dir, SHA.slice(0, 9), "review"])).toBe(2);
     expect(exitCode([dir, SHA, "../../etc/passwd"])).toBe(2);
+  });
+
+  // The results directory is named with the SHORT form, so copying that name
+  // into the sha argument is the natural mistake. It stays a usage error — a
+  // short sha cannot bind a REVIEWED line, which is the whole point of the
+  // argument — but it has to read as a typo, not as a broken lane.
+  it("tells an abbreviated sha what is wrong and exactly what to pass", () => {
+    const short = SHA.slice(0, 12);
+    const err = usageError([dir, short, "review"]);
+    expect(err).toMatch(/12-character abbreviation/);
+    expect(err).toMatch(new RegExp(`git rev-parse ${short}`));
+  });
+
+  it("still says only that a non-sha is not a sha", () => {
+    const err = usageError([dir, "round-2", "review"]);
+    expect(err).toMatch(/is not a full 40-character sha/);
+    expect(err).not.toMatch(/abbreviation/);
   });
 });
 

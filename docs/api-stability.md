@@ -105,6 +105,7 @@ These features are behind opt-in flags and may change or be removed in any relea
 | `createChecker(tsconfig, options?)`           | Stable                                 |
 | `createCheckerByJson(root, config, options?)` | Stable                                 |
 | `checker.getComponentMeta(filePath)`          | Stable                                 |
+| `checker.getComponentMetaBatch(filePaths)`    | Experimental (opt-in Verter extension) |
 | `checker.getExportNames(filePath)`            | Stable                                 |
 | `checker.updateFile(path, content)`           | Stable                                 |
 | `checker.deleteFile(path)`                    | Stable                                 |
@@ -113,6 +114,10 @@ These features are behind opt-in flags and may change or be removed in any relea
 | `PropertyMetaSchema` shape                    | Stable (matches Volar)                 |
 | `MetaCheckerOptions`                          | Stable                                 |
 | `VolarComponentMeta._verter`                  | Experimental (opt-in Verter extension) |
+
+`checker.getComponentMetaBatch(filePaths)` is experimental because Volar's
+`ComponentMetaChecker` has no batch method; like `_verter`, it is a Verter-only
+extension rather than a Volar-parity API.
 
 ## Internal / Unstable
 

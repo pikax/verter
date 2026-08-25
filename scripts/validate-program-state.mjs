@@ -252,6 +252,42 @@ function gitFailureReason(res) {
   return stderr !== "" ? stderr : `git exited with status ${res.status}`;
 }
 
+// How many conflicting paths a rehearsal violation lists before eliding. One
+// real run produced 162 conflict-staged entries, 48 of them rename/rename
+// noise on content-hash-named golden files.
+const MAX_REPORTED_CONFLICT_PATHS = 12;
+
+// `git merge-tree --write-tree` prints, on conflict: the toplevel tree OID,
+// then one `<mode> <object> <stage>\t<path>` line per conflict-staged entry,
+// then a blank line and free-text messages. Stages 1/2/3 repeat a path, so
+// dedupe while keeping git's own order.
+function mergeTreeConflictPaths(stdout) {
+  const lines = (stdout ?? "").split("\n");
+  const paths = [];
+  const seen = new Set();
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "") break; // end of the conflicted-file-info section
+    const tab = lines[i].indexOf("\t");
+    if (tab === -1) continue;
+    const p = lines[i].slice(tab + 1);
+    if (p !== "" && !seen.has(p)) {
+      seen.add(p);
+      paths.push(p);
+    }
+  }
+  return paths;
+}
+
+// The files that actually conflicted, elision stated rather than silent. This
+// slot used to hold a fixed authority citation — a reader cannot be left to
+// mistake governance document names for the conflicting file list.
+function describeConflictPaths(paths) {
+  if (paths.length === 0) return "git merge-tree reported no conflict-staged paths";
+  const shown = paths.slice(0, MAX_REPORTED_CONFLICT_PATHS);
+  const elided = paths.length - shown.length;
+  return `${paths.length} conflicting path(s): ${shown.join(", ")}${elided > 0 ? ` (+${elided} more, elided)` : ""}`;
+}
+
 // One batched pass over every distinct object spec (a bare 40-char sha, or
 // `<sha>^{tree}`) collected across every block/field. Returns a Map spec ->
 // {oid, type} for a resolved object, spec -> null for "missing", or `null`
@@ -1133,6 +1169,30 @@ function verifyConcurrentLandingSafety(
       );
       return;
     }
+    // The replay below models "the candidate's delta on top of trunk-so-far"
+    // only while the merge base is an ancestor of the `cumulative` side, which
+    // is rooted at the pinned trunk. When it is not, the "ours" side carries a
+    // spurious REVERSE delta — everything in cumulative..base reads as a revert
+    // — and the verdict is meaningless in both directions (observed: 66 false
+    // conflicts on one block, and a false clean pass hiding a real conflict on
+    // another). So refuse to rehearse that block: the pin is behind the block's
+    // declared base and must be advanced, which is the block's own violation.
+    // This is a fail-closed guard on degenerate input, NOT a relaxation — it
+    // never suppresses, weakens or short-circuits a conflict a well-formed
+    // rehearsal would report.
+    const basedOnPin = runGit(["merge-base", "--is-ancestor", e.base, pinnedTrunk], cwd);
+    if (basedOnPin.status !== 0 && basedOnPin.status !== 1) {
+      v(
+        `block ${e.id} base_sha ${e.base} ancestry against the pinned integration trunk ${pinnedTrunk} could not be checked: ${gitFailureReason(basedOnPin)}`,
+      );
+      return;
+    }
+    if (basedOnPin.status === 1) {
+      v(
+        `block ${e.id} declared base_sha ${e.base} is not an ancestor of the pinned integration trunk ${pinnedTrunk} (repository.integration_head_sha) — the fixed-landing-order rehearsal replays each delta onto a cumulative tree rooted at that pin, which only models a landing while the pin contains the declared base; advance the pin to a commit containing ${e.base}. This block is not rehearsed: a verdict from that degenerate input is untrustworthy in both directions`,
+      );
+      return;
+    }
     // Already-landed short-circuit (point 6 above): if this block's own
     // rehearsal candidate is already an ancestor of the REAL pinned trunk
     // (not the synthetic `cumulative` this loop is building — that would
@@ -1170,7 +1230,7 @@ function verifyConcurrentLandingSafety(
     );
     if (merge.status === 1) {
       v(
-        `block ${e.id} (landing_order ${e.order}) does not land cleanly onto the cumulative result of every prior block in the fixed landing order — replaying its base_sha ${e.base}..${e.candidate} delta via git merge-tree --write-tree --merge-base=${e.base} against ${cumulative} reports real content conflicts (contracts/stacked-prs.md, MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER.md)`,
+        `block ${e.id} (landing_order ${e.order}) does not land cleanly onto the cumulative result of every prior block in the fixed landing order — replaying its base_sha ${e.base}..${e.candidate} delta via git merge-tree --write-tree --merge-base=${e.base} against ${cumulative} reports real content conflicts in ${describeConflictPaths(mergeTreeConflictPaths(merge.stdout))}`,
       );
       return;
     }
@@ -1693,7 +1753,16 @@ function main() {
   // block reaching REVIEW/ACCEPTANCE_RECOMMENDED/ACCEPTED/PRIVATE_CHECKPOINT
   // from here forward still fails this check without a real context-packet.md
   // digest, exactly as before this exemption.
-  const CONTEXT_PACKET_DIGEST_LEGACY_GAP_GRANDFATHER = new Set(["BV2", "B5", "CM1"]);
+  // B6 joined this set on 2026-08-24 by
+  // docs/arch/refactor/rev11/amendments/AMD-014-b6-context-packet-legacy-gap.md
+  // — the explicit amendment §1 of the ruling above requires before a fourth
+  // id may join (resemblance to BV2/B5/CM1 is expressly not grounds). B6's own
+  // gap: no context packet was produced when it was dispatched and none
+  // survives, and writing one now, after implementation, would be a fabricated
+  // input artifact backdated to look like a dispatch record. The exemption is
+  // still field- and id-scoped exactly as above — only context_packet_digest,
+  // only these four ids.
+  const CONTEXT_PACKET_DIGEST_LEGACY_GAP_GRANDFATHER = new Set(["BV2", "B5", "CM1", "B6"]);
   {
     const EVIDENCE_BOUND = new Set([
       "REVIEW",

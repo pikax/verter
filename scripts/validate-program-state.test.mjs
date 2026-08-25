@@ -44,6 +44,11 @@ const WIP_A0_BRANCH = "wip-a0";
 let WIP_A0_SHA;
 // Fixed-landing-order rehearsal fixtures — see before() for how each is built.
 let SHA_LANDED, TREE_LANDED, SHA_TRUNK_TIP, TREE_TRUNK_TIP, SHA_ALT, TREE_ALT;
+// Two sibling commits off SHA_BASE that each add the SAME MANY_CONFLICT_COUNT
+// files with different content — a rehearsal conflict wider than the reported
+// path list's cap, so the report has to say how many it elided.
+const MANY_CONFLICT_COUNT = 15;
+let SHA_MANY_A, TREE_MANY_A, SHA_MANY_B, TREE_MANY_B;
 const SHA_NONEXISTENT = "abcdef1234567890abcdef1234567890abcdef12"; // well-formed, never committed
 
 function git(args, cwd, input) {
@@ -127,6 +132,26 @@ before(() => {
   SHA_ALT = git(["rev-parse", "HEAD"], gitRoot);
   TREE_ALT = git(["rev-parse", "HEAD^{tree}"], gitRoot);
   git(["checkout", "-q", "main"], gitRoot);
+
+  // Wide-conflict fixtures: two independent siblings off SHA_BASE, each adding
+  // the same MANY_CONFLICT_COUNT paths with different content — every one of
+  // them an add/add conflict when the two are rehearsed in landing_order
+  // sequence off a trunk still at SHA_BASE.
+  const manyNames = Array.from({ length: MANY_CONFLICT_COUNT }, (_, i) => `conflict-${String(i).padStart(2, "0")}.txt`);
+  for (const [branch, content] of [["rehearsal-many-a", "a"], ["rehearsal-many-b", "b"]]) {
+    git(["checkout", "-q", "-b", branch, SHA_BASE], gitRoot);
+    for (const n of manyNames) writeFileSync(join(gitRoot, n), `${content}\n`);
+    git(["add", "-A"], gitRoot);
+    git(["commit", "-q", "-m", branch], gitRoot);
+    if (branch === "rehearsal-many-a") {
+      SHA_MANY_A = git(["rev-parse", "HEAD"], gitRoot);
+      TREE_MANY_A = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+    } else {
+      SHA_MANY_B = git(["rev-parse", "HEAD"], gitRoot);
+      TREE_MANY_B = git(["rev-parse", "HEAD^{tree}"], gitRoot);
+    }
+    git(["checkout", "-q", "main"], gitRoot);
+  }
 });
 
 // Amendment authority gate fixtures. The validator resolves
@@ -2693,4 +2718,217 @@ test("fixed-landing-order rehearsal: anti-overbreadth control — a genuine conf
       `block R2 \\(landing_order 2\\) does not land cleanly onto the cumulative result of every prior block in the fixed landing order`,
     ),
   );
+});
+
+// ── Fixed-landing-order rehearsal: the conflict report names files ─────────
+// Same wiring as the anti-overbreadth control above (pin at SHA_BASE, R1 then
+// R2 replayed in landing_order, R2's add of shared.txt="v3" conflicting with
+// the "v1" R1 just produced), asserting the CONTENT of the report rather than
+// only that a report happened: the parenthetical in that message used to be a
+// fixed authority citation — two governance document names, identical to the
+// parenthetical on an unrelated malformed-candidate_sha message — sitting in
+// the slot a reader reads as "the files that conflicted". It cost two
+// investigations that intersected changed-file sets against those two names.
+test("fixed-landing-order rehearsal: a conflict names the paths that actually conflicted, not the governing documents", () => {
+  const dag = write("dag-rehearsal-conflict-paths.toml", DAG_REHEARSAL);
+  const state = write(
+    "state-rehearsal-conflict-paths.toml",
+    header({
+      status: "ACTIVE",
+      current: "R1",
+      repoSha: SHA_BASE,
+      dagDigest: DAG_REHEARSAL_DIGEST,
+      integrationBranch: "rehearsal-trunk",
+      integrationHeadSha: SHA_BASE,
+    }) +
+      acceptedBlock("R0", { entry_lock_digest: DIGEST, base_sha: SHA_BASE, candidate_sha: SHA_BASE, candidate_tree: TREE_BASE, accepted_sha: SHA_BASE, accepted_tree: TREE_BASE, conformance_reviewed_sha: SHA_BASE, architecture_reviewed_sha: SHA_BASE, adversarial_reviewed_sha: SHA_BASE }) +
+      "\n" +
+      block("R1", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_LANDED,
+        candidate_tree: TREE_LANDED,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("R2", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_ALT,
+        candidate_tree: TREE_ALT,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 2,
+      }) +
+      "\n",
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a genuine conflict must still fail");
+  const line = r.err
+    .split("\n")
+    .find((l) => l.includes("block R2 (landing_order 2) does not land cleanly"));
+  assert.ok(line, `expected the R2 conflict violation, got:\n${r.err}`);
+  assert.match(line, /1 conflicting path\(s\): shared\.txt/);
+  // The two citation names must not sit anywhere a reader can mistake them for
+  // the conflicting files. shared.txt is the only path that conflicted.
+  assert.doesNotMatch(line, /contracts\/stacked-prs\.md/);
+  assert.doesNotMatch(line, /MAINTAINER-RULING-CONCURRENCY-CEILING-AND-ROSTER\.md/);
+});
+
+test("fixed-landing-order rehearsal: a conflict wider than the report's cap says how many paths it elided", () => {
+  const dag = write("dag-rehearsal-many-paths.toml", DAG_REHEARSAL);
+  // R1 and R2 are independent siblings off SHA_BASE that add the SAME
+  // MANY_CONFLICT_COUNT files with different content, so replaying R2 onto the
+  // cumulative tree R1 produced conflicts on every one of them. A real run
+  // produced 162 conflict-staged entries; a silently truncated list there is
+  // indistinguishable from a small conflict.
+  const state = write(
+    "state-rehearsal-many-paths.toml",
+    header({
+      status: "ACTIVE",
+      current: "R1",
+      repoSha: SHA_BASE,
+      dagDigest: DAG_REHEARSAL_DIGEST,
+      integrationBranch: "rehearsal-trunk",
+      integrationHeadSha: SHA_BASE,
+    }) +
+      acceptedBlock("R0", { entry_lock_digest: DIGEST, base_sha: SHA_BASE, candidate_sha: SHA_BASE, candidate_tree: TREE_BASE, accepted_sha: SHA_BASE, accepted_tree: TREE_BASE, conformance_reviewed_sha: SHA_BASE, architecture_reviewed_sha: SHA_BASE, adversarial_reviewed_sha: SHA_BASE }) +
+      "\n" +
+      block("R1", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_MANY_A,
+        candidate_tree: TREE_MANY_A,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("R2", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_MANY_B,
+        candidate_tree: TREE_MANY_B,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 2,
+      }) +
+      "\n",
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a genuine conflict must still fail");
+  const line = r.err
+    .split("\n")
+    .find((l) => l.includes("block R2 (landing_order 2) does not land cleanly"));
+  assert.ok(line, `expected the R2 conflict violation, got:\n${r.err}`);
+  assert.match(line, new RegExp(`${MANY_CONFLICT_COUNT} conflicting path\\(s\\)`));
+  assert.match(line, /conflict-00\.txt/);
+  assert.match(line, new RegExp(`\\(\\+${MANY_CONFLICT_COUNT - 12} more, elided\\)`));
+  assert.doesNotMatch(line, /conflict-14\.txt/);
+});
+
+// ── Fixed-landing-order rehearsal: base_sha must be ancestral to the pin ───
+// The replay models "the candidate's delta on top of trunk-so-far" only when
+// the merge base is an ancestor of the cumulative side. When it is not, the
+// "ours" side carries a spurious reverse delta (everything in cumulative..base
+// reads as a revert), and the verdict is meaningless in BOTH directions —
+// observed live as 66 false conflicts on one block and a false clean pass that
+// hid a real conflict on another.
+test("fixed-landing-order rehearsal: a base_sha that is not an ancestor of the pinned trunk is its own violation, not a verdict", () => {
+  const dag = write("dag-rehearsal-base-off-pin.toml", DAG_REHEARSAL);
+  // Pin is SHA_TRUNK_TIP. R1 declares base SHA_ALT — a real commit, a genuine
+  // ancestor of its own candidate (SHA_ALT itself), but a sibling lineage off
+  // SHA_BASE that the pin's history does not contain. Replaying that delta is
+  // degenerate: theirs == base, so pre-fix the rehearsal reported a CLEAN pass
+  // for a block whose declared base the trunk pin is not even on.
+  const state = write(
+    "state-rehearsal-base-off-pin.toml",
+    header({
+      status: "ACTIVE",
+      current: "R1",
+      repoSha: SHA_TRUNK_TIP,
+      dagDigest: DAG_REHEARSAL_DIGEST,
+      integrationBranch: "rehearsal-trunk",
+      integrationHeadSha: SHA_TRUNK_TIP,
+    }) +
+      acceptedBlock("R0", { entry_lock_digest: DIGEST, base_sha: SHA_BASE, candidate_sha: SHA_BASE, candidate_tree: TREE_BASE, accepted_sha: SHA_BASE, accepted_tree: TREE_BASE, conformance_reviewed_sha: SHA_BASE, architecture_reviewed_sha: SHA_BASE, adversarial_reviewed_sha: SHA_BASE }) +
+      "\n" +
+      block("R1", "REVIEW", {
+        base_sha: SHA_ALT,
+        candidate_sha: SHA_ALT,
+        candidate_tree: TREE_ALT,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("R2", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_TRUNK_TIP,
+        candidate_tree: TREE_TRUNK_TIP,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 2,
+      }) +
+      "\n",
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, `expected the pin-ancestry violation, got:\n${r.err}\n${r.out}`);
+  assert.match(
+    r.err,
+    new RegExp(
+      `block R1 declared base_sha ${SHA_ALT} is not an ancestor of the pinned integration trunk ${SHA_TRUNK_TIP}`,
+    ),
+  );
+  // No rehearsal verdict for R1 — neither a conflict nor a clean pass.
+  assert.doesNotMatch(r.err, /block R1 \(landing_order 1\) does not land cleanly/);
+  assert.doesNotMatch(r.err, /NOTE: block R1 \(landing_order 1\)/);
+});
+
+test("fixed-landing-order rehearsal: the pinned-trunk base-ancestry guard does not silence a genuine conflict", () => {
+  const dag = write("dag-rehearsal-guard-overbreadth.toml", DAG_REHEARSAL);
+  // Both bases are SHA_BASE, which IS an ancestor of the pin — the guard has
+  // nothing to say here — and R2 still genuinely conflicts with R1. The guard
+  // is a refusal to rehearse degenerate input, never a conflict suppressor.
+  const state = write(
+    "state-rehearsal-guard-overbreadth.toml",
+    header({
+      status: "ACTIVE",
+      current: "R1",
+      repoSha: SHA_BASE,
+      dagDigest: DAG_REHEARSAL_DIGEST,
+      integrationBranch: "rehearsal-trunk",
+      integrationHeadSha: SHA_BASE,
+    }) +
+      acceptedBlock("R0", { entry_lock_digest: DIGEST, base_sha: SHA_BASE, candidate_sha: SHA_BASE, candidate_tree: TREE_BASE, accepted_sha: SHA_BASE, accepted_tree: TREE_BASE, conformance_reviewed_sha: SHA_BASE, architecture_reviewed_sha: SHA_BASE, adversarial_reviewed_sha: SHA_BASE }) +
+      "\n" +
+      block("R1", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_LANDED,
+        candidate_tree: TREE_LANDED,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 1,
+      }) +
+      "\n" +
+      block("R2", "REVIEW", {
+        base_sha: SHA_BASE,
+        candidate_sha: SHA_ALT,
+        candidate_tree: TREE_ALT,
+        charter_digest: DIGEST,
+        context_packet_digest: DIGEST,
+        evidence_digest: DIGEST,
+        landing_order: 2,
+      }) +
+      "\n",
+  );
+  const r = run(dag, state, "live");
+  assert.notEqual(r.status, 0, "a genuine conflict must still fail with the guard in place");
+  assert.match(r.err, /block R2 \(landing_order 2\) does not land cleanly/);
+  assert.doesNotMatch(r.err, /is not an ancestor of the pinned integration trunk/);
 });

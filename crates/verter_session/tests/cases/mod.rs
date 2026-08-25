@@ -48,6 +48,7 @@ mod nextest_slow_timeout_matches_advertised_budget;
 mod oracle_driver;
 mod oracle_query_specs_shared;
 mod oracle_tsgo_forbidden;
+mod runtime_constructor_matrix;
 mod shared_process_contract;
 mod svelte_compiler_block1;
 mod svelte_compiler_block1_guards;

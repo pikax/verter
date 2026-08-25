@@ -1,21 +1,26 @@
 # Rulings index
 
-One row per ruling document migrated from the session scratchpad under RULING 2 of
-[`ORCHESTRATION-AUTHORITY-MODEL`](ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md). Each document carries a
-typed YAML frontmatter header (`ruling_id`, `type`, `date`, `date_source`, `binds`, `source_file`,
-`summary`, `supersedes`, `superseded_by`, `contradicts`, `notes`) prepended to the verbatim original
-text — body content was not rewritten, only the frontmatter and a mechanical `<MACHINE_ROOT>` path
-substitution were applied. `supersedes`/`superseded_by` are per-CLAIM, not per-document: a ruling can
-supersede one claim of another while the rest of that document remains binding — see each document's
-own frontmatter for the exact claim text.
+One row per document in this directory. The original corpus was migrated from the session scratchpad
+under RULING 2 of [`ORCHESTRATION-AUTHORITY-MODEL`](ARCH-RULING-ORCHESTRATION-AUTHORITY-MODEL.md);
+documents added after that migration are listed here too. Each document carries a typed YAML
+frontmatter header. Nine keys are on every document — `ruling_id`, `type`, `date`, `date_source`,
+`binds`, `summary`, `supersedes`, `superseded_by`, `contradicts`; `source_file` and `notes` are usual
+but not universal, omitted by two documents. The corpus is the authority for this schema, not the
+reverse — read the keys off the documents rather than assuming this list. For the migrated documents
+the header was prepended to the verbatim original text — body content was not rewritten, only the
+frontmatter and a mechanical `<MACHINE_ROOT>` path substitution were applied.
+`supersedes`/`superseded_by` are per-CLAIM, not per-document: a ruling can supersede one claim of
+another while the rest of that document remains binding — see each document's own frontmatter for the
+exact claim text.
 
-**Not yet built by this migration:** the effective-state generator and authority registry described in
-RULING 1/3 of `ORCHESTRATION-AUTHORITY-MODEL` — this index is hand-curated, not a generated fail-closed
-model. Do not treat `superseded_by = —` as proof a ruling is uncontested; it means no OTHER migrated
-ruling's own text names it as superseded. Ledger `digest` binding is a separate step owned by the
-program orchestrator (RULING 1), not performed here.
+**Built since this migration:** the effective-state generator and authority registry described in RULING
+1/3 of `ORCHESTRATION-AUTHORITY-MODEL` now exist, at `scripts/effective-state.mjs` and
+`docs/arch/architecture-lock/ledger/authority-registry.toml`. This index is derived from neither: it
+remains hand-curated, not a generated fail-closed model. Do not treat `superseded_by = —` as proof a
+ruling is uncontested; it means no OTHER migrated ruling's own text names it as superseded. Ledger
+`digest` binding is a separate step owned by the program orchestrator (RULING 1), not performed here.
 
-## Maintainer directives (29)
+## Maintainer directives (43)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
@@ -24,6 +29,19 @@ program orchestrator (RULING 1), not performed here.
 | [`COALESCER-CLOSURE-IS-NAMED-DISPOSITION`](MAINTAINER-RULING-COALESCER-CLOSURE-IS-NAMED-DISPOSITION.md) | maintainer-ruling | 2026-08-23 | K3, G2, H2, TCM4 | — |
 | [`CSS-WORK-REACHES-J1`](MAINTAINER-RULING-2026-08-23-CSS-WORK-REACHES-J1.md) | maintainer-ruling | 2026-08-23 | J1 | — |
 | [`CODE-OVER-LEDGER`](MAINTAINER-RULING-2026-08-22-CODE-OVER-LEDGER.md) | maintainer-ruling | 2026-08-22 | BV2, B5, CM1, scripts/validate-program-state.mjs, ledger bookkeeping protocol | — |
+| [`BV2-B5-J1-RATIFICATION`](MAINTAINER-RULING-2026-08-22-BV2-B5-J1.md) | maintainer-ruling | 2026-08-22 | BV2, B5, J1, review-mandate protocol | — |
+| [`LSP-CSS-READERS-CONSUME-SEMANTICS`](MAINTAINER-ADDENDUM-LSP-CSS-READERS-CONSUME-SEMANTICS.md) | maintainer-ruling | 2026-08-21 | J1 | — |
+| [`SEMANTIC-CSS-EXTRACTION-CONSUMERS`](MAINTAINER-ADDENDUM-SEMANTIC-CSS-EXTRACTION-CONSUMERS.md) | maintainer-ruling | 2026-08-21 | J1 | — |
+| [`BUILD-LANE-SEPARATION`](MAINTAINER-DIRECTIVE-BUILD-LANE-SEPARATION.md) | maintainer-directive | 2026-08-21 | build architecture, release pipeline, developer workflow | — |
+| [`GATE-BLOCK-DEFERS-VERIFICATION`](MAINTAINER-DIRECTIVE-GATE-BLOCK-DEFERS-VERIFICATION.md) | maintainer-directive | 2026-08-21 | gate architecture, verification infrastructure | — |
+| [`GATE-PERFORMANCE-BLOCK`](MAINTAINER-DIRECTIVE-GATE-PERFORMANCE-BLOCK.md) | maintainer-directive | 2026-08-21 | gate architecture, verification infrastructure | — |
+| [`ONE-BUILD-ONE-RUN`](MAINTAINER-DIRECTIVE-ONE-BUILD-ONE-RUN.md) | maintainer-directive | 2026-08-21 | gate architecture, verification infrastructure | — |
+| [`SINGLE-TEST-UNIVERSE`](MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md) | maintainer-directive | 2026-08-21 | gate architecture, verification infrastructure | — |
+| [`J-TRAIN-SCOPE-IS-PARSING-ONLY`](MAINTAINER-RULING-J-TRAIN-SCOPE-IS-PARSING-ONLY.md) | maintainer-ruling | 2026-08-21 | J1, J2, J3, J4, CSS/style pipeline architecture | — |
+| [`NO-COMPAT-OR-LEGACY-CODE`](MAINTAINER-RULING-NO-COMPAT-OR-LEGACY-CODE.md) | maintainer-ruling | 2026-08-21 | all blocks, all crates, all packages | — |
+| [`ONE-CSS-PARSER-PARSE-ONCE`](MAINTAINER-RULING-ONE-CSS-PARSER-PARSE-ONCE.md) | maintainer-ruling | 2026-08-21 | J1, J2, J3, J4, CSS/style pipeline architecture | — |
+| [`VUE-DOUBLE-PIN-DISPOSITION`](MAINTAINER-RULING-VUE-DOUBLE-PIN-DISPOSITION.md) | maintainer-ruling | 2026-08-21 | Vue oracle pinning, conformance infrastructure | — |
+| [`PRE-ENFORCEMENT-ACCEPTANCES`](MAINTAINER-RULING-PRE-ENFORCEMENT-ACCEPTANCES.md) | maintainer-ruling | 2026-08-20 | BF1, BF2, B2, B3, B4 | — |
 | [`HARDEN-ORCHESTRATION`](MAINTAINER-DIRECTIVE-HARDEN-ORCHESTRATION.md) | maintainer-directive | 2026-08-20 | program-wide orchestration machinery | — |
 | [`CSS-CLEAN-CUTOVER`](MAINTAINER-DIRECTIVE-CSS-CLEAN-CUTOVER.md) | maintainer-directive | 2026-08-20 | Track J (J1-J4), CSS/style pipeline architecture | — |
 | [`NO-LIGHTNINGCSS`](MAINTAINER-RULING-NO-LIGHTNINGCSS.md) | maintainer-directive | 2026-08-17 | Track J / J1, BCSS0 (superseded within this document), CSS/style pipeline | CSS-CLEAN-CUTOVER |
@@ -50,12 +68,23 @@ program orchestrator (RULING 1), not performed here.
 | [`PARALLEL-REVIEW-SEATS`](MAINTAINER-RULING-PARALLEL-REVIEW-SEATS.md) | maintainer-directive | 2026-08-18 | program-wide review-seat protocol | — |
 | [`REVIEW-BUDGET-BY-ARTIFACT-CLASS`](MAINTAINER-RULING-REVIEW-BUDGET.md) | maintainer-directive | 2026-08-17 | program-wide review protocol | — |
 
-## Architecture rulings (14)
+## Architecture rulings (25)
 
 | ID | Type | Date | Binds | Superseded by |
 |---|---|---|---|---|
+| [`LSP-DURABLE-FENCE-OWNERSHIP-2026-08-24`](ARCHITECT-RULING-2026-08-24-LSP-DURABLE-FENCE-OWNERSHIP.md) | architecture-ruling | 2026-08-24 | H2, H3, K3 | — |
+| [`C1-CHARTER-RATIFICATION-2026-08-24`](ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFICATION.md) | architecture-ruling | 2026-08-24 | C1 | — |
+| [`C1-CHARTER-RATIFIABILITY-2026-08-24`](ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFIABILITY.md) | architecture-ruling | 2026-08-24 | C1 | — |
+| [`TCM0-DECISIONS-2026-08-24`](ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md) | architecture-ruling | 2026-08-24 | TCM0, TCM2, TCM3, TCM4 | — |
+| [`SIX-WAY-B6-CM1-2026-08-24`](ARCHITECT-RULING-2026-08-24-SIX-WAY-B6-CM1.md) | architecture-ruling | 2026-08-24 | B6, BF1, CM1, governance.md, performance-gates.toml | — |
+| [`CM1-CONTROL-AXIS-AMENDMENT-2026-08-24`](ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md) | architecture-ruling | 2026-08-24 | CM1 | — |
+| [`CM1-RUNTIME-FORM-AXIS-2026-08-24`](ARCHITECT-RULING-2026-08-24-CM1-RUNTIME-FORM-AXIS.md) | architecture-ruling | 2026-08-24 | CM1 | superseded by `CM1-AUTHORED-ASSERTION-CAPTURE-2026-08-25` |
+| [`CM1-AUTHORED-ASSERTION-CAPTURE-2026-08-25`](ARCHITECT-RULING-2026-08-25-CM1-AUTHORED-ASSERTION-CAPTURE.md) | architecture-ruling | 2026-08-25 | CM1 | — |
 | [`B6-ROUTE-OVERHEAD-CELL-LOCK-2026-08-23`](ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md) | architecture-ruling | 2026-08-23 | B6, BF1, performance-gates.toml | — |
 | [`TIMING-ARCHITECTURE-2026-08-23`](ARCHITECT-RULING-2026-08-23-TIMING-ARCHITECTURE.md) | architecture-ruling | 2026-08-23 | program-wide timing architecture (production and tests) | — |
+| [`CSS-ALLOCATION-OWNERSHIP-2026-08-23`](ARCHITECT-RULING-2026-08-23-CSS-ALLOCATION-OWNERSHIP.md) | architecture-ruling | 2026-08-23 | J1 | — |
+| [`CSS-FRAMEWORK-CONSTRUCT-VALIDITY`](ARCH-RULING-CSS-FRAMEWORK-CONSTRUCT-VALIDITY.md) | architecture-ruling | 2026-08-21 | J1, J4, CSS/style pipeline architecture | — |
+| [`J-TRAIN-FIVE-FORKS`](ARCH-RULING-J-TRAIN-FIVE-FORKS.md) | architecture-ruling | 2026-08-20 | J1, J2, J3, J4 | — |
 | [`C1-FOUR-FORKS`](ARCH-RULING-C1-FOUR-FORKS.md) | architecture-ruling | 2026-08-20 | C1 | — |
 | [`C1-THREE-GAPS-ADDENDUM`](ARCH-ADDENDUM-C1-THREE-GAPS.md) | architecture-ruling | 2026-08-20 | C1 | — |
 | [`D1-SIX-FORKS`](ARCH-RULING-D1-SIX-FORKS.md) | architecture-ruling | 2026-08-20 | D1 | C1-D1-FLOW-FILE-RECONCILIATION |
@@ -83,4 +112,9 @@ program orchestrator (RULING 1), not performed here.
 | [`B4-C1-SERIALIZE`](DISPOSITION-B4-C1-SERIALIZE.md) | disposition | unknown | B4, C1 | — |
 | [`BS1-SERIALIZE-BEHIND-BV1`](DISPOSITION-BS1-SERIALIZE.md) | disposition | unknown | BS1, BV1 | — |
 | [`TYPECHECK-POC-TO-H-TRAIN`](DISPOSITION-TYPECHECK-POC-TO-H-TRAIN.md) | disposition | 2026-08-18 | H2, H3 (future Track H blocks) | — |
-| [`CSS-ALLOCATION-OWNERSHIP-2026-08-23`](ARCHITECT-RULING-2026-08-23-CSS-ALLOCATION-OWNERSHIP.md) | architecture-ruling | 2026-08-23 | J1 | — |
+
+## Procedures (1)
+
+| ID | Type | Date | Binds | Superseded by |
+|---|---|---|---|---|
+| [`CONTEXT-PACKET-DISPATCH-PROCEDURE`](context-packet-dispatch-procedure.md) | procedure | 2026-08-22 | — | — |

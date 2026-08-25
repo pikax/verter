@@ -64,6 +64,12 @@ records the evidence that does exist.
 so an exit code never proves a mutation landed, and a verification search hitting a pre-existing
 occurrence is a false positive. A green planted run means the plant failed until proven otherwise.
 
+**Stage only your own paths.** `git add -A`, `git add .` and a bare `commit -a` capture whatever a
+concurrent writer staged between your `status` and your `add`, and any mutation still applied in the
+tree. Add explicit paths, and compare the staged set against your intended file list immediately
+before committing — mechanically, not from memory. A commit containing a file you did not write is
+the failure, whatever put it there.
+
 ## Regression prevention
 
 Use the **lowest-complexity mechanism that reliably prevents recurrence**, proportional to impact,
@@ -81,23 +87,78 @@ merely to make every defect theoretically unrepresentable.
 Never land a new name-keyed source scanner: `CLAUDE.md`'s forward-only rule forbids a guard that
 greps the tree for a spelled identifier, path or token, `syn`/AST scanning included.
 
-## Independent landing verification
+## Rebasing
 
-**Before a candidate lands, someone who did not produce the evidence checks that it is real.** They
-verify that each claimed result exists, reaches a conclusion, and binds to the candidate's sha — and
-they may refuse.
+**Rebase onto the working branch at every natural boundary** — after an implementer finishes, after a
+fix cycle ends — not only before landing. **Except while anything is being compared or measured
+against the branch:** a frozen candidate with lanes running against it, a failure triage comparing
+the candidate to a pre-candidate tree, a measurement in progress. Rebasing there moves the subject of
+the comparison and invalidates the comparison itself, not merely the freeze. Never mid-slice.
 
-No named role, no checklist. `check-results.mjs` does the mechanical half; the half that matters is
-that whoever runs it is not the author. A block once reported "adversarial, 20 plants — PASS" for a
-lane that never ran: no output file, no verdict line, and a worktree showing one ten-minute build
-then four hours of silence. Nothing in its account looked false; it was simply unchecked.
+Dispatch the rebase rather than doing it by hand, and prove both equalities — delta-of-deltas byte
+identity, and per-file blob identity.
+
+Drift corrupts the question, not just the merge. **Ask what a branch changed with
+`git diff <merge-base> <branch>`, never `git diff <trunk> <branch>`** — on a branch that is behind,
+the second reports files trunk added as files the branch deleted.
+
+**Rebase integrity is not row equivalence.** A clean rebase preserves the branch's intent, which is
+the failure when that intent is stale: patch-ids 1:1 and a clean tree are both consistent with a
+branch silently reverting a field its owner corrected upstream. Before a squash, field-diff every
+ledger row the branch touches, baselined on the merge-base, and surface a collision where both sides
+moved the same field.
+
+## Landing
+
+**Only the program orchestrator dispatches the landing agent.**
+
+**A ready-and-verified report carries the candidate identity, the evidence, and the squash message —
+subject and body.** The manager drafts the message at verification, when what the block did is
+freshest, and it travels upward with the readiness claim. Landing never asks for it.
+
+**The landing agent authors no block-scoped content.** A rebase conflict and a commit message are
+both block knowledge; produced at landing time they are unreviewed, with the gate about to run on the
+result. So the landing agent uses the supplied message verbatim and verifies compliance — never
+authoring, never rewriting — and either failing cancels the landing and returns it to the block that
+owns the code.
+
+The landing agent works in order. Each step gates the next: a failure at any point ends the landing
+rather than proceeding with a caveat.
+
+1. **Rebase** onto the working branch if the candidate is behind. **A dirty rebase cancels the
+   landing** instead of being resolved.
+2. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
+   candidate's sha, and the supplied message must comply — **in its body, not only its subject**.
+   Naming the program, its revision or a block identifier, or a commit type `CLAUDE.md` does not
+   list, returns the block. Whoever checks did not produce that evidence — that is what makes the
+   check worth anything — and may refuse.
+3. **Run the gate.**
+
+**On gate success only:** squash under the supplied message verbatim, then update the ledger, then
+land.
+
+**Artifact and binary provenance binds to content — a digest over the artifact's own inputs — never a
+commit sha.** Landing rebases and always squashes, so a sha a block recorded moves twice after the
+block stopped looking; the record stays well-formed while naming an identity the history no longer
+holds, so nothing fails and nothing warns.
+
+`check-results.mjs` does the mechanical half of the conformance check. A block once reported
+"adversarial, 20 plants — PASS" for a lane that never ran: no output file, no verdict line, and a
+worktree showing one ten-minute build then four hours of silence. Nothing in its account looked
+false; it was simply unchecked.
 
 A block's own acceptance evidence is exactly the kind of claim this exists to check — including this
 one.
 
+**A clean merge is not a correct merge.** Two changes each correct alone can auto-merge without
+conflict and still produce a defect — one narrowing what an inventory collects, the other deriving a
+fact from that inventory. Conflict markers do not detect semantic conflict, so integration is
+verified on its own.
+
 ## One trap worth stating
 
 **A check that enumerates or matches from the same source it validates proves nothing.** A totality
-test iterating its own map, or a residue check reusing the pattern it verifies, cannot fail for the
-case it exists to catch. Verify against an independent oracle: the directory, not the list; the
-shape, not the pattern.
+test iterating its own map, a residue check reusing the pattern it verifies, or a drift check
+comparing against the recorded sha it is checking, cannot fail for the case it exists to catch.
+Verify against an independent oracle: the directory, not the list; the shape, not the pattern; the
+live tree, not the pinned baseline.

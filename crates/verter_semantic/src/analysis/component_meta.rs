@@ -2197,26 +2197,15 @@ fn constructor_binding_source_position(
         });
     }
 
-    // Every entry resolved `Global`: fold String/Number/Boolean/null
-    // spellings to the closed primitive fact (a union of primitives for a
-    // multi-element constructor array); any other spelling keeps its
-    // existing display-text-only route — no closed-fact plumbing for the
-    // other seven constructor spellings. `"null"` is the literal-`null`
-    // array-element spelling from `resolve_runtime_constructor_array`
-    // (confirmed against `@vue/runtime-core`'s own `assertType`/`getType`:
-    // `[String, null]` means "String-typed value OR literal `null`").
-    fn primitive_of(spelling: &str) -> Option<PrimitiveName> {
-        match spelling {
-            "String" => Some(PrimitiveName::String),
-            "Number" => Some(PrimitiveName::Number),
-            "Boolean" => Some(PrimitiveName::Boolean),
-            "null" => Some(PrimitiveName::Null),
-            _ => None,
-        }
-    }
+    // Every entry resolved `Global`: fold each entry's producer-minted
+    // `RuntimeConstructorIdentity` to its closed primitive fact (a union of
+    // primitives for a multi-element constructor array). The identity owns
+    // that mapping exhaustively — this seam never reads a spelling. An
+    // identity with no primitive fact keeps its existing display-text-only
+    // route.
     let primitives: Option<Vec<PrimitiveName>> = bindings
         .iter()
-        .map(|entry| primitive_of(entry.spelling.as_ref()))
+        .map(|entry| entry.identity.primitive())
         .collect();
     primitives.map(|primitives| {
         let fact = if let [only] = primitives.as_slice() {

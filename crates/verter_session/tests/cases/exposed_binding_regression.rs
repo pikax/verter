@@ -631,11 +631,43 @@ defineExpose({ increment })
 }
 
 /// The SAME reproduction through `get_component_meta_output`'s Result
-/// contract directly: a genuine `UnraisableSource` failure (if repair
-/// regresses) must surface as `Err`, never collapse into `Ok(None)`
-/// (absence) or a fabricated `unknown` success.
+/// contract, with each of the three outcomes separated instead of collapsed
+/// into one `.expect(...)`.
+///
+/// The producer defect this fixture characterises
+/// (`decl_body_memo/locator_deref.rs`'s `navigate_value_parts`: an
+/// empty-path value position over a declaration that carries ONLY a
+/// signature) surfaced as one specific typed error —
+/// [`ComponentMetaOutputFailure::UnraisableSource`] on the
+/// [`ComponentMetaOutputLane::Exposed`] lane.
+///
+/// **Where the discrimination lives.** The correct answer for this input is
+/// SUCCESS, so every `Err` is red whatever it carries. No comparison of the
+/// failure's lane or variant could change that verdict, so this test makes
+/// none: the `Err` arm reports the observed error in full and names the
+/// owning producer, and that is all it claims to do. It is not an oracle and
+/// nothing here should describe it as one.
+///
+/// What discriminates is the `Ok(Some(_))` arm's pin on the exposed member's
+/// own materialized shape — a real function type with the authored parameter
+/// count — which a silent per-field degrade behind an overall-successful
+/// component resolve would fail. That pin is the verdict rail and is
+/// plant-proven.
+///
+/// A verdict-bearing assertion on an exact `(lane, failure)` pair does exist,
+/// on inputs where a typed failure is the CORRECT answer:
+/// `runtime_constructor_matrix.rs::fail_closed_constructor_positions_surface_the_exact_typed_failure`.
+///
+/// The three arms:
+///
+/// - `Err(_)` — a regression. Report the observed error in full and name the
+///   owning producer.
+/// - `Ok(None)` — the forbidden swallow: a failure demoted to absence,
+///   indistinguishable from a missing canonical.
+/// - `Ok(Some(_))` — the repaired tree; the field's own materialized shape
+///   is pinned.
 #[test]
-fn expose_function_binding_output_never_silently_absent() {
+fn expose_function_binding_output_materializes_never_absent_never_unraisable() {
     let project = make_project();
     project
         .upsert_base(
@@ -648,15 +680,24 @@ defineExpose({ reset })
         )
         .unwrap();
 
-    let output = project
-        .host()
-        .get_component_meta_output("/FnOutput2.vue")
-        .expect("output materialization must succeed, not fail with a typed error")
-        .expect(
-            "the component must resolve — a genuine miss here would be a \
-             DIFFERENT bug (the file itself failing to load), not the \
-             exposed-type defect",
-        );
+    let output = match project.host().get_component_meta_output("/FnOutput2.vue") {
+        Err(error) => panic!(
+            "REGRESSION: the `defineExpose`-bound function declaration failed to \
+             materialize. The known pre-repair failure of this producer was \
+             `Exposed` / `UnraisableSource` — the empty-path value deref finding no \
+             annotation, no object shape, and not recovering the lone function \
+             signature. Owning producer: the whole-signature recovery in \
+             `navigate_value_parts` \
+             (`crates/verter_session/src/decl_body_memo/locator_deref.rs`). \
+             Observed in full: {error:?}"
+        ),
+        Ok(None) => panic!(
+            "the component resolved to ABSENCE. A materialization failure demoted to \
+             `Ok(None)` is the forbidden swallow: the typed failure must survive as \
+             `Err`, never collapse into the same result a missing canonical produces"
+        ),
+        Ok(Some(output)) => output,
+    };
     let (analysis, _resolution, types) = output.into_parts();
     let index = analysis
         .exposed
@@ -666,15 +707,22 @@ defineExpose({ reset })
     let lanes = types.into_lanes();
     let materialized = &lanes.exposed[index];
     // `Ok(Some(component))` alone is not proof the exposed member itself
-    // resolved genuinely — a silent per-field degrade could still hide
-    // behind an overall-successful component resolve. Pin the field's own
-    // materialized shape: a real (empty-bodied, undeclared-return) function
-    // type, never an opaque/unknown substitute.
+    // resolved genuinely. Pin the recovered SIGNATURE, not merely the fact
+    // that something function-shaped came back: `reset()` takes no
+    // parameters, and the whole point of the repair is that the lone
+    // signature is recovered rather than substituted for.
+    let verter_type_expr::TypeExpr::Function(signature) = materialized else {
+        panic!(
+            "reset's defineExpose type must materialize as a real function type, \
+             not silently degrade to an opaque/unknown substitute behind an \
+             overall `Some` component resolve, got {materialized:?}"
+        );
+    };
     assert!(
-        matches!(materialized, verter_type_expr::TypeExpr::Function(_)),
-        "reset's defineExpose type must materialize as a real function type, \
-         not silently degrade to an opaque/unknown substitute behind an \
-         overall `Some` component resolve, got {materialized:?}"
+        signature.parameters.is_empty(),
+        "reset is authored with no parameters; the recovered signature must be \
+         the authored one, not a fabricated or wrongly-arity stand-in, got \
+         {signature:?}"
     );
 }
 

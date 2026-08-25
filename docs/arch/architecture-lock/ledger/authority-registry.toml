@@ -538,6 +538,22 @@ kind = "AMENDMENT"
 path = "docs/arch/refactor/rev11/amendments/AMD-011-c2-b6-predecessor-edge.md"
 sha256 = "55ff4afedc4a5ef8cf020932ba9644a0791f1c6583d08405c4bbf1d123888003"
 
+# B6's context_packet_digest legacy gap. No immutable context packet was
+# produced when B6 was dispatched and none survives; writing one now would be
+# a fabricated input artifact backdated to look like a dispatch record. This
+# amendment is the explicit instrument MAINTAINER-RULING-2026-08-22-CODE-OVER-
+# LEDGER.md §1 requires before a fourth id joins its enumerated exemption, and
+# is ratified by RULING-2026-08-24-SIX-WAY-B6-CM1 Q1. It exempts only the
+# context_packet_digest field, only for B6; it accepts no block, amends no
+# charter, and adds no DAG/ledger block. Registered here for citability and
+# digest-binding — B6's [[authorization]] record below is unchanged and no
+# second one is created.
+[[document]]
+id = "AMD-014-B6-CONTEXT-PACKET-LEGACY-GAP"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-014-b6-context-packet-legacy-gap.md"
+sha256 = "f4dcd43929558d326d327a9a550608b27462df733caf85b3c380541aa70b3e82"
+
 [[authorization]]
 block = "B6"
 documents = ["B6-CHARTER", "AMD-011-C2-B6-PREDECESSOR-EDGE"]
@@ -589,3 +605,110 @@ id = "RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md"
 sha256 = "dccb05d01e6997d3ab1de6af99dc59d19c71c0671713c1bf1bc7b4f0fe06bf94"
+
+# Six-question architecture ruling taken on 4643edbaa (lane
+# architecture-sixway): B6's missing immutable context packet, the four-arm
+# route-overhead gate whose pinned harness refuses three arms, the rebinding
+# of the three B6 mandates, the registered B6 charter digest versus its stale
+# header prose, CM1's two ignored type captures, and the batch-by-compat
+# acceptance cell. It records four open P1 findings; it accepts no block,
+# amends no charter, and adds no DAG/ledger block.
+[[document]]
+id = "RULING-2026-08-24-SIX-WAY-B6-CM1"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-SIX-WAY-B6-CM1.md"
+sha256 = "1b8b52fa4706cdee7d3f59cf7dd0bb34226b466e31cfd824658f3a3083effafa"
+
+# Ratification of CM1 charter amendment A (lane architecture-cm1-amend,
+# RESULT: PASS): the green negative control is restricted to module-owned and
+# imported custom classes; PropType<T> and setup-local custom classes leave
+# that control and remain solely as the two settled ignored captures. It
+# amends CM1's acceptance text only — it does not accept CM1 or add a
+# DAG/ledger block.
+[[document]]
+id = "RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md"
+sha256 = "ecd65254c7d5f3b14c5679ac7fb7165a108c8f2bb4513e5b49b3fb45bede43bf"
+
+# Eight-question architecture ruling taken on 6e1777b4c, TCM0's round-3
+# candidate (lane architecture-tcm0-decisions, RESULT: PASS): the candidate's
+# scoping, the projection/semantic topology-selection transfer to TCM2/TCM3,
+# the Scope-10 performance contract, feature-ownership-ledger rows 25-26, the
+# dead get_diagnostics_background surface and row 31, diagnostic-mapper
+# convergence ownership, package-transcript staleness, and the candidate's
+# program-state.toml hunk. It returns the candidate as wrongly scoped, ratifies
+# the topology transfer, and directs the corrected TCM0 ledger notes to be
+# authored on trunk. It accepts no block, re-pins no charter digest, and adds
+# no DAG/ledger block.
+[[document]]
+id = "RULING-2026-08-24-TCM0-DECISIONS"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md"
+sha256 = "881eaf4e4a11e5a346e5f28006f446ec116d709768ecfeff3ebaf01d2b663b2a"
+
+# C1's charter and the two rulings that decide its ratifiability, recorded
+# trunk-side because RULING-2026-08-24-C1-CHARTER-RATIFIABILITY Q3 rules that
+# a block branch may only inherit this registry byte-for-byte through rebase:
+# authorization is authored here, by the registry/ledger owner, never on the
+# block branch. The charter's own **Status:** header still reads DRAFT and is
+# deliberately unchanged — the ratification is the confirmation ruling plus
+# the digest binding below, and a CHARTER document is never classified by its
+# own Status prose. The digest is the charter's exact bytes as ratified at
+# 8799580e161, taken unmodified from block/module-resolver-core so the two
+# stay identical across that block's eventual landing.
+[[document]]
+id = "C1-CHARTER"
+kind = "CHARTER"
+path = "docs/arch/refactor/rev11/charters/C1.md"
+sha256 = "99c0beb6ac0c36fb56a0c9ae13228db7e5b84b11da21089b79508db17b3cfbff"
+
+# Three-question architecture ruling taken on ccda4256230 (lane
+# architecture-c1-charter, RESULT: FAIL, five P1 findings): the charter is not
+# ratifiable as written and needs one controlling sentence incorporating
+# ARCH-ADDENDUM-C1-THREE-GAPS; Stage 2 needs a separately ratified,
+# digest-bound execution plan and the branch's WIP commits are not dispatch
+# authority; the branch-local registry edits are dropped entirely. It accepts
+# no block, moves no status, and adds no DAG/ledger block.
+[[document]]
+id = "RULING-2026-08-24-C1-CHARTER-RATIFIABILITY"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFIABILITY.md"
+sha256 = "db47255aa1b1a5e5588bea42161c5d69d463feee26b50e63317cdc35263b098a"
+
+# The ratification of record for the C1 charter (lane
+# architecture-c1-charter-confirm, RESULT: PASS, findings none, reviewed
+# 8799580e161): the added controlling sentence exactly incorporates the
+# addendum's dispositions without overreach, and the charter is ratified at
+# the reviewed tip. Charter text only — it accepts no block, unlocks nothing,
+# and leaves the preceding ruling's Stage 2 and trunk-side-authorization
+# findings open. C1 stays LOCKED with an unsatisfied predecessor set.
+[[document]]
+id = "RULING-2026-08-24-C1-CHARTER-RATIFICATION"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-C1-CHARTER-RATIFICATION.md"
+sha256 = "1e44da3d4104cb2866f75d267cf3cdf6cebc719c099ba890760f6b6c1c64a834"
+
+[[authorization]]
+block = "C1"
+documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION"]
+ratified_by = "architecture ruling seat under explicit maintainer delegation"
+ratified_at = "2026-08-24"
+scope = "Ratifies the C1 charter text — converging ModuleResolverCore and the non-flow TypeInfoCore — as digest-bound authority, with ARCH-ADDENDUM-C1-THREE-GAPS.md governing wherever it conflicts: sealing over semantic-owned snapshots with no foreign implementations, enumerated per-module move/stay/split dispositions in place of a literal relocation, and one closed non-overridable inherent gateway in place of the exhaustive-coverage proof C1-AC-5 specifies. It is charter authority ONLY and dispatches nothing: C1 stays LOCKED, its predecessor set is unsatisfied (CM1 is REVIEW, not ACCEPTED), and RULING-2026-08-24-C1-CHARTER-RATIFIABILITY leaves two findings open against it — Stage 2 requires a separately ratified, digest-bound execution plan binding an exact rebased baseline, caller/deletion inventory, Cargo-edge and guard transition and atomic abort conditions, and no block-branch registry delta may substitute for authorization authored here. Execution authority requires a further record."
+
+# Three-question architecture ruling taken on 7dac2b614, the tip of the unowned
+# branch block/lsp-durable-fence (lane architecture-lspfence-ownership,
+# RESULT: PASS, findings none): the work belongs to planned block H2 — H3
+# consumes that basis and K3 only audits residue, so no new block is required;
+# the design is sound on its face, a project-bound gateway producing one
+# verified (ide, pin) pair preserving single authority and a stale durable
+# publication aborting as the required fail-closed behaviour; and the branch is
+# preserved as H2 evidence rather than landed, H2 re-deriving the minimum fix.
+# It grants ownership of a question, not execution authority: it accepts no
+# block, moves no status, and creates no [[authorization]] row — H2 stays
+# LOCKED with an unsatisfied predecessor set.
+[[document]]
+id = "RULING-2026-08-24-LSP-DURABLE-FENCE-OWNERSHIP"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-LSP-DURABLE-FENCE-OWNERSHIP.md"
+sha256 = "0226abba68762cee9e89d947da1b0e1fafb60adb15308cf3ad2bea3c0b0318b9"
