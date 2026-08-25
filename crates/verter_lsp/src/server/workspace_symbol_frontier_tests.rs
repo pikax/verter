@@ -158,11 +158,15 @@ async fn frontier_fixture_with(
         });
         server.documents.schedule_semantic_analysis(&uri);
     }
+    // No `tokio::time::timeout` here: most callers run this fixture under
+    // `start_paused`, where a timeout auto-advances the virtual clock and
+    // fires spuriously. nextest's terminate-after is the outer watchdog for
+    // a genuine hang.
     for _ in 0..2 {
-        tokio::time::timeout(std::time::Duration::from_secs(10), semantic_ready.recv())
+        semantic_ready
+            .recv()
             .await
-            .expect("semantic analysis must settle")
-            .expect("semantic ready channel stays open");
+            .expect("semantic analysis must settle");
     }
 
     FrontierFixture {
@@ -386,7 +390,7 @@ async fn seed_parent_prop_usage(
 /// rewritten import resolves to — is still unopened. Both carrier IDE buffers
 /// are live roots, so the IDE-root predicate alone reports ready and TSGO
 /// answers with a set that OMITS the parent's usage.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn references_on_child_declaration_fail_closed_until_imported_api_is_live() {
     let fixture = frontier_fixture().await;
     let server = fixture.server();
@@ -427,7 +431,7 @@ async fn references_on_child_declaration_fail_closed_until_imported_api_is_live(
 /// The other half: once the import-dependency publication has delivered the
 /// child's API companion, the same query serves and INCLUDES the parent usage.
 /// Without this half a predicate that always refused would look correct.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn references_on_child_declaration_include_parent_usage_after_publication() {
     let fixture = frontier_fixture().await;
     let server = fixture.server();
@@ -469,13 +473,99 @@ async fn references_on_child_declaration_include_parent_usage_after_publication(
     fixture.shutdown().await;
 }
 
+/// Production `did_change` debounce and the SyncCoordinator must themselves
+/// deliver the imported child's API companion. Isolation tests keep the quiet
+/// window paused so explicit `publish_import_dependencies_settled` is the
+/// source of truth; this test waits the domain quiet window, awaits the
+/// import-closure receipt, then issues `references_at` once.
+///
+/// Multi-thread: the coordinator's production sync path uses
+/// `tokio::task::block_in_place`, which current-thread paused time cannot
+/// host. The quiet-window boundary itself is proven under pause in
+/// `quiet_window_boundary_under_paused_time`.
+#[tokio::test(flavor = "multi_thread")]
+async fn production_edit_debounce_delivers_imported_api_companion() {
+    let fixture = frontier_fixture_with(PARENT_SOURCE, &[], &[]).await;
+    let server = fixture.server();
+    let child_uri = fixture.uri("src/ZChild.vue");
+    let parent_uri = fixture.uri("src/AParent.vue");
+    let parent_canonical = format!("{}/src/AParent.vue", fixture.workspace_id);
+    server.ensure_current_file_synced(&parent_uri).await;
+    server.ensure_current_file_synced(&child_uri).await;
+
+    let mut semantic_ready = server.documents.subscribe_semantic_ready();
+    super::super::lifecycle::handle_did_change(
+        server,
+        tower_lsp_server::ls_types::DidChangeTextDocumentParams {
+            text_document: tower_lsp_server::ls_types::VersionedTextDocumentIdentifier {
+                uri: parent_uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![tower_lsp_server::ls_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: format!("{PARENT_SOURCE}<!-- edited -->\n"),
+            }],
+        },
+    )
+    .await;
+    let expected_revision = server
+        .documents
+        .get(&parent_uri)
+        .expect("parent stays open")
+        .document_revision;
+    // This test runs on the real clock (multi_thread), so a real watchdog is
+    // both safe and useful: a missing revision reports as a named failure
+    // rather than a 180s harness timeout.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let ready = semantic_ready
+                .recv()
+                .await
+                .expect("semantic analysis must settle after did_change");
+            if ready.document_revision == expected_revision {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the post-edit semantic revision must be delivered (outer watchdog)");
+
+    let expected_key = server
+        .import_sync_freshness_key()
+        .expect("host generations after the edit");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        server
+            .import_sync
+            .wait_fresh_at(&parent_canonical, expected_key),
+    )
+    .await
+    .expect("import-closure receipt must settle at the post-edit key");
+
+    let position = position_of(server, &child_uri, "title: string", 0);
+    let expected_usage = seed_parent_usage(&fixture, &child_uri, position).await;
+    let locations = references_at(server, &child_uri, position)
+        .await
+        .expect("references must serve once the import closure is delivered");
+    assert!(
+        locations
+            .iter()
+            .any(|location| location.uri == parent_uri && location.range == expected_usage),
+        "the served answer must include the parent's `:title` usage range-exact \
+         ({expected_usage:?}): {locations:?}"
+    );
+
+    fixture.shutdown().await;
+}
+
 /// The interactive IDE sync of an ALREADY-imported carrier syncs the IDE
 /// companion only and closes no other buffer, so it must not commit a state
 /// claiming the API companion is unloaded: that buffer is still open in the
 /// provider, and every consumer of the committed state — the workspace-symbol
 /// import closure, the publication's already-delivered skip, the open-vs-update
 /// verb choice — would then read a delivered companion as missing.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn opening_an_imported_carrier_keeps_its_delivered_api_companion_loaded() {
     let fixture = frontier_fixture().await;
     let server = fixture.server();
@@ -566,7 +656,7 @@ async fn edit_and_repair(fixture: &FrontierFixture, relative_path: &str, version
 /// declaring `title`, drop the parent file, and hand back a credible incomplete
 /// reference set — the same defect class as a never-opened companion, one stage
 /// later.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn references_fail_closed_while_the_delivered_api_is_stale_then_serve_after_republication() {
     let fixture = frontier_fixture().await;
     let server = fixture.server();
@@ -620,7 +710,7 @@ async fn references_fail_closed_while_the_delivered_api_is_stale_then_serve_afte
 /// change — keeps the delivered API companion CURRENT, so the frontier stays
 /// ready immediately and the query never waits on a republication it does not
 /// need.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn an_api_neutral_edit_keeps_the_frontier_ready_without_republication() {
     let fixture = frontier_fixture().await;
     let server = fixture.server();
@@ -678,7 +768,7 @@ async fn open_barrel_document(fixture: &FrontierFixture, relative_path: &str, so
 /// delivered both the child's API companion and the barrel's rewritten shadow.
 /// Without this half the retraction test below could pass against a frontier
 /// that never serves this shape at all.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn references_serve_through_a_barrel_reexport_after_publication() {
     let fixture = frontier_fixture_with(
         BARREL_PARENT_SOURCE,
@@ -740,7 +830,7 @@ async fn references_serve_through_a_barrel_reexport_after_publication() {
 /// re-publication leg skips an already-live shadow, so nothing re-delivers it,
 /// and every references/rename answer for every carrier in the project collapses
 /// to nothing for the rest of the session.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn opening_the_barrel_document_keeps_the_project_references_surface() {
     let fixture = frontier_fixture_with(
         BARREL_PARENT_SOURCE,
@@ -786,7 +876,7 @@ async fn opening_the_barrel_document_keeps_the_project_references_surface() {
 /// barrel leg skips an already-live shadow — so if the open records no delivery
 /// the closure has nothing left to wait for and refuses every references answer
 /// in the project forever.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn opening_the_barrel_before_publication_still_serves_project_references() {
     let fixture = frontier_fixture_with(
         BARREL_PARENT_SOURCE,
@@ -912,7 +1002,7 @@ async fn resync_barrel_with_publish_during_delivery(
 /// Control for the test below: the SAME paused delivery with no publish landing
 /// inside it commits the delivery normally. Without this, a supersession check
 /// that refused unconditionally would look correct.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn a_paused_delivery_with_no_publish_still_claims_its_shadow() {
     let fixture = alias_barrel_fixture("src/ZChild.vue").await;
     let server = fixture.server();
@@ -953,7 +1043,7 @@ async fn a_paused_delivery_with_no_publish_still_claims_its_shadow() {
 /// answering project-wide references and rename over a stale projection, which
 /// is worse than the refusal it replaced. The delivery is claimed only if the
 /// snapshot published at commit time still produces the bytes that were sent.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn a_snapshot_published_during_delivery_is_never_claimed_as_that_delivery() {
     let fixture = alias_barrel_fixture("src/ZChild.vue").await;
     let server = fixture.server();

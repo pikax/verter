@@ -25,32 +25,64 @@ fn always_alive(_t: &FakeTransport) -> bool {
 
 /// FAIL-CLOSED: a slow establishment that never completes within the bound yields
 /// NO transport within the bound — the caller fails closed instead of stalling.
-#[tokio::test]
+///
+/// The invariant is "returned at its OWN configured `bound` argument, not
+/// some other hardcoded duration". A wall-clock outer guard — even a
+/// generous multiple of `bound` — cannot discriminate that: an
+/// implementation that ignores `bound` entirely but happens to have some
+/// OTHER internal timeout comfortably under the guard would still pass,
+/// having never honored the parameter under test (e.g. it returns at 500ms
+/// against a `bound * 20` == 1s guard for a 50ms bound).
+///
+/// Instead this runs on tokio's PAUSED virtual clock and asserts the elapsed
+/// virtual time is EXACTLY `bound` — not a window around it. With nothing
+/// else in the test armed on a timer, tokio's paused-clock auto-advance can
+/// only ever fast-forward to the earliest pending deadline, so an
+/// implementation that genuinely times out AT `bound` produces an exact,
+/// reproducible elapsed value; one that ignores `bound` (whether via a
+/// different hardcoded duration or by running the full 30s producer to
+/// completion) produces a DIFFERENT exact value, caught precisely — with
+/// zero real wall-clock cost either way. Run twice with two different
+/// bounds so a hardcoded-duration implementation cannot coincidentally match
+/// one probe.
+#[tokio::test(start_paused = true)]
 async fn slow_establishment_times_out_fail_closed() {
-    let cell: LazyTransport<FakeTransport> = LazyTransport::new();
-    let started = tokio::time::Instant::now();
-    let established = cell
-        .get_or_establish(
-            gen_const(Some("gen-1")),
-            always_alive,
-            || async {
-                // Far longer than the bound below — models a never-initializing editor.
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                Some(Arc::new(FakeTransport(1)))
-            },
-            Duration::from_millis(50),
-        )
-        .await;
-    assert!(
-        established.is_none(),
-        "a slow establishment must yield NO transport within the bound (fail closed)"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "establishment must fail closed at its small bound, not run to completion"
-    );
-    // And `current()` reflects no live transport.
-    assert!(cell.current().await.is_none());
+    async fn assert_times_out_at_exactly(bound: Duration) {
+        let cell: LazyTransport<FakeTransport> = LazyTransport::new();
+        let start = tokio::time::Instant::now();
+        let established = cell
+            .get_or_establish(
+                gen_const(Some("gen-1")),
+                always_alive,
+                || async {
+                    // Far longer than any bound probed below — models a
+                    // never-initializing editor. Under paused time this costs
+                    // no real wall-clock time even if a broken implementation
+                    // runs it to completion; it only shows up in the elapsed
+                    // virtual-time assertion below.
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Some(Arc::new(FakeTransport(1)))
+                },
+                bound,
+            )
+            .await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start + bound,
+            "a slow establishment must fail closed at EXACTLY its own configured \
+             bound ({bound:?}) — any other elapsed value means the implementation \
+             is not honoring the `bound` argument"
+        );
+        assert!(
+            established.is_none(),
+            "a slow establishment must yield NO transport within the bound (fail closed)"
+        );
+        // And `current()` reflects no live transport.
+        assert!(cell.current().await.is_none());
+    }
+
+    assert_times_out_at_exactly(Duration::from_millis(50)).await;
+    assert_times_out_at_exactly(Duration::from_millis(200)).await;
 }
 
 /// SINGLEFLIGHT: N concurrent demands establish the transport EXACTLY ONCE and all
@@ -233,10 +265,17 @@ async fn dead_live_transport_is_evicted_and_rearms() {
     // The next demand at the SAME generation must EVICT the dead Live and fail closed
     // (`None`) — no stall, no dead transport returned, and NO re-establishment within
     // the same failed generation (the shim has not republished a fresh advertisement).
-    let started = tokio::time::Instant::now();
+    // No producer runs on this path at all (eviction must skip
+    // re-establishing outright), so a hang-detecting OUTER guard is the
+    // right shape, not a wall-clock discriminator: `after_death.is_none()`
+    // plus the `establish_count` check below already prove eviction took
+    // the no-reestablish path; the timeout only catches a genuine stall
+    // (something incorrectly blocking forever) without risking a false
+    // failure from ordinary scheduler latency on a loaded machine.
     let ec = Arc::clone(&establish_count);
-    let after_death = cell
-        .get_or_establish(
+    let after_death = tokio::time::timeout(
+        Duration::from_secs(10),
+        cell.get_or_establish(
             gen_const(Some("gen-1")),
             liveness.clone(),
             || async move {
@@ -244,15 +283,13 @@ async fn dead_live_transport_is_evicted_and_rearms() {
                 Some(Arc::new(FakeTransport(2)))
             },
             Duration::from_secs(5),
-        )
-        .await;
+        ),
+    )
+    .await
+    .expect("eviction must fail closed promptly (no stall)");
     assert!(
         after_death.is_none(),
         "a dead Live transport must be EVICTED and fail closed to OWNED (None), never returned"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "eviction must fail closed promptly (no stall)"
     );
     assert_eq!(
         establish_count.load(Ordering::SeqCst),

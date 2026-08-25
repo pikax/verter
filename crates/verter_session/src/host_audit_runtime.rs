@@ -13,15 +13,20 @@
 //! Each runtime owns at most ONE peak-RSS sampler thread on
 //! native targets. The thread spawns lazily on the first
 //! `AuditRequestRegistration::new` call when
-//! `AuditConfig::audit_timing_capture` is enabled, holds a
-//! `Weak<HostAuditRuntime>` to break the runtime↔thread cycle,
-//! ticks every 50 ms, and writes
-//! `fetch_max(current_process_rss())` into each in-flight
-//! request's per-request peak slot. The runtime's `Drop` impl
-//! joins the handle so dropped hosts do not leak threads. WASM
-//! targets are gated off via `#[cfg(not(target_arch = "wasm32"))]`
-//! — `process_rss_peak_bytes` stays at `0` there regardless of
-//! flag state.
+//! `AuditConfig::audit_timing_capture` is enabled, holds
+//! `Arc<SamplerState>` (never `Arc<HostAuditRuntime>`), ticks
+//! every 50 ms, and writes `fetch_max(current_process_rss())`
+//! into each in-flight request's per-request peak slot. The
+//! registry holds a `Weak` to that COUNTER, not to the request
+//! context: an upgraded context would reach the runtime through
+//! its audit registration, so the sampler dropping the last one
+//! would run the registration's `Drop` (write-locking the very
+//! registry the sampler is read-locking) and then the runtime's
+//! `Drop` (joining the sampler from the sampler). Owner
+//! drop sets an exact stop flag and unparks the sampler, then
+//! joins on the owner thread. WASM targets are gated off via
+//! `#[cfg(not(target_arch = "wasm32"))]` — `process_rss_peak_bytes`
+//! stays at `0` there regardless of flag state.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -42,6 +47,82 @@ use std::time::Duration;
 /// sampler CPU overhead low (~0.1% of one core at this rate).
 #[cfg(not(target_arch = "wasm32"))]
 const SAMPLER_TICK: Duration = Duration::from_millis(50);
+
+/// Per-runtime sampler state. The sampler thread holds
+/// [`Arc<SamplerState>`] and never [`Arc<HostAuditRuntime>`], so
+/// owner drop cannot run on the sampler thread.
+struct SamplerState {
+    /// PRIVATE active-request registry — the three crate-private
+    /// methods on [`HostAuditRuntime`] mediate every access.
+    ///
+    /// The value is a `Weak` to the request's peak-RSS COUNTER, never
+    /// to the `RequestContext`. An `AtomicU64` has no destructor, so an
+    /// upgrade the sampler drops can neither re-enter this lock nor
+    /// release the last `Arc<HostAuditRuntime>`.
+    active_requests: RwLock<FxHashMap<u64, Weak<std::sync::atomic::AtomicU64>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    stop: AtomicBool,
+    #[cfg(not(target_arch = "wasm32"))]
+    parked_thread: parking_lot::Mutex<Option<std::thread::Thread>>,
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    sample_handshake: parking_lot::Mutex<Option<SampleHandshake>>,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+struct SampleHandshake {
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<owner_release_proof::OwnerReleaseEntered>,
+}
+
+/// TEST-ONLY currency that releases a paused sampler.
+///
+/// The witness holds a private field, so in safe Rust it cannot be
+/// constructed outside this module; the re-export makes it nameable in a
+/// channel signature without making it forgeable. That is the whole of the
+/// compiler-checked guarantee — it is on the currency, not on the release.
+///
+/// A witness arriving on a release channel does NOT establish that the owner
+/// thread is inside a release. The probe and its `fire` are visible to the
+/// enclosing module, so any code within `host_audit_runtime` — its test
+/// submodules included — can mint one at any point, and firing only from a
+/// release is a convention of this module rather than something the type
+/// carries. The witness is zero-sized, so `transmute` or `zeroed` forges
+/// one; that route is out of charter here rather than something this type
+/// prevents.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+mod owner_release_proof {
+    use std::sync::mpsc::SyncSender;
+
+    /// Witness that the owner thread entered a release.
+    pub struct OwnerReleaseEntered(());
+
+    /// The armed observer of one release point, if a test armed one. Empty
+    /// in every unobserved runtime.
+    #[derive(Default)]
+    pub(super) struct OwnerReleaseProbe(
+        parking_lot::Mutex<Option<SyncSender<OwnerReleaseEntered>>>,
+    );
+
+    impl OwnerReleaseProbe {
+        /// Arm the observer. The next release hands it the witness.
+        pub(super) fn arm(&self, observer: SyncSender<OwnerReleaseEntered>) {
+            *self.0.lock() = Some(observer);
+        }
+
+        /// Hand the armed observer the witness, once. On a rendezvous
+        /// channel this blocks until the observer takes it, which is what
+        /// pins the release and the observer to the same instant.
+        pub(super) fn fire(&self) {
+            let observer = self.0.lock().take();
+            if let Some(observer) = observer {
+                let _ = observer.send(OwnerReleaseEntered(()));
+            }
+        }
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub use owner_release_proof::OwnerReleaseEntered;
 
 /// Host-owned audit-runtime concrete type. Wraps the records store,
 /// the audit-config snapshot, and the active-request registry.
@@ -66,9 +147,12 @@ const SAMPLER_TICK: Duration = Duration::from_millis(50);
 pub struct HostAuditRuntime {
     config: Arc<AuditConfig>,
     records: Arc<AuditRecordsStore>,
-    /// PRIVATE — direct access from outside this module is impossible.
-    /// The three crate-private methods below mediate every access.
-    active_requests: RwLock<FxHashMap<u64, Weak<RequestContext>>>,
+    /// Sample-loop state, shared with the sampler thread. The
+    /// sampler may hold `Arc<SamplerState>` and must never hold
+    /// `Arc<HostAuditRuntime>` — otherwise owner drop during an
+    /// in-flight sample can run `HostAuditRuntime::drop` on the
+    /// sampler thread, which would `join` itself.
+    sampler: Arc<SamplerState>,
     /// One-shot start latch for the sampler thread. `false` means
     /// the runtime has not yet spawned a sampler. The first
     /// `compare_exchange` to `true` wins the spawn and stores the
@@ -96,6 +180,18 @@ pub struct HostAuditRuntime {
     /// — debug or release — carries the slot.
     #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
     sampler_join_observed: std::sync::OnceLock<Arc<AtomicBool>>,
+    /// TEST-ONLY: fired at the start of `Drop`, before unpark/join, so a
+    /// handshake test can prove owner drop entered while the sampler is
+    /// still inside the sample.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    drop_entered: owner_release_proof::OwnerReleaseProbe,
+    /// TEST-ONLY: fired at the start of `drop_active_request`, BEFORE it
+    /// takes the registry write lock. That is the first instant the owner
+    /// thread is provably inside the release, and it is reachable while a
+    /// paused sampler still read-holds the registry — unlike `Drop`, which
+    /// the release itself has to get past first.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    owner_release_entered: owner_release_proof::OwnerReleaseProbe,
 }
 
 impl std::fmt::Debug for HostAuditRuntime {
@@ -103,7 +199,10 @@ impl std::fmt::Debug for HostAuditRuntime {
         f.debug_struct("HostAuditRuntime")
             .field("config", &self.config)
             .field("records", &"<AuditRecordsStore>")
-            .field("active_requests_count", &self.active_requests.read().len())
+            .field(
+                "active_requests_count",
+                &self.sampler.active_requests.read().len(),
+            )
             .finish()
     }
 }
@@ -120,13 +219,25 @@ impl HostAuditRuntime {
         Self {
             config: Arc::new(config),
             records,
-            active_requests: RwLock::new(FxHashMap::default()),
+            sampler: Arc::new(SamplerState {
+                active_requests: RwLock::new(FxHashMap::default()),
+                #[cfg(not(target_arch = "wasm32"))]
+                stop: AtomicBool::new(false),
+                #[cfg(not(target_arch = "wasm32"))]
+                parked_thread: parking_lot::Mutex::new(None),
+                #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+                sample_handshake: parking_lot::Mutex::new(None),
+            }),
             #[cfg(not(target_arch = "wasm32"))]
             sampler_started: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
             sampler_thread: parking_lot::Mutex::new(None),
             #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
             sampler_join_observed: std::sync::OnceLock::new(),
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            drop_entered: owner_release_proof::OwnerReleaseProbe::default(),
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            owner_release_entered: owner_release_proof::OwnerReleaseProbe::default(),
         }
     }
 
@@ -161,6 +272,57 @@ impl HostAuditRuntime {
         )
     }
 
+    /// Test-only — the sampler's real tick interval. Exposed so a
+    /// shutdown-promptness assertion can be tied to the ACTUAL production
+    /// constant that bounds it (the sampler checks `weak.upgrade()` once
+    /// per tick, so `Drop`'s join can never take meaningfully longer than
+    /// one tick), rather than an arbitrary, disconnected wall-clock guess.
+    /// Gated to `test` / the opt-in `test-support` feature, so it is not
+    /// part of the public surface of any production build.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub const fn sampler_tick_for_test() -> Duration {
+        SAMPLER_TICK
+    }
+
+    /// TEST-ONLY — arm a handshake that fires once the sampler is
+    /// inside a sample and then blocks until the test releases it.
+    /// Used to prove owner drop during an in-flight sample joins on
+    /// the owner thread rather than self-joining the sampler.
+    ///
+    /// Releasing the sampler costs one [`OwnerReleaseEntered`], which safe
+    /// Rust cannot forge outside that type's own module — see it for what a
+    /// witness does and does not establish.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub fn arm_sample_handshake(
+        &self,
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<OwnerReleaseEntered>,
+    ) {
+        *self.sampler.sample_handshake.lock() = Some(SampleHandshake { entered, release });
+    }
+
+    /// TEST-ONLY — observe the start of the active-request release. The
+    /// production release fires this probe from inside `drop_active_request`,
+    /// before it takes the registry write lock; on a rendezvous channel that
+    /// send blocks until the observer takes the witness, which is what pins
+    /// firer and observer to the same instant. Wiring a paused sampler's
+    /// release end here couples the sampler's resume to that instant. See
+    /// [`OwnerReleaseEntered`] for what a witness does and does not establish.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub fn arm_owner_release_entered(
+        &self,
+        observer: std::sync::mpsc::SyncSender<OwnerReleaseEntered>,
+    ) {
+        self.owner_release_entered.arm(observer);
+    }
+
+    /// TEST-ONLY — fire `entered` at the start of `Drop`, before unpark/join.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub fn arm_drop_entered(&self, observer: std::sync::mpsc::SyncSender<OwnerReleaseEntered>) {
+        self.drop_entered.arm(observer);
+    }
+
     /// Borrow the audit-config snapshot. Read-only — the host
     /// updates the runtime as a whole when configuration changes.
     #[must_use]
@@ -183,7 +345,7 @@ impl HostAuditRuntime {
     /// back-reference.
     #[must_use]
     pub fn snapshot(&self) -> AuditRuntimeSnapshot {
-        let map = self.active_requests.read();
+        let map = self.sampler.active_requests.read();
         let mut active_request_ids: Vec<u64> = map.keys().copied().collect();
         active_request_ids.sort_unstable();
         active_request_ids.dedup();
@@ -206,7 +368,7 @@ impl HostAuditRuntime {
     }
 
     /// Crate-private. Called ONLY by `AuditRequestRegistration::new`
-    /// to insert a `Weak<RequestContext>` into the active-request
+    /// to insert a `Weak` to the request's peak-RSS slot into the
     /// registry. The architecture guard
     /// `audit_request_registration_lifecycle` enforces the single
     /// in-tree call site.
@@ -239,8 +401,8 @@ impl HostAuditRuntime {
                 std::sync::atomic::Ordering::Relaxed,
             );
         }
-        let mut map = self.active_requests.write();
-        map.insert(request_id, Arc::downgrade(ctx));
+        let mut map = self.sampler.active_requests.write();
+        map.insert(request_id, Arc::downgrade(&ctx.process_rss_peak_bytes));
     }
 
     /// Crate-private. Called ONLY by
@@ -248,7 +410,7 @@ impl HostAuditRuntime {
     /// entry from the active-request registry AND publish the
     /// finalised record into the records store.
     pub(crate) fn finalize_active_request(&self, request_id: u64, record: RequestAuditRecord) {
-        let mut map = self.active_requests.write();
+        let mut map = self.sampler.active_requests.write();
         map.remove(&request_id);
         drop(map); // release before insertion to avoid lock-order coupling
         self.records.insert(record);
@@ -259,32 +421,14 @@ impl HostAuditRuntime {
     /// entry from the active-request registry; does NOT publish a
     /// record — the absence of a record is itself observable.
     pub(crate) fn drop_active_request(&self, request_id: u64) {
-        let mut map = self.active_requests.write();
+        // Announce BEFORE the write: a sampler paused mid-sample holds the
+        // read guard, so the lock below is exactly where this thread waits
+        // for it. Announcing after would only be reachable once the sampler
+        // had already been released.
+        #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+        self.owner_release_entered.fire();
+        let mut map = self.sampler.active_requests.write();
         map.remove(&request_id);
-    }
-
-    /// Crate-private. Sampler-internal accessor — invokes `f` on
-    /// every live `Arc<RequestContext>` currently in the
-    /// active-request registry. Skips `Weak` slots whose strong
-    /// count has dropped to zero. Used by the host-owned peak-RSS
-    /// sampler thread to advance each in-flight request's
-    /// `process_rss_peak_bytes` slot via `fetch_max`.
-    ///
-    /// The closure runs while a read-lock is held, so it MUST NOT
-    /// re-enter the registry. The sampler intentionally only does
-    /// `fetch_max` on a per-context atomic — that operation is
-    /// lock-free and can never deadlock.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn for_each_active_request<F>(&self, mut f: F)
-    where
-        F: FnMut(&Arc<RequestContext>),
-    {
-        let map = self.active_requests.read();
-        for weak in map.values() {
-            if let Some(ctx) = weak.upgrade() {
-                f(&ctx);
-            }
-        }
     }
 
     /// Spawn the host-owned peak-RSS sampler thread (native only).
@@ -294,11 +438,9 @@ impl HostAuditRuntime {
     /// has `audit_timing_capture = true`. The first call wins the
     /// `compare_exchange` on `sampler_started`, spawns the
     /// thread, and stores the `JoinHandle`. Subsequent calls
-    /// short-circuit. The thread holds a `Weak<HostAuditRuntime>`
-    /// so the runtime↔thread cycle is broken — the runtime can
-    /// drop, the next `weak.upgrade()` returns `None`, and the
-    /// thread terminates. The `Drop` impl explicitly joins the
-    /// handle to avoid leaking threads across host drops.
+    /// short-circuit. The thread holds `Arc<SamplerState>` and
+    /// never `Arc<HostAuditRuntime>`. Owner drop sets `stop` and
+    /// unparks the sampler, then joins on the owner thread.
     ///
     /// On WASM this method is gated off via
     /// `#[cfg(not(target_arch = "wasm32"))]`; the WASM target
@@ -317,10 +459,10 @@ impl HostAuditRuntime {
         {
             return;
         }
-        let weak: Weak<HostAuditRuntime> = Arc::downgrade(self);
+        let state = Arc::clone(&self.sampler);
         let handle = std::thread::Builder::new()
             .name("verter-audit-rss-sampler".to_string())
-            .spawn(move || sampler_loop(weak))
+            .spawn(move || sampler_loop(state))
             .expect("spawning the verter-audit-rss-sampler thread must succeed");
         // The `sampler_started` latch above is THIS host's spawn signal,
         // read back per-host via `sampler_spawned()`.
@@ -336,12 +478,15 @@ impl HostAuditRuntime {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for HostAuditRuntime {
     fn drop(&mut self) {
-        // Take the join handle (if any) and explicitly join it. By
-        // the time `Drop` runs, the strong count on `Arc<Self>` is
-        // zero, so the sampler's `Weak::upgrade()` on its next
-        // iteration returns `None` and the thread breaks out of
-        // its loop. The join just waits for that natural
-        // termination.
+        // Exact stop + unpark, then join on THIS thread. The
+        // sampler never holds `Arc<HostAuditRuntime>`, so this
+        // Drop cannot run on the sampler thread.
+        #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+        self.drop_entered.fire();
+        self.sampler.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.sampler.parked_thread.lock().take() {
+            thread.unpark();
+        }
         let handle = self.sampler_thread.lock().take();
         if let Some(handle) = handle {
             // join() returns Err only if the thread panicked. A
@@ -376,31 +521,57 @@ impl Drop for HostAuditRuntime {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn sampler_loop(weak: Weak<HostAuditRuntime>) {
-    // The sampler loop ticks every 50 ms while the runtime is
-    // alive. On each tick it samples `current_process_rss()` once
-    // and writes `fetch_max` into every in-flight request's
-    // per-request peak slot. The sample-once-per-tick discipline
-    // means N in-flight requests share the same value on the
-    // same tick, which matches the contract: each request's
-    // `process_rss_peak_bytes` is the highest sample taken
-    // anywhere in its in-flight window, regardless of which
-    // sibling request was concurrent.
+fn sampler_loop(state: Arc<SamplerState>) {
+    // The sampler loop ticks every 50 ms while `stop` is clear.
+    // Owner drop stores `stop` and unparks this thread, so
+    // shutdown does not wait for the next periodic tick. The
+    // sample-once-per-tick discipline means N in-flight requests
+    // share the same RSS value on the same tick.
+    *state.parked_thread.lock() = Some(std::thread::current());
     loop {
-        let runtime = match weak.upgrade() {
-            Some(r) => r,
-            None => return, // host dropped — exit cleanly.
-        };
+        if state.stop.load(Ordering::Acquire) {
+            return;
+        }
         let now = verter_audit::current_process_rss();
-        runtime.for_each_active_request(|ctx| {
-            ctx.process_rss_peak_bytes.fetch_max(now, Ordering::Relaxed);
-        });
-        // Drop the upgraded `Arc` BEFORE we sleep so the
-        // strong-count lifecycle of the runtime is bounded by
-        // the host. If we held the Arc across the sleep, the
-        // host's drop would block until the next iteration.
-        drop(runtime);
-        std::thread::sleep(SAMPLER_TICK);
+        {
+            let map = state.active_requests.read();
+            // Keep one upgrade alive across the handshake below. Pausing
+            // ABOVE this block would let the shutdown test pass without
+            // ever entering the only window in which an owner drop racing
+            // the sampler could run a destructor on this thread: registry
+            // read guard held, registered value upgraded.
+            #[cfg(any(test, feature = "test-support"))]
+            let mut held: Option<Arc<std::sync::atomic::AtomicU64>> = None;
+            for weak in map.values() {
+                if let Some(slot) = weak.upgrade() {
+                    slot.fetch_max(now, Ordering::Relaxed);
+                    #[cfg(any(test, feature = "test-support"))]
+                    if held.is_none() {
+                        held = Some(slot);
+                    }
+                }
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(handshake) = state.sample_handshake.lock().take() {
+                let _ = handshake.entered.send(());
+                // A disconnected release is NOT a release. Discarding the
+                // error would resume the sample whenever the sender was
+                // merely dropped, which hands back the witness-free release
+                // the witness type exists to forbid. Panicking here fails the
+                // sampler's own join, so the test that let this happen cannot
+                // read the resulting shutdown as clean.
+                handshake
+                    .release
+                    .recv()
+                    .expect("a paused sample resumes only on an owner-release witness");
+            }
+            #[cfg(any(test, feature = "test-support"))]
+            drop(held);
+        }
+        if state.stop.load(Ordering::Acquire) {
+            return;
+        }
+        std::thread::park_timeout(SAMPLER_TICK);
     }
 }
 
@@ -570,6 +741,111 @@ impl crate::VerterHost {
     pub fn replace_host_audit_runtime_for_test(&mut self, config: AuditConfig) {
         let store = Arc::clone(self.host_audit_runtime.audit_records_store());
         self.host_audit_runtime = Arc::new(HostAuditRuntime::new(config, store));
+    }
+}
+
+/// The sampler must survive an owner drop that races a sample which has
+/// the registry read guard held AND a registered value upgraded. That is
+/// the only window in which a destructor could ever run on the sampler
+/// thread, and both hazards it used to carry are reachable from it.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod sampler_ownership_tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Registering a `Weak<RequestContext>` instead of a `Weak` to the
+    /// bare peak-RSS counter makes the sampler a transitive owner of the
+    /// runtime: `RequestContext` holds `Arc<AuditRequestRegistration>`,
+    /// whose `Active` arm holds `Arc<HostAuditRuntime>`. This test drives
+    /// exactly that chain.
+    ///
+    /// Sequence: the sampler pauses mid-sample holding the read guard and
+    /// its upgrade; a side thread then drops the request context and the
+    /// host; the active-request release hands the paused sampler its witness
+    /// directly. This thread never holds the release end, so it cannot
+    /// resume the sampler early even by accident — the release and the paused
+    /// sample overlap by construction rather than by being spawned in that
+    /// order.
+    ///
+    /// Against a registry of `Weak<RequestContext>` the sampler's release
+    /// destroys the last context, which runs `ActiveRegistration::drop` →
+    /// `drop_active_request` → `active_requests.write()` while this same
+    /// thread holds the read guard (`parking_lot::RwLock` is not
+    /// reentrant), and then `HostAuditRuntime::drop` → `join()` on the
+    /// sampler thread itself. Either way the runtime never finishes
+    /// dropping and the join observable stays `false` — verified by
+    /// planting that registry shape and watching this test go red.
+    #[test]
+    fn owner_drop_during_a_sample_holding_a_registered_value_joins_cleanly() {
+        let host = Arc::new(crate::VerterHost::new_standalone(crate::HostConfig {
+            audit_enabled: true,
+            audit_timing_capture: true,
+            footprint_capture: true,
+            ..crate::HostConfig::default()
+        }));
+
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        // The release channel is wired from the active-request release
+        // STRAIGHT to the paused sampler; this thread keeps no end of it and
+        // so has no way to release the sampler itself. The release mints the
+        // witness and hands it over as a rendezvous, which pins the owner
+        // thread inside the release to the instant the sampler resumes — the
+        // overlap is produced by the wiring rather than waited for.
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        host.host_audit_runtime()
+            .arm_sample_handshake(entered_tx, release_rx);
+        host.host_audit_runtime()
+            .arm_owner_release_entered(release_tx);
+
+        // A live registration: it enters the registry, spawns the
+        // sampler, and — installed on the context — makes the context a
+        // transitive owner of the runtime.
+        let ctx = RequestContext::new(1, Arc::<str>::from("/sampler_owner.vue"), false, None);
+        let registration = AuditRequestRegistration::new(&host, Arc::clone(&ctx));
+        assert!(
+            matches!(registration, AuditRequestRegistration::Active(_)),
+            "the default consumer filter must admit ComponentMeta"
+        );
+        ctx.install_audit_registration(Arc::new(registration))
+            .expect("the context has no registration yet");
+        assert!(
+            host.host_audit_runtime().sampler_spawned(),
+            "an active registration under audit_timing_capture must spawn the sampler"
+        );
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the sampler must pause inside a sample holding a registered value");
+
+        let join_observer = host.host_audit_runtime().sampler_join_observer();
+        let (dropped_tx, dropped_rx) = mpsc::sync_channel(0);
+        let dropper = thread::spawn(move || {
+            drop(ctx);
+            drop(host);
+            let _ = dropped_tx.send(());
+        });
+
+        // Nothing to do but wait for the drop: the sampler is released by the
+        // release itself. Under the prohibited registry shape the sampler
+        // holds a context of its own, so the dropper's `drop(ctx)` is not the
+        // last one, no release is ever entered, the sampler is never handed a
+        // witness, and the runtime is never dropped — which the join
+        // observable below reports as the failure it is, causally rather than
+        // by waiting for a clock.
+        dropped_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("owner drop racing an active sample must complete (outer watchdog)");
+        dropper.join().expect("the dropper thread must not panic");
+
+        assert!(
+            join_observer.load(Ordering::Acquire),
+            "the runtime must have joined its sampler on the OWNER thread; a \
+             registry that hands the sampler a transitive owner leaves this \
+             false — the destructor chain either self-joins or blocks on the \
+             registry write lock the sampler is read-holding"
+        );
     }
 }
 

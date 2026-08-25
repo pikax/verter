@@ -121,6 +121,13 @@ pub(crate) struct CarrierSyncState {
     /// internal timeout FIRES (a never-answering `didClose` returns a fail-closed `Err` within
     /// the bound).
     close_barrier_bound: Duration,
+    /// TEST-ONLY: fires immediately before `gate.lock().await`, so a test can
+    /// wait for a drive to REACH the gate without polling `Arc::strong_count`.
+    /// It means "about to contend for the gate", not "blocked on it" — a
+    /// consumer that needs the stronger fact re-polls for `Pending` after
+    /// this receipt.
+    #[cfg(test)]
+    gate_parked: tokio::sync::Notify,
 }
 
 impl CarrierSyncState {
@@ -141,6 +148,8 @@ impl CarrierSyncState {
             next_version: AtomicI64::new(2),
             next_seq: AtomicU64::new(1),
             close_barrier_bound,
+            #[cfg(test)]
+            gate_parked: tokio::sync::Notify::new(),
         }
     }
 
@@ -155,6 +164,12 @@ impl CarrierSyncState {
     /// await.
     pub(crate) fn gate_for(&self, carrier: &str) -> Arc<AsyncMutex<()>> {
         Arc::clone(self.gates.lock().entry(carrier.to_string()).or_default())
+    }
+
+    /// TEST-ONLY: subscribe before driving an op that must reach the gate.
+    #[cfg(test)]
+    pub(crate) fn gate_parked_notify(&self) -> &tokio::sync::Notify {
+        &self.gate_parked
     }
 
     /// Record `kind` as the carrier's latest pending submission at `seq` (a later
@@ -298,6 +313,8 @@ impl CarrierSyncState {
         //    op's barrier completes (ordered commits; no didChange ahead of didOpen; no
         //    didClose interleaved with an in-flight injection).
         let gate = self.gate_for(carrier);
+        #[cfg(test)]
+        self.gate_parked.notify_waiters();
         let _guard = gate.lock().await;
 
         // 3. Drain the NEWEST pending op. If an earlier gate holder already committed

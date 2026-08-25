@@ -11,10 +11,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use dashmap::{DashMap, DashSet};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::Client;
 
@@ -57,6 +57,40 @@ pub struct SyncCoordinatorHandle {
     pending: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
     /// Changes received but not yet processed. See [`CanonicalChangeState`].
     changes: ChangeTracker,
+    /// TEST-ONLY: the coordinator's own progress receipts.
+    #[cfg(test)]
+    pub(crate) receipts: CoordinatorReceipts,
+}
+
+/// TEST-ONLY receipts a test waits on instead of polling or sleeping.
+///
+/// These are the coordinator's own transitions, published where they
+/// happen. Nothing in production reads them.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct CoordinatorReceipts {
+    /// One notify after each coordinator select-arm, so paused-time tests
+    /// wait for an exact loop tick instead of a yield-count flush.
+    pub(crate) loop_tick: Arc<tokio::sync::Notify>,
+    /// One notify after `publish_merged_diagnostics` writes the verter-diag
+    /// cache, which happens on a spawned task after the tick.
+    pub(crate) diags_published: Arc<tokio::sync::Notify>,
+    /// Live `publish_merged_diagnostics` tasks. Zero means every spawned
+    /// publish has written the cache (or been aborted).
+    pub(crate) diag_tasks_live: Arc<std::sync::atomic::AtomicUsize>,
+    /// Monotonic count of COMPLETED dispatch ticks — incremented at the end
+    /// of the quiet-window arm, after every ready document's `sync_file` has
+    /// awaited. This is the only receipt that fences a whole dispatch
+    /// decision: a single document's provider receipt lands MID-arm, and the
+    /// ready set is iterated in `HashMap` order, so another document's
+    /// dispatch can land on either side of it.
+    pub(crate) dispatch_ticks: Arc<std::sync::atomic::AtomicUsize>,
+    /// Monotonic count of completed `publish_merged_diagnostics` tasks. A
+    /// live gauge cannot settle a tick: the task is spawned AFTER the
+    /// provider sync it follows, so `diag_tasks_live == 0` is already true
+    /// at the moment the sync receipt lands. A monotonic count makes "this
+    /// tick's publish has finished" an exact predicate.
+    pub(crate) diags_published_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +202,7 @@ impl SyncCoordinatorHandle {
                 wake_tx,
                 pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
                 changes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+                receipts: CoordinatorReceipts::default(),
             },
             wake_rx,
         )
@@ -179,6 +214,110 @@ impl SyncCoordinatorHandle {
             .into_iter()
             .map(|(canonical_id, pending)| (canonical_id, pending.uri))
             .collect()
+    }
+
+    /// Wait for one coordinator loop tick. Interest is registered before
+    /// the await so a tick between enable and poll cannot be missed.
+    #[cfg(test)]
+    pub(crate) async fn await_loop_tick(&self) {
+        let notified = self.receipts.loop_tick.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        notified.await;
+    }
+
+    /// Wait until `ready` is true, waking on each coordinator loop tick.
+    /// The 20s Instant is an outer watchdog only — it is not the thing
+    /// that makes the wait succeed. Interest is enabled before the
+    /// predicate is re-checked so a tick cannot sneak past. The watchdog
+    /// is raced against the tick wait so a missing tick cannot hang.
+    ///
+    /// Do not use this under a paused clock: a `Notify` wait is not a
+    /// timer, so auto-advance will not fire the debounce. Paused tests
+    /// drive `await_loop_tick` + `advance` instead.
+    #[cfg(test)]
+    pub(crate) async fn await_until(&self, mut ready: impl FnMut() -> bool, fail: impl FnOnce()) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if ready() {
+                return;
+            }
+            let tick = self.receipts.loop_tick.notified();
+            let published = self.receipts.diags_published.notified();
+            tokio::pin!(tick);
+            tokio::pin!(published);
+            tick.as_mut().enable();
+            published.as_mut().enable();
+            if ready() {
+                return;
+            }
+            tokio::select! {
+                biased;
+                () = tick => {}
+                () = published => {}
+                () = tokio::time::sleep_until(deadline) => {
+                    // Watchdog firing is failure even if `ready()` is now
+                    // true: that means the predicate flipped without a
+                    // loop_tick/diags_published receipt (a poll of owned
+                    // state). The 20s Instant must never be a success path.
+                    fail();
+                    panic!("sync coordinator loop_tick watchdog");
+                }
+            }
+        }
+    }
+
+    /// TEST-ONLY: whether `canonical_id` still has an undrained signal in
+    /// the handle-side inbox. Once this is false the coordinator has taken
+    /// that signal into its own pending map, so a later dispatch decision
+    /// provably saw it.
+    #[cfg(test)]
+    pub(crate) fn inbox_contains(&self, canonical_id: &str) -> bool {
+        self.pending.lock().contains_key(canonical_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diag_tasks_live(&self) -> usize {
+        self.receipts
+            .diag_tasks_live
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// TEST-ONLY: monotonic count of completed diagnostics publications.
+    /// Pair it with [`Self::await_until`] to settle on "the publish this
+    /// tick owed has finished" without a fixed sleep.
+    /// TEST-ONLY: completed dispatch ticks. See
+    /// [`CoordinatorReceipts::dispatch_ticks`].
+    #[cfg(test)]
+    pub(crate) fn dispatch_ticks(&self) -> usize {
+        self.receipts
+            .dispatch_ticks
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diags_published_count(&self) -> usize {
+        self.receipts
+            .diags_published_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+struct DiagTaskLiveGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(test)]
+impl DiagTaskLiveGuard {
+    fn new(counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(counter)
+    }
+}
+
+#[cfg(test)]
+impl Drop for DiagTaskLiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -273,8 +412,10 @@ pub struct SyncCoordinatorDeps {
     pub carrier_transaction_coordinator: Arc<crate::external_ts::CarrierTransactionCoordinator>,
 }
 
-/// Debounce interval: sync fires after 300ms of silence for a given file.
-pub(crate) const DEBOUNCE_MS: u64 = 300;
+/// Debounce interval: sync fires after [`crate::edit_quiet_window::EDIT_QUIET_WINDOW`]
+/// of silence for a given file. Alias kept so existing tests can name the
+/// millisecond form of the one quiet-window policy.
+pub(crate) const DEBOUNCE_MS: u64 = crate::edit_quiet_window::EDIT_QUIET_WINDOW_MS;
 
 /// Spawn the coordinator task and return a handle for sending signals.
 pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandle {
@@ -283,17 +424,23 @@ pub fn spawn_sync_coordinator(deps: SyncCoordinatorDeps) -> SyncCoordinatorHandl
     let changes: ChangeTracker = Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let semantic_ready_rx = deps.documents.subscribe_semantic_ready();
     tracing::info!("sync_coordinator: spawned (debounce {DEBOUNCE_MS}ms)");
+    #[cfg(test)]
+    let receipts = CoordinatorReceipts::default();
     tokio::spawn(coordinator_loop(
         wake_rx,
         semantic_ready_rx,
         Arc::clone(&pending),
         Arc::clone(&changes),
         Arc::new(deps),
+        #[cfg(test)]
+        receipts.clone(),
     ));
     SyncCoordinatorHandle {
         wake_tx,
         pending,
         changes,
+        #[cfg(test)]
+        receipts,
     }
 }
 
@@ -303,8 +450,9 @@ async fn coordinator_loop(
     inbox: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
     changes: ChangeTracker,
     deps: Arc<SyncCoordinatorDeps>,
+    #[cfg(test)] receipts: CoordinatorReceipts,
 ) {
-    let debounce = Duration::from_millis(DEBOUNCE_MS);
+    let debounce = crate::edit_quiet_window::EDIT_QUIET_WINDOW;
     // Map from canonical_id → (last_change_time, uri_str)
     let mut pending_files: HashMap<String, (Instant, PendingSignal)> = HashMap::new();
     // Provider-state commits are serialized and allowed to finish. Diagnostics
@@ -375,9 +523,12 @@ async fn coordinator_loop(
                             .parse::<Uri>()
                             .ok()
                             .and_then(|uri| {
-                                deps.documents.get(&uri).map(|document| document.version)
+                                deps.documents.get(&uri).map(|document| {
+                                    document.version == ready.version
+                                        && document.document_revision == ready.document_revision
+                                })
                             })
-                            == Some(ready.version)
+                            == Some(true)
                         {
                             // An earlier pre-semantic pass may have cached an empty
                             // result under this same document/host generation.
@@ -447,7 +598,7 @@ async fn coordinator_loop(
             }
             _ = async {
                 match next_deadline {
-                    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
                     None => std::future::pending::<()>().await,
                 }
             } => {
@@ -524,21 +675,45 @@ async fn coordinator_loop(
                         let task_canonical_id = canonical_id.clone();
                         diagnostic_tasks.insert(
                             canonical_id,
-                            tokio::spawn(async move {
-                                publish_merged_diagnostics(
-                                    &task_deps,
-                                    &task_canonical_id,
-                                    &signal.uri,
-                                )
-                                .await;
+                            tokio::spawn({
+                                #[cfg(test)]
+                                let diags_published = Arc::clone(&receipts.diags_published);
+                                #[cfg(test)]
+                                let diag_tasks_live = Arc::clone(&receipts.diag_tasks_live);
+                                #[cfg(test)]
+                                let diags_published_count = Arc::clone(&receipts.diags_published_count);
+                                async move {
+                                    {
+                                        #[cfg(test)]
+                                        let _live = DiagTaskLiveGuard::new(diag_tasks_live);
+                                        publish_merged_diagnostics(
+                                            &task_deps,
+                                            &task_canonical_id,
+                                            &signal.uri,
+                                        )
+                                        .await;
+                                    }
+                                    #[cfg(test)]
+                                    {
+                                        diags_published_count
+                                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                        diags_published.notify_waiters();
+                                    }
+                                }
                             }),
                         );
                     }
                 }
                 arm_open_importer_republish(&deps, &settled_edits, &mut pending_files);
                 diagnostic_tasks.retain(|_, task| !task.is_finished());
+                #[cfg(test)]
+                receipts
+                    .dispatch_ticks
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         }
+        #[cfg(test)]
+        receipts.loop_tick.notify_waiters();
     }
 }
 

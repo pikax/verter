@@ -455,8 +455,12 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
             text: source.to_string(),
         });
 
-        registry.schedule_semantic_analysis(&uri);
-        tokio::task::yield_now().await;
+        // Disabled enrichment spawns NOTHING — the absent task is the proof,
+        // so nothing has to be waited for or yielded past.
+        assert!(
+            registry.schedule_semantic_analysis_for_test(&uri).is_none(),
+            "disabled {language_id} enrichment must not spawn a semantic task"
+        );
         assert!(
             registry.semantic_host.read().is_none(),
             "disabled {language_id} enrichment must not construct the isolated semantic host"
@@ -467,16 +471,23 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
         );
 
         registry.set_semantic_analysis_enabled(true);
-        registry.schedule_semantic_analysis(&uri);
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        // Subscribe BEFORE scheduling: the publication receipt is the wake,
+        // not a yield loop over `get_analysis`. Joining the task itself would
+        // also prove completion, but the receipt is what production consumers
+        // use, so the test settles the same way they do.
+        let mut ready = registry.subscribe_semantic_ready();
+        registry
+            .schedule_semantic_analysis_for_test(&uri)
+            .expect("enabled enrichment must spawn a semantic task");
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
-                if registry
-                    .get_analysis(&uri)
-                    .is_some_and(|analysis| analysis.template.is_some())
-                {
-                    break;
+                let event = ready
+                    .recv()
+                    .await
+                    .expect("the semantic-ready channel stays open");
+                if event.uri == uri.as_str() {
+                    return;
                 }
-                tokio::task::yield_now().await;
             }
         })
         .await
@@ -485,6 +496,12 @@ async fn optional_semantic_analysis_is_isolated_and_published_asynchronously() {
                 "background {language_id} semantic snapshot should publish without inline request computation"
             )
         });
+        assert!(
+            registry
+                .get_analysis(&uri)
+                .is_some_and(|analysis| analysis.template.is_some()),
+            "the {language_id} publication receipt must be backed by a stored template analysis"
+        );
         let feature = registry
             .feature_snapshot(&uri)
             .expect("carrier feature snapshot");
@@ -538,6 +555,74 @@ const SEMANTIC_REVISION_A: &str =
     "<script setup lang=\"ts\">\nconst value = 'a'\n</script>\n<template>{{ value }}</template>";
 const SEMANTIC_REVISION_B: &str =
     "<script setup lang=\"ts\">\nconst value = 'b'\n</script>\n<template>{{ value }}</template>";
+
+/// Production and tests share the 750ms quiet window — the sleep is no
+/// longer compiled out under `cfg(test)`, so a test drives the same
+/// scheduler topology production does, on a paused clock.
+///
+/// The discriminator is the ISOLATED SEMANTIC HOST, not the published
+/// analysis. `semantic_host()` is constructed by the task itself, the
+/// first thing it does after its sleep returns, so its absence at
+/// `window - ε` is proof that no work has begun. "Analysis not published
+/// yet" would be true anyway while the blocking upsert runs, and the
+/// revision-discard half below does not need the window at all — neither
+/// would notice the sleep being compiled out. Verified: putting the sleep
+/// back behind `cfg(not(test))` turns the `window - ε` assertion red.
+#[tokio::test(start_paused = true)]
+async fn semantic_quiet_window_discards_stale_revision_at_the_bound() {
+    let registry = semantic_test_registry();
+    let uri: Uri = "file:///workspace/Quiet.vue".parse().unwrap();
+    let _ = registry.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "vue".to_string(),
+        version: 1,
+        text: SEMANTIC_REVISION_A.to_string(),
+    });
+    assert!(
+        registry.semantic_host.read().is_none(),
+        "test setup: no semantic host may exist before the task is scheduled"
+    );
+    // Arm interest BEFORE spawning: the task fires this receipt as its first
+    // act, so awaiting it proves the task RAN and armed its quiet-window
+    // sleep. Without it the absence assertions below could hold simply
+    // because the task was never polled — vacuous rather than causal.
+    let armed = registry.semantic_task_armed.notified();
+    tokio::pin!(armed);
+    armed.as_mut().enable();
+    let handle = registry
+        .schedule_semantic_analysis_for_test(&uri)
+        .expect("semantic task");
+    armed.await;
+
+    tokio::time::advance(
+        super::SEMANTIC_ANALYSIS_QUIET_WINDOW - std::time::Duration::from_millis(1),
+    )
+    .await;
+    tokio::task::yield_now().await;
+    assert!(
+        registry.semantic_host.read().is_none(),
+        "the semantic task must still be inside its quiet window at window - ε — \
+         constructing the isolated host is the first thing it does once the sleep \
+         returns, so a host here means the production sleep was skipped"
+    );
+    assert!(
+        registry.get_analysis(&uri).is_none(),
+        "semantic enrichment must not publish before the production quiet window"
+    );
+
+    let _ = registry.did_change(&uri, 2, SEMANTIC_REVISION_B);
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    handle.await.expect("semantic task joins");
+    assert!(
+        registry.get_analysis(&uri).is_none(),
+        "a revision captured before the quiet window must be discarded after an edit inside it"
+    );
+    let current = registry
+        .feature_snapshot(&uri)
+        .expect("edited feature snapshot");
+    assert_eq!(current.client_version(), 2);
+    assert_eq!(current.source(), SEMANTIC_REVISION_B);
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn in_flight_semantic_completion_is_rejected_after_edit() {
@@ -613,20 +698,22 @@ async fn committed_edit_invalidates_post_admission_semantic_publication() {
 
     let (reacquire_attempted_tx, reacquire_attempted_rx) = std::sync::mpsc::channel();
     let publication_canonical_id = canonical_id.clone();
-    registry.set_before_change_document_reacquire_hook_for_test(Box::new(move |registry, _| {
+    // The publication receipt is sent immediately AFTER the snapshot insert,
+    // so blocking on it proves the cache write landed. This hook runs on the
+    // plain `edit` thread, never inside the runtime, so a blocking receive is
+    // legal here — and it is exact, unlike spinning on `contains_key`.
+    let mut publication_receipt = registry.subscribe_semantic_ready();
+    registry.set_before_change_document_reacquire_hook_for_test(Box::new(move |_, _| {
         reacquire_attempted_tx
             .send(())
             .expect("test observes the document shard reacquire attempt");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !registry
-            .semantic_snapshots
-            .contains_key(&publication_canonical_id)
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "old semantic publication reaches the cache"
-            );
-            std::thread::yield_now();
+        loop {
+            let published = publication_receipt
+                .blocking_recv()
+                .expect("old semantic publication reaches the cache");
+            if published.canonical_id == publication_canonical_id {
+                return;
+            }
         }
     }));
 

@@ -2410,8 +2410,8 @@ impl Scheduler {
             {
                 let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
                 let _ensured = self.nodes.entry(dep_id.clone()).or_insert_with(|| {
-                    let dep_node = self.create_node(dep_id, None);
-                    let dep_gen = dep_node.bump_generation();
+                    let dep_node = self.create_node_at_least(dep_id, None, 1);
+                    let dep_gen = dep_node.generation();
                     // Plant the auto-ingest tracking entry BEFORE
                     // publishing the FileNode and BEFORE sending the
                     // NewRequest. A concurrent matrix consultation that
@@ -2650,18 +2650,26 @@ impl Scheduler {
     /// Create a FileNode for a file, respecting the generation floor
     /// from prior incarnations so stale completions never match.
     fn create_node(&self, file_id: &str, file_language: Option<FileLanguage>) -> Arc<FileNode> {
+        self.create_node_at_least(file_id, file_language, 0)
+    }
+
+    fn create_node_at_least(
+        &self,
+        file_id: &str,
+        file_language: Option<FileLanguage>,
+        min_generation: u64,
+    ) -> Arc<FileNode> {
         let language = file_language.unwrap_or_else(|| self.source_loader.classify(file_id));
-        let node = Arc::new(FileNode::new(file_id.to_string(), language));
-        // Set generation above any prior incarnation's floor.
-        if let Some(floor) = self.generation_floors.get(file_id) {
-            let floor_val = *floor;
-            // Bump generation to floor+1 so the new incarnation starts
-            // above all generations the old incarnation ever used.
-            while node.generation() <= floor_val {
-                node.bump_generation();
-            }
-        }
-        node
+        let floor_gen = self
+            .generation_floors
+            .get(file_id)
+            .map(|floor| *floor + 1)
+            .unwrap_or(0);
+        Arc::new(FileNode::new_at(
+            file_id.to_string(),
+            language,
+            floor_gen.max(min_generation),
+        ))
     }
 
     /// Get the scheduler configuration.
@@ -2820,6 +2828,48 @@ impl Scheduler {
     /// dispatch-time `debug_assert!` that the stale identity has
     /// been terminalized.
     pub fn invalidate(&self, id: &str) {
+        self.invalidate_with_lock_hooks(id, &mut || {}, &mut || {});
+    }
+
+    /// TEST-ONLY: fire `attempt` after the node snapshot and BEFORE
+    /// `dag.lock()`, so a test holding the DAG lock can sample
+    /// generation once the invalidator has reached the lock rather
+    /// than spinning on `yield_now`.
+    #[cfg(test)]
+    pub(crate) fn invalidate_signaling_before_dag_lock(
+        &self,
+        id: &str,
+        attempt: std::sync::mpsc::SyncSender<()>,
+    ) {
+        self.invalidate_with_lock_hooks(
+            id,
+            &mut || {
+                let _ = attempt.send(());
+            },
+            &mut || {},
+        );
+    }
+
+    /// TEST-ONLY: fire `attempt` after `dag.lock()` and BEFORE the
+    /// publication hold, so a test holding the publication lock can
+    /// sample generation without a yield loop.
+    #[cfg(test)]
+    pub(crate) fn invalidate_signaling_before_publication(
+        &self,
+        id: &str,
+        attempt: std::sync::mpsc::SyncSender<()>,
+    ) {
+        self.invalidate_with_lock_hooks(id, &mut || {}, &mut || {
+            let _ = attempt.send(());
+        });
+    }
+
+    fn invalidate_with_lock_hooks(
+        &self,
+        id: &str,
+        before_dag_lock: &mut dyn FnMut(),
+        before_publication: &mut dyn FnMut(),
+    ) {
         // Snapshot the FileNode `Arc` and drop the nodes-shard `Ref`
         // BEFORE acquiring `dag.lock()`. Holding a DashMap Ref
         // across a parking_lot Mutex acquisition forms a latent
@@ -2834,14 +2884,16 @@ impl Scheduler {
             None => return,
         };
         let canonical: Arc<str> = Arc::from(id);
+        before_dag_lock();
         let mut dag = self.dag.lock();
+        before_publication();
         // The bump and the source-root publication run under ONE
         // publication hold, so a concurrent `capture_source_root` sees
         // the pre-bump node with the pre-bump root or the post-bump node
         // with the post-bump root — never a torn pair. The publication
         // lock is INNER to the DAG lock already held here.
         let new_gen = self.source_root.publish_transition(|publication| {
-            let new_gen = node.bump_generation();
+            let new_gen = publication.bump_node_generation(&node);
             publication.absent(&canonical, node.incarnation_id(), new_gen);
             new_gen
         });
@@ -3044,7 +3096,7 @@ impl Scheduler {
         let mut dag = self.dag.lock();
         // Bump + publish atomically; see [`Self::invalidate`].
         let new_gen = self.source_root.publish_transition(|publication| {
-            let new_gen = node.bump_generation();
+            let new_gen = publication.bump_node_generation(&node);
             publication.absent(&canonical, node.incarnation_id(), new_gen);
             new_gen
         });
@@ -3646,12 +3698,8 @@ impl Scheduler {
         }
         if let Some(requested) = requested_language {
             if node.file_language != requested {
-                let fresh = self.create_node(&file_id, Some(requested));
-                // Start strictly above the old incarnation so no stale
-                // completion can ever match the new generation.
-                while fresh.generation() <= node.generation() {
-                    fresh.bump_generation();
-                }
+                let fresh =
+                    self.create_node_at_least(&file_id, Some(requested), node.generation() + 1);
                 let fresh_gen = fresh.generation();
                 // Publishing the replacement node and its `Absent`
                 // source version under ONE publication hold keeps a
@@ -3681,7 +3729,7 @@ impl Scheduler {
             // file's published source state is `Absent` until the Source
             // stage commits one.
             let gen = self.source_root.publish_transition(|publication| {
-                let gen = node.bump_generation();
+                let gen = publication.bump_node_generation(&node);
                 publication.absent(&canonical, node.incarnation_id(), gen);
                 gen
             });
@@ -3699,8 +3747,11 @@ impl Scheduler {
             if gen == 0 {
                 // Node was just created, needs a Source job. No
                 // supersede sweep is needed at generation 0 — there is
-                // no prior dispatched identity.
-                node.bump_generation()
+                // no prior dispatched identity. The bump still takes
+                // the publication capability so a lock-free atomic
+                // cannot race a concurrent publish.
+                self.source_root
+                    .publish_transition(|publication| publication.bump_node_generation(&node))
             } else {
                 gen
             }
@@ -4645,10 +4696,12 @@ impl Scheduler {
                                                 // `Some(..)` is load-bearing: it is
                                                 // what keeps the host classifier out
                                                 // of this doubly-locked region.
-                                                let dep_node =
-                                                    self.create_node(dep_id, Some(dep_language));
-                                                created_generation =
-                                                    Some(dep_node.bump_generation());
+                                                let dep_node = self.create_node_at_least(
+                                                    dep_id,
+                                                    Some(dep_language),
+                                                    1,
+                                                );
+                                                created_generation = Some(dep_node.generation());
                                                 dep_node
                                             });
                                     }
@@ -10273,7 +10326,7 @@ mod tests {
         };
         let sched = Scheduler::test_with_executor(config, loader, executor);
 
-        let _h = sched.submit_request(Request {
+        let handle = sched.submit_request(Request {
             file_id: "/panic.vue".to_string(),
             target: TargetStage::Source,
             priority: Priority::Interactive,
@@ -10289,31 +10342,32 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("Source worker must enter the gated executor");
 
-        // Bump the generation BEHIND the running worker WITHOUT
-        // calling the supersede sweep. This isolates the
-        // permit-release responsibility on
+        // Bump the generation BEHIND the running worker through the
+        // live publication hold, WITHOUT the supersede sweep. This
+        // isolates the permit-release responsibility on
         // `surface_stage_panic_as_failed`: there is no other code
         // path (no `cancel_matching` from supersede) that could
         // release the permit on its behalf. A generation-mismatch
         // early return would leave the permit parked forever in
         // this configuration.
         let node = sched.nodes.get("/panic.vue").expect("node exists").clone();
-        node.bump_generation();
+        sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&node));
 
         // Release the gate; the executor panics; panic-catch enters
         // `surface_stage_panic_as_failed`.
         drop(release_tx);
 
-        // Wait for the panic-catch closure to finish.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if sched.dag.lock().in_flight_io_permits() == 0 {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        // The request handle is the panic-catch receipt: terminalize_failure
+        // signals Failed on the dispatched generation even after a live
+        // bump, and that same cancel path drops the parked IO permit.
+        match handle
+            .wait_timeout(Duration::from_secs(5))
+            .expect("panic-catch must complete the request handle")
+        {
+            CompletionState::Failed(_) => {}
+            other => panic!("expected Failed after the gated source panic, got {other:?}"),
         }
 
         assert_eq!(
@@ -12310,8 +12364,12 @@ mod tests {
 
         // Plant a FileNode at gen=2 (the "live" generation).
         let dep_node = sched.create_node(dep_id, None);
-        dep_node.bump_generation(); // gen=1
-        dep_node.bump_generation(); // gen=2
+        sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node)); // gen=1
+        sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node)); // gen=2
         sched.nodes.insert(dep_id.to_string(), dep_node);
 
         // Plant a tracking entry at gen=1 (the "stale" gen).
@@ -12380,8 +12438,12 @@ mod tests {
 
         // FileNode at gen=2.
         let dep_node = sched.create_node(dep_id, None);
-        dep_node.bump_generation();
-        dep_node.bump_generation();
+        sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node));
+        sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node));
         sched.nodes.insert(dep_id.to_string(), dep_node);
 
         // Tracking entry at gen=2 (the LIVE generation, not the
@@ -12496,7 +12558,9 @@ mod tests {
         // identity, current_analysis None) consults the tracking
         // entry and returns Gating.
         let dep_node = sched.create_node(dep_id, None);
-        dep_node.bump_generation();
+        sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node));
         sched.nodes.insert(dep_id.to_string(), dep_node);
         {
             let dag = sched.dag.lock();
@@ -13087,7 +13151,9 @@ mod tests {
         // path aligned on the same `(file, gen, profile)` slot so the
         // skip-arm fires every iteration of the worker thread.
         for _ in 0..5 {
-            node.bump_generation();
+            sched
+                .source_root
+                .publish_transition(|publication| publication.bump_node_generation(&node));
         }
         // Seed Source + Analysis so `commit_artifact`'s
         // current_source / current_analysis early-out gates do not
@@ -13380,13 +13446,11 @@ mod tests {
         // Replace the published node with a DIFFERENT incarnation at the
         // SAME generation, itself carrying a committed source. Every
         // condition except incarnation identity now holds.
-        let replacement = Arc::new(crate::node::FileNode::new(
+        let replacement = Arc::new(crate::node::FileNode::new_at(
             "/inc.vue".to_string(),
             verter_language::FileLanguage::vue(),
+            generation,
         ));
-        while replacement.generation() < generation {
-            replacement.bump_generation();
-        }
         replacement.source.store(Arc::new(Some(Arc::new(
             crate::node::SourceSnapshot::new_empty(Arc::from("x"), generation),
         ))));
@@ -13485,7 +13549,9 @@ mod tests {
 
         // Advance the node WITHOUT a supersede sweep — the state the
         // released-lock window leaves behind.
-        node.bump_generation();
+        sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&node));
         assert_ne!(
             node.generation(),
             generation,
@@ -13699,7 +13765,10 @@ mod tests {
         sched
             .nodes
             .insert("/dep.vue".to_string(), sched.create_node("/dep.vue", None));
-        let dep_gen = sched.nodes.get("/dep.vue").unwrap().bump_generation();
+        let dep_node = sched.nodes.get("/dep.vue").unwrap().clone();
+        let dep_gen = sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node));
 
         let owner_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&owner),
@@ -14355,10 +14424,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn bump_generation_supersede_dispatch_skip_no_spurious_panic() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc;
         use std::sync::Arc;
         use std::thread;
-        use std::time::Duration;
 
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/race.vue".to_string(), Arc::from("r"));
@@ -14388,61 +14456,81 @@ mod tests {
         // the bump waits for the lock. With a bare-atomic bump the
         // bump would run first and `node.generation()` would advance
         // during the hold window.
+        //
+        // The invariant is proven by REAL EVENT ORDER, not by a fixed
+        // sleep racing to sample mid-hold: the holder signals the exact
+        // moment it acquires the lock (so the driver below never guesses
+        // how long acquisition takes) and records the exact moment it
+        // releases; `invalidate()`'s own return is then compared against
+        // that recorded release instant. A bare-atomic bump would let
+        // `invalidate()` return long before the holder's release,
+        // independent of scheduler timing — never a narrow race margin.
+        // Sample generation FROM THE HOLDER while the DAG lock is still
+        // held. Timestamps from a side-thread monitor can pass under
+        // observer starvation (the monitor wakes after release and records
+        // a late instant even though the bump ran early). The holder
+        // itself cannot miss an early bump: `node.generation()` is the
+        // protected state, read under the lock that is supposed to gate
+        // the bump.
         let dag_handle = Arc::clone(&sched.dag);
-        let hold_active = Arc::new(AtomicBool::new(true));
-        let hold_active_w = Arc::clone(&hold_active);
+        let (acquired_tx, acquired_rx) = mpsc::sync_channel::<()>(0);
+        let (release_tx, release_rx) = mpsc::sync_channel::<()>(0);
+        let node_for_holder = Arc::clone(&node);
         let holder = thread::spawn(move || {
-            let _guard = dag_handle.lock();
-            // Hold for 200ms.
-            thread::sleep(Duration::from_millis(200));
-            hold_active_w.store(false, Ordering::Release);
+            let guard = dag_handle.lock();
+            acquired_tx
+                .send(())
+                .expect("driver must outlive the acquire signal");
+            release_rx
+                .recv()
+                .expect("driver must release after sampling");
+            assert_eq!(
+                node_for_holder.generation(),
+                gen_before,
+                "generation advanced while the DAG lock is held — \
+                 bump_generation ran outside the lock"
+            );
+            drop(guard);
         });
 
-        // Give the holder thread time to acquire the lock.
-        thread::sleep(Duration::from_millis(20));
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("holder must signal lock acquisition (outer watchdog)");
 
-        // Concurrent invalidate. With the lock-first path this
-        // blocks on the DAG lock until the holder releases. With a
-        // bare-atomic bump the bump would run immediately and the
-        // supersede call would then block on the lock — but the
-        // generation would already be advanced.
+        let (attempt_tx, attempt_rx) = mpsc::sync_channel::<()>(0);
         let node_clone = Arc::clone(&node);
         let sched_clone = Arc::clone(&sched);
         let inv = thread::spawn(move || {
-            let observed_before_call = node_clone.generation();
-            sched_clone.invalidate("/race.vue");
-            (observed_before_call, node_clone.generation())
+            sched_clone.invalidate_signaling_before_dag_lock("/race.vue", attempt_tx);
+            node_clone.generation()
         });
-
-        // Sample node.generation() WHILE the holder is still parked.
-        // Invariant: the generation does NOT advance during the
-        // hold window because invalidate is blocked. With a
-        // bare-atomic bump the bump would run immediately and the
-        // generation would advance.
-        thread::sleep(Duration::from_millis(50));
-        let mid_hold_gen = node.generation();
-        assert!(
-            hold_active.load(Ordering::Acquire),
-            "precondition: holder thread must still hold the DAG lock",
-        );
-
-        // KEY ASSERTION: with the holder still parked, the generation
-        // must be unchanged. With the bump under the DAG lock,
-        // `mid_hold_gen == gen_before`. With a bare-atomic bump the
-        // bump would run ahead and `mid_hold_gen > gen_before`.
+        // The hook fires immediately BEFORE `dag.lock()`, so this receipt
+        // means "the invalidator is about to contend for the lock", not
+        // "it is blocked on it". The sample below is therefore a cheap
+        // early tripwire, not the discriminator: the holder's own in-lock
+        // sample is what proves the bump did not run inside the hold, and
+        // the type-level `SourcePublication` capability is what makes a
+        // bare bump impossible to write at all.
+        attempt_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("invalidator must reach the dag.lock() acquire (outer watchdog)");
         assert_eq!(
-            mid_hold_gen, gen_before,
-            "bump_generation must NOT advance node.generation() while \
-             the DAG lock is held by another thread — a bare-atomic \
-             bump would advance the generation BEFORE the supersede \
-             sweep could cancel the stale identity, opening the \
-             dispatch-time defensive `debug_assert!` window. \
-             observed: gen_before={gen_before}, mid_hold_gen={mid_hold_gen}",
+            node.generation(),
+            gen_before,
+            "generation advanced before dag.lock() — bump ran outside the lock"
         );
+        release_tx
+            .send(())
+            .expect("holder must still be waiting to release");
 
-        // Drain the threads.
-        let _ = inv.join();
-        let _ = holder.join();
+        let gen_after_invalidate = inv.join().expect("invalidate thread must not panic");
+        holder.join().expect("holder thread must not panic");
+        assert!(
+            gen_after_invalidate > gen_before,
+            "invalidate() must still advance the generation once it \
+             actually runs (gen_before={gen_before}, \
+             observed={gen_after_invalidate})",
+        );
     }
 
     /// Discriminating stress test for the AB-BA prevention rule
@@ -15740,7 +15828,9 @@ mod tests {
         // Plant a FileNode for /dep.ts and bump to gen=1 so we have
         // a stable generation to plant the record under.
         let dep_node = sched.create_node("/dep.ts", None);
-        let dep_gen_v1 = dep_node.bump_generation();
+        let dep_gen_v1 = sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node));
         sched.nodes.insert("/dep.ts".to_string(), dep_node);
 
         let key_v1 = DepKey::FileStage {
@@ -15883,7 +15973,9 @@ mod tests {
         // generation.
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
         let dep_node = sched.create_node("/dep.ts", None);
-        let dep_gen_v1 = dep_node.bump_generation();
+        let dep_gen_v1 = sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node));
         sched.nodes.insert("/dep.ts".to_string(), dep_node);
         let key_v1 = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
@@ -16345,10 +16437,14 @@ mod tests {
 
         // Plant /a.vue and /dep.ts FileNodes at gen=1.
         let a_node = sched.create_node("/a.vue", None);
-        let a_gen = a_node.bump_generation();
+        let a_gen = sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&a_node));
         sched.nodes.insert("/a.vue".to_string(), a_node);
         let dep_node = sched.create_node("/dep.ts", None);
-        let dep_gen = dep_node.bump_generation();
+        let dep_gen = sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node));
         sched.nodes.insert("/dep.ts".to_string(), dep_node);
         let a_arc: Arc<str> = Arc::from("/a.vue");
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
@@ -16554,10 +16650,14 @@ mod tests {
         // Plant /a.vue and /dep.ts FileNodes at gen=1, with full
         // Source+Analysis committed for both (recovery state).
         let a_node = sched.create_node("/a.vue", None);
-        let a_gen = a_node.bump_generation();
+        let a_gen = sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&a_node));
         sched.nodes.insert("/a.vue".to_string(), a_node);
         let dep_node = sched.create_node("/dep.ts", None);
-        let dep_gen = dep_node.bump_generation();
+        let dep_gen = sched
+            .source_root
+            .publish_transition(|publication| publication.bump_node_generation(&dep_node));
         sched.nodes.insert("/dep.ts".to_string(), dep_node);
         let a_arc: Arc<str> = Arc::from("/a.vue");
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
@@ -19475,7 +19575,9 @@ mod tests {
                 .entry(id.to_string())
                 .or_insert_with(|| sched.create_node(id, None))
                 .clone();
-            let gen = node.bump_generation();
+            let gen = sched
+                .source_root
+                .publish_transition(|publication| publication.bump_node_generation(&node));
             assert_eq!(gen, 1, "fixture expects first bump to land generation 1");
             let (handle, sender) = completion_pair::<RequestResult>();
             // No context → no dedup event; discard the (None) return.

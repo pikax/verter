@@ -191,9 +191,10 @@ fn lookup_publish_admission_refusal_returns_computed_value_when_opted_in() {
 #[test]
 fn lookup_publish_joiner_forks_and_recomputes_after_winner_panic() {
     use std::sync::mpsc;
-    use std::time::Instant;
+    use std::time::Duration;
 
     let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
+    let joiner_parked = inflight.subscribe_joiner_park();
 
     let (claimed_tx, claimed_rx) = mpsc::sync_channel::<()>(0);
     let release_barrier = Arc::new(Barrier::new(2));
@@ -246,23 +247,9 @@ fn lookup_publish_joiner_forks_and_recomputes_after_winner_panic() {
         )
     });
 
-    // Deterministic wait: the joiner holds its own slot Arc once the
-    // strong count reaches 4 (table + winner.slot + winner.panic_guard +
-    // joiner).
-    let poll_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if inflight
-            .slot_strong_count(&7u32)
-            .is_some_and(|count| count >= 4)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < poll_deadline,
-            "joiner failed to acquire inflight slot Arc within 10s"
-        );
-        std::hint::spin_loop();
-    }
+    joiner_parked
+        .recv_timeout(Duration::from_secs(10))
+        .expect("joiner must park on the inflight slot before the winner panics");
     release_barrier.wait();
 
     winner.join().unwrap();

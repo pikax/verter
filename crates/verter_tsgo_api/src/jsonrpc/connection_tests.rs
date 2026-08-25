@@ -5,7 +5,6 @@
 //! end-to-end (NON-VACUOUS: real framing, real id-correlation, real async I/O)
 //! without a live tsgo process.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::*;
@@ -109,18 +108,22 @@ async fn concurrent_requests_correlate_by_id() {
 
 #[tokio::test]
 async fn server_to_client_request_is_auto_answered() {
-    // The fake server, on receiving `initialize`, FIRST sends a server→client
-    // request (`client/registerCapability`) and waits for its answer before
-    // replying to `initialize`. If the connection did not auto-answer the
-    // server→client request, the server would block and `initialize` would hang.
+    // The fake server, on receiving `initialize`, sends a server→client
+    // request (`client/registerCapability`) and GENUINELY WAITS for its
+    // answer — not just orders its own writes — before replying to
+    // `initialize`. If the connection did not auto-answer the server→client
+    // request, the answer never arrives, the fake server never sends the
+    // initialize reply, and `initialize` hangs (caught by the outer
+    // timeout below) rather than merely running slow. This makes
+    // `initialize`'s own resolution THE causal proof of the auto-answer —
+    // no separate counter or poll needed.
     let (cr, cw, mut sr, mut sw) = duplex_pair();
-    let saw_answer = Arc::new(AtomicUsize::new(0));
-    let saw_answer_task = Arc::clone(&saw_answer);
 
     tokio::spawn(async move {
         let mut framer = MessageFramer::new();
         let mut chunk = [0u8; 8192];
-        let mut server_req_id = 1000;
+        let server_req_id = 1000;
+        let mut pending_initialize_id: Option<serde_json::Value> = None;
         loop {
             let n = match sr.read(&mut chunk).await {
                 Ok(0) | Err(_) => break,
@@ -134,26 +137,31 @@ async fn server_to_client_request_is_auto_answered() {
                     .and_then(|m| m.as_str())
                     .map(str::to_owned);
                 match (id, method) {
-                    // Client request `initialize`: first ask the client a question.
+                    // Client request `initialize`: ask the client a question
+                    // and defer the reply — it is sent only once the ANSWER
+                    // arm below observes the answer.
                     (Some(client_id), Some(m)) if !client_id.is_null() && m == "initialize" => {
+                        pending_initialize_id = Some(client_id);
                         let server_req = serde_json::json!({
                             "jsonrpc": "2.0", "id": server_req_id,
                             "method": "client/registerCapability", "params": {}
                         });
-                        server_req_id += 1;
                         sw.write_all(&encode_message(&server_req)).await.unwrap();
                         sw.flush().await.unwrap();
-                        // Reply to initialize only AFTER the question is sent.
+                    }
+                    // The client's ANSWER to our server→client request (a response,
+                    // no method, id == our server_req_id). Only NOW send the
+                    // deferred initialize reply — genuinely gating on the answer,
+                    // not merely ordering two eager writes.
+                    (Some(answer_id), None) if answer_id.as_i64() == Some(server_req_id) => {
+                        let client_id = pending_initialize_id
+                            .take()
+                            .expect("the answer must follow a pending initialize question");
                         let reply = serde_json::json!({
                             "jsonrpc": "2.0", "id": client_id, "result": { "ok": true }
                         });
                         sw.write_all(&encode_message(&reply)).await.unwrap();
                         sw.flush().await.unwrap();
-                    }
-                    // The client's ANSWER to our server→client request (a response,
-                    // no method, id == our server_req_id).
-                    (Some(answer_id), None) if answer_id.as_i64() == Some(1000) => {
-                        saw_answer_task.fetch_add(1, Ordering::SeqCst);
                     }
                     _ => {}
                 }
@@ -162,18 +170,17 @@ async fn server_to_client_request_is_auto_answered() {
     });
 
     let conn = JsonRpcConnection::connect(cr, cw);
-    let result = conn
-        .request("initialize", serde_json::Value::Null)
-        .await
-        .expect("initialize ok");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        conn.request("initialize", serde_json::Value::Null),
+    )
+    .await
+    .expect(
+        "initialize must not hang — the connection failed to auto-answer the \
+         server→client request, so the fake server's deferred reply never fires",
+    )
+    .expect("initialize ok");
     assert_eq!(result["ok"], serde_json::json!(true));
-    // Give the server task a moment to observe the auto-answer.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(
-        saw_answer.load(Ordering::SeqCst),
-        1,
-        "the connection must auto-answer the server→client request"
-    );
     conn.close().await.unwrap();
 }
 

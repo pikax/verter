@@ -852,6 +852,13 @@ canonical -> version history of
 
 Rules:
 
+- **Live generation advances have a closed type gateway.** `FileNode` stores
+  its counter as the opaque child-module `LiveGenerationCounter`; the raw
+  `AtomicU64` never escapes that module. Reads go through the wrapper and the
+  only advance requires `&SourcePublication`, forwarded by
+  `FileNode::bump_generation`. `FileNode` denies `private_interfaces`, so
+  widening the private field beyond the opaque type's visibility is itself a
+  compile error rather than exposing a new sibling-module mutation route.
 - **Publication is atomic with the lifecycle transition.** The node
   mutation happens INSIDE the `publish_transition` closure and
   `capture_root` takes the same lock, so a capture is totally ordered

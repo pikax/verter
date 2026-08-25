@@ -87,8 +87,12 @@ windows-sys = { version = "0.61.2", features = [
 # tokio's `net` feature, NOT a sync-fd workaround.
 
 [dev-dependencies]
-# tokio itself is not re-declared here: the [dependencies] copy above already
-# carries a superset of the features this crate's tests need.
+# `test-util` is additive: unifies onto the main `tokio` dependency for test
+# builds only, activating `start_paused`/virtual-time control so deterministic
+# tests can prove "fires at exactly its own bound" as an exact virtual-clock
+# assertion instead of a wall-clock margin. The [dependencies] tokio does not
+# include `test-util` (production must not activate it).
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "time", "sync", "test-util"] }
 # Self dev-dependency: enables the `test-fake-engine` feature for THIS crate's
 # test builds only (cargo builds dev-dependencies when compiling tests), so the
 # fake engine bin exists for `cargo test` (CARGO_BIN_EXE_) while a default

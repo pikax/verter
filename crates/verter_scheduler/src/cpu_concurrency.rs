@@ -38,6 +38,20 @@ pub struct CpuConcurrencySemaphore {
     available: Mutex<usize>,
     /// Notified (one waiter) each time a permit becomes available.
     permit_returned: Condvar,
+    /// TEST-ONLY: incremented the instant `acquire()` has taken the mutex
+    /// and evaluated the availability predicate at least once — i.e. the
+    /// caller has genuinely REACHED the blocking/non-blocking decision
+    /// point, past any thread-spawn scheduling delay. Lets a test observe
+    /// "the acquire attempt has truly started" without a channel send
+    /// racing an arbitrary OS preemption between spawn and the first
+    /// executed statement of the acquiring closure.
+    #[cfg(test)]
+    attempt_count: std::sync::atomic::AtomicUsize,
+    /// TEST-ONLY: a sender armed by [`Self::subscribe_park`]. `acquire`
+    /// sends on it immediately before `Condvar::wait`, so a test observes
+    /// parking as a receipt rather than by polling a counter.
+    #[cfg(test)]
+    park_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl CpuConcurrencySemaphore {
@@ -62,7 +76,29 @@ impl CpuConcurrencySemaphore {
         Self {
             available: Mutex::new(capacity),
             permit_returned: Condvar::new(),
+            #[cfg(test)]
+            attempt_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            park_tx: Mutex::new(None),
         }
+    }
+
+    /// TEST-ONLY: the number of `acquire()` calls that have genuinely
+    /// reached the availability check (taken the mutex at least once),
+    /// past any thread-spawn scheduling delay. See `attempt_count`.
+    #[cfg(test)]
+    pub(crate) fn attempt_count(&self) -> usize {
+        self.attempt_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// TEST-ONLY: register a channel completed immediately before this
+    /// semaphore parks on `Condvar::wait`. Interest must be registered
+    /// before the acquiring thread is spawned.
+    #[cfg(test)]
+    pub(crate) fn subscribe_park(&self) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self.park_tx.lock() = Some(tx);
+        rx
     }
 
     /// Blocks until a permit is available, then takes it and returns an
@@ -73,12 +109,19 @@ impl CpuConcurrencySemaphore {
     #[must_use = "the returned CpuConcurrencyPermit holds a slot until it is dropped"]
     pub fn acquire(&self) -> CpuConcurrencyPermit<'_> {
         let mut available = self.available.lock();
+        #[cfg(test)]
+        self.attempt_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         while *available == 0 {
             // Park until a returned permit notifies us. `parking_lot`'s
             // `Condvar::wait` is not subject to spurious wakeups across
             // platforms the way std's can be, but the `while` loop
             // re-checks the predicate regardless, so a spurious wake is
             // harmless.
+            #[cfg(test)]
+            if let Some(tx) = self.park_tx.lock().as_ref() {
+                let _ = tx.send(());
+            }
             self.permit_returned.wait(&mut available);
         }
         *available -= 1;
@@ -119,7 +162,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     #[test]
     fn acquire_decrements_release_restores() {
@@ -151,29 +194,51 @@ mod tests {
 
     #[test]
     fn over_capacity_blocks_then_proceeds() {
+        use std::sync::mpsc;
+
         let sem = Arc::new(CpuConcurrencySemaphore::new(1));
         let p = sem.acquire();
 
         let proceeded = Arc::new(AtomicUsize::new(0));
         let sem2 = Arc::clone(&sem);
         let flag = Arc::clone(&proceeded);
+        // Causal handshake: `subscribe_park` completes immediately before
+        // `Condvar::wait`. A broken non-blocking acquire bumps `attempt_count`
+        // and returns without sending, so the wait below fails closed.
+        let attempt_count_before = sem.attempt_count();
+        let park_rx = sem.subscribe_park();
+
+        let (acquired_tx, acquired_rx) = mpsc::channel::<()>();
         let h = thread::spawn(move || {
             let _p2 = sem2.acquire();
             flag.store(1, Ordering::SeqCst);
+            let _ = acquired_tx.send(());
         });
 
-        thread::sleep(Duration::from_millis(50));
-        assert_eq!(proceeded.load(Ordering::SeqCst), 0, "second acquire blocks");
+        park_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "spawned thread never entered the condvar wait (attempt_count {} -> {}); \
+                     a non-blocking acquire would skip the wait loop",
+                    attempt_count_before,
+                    sem.attempt_count()
+                )
+            });
+        assert_eq!(
+            proceeded.load(Ordering::SeqCst),
+            0,
+            "second acquire is parked on the condvar and must not have proceeded"
+        );
+        assert!(
+            acquired_rx.try_recv().is_err(),
+            "second acquire must not have sent while the first permit is still held"
+        );
 
         drop(p);
-        let start = Instant::now();
-        while proceeded.load(Ordering::SeqCst) == 0 {
-            assert!(
-                start.elapsed() < Duration::from_secs(2),
-                "blocked acquire never proceeded"
-            );
-            thread::sleep(Duration::from_millis(5));
-        }
+        acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("blocked acquire never proceeded");
         h.join().unwrap();
     }
 }

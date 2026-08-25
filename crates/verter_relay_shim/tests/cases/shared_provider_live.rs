@@ -20,6 +20,7 @@
 //! Gating: NON-VACUOUS whenever tsgo is present. Under `VERTER_REQUIRE_TSGO` a
 //! missing engine is a HARD failure (a skip would be a vacuous pass).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,6 +29,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::oneshot;
 
 use verter_lsp::documents::line_index::LineIndex;
 use verter_lsp::documents::position_map::PositionMapper;
@@ -96,6 +98,40 @@ async fn engine_or_skip() -> Option<PathBuf> {
             None
         }
     }
+}
+
+/// Read carrier diagnostics until `$code` appears.
+///
+/// The engine is an external process with no applied-generation receipt: a
+/// diagnostics call can RETURN before a freshly injected carrier has been
+/// typed, handing back a correct-but-incomplete set. Re-reading waits for the
+/// ENGINE — nothing on the Verter side changes between reads — so this is the
+/// permitted external-liveness case, not a retry around a Verter decision. The
+/// watchdog's expiry IS the failure, and it still fires on a path where SHARED
+/// never engages: the code then never appears at all, however long we wait.
+macro_rules! diagnostics_until_code {
+    ($read:expr, $code:literal, $what:expr) => {{
+        let mut last_codes: Vec<String> = Vec::new();
+        let found = tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                if let Ok(diags) = $read.await {
+                    if diags.iter().any(|d| d.code.as_deref() == Some($code)) {
+                        return diags;
+                    }
+                    last_codes = diags.iter().filter_map(|d| d.code.clone()).collect();
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        })
+        .await;
+        match found {
+            Ok(diags) => diags,
+            Err(_) => panic!(
+                "{}: TS{} never appeared within the 90s watchdog; last codes = {:?}",
+                $what, $code, last_codes
+            ),
+        }
+    }};
 }
 
 fn norm(p: &Path) -> String {
@@ -311,12 +347,24 @@ fn write_dual_claimant_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     (dir.join("tsconfig.app.json"), src)
 }
 
+/// Stable map key for a JSON-RPC request id (number or string).
+fn jsonrpc_id_key(id: &serde_json::Value) -> Option<String> {
+    match id {
+        serde_json::Value::Number(n) => Some(format!("n:{n}")),
+        serde_json::Value::String(s) => Some(format!("s:{s}")),
+        _ => None,
+    }
+}
+
 /// A fake editor over the shim stdio: writes LSP frames, records EVERY frame the
 /// shim writes back (so a leak test can inspect the whole editor-visible stream),
-/// and auto-answers server→client requests with `null` (as a real editor does).
+/// auto-answers server→client requests with `null` (as a real editor does), and
+/// completes a request-id oneshot when the matching client←server response
+/// arrives. Callers register the oneshot before send — they do not poll frames.
 struct FakeEditor {
     out_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     frames: Arc<StdMutex<Vec<serde_json::Value>>>,
+    pending: Arc<StdMutex<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
 }
 
 impl FakeEditor {
@@ -331,7 +379,12 @@ impl FakeEditor {
             }
         });
         let frames = Arc::new(StdMutex::new(Vec::new()));
+        let pending = Arc::new(StdMutex::new(HashMap::<
+            String,
+            oneshot::Sender<serde_json::Value>,
+        >::new()));
         let sink = Arc::clone(&frames);
+        let pending_sink = Arc::clone(&pending);
         let answer_tx = out_tx.clone();
         tokio::spawn(async move {
             let mut out = stdout;
@@ -350,12 +403,35 @@ impl FakeEditor {
                         let reply =
                             serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": null });
                         let _ = answer_tx.send(encode_message(&reply));
+                    } else if has_id {
+                        if let Some(key) = jsonrpc_id_key(&msg["id"]) {
+                            if let Some(tx) = pending_sink.lock().unwrap().remove(&key) {
+                                let _ = tx.send(msg.clone());
+                            }
+                        }
                     }
                     sink.lock().unwrap().push(msg);
                 }
             }
         });
-        Self { out_tx, frames }
+        Self {
+            out_tx,
+            frames,
+            pending,
+        }
+    }
+
+    /// Register a oneshot keyed by `msg`'s request id, then write the frame.
+    /// The stdout reader completes the oneshot on the matching response.
+    fn send_request(&self, msg: &serde_json::Value) -> oneshot::Receiver<serde_json::Value> {
+        let id = msg
+            .get("id")
+            .expect("client JSON-RPC request must carry an id");
+        let key = jsonrpc_id_key(id).expect("JSON-RPC id is a number or string");
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(key, tx);
+        let _ = self.out_tx.send(encode_message(msg));
+        rx
     }
 
     async fn send(&self, msg: &serde_json::Value) {
@@ -365,85 +441,10 @@ impl FakeEditor {
     fn all_frames(&self) -> Vec<serde_json::Value> {
         self.frames.lock().unwrap().clone()
     }
-
-    async fn wait_for(
-        &self,
-        pred: impl Fn(&serde_json::Value) -> bool,
-        timeout: Duration,
-    ) -> Option<serde_json::Value> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            if let Some(found) = self
-                .frames
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|m| pred(m))
-                .cloned()
-            {
-                return Some(found);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return None;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }
-}
-
-/// Locate the `verter-relay-shim` binary in the workspace target profile dir.
-/// `CARGO_BIN_EXE_*` is only exported to the DEFINING crate's tests, and the shim
-/// lives in a sibling binary crate, so it is located next to this test executable
-/// (`target/<profile>/deps/<test>` → `target/<profile>/verter-relay-shim`).
-fn shim_binary_path() -> PathBuf {
-    let mut dir = std::env::current_exe().expect("current test exe");
-    dir.pop(); // deps/
-    dir.pop(); // <profile>/
-    let name = if cfg!(windows) {
-        "verter-relay-shim.exe"
-    } else {
-        "verter-relay-shim"
-    };
-    dir.join(name)
-}
-
-/// Ensure the shim binary is current (self-contained: `cargo test -p verter_lsp`
-/// does not build a sibling crate's bin). An existing path is not sufficient: Cargo
-/// can leave a stale sibling binary after the control protocol changes. Build once per
-/// test process; Cargo's incremental check makes the up-to-date case cheap.
-fn ensure_shim_built() -> PathBuf {
-    static CURRENT_SHIM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CURRENT_SHIM
-        .get_or_init(|| {
-            let profile = if cfg!(debug_assertions) {
-                "--profile=dev"
-            } else {
-                "--release"
-            };
-            let status = std::process::Command::new(env!("CARGO"))
-                .args([
-                    "build",
-                    "-p",
-                    "verter_relay_shim",
-                    "--bin",
-                    "verter-relay-shim",
-                ])
-                .arg(profile)
-                .status()
-                .expect("spawn cargo build for the relay shim");
-            assert!(status.success(), "cargo build of verter-relay-shim failed");
-            let path = shim_binary_path();
-            assert!(
-                path.is_file(),
-                "the relay shim binary is missing after build: {path:?}"
-            );
-            path
-        })
-        .clone()
 }
 
 fn spawn_shim(tsgo: &Path, control_dir: &Path, session_key: &str) -> Child {
-    Command::new(ensure_shim_built())
+    Command::new(super::shim_live::relay_shim_bin())
         .arg("--real-tsgo")
         .arg(tsgo)
         .arg("--control-dir")
@@ -550,15 +551,15 @@ async fn setup(tsgo: &Path, tag: &str) -> Harness {
     let editor_stdout = shim.stdout.take().expect("shim stdout piped");
     let editor = FakeEditor::new(editor_stdin, editor_stdout);
 
-    editor
-        .send(&serde_json::json!({
+    let init_resp = tokio::time::timeout(
+        Duration::from_secs(40),
+        editor.send_request(&serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init_params(&root_uri),
-        }))
-        .await;
-    let init_resp = editor
-        .wait_for(|m| m["id"] == 1, Duration::from_secs(40))
-        .await
-        .expect("the relayed initialize response");
+        })),
+    )
+    .await
+    .expect("the relayed initialize response hang-detected")
+    .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
         Some("7.0.2"),
@@ -622,15 +623,15 @@ async fn setup_dual_claimant(tsgo: &Path, tag: &str) -> Harness {
     let editor_stdout = shim.stdout.take().expect("shim stdout piped");
     let editor = FakeEditor::new(editor_stdin, editor_stdout);
 
-    editor
-        .send(&serde_json::json!({
+    let init_resp = tokio::time::timeout(
+        Duration::from_secs(40),
+        editor.send_request(&serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init_params(&root_uri),
-        }))
-        .await;
-    let init_resp = editor
-        .wait_for(|m| m["id"] == 1, Duration::from_secs(40))
-        .await
-        .expect("the relayed initialize response");
+        })),
+    )
+    .await
+    .expect("the relayed initialize response hang-detected")
+    .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
         Some("7.0.2"),
@@ -732,13 +733,11 @@ async fn shared_provider_serves_real_vue_macro_carrier() {
         .await
         .expect("inject the real IDE carrier");
 
-    let diags = tokio::time::timeout(
-        Duration::from_secs(45),
+    let diags = diagnostics_until_code!(
         h.provider.semantic_diagnostics_for_carrier(&carrier_tsx),
-    )
-    .await
-    .expect("shared semantic diagnostics timed out")
-    .expect("shared semantic diagnostics");
+        "2322",
+        "[macro] shared --api carrier diagnostics"
+    );
 
     let codes: Vec<_> = diags.iter().filter_map(|d| d.code.clone()).collect();
     eprintln!("[macro] shared --api carrier diagnostics codes = {codes:?}");
@@ -841,13 +840,11 @@ async fn shared_provider_serves_dual_claimant_carrier_with_real_types() {
         .await
         .expect("inject the real IDE carrier");
 
-    let diags = tokio::time::timeout(
-        Duration::from_secs(45),
+    let diags = diagnostics_until_code!(
         h.provider.semantic_diagnostics_for_carrier(&carrier_tsx),
-    )
-    .await
-    .expect("shared semantic diagnostics timed out")
-    .expect("shared semantic diagnostics");
+        "2322",
+        "[dualclaim] shared --api carrier diagnostics"
+    );
 
     let codes: Vec<_> = diags.iter().filter_map(|d| d.code.clone()).collect();
     eprintln!("[dualclaim] shared --api carrier diagnostics codes = {codes:?}");
@@ -929,17 +926,39 @@ async fn shared_provider_carrier_never_leaks_to_editor() {
         .await;
 
     // Drive an editor request whose response could reference the carrier.
-    h.editor
-        .send(&serde_json::json!({
+    let leak_probe = tokio::time::timeout(
+        Duration::from_secs(15),
+        h.editor.send_request(&serde_json::json!({
             "jsonrpc": "2.0", "id": 100, "method": "workspace/symbol",
             "params": { "query": "Widget" },
-        }))
-        .await;
-    let _ = h
-        .editor
-        .wait_for(|m| m["id"] == 100, Duration::from_secs(15))
-        .await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+        })),
+    )
+    .await
+    .expect("the leak-probe workspace/symbol request did not complete")
+    .expect("the leak-probe workspace/symbol oneshot closed without a response");
+    assert_eq!(
+        leak_probe.get("id").and_then(|id| id.as_u64()),
+        Some(100),
+        "the leak-probe response must complete for request id 100, got {leak_probe}"
+    );
+    // Protocol fence: a subsequent request/response on the same stream
+    // happens-after any leak that was already in flight. Inspect after
+    // that receipt, not after an unconditional extra sleep.
+    let fence = tokio::time::timeout(
+        Duration::from_secs(15),
+        h.editor.send_request(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 101, "method": "workspace/symbol",
+            "params": { "query": "fence" },
+        })),
+    )
+    .await
+    .expect("the protocol-fence workspace/symbol request did not complete")
+    .expect("the protocol-fence workspace/symbol oneshot closed without a response");
+    assert_eq!(
+        fence.get("id").and_then(|id| id.as_u64()),
+        Some(101),
+        "the protocol-fence response must complete for request id 101, got {fence}"
+    );
 
     for frame in h.editor.all_frames() {
         let text = frame.to_string();
@@ -1447,15 +1466,15 @@ async fn setup_composite(tsgo: &Path, tag: &str, owned: Arc<dyn TypeProvider>) -
     let editor_stdout = shim.stdout.take().expect("shim stdout piped");
     let editor = FakeEditor::new(editor_stdin, editor_stdout);
 
-    editor
-        .send(&serde_json::json!({
+    let init_resp = tokio::time::timeout(
+        Duration::from_secs(40),
+        editor.send_request(&serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init_params(&root_uri),
-        }))
-        .await;
-    let init_resp = editor
-        .wait_for(|m| m["id"] == 1, Duration::from_secs(40))
-        .await
-        .expect("the relayed initialize response");
+        })),
+    )
+    .await
+    .expect("the relayed initialize response hang-detected")
+    .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
         Some("7.0.2"),
@@ -1539,13 +1558,11 @@ async fn composite_overlays_shared_diagnostics_via_live_resolver() {
         .await
         .expect("composite open of the real IDE carrier");
 
-    let diags = tokio::time::timeout(
-        Duration::from_secs(45),
+    let diags = diagnostics_until_code!(
         h.composite.get_diagnostics(&carrier_tsx),
-    )
-    .await
-    .expect("composite get_diagnostics timed out")
-    .expect("composite diagnostics");
+        "2322",
+        "[composite] diagnostics"
+    );
 
     let codes: Vec<_> = diags.iter().filter_map(|d| d.code.clone()).collect();
     eprintln!("[composite] diagnostics codes = {codes:?}");
@@ -1648,13 +1665,11 @@ async fn composite_successful_shared_route_never_activates_managed_fallback() {
     );
     assert_eq!(h.composite.child_pid(), None);
 
-    let diagnostics = tokio::time::timeout(
-        Duration::from_secs(45),
+    let diagnostics = diagnostics_until_code!(
         h.composite.get_diagnostics(&carrier_tsx),
-    )
-    .await
-    .expect("composite get_diagnostics timed out")
-    .expect("composite diagnostics");
+        "2322",
+        "strict pull diagnostics from the shared editor Program"
+    );
 
     let codes: Vec<_> = diagnostics
         .iter()
@@ -1897,15 +1912,15 @@ async fn setup_composite_monorepo(
     let editor_stdout = shim.stdout.take().expect("shim stdout piped");
     let editor = FakeEditor::new(editor_stdin, editor_stdout);
 
-    editor
-        .send(&serde_json::json!({
+    let init_resp = tokio::time::timeout(
+        Duration::from_secs(40),
+        editor.send_request(&serde_json::json!({
             "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": init_params(&root_uri),
-        }))
-        .await;
-    let init_resp = editor
-        .wait_for(|m| m["id"] == 1, Duration::from_secs(40))
-        .await
-        .expect("the relayed initialize response");
+        })),
+    )
+    .await
+    .expect("the relayed initialize response hang-detected")
+    .expect("the relayed initialize response");
     assert_eq!(
         init_resp["result"]["serverInfo"]["version"].as_str(),
         Some("7.0.2"),
@@ -2021,13 +2036,11 @@ async fn assert_template_member_served_typed(h: &CompositeHarness, topology: &st
     );
 
     // Sanity: the shared Program serves this carrier at all (the diagnostics lane).
-    let diags = tokio::time::timeout(
-        Duration::from_secs(45),
+    let diags = diagnostics_until_code!(
         h.composite.get_diagnostics(&carrier_tsx),
-    )
-    .await
-    .expect("composite get_diagnostics timed out")
-    .expect("composite diagnostics");
+        "2322",
+        format!("[{topology}] shared Program carrier diagnostics")
+    );
     let codes: Vec<_> = diags.iter().filter_map(|d| d.code.clone()).collect();
     assert!(
         diags.iter().any(|d| d.code.as_deref() == Some("2322")),

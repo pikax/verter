@@ -206,9 +206,9 @@ Filter is read ONCE at registration time inside `AuditRequestRegistration::new` 
 ### Peak-RSS sampler thread (native only)
 
 - Spawns lazily on the first `AuditRequestRegistration::new` call when `AuditConfig::audit_timing_capture` is on (single-shot start latch via `compare_exchange`).
-- Holds a `Weak<HostAuditRuntime>` — runtime drop releases the strong count, the next `weak.upgrade()` returns `None`, thread terminates.
+- Holds `Arc<SamplerState>` only — never `Arc<HostAuditRuntime>`. Runtime drop cannot land on the sampler thread.
 - Ticks every 50 ms; writes `fetch_max(current_process_rss())` into each in-flight request's `process_rss_peak_bytes` slot.
-- Runtime's `Drop` impl explicitly joins the handle so dropped hosts do not leak threads. Process-static `SAMPLER_THREAD_SPAWN_COUNT` and `SAMPLER_THREAD_JOIN_COUNT` counters discriminate "sampler did not spawn" from "sampler spawned but did not join".
+- Owner drop sends stop, unparks, and joins the sampler on the owner thread. Per-host observer state, not process-static join counters, discriminates spawn vs join.
 
 WASM targets gated off via `#[cfg(not(target_arch = "wasm32"))]` — no sampler thread, `process_rss_peak_bytes` stays at `0` regardless of `audit_timing_capture`.
 

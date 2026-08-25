@@ -188,12 +188,28 @@ rather than proceeding with a caveat.
    is cut from the candidate. Deferring a block's acceptance does not license landing uncovered work —
    it only moves work nobody owns onto the working branch, where the next block to touch it discovers
    the gap one item at a time. Naming a logical owner is not binding one.
-4. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
+   **Check non-circularity.** A delta that edits the charter, amendment or architecture document
+   supplying its own coverage is manufacturing it. Confirm the candidate touches none of the
+   instruments its mapping cites.
+
+   **Where a criterion bundles changes with different ratified bases, split it.** A mapping reading
+   "these two changes → one criterion, bound by that amendment" invites the reader to infer the
+   amendment covers both, and an amendment that expressly excludes one of them then appears to
+   authorise it. One basis per row.
+
+4. **Run the block's regression mechanism if the gate does not select it.** The canonical gate's
+   exclusion filters are not visible from its verdict, and a block whose only rail sits behind one
+   gets a green that is silent about it by construction — a compile-fail suite excluded by package
+   and test pattern is the worked example. Run it directly against **the tree that lands, identified
+   by tree hash**, and report it. Tree hash rather than commit sha: a squash changes commit identity
+   and never tree content, so a sha-based rule forces a redundant re-run for a difference that does
+   not exist.
+5. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
    candidate's sha, and the supplied message must comply — **in its body, not only its subject**.
    Naming the program, its revision or a block identifier, or a commit type `CLAUDE.md` does not
    list, returns the block. Whoever checks did not produce that evidence — that is what makes the
    check worth anything — and may refuse.
-5. **Run the gate.**
+6. **Run the gate.**
 
 **On gate success only:** squash under the supplied message verbatim, then land, then update the
 ledger, then **remove the block's worktree, delete the merged branch and prune** — on a successful

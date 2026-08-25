@@ -35,6 +35,7 @@
 
 use std::process::Command;
 use std::sync::Arc;
+#[cfg(feature = "external-corpus")]
 use std::time::Instant;
 
 use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
@@ -695,12 +696,25 @@ defineSlots<{ default(props: { row: string }): any }>()
 // Test #6h — REGRESSION (hermetic warm-pass)
 // ---------------------------------------------------------------------------
 //
-// First call <60s; second call <100ms. Cache reuse path must drop into
-// the `ComponentMetaResultDb` warm cache. SA-1.B-impl tightens the
-// dep-signature wiring so this regression triggers consistently.
+// Cache reuse path must drop into the `ComponentMetaResultDb` warm cache.
+// SA-1.B-impl tightens the dep-signature wiring so this regression triggers
+// consistently.
+//
+// The discriminator is the audit substrate's deterministic per-request work
+// counters (the same rail #7h below uses), never elapsed time: a wall-clock
+// threshold measures the machine under concurrent load, not the cache, and a
+// flaky threshold trains re-running until green, which launders a real
+// regression. The cold pass must perform real synthesis work (charges > 0);
+// the warm pass — same host, same file, no invalidation between calls — must
+// perform NONE, because a genuine `ComponentMetaResultDb` hit returns the
+// cached result without re-entering the projector/instantiator at all.
 #[test]
 fn slot_bindings_warm_pass_o1_for_mocked_heritage() {
-    let host = build_test_host();
+    let host = Arc::new(VerterHost::new_standalone(HostConfig {
+        audit_enabled: true,
+        footprint_capture: true,
+        ..HostConfig::default()
+    }));
     // 50-member heritage chain — purely synthetic, no external corpus.
     let mut heritage = String::new();
     heritage.push_str("export interface Base { tag0: string }\n");
@@ -725,20 +739,46 @@ defineSlots<Slots>()
 "#,
     );
 
-    let cold_start = Instant::now();
-    let _ = host.get_component_meta("/src/Comp.vue").expect("cold meta");
-    let cold = cold_start.elapsed();
+    let charges_for = |footprint: &verter_audit::RequestFootprintAudit| -> u64 {
+        footprint.instantiations.len() as u64
+            + footprint.truncation_counters.instantiations_truncated
+            + footprint.projections.len() as u64
+            + footprint.truncation_counters.projections_truncated
+            + footprint.conditional_decisions.len() as u64
+            + footprint
+                .truncation_counters
+                .conditional_decisions_truncated
+    };
+
+    let (_analysis, _resolution, cold_record) = AuditedRequest::builder()
+        .attach_to(Arc::clone(&host))
+        .resolve_component_meta("/src/Comp.vue")
+        .expect("cold audited resolution");
+    let cold_footprint = cold_record
+        .footprint
+        .as_ref()
+        .expect("footprint capture is on for an audited request");
+    let cold_charges = charges_for(cold_footprint);
     assert!(
-        cold.as_secs() < 60,
-        "cold pass for 50-member heritage must finish under 60s; observed {cold:?}",
+        cold_charges > 0,
+        "cold pass for a 50-member heritage chain must perform real synthesis work \
+         (observed 0 charges — the fixture is not exercising the traversal)",
     );
 
-    let warm_start = Instant::now();
-    let _ = host.get_component_meta("/src/Comp.vue").expect("warm meta");
-    let warm = warm_start.elapsed();
-    assert!(
-        warm.as_millis() < 100,
-        "warm pass must hit the result cache; observed {warm:?}",
+    let (_analysis2, _resolution2, warm_record) = AuditedRequest::builder()
+        .attach_to(Arc::clone(&host))
+        .resolve_component_meta("/src/Comp.vue")
+        .expect("warm audited resolution");
+    let warm_footprint = warm_record
+        .footprint
+        .as_ref()
+        .expect("footprint capture is on for an audited request");
+    let warm_charges = charges_for(warm_footprint);
+    assert_eq!(
+        warm_charges, 0,
+        "warm pass must hit the ComponentMetaResultDb result cache and perform ZERO \
+         further projection/instantiation/conditional work — observed {warm_charges} \
+         charges, meaning the cache was bypassed and the traversal re-ran",
     );
 }
 

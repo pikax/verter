@@ -198,12 +198,18 @@ type StagedEntry = (Arc<str>, u64, u64, PublishedSourceState);
 /// closure, which records the logical source state each affected
 /// canonical has AFTER the transition it just performed. Every recorded
 /// entry lands in ONE epoch.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SourcePublication {
     entries: SmallVec<[StagedEntry; 2]>,
 }
 
 impl SourcePublication {
+    fn empty() -> Self {
+        Self {
+            entries: SmallVec::new(),
+        }
+    }
+
     /// Record that `canonical` now has a coherent committed source.
     pub fn present(
         &mut self,
@@ -218,6 +224,14 @@ impl SourcePublication {
             generation,
             PublishedSourceState::Present { whole_hash },
         ));
+    }
+
+    /// Bump `node`'s generation. This capability exists only on
+    /// [`SourcePublication`], which is only handed out while the
+    /// publication lock is held, so a generation bump that must be
+    /// atomic with publication cannot run outside that hold.
+    pub fn bump_node_generation(&self, node: &crate::node::FileNode) -> u64 {
+        node.bump_generation(self)
     }
 
     /// Record that `canonical` now has no coherent committed source —
@@ -359,7 +373,7 @@ impl SchedulerSourceDirectory {
     /// OUTER to the `nodes` / `versions` DashMap shards. `transition`
     /// may take a DashMap shard; it must NEVER take the DAG lock.
     pub fn publish_transition<R>(&self, transition: impl FnOnce(&mut SourcePublication) -> R) -> R {
-        let mut publication = SourcePublication::default();
+        let mut publication = SourcePublication::empty();
         let mut superseded = 0u64;
         let mut trimmable: SmallVec<[Arc<str>; 2]> = SmallVec::new();
 
@@ -616,7 +630,3 @@ impl Drop for SchedulerSourceRoot {
         self.directory.release_root(self.epoch);
     }
 }
-
-#[cfg(test)]
-#[path = "source_root_tests.rs"]
-mod source_root_tests;

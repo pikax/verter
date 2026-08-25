@@ -2,22 +2,33 @@
 //!
 //! ## Closure perf probes
 //!
-//! Three probes verify the host-DB-routed read-through pattern does
-//! not regress:
+//! The probes here verify the host-DB-routed read-through pattern does not
+//! regress; among them:
 //!
-//! - `dispatch_lowering_cost_bounded_on_editortoolbar`: sequential
-//!   bound — `< min(baseline, 500ms)` per dispatch lowering call on
-//!   the EditorToolbar fixture.
-//! - `dispatch_lowering_concurrent_does_not_regress`: 4-thread
-//!   contention test — concurrent p95 < +10% of sequential baseline.
+//! - `dispatch_lowering_cost_bounded_on_editortoolbar`: a warm-replay
+//!   request on the EditorToolbar fixture must be served entirely from
+//!   the `ComponentMetaResultDb` final-result cache — a deterministic
+//!   `component_meta_result_cache_hits`/`_misses` delta proof (zero
+//!   misses, exactly one hit), not a wall-clock budget.
+//! - `concurrent_warm_readers_all_hit_the_final_result_cache`: four
+//!   threads read the same ALREADY-WARM key concurrently; all four must
+//!   succeed with a result-cache miss delta of zero and a hit delta of
+//!   exactly four. Because the key is warm before the burst, this probe
+//!   says nothing about serialization, cold coalescing, or whether any
+//!   two reads overlapped — it proves only that every concurrent warm
+//!   reader reaches and hits the one shared final-result cache.
 //! - `concurrent_demand_for_same_meta_key_collapses_to_one_compute`:
-//!   32 threads on the same cold key — a deterministic
+//!   32 threads on the same COLD key — a deterministic
 //!   singleflight-collapse rendezvous (NOT a wall-clock proxy). One
 //!   request leads the cold compute; the other 31 Follower-join the
 //!   in-flight lane. The invariant is structural: exactly one cold
 //!   recompute, one Leader + 31 Followers, no `Cache`/`Fallback`/
-//!   forked lane, all 32 results structurally identical, and the
-//!   singleflight lane drains to zero after the burst.
+//!   forked lane, exactly one published candidate for the key, all 32
+//!   results structurally identical, and the singleflight lane drains
+//!   to zero after the burst. It drives the resolve-tier singleflight
+//!   lane through a test-only request-host adapter, so it asserts lane
+//!   roles and recompute counts, not `ComponentMetaResultDb` hit/miss
+//!   deltas.
 //!
 //! ## Memo footprint audit
 //!
@@ -25,14 +36,26 @@
 //! semantic graph's node count after a fixed query suite stays
 //! within 1.20× the post-Step-2 baseline.
 //!
-//! These probes are observational guards. They do not assert
-//! absolute timing budgets (CI VMs are noisy); they assert
-//! relative-to-baseline bounds the host-DB read-through pattern
-//! must not regress.
+//! These probes are observational guards. They do not assert wall-clock
+//! timing budgets at all (CI VMs are noisy and elapsed-time ceilings flip
+//! under machine load with zero code change; CLAUDE.md forbids
+//! `Instant`/`as_millis` assertions in `verter_session` correctness tests
+//! for exactly this reason). Instead they assert deterministic counter and
+//! structural properties the host-DB read-through pattern must not regress.
+//!
+//! **Known, accepted coverage gap:** a counter proving "no re-lowering
+//! happened" does not prove "the read-through was actually fast" — a pure
+//! LATENCY regression with no structural signature (e.g. an injected sleep
+//! on an already-warm result-cache hit) would not be caught by these
+//! probes. That is a deliberate scope boundary, not an oversight: true
+//! performance-regression coverage for this class belongs in `verter_bench`
+//! (statistically repeated, warmed-up measurements — the environment
+//! wall-clock assertions are actually sound in), not in a correctness test
+//! file whose own CI runs are exactly the noisy, single-sample environment
+//! that makes a wall-clock ceiling here flip under load.
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
 
 use crate::host_manage::component_meta_request_impl::ViewBoundRequestHost;
 use crate::meta::MetaProject;
@@ -45,7 +68,6 @@ use crate::session_view::HostViewRef;
 use crate::types::HostConfig;
 use crate::VerterHost;
 
-const HARD_CAP_NS: u128 = 500_000_000;
 const NODE_COUNT_GROWTH_LIMIT: f64 = 1.20;
 
 fn make_project() -> Arc<MetaProject> {
@@ -262,89 +284,126 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     );
 }
 
-fn time_ns<F: FnOnce()>(f: F) -> u128 {
-    let start = Instant::now();
-    f();
-    start.elapsed().as_nanos()
-}
-
 #[test]
 fn dispatch_lowering_cost_bounded_on_editortoolbar() {
     let project = make_project();
     upsert_editor_toolbar_fixture(&project);
     let session = project.open_session_batch().unwrap();
+    let host = session.host();
 
-    // Warm baseline — first eval pays parse / shallow / decl cost.
-    let baseline_ns = time_ns(|| {
-        let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
-    });
+    // Cold — first resolution pays parse / shallow / decl / dispatch-lowering
+    // cost and populates the `ComponentMetaResultDb` final-result cache.
+    let _ = session.get_component_meta("/EditorToolbar.vue").unwrap();
 
-    // Warm-replay should hit warm caches at every level.
-    let warm_ns = time_ns(|| {
-        let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
-    });
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+    let misses_before = host
+        .provenance()
+        .component_meta_result_cache_misses
+        .load(Relaxed);
 
-    eprintln!(
-        "step3 perf probe: baseline {baseline_ns} ns, warm {warm_ns} ns, hard cap {HARD_CAP_NS} ns"
+    // Warm-replay must be served entirely from the `ComponentMetaResultDb`
+    // final-result cache (`try_component_meta_cache_hit` — "zero resolver
+    // work" per its own doc comment), never the resolver-node cache: a
+    // warm `get_component_meta` call returns from the result cache BEFORE
+    // ever reaching the resolver dispatch that owns `resolver_node_cache_*`.
+    // Deterministic proof, not a wall-clock one: an elapsed-time ceiling
+    // flips under machine load with zero code change, while these counters
+    // are exact regardless of scheduling.
+    let _ = session.get_component_meta("/EditorToolbar.vue").unwrap();
+
+    assert_eq!(
+        host.provenance()
+            .component_meta_result_cache_misses
+            .load(Relaxed)
+            - misses_before,
+        0,
+        "warm-replay missed the ComponentMetaResultDb final-result cache — Step 3 \
+         read-through is regressing (re-lowering on an already-warm request)"
     );
-
-    // Warm-replay must beat the hard cap. Cold may exceed on noisy CI.
-    assert!(
-        warm_ns < HARD_CAP_NS,
-        "warm-replay {warm_ns} ns exceeds hard cap {HARD_CAP_NS} ns — Step 3 read-through is regressing"
+    assert_eq!(
+        host.provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed)
+            - hits_before,
+        1,
+        "warm-replay must hit the ComponentMetaResultDb final-result cache exactly once"
     );
 }
 
+/// Four CONCURRENT readers against an ALREADY-WARM key must all be served
+/// by the one shared `ComponentMetaResultDb` final-result cache: all four
+/// succeed, the miss delta is zero, and the hit delta is exactly four. A
+/// result cache that became thread-local (each reader missing against its
+/// own empty copy) fails these deltas.
+///
+/// What this does NOT prove: the test does not force the four lookups to
+/// overlap — a warm lookup is short and the threads may run one after
+/// another — so a bypass that only triggers under genuine overlap is NOT
+/// covered. The key is also warmed before the burst, so it says nothing
+/// about serialization or cold coalescing; the cold-key concurrency
+/// invariants are owned by
+/// `concurrent_demand_for_same_meta_key_collapses_to_one_compute` below.
 #[test]
-fn dispatch_lowering_concurrent_does_not_regress() {
+fn concurrent_warm_readers_all_hit_the_final_result_cache() {
     let project = make_project();
     upsert_editor_toolbar_fixture(&project);
     let session = project.open_session_batch().unwrap();
 
-    // Warm the cache before contention measurement.
-    let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
+    // Warm the cache before the concurrent burst.
+    let _ = session.get_component_meta("/EditorToolbar.vue").unwrap();
 
-    // Sequential baseline: 4 sequential warm queries.
-    let seq_ns = time_ns(|| {
-        for _ in 0..4 {
-            let _ = session.evaluate_types("/EditorToolbar.vue").unwrap();
-        }
-    });
-
-    // Concurrent: same 4 warm queries, but issued from threads. The
-    // host's typed DBs are DashMap-backed and admit concurrent readers
-    // without single-writer contention.
     let host = session.host();
-    let host_ptr: usize = host as *const VerterHost as usize;
-    let concurrent_ns = time_ns(|| {
-        std::thread::scope(|scope| {
-            for _ in 0..4 {
-                scope.spawn(move || {
-                    // SAFETY: VerterHost outlives this scope (session
-                    // is held by parent). All public APIs we call are
-                    // `&self`. The crate has many internal pointer
-                    // casts of the same shape (see DashMap reads on
-                    // ProjectTypeStore from Arc<VerterHost>).
-                    let host_ref: &VerterHost = unsafe { &*(host_ptr as *const VerterHost) };
-                    let _ = host_ref.get_component_meta("/EditorToolbar.vue");
-                });
-            }
-        });
+    let misses_before = host
+        .provenance()
+        .component_meta_result_cache_misses
+        .load(Relaxed);
+    let hits_before = host
+        .provenance()
+        .component_meta_result_cache_hits
+        .load(Relaxed);
+
+    // Results are collected (not discarded) so a silently-failed or
+    // serialized-away request can't make the zero-miss assertion pass
+    // without every reader actually reaching and hitting the cache.
+    // `host` is a `&VerterHost` that outlives the scope, so the scoped
+    // threads borrow it directly.
+    let results: Vec<Option<_>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| scope.spawn(move || host.get_component_meta("/EditorToolbar.vue")))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("concurrent reader must not panic"))
+            .collect()
     });
+    assert_eq!(
+        results.iter().filter(|r| r.is_some()).count(),
+        4,
+        "all 4 concurrent warm readers must succeed — a silently-failed reader would \
+         never reach the result cache and would make the miss-count assertion vacuous"
+    );
 
-    eprintln!("step3 concurrent probe: seq {seq_ns} ns, concurrent {concurrent_ns} ns");
-
-    // Tolerance: concurrent should be ≤ 20× sequential. The two paths
-    // measure different APIs (evaluate_types vs get_component_meta)
-    // and concurrent has scope/spawn overhead. The probe asserts the
-    // weaker contract — no thundering-herd-style collapse where the
-    // host DB is fully serialized and each thread blocks on every
-    // other thread.
-    let limit = seq_ns.saturating_mul(20).max(HARD_CAP_NS);
-    assert!(
-        concurrent_ns <= limit,
-        "concurrent {concurrent_ns} ns exceeds 20× sequential {seq_ns} ns (limit {limit}) — \
-         host-DB read-through likely thrashing under contention"
+    assert_eq!(
+        host.provenance()
+            .component_meta_result_cache_misses
+            .load(Relaxed)
+            - misses_before,
+        0,
+        "concurrent warm reads on an already-warmed key missed the ComponentMetaResultDb \
+         final-result cache — host-DB read-through is thrashing (re-lowering) under contention"
+    );
+    assert_eq!(
+        host.provenance()
+            .component_meta_result_cache_hits
+            .load(Relaxed)
+            - hits_before,
+        4,
+        "all 4 concurrent warm readers must hit the ComponentMetaResultDb final-result \
+         cache — fewer than 4 means at least one reader took neither the hit nor the \
+         miss path (e.g. bypassed the result cache entirely)"
     );
 }
 
@@ -584,6 +643,7 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
     let token = probe_host.snapshot_store_view_read().0.compat_token();
 
     let sf = host.resolver_runtime().component_meta.singleflight();
+    let follower_parked = sf.subscribe_joiner_park();
     let gate = Arc::new(LeaderGate::new());
 
     let recomputes_before = host
@@ -635,19 +695,19 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
             })
             .collect();
 
-        // Deterministically wait until every Follower has committed onto
-        // the Leader's run lane (each adds 2 refs). NO sleep, NO barrier
-        // — poll the existing lane strong count with yield.
-        let mut spins = 0u64;
-        while sf.test_flight_strong_count(&key, token) < FULL_OCCUPANCY {
-            spins += 1;
-            assert!(
-                spins < 10_000_000,
-                "liveness: a follower never committed onto the leader's run lane (count stuck \
-                 below {FULL_OCCUPANCY}). A follower pinned a DIFFERENT lane than the leader's run \
-                 lane (pin/run lane drift).",
-            );
-            std::thread::yield_now();
+        // Wait until every Follower has parked on the Leader's condvar.
+        // The joiner-park send fires immediately before that wait, so
+        // FOLLOWERS receipts are the exact occupancy proof.
+        for i in 0..FOLLOWERS {
+            follower_parked
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "follower {i} never parked on the leader's run lane (stuck below \
+                         {FULL_OCCUPANCY}). A follower pinned a DIFFERENT lane than the leader's \
+                         run lane (pin/run lane drift)."
+                    )
+                });
         }
         // Full occupancy is the deterministic ceiling: Leader(3) + 31×2.
         // No caller holds more, and every Follower is blocked on the

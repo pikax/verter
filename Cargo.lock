@@ -4079,7 +4079,12 @@ dependencies = [
  "libc",
  "serde_json",
  "tokio",
+ "verter_lsp",
+ "verter_session",
+ "verter_span",
+ "verter_test_support",
  "verter_tsgo_api",
+ "verter_workspace",
  "windows-sys",
 ]
 

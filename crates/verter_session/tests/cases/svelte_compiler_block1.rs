@@ -12,7 +12,8 @@
 //! * `get_ide` is a pure cached read — it does NOT compile on a cache miss.
 //! * `ensure_ide_compiled` is idempotent / warm on the second call, and a
 //!   dependency edit forces recompute before `get_ide`.
-//! * Racing `ensure_ide_compiled` and `get_virtual_file(Main)` coalesce.
+//! * Concurrent `ensure_ide_compiled` and `get_virtual_file(Main)` coalesce onto
+//!   ONE parsed carrier artifact and ONE published compile slot.
 //! * A Svelte projector typed-unsupported diagnostic reaches the host
 //!   `DiagnosticsSnapshot` through the runtime-bundle diagnostics channel.
 
@@ -760,26 +761,48 @@ fn ensure_ide_compiled_is_idempotent_and_invalidates_on_dependency_edit() {
 }
 
 #[test]
-fn racing_ensure_ide_compiled_and_get_virtual_file_main_coalesce() {
+fn concurrent_ensure_ide_compiled_and_get_virtual_file_main_share_one_published_slot() {
     // Vue produces BOTH a runtime Main and an IDE artifact from ONE shared
-    // compile. Racing `ensure_ide_compiled` (Ide demand) and
+    // compile. Concurrent `ensure_ide_compiled` (Ide demand) and
     // `get_virtual_file(Main)` (VirtualNode demand) on the same
     // (canonical, profile) must COALESCE on ONE shared parsed carrier artifact
     // and ONE published compile slot — the demand is checked AFTER the shared
     // result, so both succeed and the result is consistent regardless of which
     // thread wins.
     //
-    // DISCRIMINATING (single-slot coalescing, not just "both succeed"): the
-    // racing pair must share ONE parsed carrier artifact. `carrier_parses` is
-    // the framework-neutral parse-once rail (one increment per
-    // `CarrierCompiler::parse`); a regression where each request RE-PARSED the
-    // carrier independently (a per-request parse instead of a shared cached
-    // artifact) would bump it to >= 2. Two independent compiles that each
-    // re-parsed would fail this assertion; the current both-succeed-only test
-    // would not. The carrier is parsed once at `upsert`, and BOTH the Ide and
-    // the Main demand reuse that one cached artifact (no `src=` blocks, no
-    // parse-affecting template options ⇒ `can_use_cache`), so exactly ONE
-    // carrier parse backs the racing pair.
+    // STAGING — what it guarantees and what it does not. The two requests are
+    // released from a shared `Barrier`, so neither is issued until both threads
+    // exist and are at the gate. That removes the ordering where the first
+    // thread runs to completion and publishes before the second is even
+    // scheduled, which is the ordering a loaded machine otherwise produces. It
+    // does NOT guarantee both requests are inside the cold compile region at
+    // the same instant: once the barrier releases, either thread may be
+    // descheduled. Forcing exact simultaneous cold admission needs a staging
+    // seam at the pipeline's cold-admission point, and the seam that exists
+    // there is `#[cfg(test)]` + `pub(crate)` — neither compiled into nor
+    // visible from this integration binary. So this test is named for what it
+    // PROVES (one published slot), not for a deterministic overlap it cannot
+    // stage, and every assertion below holds whether or not the two requests
+    // actually overlapped.
+    //
+    // DISCRIMINATING on two independent rails, neither of them a timing
+    // observation:
+    //
+    // 1. ONE parsed carrier artifact. `carrier_parses` is the framework-neutral
+    //    parse-once rail (one increment per `CarrierCompiler::parse`); a
+    //    regression where each request RE-PARSED the carrier independently
+    //    would bump it to >= 2. The carrier is parsed once at `upsert`, and
+    //    BOTH the Ide and the Main demand reuse that one cached artifact (no
+    //    `src=` blocks, no parse-affecting template options ⇒ `can_use_cache`).
+    //
+    // 2. ONE PUBLISHED compile slot. `compile_slot_is_warm` is the read-only
+    //    mirror of the writer's own warm-hit gate, so asserting it once both
+    //    requests have completed is a CAUSAL witness that the shared slot was
+    //    published — not an inference drawn from how many computes happened to
+    //    run. Neither other rail covers this: parse reuse would still hold for
+    //    a pair that computed independently and published nothing reusable,
+    //    and the cold-compute bound below is satisfied by two independent
+    //    computes just as it is by one shared one.
     let host = host();
     upsert(&host, "/src/App.vue", VUE_SRC, FileLanguage::vue());
     // The race is between an IDE demand and a RUNTIME demand on ONE identity,
@@ -789,24 +812,33 @@ fn racing_ensure_ide_compiled_and_get_virtual_file_main_coalesce() {
     let profile = runtime_and_ide_profile();
 
     // Baseline AFTER upsert: the upsert performed the single carrier parse.
-    // Measure the delta the racing compile pair adds — it must add NO further
-    // carrier parse (the compiles reuse the one cached artifact) and run at
-    // most one cold compile-output compute (the coalesced shared slot).
+    // Measure the delta the concurrent compile pair adds — it must add NO
+    // further carrier parse (the compiles reuse the one cached artifact) and
+    // run at most one cold compile-output compute per requesting thread.
     let parses_before = host.provenance_snapshot().carrier_parses;
     let cold_runs_before = host
         .provenance()
         .compile_cold_runs
         .load(std::sync::atomic::Ordering::Relaxed);
 
+    // Both threads park here and are released together, so the pair is issued
+    // as one event rather than in spawn order.
+    let gate = Arc::new(std::sync::Barrier::new(2));
     let h1 = {
         let host = Arc::clone(&host);
         let profile = profile.clone();
-        std::thread::spawn(move || host.ensure_ide_compiled("/src/App.vue", &profile))
+        let gate = Arc::clone(&gate);
+        std::thread::spawn(move || {
+            gate.wait();
+            host.ensure_ide_compiled("/src/App.vue", &profile)
+        })
     };
     let h2 = {
         let host = Arc::clone(&host);
         let profile = profile.clone();
+        let gate = Arc::clone(&gate);
         std::thread::spawn(move || {
+            gate.wait();
             host.get_virtual_file(VirtualQuery {
                 raw_id: None,
                 canonical_id: Some("/src/App.vue".to_string()),
@@ -826,42 +858,94 @@ fn racing_ensure_ide_compiled_and_get_virtual_file_main_coalesce() {
         .expect("main thread")
         .expect("get_virtual_file(Main) ok");
 
+    // Close the cold-compute window HERE, on the join. The bound applied to it
+    // is derived over the two REQUESTING THREADS, so the window must contain
+    // those two requests and nothing else. The cached reads further down are
+    // sequential post-join callers that are not part of the pair; charging
+    // their compute to a two-thread bound is how a third compute could answer
+    // a bound that never covered it.
+    let cold_runs_after_race = host
+        .provenance()
+        .compile_cold_runs
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let cold_delta = cold_runs_after_race - cold_runs_before;
+
+    // THE PUBLICATION WITNESS, taken before any further read. Both requests
+    // have completed, so the shared slot must be published: this predicate is
+    // the read-only twin of the writer's own warm-hit gate — it calls the same
+    // slot lookup with the same arguments, so it cannot drift from the writer —
+    // and therefore `false` means a read taken now would not be served warm:
+    // the pair finished WITHOUT leaving a slot the other surface can reuse.
+    assert!(
+        host.compile_slot_is_warm("/src/App.vue", &profile),
+        "the completed pair must leave ONE PUBLISHED compile slot: \
+         `compile_slot_is_warm` mirrors the writer's warm-hit gate, so `false` \
+         means neither request published a slot the other demand surface can \
+         reuse (cold computes observed: {cold_delta})"
+    );
+
     assert!(ide_ok, "the IDE ensure must succeed on the coalesced slot");
     assert!(
         main.contains("export default _sfc_main"),
         "the Main demand must produce the runtime module on the coalesced slot"
     );
-    // Both surfaces are now readable from the one shared compile.
-    assert!(host.get_ide("/src/App.vue", &profile).is_some());
-    assert!(main_code(&host, "/src/App.vue", &profile).is_some());
 
-    // Single-slot coalescing: the racing pair shares ONE parsed carrier
-    // artifact — neither request re-parsed the carrier.
-    let parses_after = host.provenance_snapshot().carrier_parses;
-    assert_eq!(
-        parses_after, parses_before,
-        "the racing Ide + Main pair must reuse the ONE carrier artifact parsed at upsert \
-         (carrier_parses must not increase): a per-request re-parse is a coalescing regression \
-         (before={parses_before}, after={parses_after})"
-    );
-    // Both subsequent cached reads above add NO cold compile compute; the
-    // published slot serves them warm. The racing pair itself ran at most a
-    // bounded number of cold computes (the demand is checked AFTER the shared
-    // result; the published slot satisfies both surfaces), never re-parsing.
-    let cold_runs_after = host
-        .provenance()
-        .compile_cold_runs
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let cold_delta = cold_runs_after - cold_runs_before;
+    // The pair ran at least one cold compile-output compute (the slot was cold
+    // at the baseline) and at most one per requesting thread (the demand is
+    // checked AFTER the shared result; the published slot satisfies both
+    // surfaces). Measured on the join, so the count is the pair's alone.
     assert!(
         cold_delta >= 1,
-        "the racing pair must have run at least one cold compile-output compute (delta={cold_delta})"
+        "the concurrent pair must have run at least one cold compile-output \
+         compute (delta={cold_delta})"
     );
     assert!(
         cold_delta <= 2,
-        "the racing pair shares ONE compile slot — at most one cold compute PER racing thread \
-         (<= 2 total); a larger count means the cached slot is not being reused across the \
-         demand surfaces (delta={cold_delta})"
+        "at most one cold compute PER requesting thread (<= 2 total); a larger \
+         count means the cached slot is not being reused across the demand \
+         surfaces (delta={cold_delta})"
+    );
+
+    // Both surfaces are readable from the one shared compile — and both reads
+    // must CONSUME the published slot, not recompute it. This is a SECOND,
+    // separate cold-compute window, disjoint from the pair's window above:
+    // that one bounds the two racing requests; this one bounds the two
+    // sequential post-join reads, which are demand-bearing (`main_code` goes
+    // through `get_virtual_file` and CAN compute). The zero bound is CAUSAL,
+    // not probabilistic: `compile_slot_is_warm` was asserted true immediately
+    // above, so the slot is proven published before either read is issued — a
+    // read that cold-computes here has not lost a race, it has failed to
+    // consume a slot that demonstrably exists.
+    let cold_runs_before_reads = host
+        .provenance()
+        .compile_cold_runs
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(host.get_ide("/src/App.vue", &profile).is_some());
+    assert!(main_code(&host, "/src/App.vue", &profile).is_some());
+    let cold_runs_after_reads = host
+        .provenance()
+        .compile_cold_runs
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let read_cold_delta = cold_runs_after_reads - cold_runs_before_reads;
+    assert_eq!(
+        read_cold_delta, 0,
+        "the post-join `get_ide` + `get_virtual_file(Main)` reads must add \
+         EXACTLY ZERO cold compile-output computes: the slot was proven \
+         published (warm) immediately before these reads, so any cold compute \
+         here means a demand surface stopped consuming the published slot and \
+         recomputed outside the pair's window — the regression where the pair's \
+         two-thread bound passes while the Main read silently cold-computes \
+         after the join (cold computes added by the reads: {read_cold_delta})"
+    );
+
+    // Single-slot coalescing: the pair shares ONE parsed carrier artifact —
+    // neither request re-parsed the carrier.
+    let parses_after = host.provenance_snapshot().carrier_parses;
+    assert_eq!(
+        parses_after, parses_before,
+        "the concurrent Ide + Main pair must reuse the ONE carrier artifact parsed at upsert \
+         (carrier_parses must not increase): a per-request re-parse is a coalescing regression \
+         (before={parses_before}, after={parses_after})"
     );
 }
 

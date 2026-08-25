@@ -1,10 +1,5 @@
 use super::*;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
-#[cfg(target_arch = "wasm32")]
-use web_time::Duration;
-
 fn canonical(s: &str) -> Arc<str> {
     Arc::from(s)
 }
@@ -904,11 +899,13 @@ fn dep_reaches_owner_detects_cycle_past_256_hops() {
 ///   max_frontier_len grows toward O(WIDTH * WIDTH) = 256 per layer
 ///
 /// Discriminator: the test reads the BFS metrics directly via the
-/// instrumented variant and asserts the O(V) bound. The wall-clock
-/// fallback (2s) catches any timeout pathology, but the equality
-/// and inequality on the metric counters are the load-bearing
+/// instrumented variant and asserts the O(V) bound. The equality
+/// and inequality on the metric counters are the sole load-bearing
 /// assertions — they discriminate enqueue-time visited from
-/// pop-time visited without relying on timing.
+/// pop-time visited without relying on timing (a supplementary
+/// wall-clock fallback was removed as redundant: it added no
+/// discriminating power over these counters while risking a false
+/// failure under machine load).
 #[test]
 fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
     const LAYERS: usize = 6;
@@ -967,9 +964,7 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
     // Owner is not part of the graph — no cycle. Probe starts at
     // layer 0's first node; the BFS must exhaust the reachable
     // subgraph and return false.
-    let start = std::time::Instant::now();
     let (reachable, metrics) = dag.dep_reaches_owner_with_metrics(&owner, 1, &layers[0][0], 1);
-    let elapsed = start.elapsed();
     assert!(!reachable, "no cycle exists; BFS should return false");
 
     // Primary discriminating assertions on the BFS metrics.
@@ -1000,13 +995,6 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
          lets it grow toward O(edges).",
         metrics.max_frontier_len,
         REACHABLE,
-    );
-
-    // Fallback wall-clock bound: well above any O(V) walk but far
-    // below the O(E) blow-up the pop-time variant produces.
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "dense-graph BFS must complete in bounded O(V) time; elapsed = {elapsed:?}",
     );
 }
 

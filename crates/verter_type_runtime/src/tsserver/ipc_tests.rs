@@ -1518,6 +1518,78 @@ async fn carrier_refresh_receipt_waits_for_deferred_plugin_graph_application() {
     assert_eq!(refresh.applied_generation.load(Ordering::Acquire), 7);
 }
 
+/// Force `notify_waiters` in the former check-to-await gap.
+///
+/// What this discriminates is the ORDERING: `notify_waiters` stores no
+/// permit, so constructing the future AFTER the in-flight re-check loses
+/// the wake and the wait hangs. Planted and observed red. What it does
+/// NOT discriminate is `enable()` — on Tokio 1.52 `notified()` snapshots
+/// the `notify_waiters` counter at construction, so removing `enable()`
+/// leaves this green. Production keeps pin+enable as defense in depth,
+/// matching `RegistrationSignal`.
+#[tokio::test(start_paused = true)]
+async fn interactive_idle_wait_does_not_lose_notify_waiters_in_the_check_to_await_gap() {
+    let pending = TsserverPendingRequests::default();
+    pending.interactive_in_flight.store(1, Ordering::Release);
+    let fired = std::sync::atomic::AtomicBool::new(false);
+    let start = tokio::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        wait_for_interactive_idle_on_gap(&pending, |pending| {
+            if !fired.swap(true, Ordering::SeqCst) {
+                pending.interactive_in_flight.store(0, Ordering::Release);
+                pending.interactive_idle.notify_waiters();
+            }
+        }),
+    )
+    .await
+    .expect("notify_waiters in the check-to-await gap must resume the waiter");
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "the gap hook must have fired — otherwise the wait took the idle fast path"
+    );
+    assert_eq!(
+        tokio::time::Instant::now(),
+        start,
+        "a captured notify_waiters wake must not consume virtual time"
+    );
+}
+
+/// Same shape and same caveat as the two idle-wait gap tests: on Tokio 1.52
+/// `notified()` snapshots the `notify_waiters` generation at CONSTRUCTION, so
+/// this stays green with `enable()` removed. What it DOES discriminate is the
+/// ordering — constructing the future AFTER the applied-generation re-check
+/// (strictly: after the gap hook) loses the wake and hangs. Planted and
+/// observed red. Production keeps pin+`enable()` as defense in depth,
+/// matching `RegistrationSignal`.
+#[tokio::test(start_paused = true)]
+async fn carrier_refresh_wait_does_not_lose_notify_waiters_in_the_check_to_await_gap() {
+    let refresh = TsserverCarrierRefresh::default();
+    let fired = std::sync::atomic::AtomicBool::new(false);
+    let start = tokio::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        wait_for_carrier_refresh_on_gap(&refresh, 1, |refresh| {
+            if !fired.swap(true, Ordering::SeqCst) {
+                refresh.applied_generation.store(1, Ordering::Release);
+                refresh.completion.notify_waiters();
+            }
+        }),
+    )
+    .await
+    .expect("notify_waiters in the check-to-await gap must resume the waiter")
+    .expect("applied generation 1 must satisfy the wait");
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "the gap hook must have fired — otherwise the wait took the already-applied fast path"
+    );
+    assert_eq!(
+        tokio::time::Instant::now(),
+        start,
+        "a captured notify_waiters wake must not consume virtual time"
+    );
+}
+
 /// The refresh and its host-turn fence are one background transaction. Paying
 /// the editor-idle quiet window between the two frames adds fixed latency to
 /// every open/change without improving preemption: interactive traffic can

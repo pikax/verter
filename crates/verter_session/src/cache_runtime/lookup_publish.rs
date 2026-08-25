@@ -222,6 +222,8 @@ where
         let mut state = slot.state.lock();
         if state.claimed {
             // Joiner — wait for the winner to publish or fail.
+            #[cfg(test)]
+            inflight.notify_joiner_park();
             slot.ready.wait_while(&mut state, |s| !s.completed);
             match state.failure {
                 // Deterministic compute failure — surface `None` (the

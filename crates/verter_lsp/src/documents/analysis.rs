@@ -6,6 +6,12 @@
 
 use super::*;
 
+/// Edit-debounce quiet window before optional semantic enrichment runs.
+/// Production and tests share this duration; tests drive it with paused
+/// Tokio time rather than compiling the sleep out.
+pub(crate) const SEMANTIC_ANALYSIS_QUIET_WINDOW: std::time::Duration =
+    std::time::Duration::from_millis(750);
+
 fn type_expr_contains_boolean(expression: &verter_type_expr::TypeExpr) -> bool {
     use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
@@ -65,6 +71,7 @@ pub(crate) struct SemanticReady {
     pub canonical_id: String,
     pub uri: String,
     pub version: i32,
+    pub document_revision: DocumentRevisionId,
 }
 
 impl DocumentRegistry {
@@ -159,8 +166,9 @@ impl DocumentRegistry {
 
         let registry = Arc::clone(self);
         Some(tokio::spawn(async move {
-            #[cfg(not(test))]
-            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            #[cfg(test)]
+            registry.semantic_task_armed.notify_waiters();
+            tokio::time::sleep(SEMANTIC_ANALYSIS_QUIET_WINDOW).await;
 
             if !registry.semantic_analysis_enabled()
                 || !registry.document_snapshot_is_current(&uri_key, document_revision)
@@ -367,6 +375,7 @@ impl DocumentRegistry {
                     canonical_id,
                     uri: uri_key,
                     version,
+                    document_revision,
                 });
                 drop(document);
             }
