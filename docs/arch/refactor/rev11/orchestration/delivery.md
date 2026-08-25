@@ -333,6 +333,20 @@ excluded; a compile-fail fixture proving two types differ while claiming the dec
 a one-sided absence read as a two-sided fact; a check whose own command line contained the pattern it
 matched. Each was true of what it examined and asserted about something larger.
 
+**Capture before delete.** A criterion that measures or rehomes something a pending cutover removes
+must have its capture and rehoming land *inside* that cutover, never after it. Land the deletion first
+and a counter criterion passes for the wrong reason — nothing remains to charge it — while a
+comparison criterion loses the baseline it compares against and becomes unmeasurable, with no failure
+to announce either. Before scheduling any new criterion, test it against the deletion set of every
+pending cutover.
+
+**A truncated listing that prints nothing reads as "nothing exists".** A survey whose output is capped
+supports a negative conclusion only if the truncation is proven not to have hidden the answer — a
+branch sweep piped through a line limit across hundreds of branches printed nothing and was about to
+be read as work being lost, where a containment predicate found it in three. Prefer a predicate that
+answers the question over eyeballing a capped list; as with a match set wider than the defect, the
+instrument's shape produced the result rather than the tree's contents.
+
 **A check needs a control on a known-good AND a known-bad run.** A step that can fail may still be
 measuring the wrong thing, and a match set wider than the defect inverts under noise without
 announcing it: a completeness check matched 25 occurrences on a green run and 16 on a red one,
