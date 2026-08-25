@@ -1514,7 +1514,7 @@ status = "IN_PROGRESS"
 charter_digest = "ad982473306df5a093526968de0d1c42fbe4f8f514372a35bb5d96e55791fa17"
 context_packet_digest = ""
 base_sha = "39dd20abb45b7bd5e8630d388282258baa8c5450"
-implementation_candidate_sha = "3e222e2d5123b3fa769f29d16b2d040c344a753b"
+implementation_candidate_sha = "435e2211a88daffb0acb69d9e2e22df088fd5f25"
 implementation_ref = "refs/heads/block/j1-integration"
 landing_order = 2
 # candidate_sha/candidate_tree: pinned to the latest LANDED slice
