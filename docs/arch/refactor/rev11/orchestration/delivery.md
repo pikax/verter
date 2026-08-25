@@ -170,9 +170,16 @@ rather than proceeding with a caveat.
    check worth anything — and may refuse.
 4. **Run the gate.**
 
-**On gate success only:** squash under the supplied message verbatim, then update the ledger, then
-land, then **remove the block's worktree, delete the merged branch and prune** — on a successful
+**On gate success only:** squash under the supplied message verbatim, then land, then update the
+ledger, then **remove the block's worktree, delete the merged branch and prune** — on a successful
 landing only, since a returned block needs its worktree intact.
+
+**The ledger commit goes on top of the landed sha, not before it.** Landing is a fast-forward, so a
+ledger commit written first puts the candidate one behind, forces a rebase, and produces a new sha —
+leaving the row naming a commit the history no longer holds, which is the provenance failure below,
+manufactured by the step order that was supposed to prevent it. Land first and the sha is final when
+it is pinned. Clearing a block ref that landing deleted is not enough on its own: the row must name a
+ref that still resolves and still carries the commit.
 
 **The gate does not run `cargo fmt` or `cargo clippy`.** `CLAUDE.md` keeps them as separate
 end-of-change checks, so without step 2 a candidate can pass rebase, conformance and a full gate and

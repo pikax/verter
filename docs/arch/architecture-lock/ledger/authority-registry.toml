@@ -388,13 +388,13 @@ sha256 = "0bcc283edaf168fe1cc566c66986bc79664f47bf672c63117210e8ffd812789b"
 id = "BV2-FINDING-A"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCH-RULING-BV2-FINDING-A-REPAIR-AND-PLACEMENT.md"
-sha256 = "5429fb247b6fda9d90fa58d2a3cf01b8bd99967daafa8c7d04a4f6c3107b4cea"
+sha256 = "34bb5eb50e9a769aa7fb1c574de88aa7c905525ba97e6ce3254bb5010a2fd568"
 
 [[document]]
 id = "CM1-FINDINGS-BC"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCH-RULING-CM1-FINDINGS-BC.md"
-sha256 = "439ecf43810a30410d6129dbd7798f6dc1cbe8ba99a6c7d3a0d4ecf40611f501"
+sha256 = "97b4c66638b1bd880691dd835a9f060803c387c7cac01244380a6f7a57de4479"
 
 [[authorization]]
 block = "BV2"
