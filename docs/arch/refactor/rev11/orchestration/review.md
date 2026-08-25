@@ -64,6 +64,12 @@ and neither substitutes for the sub-block reviews.
 
 ## When rounds are the wrong instrument
 
+**Never judge convergence on count.** One block's finding counts across nine rounds ran 5, 5, 6, 4,
+5, 6, 7, 6, 6 — flat, and by that measure nine rounds of nothing. Underneath, its blockers went from
+six against legacy text to two against text written in the previous round, and its dominant class from
+eighty-three occurrences to two. A convergence judgement on count would have been correct by its own
+measure and wrong in fact.
+
 **Read where findings land, not only how many.** Findings against a document's newest additions are
 convergence on a moving front; findings against legacy text mean the population is still unenumerated.
 A round falling from a dominant class to two of six, with both blockers against work written since the

@@ -606,6 +606,11 @@ removes the attribute a review named and leaves its siblings asserting the same 
 whole sentence, cell or heading instead: a deletion cannot partially retain a predicate, and a
 rewrite can — twice did.
 
+**When a count and its items disagree, correct the count.** A lead-in saying five obligations above
+four rows is fixed by writing four, never by authoring a fifth. The tempting repair makes the document
+self-consistent by adding content nobody wrote, and a worker optimising for consistency will take it
+unless told not to.
+
 **The deletion remedy applies to PROSE ASSERTIONS, never to a value-carrying or identity slot.** A
 table row's key cell is not restating the section that defines it — it *is* the row's identity, and
 reducing it to a pointer makes rows indistinguishable, two of them literal duplicates. Frontmatter
