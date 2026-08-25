@@ -129,13 +129,19 @@ moved the same field.
 
 **Only the program orchestrator dispatches the landing agent.**
 
-**A ready-and-verified report carries the candidate identity, the evidence, and the squash message —
-subject and body.** The manager drafts the message at verification, when what the block did is
-freshest, and it travels upward with the readiness claim. Landing never asks for it.
+**A ready-and-verified report carries the candidate identity, the evidence, the squash message —
+subject and body — and the acceptance-coverage mapping.** The manager drafts both at verification,
+when what the block did is freshest, and they travel upward with the readiness claim. Landing never
+asks for either. Coverage has the same freshness property as the message and more strongly: naming
+which criterion covers a change is harder to reconstruct later than describing the change, and the
+block is the only party that knows why it made each one.
 
-**The landing agent authors no block-scoped content.** A rebase conflict and a commit message are
-both block knowledge; produced at landing time they are unreviewed, with the gate about to run on the
-result. So the landing agent uses the supplied message verbatim and verifies compliance — never
+**The landing agent authors no block-scoped content.** A rebase conflict, a commit message and an
+acceptance-coverage mapping are all block knowledge; produced at landing time they are unreviewed,
+with the gate about to run on the result. Coverage is the sharpest case: a mapping the checker
+invents will always find itself satisfied, because the checker chooses which criterion to point at —
+the same trap as a check that enumerates from the source it validates. The block names the
+identifier; the landing agent verifies the naming and may refuse. So the landing agent uses the supplied message verbatim and verifies compliance — never
 authoring, never rewriting — and either failing cancels the landing and returns it to the block that
 owns the code.
 

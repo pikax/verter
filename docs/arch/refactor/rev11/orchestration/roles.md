@@ -69,6 +69,7 @@ architecture paths; dependencies; available capacity; any binding user instructi
     CANDIDATE_SHA: <the sha the evidence binds to, or none>
     EVIDENCE: <paths or commands>
     SQUASH_MESSAGE: <subject and body — required on ready>
+    ACCEPTANCE_COVERAGE: <each material change → the acceptance id covering it — required on ready>
     DECISION_NEEDED: <only if blocked>
     NEXT: <next material action>
 
