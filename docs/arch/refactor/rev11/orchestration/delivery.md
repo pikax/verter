@@ -333,6 +333,17 @@ excluded; a compile-fail fixture proving two types differ while claiming the dec
 a one-sided absence read as a two-sided fact; a check whose own command line contained the pattern it
 matched. Each was true of what it examined and asserted about something larger.
 
+**Verification is three-sided.** A step must fail when it should, pass when it should, **and be
+incapable of reporting success while its subject is broken.** The third is not implied by the first
+two: a generator whose transcript write failed left the previous file in place, so a hash comparison
+saw equality and read it as success — the failure invisible precisely because nothing changed. Ask
+what your check does when its subject is absent, stale or unwritten, not only when it is wrong.
+
+**When a finding recurs one rung higher, close the range rather than the instance.** A fix that
+handles the reported case and leaves the next one is a ladder with no top; the recurrence is evidence
+the property is unbounded. Sweep the range and name the residual bound in the test, so the limit is a
+declared constant rather than wherever the last review happened to stop.
+
 **Capture before delete.** A criterion that measures or rehomes something a pending cutover removes
 must have its capture and rehoming land *inside* that cutover, never after it. Land the deletion first
 and a counter criterion passes for the wrong reason — nothing remains to charge it — while a
