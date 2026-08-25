@@ -139,7 +139,8 @@ deferral on this amendment and recording the predecessor-set divergence
 unresolved are both correct.
 
 **Disclosure, because a ratification binds to what was read.** The amendment
-text is byte-unchanged since the reviewed sha. The artifact set has since
+text is unchanged since the reviewed sha apart from this section and the Status
+line. The artifact set has since
 changed in three ways: one regression test was renamed after the proposition it
 actually proves, a second rustdoc comment was corrected to name all four file
 operations, and the evidence records were regenerated. None of the three
