@@ -1,0 +1,10 @@
+error[E0308]: mismatched types
+  --> tests/compile-fail/raw_u64_is_not_parse_instance_generation.rs:13:21
+   |
+13 |         generation: 1u64,
+   |                     ^^^^ expected `ParseInstanceGeneration`, found `u64`
+   |
+help: try wrapping the expression in `verter_identity::identity::ParseInstanceGeneration`
+   |
+13 |         generation: verter_identity::identity::ParseInstanceGeneration(1u64),
+   |                     +++++++++++++++++++++++++++++++++++++++++++++++++++    +
