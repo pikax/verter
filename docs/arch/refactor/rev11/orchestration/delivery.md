@@ -366,6 +366,16 @@ was right an hour ago describes a reference that may have moved since, and the d
 work is measured against rather than in the work, which is the one class a clean self-check cannot
 surface.
 
+**A test that would apply is not a ruling that has applied.** A decision reached in correspondence is
+a decision, not an instrument, and a block citing it as ruled is citing something that does not
+exist. Only the record settles which. Route a ruling for recording in the same message that issues
+it, or mark it explicitly as not yet an instrument.
+
+**Enumerate the whole range and disposition every member.** A curated list omits the case nobody
+thought of, and a reviewer then has nothing to catch. Bounding a range from both sides and giving
+each member an explicit disposition is what made a false entry findable — completeness is what makes
+an artifact falsifiable.
+
 **Correct a document where its pin is authored, not where its bytes are convenient.** A branch that
 inherits a registry byte-for-byte and authors none of it cannot correct what that registry pins: it
 would hold new bytes against the old digest it inherited, a live mismatch. Changing the document and
