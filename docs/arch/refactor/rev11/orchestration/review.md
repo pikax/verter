@@ -132,6 +132,18 @@ paths, the surface is not being enumerated and further rounds will keep finding 
 Its output is the surface; review resumes against it. Enumeration is cheaper than discovery repeated
 per round, and it converts an unbounded sequence of rounds into a bounded one.
 
+## Documents get two rounds
+
+**A document gets at most two review rounds. Then it ratifies with its residue recorded, or it is
+rescoped.** Only a contradiction or a false claim blocks ratification; a proof gap, a wide phrasing,
+an underspecified field are recorded as open findings and the plan proceeds.
+
+A plan is a means. A block's deliverable is the code, and a document polished past two rounds is
+spending the block's budget on the wrong artifact — one plan took twenty-three ratification rounds and
+eight repair rounds while the cutover it gated had not started. Iterative repair on a large
+interlocking document introduces defects at roughly the rate it removes them, so the rounds do not
+converge; they circulate.
+
 ## Convergence
 
 **Default maximum: two substantive fix cycles per slice.** Not converging means stop and rescope,
