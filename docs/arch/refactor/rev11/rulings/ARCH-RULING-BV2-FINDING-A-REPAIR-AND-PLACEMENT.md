@@ -37,7 +37,7 @@ Production VDOM template codegen panics at
 
 ## Established root cause — reproduced in-repo, instrumented, confirmed
 
-Full report: `<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/FINDING-A-ROOT-CAUSE.md`. A reproducing test exists at
+Full report: `<SESSION_SCRATCH>/scratchpad/FINDING-A-ROOT-CAUSE.md`. A reproducing test exists at
 `crates/verter_compiler/tests/cases/vdom_root_static_class_comment_prefix_panic.rs` (in the
 investigation worktree, not landed): the bug SFC fails red with the identical panic; three negative
 controls (no static class / no comment / dev mode) pass, matching every known ablation.
@@ -1204,9 +1204,9 @@ The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (an
 | `crates/verter_compiler/src/framework_common/generated_chunk.rs` | Generated-chunk assembly and multi-source map composition |
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "git branch --show-current && git status --short && wc -l <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/FINDING-A-ROOT-CAUSE.md && sed -n '1,260p' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/FINDING-A-ROOT-CAUSE.md"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "git branch --show-current && git status --short && wc -l <SESSION_SCRATCH>/scratchpad/FINDING-A-ROOT-CAUSE.md && sed -n '1,260p' <SESSION_SCRATCH>/scratchpad/FINDING-A-ROOT-CAUSE.md"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 107ms:[0m
-     319 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/FINDING-A-ROOT-CAUSE.md
+     319 <SESSION_SCRATCH>/scratchpad/FINDING-A-ROOT-CAUSE.md
 # Root-cause investigation: `overwrite_segmented precondition violated at [0,N)`
 
 Worktree: `<MACHINE_ROOT>/verter-findA`, detached at `6ab1000bd`
@@ -1469,7 +1469,7 @@ regression):
    comment-strip (if the comment survives outside the header claim) applies
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "sed -n '261,380p' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/FINDING-A-ROOT-CAUSE.md"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "sed -n '261,380p' <SESSION_SCRATCH>/scratchpad/FINDING-A-ROOT-CAUSE.md"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 0ms:[0m
    after, against whatever chunk state now exists — using the ordinary
    (non-segmented) `overwrite`'s more permissive multi-chunk splice instead of

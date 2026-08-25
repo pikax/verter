@@ -31,7 +31,7 @@ Architecture challenge, read-only, on <MACHINE_ROOT>/verter
 (branch program/architecture-lock, tip 6ab1000bd).
 
 Block D1 ("Private sole-solver foundation", program.md:225-233) has a drafted charter at
-<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md whose author honestly flagged SIX open design forks rather than guessing.
+<SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md whose author honestly flagged SIX open design forks rather than guessing.
 Your job is to RULE on each — decisively, from the code and the ratified documents, not from preference.
 Read the charter first, then answer.
 
@@ -75,7 +75,7 @@ checkpoint review approval but MUST NOT merge or release independently from D2 (
 [35m[3mcodex[0m[0m
 I’ll treat this as an architecture ruling, not an implementation review. I’m starting with the charter and the canonical architecture/program references, then I’ll trace each fork into the exact code and landed validator artifacts.
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "sed -n '1,260p' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "sed -n '1,260p' <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 15778ms:[0m
 # D1 — Private sole-flow-solver foundation
 
@@ -339,10 +339,10 @@ D1/D2's final typestate cutover" — `A3-SPEC.md` §1.4). D1's own charter binds
 this list as its exit obligation; it is recorded here so `D2`'s charter does not have to
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc 'ls -l <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md && wc -l <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md && /bin/cat <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md'[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc 'ls -l <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md && wc -l <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md && /bin/cat <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md'[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 19364ms:[0m
--rw-r--r--@ 1 carlosrodrigues  wheel  39881 Aug 20 11:53 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md
-     478 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md
+-rw-r--r--@ 1 <user>  wheel  39881 Aug 20 11:53 <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md
+     478 <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md
 # D1 — Private sole-flow-solver foundation
 
 **Status:** DRAFT pending maintainer ratification. **Class:** Foundational
@@ -825,7 +825,7 @@ program rework on other blocks (`C1`'s four forks, `B4`'s emitter-disposition le
 [35m[3mcodex[0m[0m
 The draft’s core ambiguity is real, but one premise is already stale: it still describes AMD-001’s validator package as undelivered. I’m reading the omitted middle sections now before testing that and the other five premises against the ratified evidence.
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md | sed -n '1,170p'; nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md | sed -n '171,340p'; nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md | sed -n '341,520p'"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md | sed -n '1,170p'; nl -ba <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md | sed -n '171,340p'; nl -ba <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md | sed -n '341,520p'"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 11013ms:[0m
      1	# D1 — Private sole-flow-solver foundation
      2	
@@ -1307,7 +1307,7 @@ The draft’s core ambiguity is real, but one premise is already stale: it still
    478	   implementer inferring it from ruling prose under time pressure.
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/D1-CHARTER-DRAFT.md | sed -n '205,265p'"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "nl -ba <SESSION_SCRATCH>/scratchpad/D1-CHARTER-DRAFT.md | sed -n '205,265p'"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 7760ms:[0m
    205	release artifact's hot path; that null result is itself part of D1-AC-2's proof, not a
    206	separate performance obligation. D1 may **not** request a new locked cell for
@@ -2986,9 +2986,9 @@ docs/arch/refactor/rev11/evidence/A6/implementation-lock-record.md:906:ticked co
 docs/arch/architecture-lock/ledger/program-state.toml
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "find docs/arch/refactor/rev11 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter -name 'ARCH-RULING-C1-FOUR-FORKS.md' -print 2>/dev/null; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '1,180p'; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '180,360p'; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '360,500p'"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "find docs/arch/refactor/rev11 <SESSION_SCRATCH> -name 'ARCH-RULING-C1-FOUR-FORKS.md' -print 2>/dev/null; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '1,180p'; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '180,360p'; nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '360,500p'"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 10712ms:[0m
-<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
+<SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
      1	# C1 — Converge `ModuleResolverCore` and non-flow `TypeInfoCore`
      2	
      3	**Status:** DRAFT — authored for maintainer review; no AMD ratifies it yet. **Class:** Foundational
@@ -3444,7 +3444,7 @@ docs/arch/architecture-lock/ledger/program-state.toml
    451	need a ruling to resolve.
 
 [35m[3mexec[0m[0m
-[1m/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '176,246p'; wc -l <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md; nl -ba <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md | sed -n '1,260p'"[0m in <MACHINE_ROOT>/verter
+[1m/bin/zsh -lc "nl -ba docs/arch/refactor/rev11/charters/C1.md | sed -n '176,246p'; wc -l <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md; nl -ba <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md | sed -n '1,260p'"[0m in <MACHINE_ROOT>/verter
 [32m succeeded in 16909ms:[0m
    176	new-lock-record path (mirroring `B1.md:169-171`); it may not reweight or reinterpret
    177	`A6_META_COMPILE_40_COLD_RUST` after measurement.
@@ -3517,7 +3517,7 @@ docs/arch/architecture-lock/ledger/program-state.toml
    244	lifecycle can reuse the same resolution logic without being forced to block; it does not retrofit every
    245	existing call site to stop blocking — `HostResolverContext`/`SessionResolverContext` keep blocking by
    246	design.
-   14472 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
+   14472 <SESSION_SCRATCH>/scratchpad/rulings/ARCH-RULING-C1-FOUR-FORKS.md
      1	Reading prompt from stdin...
      2	OpenAI Codex v0.148.0
      3	--------
@@ -3537,7 +3537,7 @@ docs/arch/architecture-lock/ledger/program-state.toml
     17	heaviest fan-in node left in the DAG — C2, D3, D7 and two others depend on it.
     18	
     19	A charter draft exists at
-    20	<SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md
+    20	<SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md
     21	Read it first. Its author honestly flagged four unresolved design forks rather than guessing. Your job is
     22	to KILL OR CONFIRM a specific proposed position on each — falsification, not fresh design. For each,
     23	answer VIOLATES (name the invariant and cite file:line) or DOES-NOT-VIOLATE, then give the ruling.
@@ -3590,7 +3590,7 @@ docs/arch/architecture-lock/ledger/program-state.toml
     70	codex
     71	I’ll treat this as an architecture falsification review, not a redesign. I’ll read the draft and the canonical architecture/type-resolution/session references, then trace the cited APIs and C2/F1 dependencies to ground each verdict in exact lines.
     72	exec
-    73	/bin/zsh -lc "pwd && git branch --show-current && git rev-parse HEAD && wc -l CLAUDE.md .claude/skills/architecture/SKILL.md .claude/skills/type-resolution/SKILL.md .claude/skills/host-session/SKILL.md <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md && sed -n '1,260p' <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md" in <MACHINE_ROOT>/verter
+    73	/bin/zsh -lc "pwd && git branch --show-current && git rev-parse HEAD && wc -l CLAUDE.md .claude/skills/architecture/SKILL.md .claude/skills/type-resolution/SKILL.md .claude/skills/host-session/SKILL.md <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md && sed -n '1,260p' <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md" in <MACHINE_ROOT>/verter
     74	 succeeded in 0ms:
     75	<MACHINE_ROOT>/verter
     76	program/architecture-lock
@@ -3599,7 +3599,7 @@ docs/arch/architecture-lock/ledger/program-state.toml
     79	     230 .claude/skills/architecture/SKILL.md
     80	    1342 .claude/skills/type-resolution/SKILL.md
     81	     738 .claude/skills/host-session/SKILL.md
-    82	     314 <SESSION_SCRATCH>/-Users-carlosrodrigues-Documents-dev-verter/cad766b2-94b4-4208-a25d-0fed78cc40e6/scratchpad/C1-CHARTER-DRAFT.md
+    82	     314 <SESSION_SCRATCH>/scratchpad/C1-CHARTER-DRAFT.md
     83	    3283 total
     84	# C1 — Converge `ModuleResolverCore` and non-flow `TypeInfoCore`
     85	
