@@ -709,7 +709,7 @@ sha256 = "881eaf4e4a11e5a346e5f28006f446ec116d709768ecfeff3ebaf01d2b663b2a"
 id = "C1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/C1.md"
-sha256 = "99c0beb6ac0c36fb56a0c9ae13228db7e5b84b11da21089b79508db17b3cfbff"
+sha256 = "12653a27a1cedf0c0070a7e198cd9d0776c4a97cbd1a8bd35dc91699b62dcdba"
 
 # Three-question architecture ruling taken on ccda4256230 (lane
 # architecture-c1-charter, RESULT: FAIL, five P1 findings): the charter is not

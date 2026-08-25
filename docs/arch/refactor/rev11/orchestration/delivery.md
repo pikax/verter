@@ -361,6 +361,18 @@ landed pins nothing anyone can check. One act scoped that way expired itself —
 was the one recording its own expiry boundary, which fired on its own bytes while changing no
 disposition it had ratified.
 
+**A rebase invalidates every claim a document makes about files it does not own.** Rebase-integrity
+proofs cover blobs and deltas, and structurally cannot see a claim *about* a file whose content moved
+underneath it: a script grew sixty lines so every line citation into it displaced, and an upstream
+re-pin left a document describing an old-and-old pairing that had become a hybrid. Both were correct
+when written and false when read. So post-rebase citation re-verification is its own step, and a
+citation into a file the block does not own is a behaviour or a function identity, never a line
+number.
+
+**A finding dispositioned but not briefed is a finding lost.** Carrying the questions forward without
+the open findings loses everything the earlier rounds bought — one round's flag that a named function
+did not exist vanished because the next brief was scoped to its six questions.
+
 **At freeze, re-derive every digest the candidate quotes — never carry one forward.** A digest that
 was right an hour ago describes a reference that may have moved since, and the drift is in what the
 work is measured against rather than in the work, which is the one class a clean self-check cannot
