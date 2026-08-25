@@ -366,9 +366,17 @@ was right an hour ago describes a reference that may have moved since, and the d
 work is measured against rather than in the work, which is the one class a clean self-check cannot
 surface.
 
-**Ratify last.** Evidence, then freeze the candidate, then issue the act against that frozen sha. An
-act issued before its own consequence is recorded either expires when the recording lands or
-contradicts the evidence it pins — the same defect on two surfaces, and both have happened.
+**An act pins the content it ratifies — named files and their digests — never a tree sha.** A tree
+sha covers everything, including the record of the act itself, so recording the act changes the tree
+and unpins it. That is unavoidable by ordering: the consequence of an act is an evidence change, so
+an act pinned to a whole tree that must record it unpins itself the moment it is recorded. Pinning
+the ratified set instead closes the loop, because recording the act elsewhere in the tree cannot
+touch it.
+
+**Ratify last** remains the ordering — evidence, freeze, act — but it is no longer load-bearing on
+its own. An act issued before its own consequence is recorded either expires when the recording lands
+or contradicts the evidence it pins; that happened twice before the pinning was fixed, and a third
+time when the instruction to fix it moved the tree.
 
 **An act whose own consequence must be recorded in the evidence it pins can never be self-consistent.**
 Record the consequence first, freeze, then pin. Re-pinning is cheap; an act that cannot be made
