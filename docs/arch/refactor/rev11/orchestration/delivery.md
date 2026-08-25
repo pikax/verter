@@ -361,6 +361,11 @@ landed pins nothing anyone can check. One act scoped that way expired itself —
 was the one recording its own expiry boundary, which fired on its own bytes while changing no
 disposition it had ratified.
 
+**Whether work accumulated on one line is a git fact, not a policy statement.** "It accumulates" said
+as intent reads identically to "it accumulated" said as observation, and two branches described as one
+line turned out to be siblings sharing only their fork point — with the criteria a precondition named
+absent from the base that precondition was handed to. Check ancestry before relying on it.
+
 **A rebase invalidates every claim a document makes about files it does not own.** Rebase-integrity
 proofs cover blobs and deltas, and structurally cannot see a claim *about* a file whose content moved
 underneath it: a script grew sixty lines so every line citation into it displaced, and an upstream
