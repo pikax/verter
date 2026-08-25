@@ -747,3 +747,186 @@ fn dialect_interpolations_balance_in_selector_grammar() {
         assert_eq!(cst.reconstruct(), input);
     }
 }
+
+#[test]
+fn attribute_selector_captures_trailing_case_sensitivity_flags_span() {
+    // `[attr~="v" i]` — the common oracle-pinned shape (Svelte's
+    // `SimpleSelector::Attribute.flags`, e.g. `[data-x~="y" i]`).
+    let input = r#"[data-x~="y" i]"#;
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+    let attribute = &structure.attributes()[0];
+    let flags_span = attribute.flags_span().expect("a flags run is present");
+    assert_eq!(source.slice(flags_span), "i");
+
+    // `s` flag, no leading matcher whitespace asymmetry.
+    let input = r#"[data-x="y" s]"#;
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+    let attribute = &structure.attributes()[0];
+    assert_eq!(
+        source.slice(attribute.flags_span().expect("a flags run is present")),
+        "s"
+    );
+
+    // No flags at all.
+    let input = r#"[data-x="y"]"#;
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+    let attribute = &structure.attributes()[0];
+    assert_eq!(attribute.flags_span(), None);
+
+    // A bare attribute selector with no matcher/value at all.
+    let input = "[hidden]";
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+    let attribute = &structure.attributes()[0];
+    assert_eq!(attribute.flags_span(), None);
+}
+
+#[test]
+fn unquoted_attribute_value_is_truncated_at_the_first_js_whitespace_codepoint_at_parse_time() {
+    // Svelte's own lenient reader stops an unquoted attribute value at the
+    // first JS-`\s` codepoint (NBSP, U+00A0, included) — the general CSS
+    // Syntax tokenizer instead treats NBSP as a valid name-continuation
+    // codepoint, so `value_span` would otherwise cover the WHOLE
+    // `a<NBSP>b` run. The parser truncates the span itself, at build time,
+    // so a reader never re-scans it.
+    let input = "[data-x=a\u{00A0}b]";
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+    let attribute = &structure.attributes()[0];
+    assert!(!attribute.value_was_quoted());
+    let value_span = attribute.value_span().expect("a value is present");
+    assert_eq!(source.slice(value_span), "a");
+}
+
+#[test]
+fn quoted_attribute_value_is_never_truncated_at_whitespace() {
+    let input = "[data-x=\"a\u{00A0}b\"]";
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let structure = parse_selector_structure(&source, CssDialect::Css).unwrap();
+    let attribute = &structure.attributes()[0];
+    assert!(attribute.value_was_quoted());
+    let value_span = attribute.value_span().expect("a value is present");
+    assert_eq!(source.slice(value_span), "a\u{00A0}b");
+}
+
+// @ai-generated - the selector grammar (SelectorList entry point) never routes through the
+// indentation-aware layout parser, so it is dialect-neutral by construction outside of each
+// dialect's own interpolation prefix. This proves that neutrality holds for Sass and Stylus too,
+// not just Scss/Less: identical structural facts, identical attribute/pseudo/nth classification,
+// and dialect-correct interpolation syntax (`#{...}` for Sass, `${...}` for Stylus).
+#[test]
+fn sass_and_stylus_selector_coverage_parity_with_css_and_less() {
+    const DIALECTS: [CssDialect; 5] = [
+        CssDialect::Css,
+        CssDialect::Scss,
+        CssDialect::Less,
+        CssDialect::Sass,
+        CssDialect::Stylus,
+    ];
+
+    // Dialect-specific interpolation syntax parses to the same generic `Interpolation` node
+    // that Scss/Less already exercise (verter_css_syntax::SyntaxKind imported below).
+    for (dialect, input, expected) in [
+        (CssDialect::Scss, ".item-#{$name}", "#{$name}"),
+        (CssDialect::Less, ".item-@{name}", "@{name}"),
+        (CssDialect::Sass, ".item-#{$name}", "#{$name}"),
+        (CssDialect::Stylus, ".item-${name}", "${name}"),
+    ] {
+        let source = CssSource::new(Arc::from(input), 31).unwrap();
+        let cst = parse_lossless(
+            source.clone(),
+            dialect,
+            CssEntryPoint::SelectorList,
+            CssParseMode::Strict,
+        )
+        .unwrap();
+        let interpolation = cst
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == verter_css_syntax::SyntaxKind::Interpolation
+                    && node.flags & verter_css_syntax::NodeFlags::DIALECT_EXTENSION.0 != 0
+            })
+            .unwrap();
+        assert_eq!(source.slice(interpolation.span()), expected, "{dialect:?}");
+        assert_eq!(cst.reconstruct(), input, "{dialect:?}");
+    }
+
+    // A rich selector list — namespaces, combinators, an attribute matcher, and a nested
+    // functional pseudo with an An+B formula — classifies identically across every dialect.
+    let input = r#"svg|a#hero.button > .label:hover[data-x="y"] + [lang|=en], button.primary:is(.a,.b):nth-child(2n+1)"#;
+    for dialect in DIALECTS {
+        let source = CssSource::new(Arc::from(input), 13).unwrap();
+        let structure = parse_selector_structure(&source, dialect).unwrap();
+
+        assert_eq!(structure.top_level_selector_count(), 2, "{dialect:?}");
+        assert!(
+            structure
+                .components()
+                .iter()
+                .any(|component| component.kind() == SelectorComponentKind::Namespace),
+            "{dialect:?}"
+        );
+        assert!(
+            structure
+                .components()
+                .iter()
+                .any(|component| component.kind() == SelectorComponentKind::Id),
+            "{dialect:?}"
+        );
+        assert_eq!(
+            structure
+                .combinators()
+                .iter()
+                .map(|combinator| combinator.kind())
+                .collect::<Vec<_>>(),
+            vec![CombinatorKind::Child, CombinatorKind::NextSibling],
+            "{dialect:?}"
+        );
+        assert_eq!(structure.attributes().len(), 2, "{dialect:?}");
+        assert!(
+            structure
+                .attributes()
+                .iter()
+                .any(|attribute| attribute.matcher() == Some(AttributeMatcher::DashMatch)),
+            "{dialect:?}"
+        );
+        let is_pseudo = structure
+            .pseudos()
+            .iter()
+            .find(|pseudo| pseudo.kind() == PseudoFunctionKind::Is)
+            .copied()
+            .unwrap_or_else(|| panic!("{dialect:?} missing :is()"));
+        assert_eq!(is_pseudo.selector_count(), 2, "{dialect:?}");
+        let nth_pseudo = structure
+            .pseudos()
+            .iter()
+            .find(|pseudo| pseudo.kind() == PseudoFunctionKind::NthChild)
+            .copied()
+            .unwrap_or_else(|| panic!("{dialect:?} missing :nth-child()"));
+        assert_eq!(
+            nth_pseudo.nth(),
+            Some(NthExpression { a: 2, b: 1 }),
+            "{dialect:?}"
+        );
+        assert!(structure.facts().is_complete_static(), "{dialect:?}");
+    }
+
+    // Vue's SFC-scoped pseudo aliases keep their exact same classification (functional pseudo
+    // vs. pseudo-element) in every dialect, not only under the plain CSS entry point.
+    for (input, expected_kind) in [
+        (":deep(.a)", SelectorComponentKind::FunctionalPseudo),
+        ("::v-deep(.a)", SelectorComponentKind::FunctionalPseudo),
+        ("::deep(.a)", SelectorComponentKind::PseudoElement),
+    ] {
+        for dialect in DIALECTS {
+            let source = CssSource::new(Arc::from(input), 0).unwrap();
+            let structure = parse_selector_structure(&source, dialect).unwrap();
+            let component = &structure.list().selectors()[0].compounds()[0].components()[0];
+            assert_eq!(component.kind(), expected_kind, "{dialect:?}: {input}");
+        }
+    }
+}

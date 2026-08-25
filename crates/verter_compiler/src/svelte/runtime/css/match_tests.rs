@@ -4,14 +4,14 @@
 //! direction fails.
 
 use crate::svelte::parser::parse_svelte;
-use crate::svelte::runtime::css::build_style_scope_plan;
-use crate::svelte::runtime::css::types::{
-    Block, BlockChild, CssMode, SelectorList, SimpleSelector, StyleChild,
-};
+use crate::svelte::runtime::css::analyze::{relative_steps, CssAnalysis};
+use crate::svelte::runtime::css::types::CssMode;
+use crate::svelte::runtime::css::{analyze_style_body, build_style_scope_plan, AnalyzedStyleBody};
 use crate::svelte::runtime::expr::MatcherExpr;
 use crate::svelte::runtime::ir::{IrNode, SpecialKind};
 use crate::svelte::runtime::{lower_parsed_svelte_to_ir, SvelteRuntimeOptions};
 use oxc_allocator::Allocator;
+use verter_css_syntax::StyleStatement;
 use verter_span::Span;
 
 /// The extracted matcher facts of one component: per-selector used verdicts
@@ -55,78 +55,79 @@ fn slice(source: &str, span: Span) -> String {
     source[span.start as usize..span.end as usize].to_string()
 }
 
+/// Walk the analyzed tree's selector lists, reading the matcher's `used`/
+/// `scoped` verdicts off [`CssAnalysis`] (the `Span`-keyed side table) rather
+/// than off tree node fields — the shared grammar's `ComplexSelector`/
+/// `SelectorCompound` are immutable, so the matcher's writes land in
+/// `analysis`, not on the tree.
 fn collect_selector_facts(
     source: &str,
-    list: &SelectorList,
+    list: &verter_css_syntax::SelectorList,
+    analysis: &CssAnalysis,
     used: &mut Vec<(String, bool)>,
     scoped: &mut Vec<String>,
 ) {
-    for complex in &list.children {
-        used.push((slice(source, complex.span), complex.metadata.used));
-        for relative in &complex.children {
-            if relative.metadata.scoped {
-                // A relative selector's span starts at its leading combinator
-                // (the whitespace run for the descendant combinator) — trim
-                // so lookups key on the visible compound text.
-                scoped.push(slice(source, relative.span).trim().to_string());
+    for complex in list.selectors() {
+        used.push((
+            slice(source, complex.span()).trim().to_string(),
+            analysis.complex_facts(complex).used,
+        ));
+        for (combinator, compound) in relative_steps(complex) {
+            if analysis.compound_facts(compound).scoped {
+                // A compound's own span starts after its leading combinator;
+                // include the combinator's start when present so the scoped
+                // text carries the same visible compound text the oracle
+                // expects (e.g. `.b`, not ` .b`, for a leading descendant
+                // combinator — trimmed below either way).
+                let start = combinator.map_or(compound.span().start, |c| c.span().start);
+                scoped.push(
+                    slice(source, Span::new(start, compound.span().end))
+                        .trim()
+                        .to_string(),
+                );
             }
-            for simple in &relative.selectors {
-                if let SimpleSelector::PseudoClass {
-                    args: Some(args), ..
-                } = simple
-                {
-                    collect_selector_facts(source, args, used, scoped);
+            for component in compound.components() {
+                if let Some(args) = component.pseudo().and_then(|pseudo| pseudo.selector_list()) {
+                    collect_selector_facts(source, args, analysis, used, scoped);
                 }
             }
         }
     }
 }
 
-fn collect_rule_facts(
+fn collect_statement_facts(
     source: &str,
-    children: &[StyleChild],
+    statements: &[StyleStatement],
+    analysis: &CssAnalysis,
     used: &mut Vec<(String, bool)>,
     scoped: &mut Vec<String>,
 ) {
-    for child in children {
-        match child {
-            StyleChild::Rule(rule) => {
-                collect_selector_facts(source, &rule.prelude, used, scoped);
-                collect_block_facts(source, &rule.block, used, scoped);
+    for statement in statements {
+        match statement {
+            StyleStatement::Rule(rule) => {
+                collect_selector_facts(source, rule.selector_list(), analysis, used, scoped);
+                collect_statement_facts(source, rule.body().statements(), analysis, used, scoped);
             }
-            StyleChild::Atrule(at) => {
-                if let Some(block) = &at.block {
-                    collect_block_facts(source, block, used, scoped);
+            StyleStatement::AtRule(atrule) => {
+                if let Some(block) = atrule.body() {
+                    collect_statement_facts(source, block.statements(), analysis, used, scoped);
                 }
             }
-        }
-    }
-}
-
-fn collect_block_facts(
-    source: &str,
-    block: &Block,
-    used: &mut Vec<(String, bool)>,
-    scoped: &mut Vec<String>,
-) {
-    for item in &block.children {
-        match item {
-            BlockChild::Rule(rule) => {
-                collect_selector_facts(source, &rule.prelude, used, scoped);
-                collect_block_facts(source, &rule.block, used, scoped);
-            }
-            BlockChild::Atrule(at) => {
-                if let Some(inner) = &at.block {
-                    collect_block_facts(source, inner, used, scoped);
-                }
-            }
-            BlockChild::Declaration(_) => {}
+            StyleStatement::Declaration(_)
+            | StyleStatement::MixinOrFunction(_)
+            | StyleStatement::Unknown(_) => {}
         }
     }
 }
 
 /// Parse + lower + plan (the production wiring) and extract the matcher
-/// facts.
+/// facts. Runs the SAME `analyze_style_body`/`matcher::match_stylesheet`
+/// pipeline TWICE — once through [`build_style_scope_plan`] (proving the
+/// full production wiring, including hash + render, succeeds/fails
+/// consistently) and once directly (for the per-selector introspection
+/// `build_style_scope_plan`'s public [`ProvenStyleScopePlan`] does not
+/// expose) — both calls are pure/deterministic over the same source, so the
+/// two runs agree by construction.
 fn facts(source: &str) -> Facts {
     let alloc = Allocator::default();
     let parsed = parse_svelte(source);
@@ -146,9 +147,24 @@ fn facts(source: &str) -> Facts {
         false,
     ) {
         Ok(plan) => {
+            let AnalyzedStyleBody { tree, mut analysis } =
+                analyze_style_body(source, body_span(source)).expect("re-analysis succeeds");
+            crate::svelte::runtime::css::matcher::match_stylesheet(
+                source,
+                &tree,
+                &mut analysis,
+                &ir,
+            )
+            .expect("re-match succeeds");
             let mut used = Vec::new();
             let mut scoped_selectors = Vec::new();
-            collect_rule_facts(source, &plan.ast.children, &mut used, &mut scoped_selectors);
+            collect_statement_facts(
+                source,
+                tree.statements(),
+                &analysis,
+                &mut used,
+                &mut scoped_selectors,
+            );
             let mut scoped_tags: Vec<String> = plan
                 .facts
                 .scoped
@@ -1319,9 +1335,19 @@ fn entity_decoded_class_value_scopes_the_div_and_matches_word_selectors() {
 
     // The per-selector used verdicts: `.b` matches a decoded word; `.c`
     // matches nothing (the negative — it must stay pruned).
+    let AnalyzedStyleBody { tree, mut analysis } =
+        analyze_style_body(source, body_span(source)).expect("re-analysis succeeds");
+    crate::svelte::runtime::css::matcher::match_stylesheet(source, &tree, &mut analysis, &ir)
+        .expect("re-match succeeds");
     let mut used = Vec::new();
     let mut scoped_selectors = Vec::new();
-    collect_rule_facts(source, &plan.ast.children, &mut used, &mut scoped_selectors);
+    collect_statement_facts(
+        source,
+        tree.statements(),
+        &analysis,
+        &mut used,
+        &mut scoped_selectors,
+    );
     let verdict = |text: &str| {
         used.iter()
             .find(|(t, _)| t == text)
@@ -1504,7 +1530,11 @@ fn certainties(source: &str) -> Vec<(String, MatchCertainty)> {
     crate::svelte::runtime::css::style_selector_certainties_for_test(source, body_span(source), &ir)
         .unwrap_or_else(|e| panic!("the matcher proves: {e:?}"))
         .into_iter()
-        .map(|(span, certainty)| (slice(source, span), certainty))
+        // The shared grammar's `ComplexSelector::span()` is not rewound past
+        // trailing whitespace the way the official compiler's own selector
+        // spans are (see `collect_selector_facts`'s doc) — trim to key on
+        // the visible selector text.
+        .map(|(span, certainty)| (slice(source, span).trim().to_string(), certainty))
         .collect()
 }
 

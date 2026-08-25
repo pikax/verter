@@ -4,7 +4,14 @@ use verter_span::Span;
 use crate::diagnostic::{CssParseFailure, CssStructureTooLarge};
 use crate::dialect::CssDialect;
 use crate::event::{ParseEvent, ParseEventSink, SyntaxKind};
+use crate::lexer::{codepoint_at, is_js_whitespace_codepoint};
 use crate::parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource};
+use crate::style_ir::notify_parse_phase;
+use crate::svelte_compat::{
+    classify_argument_is_empty, classify_svelte_nth_arg, svelte_nth_of_selector_span,
+    svelte_percentage_selector_span, svelte_trailing_type_selector_span,
+    svelte_unclassified_expected_identifier,
+};
 use crate::token::{
     css_identifier_eq_ignore_ascii_case, decode_css_identifier, SyntaxToken, TokenFlags, TokenKind,
 };
@@ -64,6 +71,25 @@ pub enum PseudoFunctionKind {
 pub struct NthExpression {
     pub a: i32,
     pub b: i32,
+}
+
+/// Svelte-compat classification of a `:nth-child` / `:nth-last-child`
+/// argument, decided ONCE at parse time from the already-delimited
+/// [`SelectorPseudo::argument_span`]. Reject projection reads this fact
+/// and never re-derives it from argument bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvelteNthArg {
+    /// Empty argument (`:nth-child()`).
+    Empty,
+    /// Official `REGEX_NTH_OF` consumes the argument, or a prefix ending
+    /// with `of` (the following selector is the nested `of` list).
+    Formula,
+    /// The entire argument is one complete Svelte-compat identifier.
+    TrailingIdentifier,
+    /// Argument starts with `-?\d` — official `read_identifier` reject.
+    LeadingHyphenOrDigit,
+    /// None of the above.
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +201,8 @@ pub struct SelectorAttribute {
     matcher: Option<AttributeMatcher>,
     name_span: Option<Span>,
     value_span: Option<Span>,
+    value_quoted: bool,
+    flags_span: Option<Span>,
 }
 
 impl SelectorAttribute {
@@ -195,6 +223,24 @@ impl SelectorAttribute {
     pub const fn value_span(&self) -> Option<Span> {
         self.value_span
     }
+
+    /// Whether the value token found by [`Self::value_span`] was a quoted
+    /// CSS `String` token (`[attr="v"]`/`[attr='v']`) rather than an
+    /// unquoted value token (`[attr=v]`) — a fact recorded at parse time
+    /// from the token's own kind, never inferred downstream from the byte
+    /// preceding the (already quote-stripped) value span. `false` when
+    /// there is no value at all.
+    #[inline]
+    pub const fn value_was_quoted(&self) -> bool {
+        self.value_quoted
+    }
+
+    /// The trailing case-sensitivity flags run (`i` / `s`), e.g.
+    /// `[attr~="v" i]` — Svelte's `SimpleSelector::Attribute.flags`. `None`
+    /// when the attribute selector carries no flags.
+    pub const fn flags_span(&self) -> Option<Span> {
+        self.flags_span
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +251,13 @@ pub struct SelectorPseudo {
     selector_count: u32,
     nth: Option<NthExpression>,
     selector_list: Option<Box<SelectorList>>,
+    /// Svelte-compat nth-argument shape. `Some` only for
+    /// [`PseudoFunctionKind::NthChild`] / [`NthLastChild`](PseudoFunctionKind::NthLastChild).
+    svelte_nth_arg: Option<SvelteNthArg>,
+    /// Whether the argument is empty or trivia/comment-only. Minted at
+    /// parse time for every pseudo; reject projection reads it for
+    /// non-nth functional pseudos and never re-strips argument bytes.
+    argument_is_empty: bool,
 }
 
 impl SelectorPseudo {
@@ -236,6 +289,19 @@ impl SelectorPseudo {
     #[inline]
     pub fn selector_list(&self) -> Option<&SelectorList> {
         self.selector_list.as_deref()
+    }
+
+    /// The parse-time Svelte nth-argument classification. `None` when this
+    /// is not `:nth-child` / `:nth-last-child`.
+    #[inline]
+    pub const fn svelte_nth_arg(&self) -> Option<SvelteNthArg> {
+        self.svelte_nth_arg
+    }
+
+    /// Whether the already-delimited argument is empty or trivia-only.
+    #[inline]
+    pub const fn argument_is_empty(&self) -> bool {
+        self.argument_is_empty
     }
 }
 
@@ -319,11 +385,130 @@ pub enum ComplexSelectorPart {
     Combinator(SelectorCombinator),
 }
 
+/// The classification of a [`SelectorCompound`]'s UNCLAIMED trailing byte
+/// run — the compound's own span minus whatever bytes its recognized
+/// [`components()`](SelectorCompound::components) claimed. The general CSS3
+/// grammar this crate implements admits a handful of shapes Svelte's own
+/// hand-rolled reader accepts leniently (a keyframe-step percentage, an
+/// An+B pseudo-argument formula, a bare trailing type selector with no
+/// combinator) by simply closing the compound without a typed component for
+/// that run, leaving raw bytes unclassified. Decided ONCE, at parse time,
+/// when the compound's own node is built (see [`SelectorCompound::tail`]) —
+/// a consumer reads the stored fact and never re-derives it from source
+/// bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompoundTail {
+    /// No unclaimed trailing bytes — every byte in the compound's span
+    /// belongs to a recognized component.
+    #[default]
+    Claimed,
+    /// Zero recognized components; the WHOLE compound span is Svelte's
+    /// keyframe-step percentage shape (`50%`).
+    Percentage(Span),
+    /// Zero recognized components; the WHOLE compound span is Svelte's
+    /// lenient An+B pseudo-argument shape (e.g. `2n+1` as a bare pseudo
+    /// argument, `:is(2n+1)`).
+    NthOf(Span),
+    /// At least one recognized component; the run after the LAST one is a
+    /// single, complete bare identifier with no combinator — Svelte's
+    /// lenient implicit-type-selector shape (the `div` in
+    /// `:global(.x)div`).
+    TrailingIdentifier(Span),
+    /// Unclaimed trailing bytes are present but match none of the lenient
+    /// shapes above.
+    Unclassified {
+        span: Span,
+        /// Whether the run begins with a literal `.` — Svelte's
+        /// malformed-class-selector shape (`.1bad`). Only meaningful when
+        /// the compound has zero recognized components (the run then covers
+        /// the whole compound span).
+        starts_with_dot: bool,
+        /// Whether Svelte's `read_identifier` would reject this run
+        /// (`css_expected_identifier`): a leading `.`, a leading `-?\d`,
+        /// or a delim `@`/`#` with no following name. Minted at parse
+        /// time; reject projection reads this flag and never re-inspects
+        /// the run's bytes.
+        expected_identifier: bool,
+    },
+}
+
+/// Classify `compound_span`'s unclaimed trailing byte run against Svelte's
+/// lenient grammar-gap shapes — see [`CompoundTail`]. The SOLE place this
+/// crate reads raw source bytes to decide a compound's grammar-gap shape;
+/// [`SelectorSink::build_node`] calls this exactly once per compound, at
+/// parse time, and stores the result on [`SelectorCompound::tail`].
+///
+/// A zero-component compound tries Svelte's keyframe-step percentage shape,
+/// then its lenient An+B pseudo-argument shape, over the compound's WHOLE
+/// span (see [`svelte_percentage_selector_span`] / [`svelte_nth_of_selector_span`]'s
+/// docs — the general grammar leaves a `50%` or bare `2n+1` compound with
+/// zero typed components, so the compound span is all that is available). A
+/// compound with at least one component tries the trailing-identifier shape
+/// over the run after its LAST component (see
+/// [`svelte_trailing_type_selector_span`]'s doc: a type/universal selector
+/// must be FIRST in a compound, so a trailing bare identifier like
+/// `:global(.x)div`'s `div` never becomes a typed component).
+fn classify_compound_tail(
+    source: &CssSource,
+    compound_span: Span,
+    last_component: Option<&SelectorComponent>,
+) -> CompoundTail {
+    match last_component {
+        None => {
+            if compound_span.start >= compound_span.end {
+                return CompoundTail::Claimed;
+            }
+            if let Some(matched) = svelte_percentage_selector_span(source, compound_span) {
+                if matched == compound_span {
+                    return CompoundTail::Percentage(matched);
+                }
+            }
+            if let Some(matched) = svelte_nth_of_selector_span(source, compound_span) {
+                if matched == compound_span {
+                    return CompoundTail::NthOf(matched);
+                }
+            }
+            let starts_with_dot = source.slice(compound_span).starts_with('.');
+            CompoundTail::Unclassified {
+                span: compound_span,
+                starts_with_dot,
+                expected_identifier: svelte_unclassified_expected_identifier(
+                    source,
+                    compound_span,
+                    starts_with_dot,
+                ),
+            }
+        }
+        Some(last) => {
+            let span = Span::new(last.span().end, compound_span.end);
+            if span.start >= span.end {
+                return CompoundTail::Claimed;
+            }
+            match svelte_trailing_type_selector_span(source, span) {
+                Some(matched) => CompoundTail::TrailingIdentifier(matched),
+                None => {
+                    let starts_with_dot = false;
+                    CompoundTail::Unclassified {
+                        span,
+                        starts_with_dot,
+                        expected_identifier: svelte_unclassified_expected_identifier(
+                            source,
+                            span,
+                            starts_with_dot,
+                        ),
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorCompound {
     span: Span,
     components: Vec<SelectorComponent>,
     facts: SelectorFacts,
+    tail: CompoundTail,
 }
 
 impl SelectorCompound {
@@ -337,6 +522,12 @@ impl SelectorCompound {
 
     pub const fn facts(&self) -> SelectorFacts {
         self.facts
+    }
+
+    /// The compound's grammar-gap [`CompoundTail`] classification, decided
+    /// once at parse time — see [`CompoundTail`]'s doc.
+    pub const fn tail(&self) -> CompoundTail {
+        self.tail
     }
 }
 
@@ -384,6 +575,24 @@ impl ComplexSelector {
     pub const fn facts(&self) -> SelectorFacts {
         self.facts
     }
+
+    /// Parser-minted pairing of each compound with its leading combinator —
+    /// the official `RelativeSelector` shape. Interleaved `parts()` stay the
+    /// stored authority; this projection does not rescan source.
+    #[must_use]
+    pub fn relative_steps(&self) -> Vec<(Option<&SelectorCombinator>, &SelectorCompound)> {
+        let mut steps = Vec::new();
+        let mut pending: Option<&SelectorCombinator> = None;
+        for part in &self.parts {
+            match part {
+                ComplexSelectorPart::Combinator(combinator) => pending = Some(combinator),
+                ComplexSelectorPart::Compound(compound) => {
+                    steps.push((pending.take(), compound));
+                }
+            }
+        }
+        steps
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,6 +628,10 @@ impl SelectorStructure {
 
     pub fn list(&self) -> &SelectorList {
         &self.list
+    }
+
+    pub(crate) fn into_list(self) -> SelectorList {
+        self.list
     }
 
     pub fn top_level_selector_count(&self) -> u32 {
@@ -650,10 +863,12 @@ impl SelectorSink {
                 let facts = components.iter().fold(recovered_facts, |facts, component| {
                     facts.combine(component.facts)
                 });
+                let tail = classify_compound_tail(&self.source, span, components.last());
                 Some(BuiltSelectorNode::Compound(SelectorCompound {
                     span,
                     components,
                     facts,
+                    tail,
                 }))
             }
             SyntaxKind::Combinator => Some(BuiltSelectorNode::Combinator(SelectorCombinator {
@@ -661,14 +876,28 @@ impl SelectorSink {
                 span,
             })),
             kind if selector_component_kind(kind).is_some() => {
-                let nested_components: Vec<_> = open
-                    .children
-                    .iter()
-                    .filter_map(|child| match child {
-                        BuiltSelectorNode::Component(component) => Some(component.clone()),
-                        _ => None,
-                    })
-                    .collect();
+                let mut nested_components = Vec::new();
+                let mut nested_list = None;
+                for child in open.children {
+                    match child {
+                        BuiltSelectorNode::Component(component) => {
+                            nested_components.push(component);
+                        }
+                        BuiltSelectorNode::List(value) if nested_list.is_none() => {
+                            // A functional pseudo's argument list is MOVED into its component,
+                            // exactly as the outer list is moved into its rule. The bracket
+                            // encloses the WHOLE transfer, box included, so the bucket's only
+                            // admissible cost is one `Box<SelectorList>` per occurrence and a
+                            // clone re-introduced anywhere inside it shows up as extra calls and
+                            // off-size bytes. Leaving `Box::new` outside let a clone hide in the
+                            // gap between the exit marker and the box.
+                            notify_parse_phase("selector_clone_enter");
+                            nested_list = Some(Box::new(value));
+                            notify_parse_phase("selector_clone_exit");
+                        }
+                        _ => {}
+                    }
+                }
                 let mut interpolations: Vec<_> = nested_components
                     .iter()
                     .filter(|component| component.kind == SelectorComponentKind::Interpolation)
@@ -694,13 +923,24 @@ impl SelectorSink {
                 } else {
                     Vec::new()
                 };
-                let attribute =
-                    (kind == SyntaxKind::AttributeSelector).then(|| SelectorAttribute {
+                let attribute = (kind == SyntaxKind::AttributeSelector).then(|| {
+                    let value_quoted = attribute_value_quoted(tokens);
+                    let value_span = attribute_value_span(tokens).map(|value_span| {
+                        if value_quoted {
+                            value_span
+                        } else {
+                            truncate_unquoted_attribute_value(&self.source, value_span)
+                        }
+                    });
+                    SelectorAttribute {
                         span,
                         matcher: attribute_matcher(tokens, &self.source),
                         name_span: attribute_name_span(tokens),
-                        value_span: attribute_value_span(tokens),
-                    });
+                        value_span,
+                        value_quoted,
+                        flags_span: attribute_flags_span(tokens),
+                    }
+                });
                 let pseudo = matches!(
                     kind,
                     SyntaxKind::PseudoClass
@@ -711,11 +951,7 @@ impl SelectorSink {
                 )
                 .then(|| {
                     let pseudo_kind = pseudo_kind(tokens, &self.source);
-                    let selector_list = open.children.iter().find_map(|child| match child {
-                        BuiltSelectorNode::List(value) => Some(Box::new(value.clone())),
-                        _ => None,
-                    });
-                    let selector_count = selector_list.as_ref().map_or(0, |list| {
+                    let selector_count = nested_list.as_ref().map_or(0, |list| {
                         u32::try_from(list.selectors.len()).unwrap_or(u32::MAX)
                     });
                     let nth = matches!(
@@ -724,13 +960,26 @@ impl SelectorSink {
                     )
                     .then(|| parse_an_plus_b_tokens(tokens, &self.source))
                     .flatten();
+                    let argument_span = pseudo_argument_span(tokens, span);
+                    let svelte_nth_arg = matches!(
+                        pseudo_kind,
+                        PseudoFunctionKind::NthChild | PseudoFunctionKind::NthLastChild
+                    )
+                    .then(|| classify_svelte_nth_arg(&self.source, argument_span));
+                    let argument_is_empty = classify_argument_is_empty(
+                        &self.source,
+                        argument_span,
+                        nested_list.as_deref(),
+                    );
                     SelectorPseudo {
                         span,
-                        argument_span: pseudo_argument_span(tokens, span),
+                        argument_span,
                         kind: pseudo_kind,
                         selector_count,
                         nth,
-                        selector_list,
+                        selector_list: nested_list,
+                        svelte_nth_arg,
+                        argument_is_empty,
                     }
                 });
                 if kind == SyntaxKind::Interpolation {
@@ -988,6 +1237,83 @@ fn attribute_value_span(tokens: &[SyntaxToken]) -> Option<Span> {
         span.end = span.end.saturating_sub(1);
     }
     Some(span)
+}
+
+/// Whether the SAME value token [`attribute_value_span`] locates is a quoted
+/// CSS `String` token — the identical token-kind check that function already
+/// performs to decide whether to strip quote bytes, captured as its own fact
+/// so [`SelectorAttribute::value_was_quoted`] never needs a caller to infer
+/// quoted-ness from raw source bytes.
+fn attribute_value_quoted(tokens: &[SyntaxToken]) -> bool {
+    let Some(matcher) = attribute_matcher_token_index(tokens) else {
+        return false;
+    };
+    tokens[matcher + 1..]
+        .iter()
+        .find(|token| !token.kind().is_trivia() && token.kind() != TokenKind::Delim)
+        .is_some_and(|token| token.kind() == TokenKind::String)
+}
+
+/// Svelte's `read_attribute_value` unquoted-value truncation
+/// (`REGEX_CLOSING_BRACKET = /[\s\]]/`): stop at the first JS-whitespace
+/// CODEPOINT (NBSP, U+00A0, included), never a byte scan. The general CSS
+/// Syntax tokenizer treats NBSP as a valid non-ASCII name-continuation
+/// codepoint, so an unquoted attribute value token can run past the point
+/// Svelte's own lenient reader would have stopped (`[data-x=a<NBSP>b]` reads
+/// the whole `a<NBSP>b` as one token, while Svelte truncates at the NBSP).
+/// Applied here, at parse time, so [`SelectorAttribute::value_span`] already
+/// carries the truncated span — a reader never re-scans it. A QUOTED value
+/// is never truncated this way (the caller only applies this to an
+/// UNQUOTED value token).
+fn truncate_unquoted_attribute_value(source: &CssSource, span: Span) -> Span {
+    let text = source.slice(span);
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while let Some((codepoint, width)) = codepoint_at(bytes, index) {
+        if is_js_whitespace_codepoint(codepoint) {
+            break;
+        }
+        index += width;
+    }
+    Span::new(
+        span.start,
+        span.start
+            .saturating_add(u32::try_from(index).unwrap_or(u32::MAX)),
+    )
+}
+
+/// The trailing case-sensitivity flags run (`i` / `s`, e.g. `[attr~="v" i]`)
+/// — the official `read_attribute_flags` (`REGEX_ATTRIBUTE_FLAGS =
+/// /[a-zA-Z]+/y`), read as ONE `Ident` token immediately after the value
+/// token (when a matcher/value is present) or after the attribute name (when
+/// it is not — upstream's reader runs `read_attribute_flags` unconditionally
+/// after the optional matcher+value, so a value-less `[attr i]` still reads a
+/// flags run). `None` when no such trailing identifier is present.
+fn attribute_flags_span(tokens: &[SyntaxToken]) -> Option<Span> {
+    let start_search = match attribute_matcher_token_index(tokens) {
+        Some(matcher) => {
+            let value_index = tokens[matcher + 1..]
+                .iter()
+                .position(|token| !token.kind().is_trivia() && token.kind() != TokenKind::Delim)
+                .map(|offset| matcher + 1 + offset)?;
+            value_index + 1
+        }
+        None => {
+            let name_index = tokens
+                .iter()
+                .position(|token| token.kind() == TokenKind::Ident)?;
+            name_index + 1
+        }
+    };
+    let mut index = start_search;
+    while tokens
+        .get(index)
+        .is_some_and(|token| token.kind().is_trivia())
+    {
+        index += 1;
+    }
+    let token = tokens.get(index)?;
+    (token.kind() == TokenKind::Ident).then(|| Span::new(token.start, token.end))
 }
 
 fn attribute_matcher_token_index(tokens: &[SyntaxToken]) -> Option<usize> {

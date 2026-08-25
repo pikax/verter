@@ -36,11 +36,15 @@ pub use lexer::Lexer;
 pub use parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource, Parser, SourceSize};
 pub use selector::{
     parse_selector_structure, AttributeMatcher, CombinatorKind, ComplexSelector,
-    ComplexSelectorPart, NthExpression, PseudoFunctionKind, SelectorAttribute, SelectorCombinator,
-    SelectorCompleteness, SelectorComponent, SelectorComponentKind, SelectorCompound,
-    SelectorFacts, SelectorInterpolation, SelectorKind, SelectorList, SelectorPseudo,
-    SelectorStructure, SelectorTrust,
+    ComplexSelectorPart, CompoundTail, NthExpression, PseudoFunctionKind, SelectorAttribute,
+    SelectorCombinator, SelectorCompleteness, SelectorComponent, SelectorComponentKind,
+    SelectorCompound, SelectorFacts, SelectorInterpolation, SelectorKind, SelectorList,
+    SelectorPseudo, SelectorStructure, SelectorTrust, SvelteNthArg,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use style_ir::parse_style_ir_thread_invocations;
+#[cfg(any(test, feature = "test-support"))]
+pub use style_ir::set_style_ir_parse_phase_probe;
 pub use style_ir::{
     parse_component_value_tree, parse_style_ir, ComponentBlock, ComponentDelimiter,
     ComponentFunction, ComponentToken, ComponentValue, ComponentValueTree, StaticClassFact,
@@ -48,7 +52,12 @@ pub use style_ir::{
     StyleMixinOrFunction, StyleRule, StyleStatement, StyleSyntaxIr, StyleSyntaxIrSink,
     UnknownStatement, UnknownStatementKind, ValueInterpolation,
 };
-pub use svelte_compat::style_body_reject_code;
+pub use svelte_compat::{
+    parse_style_body, style_body_reject_code, svelte_first_significant_value_span,
+    svelte_nth_of_selector_span, svelte_percentage_selector_span, svelte_read_value_text,
+    svelte_reject_from_ir, svelte_trailing_type_selector_span, svelte_trim_js_whitespace,
+    CssBodyParseError,
+};
 pub use token::{
     css_identifier_eq_ignore_ascii_case, decode_css_identifier, DecodedName, SyntaxToken,
     TokenFlags, TokenKind,

@@ -1,65 +1,42 @@
-//! The Svelte selector-to-template matcher — a faithful port of the official
+//! The Svelte selector-to-template matcher — matches the official
 //! `svelte@5.56.10` `phases/2-analyze/css/css-prune.js` (`prune`,
 //! `apply_selector` BACKWARD, `apply_combinator`,
 //! `relative_selector_might_apply_to_node`, `attribute_matches`,
 //! `test_attribute`, and the DOM-neighborhood helpers) plus the
 //! `phases/2-analyze/css/utils.js` `get_possible_values` class/attribute
-//! value enumeration (UNKNOWN bails to "may match anything", exactly as
-//! upstream).
+//! value enumeration, walking the shared `verter_css_syntax` grammar via
+//! [`match_relsel`]'s [`StepView`] algebra.
 //!
-//! Inputs are the analyzed span-bearing CSS AST and the runtime IR
-//! ([`SvelteRuntimeIr`]) — the IR is consumed STRICTLY read-only. The IR has
-//! no parent/sibling/path accessor, so the matcher builds its own
-//! [`TemplateIndex`] in ONE downward walk from `root_scope().roots`: a
-//! per-node `path` (the ancestor chain interleaving fragment + container
-//! entries, root→parent, exactly the official `metadata.path` shape), an
-//! ordered node list per fragment (element children and template-scope
-//! roots), the snippet⇄site links (`SnippetBlock.metadata.sites` /
-//! `RenderTag.metadata.snippets` / `Component.metadata.snippets`), and the
-//! element inventory the official `analysis.elements` iterable carries.
+//! ## Why there is no separate write-back pass
 //!
-//! Outcomes are FAIL-CLOSED: any template or selector construct whose
-//! official neighborhood semantics cannot be PROVEN from the IR (a
-//! named-slot filler whose lowered child order diverges from the source
-//! fragment order, `<svelte:fragment slot>` hoisting that erases the
-//! official climb-out boundary, a `<svelte:head>` `<title>` that the IR
-//! decomposes away, a `{@render}` spread argument, a value literal whose JS
-//! stringification cannot be reproduced exactly) aborts the match with the
-//! typed [`MatcherRefusal`] — never a guessed scope, never an
-//! over-approximated `used` verdict. (A legacy `<slot>` element is PROVABLE:
-//! the IR projects its lossless block topology, so slot CSS scoping matches
-//! without refusal.)
+//! The official JS algorithm mutates `metadata.used`/`metadata.scoped`
+//! through shared object references (a spread-copied selector aliases the
+//! same `metadata` object as its source). [`CompoundView::origin`] always
+//! resolves back to the REAL [`SelectorCompound`] in the immutable source
+//! tree (never a clone — a `:has(...)`-filtered or synthetic view either
+//! carries the real node or none at all), so this matcher writes directly
+//! through `analysis.mark_scoped(origin)`/`analysis.mark_used(complex)`
+//! during the walk — semantics-preserving because `used`/`scoped` are never
+//! READ mid-walk, only written.
 //!
-//! The JS algorithm mutates `metadata.used` / `metadata.scoped` in place
-//! through shared object references (spread-copied selectors alias the same
-//! `metadata` object). The port collects those writes in a [`MatchSink`]
-//! keyed by node span — a spread-copy keeps the original's span, so the
-//! deferred write lands on the aliased original exactly as the JS mutation
-//! does — and applies them after the walk; the algorithm never reads its own
-//! `used`/`scoped` writes, so deferral is semantics-preserving. Synthetic
-//! selectors (the official module-level `nesting_selector` / `any_selector`)
-//! carry a sentinel span no AST node owns, so their writes drop, matching the
-//! upstream write-to-singleton no-op.
+//! [`MatchSink`] carries what has no home on the CSS-domain
+//! [`CssAnalysis`](super::analyze::CssAnalysis): [`NodeId`] scoped-element
+//! membership and the observability-only certainty rows.
 
-// The template-neighborhood index + DOM-neighborhood helpers and the
-// expression-value enumeration live in the sibling submodules; this file owns
-// the selector-matching walk itself.
 #[path = "match_attribute.rs"]
 mod attribute;
 #[path = "match_certainty.rs"]
 mod certainty;
 #[path = "match_index.rs"]
 mod index;
-#[path = "match_relsel.rs"]
-mod relsel;
 #[path = "match_values.rs"]
 mod values;
-#[path = "match_writeback.rs"]
-mod writeback;
-
-use std::borrow::Cow;
 
 use rustc_hash::FxHashSet;
+use verter_css_syntax::{
+    CombinatorKind, ComplexSelector, SelectorComponentKind, SelectorPseudo, StyleDirective,
+    StyleRule, StyleStatement, StyleSyntaxIr,
+};
 use verter_span::Span;
 
 use index::{
@@ -68,38 +45,44 @@ use index::{
 };
 use values::expression_possible_values;
 
-use super::analyze::{is_outer_global, is_unscoped_pseudo_class};
-use super::types::{
-    Atrule, Block, BlockChild, Combinator, ComplexSelector, MatchedTemplateFacts, RelativeSelector,
-    Rule, SelectorList, SimpleSelector, StyleChild, StyleSheet,
+use super::analyze::{
+    component_name, is_outer_global, is_pseudo_class_component, is_unscoped_pseudo_class,
+    relative_steps, CssAnalysis,
 };
+use super::match_relsel::{self as relsel, CombinatorView, ComponentView, CompoundView, StepView};
+use super::types::MatchedTemplateFacts;
 use crate::svelte::runtime::ir::{AttrIr, MixedAttrPart, NodeId, SvelteRuntimeIr};
 use attribute::{
     ends_with_js_whitespace, starts_with_js_whitespace, test_attribute, unescape_backslashes,
     unquote,
 };
 pub use certainty::MatchCertainty;
-use relsel::{get_relative_selectors, truncate};
-use writeback::apply_sink_to_children;
 
 /// Run the official `prune(stylesheet, elements)` walk over the analyzed CSS
-/// AST and the component's template. On success the `used` / `scoped`
-/// selector verdicts are written onto the AST metadata and the per-element
-/// scope facts are returned; an unprovable construct returns the typed
-/// fail-closed [`MatcherRefusal`] and writes NO facts.
-pub(crate) fn match_stylesheet(
-    ast: &mut StyleSheet,
+/// tree and the component's template, mutating `analysis`'s `used`/`scoped`
+/// side-table facts directly (see the module doc for why no deferred
+/// write-back pass is needed). On success the per-element scope facts are
+/// returned; an unprovable construct returns the typed fail-closed
+/// [`MatcherRefusal`] and leaves `analysis` PARTIALLY written — a matcher
+/// refusal never constructs a plan at all, so a caller that discards
+/// `analysis` on `Err` observes no partial state either way.
+pub(crate) fn match_stylesheet<'ast>(
+    source: &'ast str,
+    tree: &'ast StyleSyntaxIr,
+    analysis: &mut CssAnalysis,
     ir: &SvelteRuntimeIr<'_>,
 ) -> Result<MatchedTemplateFacts, MatcherRefusal> {
-    let fallback_span = ast.span;
+    let fallback_span = Span::new(tree.source().origin(), tree.source().end());
     let index = TemplateIndex::build(ir, fallback_span)?;
     let sink = {
         let mut matcher = Matcher {
+            source,
+            analysis,
             index: &index,
             sink: MatchSink::default(),
         };
-        let mut chain: Vec<&Rule> = Vec::new();
-        matcher.prune_children(&ast.children, &mut chain)?;
+        let mut chain: Vec<&StyleRule> = Vec::new();
+        matcher.prune_statements(tree.statements(), &mut chain)?;
         matcher.sink
     };
     // Conformance observability: the complete matcher-fact set (per-selector
@@ -110,20 +93,23 @@ pub(crate) fn match_stylesheet(
     crate::svelte::runtime::conformance_trace::record(|trace| {
         trace
             .style_matches
-            .push(build_style_match_trace(&sink, &index));
+            .push(build_style_match_trace(tree, analysis, &sink, &index));
     });
-    apply_sink_to_children(&mut ast.children, &sink);
     Ok(MatchedTemplateFacts {
         scoped: sink.scoped_elements,
     })
 }
 
-/// Project one match run's sink into the conformance trace's fact set —
-/// deterministic orders (sorted spans / node ids; the certainty rows keep
-/// prune visit order), synthetic-selector writes excluded (no AST node owns
-/// the sentinel span).
+/// Project one match run into the conformance trace's fact set — the
+/// used/scoped verdicts are read from the FINAL [`CssAnalysis`] state (the
+/// side table the walk wrote them into); a synthetic step's `origin()` never
+/// inserts an entry in the first place, so no sentinel-spanned sink set needs
+/// filtering here (see the module doc). Deterministic orders (sorted spans /
+/// node ids; the certainty rows keep prune visit order).
 #[cfg(feature = "conformance-trace")]
 fn build_style_match_trace(
+    tree: &StyleSyntaxIr,
+    analysis: &CssAnalysis,
     sink: &MatchSink,
     index: &TemplateIndex<'_, '_>,
 ) -> crate::svelte::runtime::conformance_trace::StyleMatchTrace {
@@ -132,21 +118,17 @@ fn build_style_match_trace(
     };
     use crate::svelte::runtime::ir::IrNode;
 
-    let synthetic = synthetic_span();
-    let mut used_selector_spans: Vec<Span> = sink
-        .used_selectors
-        .iter()
-        .copied()
-        .filter(|span| *span != synthetic)
-        .collect();
-    used_selector_spans.sort_unstable_by_key(|span| (span.start, span.end));
-    let mut scoped_selector_spans: Vec<Span> = sink
-        .scoped_selectors
-        .iter()
-        .copied()
-        .filter(|span| *span != synthetic)
-        .collect();
-    scoped_selector_spans.sort_unstable_by_key(|span| (span.start, span.end));
+    let mut used_selector_spans = Vec::new();
+    let mut scoped_selector_spans = Vec::new();
+    collect_used_and_scoped_spans(
+        tree.statements(),
+        analysis,
+        &mut used_selector_spans,
+        &mut scoped_selector_spans,
+    );
+    used_selector_spans.sort_unstable_by_key(|span: &Span| (span.start, span.end));
+    scoped_selector_spans.sort_unstable_by_key(|span: &Span| (span.start, span.end));
+
     let mut scoped_nodes: Vec<NodeId> = sink.scoped_elements.iter().copied().collect();
     scoped_nodes.sort_unstable_by_key(|node| node.0);
     let scoped_elements = scoped_nodes
@@ -163,9 +145,7 @@ fn build_style_match_trace(
                 // `is_matchable_element`). The trace is CONFORMANCE
                 // AUTHORITY, so an impossible node kind FAILS CLOSED here —
                 // fabricating a placeholder span would manufacture typed
-                // evidence. The full committed conformance corpus exercises
-                // this projection for every supported fixture, so a
-                // reachable branch would fail that suite loudly.
+                // evidence.
                 other => unreachable!(
                     "scoped node {node:?} is not a matchable element (found {other:?}) — \
                      the matcher only scopes template-index elements"
@@ -193,37 +173,99 @@ fn build_style_match_trace(
     }
 }
 
+/// Walk every selector list reachable from `statements` (rule preludes,
+/// recursing into pseudo-class argument lists), collecting the spans of
+/// every complex selector marked `used` and every compound marked `scoped`
+/// in `analysis`.
+#[cfg(feature = "conformance-trace")]
+fn collect_used_and_scoped_spans(
+    statements: &[StyleStatement],
+    analysis: &CssAnalysis,
+    used: &mut Vec<Span>,
+    scoped: &mut Vec<Span>,
+) {
+    for statement in statements {
+        match statement {
+            StyleStatement::Rule(rule) => {
+                collect_selector_list_spans(rule.selector_list(), analysis, used, scoped);
+                collect_used_and_scoped_spans(rule.body().statements(), analysis, used, scoped);
+            }
+            StyleStatement::AtRule(atrule) => {
+                if let Some(block) = atrule.body() {
+                    collect_used_and_scoped_spans(block.statements(), analysis, used, scoped);
+                }
+            }
+            StyleStatement::Declaration(_)
+            | StyleStatement::MixinOrFunction(_)
+            | StyleStatement::Unknown(_) => {}
+        }
+    }
+}
+
+#[cfg(feature = "conformance-trace")]
+fn collect_selector_list_spans(
+    list: &verter_css_syntax::SelectorList,
+    analysis: &CssAnalysis,
+    used: &mut Vec<Span>,
+    scoped: &mut Vec<Span>,
+) {
+    for complex in list.selectors() {
+        if analysis.complex_facts(complex).used {
+            used.push(complex.span());
+        }
+        for (_, compound) in relative_steps(complex) {
+            if analysis.compound_facts(compound).scoped {
+                scoped.push(compound.span());
+            }
+            for component in compound.components() {
+                if let Some(args) = component.pseudo().and_then(SelectorPseudo::selector_list) {
+                    collect_selector_list_spans(args, analysis, used, scoped);
+                }
+            }
+        }
+    }
+}
+
+/// Type-witness anchor: `match_stylesheet` is nominally typed against the
+/// shared `StyleSyntaxIr` + `CssAnalysis` — a re-parse-and-resolve shim with
+/// the same runtime shape would fail to unify here.
+const _: for<'ast> fn(
+    &'ast str,
+    &'ast StyleSyntaxIr,
+    &mut CssAnalysis,
+    &SvelteRuntimeIr<'_>,
+) -> Result<MatchedTemplateFacts, MatcherRefusal> = match_stylesheet;
+
 /// Test hook: run the prune walk and return the per-TOP-LEVEL-complex-selector
 /// [`MatchCertainty`] rows (prune visit order, `No` rows included) WITHOUT
-/// applying the sink — the tri-state observability the matcher tests pin
-/// (production callers use [`match_stylesheet`], whose output projects the
-/// certainty through [`MatchCertainty::might_match`]).
+/// constructing [`MatchedTemplateFacts`] — the tri-state observability the
+/// differential matcher tests pin.
 #[cfg(test)]
-pub(crate) fn match_stylesheet_certainties_for_test(
-    ast: &StyleSheet,
+pub(crate) fn match_stylesheet_certainties_for_test<'ast>(
+    source: &'ast str,
+    tree: &'ast StyleSyntaxIr,
+    analysis: &mut CssAnalysis,
     ir: &SvelteRuntimeIr<'_>,
 ) -> Result<Vec<(Span, MatchCertainty)>, MatcherRefusal> {
-    let index = TemplateIndex::build(ir, ast.span)?;
+    let index = TemplateIndex::build(ir, Span::new(tree.source().origin(), tree.source().end()))?;
     let mut matcher = Matcher {
+        source,
+        analysis,
         index: &index,
         sink: MatchSink::default(),
     };
-    let mut chain: Vec<&Rule> = Vec::new();
-    matcher.prune_children(&ast.children, &mut chain)?;
+    let mut chain: Vec<&StyleRule> = Vec::new();
+    matcher.prune_statements(tree.statements(), &mut chain)?;
     Ok(matcher.sink.selector_certainties)
 }
 
 /// A template or selector construct the matcher cannot PROVE equivalent to
 /// the official semantics — the typed fail-closed refusal of
-/// [`match_stylesheet`]: no facts are published, no plan is constructed, and
-/// the caller refuses emission on the style surface (never a guessed scope).
+/// [`match_stylesheet`]: no facts are published, and the caller refuses
+/// emission on the style surface (never a guessed scope).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MatcherRefusal {
-    /// The byte span of the offending construct (absolute in the component
-    /// source; the css body span when the construct carries no span of its
-    /// own).
     pub(crate) span: Span,
-    /// A stable description of the unprovable construct class.
     pub(crate) construct: &'static str,
 }
 
@@ -235,72 +277,13 @@ impl MatcherRefusal {
 
 type MatchResult<T> = Result<T, MatcherRefusal>;
 
-/// The deferred metadata writes of one match run (see the module docs for the
-/// span-keyed aliasing rationale).
-#[derive(Default)]
-struct MatchSink {
-    /// `ComplexSelector.metadata.used = true` writes, keyed by node span.
-    used_selectors: FxHashSet<Span>,
-    /// `RelativeSelector.metadata.scoped = true` writes, keyed by node span.
-    scoped_selectors: FxHashSet<Span>,
-    /// `element.metadata.scoped = true` writes (the per-element scope facts).
-    scoped_elements: FxHashSet<NodeId>,
-    /// The per-TOP-LEVEL-complex-selector certainty rows (prune visit order,
-    /// `No` rows included) — the observability the conformance trace and the
-    /// matcher tests read. Absent from production builds: the production
-    /// verdict is fully carried by the three sets above.
-    #[cfg(any(test, feature = "conformance-trace"))]
-    selector_certainties: Vec<(Span, MatchCertainty)>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// The selector matcher (css-prune.js head): prune / apply_selector /
-// apply_combinator / relative_selector_might_apply_to_node.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A relative selector VIEW — the original AST node or an official-style
-/// spread copy (combinator swap, `:root`-filter, synthetic). A copy keeps the
-/// original's span, so deferred metadata writes alias the original exactly as
-/// the JS shared-`metadata` object does; synthetics carry [`synthetic_span`].
-type RelView<'ast> = Cow<'ast, RelativeSelector>;
-
 /// The sentinel span synthetic selectors carry (the official `start: -1`
-/// nodes) — no AST node owns it, so sink writes to it drop.
+/// nodes) — used only for a refusal raised against a synthetic step (dead in
+/// practice: a synthetic nesting step is only ever constructed at
+/// `rule_idx >= 1`, so the one refusal site that could target it is
+/// unreachable by construction, exactly as upstream).
 fn synthetic_span() -> Span {
     Span::new(u32::MAX, u32::MAX)
-}
-
-/// The official module-level `descendant_combinator`.
-fn descendant_combinator() -> Combinator {
-    Combinator {
-        span: synthetic_span(),
-        name: " ".to_string(),
-    }
-}
-
-/// The official module-level `nesting_selector` (`&`).
-fn nesting_selector() -> RelativeSelector {
-    RelativeSelector {
-        span: synthetic_span(),
-        combinator: None,
-        selectors: vec![SimpleSelector::Nesting {
-            span: synthetic_span(),
-        }],
-        metadata: Default::default(),
-    }
-}
-
-/// The official module-level `any_selector` (`*`).
-fn any_selector() -> RelativeSelector {
-    RelativeSelector {
-        span: synthetic_span(),
-        combinator: None,
-        selectors: vec![SimpleSelector::Type {
-            span: synthetic_span(),
-            name: "*".to_string(),
-        }],
-        metadata: Default::default(),
-    }
 }
 
 /// The official `whitelist_attribute_selector` — attributes the runtime may
@@ -353,24 +336,62 @@ const CASE_INSENSITIVE_ATTRIBUTES: &[&str] = &[
     "wrap",
 ];
 
-/// The matcher state: the template index plus the deferred metadata writes.
-struct Matcher<'i, 'ir, 'src> {
+/// The deferred/observability state a match run still needs beyond direct
+/// [`CssAnalysis`] mutation (see the module doc): the per-element scope facts
+/// (no CSS-domain home) and the certainty rows (test/trace observability
+/// only).
+#[derive(Default)]
+struct MatchSink {
+    scoped_elements: FxHashSet<NodeId>,
+    #[cfg(any(test, feature = "conformance-trace"))]
+    selector_certainties: Vec<(Span, MatchCertainty)>,
+}
+
+/// The matcher state: the source text, the mutable analysis side table, the
+/// template index, and the sink.
+struct Matcher<'ast, 'm, 'i, 'ir, 'src> {
+    /// The FULL original component source (matching the absolute offsets
+    /// every span in `tree` carries) — raw `source[span.start..span.end]`
+    /// indexing (every `analyze::component_name` call, and this module's own
+    /// attribute-span slices) requires the untrimmed full text.
+    source: &'ast str,
+    analysis: &'m mut CssAnalysis,
     index: &'i TemplateIndex<'ir, 'src>,
     sink: MatchSink,
 }
 
-impl<'ast> Matcher<'_, '_, '_> {
-    /// The official `prune` walk over rule-position children: a global-block
-    /// rule visits only its prelude; every other rule visits prelude + block.
-    fn prune_children(
+impl<'ast> Matcher<'ast, '_, '_, '_, '_> {
+    fn source_text(&self) -> &'ast str {
+        self.source
+    }
+
+    fn truncate(&self, complex: &'ast ComplexSelector) -> Vec<StepView<'ast>> {
+        relsel::truncate(self.source, self.analysis, complex)
+    }
+
+    fn get_relative_selectors(
+        &self,
+        complex: &'ast ComplexSelector,
+        rule_idx: usize,
+    ) -> Vec<StepView<'ast>> {
+        relsel::get_relative_selectors(self.source, self.analysis, complex, rule_idx)
+    }
+
+    /// The official `prune` walk over rule-position statements: a
+    /// global-block rule visits only its prelude; every other rule visits
+    /// prelude + block; declarations carry no analysis.
+    fn prune_statements(
         &mut self,
-        children: &'ast [StyleChild],
-        chain: &mut Vec<&'ast Rule>,
+        statements: &'ast [StyleStatement],
+        chain: &mut Vec<&'ast StyleRule>,
     ) -> MatchResult<()> {
-        for child in children {
-            match child {
-                StyleChild::Rule(rule) => self.prune_rule(rule, chain)?,
-                StyleChild::Atrule(atrule) => self.prune_atrule(atrule, chain)?,
+        for statement in statements {
+            match statement {
+                StyleStatement::Rule(rule) => self.prune_rule(rule, chain)?,
+                StyleStatement::AtRule(atrule) => self.prune_atrule(atrule, chain)?,
+                StyleStatement::Declaration(_)
+                | StyleStatement::MixinOrFunction(_)
+                | StyleStatement::Unknown(_) => {}
             }
         }
         Ok(())
@@ -378,35 +399,28 @@ impl<'ast> Matcher<'_, '_, '_> {
 
     fn prune_atrule(
         &mut self,
-        atrule: &'ast Atrule,
-        chain: &mut Vec<&'ast Rule>,
+        atrule: &'ast StyleDirective,
+        chain: &mut Vec<&'ast StyleRule>,
     ) -> MatchResult<()> {
-        if let Some(block) = &atrule.block {
-            self.prune_block(block, chain)?;
+        if let Some(block) = atrule.body() {
+            self.prune_statements(block.statements(), chain)?;
         }
         Ok(())
     }
 
-    fn prune_block(&mut self, block: &'ast Block, chain: &mut Vec<&'ast Rule>) -> MatchResult<()> {
-        for child in &block.children {
-            match child {
-                BlockChild::Declaration(_) => {}
-                BlockChild::Rule(rule) => self.prune_rule(rule, chain)?,
-                BlockChild::Atrule(atrule) => self.prune_atrule(atrule, chain)?,
-            }
-        }
-        Ok(())
-    }
-
-    fn prune_rule(&mut self, rule: &'ast Rule, chain: &mut Vec<&'ast Rule>) -> MatchResult<()> {
+    fn prune_rule(
+        &mut self,
+        rule: &'ast StyleRule,
+        chain: &mut Vec<&'ast StyleRule>,
+    ) -> MatchResult<()> {
         chain.push(rule);
         let result = (|| {
-            for complex in &rule.prelude.children {
+            for complex in rule.selector_list().selectors() {
                 self.prune_complex_selector(complex, chain)?;
             }
             // `Rule(node, context)`: a global block visits only its prelude.
-            if !rule.metadata.is_global_block {
-                self.prune_block(&rule.block, chain)?;
+            if !self.analysis.rule_facts(rule).is_global_block {
+                self.prune_statements(rule.body().statements(), chain)?;
             }
             Ok(())
         })();
@@ -419,10 +433,10 @@ impl<'ast> Matcher<'_, '_, '_> {
     fn prune_complex_selector(
         &mut self,
         complex: &'ast ComplexSelector,
-        chain: &[&'ast Rule],
+        chain: &[&'ast StyleRule],
     ) -> MatchResult<()> {
         let rule_idx = chain.len() - 1;
-        let selectors = get_relative_selectors(complex, rule_idx);
+        let selectors = self.get_relative_selectors(complex, rule_idx);
         let elements = self.index.elements.clone();
         #[cfg(any(test, feature = "conformance-trace"))]
         let mut aggregate = MatchCertainty::No;
@@ -436,24 +450,18 @@ impl<'ast> Matcher<'_, '_, '_> {
                 0,
                 selectors.len(),
             )?;
-            // The production projection: `Yes | Maybe` marks the selector
-            // used, exactly as the pre-tri-state `true` did.
             if matched.might_match() {
-                self.sink.used_selectors.insert(complex.span);
+                self.analysis.mark_used(complex);
             }
             #[cfg(any(test, feature = "conformance-trace"))]
             {
-                // The selector-level certainty is the OR-fold over elements:
-                // one proven element proves the selector used; only `Maybe`
-                // elements leave it undecided; no matching element at all is
-                // the proven-unused `No`.
                 aggregate = aggregate.or(matched);
             }
         }
         #[cfg(any(test, feature = "conformance-trace"))]
         self.sink
             .selector_certainties
-            .push((complex.span, aggregate));
+            .push((complex.span(), aggregate));
         Ok(())
     }
 
@@ -462,8 +470,8 @@ impl<'ast> Matcher<'_, '_, '_> {
     #[allow(clippy::too_many_arguments)]
     fn apply_selector(
         &mut self,
-        relative_selectors: &[RelView<'_>],
-        chain: &[&Rule],
+        relative_selectors: &[StepView<'ast>],
+        chain: &[&'ast StyleRule],
         rule_idx: usize,
         element: NodeId,
         direction: Direction,
@@ -477,17 +485,14 @@ impl<'ast> Matcher<'_, '_, '_> {
             Direction::Forward => from,
             Direction::Backward => to - 1,
         };
-        let relative_selector = &relative_selectors[selector_index];
+        let relative_selector = relative_selectors[selector_index];
         let (rest_from, rest_to) = match direction {
             Direction::Forward => (from + 1, to),
             Direction::Backward => (from, to - 1),
         };
 
-        // The official `might_apply && apply_combinator` short-circuit: a
-        // proven-`No` compound skips the combinator walk (its side effects
-        // and refusals included), exactly as the boolean `&&` did.
         let compound = self.relative_selector_might_apply_to_node(
-            relative_selector,
+            relative_selector.compound,
             chain,
             rule_idx,
             element,
@@ -497,7 +502,7 @@ impl<'ast> Matcher<'_, '_, '_> {
             MatchCertainty::No
         } else {
             compound.and(self.apply_combinator(
-                relative_selector,
+                &relative_selector,
                 relative_selectors,
                 rest_from,
                 rest_to,
@@ -508,13 +513,11 @@ impl<'ast> Matcher<'_, '_, '_> {
             )?)
         };
 
-        // The production projection boundary: `Yes | Maybe` writes the
-        // scoped facts, exactly as the pre-tri-state `true` did.
         if matched.might_match() {
-            if !is_outer_global(relative_selector.as_ref()) {
-                self.sink
-                    .scoped_selectors
-                    .insert(relative_selector.as_ref().span);
+            if let Some(origin) = relative_selector.compound.origin() {
+                if !is_outer_global(self.source_text(), origin) {
+                    self.analysis.mark_scoped(origin);
+                }
             }
             self.sink.scoped_elements.insert(element);
         }
@@ -526,34 +529,32 @@ impl<'ast> Matcher<'_, '_, '_> {
     #[allow(clippy::too_many_arguments)]
     fn apply_combinator(
         &mut self,
-        relative_selector: &RelView<'_>,
-        relative_selectors: &[RelView<'_>],
+        relative_selector: &StepView<'ast>,
+        relative_selectors: &[StepView<'ast>],
         from: usize,
         to: usize,
-        chain: &[&Rule],
+        chain: &[&'ast StyleRule],
         rule_idx: usize,
         node: NodeId,
         direction: Direction,
     ) -> MatchResult<MatchCertainty> {
-        let combinator = match direction {
+        let combinator_kind = match direction {
             Direction::Forward => {
                 if from < to {
-                    relative_selectors[from].as_ref().combinator.as_ref()
+                    relative_selectors[from].combinator.kind()
                 } else {
                     None
                 }
             }
-            Direction::Backward => relative_selector.as_ref().combinator.as_ref(),
+            Direction::Backward => relative_selector.combinator.kind(),
         };
-        let Some(combinator) = combinator else {
-            // No remaining combinator — the walk completed; nothing left to
-            // constrain (definitional).
+        let Some(kind) = combinator_kind else {
             return Ok(MatchCertainty::Yes);
         };
 
-        match combinator.name.as_str() {
-            " " | ">" => {
-                let is_adjacent = combinator.name == ">";
+        match kind {
+            CombinatorKind::Descendant | CombinatorKind::Child => {
+                let is_adjacent = kind == CombinatorKind::Child;
                 let parents = match direction {
                     Direction::Forward => get_descendant_elements(self.index, node, is_adjacent),
                     Direction::Backward => {
@@ -573,11 +574,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                         to,
                     )?);
                 }
-                // The official `parent_matched || (…every_is_global…)`
-                // short-circuit: the all-global boundary fallback is only
-                // evaluated (refusals included) when NO parent matched. An
-                // all-global remainder is DEFINITIONAL (`:global` is the
-                // user's explicit scope-exemption assertion).
                 if parent_matched.might_match() {
                     return Ok(parent_matched);
                 }
@@ -589,27 +585,23 @@ impl<'ast> Matcher<'_, '_, '_> {
                 }
                 Ok(MatchCertainty::No)
             }
-            "+" | "~" => {
+            CombinatorKind::NextSibling | CombinatorKind::LaterSibling => {
+                let is_next = kind == CombinatorKind::NextSibling;
                 let mut seen: FxHashSet<NodeId> = FxHashSet::default();
-                let siblings = get_possible_element_siblings(
-                    self.index,
-                    node,
-                    direction,
-                    combinator.name == "+",
-                    &mut seen,
-                );
+                let siblings =
+                    get_possible_element_siblings(self.index, node, direction, is_next, &mut seen);
                 let mut sibling_matched = MatchCertainty::No;
                 for (possible_sibling, existence) in siblings.entries() {
                     let branch = if self.index.is_render_tag(possible_sibling)
                         || self.index.is_component_node(possible_sibling)
                         || self.index.is_slot_node(possible_sibling)
                     {
-                        // `{@render foo()}<p>foo</p>` with `:global(.x) + p`
-                        // is a match — the rendered content is unknowable
-                        // (official includes `SlotElement` here: a slot may
-                        // render supplied content), so the official acceptance
-                        // is a fail-open `Maybe`.
-                        if to - from == 1 && relative_selectors[from].as_ref().metadata.is_global {
+                        let from_is_global = (to - from == 1)
+                            && relative_selectors[from]
+                                .compound
+                                .origin()
+                                .is_some_and(|c| self.analysis.compound_facts(c).is_global);
+                        if from_is_global {
                             MatchCertainty::Maybe
                         } else {
                             MatchCertainty::No
@@ -624,10 +616,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                             from,
                             to,
                         )?;
-                        // A PROBABLY-existence sibling hop (the official
-                        // `NODE_PROBABLY_EXISTS` — the neighbor relation runs
-                        // through a conditional block) caps the branch at
-                        // `Maybe`: the sibling relation itself is unproven.
                         match existence {
                             Existence::Definitely => applied,
                             Existence::Probably => applied.and(MatchCertainty::Maybe),
@@ -635,8 +623,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                     };
                     sibling_matched = sibling_matched.or(branch);
                 }
-                // The official `sibling_matched || (…every_is_global…)`
-                // short-circuit, as in the descendant arm above.
                 if sibling_matched.might_match() {
                     return Ok(sibling_matched);
                 }
@@ -648,23 +634,22 @@ impl<'ast> Matcher<'_, '_, '_> {
                 }
                 Ok(MatchCertainty::No)
             }
-            // Other combinators (`||`) are accepted as upstream does — an
-            // unevaluated acceptance is a fail-open `Maybe`.
-            _ => Ok(MatchCertainty::Maybe),
+            // `||` — an unevaluated acceptance is a fail-open `Maybe`.
+            CombinatorKind::Column => Ok(MatchCertainty::Maybe),
         }
     }
 
     /// The official `every_is_global(relative_selectors, from, to, rule)`.
     fn every_is_global(
         &mut self,
-        relative_selectors: &[RelView<'_>],
-        chain: &[&Rule],
+        relative_selectors: &[StepView<'ast>],
+        chain: &[&'ast StyleRule],
         rule_idx: usize,
         from: usize,
         to: usize,
     ) -> MatchResult<bool> {
-        for selector in &relative_selectors[from..to] {
-            if !self.is_global_with_rule(selector.as_ref(), chain, rule_idx)? {
+        for step in &relative_selectors[from..to] {
+            if !self.is_global_with_rule(step.compound, chain, rule_idx)? {
                 return Ok(false);
             }
         }
@@ -677,50 +662,67 @@ impl<'ast> Matcher<'_, '_, '_> {
     /// complex selector.
     fn is_global_with_rule(
         &mut self,
-        selector: &RelativeSelector,
-        chain: &[&Rule],
+        compound: CompoundView<'ast>,
+        chain: &[&'ast StyleRule],
         rule_idx: usize,
     ) -> MatchResult<bool> {
-        if selector.metadata.is_global || selector.metadata.is_global_like {
-            return Ok(true);
+        if let Some(origin) = compound.origin() {
+            let facts = self.analysis.compound_facts(origin);
+            if facts.is_global || facts.is_global_like {
+                return Ok(true);
+            }
         }
 
         let mut explicitly_global = false;
+        let components = compound.components(self.source, self.analysis);
 
-        for simple in &selector.selectors {
-            let mut selector_list: Option<(&SelectorList, usize)> = None;
+        for component in &components {
+            let mut selector_list: Option<(&'ast verter_css_syntax::SelectorList, usize)> = None;
             let mut can_be_global = false;
 
-            if let SimpleSelector::PseudoClass { name, args, .. } = simple {
-                if (name == "is" || name == "where") && args.is_some() {
-                    selector_list = args.as_ref().map(|list| (list, rule_idx));
-                } else {
-                    can_be_global = is_unscoped_pseudo_class(simple);
+            if let ComponentView::Real(real) = component {
+                if is_pseudo_class_component(real) {
+                    let name = component_name(self.source_text(), real);
+                    if matches!(name.as_deref(), Some("is") | Some("where")) {
+                        if let Some(list) = real.pseudo().and_then(SelectorPseudo::selector_list) {
+                            selector_list = Some((list, rule_idx));
+                        }
+                    } else {
+                        can_be_global = is_unscoped_pseudo_class(self.source_text(), real);
+                    }
                 }
             }
 
-            if matches!(simple, SimpleSelector::Nesting { .. }) {
+            let is_nesting = matches!(component, ComponentView::SyntheticNesting)
+                || matches!(component, ComponentView::Real(real) if real.kind() == SelectorComponentKind::Nesting);
+            if is_nesting {
                 if rule_idx == 0 {
-                    // The analyzer only accepts a top-level `&` as the lone
-                    // `:global(&)`, which truncation removes before this arm
-                    // — a parentless nesting reference here is unprovable.
+                    let span = match component {
+                        ComponentView::Real(real) => real.span(),
+                        _ => synthetic_span(),
+                    };
                     return Err(MatcherRefusal::at(
-                        selector.span,
+                        span,
                         "a nesting selector without a parent rule",
                     ));
                 }
                 let owner_idx = rule_idx - 1;
-                selector_list = Some((&chain[owner_idx].prelude, owner_idx));
+                selector_list = Some((chain[owner_idx].selector_list(), owner_idx));
             }
 
             let has_global_selectors = match selector_list {
                 None => false,
                 Some((list, owner_idx)) => {
                     let mut any = false;
-                    for complex in &list.children {
-                        let mut all = !complex.children.is_empty();
-                        for relative in &complex.children {
-                            if !self.is_global_with_rule(relative, chain, owner_idx)? {
+                    for complex in list.selectors() {
+                        let steps = relative_steps(complex);
+                        let mut all = !steps.is_empty();
+                        for (_, inner_compound) in &steps {
+                            if !self.is_global_with_rule(
+                                CompoundView::Parsed(inner_compound),
+                                chain,
+                                owner_idx,
+                            )? {
                                 all = false;
                                 break;
                             }
@@ -740,20 +742,14 @@ impl<'ast> Matcher<'_, '_, '_> {
             }
         }
 
-        Ok(explicitly_global || selector.selectors.is_empty())
+        Ok(explicitly_global || components.is_empty())
     }
 
     /// The official `relative_selector_might_apply_to_node`.
-    ///
-    /// The returned certainty starts at `Yes` and each CONSTRAINING simple
-    /// selector ANDs its own verdict in (a proven-`No` constraint returns
-    /// immediately, exactly where the boolean walk returned `false`);
-    /// officially NON-CONSTRAINING selectors (pseudo-elements, state
-    /// pseudo-classes, keyframe percentages) leave it untouched.
     fn relative_selector_might_apply_to_node(
         &mut self,
-        relative_selector: &RelView<'_>,
-        chain: &[&Rule],
+        compound: CompoundView<'ast>,
+        chain: &[&'ast StyleRule],
         rule_idx: usize,
         element: NodeId,
         direction: Direction,
@@ -761,376 +757,433 @@ impl<'ast> Matcher<'_, '_, '_> {
         let mut include_self: Option<bool> = None;
         let mut certainty = MatchCertainty::Yes;
 
-        // Borrow the selector list for the whole loop (a spread copy owns its
-        // filtered list; the borrow lives on the view either way).
-        let selectors: &[SimpleSelector] = &relative_selector.as_ref().selectors;
+        let components = compound.components(self.source, self.analysis);
 
-        for selector in selectors {
+        for component in &components {
             // `:has(...)` — treat `.x:has(.y)` like `.x .y`, walking FORWARD.
-            if let SimpleSelector::PseudoClass {
-                name,
-                args: Some(args),
-                ..
-            } = selector
-            {
-                if name == "has" {
-                    if include_self.is_none() {
-                        include_self = Some(self.compute_has_include_self(chain, rule_idx)?);
-                    }
-                    let include = include_self == Some(true);
-
-                    let mut matched = MatchCertainty::No;
-                    for complex_selector in &args.children {
-                        let truncated = truncate(complex_selector);
-                        let Some((first, rest)) = truncated.split_first() else {
-                            // Just a `:global(...)` — definitional.
-                            self.sink.used_selectors.insert(complex_selector.span);
-                            matched = MatchCertainty::Yes;
-                            continue;
-                        };
-
-                        if include {
-                            let mut selector_including_self: Vec<RelView<'_>> =
-                                Vec::with_capacity(truncated.len());
-                            if first.as_ref().combinator.is_some() {
-                                let mut owned = first.as_ref().clone();
-                                owned.combinator = None;
-                                selector_including_self.push(Cow::Owned(owned));
-                            } else {
-                                selector_including_self.push(first.clone());
+            if let ComponentView::Real(real) = component {
+                if is_pseudo_class_component(real) {
+                    let name = component_name(self.source_text(), real);
+                    if name.as_deref() == Some("has") {
+                        if let Some(args) = real.pseudo().and_then(SelectorPseudo::selector_list) {
+                            if include_self.is_none() {
+                                include_self =
+                                    Some(self.compute_has_include_self(chain, rule_idx)?);
                             }
-                            selector_including_self.extend(rest.iter().cloned());
-                            let applied = self.apply_selector(
-                                &selector_including_self,
-                                chain,
-                                rule_idx,
-                                element,
-                                Direction::Forward,
-                                0,
-                                selector_including_self.len(),
-                            )?;
-                            if applied.might_match() {
-                                self.sink.used_selectors.insert(complex_selector.span);
-                                matched = matched.or(applied);
-                            }
-                        }
+                            let include = include_self == Some(true);
 
-                        let mut selector_excluding_self: Vec<RelView<'_>> =
-                            Vec::with_capacity(truncated.len() + 1);
-                        selector_excluding_self.push(Cow::Owned(any_selector()));
-                        if first.as_ref().combinator.is_some() {
-                            selector_excluding_self.push(first.clone());
-                        } else {
-                            let mut owned = first.as_ref().clone();
-                            owned.combinator = Some(descendant_combinator());
-                            selector_excluding_self.push(Cow::Owned(owned));
-                        }
-                        selector_excluding_self.extend(rest.iter().cloned());
-                        let applied = self.apply_selector(
-                            &selector_excluding_self,
-                            chain,
-                            rule_idx,
-                            element,
-                            Direction::Forward,
-                            0,
-                            selector_excluding_self.len(),
-                        )?;
-                        if applied.might_match() {
-                            self.sink.used_selectors.insert(complex_selector.span);
-                            matched = matched.or(applied);
-                        }
-                    }
+                            let mut matched = MatchCertainty::No;
+                            for complex_selector in args.selectors() {
+                                let truncated = self.truncate(complex_selector);
+                                let Some((first, rest)) = truncated.split_first() else {
+                                    self.analysis.mark_used(complex_selector);
+                                    matched = MatchCertainty::Yes;
+                                    continue;
+                                };
 
-                    if matched == MatchCertainty::No {
-                        return Ok(MatchCertainty::No);
-                    }
-                    certainty = certainty.and(matched);
-                    continue;
-                }
-            }
-
-            if matches!(
-                selector,
-                SimpleSelector::Percentage { .. } | SimpleSelector::Nth { .. }
-            ) {
-                // A keyframe PERCENTAGE never constrains an element
-                // (definitional skip); an `:nth-*` IS a constraint the
-                // official walk leaves unevaluated — a fail-open `Maybe`.
-                if matches!(selector, SimpleSelector::Nth { .. }) {
-                    certainty = certainty.and(MatchCertainty::Maybe);
-                }
-                continue;
-            }
-
-            match selector {
-                SimpleSelector::PseudoClass { name, args, .. } => {
-                    let name = unescape_backslashes(name);
-                    if name == "host" || name == "root" {
-                        return Ok(MatchCertainty::No);
-                    }
-
-                    if name == "global" && args.is_some() && selectors.len() == 1 {
-                        let args = args.as_ref().expect("checked is_some above");
-                        let Some(complex_selector) = args.children.first() else {
-                            // An empty `:global()` — definitional.
-                            return Ok(MatchCertainty::Yes);
-                        };
-                        let views: Vec<RelView<'_>> = complex_selector
-                            .children
-                            .iter()
-                            .map(Cow::Borrowed)
-                            .collect();
-                        return self.apply_selector(
-                            &views,
-                            chain,
-                            rule_idx,
-                            element,
-                            Direction::Backward,
-                            0,
-                            views.len(),
-                        );
-                    }
-
-                    // We came across a `:global` — everything beyond it is a
-                    // potential match (the user's explicit scope-exemption
-                    // assertion — definitional).
-                    if name == "global" && args.is_none() {
-                        return Ok(MatchCertainty::Yes);
-                    }
-
-                    // `:not(...)` contents stay unscoped; complex arguments
-                    // with descendants are assumed to match (missing prune is
-                    // the only drawback). The `:not` itself is a constraint
-                    // the official walk never evaluates — a fail-open
-                    // `Maybe`.
-                    if name == "not" {
-                        if let Some(args) = args {
-                            for complex_selector in &args.children {
-                                self.mark_complex_used_recursive(complex_selector);
-                                let truncated = truncate(complex_selector);
-
-                                if complex_selector.children.len() > 1 {
-                                    for selector in &truncated {
-                                        self.sink.scoped_selectors.insert(selector.as_ref().span);
-                                    }
-
-                                    let mut el = Some(element);
-                                    while let Some(current) = el {
-                                        self.sink.scoped_elements.insert(current);
-                                        el = get_element_parent(self.index, current);
+                                if include {
+                                    let including_self_combinator = CombinatorView::None;
+                                    let mut selector_including_self: Vec<StepView<'ast>> =
+                                        Vec::with_capacity(truncated.len());
+                                    selector_including_self.push(StepView {
+                                        combinator: including_self_combinator,
+                                        compound: first.compound,
+                                    });
+                                    selector_including_self.extend_from_slice(rest);
+                                    let applied = self.apply_selector(
+                                        &selector_including_self,
+                                        chain,
+                                        rule_idx,
+                                        element,
+                                        Direction::Forward,
+                                        0,
+                                        selector_including_self.len(),
+                                    )?;
+                                    if applied.might_match() {
+                                        self.analysis.mark_used(complex_selector);
+                                        matched = matched.or(applied);
                                     }
                                 }
-                            }
-                        }
-                        certainty = certainty.and(MatchCertainty::Maybe);
-                        continue;
-                    }
 
-                    if (name == "is" || name == "where") && args.is_some() {
-                        let args = args.as_ref().expect("checked is_some above");
-                        let mut matched = MatchCertainty::No;
-
-                        for complex_selector in &args.children {
-                            let truncated = truncate(complex_selector);
-
-                            if truncated.is_empty() {
-                                // It was just a `:global(...)` — definitional.
-                                self.sink.used_selectors.insert(complex_selector.span);
-                                matched = MatchCertainty::Yes;
-                            } else {
+                                let excluding_self_first_combinator = match first.combinator {
+                                    CombinatorView::None => CombinatorView::SyntheticDescendant,
+                                    other => other,
+                                };
+                                let mut selector_excluding_self: Vec<StepView<'ast>> =
+                                    Vec::with_capacity(truncated.len() + 1);
+                                selector_excluding_self.push(StepView {
+                                    combinator: CombinatorView::None,
+                                    compound: CompoundView::SyntheticAny,
+                                });
+                                selector_excluding_self.push(StepView {
+                                    combinator: excluding_self_first_combinator,
+                                    compound: first.compound,
+                                });
+                                selector_excluding_self.extend_from_slice(rest);
                                 let applied = self.apply_selector(
-                                    &truncated,
+                                    &selector_excluding_self,
                                     chain,
                                     rule_idx,
                                     element,
-                                    Direction::Backward,
+                                    Direction::Forward,
                                     0,
-                                    truncated.len(),
+                                    selector_excluding_self.len(),
                                 )?;
                                 if applied.might_match() {
-                                    self.sink.used_selectors.insert(complex_selector.span);
+                                    self.analysis.mark_used(complex_selector);
                                     matched = matched.or(applied);
-                                } else if complex_selector.children.len() > 1 {
-                                    // `foo :is(bar baz)` can also mean `bar` is an
-                                    // ancestor and `baz` a descendant — assume it
-                                    // matches (a fail-open `Maybe`).
-                                    self.sink.used_selectors.insert(complex_selector.span);
-                                    matched = matched.or(MatchCertainty::Maybe);
-                                    for selector in &truncated {
-                                        self.sink.scoped_selectors.insert(selector.as_ref().span);
+                                }
+                            }
+
+                            if matched == MatchCertainty::No {
+                                return Ok(MatchCertainty::No);
+                            }
+                            certainty = certainty.and(matched);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            match component {
+                ComponentView::Percentage(_) => continue,
+                ComponentView::Nth(_) => {
+                    certainty = certainty.and(MatchCertainty::Maybe);
+                    continue;
+                }
+                _ => {}
+            }
+
+            match component {
+                ComponentView::Real(real) => match real.kind() {
+                    SelectorComponentKind::PseudoClass
+                    | SelectorComponentKind::FunctionalPseudo => {
+                        let raw_name = component_name(self.source_text(), real).unwrap_or_default();
+                        let name = unescape_backslashes(&raw_name);
+                        if name == "host" || name == "root" {
+                            return Ok(MatchCertainty::No);
+                        }
+
+                        let args = real.pseudo().and_then(SelectorPseudo::selector_list);
+
+                        if let Some(args) =
+                            args.filter(|_| name == "global" && components.len() == 1)
+                        {
+                            let Some(complex_selector) = args.selectors().first() else {
+                                return Ok(MatchCertainty::Yes);
+                            };
+                            let views: Vec<StepView<'ast>> = relative_steps(complex_selector)
+                                .into_iter()
+                                .map(|(combinator, inner_compound)| StepView {
+                                    combinator: combinator
+                                        .map_or(CombinatorView::None, CombinatorView::Parsed),
+                                    compound: CompoundView::Parsed(inner_compound),
+                                })
+                                .collect();
+                            return self.apply_selector(
+                                &views,
+                                chain,
+                                rule_idx,
+                                element,
+                                Direction::Backward,
+                                0,
+                                views.len(),
+                            );
+                        }
+
+                        if name == "global" && args.is_none() {
+                            return Ok(MatchCertainty::Yes);
+                        }
+
+                        if name == "not" {
+                            if let Some(args) = args {
+                                for complex_selector in args.selectors() {
+                                    self.mark_complex_used_recursive(complex_selector);
+                                    let truncated = self.truncate(complex_selector);
+
+                                    if relative_steps(complex_selector).len() > 1 {
+                                        for step in &truncated {
+                                            if let Some(origin) = step.compound.origin() {
+                                                self.analysis.mark_scoped(origin);
+                                            }
+                                        }
+                                        let mut el = Some(element);
+                                        while let Some(current) = el {
+                                            self.sink.scoped_elements.insert(current);
+                                            el = get_element_parent(self.index, current);
+                                        }
                                     }
                                 }
                             }
+                            certainty = certainty.and(MatchCertainty::Maybe);
+                            continue;
                         }
 
-                        if matched == MatchCertainty::No {
-                            return Ok(MatchCertainty::No);
+                        if let Some(args) = args.filter(|_| name == "is" || name == "where") {
+                            let mut matched = MatchCertainty::No;
+
+                            for complex_selector in args.selectors() {
+                                let truncated = self.truncate(complex_selector);
+
+                                if truncated.is_empty() {
+                                    self.analysis.mark_used(complex_selector);
+                                    matched = MatchCertainty::Yes;
+                                } else {
+                                    let applied = self.apply_selector(
+                                        &truncated,
+                                        chain,
+                                        rule_idx,
+                                        element,
+                                        Direction::Backward,
+                                        0,
+                                        truncated.len(),
+                                    )?;
+                                    if applied.might_match() {
+                                        self.analysis.mark_used(complex_selector);
+                                        matched = matched.or(applied);
+                                    } else if relative_steps(complex_selector).len() > 1 {
+                                        self.analysis.mark_used(complex_selector);
+                                        matched = matched.or(MatchCertainty::Maybe);
+                                        for step in &truncated {
+                                            if let Some(origin) = step.compound.origin() {
+                                                self.analysis.mark_scoped(origin);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if matched == MatchCertainty::No {
+                                return Ok(MatchCertainty::No);
+                            }
+                            certainty = certainty.and(matched);
                         }
-                        certainty = certainty.and(matched);
                     }
-                }
 
-                SimpleSelector::PseudoElement { .. } => {}
+                    SelectorComponentKind::PseudoElement | SelectorComponentKind::Namespace => {}
 
-                SimpleSelector::Attribute {
-                    name: attr_name,
-                    matcher,
-                    value,
-                    flags,
-                    ..
-                } => {
-                    let element_name_lower = self.index.element_name(element).to_lowercase();
-                    let whitelisted = whitelisted_attributes(&element_name_lower)
-                        .contains(&attr_name.to_lowercase().as_str());
-                    let flags = flags.as_deref().unwrap_or("");
-                    let case_insensitive = flags.contains('i')
-                        || (!flags.contains('s')
-                            && CASE_INSENSITIVE_ATTRIBUTES
-                                .contains(&attr_name.to_lowercase().as_str()));
-                    if whitelisted {
-                        // The runtime may TOGGLE a whitelisted attribute
-                        // (`details[open]`) — assumed matching without proof,
-                        // a fail-open `Maybe`.
-                        certainty = certainty.and(MatchCertainty::Maybe);
-                    } else {
+                    SelectorComponentKind::Attribute => {
+                        let Some(attr) = real.attribute() else {
+                            continue;
+                        };
+                        let attr_name = attr
+                            .name_span()
+                            .and_then(|span| {
+                                verter_css_syntax::decode_css_identifier(
+                                    &self.source_text()[span.start as usize..span.end as usize],
+                                )
+                                .ok()
+                            })
+                            .unwrap_or_default()
+                            .into_owned();
+                        let matcher_str = attr.matcher().map(attribute_matcher_str);
+                        // The parser already truncated an unquoted value span
+                        // at Svelte's own lenient boundary (see
+                        // `SelectorAttribute::value_span`'s doc) — a straight
+                        // slice, never a second boundary search here.
+                        let value = attr.value_span().map(|span| {
+                            &self.source_text()[span.start as usize..span.end as usize]
+                        });
+                        let flags = attr
+                            .flags_span()
+                            .map(|span| &self.source_text()[span.start as usize..span.end as usize])
+                            .unwrap_or("");
+
+                        let element_name_lower = self.index.element_name(element).to_lowercase();
+                        let whitelisted = whitelisted_attributes(&element_name_lower)
+                            .contains(&attr_name.to_lowercase().as_str());
+                        let case_insensitive = flags.contains('i')
+                            || (!flags.contains('s')
+                                && CASE_INSENSITIVE_ATTRIBUTES
+                                    .contains(&attr_name.to_lowercase().as_str()));
+                        if whitelisted {
+                            certainty = certainty.and(MatchCertainty::Maybe);
+                        } else {
+                            let attr_result = self.attribute_matches(
+                                element,
+                                &attr_name,
+                                value.map(unquote),
+                                matcher_str,
+                                case_insensitive,
+                            )?;
+                            if attr_result == MatchCertainty::No {
+                                return Ok(MatchCertainty::No);
+                            }
+                            certainty = certainty.and(attr_result);
+                        }
+                    }
+
+                    SelectorComponentKind::Class => {
+                        let raw_name = component_name(self.source_text(), real).unwrap_or_default();
+                        let name = unescape_backslashes(&raw_name);
                         let attr = self.attribute_matches(
                             element,
-                            attr_name,
-                            value.as_deref().map(unquote),
-                            matcher.as_deref(),
-                            case_insensitive,
+                            "class",
+                            Some(&name),
+                            Some("~="),
+                            false,
                         )?;
                         if attr == MatchCertainty::No {
                             return Ok(MatchCertainty::No);
                         }
                         certainty = certainty.and(attr);
                     }
-                }
 
-                SimpleSelector::Class { name, .. } => {
-                    let name = unescape_backslashes(name);
-                    let attr =
-                        self.attribute_matches(element, "class", Some(&name), Some("~="), false)?;
-                    if attr == MatchCertainty::No {
-                        return Ok(MatchCertainty::No);
-                    }
-                    certainty = certainty.and(attr);
-                }
-
-                SimpleSelector::Id { name, .. } => {
-                    let name = unescape_backslashes(name);
-                    let attr =
-                        self.attribute_matches(element, "id", Some(&name), Some("="), false)?;
-                    if attr == MatchCertainty::No {
-                        return Ok(MatchCertainty::No);
-                    }
-                    certainty = certainty.and(attr);
-                }
-
-                SimpleSelector::Type { name, .. } => {
-                    let name = unescape_backslashes(name);
-                    // The official compare is `element.name.toLowerCase() !==
-                    // name.toLowerCase()` — the FULL Unicode fold (an ASCII
-                    // fold wrongly prunes `x-CAFÉ` on `<x-café>`). A matching
-                    // static tag and the universal `*` are proofs; the
-                    // `<svelte:element>` escape hatch passes on a DYNAMIC tag
-                    // — a fail-open `Maybe`.
-                    if self.index.element_name(element).to_lowercase() != name.to_lowercase()
-                        && name != "*"
-                    {
-                        if !self.index.is_svelte_element(element) {
+                    SelectorComponentKind::Id => {
+                        let raw_name = component_name(self.source_text(), real).unwrap_or_default();
+                        let name = unescape_backslashes(&raw_name);
+                        let attr =
+                            self.attribute_matches(element, "id", Some(&name), Some("="), false)?;
+                        if attr == MatchCertainty::No {
                             return Ok(MatchCertainty::No);
                         }
-                        certainty = certainty.and(MatchCertainty::Maybe);
+                        certainty = certainty.and(attr);
                     }
-                }
 
-                SimpleSelector::Nesting { span } => {
-                    if rule_idx == 0 {
-                        return Err(MatcherRefusal::at(
-                            *span,
-                            "a nesting selector without a parent rule",
-                        ));
-                    }
-                    let parent_idx = rule_idx - 1;
-                    let parent = chain[parent_idx];
-                    let mut matched = MatchCertainty::No;
-
-                    for complex_selector in &parent.prelude.children {
-                        let parent_selectors = get_relative_selectors(complex_selector, parent_idx);
-                        let applied = self.apply_selector(
-                            &parent_selectors,
-                            chain,
-                            parent_idx,
-                            element,
-                            direction,
-                            0,
-                            parent_selectors.len(),
-                        )?;
-                        // The official `applied || all_global` short-circuit:
-                        // the all-global check runs only when the parent
-                        // selector did not apply; an all-global parent is
-                        // definitional.
-                        let branch = if applied.might_match() {
-                            applied
-                        } else {
-                            let mut all = true;
-                            for relative in &complex_selector.children {
-                                if !self.is_global_with_rule(relative, chain, parent_idx)? {
-                                    all = false;
-                                    break;
-                                }
+                    SelectorComponentKind::Type => {
+                        let raw_name = type_selector_name(self.source_text(), real);
+                        let name = unescape_backslashes(&raw_name);
+                        if self.index.element_name(element).to_lowercase() != name.to_lowercase()
+                            && name != "*"
+                        {
+                            if !self.index.is_svelte_element(element) {
+                                return Ok(MatchCertainty::No);
                             }
-                            if all {
-                                MatchCertainty::Yes
-                            } else {
-                                MatchCertainty::No
-                            }
-                        };
-                        if branch.might_match() {
-                            self.sink.used_selectors.insert(complex_selector.span);
-                            matched = matched.or(branch);
+                            certainty = certainty.and(MatchCertainty::Maybe);
                         }
                     }
 
+                    SelectorComponentKind::Nesting => {
+                        let matched =
+                            self.handle_nesting(real.span(), chain, rule_idx, element, direction)?;
+                        if matched == MatchCertainty::No {
+                            return Ok(MatchCertainty::No);
+                        }
+                        certainty = certainty.and(matched);
+                    }
+
+                    SelectorComponentKind::DynamicClass | SelectorComponentKind::Interpolation => {
+                        // Rejected upstream of the matcher today (the
+                        // admission gate never trusts a dynamic selector into
+                        // analysis/match); fail closed rather than guess if
+                        // that invariant is ever violated.
+                        return Err(MatcherRefusal::at(
+                            real.span(),
+                            "an unsupported dynamic selector construct",
+                        ));
+                    }
+                },
+
+                ComponentView::SyntheticAnyType => {}
+
+                ComponentView::SyntheticNesting => {
+                    let matched =
+                        self.handle_nesting(synthetic_span(), chain, rule_idx, element, direction)?;
                     if matched == MatchCertainty::No {
                         return Ok(MatchCertainty::No);
                     }
                     certainty = certainty.and(matched);
                 }
 
-                SimpleSelector::Percentage { .. } | SimpleSelector::Nth { .. } => {
+                ComponentView::Percentage(_) | ComponentView::Nth(_) => {
                     unreachable!("percentage/nth were skipped above")
                 }
             }
         }
 
-        // Possible match — as certain as the weakest verified constraint.
         Ok(certainty)
+    }
+
+    /// The official `SimpleSelector::Nesting` handling shared by a real
+    /// nesting component and the synthetic `&` marker.
+    fn handle_nesting(
+        &mut self,
+        span_for_refusal: Span,
+        chain: &[&'ast StyleRule],
+        rule_idx: usize,
+        element: NodeId,
+        direction: Direction,
+    ) -> MatchResult<MatchCertainty> {
+        if rule_idx == 0 {
+            return Err(MatcherRefusal::at(
+                span_for_refusal,
+                "a nesting selector without a parent rule",
+            ));
+        }
+        let parent_idx = rule_idx - 1;
+        let parent = chain[parent_idx];
+        let mut matched = MatchCertainty::No;
+
+        for complex_selector in parent.selector_list().selectors() {
+            let parent_selectors = self.get_relative_selectors(complex_selector, parent_idx);
+            let applied = self.apply_selector(
+                &parent_selectors,
+                chain,
+                parent_idx,
+                element,
+                direction,
+                0,
+                parent_selectors.len(),
+            )?;
+            let branch = if applied.might_match() {
+                applied
+            } else {
+                let mut all = true;
+                for (_, compound) in relative_steps(complex_selector) {
+                    if !self.is_global_with_rule(
+                        CompoundView::Parsed(compound),
+                        chain,
+                        parent_idx,
+                    )? {
+                        all = false;
+                        break;
+                    }
+                }
+                if all {
+                    MatchCertainty::Yes
+                } else {
+                    MatchCertainty::No
+                }
+            };
+            if branch.might_match() {
+                self.analysis.mark_used(complex_selector);
+                matched = matched.or(branch);
+            }
+        }
+
+        Ok(matched)
     }
 
     /// The `:has(...)` `include_self` computation — whether an enclosing rule
     /// is global-ish (`:root`, `:global(...)`, or fully-global selectors), in
     /// which case the element itself is a `:has` anchor candidate.
-    fn compute_has_include_self(&mut self, chain: &[&Rule], rule_idx: usize) -> MatchResult<bool> {
-        // `get_parent_rules(rule)` — rule first, root last; the chain slice
-        // carries the same rules.
+    fn compute_has_include_self(
+        &mut self,
+        chain: &[&'ast StyleRule],
+        rule_idx: usize,
+    ) -> MatchResult<bool> {
         for (idx, rule) in chain[..=rule_idx].iter().enumerate() {
-            for complex in &rule.prelude.children {
-                for relative in &complex.children {
-                    if self.is_global_with_rule(relative, chain, idx)? {
+            for complex in rule.selector_list().selectors() {
+                for (_, compound) in relative_steps(complex) {
+                    if self.is_global_with_rule(CompoundView::Parsed(compound), chain, idx)? {
                         return Ok(true);
                     }
                 }
             }
         }
-        // `rules[rules.length - 1]` — the ROOT rule.
         let root_rule = chain[0];
-        for complex in &root_rule.prelude.children {
-            for relative in &complex.children {
-                for simple in &relative.selectors {
-                    if let SimpleSelector::PseudoClass { name, args, .. } = simple {
-                        if name == "root" || (name == "global" && args.is_some()) {
+        for complex in root_rule.selector_list().selectors() {
+            for (_, compound) in relative_steps(complex) {
+                for component in compound.components() {
+                    if is_pseudo_class_component(component) {
+                        let name = component_name(self.source_text(), component);
+                        let has_args = component
+                            .pseudo()
+                            .and_then(SelectorPseudo::selector_list)
+                            .is_some();
+                        if name.as_deref() == Some("root")
+                            || (name.as_deref() == Some("global") && has_args)
+                        {
                             return Ok(true);
                         }
                     }
@@ -1142,16 +1195,15 @@ impl<'ast> Matcher<'_, '_, '_> {
 
     /// The official recursive `:not` used-marking walk (`ComplexSelector`
     /// visitor with `context.next()`).
-    fn mark_complex_used_recursive(&mut self, complex: &ComplexSelector) {
-        self.sink.used_selectors.insert(complex.span);
-        for relative in &complex.children {
-            for simple in &relative.selectors {
-                if let SimpleSelector::PseudoClass {
-                    args: Some(args), ..
-                } = simple
-                {
-                    for inner in &args.children {
-                        self.mark_complex_used_recursive(inner);
+    fn mark_complex_used_recursive(&mut self, complex: &'ast ComplexSelector) {
+        self.analysis.mark_used(complex);
+        for (_, compound) in relative_steps(complex) {
+            for component in compound.components() {
+                if is_pseudo_class_component(component) {
+                    if let Some(args) = component.pseudo().and_then(SelectorPseudo::selector_list) {
+                        for inner in args.selectors() {
+                            self.mark_complex_used_recursive(inner);
+                        }
                     }
                 }
             }
@@ -1159,24 +1211,8 @@ impl<'ast> Matcher<'_, '_, '_> {
     }
 
     /// The official `attribute_matches(node, name, expected_value, operator,
-    /// case_insensitive)` over the IR attribute families.
-    ///
-    /// Tri-state: only a SINGLE STATIC decoded value proves `Yes`/`No` for a
-    /// value test; every runtime-dependent family (spread / bind / directive)
-    /// and every enumerated possible-value acceptance is the official
-    /// fail-open `Maybe` (possible values are not a proof that the matching
-    /// branch is taken at runtime).
-    ///
-    /// The `Maybe` is the PRINCIPLED conservatism for a runtime-variable
-    /// value, typed on the value families themselves — never a corpus
-    /// carve-out: the official matcher ACCEPTS such a value fail-open
-    /// (`true`) rather than proving it, so upgrading an enumerated
-    /// acceptance to `Yes` would claim more than the official semantics
-    /// establish. Certainty stays COMPUTED from the decoded values in both
-    /// directions — an enumerated set with NO matching member still proves
-    /// `No` below, and a static decoded value still proves `Yes`/`No` — a
-    /// blanket treats-every-expression-as-unknown `Maybe` is pinned out by
-    /// the conformance metamorphic per-family negative controls.
+    /// case_insensitive)` over the IR attribute families — no CSS-AST
+    /// dependency; identical to `match.rs`'s.
     fn attribute_matches(
         &mut self,
         node: NodeId,
@@ -1189,14 +1225,9 @@ impl<'ast> Matcher<'_, '_, '_> {
 
         for attribute in self.index.attrs_of(node) {
             match attribute {
-                // A spread may set ANY attribute to ANY value at runtime.
                 AttrIr::Spread { .. } => return Ok(MatchCertainty::Maybe),
-                // A `bind:` target carries a runtime-dependent value.
                 AttrIr::Bind { target, .. } if target == name => return Ok(MatchCertainty::Maybe),
-                // A `style:` directive writes the style at runtime.
                 AttrIr::Style { .. } if name_lower == "style" => return Ok(MatchCertainty::Maybe),
-                // A `class:name={cond}` directive toggles the class on a
-                // runtime condition.
                 AttrIr::Class {
                     name: class_name, ..
                 } if name_lower == "class" => {
@@ -1211,7 +1242,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                 _ => {}
             }
 
-            // `if (attribute.type !== 'Attribute') continue;`
             let (attr_name, kind) = match attribute {
                 AttrIr::Static { name, value } => (name, AttrValueKind::Static(value.as_ref())),
                 AttrIr::Dynamic { name, expr } => (name, AttrValueKind::Expr(*expr)),
@@ -1222,10 +1252,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                 continue;
             }
 
-            // `if (attribute.value === true) return operator === null;` — a
-            // valueless boolean attribute is a STATIC fact: provably present
-            // (`Yes` for a bare existence test), provably valueless (`No`
-            // for a value test).
             let value = match kind {
                 AttrValueKind::Static(None) => {
                     return Ok(if operator.is_none() {
@@ -1237,17 +1263,12 @@ impl<'ast> Matcher<'_, '_, '_> {
                 other => other,
             };
             let Some(expected_value) = expected_value else {
-                // A bare `[name]` existence test: a STATIC value and a MIXED
-                // concatenation (always a string) prove presence; a bare
-                // `{expr}` value may be nullish at runtime — Svelte then
-                // REMOVES the attribute — so presence is unproven.
                 return Ok(match value {
                     AttrValueKind::Static(_) | AttrValueKind::Mixed(_) => MatchCertainty::Yes,
                     AttrValueKind::Expr(_) => MatchCertainty::Maybe,
                 });
             };
 
-            // A single text chunk tests directly.
             if let AttrValueKind::Static(Some(static_value)) = value {
                 let operator = operator.ok_or_else(|| {
                     MatcherRefusal::at(
@@ -1255,19 +1276,12 @@ impl<'ast> Matcher<'_, '_, '_> {
                         "an attribute value test without an operator",
                     )
                 })?;
-                // The DECODED semantic value (the producer boundary owns the
-                // decode) — the SAME text the emitters serialize, so the match
-                // verdict and the emitted attribute can never disagree
-                // (`class="a&#32;b"` tests the word list `a b`). A static
-                // value test is a PROOF in both directions.
                 let matches = test_attribute(
                     operator,
                     expected_value,
                     case_insensitive,
                     static_value.value.as_str(),
                 )?;
-                // Continue if we still may match against a class/style
-                // directive.
                 if !matches && (name_lower == "class" || name_lower == "style") {
                     continue;
                 }
@@ -1278,8 +1292,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                 });
             }
 
-            // The chunked (expression / mixed) value: enumerate possible
-            // values, bailing to "matches" on UNKNOWN.
             let chunks: Vec<ValueChunk<'_>> = match value {
                 AttrValueKind::Expr(expr) => vec![ValueChunk::Expr(expr)],
                 AttrValueKind::Mixed(parts) => parts
@@ -1299,9 +1311,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                 let current_possible_values =
                     self.get_possible_values(chunk, name_lower == "class")?;
                 let Some(current_possible_values) = current_possible_values else {
-                    // Impossible to find out all combinations — the official
-                    // UNKNOWN "may match anything" bail, the canonical
-                    // fail-open `Maybe` (the former unconditional `true`).
                     return Ok(MatchCertainty::Maybe);
                 };
 
@@ -1336,10 +1345,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                                 prev_values.push(value.clone());
                             }
                         }
-                        // A FINITE combination product enumerates fully — the
-                        // exponential bail below guards only the fresh-append
-                        // growth path, exactly as upstream (whose combine
-                        // branch `continue`s past the check).
                         continue;
                     }
                     for prev in prev_values.drain(..) {
@@ -1358,8 +1363,6 @@ impl<'ast> Matcher<'_, '_, '_> {
                     prev_values.push(" ".to_string());
                 }
                 if prev_values.len() > 20 {
-                    // Might grow exponentially — bail out (a fail-open
-                    // `Maybe`, the former unconditional `true`).
                     return Ok(MatchCertainty::Maybe);
                 }
             }
@@ -1375,27 +1378,16 @@ impl<'ast> Matcher<'_, '_, '_> {
             })?;
             for value in &possible_values {
                 if test_attribute(operator, expected_value, case_insensitive, value)? {
-                    // An enumerated POSSIBLE value matched — possible values
-                    // are not a proof the matching branch is taken at
-                    // runtime, so the acceptance stays `Maybe` (projected to
-                    // the same `true` production behavior). This is the
-                    // principled runtime-variable ⇒ unproven mapping, not a
-                    // blanket: falling THROUGH this loop with no matching
-                    // member still proves `No` at the function tail.
                     return Ok(MatchCertainty::Maybe);
                 }
             }
         }
 
-        // No attribute of this name (or no possible value matched and no
-        // class/style directive remained) — provably no match against the
-        // static template facts.
         Ok(MatchCertainty::No)
     }
 
-    /// The official `get_possible_values(chunk, is_class)` — a text chunk is
-    /// itself; an expression chunk enumerates via `gather_possible_values`
-    /// (`None` = UNKNOWN, the "may match anything" bail).
+    /// The official `get_possible_values(chunk, is_class)` — identical to
+    /// `match.rs`'s; no CSS-AST dependency.
     fn get_possible_values(
         &self,
         chunk: &ValueChunk<'_>,
@@ -1409,6 +1401,34 @@ impl<'ast> Matcher<'_, '_, '_> {
                     .map_err(|construct| MatcherRefusal::at(self.index.fallback_span, construct))
             }
         }
+    }
+}
+
+/// The decoded name of a `Type`-kind component: the shared grammar recognizes
+/// the universal selector `*` as a `Type` component with NO `name_span` (its
+/// token is `Delim`, not `Ident` — see `selector_name_span` in
+/// `verter_css_syntax::selector`), so a missing name span on a `Type`
+/// component means `*` (the only shape `parse_selector_name_component`
+/// builds a nameless `Type` component for).
+fn type_selector_name<'a>(
+    source: &'a str,
+    component: &verter_css_syntax::SelectorComponent,
+) -> std::borrow::Cow<'a, str> {
+    match component_name(source, component) {
+        Some(name) => name,
+        None => std::borrow::Cow::Borrowed("*"),
+    }
+}
+
+fn attribute_matcher_str(matcher: verter_css_syntax::AttributeMatcher) -> &'static str {
+    use verter_css_syntax::AttributeMatcher;
+    match matcher {
+        AttributeMatcher::Exact => "=",
+        AttributeMatcher::Includes => "~=",
+        AttributeMatcher::DashMatch => "|=",
+        AttributeMatcher::Prefix => "^=",
+        AttributeMatcher::Suffix => "$=",
+        AttributeMatcher::Substring => "*=",
     }
 }
 

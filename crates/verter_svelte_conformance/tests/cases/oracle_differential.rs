@@ -73,6 +73,31 @@
 //! Hermetic: committed goldens + in-process Verter lowering only (no node,
 //! no live official compiler; the live-oracle reconciliation is the JS
 //! `--check` job).
+//!
+//! # Known coverage gaps (do not describe this differential as byte-exact)
+//!
+//! This differential catches every axis it names above, including (as of
+//! the InjectedCssPayload strengthening) a `const`→`let` declaration
+//! regression and a reordered/added/removed property inside a hoisted
+//! `$$css` object. It does NOT catch:
+//!
+//! - **The injected `$$css.hash` STRING VALUE itself.** The golden generator
+//!   (`scripts/svelte-golden-lib.mjs`'s `normalizeModuleForComparison`) masks
+//!   every `svelte-<hash>` occurrence to `svelte-<scoped>` BEFORE writing
+//!   `clientModule` into the committed golden JSON — the real hash is never
+//!   persisted for the injected route at all (unlike the EXTERNAL route's
+//!   `GoldenCss.hash`, which is captured pre-mask). Closing this needs a
+//!   golden-generator change (a new field capturing the raw hash before
+//!   masking) plus regenerating the committed corpus — out of this
+//!   differential's reach on its own.
+//! - **Source maps.** `GoldenCss` carries only `{present, hash, code}` — no
+//!   map field — so a source-map regression on either route is invisible
+//!   here regardless of injected/external mode. Same class of gap as above:
+//!   needs a golden schema + generator change, not a Rust-side fix.
+//!
+//! Both gaps are structural (missing golden data), not comparison-logic
+//! bugs in this file — extending the axes above without first extending the
+//! golden schema would compare against data that was never captured.
 
 use crate::common;
 
@@ -453,8 +478,69 @@ fn scope_token_signature(masked_code: &str) -> BTreeMap<ScopeTokenCarrier, usize
 /// extracted from a MASKED module.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct InjectedCssPayload {
+    /// The declaring keyword (`const`/`let`/`var`) immediately before `$$css
+    /// =`, or `None` for a bare re-assignment with no declarator
+    /// (`$$css = {...}` with no preceding `let`/`const`/`var` in the same
+    /// statement). Catches a `const` → `let` codegen regression.
+    decl_keyword: Option<String>,
     hash: String,
     code: String,
+    /// The ordered list of the object literal's TOP-LEVEL property keys
+    /// (e.g. `["hash", "code"]`). Comparing this — not just the extracted
+    /// `hash`/`code` string VALUES — catches a reordered property, or an
+    /// added/removed property, inside the hoisted object that leaves
+    /// `hash`/`code` themselves unchanged. Deliberately NOT a verbatim
+    /// object-text comparison: Verter and the official compiler format
+    /// object literals with different incidental whitespace (e.g. a space
+    /// after `{`), which is COSMETIC per this repo's Compiled-Output
+    /// Conformance rule, never a finding — only the key SHAPE is structural.
+    keys: Vec<String>,
+}
+
+/// Every `$.from_html`/`$.from_svg`/`$.from_mathml` template-literal FIRST
+/// argument in `masked_code`, in source order — the REVERSE-containment
+/// counterpart to Axis 2's forward `masked_module.contains(&template.html)`
+/// check, mirroring `scripts/svelte-golden-lib.mjs`'s `extractTemplates`
+/// closely enough to enumerate what Verter itself registers.
+/// `$.from_tree`'s array-literal argument form is intentionally not scanned
+/// (no SUPPORTED fixture in this corpus emits a scoped template through it;
+/// scanning only the backtick forms keeps this a narrow reverse-containment
+/// check rather than a second template-topology comparator).
+fn from_html_template_args(masked_code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = masked_code.as_bytes();
+    for factory in ["from_html", "from_svg", "from_mathml"] {
+        let needle = format!("$.{factory}(");
+        let mut start = 0;
+        while let Some(found) = masked_code[start..].find(&needle) {
+            let call_at = start + found;
+            let mut i = call_at + needle.len();
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if bytes.get(i) != Some(&b'`') {
+                start = call_at + needle.len();
+                continue;
+            }
+            let content_start = i + 1;
+            let mut j = content_start;
+            let end = loop {
+                match bytes.get(j) {
+                    None => break None,
+                    Some(b'\\') => j += 2,
+                    Some(b'`') => break Some(j),
+                    _ => j += 1,
+                }
+            };
+            let Some(end) = end else {
+                start = call_at + needle.len();
+                continue;
+            };
+            out.push(masked_code[content_start..end].to_string());
+            start = end + 1;
+        }
+    }
+    out
 }
 
 /// Read the JS string literal starting at byte `i` (which must be a quote),
@@ -511,10 +597,85 @@ fn object_string_property(object_text: &str, key: &str) -> Option<String> {
     None
 }
 
+/// The ordered list of TOP-LEVEL property keys in an object-literal text
+/// (`{key1: …, key2: …}`), skipping string-literal contents and any nested
+/// object/array VALUE (so a nested object's own keys are never conflated
+/// with the top level's). Depth-tracked so a value that is itself an object
+/// or array does not contribute its inner keys.
+fn object_top_level_keys(object_text: &str) -> Vec<String> {
+    let bytes = object_text.as_bytes();
+    let mut keys = Vec::new();
+    let mut i = 0;
+    let mut depth = 0i32;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' => {
+                if let Some((_, next)) = read_js_string_at(object_text, i) {
+                    i = next;
+                } else {
+                    i += 1;
+                }
+            }
+            b'{' | b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                i += 1;
+            }
+            b if depth == 1 && (b.is_ascii_alphabetic() || b == b'_' || b == b'$') => {
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+                {
+                    i += 1;
+                }
+                let mut k = i;
+                while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if bytes.get(k) == Some(&b':') {
+                    keys.push(object_text[start..i].to_string());
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    keys
+}
+
+/// Whether a `let`/`const`/`var` declaration keyword immediately (modulo
+/// whitespace) precedes byte `at` in `code`, with a proper identifier
+/// boundary before it — the keyword text if so.
+fn preceding_declaration_keyword(code: &str, at: usize) -> Option<&'static str> {
+    let bytes = code.as_bytes();
+    let mut k = at;
+    while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+        k -= 1;
+    }
+    for keyword in ["const", "let", "var"] {
+        let klen = keyword.len();
+        if k < klen || &code[k - klen..k] != keyword {
+            continue;
+        }
+        let before_ok = k == klen
+            || !(bytes[k - klen - 1].is_ascii_alphanumeric()
+                || bytes[k - klen - 1] == b'_'
+                || bytes[k - klen - 1] == b'$');
+        if before_ok {
+            return Some(keyword);
+        }
+    }
+    None
+}
+
 /// Every hoisted `$$css = {…}` payload of a MASKED module, in source order.
-/// A malformed payload object (missing `hash`/`code` string values) is
-/// reported as an error string so the caller can surface it as a violation
-/// rather than silently comparing nothing.
+/// A malformed payload object (missing `hash`/`code` string values, or a
+/// bare `let`/`const`/`var $$css;` declaration with no initializer sitting
+/// beside a real hoist — a duplicate/leaked binding, not an ordinary
+/// identifier use) is reported as an error string so the caller can surface
+/// it as a violation rather than silently comparing nothing.
 fn injected_css_payloads(masked_code: &str) -> Result<Vec<InjectedCssPayload>, String> {
     let mut payloads = Vec::new();
     let bytes = masked_code.as_bytes();
@@ -539,8 +700,21 @@ fn injected_css_payloads(masked_code: &str) -> Result<Vec<InjectedCssPayload>, S
             j += 1;
         }
         if j >= bytes.len() || bytes[j] != b'=' {
+            // A bound identifier with no `=` at all. An ordinary USE
+            // (`$.append_styles($$anchor, $$css)`) is not preceded by a
+            // declaration keyword — but a `let`/`const`/`var $$css` with no
+            // initializer IS a malformed emission: a stray/duplicate binding
+            // beside the real hoisted payload elsewhere in the module.
+            if let Some(keyword) = preceding_declaration_keyword(masked_code, at) {
+                return Err(format!(
+                    "a bare `{keyword} $$css` declaration with no initializer at byte {at} \
+                     — a duplicate or leaked $$css binding, not an ordinary identifier use"
+                ));
+            }
             continue;
         }
+        let decl_keyword =
+            preceding_declaration_keyword(masked_code, at).map(std::string::ToString::to_string);
         j += 1;
         while j < bytes.len() && bytes[j].is_ascii_whitespace() {
             j += 1;
@@ -578,7 +752,12 @@ fn injected_css_payloads(masked_code: &str) -> Result<Vec<InjectedCssPayload>, S
             .ok_or_else(|| format!("$$css payload without a string `hash`: {object_text}"))?;
         let code = object_string_property(object_text, "code")
             .ok_or_else(|| format!("$$css payload without a string `code`: {object_text}"))?;
-        payloads.push(InjectedCssPayload { hash, code });
+        payloads.push(InjectedCssPayload {
+            decl_keyword,
+            hash,
+            code,
+            keys: object_top_level_keys(object_text),
+        });
         start = end;
     }
     Ok(payloads)
@@ -695,7 +874,11 @@ fn check_supported_against_golden(
 
     // Axis 2: the scoped-class topology — every official template that
     // carries the scoped class must appear verbatim in Verter's masked
-    // module (static scoped-class emission parity on the matched elements).
+    // module (static scoped-class emission parity on the matched elements),
+    // AND every scoped template Verter itself registers must be accounted
+    // for in the official golden's own template list — a one-way `contains`
+    // check alone cannot see Verter emitting an EXTRA scoped element (or a
+    // duplicate registration) the official compiler never produced.
     let masked_module = mask_scope_hash(&module.code);
     let templates_carry_token = golden
         .templates
@@ -712,6 +895,36 @@ fn check_supported_against_golden(
                     "{} ScopedClassTopology: official scoped template {:?} (factory `{}`) \
                      absent from Verter's masked module",
                     case.slug, template.html, template.factory
+                ),
+                observed,
+                violations,
+            );
+        }
+    }
+    // Reverse direction: `from_html_template_args` extracts every
+    // `$.from_html`/`$.from_svg`/`$.from_mathml` template-literal argument
+    // Verter itself emits (`$.from_tree`'s array-literal argument form is
+    // not scanned — no SUPPORTED fixture in this corpus emits a scoped
+    // template through it). A scope-masked argument that occurs nowhere
+    // among the golden's own scoped `templates` rows is an extra Verter
+    // never should have produced.
+    let golden_scoped_templates: BTreeSet<&str> = golden
+        .templates
+        .iter()
+        .filter(|template| template.html.contains(SCOPE_MASK))
+        .map(|template| template.html.as_str())
+        .collect();
+    for verter_html in from_html_template_args(&masked_module) {
+        if !verter_html.contains(SCOPE_MASK) {
+            continue;
+        }
+        if !golden_scoped_templates.contains(verter_html.as_str()) {
+            route_divergence(
+                (case.slug.clone(), DivergenceAxis::ScopedClassTopology),
+                format!(
+                    "{} ScopedClassTopology: Verter emits a scoped template {verter_html:?} \
+                     absent from the official golden's own template list",
+                    case.slug
                 ),
                 observed,
                 violations,
@@ -1248,6 +1461,42 @@ fn self_test_planted_scoped_template_is_detected() {
     );
 }
 
+/// REVERSE direction: removing a real scoped-template row from the golden
+/// (simulating Verter emitting a scoped template the official compiler's own
+/// list no longer accounts for) is reported on the ScopedClassTopology axis
+/// by `from_html_template_args`'s reverse-containment check — proving Axis 2
+/// catches an EXTRA Verter template, not only a MISSING one.
+#[test]
+fn self_test_verter_extra_scoped_template_is_detected() {
+    let case = find_case(|case| {
+        case.disposition == Disposition::Supported
+            && case.levels.css_source == CssSource::External
+            && case.expected_outcome == MatchOutcome::Match
+            && read_compiled_client_golden(case)
+                .templates
+                .iter()
+                .any(|template| template.html.contains(SCOPE_MASK))
+    });
+    let mut golden = read_compiled_client_golden(case);
+    assert!(
+        supported_violations_against(case, &golden).is_empty(),
+        "control: the pristine golden must report no violations"
+    );
+
+    golden
+        .templates
+        .retain(|template| !template.html.contains(SCOPE_MASK));
+    let violations = supported_violations_against(case, &golden);
+    assert!(
+        violations.iter().any(|v| {
+            v.contains("ScopedClassTopology")
+                && v.contains("absent from the official golden's own template list")
+        }),
+        "a scoped template Verter still emits but the golden no longer lists \
+         must be caught by the reverse-containment check: {violations:?}"
+    );
+}
+
 /// Stripping the runtime-carried scope token from the golden `clientModule`
 /// (the dynamic / `svelte:element` delivery the templates inventory never
 /// sees) is reported on the ScopeTokenDelivery axis — the committed RED
@@ -1322,6 +1571,118 @@ fn self_test_mutated_injected_css_payload_is_detected() {
         violations.iter().any(|v| v.contains("InjectedCssPayload")),
         "a mutated injected $$css payload must be reported on the InjectedCssPayload \
          axis: {violations:?}"
+    );
+}
+
+/// A `const $$css` → `let $$css` declaration-keyword regression in the
+/// golden `clientModule` is reported on the InjectedCssPayload axis via the
+/// captured declaration keyword, even though `hash`/`code` are unchanged.
+#[test]
+fn self_test_const_to_let_css_declaration_is_detected() {
+    let case = find_case(|case| {
+        case.disposition == Disposition::Supported
+            && case.levels.css_source == CssSource::Injected
+            && read_compiled_client_golden(case)
+                .client_module
+                .as_deref()
+                .is_some_and(|module| module.contains("const $$css ="))
+    });
+    let mut golden = read_compiled_client_golden(case);
+    assert!(
+        supported_violations_against(case, &golden).is_empty(),
+        "control: the pristine golden must report no violations"
+    );
+
+    let module = golden
+        .client_module
+        .clone()
+        .expect("selected golden carries clientModule");
+    golden.client_module = Some(module.replacen("const $$css =", "let $$css =", 1));
+    let violations = supported_violations_against(case, &golden);
+    assert!(
+        violations.iter().any(|v| v.contains("InjectedCssPayload")),
+        "a const->let $$css declaration regression must be reported on the \
+         InjectedCssPayload axis: {violations:?}"
+    );
+}
+
+/// Reordering the `hash`/`code` properties inside a hoisted `$$css` object
+/// in the golden `clientModule` is reported on the InjectedCssPayload axis
+/// via the captured key order, even though the extracted `hash`/`code`
+/// string VALUES are unchanged.
+#[test]
+fn self_test_reordered_css_payload_properties_is_detected() {
+    let case = find_case(|case| {
+        case.disposition == Disposition::Supported && case.levels.css_source == CssSource::Injected
+    });
+    let mut golden = read_compiled_client_golden(case);
+    assert!(
+        supported_violations_against(case, &golden).is_empty(),
+        "control: the pristine golden must report no violations"
+    );
+
+    let module = golden
+        .client_module
+        .clone()
+        .expect("selected golden carries clientModule");
+    let payloads = injected_css_payloads(&module).expect("golden $$css payload parses");
+    let payload = payloads
+        .first()
+        .expect("an Injected case hoists at least one $$css payload");
+    let original_object = format!("{{hash: '{}', code: '{}'}}", payload.hash, payload.code);
+    let reordered_object = format!("{{code: '{}', hash: '{}'}}", payload.code, payload.hash);
+    assert!(
+        module.contains(&original_object),
+        "expected the golden's exact object-literal shape {original_object:?} in the \
+         golden module — this self-test's assumed formatting has drifted"
+    );
+    golden.client_module = Some(module.replacen(&original_object, &reordered_object, 1));
+
+    let violations = supported_violations_against(case, &golden);
+    assert!(
+        violations.iter().any(|v| v.contains("InjectedCssPayload")),
+        "reordering the hash/code properties of a hoisted $$css object must be \
+         reported on the InjectedCssPayload axis: {violations:?}"
+    );
+}
+
+/// A stray, bare `let $$css;` declaration (no initializer) sitting beside a
+/// real hoisted payload is reported as a malformed golden — not silently
+/// treated as an ordinary identifier use and skipped.
+#[test]
+fn self_test_bare_css_declaration_beside_hoist_is_detected() {
+    let case = find_case(|case| {
+        case.disposition == Disposition::Supported
+            && case.levels.css_source == CssSource::Injected
+            && read_compiled_client_golden(case)
+                .client_module
+                .as_deref()
+                .is_some_and(|module| module.contains("const $$css ="))
+    });
+    let mut golden = read_compiled_client_golden(case);
+    assert!(
+        supported_violations_against(case, &golden).is_empty(),
+        "control: the pristine golden must report no violations"
+    );
+
+    let module = golden
+        .client_module
+        .clone()
+        .expect("selected golden carries clientModule");
+    let mutated = module.replacen("const $$css =", "let $$css; const $$css =", 1);
+    assert_ne!(
+        mutated, module,
+        "expected to find `const $$css =` in the golden module"
+    );
+    golden.client_module = Some(mutated);
+
+    let violations = supported_violations_against(case, &golden);
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("golden integrity") && v.contains("malformed $$css payload")),
+        "a bare `let $$css;` declaration beside a real hoist must be reported as a \
+         malformed golden payload, not silently skipped as an ordinary use: {violations:?}"
     );
 }
 

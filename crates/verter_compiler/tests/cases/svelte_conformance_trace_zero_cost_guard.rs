@@ -319,7 +319,7 @@ const MATCH_FILE: &str = "src/svelte/runtime/css/match.rs";
 
 /// The CLOSED `MatchSink` field inventory: the three production verdict sets
 /// plus the ONE trace/test-gated observability row.
-const MATCH_SINK_PROD_FIELDS: &[&str] = &["used_selectors", "scoped_selectors", "scoped_elements"];
+const MATCH_SINK_PROD_FIELDS: &[&str] = &["scoped_elements"];
 const MATCH_SINK_GATED_FIELD: &str = "selector_certainties";
 const MATCH_SINK_GATE: &str = "#[cfg(any(test, feature = \"conformance-trace\"))]";
 
@@ -953,8 +953,6 @@ fn dev_deps_section_classifier_discriminates() {
 #[test]
 fn match_sink_detector_discriminates() {
     let canonical = "struct MatchSink {\n\
-                     used_selectors: FxHashSet<Span>,\n\
-                     scoped_selectors: FxHashSet<Span>,\n\
                      scoped_elements: FxHashSet<NodeId>,\n\
                      #[cfg(any(test, feature = \"conformance-trace\"))]\n\
                      selector_certainties: Vec<(Span, MatchCertainty)>,\n\
@@ -964,8 +962,8 @@ fn match_sink_detector_discriminates() {
     // A smuggled ZST field with a NEUTRAL name — invisible to both the token
     // scan (no trace vocabulary) and a size assertion (zero-sized).
     let smuggled = canonical.replace(
-        "used_selectors: FxHashSet<Span>,",
-        "used_selectors: FxHashSet<Span>,\nobservability_marker: (),",
+        "scoped_elements: FxHashSet<NodeId>,",
+        "scoped_elements: FxHashSet<NodeId>,\nobservability_marker: (),",
     );
     assert!(
         match_sink_violation(&smuggled).is_some_and(|v| v.contains("observability_marker")),

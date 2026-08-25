@@ -8,6 +8,7 @@ use crate::parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource};
 use crate::selector::{
     SelectorComponent, SelectorComponentKind, SelectorList, SelectorSink, SelectorStructure,
 };
+use crate::svelte_compat::svelte_read_value_text;
 use crate::token::{css_identifier_eq_ignore_ascii_case, SyntaxToken, TokenKind};
 use crate::version::CssSyntaxGrammarVersion;
 
@@ -111,6 +112,12 @@ pub struct StyleDirective {
     span: Span,
     head_span: Span,
     opaque_args: ComponentValueTree,
+    /// The at-rule's TRIMMED, comment-stripped prelude text (Svelte's
+    /// `Atrule.prelude` — its `read_value`'s result), decoded once here, at
+    /// parse time, over the already-delimited [`Self::opaque_args`] span —
+    /// see [`crate::svelte_read_value_text`]'s doc for why a plain trim
+    /// under-approximates this. A reader never re-decodes it.
+    prelude_text: std::sync::Arc<str>,
     body: Option<StyleBlock>,
     completeness: StyleCompleteness,
 }
@@ -126,6 +133,11 @@ impl StyleDirective {
 
     pub fn opaque_args(&self) -> &ComponentValueTree {
         &self.opaque_args
+    }
+
+    /// The at-rule's decoded prelude text — see [`Self::prelude_text`]'s doc.
+    pub fn prelude_text(&self) -> &str {
+        &self.prelude_text
     }
 
     pub fn body(&self) -> Option<&StyleBlock> {
@@ -372,12 +384,27 @@ impl StaticClassFact {
     }
 }
 
+#[derive(Clone)]
 pub struct StyleSyntaxIr {
     source: CssSource,
     dialect: CssDialect,
     statements: Vec<StyleStatement>,
     diagnostics: Vec<CssDiagnostic>,
     imports_unresolved: bool,
+    /// Every `/* … */` / line-comment span the tokenizer visited while
+    /// parsing this stylesheet, in ascending source order (comments cannot
+    /// overlap or nest, and tokens are produced in strictly increasing
+    /// source-position order, so this list is already sorted by
+    /// construction). Retained so a consumer can find comment boundaries
+    /// within a byte range through [`Self::comment_spans_in`] instead of
+    /// re-lexing the source for comment/string state itself.
+    comment_spans: Vec<Span>,
+    /// The span of a `<!--` CDO token that was never paired with a later
+    /// `-->` CDC token in this stylesheet. CSS Syntax Module ignores CDO/CDC
+    /// as trivia; Svelte's `read/style.js` treats `<!-- … -->` as a required
+    /// paired HTML comment. Minted from the parse's own token stream so the
+    /// Svelte reject projection does not re-scan source for the pairing.
+    unpaired_cdo_span: Option<Span>,
 }
 
 impl StyleSyntaxIr {
@@ -425,6 +452,26 @@ impl StyleSyntaxIr {
                 SelectorComponentKind::DynamicClass | SelectorComponentKind::Interpolation
             )
         })
+    }
+
+    /// Every retained comment span FULLY CONTAINED in `range`, in source
+    /// order — a binary-search slice of [`Self::comment_spans`], never a
+    /// re-lex of `range`'s bytes.
+    /// The span of an unpaired `<!--` CDO token, if the parse saw one.
+    /// See [`Self::unpaired_cdo_span`] field doc.
+    #[must_use]
+    pub const fn unpaired_cdo_span(&self) -> Option<Span> {
+        self.unpaired_cdo_span
+    }
+
+    pub fn comment_spans_in(&self, range: Span) -> impl Iterator<Item = Span> + '_ {
+        let start_idx = self
+            .comment_spans
+            .partition_point(|comment| comment.start < range.start);
+        self.comment_spans[start_idx..]
+            .iter()
+            .copied()
+            .take_while(move |comment| comment.end <= range.end)
     }
 }
 
@@ -577,20 +624,47 @@ pub struct StyleSyntaxIrSink {
     selector_sink: Option<(usize, SelectorSink)>,
     imports_unresolved: bool,
     root_value_tree: Option<ComponentValueTree>,
+    /// Whole-source comment inventory, accumulated at event time. Comment
+    /// spans are a fact about the SOURCE, not about the IR tree: a comment in
+    /// a selector prelude belongs here just as much as one in a declaration
+    /// block, even though the selector's events are owned by `SelectorSink`
+    /// and open no IR frame. Appending as events arrive keeps it in ascending
+    /// source order, which [`StyleSyntaxIr::comment_spans_in`] binary-searches.
+    comment_spans: Vec<Span>,
+    /// Running CDO/CDC pairing state, folded at event time for the same
+    /// reason: `<!--` and `-->` are trivia that can appear anywhere in the
+    /// source, selector preludes included.
+    unpaired_cdo_span: Option<Span>,
 }
 
 impl StyleSyntaxIrSink {
     pub fn new(source: CssSource, dialect: CssDialect) -> Self {
+        Self::with_entry_point(source, dialect, CssEntryPoint::Stylesheet)
+    }
+
+    /// A sink sized for `entry`. Only a stylesheet parse produces top-level statements, so a
+    /// component-value parse reserves none: `parse_component_value_tree` returns just the value
+    /// tree, and `verter_semantic` drives that path for variable extraction — a reservation it
+    /// would never fill.
+    pub fn with_entry_point(source: CssSource, dialect: CssDialect, entry: CssEntryPoint) -> Self {
+        let token_cap = (source.text().len() / 3).max(16);
+        let statement_cap = if matches!(entry, CssEntryPoint::Stylesheet) {
+            (source.text().len() / 24).max(8)
+        } else {
+            0
+        };
         Self {
             source,
             dialect,
             open: SmallVec::new(),
-            tokens: Vec::new(),
-            statements: Vec::new(),
+            tokens: Vec::with_capacity(token_cap),
+            statements: Vec::with_capacity(statement_cap),
             diagnostics: Vec::new(),
             selector_sink: None,
             imports_unresolved: false,
             root_value_tree: None,
+            comment_spans: Vec::new(),
+            unpaired_cdo_span: None,
         }
     }
 
@@ -602,6 +676,8 @@ impl StyleSyntaxIrSink {
             statements: self.statements,
             diagnostics: self.diagnostics,
             imports_unresolved: self.imports_unresolved,
+            comment_spans: self.comment_spans,
+            unpaired_cdo_span: self.unpaired_cdo_span,
         })
     }
 
@@ -776,12 +852,15 @@ impl StyleSyntaxIrSink {
                 }) {
                     self.imports_unresolved = true;
                 }
+                let opaque_args = frame
+                    .value_tree
+                    .unwrap_or_else(|| ComponentValueTree::empty(head_span.end));
+                let prelude_text = svelte_read_value_text(&self.source, opaque_args.span());
                 self.push_statement(StyleStatement::AtRule(StyleDirective {
                     span,
                     head_span,
-                    opaque_args: frame
-                        .value_tree
-                        .unwrap_or_else(|| ComponentValueTree::empty(head_span.end)),
+                    opaque_args,
+                    prelude_text: std::sync::Arc::from(prelude_text),
                     body: frame.block,
                     completeness,
                 }));
@@ -855,6 +934,34 @@ fn trim_delimiters(mut values: Vec<ComponentValue>, closed: bool) -> Vec<Compone
 
 impl ParseEventSink for StyleSyntaxIrSink {
     fn event(&mut self, event: ParseEvent) -> Result<(), CssStructureTooLarge> {
+        if let ParseEvent::Diagnostic(diagnostic) = event {
+            self.diagnostics.push(diagnostic);
+            if diagnostic.kind != crate::diagnostic::CssDiagnosticKind::AmbiguousStatement {
+                for frame in &mut self.open {
+                    frame.recovered = true;
+                }
+            }
+        }
+
+        // Whole-source token facts are observed here, ABOVE the selector
+        // branch, because they describe the source rather than the IR tree:
+        // selector events open no IR frame and are not retained in `tokens`,
+        // but a comment or a CDO/CDC in a selector prelude is still part of
+        // the stylesheet. `event` is called once per event, so every token is
+        // observed exactly once.
+        if let ParseEvent::Token(token) = event {
+            match token.kind() {
+                TokenKind::Comment | TokenKind::LineComment => {
+                    self.comment_spans.push(Span::new(token.start, token.end));
+                }
+                TokenKind::Cdo => {
+                    self.unpaired_cdo_span = Some(Span::new(token.start, token.end));
+                }
+                TokenKind::Cdc => self.unpaired_cdo_span = None,
+                _ => {}
+            }
+        }
+
         if let Some((depth, sink)) = &mut self.selector_sink {
             sink.event(event)?;
             match event {
@@ -871,19 +978,25 @@ impl ParseEventSink for StyleSyntaxIrSink {
                     .rev()
                     .find(|frame| frame.kind == SyntaxKind::QualifiedRule)
                 {
-                    rule.selector_list = Some(structure.list().clone());
+                    notify_parse_phase("selector_clone_enter");
+                    rule.selector_list = Some(structure.into_list());
+                    notify_parse_phase("selector_clone_exit");
                 }
             }
-        } else if matches!(
-            event,
-            ParseEvent::StartNode {
-                kind: SyntaxKind::SelectorList,
-                ..
-            }
-        ) {
+            // Selector events are owned by SelectorSink; do not also open IR frames
+            // or duplicate token storage for a tree that close_frame would discard.
+            return Ok(());
+        }
+
+        if let ParseEvent::StartNode {
+            kind: SyntaxKind::SelectorList,
+            ..
+        } = event
+        {
             let mut sink = SelectorSink::new(self.source.clone());
             sink.event(event)?;
             self.selector_sink = Some((1, sink));
+            return Ok(());
         }
 
         match event {
@@ -919,27 +1032,88 @@ impl ParseEventSink for StyleSyntaxIrSink {
                 verter_debug_assert_eq!(frame.kind, kind);
                 self.close_frame(frame, end);
             }
-            ParseEvent::Diagnostic(diagnostic) => {
-                self.diagnostics.push(diagnostic);
-                if diagnostic.kind != crate::diagnostic::CssDiagnosticKind::AmbiguousStatement {
-                    for frame in &mut self.open {
-                        frame.recovered = true;
-                    }
-                }
-            }
+            ParseEvent::Diagnostic(_) => {}
         }
         Ok(())
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Per-thread count of [`parse_style_ir`] executions — the routing half
+    /// of the "one shared-grammar parse per `<style>` body" proof
+    /// (`verter_compiler`'s Svelte CSS pipeline binds to it). Incremented
+    /// inside `parse_style_ir` itself, the SOLE entry point every caller
+    /// (Svelte's `analyze_style_body`, Vue's inline-style routing, direct
+    /// tests) goes through, so a second call from ANYWHERE moves this
+    /// counter — unlike a counter a caller bumps beside its own call site,
+    /// which only proves that ONE call site ran once. Compiled only under
+    /// `test-support` (a consumer dev-dependency edge — `#[cfg(test)]` alone
+    /// cannot serve a cross-crate integration test), so production builds
+    /// carry neither the TLS nor the increment.
+    static STYLE_IR_PARSE_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of [`parse_style_ir`] executions performed on the CALLING
+/// thread. Test/guard observability only — see the thread-local's doc.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn parse_style_ir_thread_invocations() -> u64 {
+    STYLE_IR_PARSE_INVOCATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod parse_phase_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static PROBE: Cell<Option<fn(&'static str)>> = const { Cell::new(None) };
+    }
+
+    pub fn replace(probe: Option<fn(&'static str)>) -> Option<fn(&'static str)> {
+        PROBE.with(|slot| slot.replace(probe))
+    }
+
+    pub fn notify(phase: &'static str) {
+        PROBE.with(|slot| {
+            if let Some(probe) = slot.get() {
+                probe(phase);
+            }
+        });
+    }
+}
+
+/// Installs a parse-phase observer used by allocation attribution tests and returns whatever
+/// was installed before, so a caller can restore it and never leave a foreign probe armed on
+/// this thread. Production builds compile this out (`test-support` is a consumer-dev feature).
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_style_ir_parse_phase_probe(probe: Option<fn(&'static str)>) -> Option<fn(&'static str)> {
+    parse_phase_probe::replace(probe)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn notify_parse_phase(phase: &'static str) {
+    parse_phase_probe::notify(phase);
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn notify_parse_phase(_phase: &'static str) {}
 
 pub fn parse_style_ir(
     source: CssSource,
     dialect: CssDialect,
     mode: CssParseMode,
 ) -> Result<StyleSyntaxIr, CssParseFailure> {
+    #[cfg(any(test, feature = "test-support"))]
+    STYLE_IR_PARSE_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+
     let mut sink = StyleSyntaxIrSink::new(source.clone(), dialect);
+    notify_parse_phase("after_sink_new");
     parse_with_sink(&source, dialect, CssEntryPoint::Stylesheet, mode, &mut sink)?;
-    sink.finish().map_err(CssParseFailure::Structure)
+    notify_parse_phase("after_parse_emit");
+    let ir = sink.finish().map_err(CssParseFailure::Structure)?;
+    notify_parse_phase("after_finish");
+    Ok(ir)
 }
 
 pub fn parse_component_value_tree(
@@ -947,7 +1121,11 @@ pub fn parse_component_value_tree(
     dialect: CssDialect,
     mode: CssParseMode,
 ) -> Result<ComponentValueTree, CssParseFailure> {
-    let mut sink = StyleSyntaxIrSink::new(source.clone(), dialect);
+    let mut sink = StyleSyntaxIrSink::with_entry_point(
+        source.clone(),
+        dialect,
+        CssEntryPoint::ComponentValueList,
+    );
     parse_with_sink(
         &source,
         dialect,

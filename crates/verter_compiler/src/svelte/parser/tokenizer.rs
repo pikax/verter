@@ -339,8 +339,13 @@ impl<'a> SvelteParser<'a> {
                     )
                 })
         });
-        self.style_body_probes
-            .sort_by_key(|probe| (probe.encounter_order, probe.content_start));
+        self.style_body_probes.sort_by_key(|probe| {
+            (
+                probe.encounter_order,
+                probe.content.start,
+                probe.content.end,
+            )
+        });
         self.options_custom_element_probes.sort_by(|left, right| {
             left.encounter_order
                 .cmp(&right.encounter_order)
@@ -469,11 +474,11 @@ impl<'a> SvelteParser<'a> {
     /// content-start offset. The parser does NOT parse the CSS — the official-reject gate fills
     /// the slot with a faithful `read/style.js` body reader (a CSS body parse failure → the
     /// exact CSS parse code at the reserved order).
-    fn record_style_body_probe(&mut self, content_start: u32) {
+    fn record_style_body_probe(&mut self, content: Span) {
         let encounter_order = self.next_defect_seq();
         self.style_body_probes.push(StyleBodyProbe {
             encounter_order,
-            content_start,
+            content,
         });
     }
 
@@ -997,7 +1002,7 @@ impl<'a> SvelteParser<'a> {
                 // minted below — exactly mirrored by drawing the probe's `encounter_order` here.
                 // Only a style with an actual body span gets a probe.
                 if let Some(content) = style.content {
-                    self.record_style_body_probe(content.start);
+                    self.record_style_body_probe(content);
                 }
                 // A SECOND top-level `<style>` — official `style_duplicate` (`element.js`:
                 // `if (current.css) e.style_duplicate(start)`), minted AFTER `read_style`,
@@ -1192,6 +1197,13 @@ impl<'a> SvelteParser<'a> {
     /// contents are opaque) — it does not descend into nested markup. The tag name is
     /// matched CASE-SENSITIVELY, mirroring official (a `</Style>` / `</Script>` does NOT
     /// close the block).
+    ///
+    /// The `<style>` scan is not CSS-string/comment aware: a `</style>` sequence
+    /// inside a CSS string or comment still ends the block. Official Svelte
+    /// finds the close during CSS parse (string/comment aware). That gap is
+    /// owned here — the carrier tokenizer mints the content span — not by the
+    /// CSS grammar: `StyleSyntaxIr` consumes the already-delimited span and
+    /// cannot recover bytes this scan already cut.
     ///
     /// `strict_close` mirrors official's DIVERGENT raw-text-element close handling:
     /// - STRICT (`<script>`): the close is ONLY `</script` + optional whitespace + `>`. A
