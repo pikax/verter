@@ -129,6 +129,18 @@ moved the same field.
 
 **Only the program orchestrator dispatches the landing agent.**
 
+**Landing is acceptance. A block does not land until it is accepted, and landing sets it in stone.**
+There is no integration-milestone landing with acceptance deferred: a candidate reaching the working
+branch is the block's final state, so everything acceptance requires happens first — every acceptance
+identifier covered, the fresh review of the final frozen candidate by an agent that has not seen it
+returned PASS, and no open finding. A block that cannot meet that does not land; it stays on its
+branch until it can.
+
+The deferred-acceptance landing looks cheap and is not. Work reaches the working branch owned by
+nobody, its obligations surface one at a time as later blocks become their first consumers, and the
+record says a block is in progress while its code is what everything else builds on. Two blocks
+landed that way before this rule, and both had to be reopened.
+
 **A ready-and-verified report carries the candidate identity, the evidence, the squash message —
 subject and body — and the acceptance-coverage mapping.** The manager drafts both at verification,
 when what the block did is freshest, and they travel upward with the readiness claim. Landing never
