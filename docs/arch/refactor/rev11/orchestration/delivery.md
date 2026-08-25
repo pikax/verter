@@ -606,6 +606,17 @@ removes the attribute a review named and leaves its siblings asserting the same 
 whole sentence, cell or heading instead: a deletion cannot partially retain a predicate, and a
 rewrite can — twice did.
 
+**The deletion remedy applies to PROSE ASSERTIONS, never to a value-carrying or identity slot.** A
+table row's key cell is not restating the section that defines it — it *is* the row's identity, and
+reducing it to a pointer makes rows indistinguishable, two of them literal duplicates. Frontmatter
+naming what a document binds or supersedes carries machine-readable data, and a consumer reading a
+section pointer learns nothing about which files lost normative role. Applying the remedy there
+introduced defects a complete inventory had correctly found nowhere.
+
+The complete list was right; the remedy needed this category distinction. When teaching it, carry the
+case where deletion IS correct alongside it — without a counter-example a worker generalises to "stop
+deleting", which is the opposite error.
+
 **More careful editing is not the remedy.** A block ran an explicit conceptual sweep for one such
 claim and still left an independently authored restatement standing; a line-scoped filter cannot see
 a block-level strike; a substitution keyed on one of three surface forms of a literal reported success

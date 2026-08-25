@@ -64,6 +64,12 @@ and neither substitutes for the sub-block reviews.
 
 ## When rounds are the wrong instrument
 
+**Read where findings land, not only how many.** Findings against a document's newest additions are
+convergence on a moving front; findings against legacy text mean the population is still unenumerated.
+A round falling from a dominant class to two of six, with both blockers against work written since the
+previous round, says the repair held — which the count alone does not.
+
+
 **A population no one has enumerated cannot be cleared by sampling it.** One block's surface held 47
 non-owner restatements; a review round finds one to six. That is roughly twenty rounds, and twenty-one
 had run without converging — not for want of reviewer or repair quality, but because rounds were the
