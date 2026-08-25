@@ -133,6 +133,18 @@ path = "docs/arch/refactor/rev11/amendments/AMD-018-inherited-stale-response-deb
 sha256 = "ed21633e8a99ba4c7387bc680b9f994d92cc6cc908653bca4201e48852e20225"
 
 [[document]]
+id = "AMD-016-J1-OPEN-OBLIGATIONS-BOUND"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-016-j1-open-obligations-bound.md"
+sha256 = "7e4ca54038a18937760a01f4bc8e561654d0460df9f33eb0c3451d1cb0fc4f75"
+
+[[document]]
+id = "AMD-019-J1-OPEN-OBLIGATIONS-PROOF-CONTRACT"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-019-j1-open-obligations-proof-contract.md"
+sha256 = "bf91513a524783744b7d71e8d53291fc723bd264117ebeeab746ab8442cdcd54"
+
+[[document]]
 id = "AMD-017-TSGO-REQUEST-DEADLINE-QUEUE-ADMISSION"
 kind = "AMENDMENT"
 path = "docs/arch/refactor/rev11/amendments/AMD-017-tsgo-request-deadline-queue-admission.md"
@@ -476,7 +488,7 @@ sha256 = "b58bdd6d8ffd4d413b77a14e35c3d629d74ebbe2e4dc83ebd7890054e4ef2e1b"
 
 [[authorization]]
 block = "J1"
-documents = ["CSS-CLEAN-CUTOVER", "J-TRAIN-SCOPE-PARSING-ONLY", "ONE-CSS-PARSER-PARSE-ONCE", "J1-CHARTER", "RULING-2026-08-23-CSS-WORK-REACHES-J1"]
+documents = ["CSS-CLEAN-CUTOVER", "J-TRAIN-SCOPE-PARSING-ONLY", "ONE-CSS-PARSER-PARSE-ONCE", "J1-CHARTER", "RULING-2026-08-23-CSS-WORK-REACHES-J1", "AMD-016-J1-OPEN-OBLIGATIONS-BOUND", "AMD-019-J1-OPEN-OBLIGATIONS-PROOF-CONTRACT"]
 ratified_by = "designated maintainer (scope), codex architect (charter)"
 ratified_at = "2026-08-21"
 scope = "CSS owner reconciliation — parsing and Lightning CSS removal only, seven readers converging under one parse. Remaining CSS work reaches J1 through branch block/j1-integration as the single J1 candidate (RULING-2026-08-23-CSS-WORK-REACHES-J1); no new DAG blocks."
