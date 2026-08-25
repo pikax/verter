@@ -86,14 +86,65 @@ microsoft/typescript-go#4712 (merged, per its own text, as "Content Mappers" —
 **Initialize → OpenProject → Transform (repeated) → CloseProject**) and microsoft/TypeScript#63936
 ("Content Mappers Round 2", merged 2026-08-21, removing `protocolVersion` in favour of LSP-style
 `capabilities`, making diagnostic `code` required, allowing overlapping original-text spans, and adding
-multi-projection hover/folding/CodeLens/signature-help/formatting support). **Caveat recorded
-honestly**: static `strings` extraction on a stripped, optimized Go binary could not isolate the literal
-lowercase wire method-name strings (Go's JSON-RPC dispatch here appears to derive method identity via
-reflection/struct tags rather than adjacent string literals `grep` can isolate) — the type-name evidence
-above is strong structural corroboration of the 4-step lifecycle, not a byte-exact wire trace. Getting
-the exact wire spelling would need either a live protocol capture (spawning `tsc --runExternalCode` with
-a stub mapper process and tracing stdio) or reading the `typescript-go` Go source directly — neither was
-done in this pass; recorded as an open follow-up for TCM2, not papered over.
+multi-projection hover/folding/CodeLens/signature-help/formatting support). **Caveat originally recorded here, now SUPERSEDED by §3a**: static `strings` extraction on a stripped,
+optimized Go binary could not isolate the literal lowercase wire method-name strings, so the type-name
+evidence above was strong structural corroboration of the 4-step lifecycle rather than a byte-exact wire
+trace. That caveat named its own remedy — "a live protocol capture (spawning `tsc --runExternalCode` with
+a stub mapper process and tracing stdio)" — and recorded the gap as a TCM2 follow-up. **The capture has now
+been done (§3a), so the delegation is withdrawn and the request half of the wire contract is closed here,
+in TCM0, where the charter assigns it.**
+
+### 3a. The wire protocol, captured live from the running compiler
+
+`probes/probe7-mapper-wire-capture.mjs` configures a real `contentMappers` entry in a real `tsconfig.json`,
+points it at a stub mapper process, runs the pinned native `tsc --project . --runExternalCode`, and records
+every JSON-RPC frame TypeScript sends. Verbatim, from a green run (full transcript in
+`probes/transcript.md`):
+
+```json
+--> {"jsonrpc":"2.0","id":"api1","method":"initialize","params":{"positionEncodings":["utf-8","utf-16"]}}
+--> {"jsonrpc":"2.0","id":"api2","method":"openProject","params":{"configFileName":"<abs>/tsconfig.json","projectHandle":"stub-mapper@1.0.0:0","compilerOptions":{"noEmit":true,"project":"<abs>","strict":true,"configFilePath":"<abs>/tsconfig.json","runExternalCode":true}}}
+--> {"jsonrpc":"2.0","id":"api3","method":"transform","params":{"fileName":"<abs>/thing.stub","content":"stub content\n","projectHandle":"stub-mapper@1.0.0:0"}}
+--> {"jsonrpc":"2.0","id":"api4","method":"closeProject","params":{"projectHandle":"stub-mapper@1.0.0:0"}}
+```
+
+Facts this establishes, each asserted by the probe so a rename or reorder goes red:
+
+| Fact | Value |
+|---|---|
+| Method names | **`initialize`, `openProject`, `transform`, `closeProject`** — lowercase-initial camelCase, NOT the capitalised Go type names §3 extracted |
+| Lifecycle order | exactly those four, in that order, per project |
+| Transport | JSON-RPC 2.0 over stdio with `Content-Length` framing |
+| Request ids | strings, `api1`, `api2`, … monotonically per connection |
+| `initialize` params | `{positionEncodings: ["utf-8","utf-16"]}` — the server offers BOTH and the mapper picks |
+| `openProject` params | `{configFileName, projectHandle, compilerOptions}`; `runExternalCode: true` is echoed into `compilerOptions` |
+| `transform` params | `{fileName, content, projectHandle}` — TypeScript supplies the file's authored bytes; the mapper is not asked to read the file itself |
+| `closeProject` params | `{projectHandle}` and nothing else |
+| `projectHandle` format | `{package}@{version}:{n}` |
+| Dispatch scope | `transform` is sent ONLY for the mapper's declared `extensions`; the sibling `.ts` file never reaches the mapper |
+
+**Configuration shape, also established by the capture** (each key discovered by iterating against the
+binary's own typed config errors, so each is confirmed by the compiler rather than guessed): the tsconfig
+key is `contentMappers`, an array whose entries carry `package` plus `extensions: string[]` (TS5024 if
+absent, TS100031 if the package does not resolve through node resolution). The referenced package's
+`package.json` must declare a `typescript.contentMapper` object (TS100034) whose `exec` is a non-empty
+string array (TS100035). The `initialize` RESULT must carry a non-empty `diagnosticSource`; omitting it
+fails the whole mapper with "The content mapper diagnostic source must not be empty". `initialize` has a
+**5-second timeout** — "The content mapper did not respond to the 'initialize' request within 5 seconds"
+— which is a hard design constraint on TCM2's mapper startup path.
+
+**Independent corroboration of the acyclic invariant.** Across a complete compile, TypeScript issued
+exactly four inbound frames on the mapper connection, all lifecycle requests — no query, no callback. The
+probe asserts that count. This is the same conclusion §4.0a reaches structurally from the `rejectHandler`
+symbols, reached here empirically from the opposite side.
+
+**What is still NOT closed, narrowed.** The `transform` RESPONSE body shape is not captured: several
+plausible encodings of the mapped output (`primary`/`outputs` carrying `extension`/`content`/`segments`)
+were rejected by the decoder with "returned an output with unsupported virtual extension ''", so the exact
+field layout of a SUCCESSFUL transform result remains unknown. The residual gap is therefore narrowed from
+"the wire method-name spelling is unverified" (closed) to "the transform response body layout is
+unverified", and is still owned by TCM2 — which will discover it directly the moment it implements a
+mapper, since the decoder reports typed errors for a wrong shape.
 
 **Trust/`--runExternalCode`** — confirmed in the JS client, `dist/api/options.d.ts:16-17`:
 ```ts
@@ -151,12 +202,50 @@ in §7 of the sub-investigation transcript this file summarizes (symbol/type/sig
 import-adder edits, referenced-symbols, completions). **None of these methods is a content-mapper
 `Transform`/`OpenProject`/`CloseProject` call** — this table is the Verter-as-client, TypeScript-as-server
 direction only. Cross-referenced against §3's `internal/contentmapper.*` Go symbol evidence (the
-OPPOSITE direction — TypeScript-as-client, Verter-as-server), the two protocols share no method names and
-neither table contains a call that would let one side re-enter the other mid-request. This is the
-concrete basis for the acyclic-invariant claim in `acyclic-invariant-test-spec.md` and `ADR-021`'s
-rejected-alternatives section: the `Transform` call (§3, confirmed via the native binary's
-`TransformParams`/`TransformAndParse`/`decodeTransformResult` symbols) has no callback/query sub-protocol
-back to its caller anywhere in either table.
+OPPOSITE direction — TypeScript-as-client, Verter-as-server), the two protocols share no method names.
+
+**Correction, 2026-08-23: this table is NOT the acyclic-invariant proof, and was previously cited as
+though it were.** An earlier revision of this section, and `acyclic-invariant-test-spec.md`, rested the
+invariant on "the full `APIMethodInfo` table has no content-mapper-initiated method". That argument does
+not work: `APIMethodInfo` is the closed method table of the **session** API — a different protocol, in
+the opposite direction — and it is simply silent about what the mapper connection can carry. Its silence
+is not evidence. The genuine proof is in §4.0a.
+
+**`ADR-021` still carries the unsound version of this argument, and this block does not fix it.** Its
+ratified rejected-alternatives bullet rests the rejection on the `APIMethodInfo` table. Per
+`docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+Q1 and Q8 this block is a NON-ACCEPTANCE evidence package that excludes every `ADR-021` change, so
+`ADR-021` is at its ratified text and does NOT carry the §4.0a `rejectHandler` evidence. The finding
+here is TCM0's; amending the ADR to rest on it is a separate ratification act belonging to the program
+orchestrator and the maintainer.
+
+### 4.0a The mapper connection's inbound direction is answered by a REJECTING handler
+
+The real evidence is a positive structural fact in the native binary, not an absence in a different
+protocol's table. Extracted from the same `lib/tsc` disassembly as §3:
+
+```
+internal/contentmapper.(*rejectHandler).HandleRequest
+internal/contentmapper.(*rejectHandler).HandleNotification
+internal/contentmapper.rejectHandler.HandleRequest
+internal/contentmapper.rejectHandler.HandleNotification
+```
+
+JSON-RPC is bidirectional by construction, so the mapper connection necessarily HAS an inbound direction;
+the question was never whether one exists, but what answers it. Upstream's answer is a type named
+`rejectHandler`, installed as the connection's inbound `HandleRequest`/`HandleNotification` implementation.
+The mapper cannot query TypeScript over its own connection because every inbound request and notification
+on that connection is rejected by design — a deliberate upstream choice, visible in the shipped binary,
+rather than an inference from a method list.
+
+This is the concrete basis for the acyclic-invariant claim in `acyclic-invariant-test-spec.md`. It is
+NOT the basis `ADR-021` cites: that document is unedited by this block (per
+`docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+Q1/Q8) and still rests its rejected-alternatives bullet on the `APIMethodInfo` table. Note what the
+`rejectHandler` evidence does and does not establish: it proves the mapper cannot re-enter TypeScript
+*through the mapper connection*. It does not prove a Verter implementation cannot open a SEPARATE session-API
+client from inside its own `transform()` handler and deadlock that way — which is precisely the cycle
+TCM2's structural guard exists to prevent, and why that guard is not redundant with this finding.
 
 ### 4a. Session initialization — no hang observed under normal use
 
@@ -164,14 +253,57 @@ back to its caller anywhere in either table.
 API constructed: 34 ms
 updateSnapshot (cold, opens project): 1037 ms
 ```
-No hang in cold in-process spawn + session `initialize` + first `updateSnapshot`. **Not tested**: the
-`API.fromLSPConnection(...)` attach path (*"Use this when connecting to an API pipe provided by an LSP
-server via `custom/initializeAPISession`"*, `dist/api/sync/api.d.ts:44-48`) — the scenario closest to
-TCM3's "attach to the editor-owned API session" topology candidate. Reproducing a session-attach hang
-would require spawning `tsc --lsp`, issuing `custom/initializeAPISession`, and attaching a second `API`
-client to the resulting pipe; this was judged out of this investigation's probe budget and is recorded
-here as an **open verification gap for TCM3**, not a passed/failed probe. Do not read the absence of a
-hang in the simple case as certifying the attach path.
+
+**These are single samples, not baselines** (added 2026-08-23 after review). Ten-iteration
+characterisation of the same two measurements on this host shows double-digit-or-larger spreads that
+themselves drift by an order of magnitude between committed re-runs (see `performance-baselines.md`'s
+addendum for the current figures — do not quote a specific multiple here, it goes stale on the next
+regeneration), so neither figure is reproducible to better than an order of magnitude and neither may be
+used as, or derived into, an acceptance threshold. They remain recorded here as evidence of the one thing
+they genuinely establish: the cold path completes, i.e. there is no hang.
+No hang in cold in-process spawn + session `initialize` + first `updateSnapshot`.
+
+**The attach path was originally NOT tested, and is now probed — see §4a-attach.** This paragraph
+previously recorded `API.fromLSPConnection` as "out of this investigation's probe budget" and an "open
+verification gap for TCM3". That delegation is **withdrawn**: the probe exists
+(`probes/probe8-lsp-session-attach.mjs`) and the path is exercised end to end.
+
+### 4a-attach. `API.fromLSPConnection` — probed, and it constrains TCM3's topology choice
+
+`probes/probe8-lsp-session-attach.mjs` spawns the pinned native `tsc --lsp -stdio`, drives a real LSP
+handshake, issues `custom/initializeAPISession`, and attaches a second API client over the returned pipe.
+This is the scenario closest to TCM3's "attach to the editor-owned API session" candidate.
+
+| Result | Value |
+|---|---|
+| `custom/initializeAPISession` response | `{sessionId: "api-session-1", pipe: "<abs>/tsgo-api-<hex>-<hex>"}` |
+| Time to that response | 2-44 ms across runs |
+| **The SYNC client CANNOT attach** | throws *"Socket connections are not yet supported in the sync client"* (`dist/api/sync/client.js:11`) |
+| The ASYNC client attaches | `connectViaSocket` → `createConnection(options.pipe)` (`dist/api/async/client.js:65-77`) |
+| Attached client visibility | resolves the opened project and sees all 64 program files over the pipe |
+| Attached client semantics | answers a real `Checker` query — resolved `interface W` and enumerated its members — not just metadata |
+| **Session-attach hang** | **not observed**; attach + first snapshot completes in 91-261 ms |
+
+**Three constraints this places on TCM3, none of which were previously recorded:**
+
+1. **The attach topology is ASYNC-CLIENT-ONLY.** The sync client refuses socket connections outright. Any
+   TCM3 design that assumed it could attach to the editor's session from the synchronous API surface is
+   not implementable against this candidate. This is a capability limit, not a performance one.
+2. **`fromLSPConnection` has different signatures on the two clients** — `Promise<API<true>>` on async
+   (`dist/api/async/api.d.ts:47`) versus a bare `API<true>` on sync. Porting between them silently yields
+   a pending Promise where an API is expected.
+3. **The pipe is not guaranteed bound the instant `custom/initializeAPISession` returns.** The probe
+   retries `createConnection` (bounded, 20 attempts over 2 s) because the first attempt can hit
+   `ECONNREFUSED`. A TCM3 client that connects once and treats refusal as fatal will be intermittently
+   broken.
+
+**Methodological warning, recorded because it produced a false result first.** The LSP server issues its
+OWN requests to the client (`client/registerCapability`). The first version of this probe never answered
+them, the server blocked, and `custom/initializeAPISession` timed out after 15 s — which is
+indistinguishable from the very session-attach hang the charter names. It was a harness bug, not a defect.
+The probe now answers every server-initiated request and ASSERTS that it answered at least one, so a
+future timeout on this path is attributable to the server rather than the harness. Any TCM3 attach
+implementation must answer server-initiated requests for the same reason.
 
 ### 4b. Disposal is fail-closed for the `Snapshot`'s own methods
 
@@ -264,11 +396,23 @@ fresh snapshot, not a server-side cancel).
 **Certified for candidate-discovery purposes, not for production activation.** The content-mapper
 protocol genuinely exists in this exact build (§3) and the basic session lifecycle behaves correctly
 under normal use (§4a-b). One narrow, reproducible defect is recorded (§4c) with a required design
-constraint for TCM3. Two verification gaps are recorded honestly rather than papered over: the exact
-wire method-name spelling for the content-mapper protocol (§3) and the LSP-attach session path (§4a).
+constraint for TCM3. Two verification gaps were originally recorded here: the exact wire method-name spelling for the
+content-mapper protocol (§3) and the LSP-attach session path (§4a). **Both are now CLOSED**: the first by the live capture in §3a
+(which also establishes the configuration shape and the 5-second `initialize` timeout; what remains of it
+is the narrower `transform` response body layout), the second by the attach probe in §4a-attach (no hang;
+and the async-only capability limit is a new, stronger finding than the gap it closes).
 Per the charter's abort/rescope condition, neither gap blocks TCM0 itself (TCM0 is read-only and
-authorizes no activation) — they are named here as required follow-up probes TCM2/TCM3 must close before
+authorizes no activation) — they were named here as required follow-up probes TCM2/TCM3 must close before
 either can be accepted, not defects that block this investigation's own conclusions.
+
+**Two ratified documents still recite both gaps as open, and this block edits neither.**
+`rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md` clause 2 gates them to TCM2 and TCM3,
+and `decisions/ADR-021-typescript-content-mapper-dual-plane.md` carries the same two carry-forward items
+in its own text. `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+Q1 and Q8 exclude every `ADR-021` change from this package, so `ADR-021` remains at its ratified text
+and does not record probes 7 and 8. The probes are the evidence and a stale recital does not undo them;
+reconciling either ratified document is a fresh ratification act for the program orchestrator and the
+maintainer, not something this block may perform by editing the artifact that disagrees with it.
 
 **Superseded, 2026-08-23:** the "not for production activation" half of this verdict is superseded by
 `rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md` — the maintainer ruled this exact
@@ -285,7 +429,125 @@ curl -s https://registry.npmjs.org/typescript/7.1.0-dev.20260822.1
 curl -s -o ts.tgz https://registry.npmjs.org/typescript/-/typescript-7.1.0-dev.20260822.1.tgz && tar xzf ts.tgz
 curl -s -o native.tgz https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.1.0-dev.20260822.1.tgz && tar xzf native.tgz
 strings -a package/lib/tsc | grep -oE "internal/contentmapper[/.][A-Za-z_.]*" | sort -u
-npm install typescript@7.1.0-dev.20260822.1 --no-save   # in a scratch dir; then run the probe scripts
-                                                          # (probe1-init-timing.mjs, probe2-stale-snapshot.mjs,
-                                                          #  probe3-stale-sourcefile-confirm.mjs, probe4-filechanges-correct.mjs)
+npm install typescript@7.1.0-dev.20260822.1 --no-save   # in a scratch dir
 ```
+
+The probe scripts themselves live in `probes/` next to this file, with their run instructions in
+`probes/README.md` and the output of a full run in `probes/transcript.md`. **Correction, 2026-08-23:**
+this block previously named four `.mjs` probe scripts that were never committed anywhere in the
+repository — a citation to evidence that did not exist. The scripts in `probes/` are re-creations of
+those four from the behaviours recorded in §4a-4c, re-executed against the same package, plus two new
+ones (§6). `probes/transcript.md` is the output of that re-run, not of the original uncommitted run.
+
+## 6. Bulk semantic-API probes — charter item 2's remaining clauses, executed
+
+`OPEN-GAPS.md`'s `G-SEMANTIC-API-CERTIFICATION` row recorded that charter item 2 requires live probes of
+"project and source-file lookup, `Program` and `TypeChecker` operations, bulk symbol/type/reference
+queries, completions, diagnostics, cancellation, and failure behaviour", and that §4.0 above supplies
+only an INVENTORY read out of `APIMethodInfo`'s type declaration for most of that list. Those probes have
+now been executed. `probes/probe5-bulk-semantic-api.mjs` is 50+ checks across every clause; each asserts a
+discriminating property rather than merely reporting a value, and the file exits non-zero if any fails.
+It currently exits 0.
+
+### 6.1 Independent re-verification of §1's package identity
+
+Every identity claim in §1 was recomputed from a freshly downloaded tarball, not carried forward:
+sha1 `c70740ef3e3d8bf9a4d3d29e38680a3f91b61a85`, sha256
+`9975ea32b5ed2b46a3780693f67de1f04ca7926726081f578762d94baa5a88d2`, 476 files, `gitHead`
+`d6c4afddb2c55f4a9dea7b59293a99a8fdea1799` — all four match §1 exactly. The probe harness
+(`probes/harness.mjs`) additionally refuses to run against any other version, so a probe result cannot be
+silently produced by a different package.
+
+### 6.2 Findings that change TCM2/TCM3 design constraints
+
+Five results are new, and each is a constraint rather than a curiosity.
+
+**(a) The diagnostic wire shape is not the classic TypeScript one.** A diagnostic delivered by this API
+carries `{fileName?, pos, end, code, category, text, reportsUnnecessary?, reportsDeprecated?,
+messageChain?, relatedInformation?}` (`dist/api/proto.generated.d.ts:686-707`), confirmed live: the probe
+asserts `pos`/`end` are numbers **and** that `start`/`length` are `undefined`, and that the message rides
+`text` with `messageText` `undefined`. Any Verter-side code written against the classic
+`start`/`length`/`messageText` shape reads `undefined` silently rather than failing. `pos`/`end` are
+offsets into the file the diagnostic is attributed to, and `fileName` is present, so attribution needs no
+caller-side bookkeeping.
+
+**(b) There is no project-wide "find all references" primitive, and the failure mode is silent.**
+`Checker.getReferencesToSymbolInFile(file, symbol)` matches only a symbol whose identity is local to that
+file. Probed on a fixture where `main.ts` imports and calls `helper` from `dep.ts`: the declaration symbol
+obtained from `dep.ts` finds its declaration in `dep.ts` and **zero** references in `main.ts`; the
+import-site symbol in `main.ts` (`SymbolFlags.Alias`) finds two; and `getAliasedSymbol` of that alias —
+i.e. the resolved declaration — again finds **zero** in `main.ts`. A cross-file references or rename
+feature must therefore be assembled caller-side: enumerate candidate files, resolve each file's own local
+alias symbol, and union. Passing the declaration symbol to every file returns an empty result with no
+error, which is indistinguishable from "no references". This is a required design constraint for TCM3's
+`References`/`Rename` capability rows, and it bears directly on the rename fail-closed rule the
+Project-Bound External-TS Contract already carries.
+
+**(c) `getCompletionsAtPosition` REJECTS any completion list that would need auto-imports.** A
+member-access completion succeeds and returns exactly the member set. An identifier-position completion
+in module scope throws `completion list needs auto imports` — a native-binary error string, confirmed by
+`strings -a` on `lib/tsc`. Auto-import completions are therefore not obtainable from this API's
+completion call at all; they must be assembled from `LanguageService.getImportEditsForSymbols` /
+`getImportAdderEdits` over symbols the caller supplies. `feature-ownership-ledger.md`'s `resolve_completion`
+row (#21) and the steering's "auto-imports" capability both depend on this, and neither previously
+recorded it.
+
+**(d) An out-of-range position produces a recovered Go panic, not a typed rejection.** Sending a position
+past end-of-file to `getCompletionsAtPosition` panics the native server inside
+`internal/ls/jsdoc_snippet.go` with `slice bounds out of range`. The IPC layer recovers it and surfaces it
+to the client as an error carrying a full Go stack trace; **the session survives** — the probe asserts
+both halves, re-querying the session afterwards and finding it still serving.
+`probes/probe6-out-of-range-completion-panic.mjs` isolates this so it cannot contaminate probe 5's run.
+The consequence for the dual-plane architecture is direct: the projection plane maps carrier positions
+into generated output and the semantic plane sends those mapped positions here, so a mapping bug does not
+degrade into a wrong answer — it produces a recovered panic. **TCM2/TCM3 must clamp positions on the
+Verter side; validation at the callee cannot be relied on.**
+
+**(e) Out-of-range positions on the `Checker` degrade to the file's module symbol.** `getSymbolAtPosition`
+at a whitespace position, and at a position 100,000 characters past EOF, both return the **module symbol
+for the file** rather than `undefined` or an error. A caller cannot distinguish "no symbol here" from
+"the file itself" without checking the returned symbol's identity. Same conclusion as (d): clamp and
+validate on the Verter side.
+
+### 6.3 What the probes confirm works, so the constraints above are not read as a general verdict
+
+Project and source-file lookup (`getProject`, `getProjects`, `getDefaultProjectForFile` — including
+correctly returning `undefined` for a file outside the project — `getSourceFileNames`, `getSourceFile`
+returning `undefined` for a nonexistent file, `getSourceFileMetadata`, `getCompilerOptions`,
+`getConfigFileNames`, and `isSourceFileDefaultLibrary` discriminating 63 default-lib files from 3 project
+files); all eight diagnostic getters, per-file, over an explicit file list in one call, and program-wide;
+the `Checker`'s single-value symbol/type operations including `getDeclaredTypeOfSymbol` +
+`getPropertiesOfType` enumerating an interface exactly, `getPropertyOfType`, `typeToString`,
+`isTypeAssignableTo` discriminating in both directions, all ten intrinsic type accessors, `resolveName`,
+and `getSymbolOfSourceFile` + `getExportsOfModule`; the **bulk array overloads** —
+`getSymbolAtPosition(file, positions[])`, `getTypeAtPosition(file, positions[])`,
+`getTypeOfSymbol(symbols[])`, `getSymbolOfSourceFile(files[])` — each returning exactly one entry per
+input, in input order (asserted against the single-value calls), with an empty input returning `[]` rather
+than an error; declaration and JavaScript emit, where `outputFiles` is a `Map` whose **key** is the file
+name and whose value carries only `{text, sourceFileName}`; and fail-closed disposal on both `Snapshot`
+and `Checker`.
+
+**Cancellation, re-probed against the live objects rather than the `.d.ts`.** §4e established absence by
+grepping type declarations. The probe now walks the entire prototype chain of the live `API`, `Snapshot`,
+`Program`, `Checker` and `LanguageService` objects for any member matching `/cancel|abort/i` and finds
+none. That is a stronger proof of the same claim, and it does not change §4e's conclusion or its
+consequence for TCM3.
+
+### 6.4 What remains open
+
+The two gaps §5 already delegates are unchanged and are NOT closed by this section: the exact
+content-mapper wire method-name spelling (TCM2) and the `API.fromLSPConnection` session-attach path
+(TCM3). Both concern surfaces these probes do not touch — probes 1-6 all drive the in-process spawn path
+(`new API({ cwd })`), never an attached LSP pipe, and never the content-mapper protocol, which runs in the
+opposite direction (§3).
+
+Bulk-method live correctness — the substance of `G-SEMANTIC-API-CERTIFICATION` — is EVIDENCED by §6:
+the probes exist, are committed, assert discriminating properties, and were executed against the pin.
+
+**The row itself is OPEN, not closed by this block.** `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+Q1 admits these probes and their transcript as evidence but returns the round-3 candidate as wrongly
+scoped and hands the incomplete contract remainder to a successor block **with fresh verification**. No
+ruling decides whether charter item 2's bulk probes must be run by the block that is accepted, or whether
+an amendment reallocates them — so the certification verdict is the successor's to make on independently
+checkable grounds. See `OPEN-GAPS.md`'s `G-SEMANTIC-API-CERTIFICATION` row and
+`successor-block-scope.md`.

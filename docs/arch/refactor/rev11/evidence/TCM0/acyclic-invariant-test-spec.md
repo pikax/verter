@@ -59,11 +59,19 @@ privacy/visibility, not by a runtime `assert!`.
 
 ## What TCM0 records as already-verified relevant to this invariant
 
-- The upstream protocol design itself is single-directional per call (`Transform` returns synchronously
-  with output + mappings; it has no callback/query sub-protocol back to the caller) — confirmed by the
-  full `APIMethodInfo` table quoted in `package-lock-and-semantic-api.md` §4.0 having no
-  content-mapper-initiated method. The cycle, if it exists, would be a Verter-introduced bug (calling out
-  from inside the handler), not something the upstream protocol invites.
+- The mapper connection's inbound direction is answered by a **rejecting handler**:
+  `internal/contentmapper.(*rejectHandler).HandleRequest` / `.HandleNotification`, extracted from the
+  candidate's native binary (`package-lock-and-semantic-api.md` §4.0a). JSON-RPC is bidirectional, so the
+  inbound direction exists; upstream deliberately rejects everything on it. The cycle, if it exists, is a
+  Verter-introduced bug (opening a separate session-API client from inside the handler), not something the
+  upstream protocol invites. **Corrected 2026-08-23:** this bullet previously cited "the full
+  `APIMethodInfo` table … having no content-mapper-initiated method". That was the wrong evidence —
+  `APIMethodInfo` is the SESSION API's method table, silent about the mapper protocol, and its silence
+  proved nothing. The conclusion is unchanged; its basis is now a positive fact rather than an absence.
+- What the `rejectHandler` evidence does NOT cover, stated so this spec's guard is not read as redundant:
+  it constrains the mapper CONNECTION only. A Verter `transform()` implementation that opens its own
+  session-API client and blocks on it would deadlock without ever sending anything inbound on the mapper
+  connection. That is exactly the case the discriminating test below must catch.
 - The native binary's own process-teardown code independently documents one deadlock class it already
   guards against (`dist/api/async/client.js:193-212`, `package-lock-and-semantic-api.md` §4d) — evidence
   that this class of bug is a real, known risk category in this exact protocol family, reinforcing why

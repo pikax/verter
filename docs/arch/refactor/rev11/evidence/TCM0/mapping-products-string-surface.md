@@ -199,9 +199,14 @@ any of the four product types** — only `chunks: Vec<Chunk<'a>>` (the geometry 
 
 ## What TCM1 must do (restated as an acceptance bar for that block, not executed here)
 
-1. Introduce ONE Verter-owned typed `SourceProjectionMap` recorded inside `CodeTransform`, replacing the
-   discard-to-string pattern at its single point of origin (`generate_map`/`generate_map_json*`,
-   `code_transform/source_map.rs`) — not at each of the nine-plus downstream consumer sites individually.
+1. Introduce ONE Verter-owned typed `SourceProjectionMap`. **CORRECTED 2026-08-23:** this item originally
+   said to do it "at its single point of origin (`generate_map`/`generate_map_json*`,
+   `code_transform/source_map.rs`) — not at each of the nine-plus downstream consumer sites individually."
+   `CodeTransform` is not a single point of origin (see the closure section at the end of this file), so
+   that instruction migrates seven call sites in one crate and no others. The correct instrument is a
+   **value newtype over the encoded map** with a private inner field, applied to the map-carrying fields:
+   the retype is what enumerates producers and consumers exhaustively, including the eight producers that
+   never touch `CodeTransform`.
 2. Keep `PlacementMap`/`RuntimeSourceMapData`/`EncodedSourceMap` distinct per the amendment's explicit
    "may share packed primitives; not collapsed into a universal map" rule — TCM0 finds no evidence today
    that would justify collapsing them, and confirms they are genuinely different data (placement/chunk
@@ -212,3 +217,148 @@ any of the four product types** — only `chunks: Vec<Chunk<'a>>` (the geometry 
    boundary on the old string convention while the in-process boundary moves — otherwise TCM1 creates
    exactly the "second string-encoded path left behind" outcome the Build Philosophy's "one clean
    cutover, not a merged dual-path transition" rule forbids.
+
+## Closure, 2026-08-23: the pre-count is the wrong instrument, and so is the deletion (`G-STRING-SURFACE-CITATIONS`)
+
+`OPEN-GAPS.md`'s `G-STRING-SURFACE-CITATIONS` row left one sub-question open: is a truly exhaustive
+STARTING count required before TCM1 may be dispatched, or is `TCM1.md`'s exit-criterion-1 deletion-based
+discovery sufficient without one? The row correctly observed that two manual counting attempts had both
+undercounted, and that a third was not the right tool.
+
+The question has now been answered from source, and **neither option as posed is correct**. The pre-count
+is not required, but the deletion does not replace it either, because `CodeTransform` is not the
+chokepoint the criterion assumes.
+
+### `CodeTransform` is one of eight in-repo producers, not the single point of origin
+
+`TCM1.md`'s owned-scope item 1 states: *"Single point of origin: `CodeTransform`'s own
+`generate_map`/`generate_map_json*` … TCM1 replaces the discard, not each downstream consumer site
+individually."* That premise does not hold.
+
+The two string-returning producers are `generate_map_json` (`crates/verter_compiler/src/code_transform/
+The two string-returning producers `generate_map_json` (`crates/verter_compiler/src/code_transform/
+source_map.rs:707`) and `generate_map_json_with_preamble` (`:721`) have **zero production call sites
+anywhere outside `crates/verter_compiler`** — the one match in `crates/verter_session/src/compile/
+map_compose.rs:70` is a comment. Inside `verter_compiler` there are exactly **seven** production callers:
+`compile/mod.rs:1399`, `:1690`, `:1990`, `:2102`; `svelte/ide/projector/mod.rs:317`;
+`svelte/runtime/css/render.rs:171`; `svelte/runtime/output.rs:204`. Every other caller of those two
+methods is a test.
+
+**Correction, 2026-08-23:** an earlier revision of this paragraph extended that "exactly seven" to
+`chain_source_map` as well. That is wrong. `chain_source_map` has an eighth PRODUCTION call site at
+`crates/verter_compiler/src/assembly/vue_module.rs:174` —
+`ct.chain_source_map(map).map(|chained| chained.to_json_string())`, inside `pub(crate) fn rewrite_script`
+at `:105`, reached from `:432`; the file's `#[cfg(test)]` does not begin until `:692`. It mints encoded
+map JSON and the producer deletion does not reach it either. The load-bearing conclusion below is
+unaffected — deleting the two STRING-RETURNING producers still yields exactly seven compile errors, all in
+one crate — but the exhaustiveness sentence as originally written was false, which is the third counting
+error in the surface this very file exists to count. Recorded rather than quietly amended.
+
+So deleting both methods produces exactly seven compile errors, all inside one crate. Every map-carrying
+field in `verter_session`, `verter_lsp`, `verter_protocol`, `verter_napi`, `verter_wasm`, `verter_ffi` and
+`verter_dx_baseline` would compile unchanged, because those fields are fed by producers that never touch
+`CodeTransform`:
+
+| # | Producer | `file:line` | Note |
+|---|---|---|---|
+| 1 | `build_tsc_source_map` | `crates/verter_compiler/src/tsc/script.rs:7042` | `pub`, a complete parallel map-JSON API; called **cross-crate** from `crates/verter_session/src/framework/api_projectors/svelte.rs:1056`, and three times internally (`script.rs:5929`, `:6174`, `:6497`) |
+| 2 | `minimal_source_map` | `crates/verter_compiler/src/tsc/script.rs:7033` | a hand-authored V3 JSON **string literal** — no builder, nothing to delete |
+| 3 | `prepend_preamble` / `assemble_sequence` / `splice_into_hole` | `crates/verter_compiler/src/assembly/compose.rs:177`, `:333`, `:379` | hand-built `SourceMapBuilder`, serialised at `:217`, `:370`, `:517` |
+| 4 | `compose_generated_chunk` | `crates/verter_compiler/src/framework_common/generated_chunk.rs:102` | hand-built builder, serialised `:202` |
+| 5 | `exact_slice_source_map` | `crates/verter_compiler/src/framework_common/vue_bridge.rs:1533` | hand-built builder, serialised `:1550` |
+| 6 | `map_compose::to_source_map` | `crates/verter_session/src/compile/map_compose.rs:26` | session-side, serialised at `crates/verter_session/src/compile.rs:231`, feeding `template_map_json` **back into** `verter_compiler` |
+| 7 | `build_api_source_map` | `crates/verter_session/src/framework/api_projectors/svelte.rs:1024` | delegates to producer 1 |
+| 8 | `shift_source_map_for_insertions` | `crates/verter_dx_baseline/src/materialize.rs:598` | uses `verter_dx_baseline`'s **own** `oxc_sourcemap` dependency (`Cargo.toml:21`), not even the re-export |
+
+The escape hatch is documented in-source. `crates/verter_compiler/src/lib.rs:41` is
+`pub use oxc_sourcemap;`, with the comment at `:36-40` stating the intent: *"Re-exporting the crate itself
+lets an out-of-crate consumer name those types and reuse the same canonical v3 encoder."* Any consumer can
+therefore mint a V3 map string via `SourceMapBuilder` / `SourceMap::to_json_string()` with no reference to
+`CodeTransform` at all, and two crates already do.
+
+### This is a fourth category, not one of the three the criterion already excludes
+
+`TCM1.md`'s exit criterion 1 is careful, and this finding is not a restatement of its own caveats. It
+explicitly names three things the deletion does not prove: read-time JSON projections of an
+already-typed value (closed by criterion 2's sealed projection set), the FFI/NAPI/WASM wire boundary
+(criterion 3), and externally-supplied inbound fields (out of scope entirely).
+
+The eight producers above fall into **none** of those three. They are not read-time re-serialisations of a
+`CodeTransform`-typed value — they never obtain one. They are not the wire boundary — producer 1 mints its
+map deep inside `verter_compiler`'s TSC script path, and producer 6 inside `verter_session`. They are not
+caller-supplied — every one of them is Verter-produced projection data. They are simply a parallel
+production path the criterion does not model, and the deletion is silent about all of them.
+
+The consequence is concrete rather than theoretical. Producer 1 feeds `TscResponse.source_map`
+(`crates/verter_session/src/types/tsc_response.rs:41`) — the V3 map for generated `.vue`/`.svelte`
+TypeScript carriers, which `crates/verter_compiler/src/tsc/script.rs:7039-7041` describes in-source as *"the
+exact JSON shape the carrier store publishes and the editor plugin consumes"* (line corrected
+2026-08-23; the earlier citation `:1283` merely names the function). That is one of the
+product's most load-bearing projection maps, and it is invisible to a `CodeTransform` deletion.
+
+### What a sound mechanical proof requires
+
+The instrument that actually enumerates this surface exhaustively is a **type change, not a deletion**:
+introduce a value newtype over the encoded map (e.g. `EncodedSourceMap`) with a private inner field and no
+`From<String>`, in a crate every consumer depends on, and retype the map-carrying fields to it. The moment
+a field stops being `String`, the compiler enumerates every producer and every consumer of that field —
+including producers 1-8, which a producer deletion cannot reach. The retype IS the enumeration; no
+starting count is needed, and no name-keyed scanner is involved, so it satisfies this program's
+structural-enforcement rule the same way the deletion argument was intended to.
+
+Two details make the difference between a real chokepoint and another partial one:
+
+- **No such newtype exists today.** A search for any newtype wrapping a map string across all crates finds
+  none; every field is a bare `String` / `Option<String>` / `Option<Arc<str>>`. Note that
+  `crates/verter_identity/src/mapping.rs` already declares `EncodedSourceMapId`, `SourceProjectionMapId`
+  and `RuntimeSourceMapDataId` — but those are **identity** newtypes over `Canonical` that explicitly
+  disclaim map construction. They are not the value newtype this needs, and the name similarity is a trap.
+- **`pub use oxc_sourcemap;` must be reconsidered in the same change**, or the newtype's constructor must
+  become the only path from an `oxc_sourcemap::SourceMap` to an encoded string. Otherwise a consumer can
+  re-mint a bare map string at any time and the newtype seals nothing.
+
+### Disposition
+
+The open sub-question closes with an answer neither option anticipated:
+
+- **An exhaustive pre-count is NOT required.** The row's own reasoning stands: three manual attempts is not
+  a plan, and the inventory in this file remains an explicitly non-exhaustive migration aid.
+- **The deletion-based proof as written is NOT sufficient**, and this is a defect in `TCM1.md`'s owned-scope
+  item 1 and exit criterion 1, verifiable against source today — not a matter of judgement.
+- **The sound proof is the newtype retype**, which is exhaustive by construction and structural rather than
+  name-keyed.
+
+`TCM1.md` is a ratified, digest-pinned document (`authority-registry.toml`, `TCM1-CHARTER`, sha256
+`2886c796307ac8b28e3288de5062a207a3262f9f78fa407ecf31637e90cc4a28`). **This evidence pass does not edit it
+and does not re-pin its digest** — rebinding a ratified document's digest without a fresh ratification act
+is itself a governance violation, and the same restraint was already exercised for
+`MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md`. The finding is recorded here, in TCM0's own
+evidence, and `OPEN-GAPS.md`'s `G-STRING-SURFACE-CITATIONS` row carries the amendment to TCM1's charter
+that follows from it.
+
+**The disposition above is evidence; its "therefore CLOSED" verdict is WITHDRAWN.** The three findings —
+the non-exhaustive inventory, the eight producers, the newtype instrument — are source-backed and stand.
+What does not stand is TCM0 self-certifying the sub-question as settled: `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+Q1 returns the round-3 candidate as wrongly scoped, lands this work as a NON-ACCEPTANCE evidence package,
+and hands the incomplete contract remainder to a successor block **with fresh verification**. Two things
+this file states about itself are exactly why: the inventory is "explicitly not claimed exhaustive" after
+two manual passes each found the prior one incomplete, and one exhaustiveness count in the closure text
+itself had to be corrected mid-pass. `G-STRING-SURFACE-CITATIONS` is therefore OPEN with the successor as
+owner (`successor-block-scope.md`).
+
+### One further correction to this file's own inventory
+
+This file's scope note lists `FfiBlockOverrideEntry.source_map` as the single caller-supplied inbound field
+out of TCM1's migration scope. The inbound chain is longer than one field:
+`NapiBlockOverrideEntry.sourceMap`/`.sourceMapHash` (`crates/verter_napi/src/lib.rs:578`, `:579`) →
+`FfiBlockOverrideEntry.source_map`/`.source_map_hash` (`crates/verter_protocol/src/types.rs:142`, `:143`) →
+`BlockOverrideEntry.source_map` (`crates/verter_session/src/types.rs:2393`, built at
+`crates/verter_ffi/src/convert/input.rs:406`) → `SuppliedContentArtifact.source_map`
+(`crates/verter_session/src/block_content.rs:73`) → `QualifiedBlockContentSourceMap.raw_map`
+(`crates/verter_session/src/types.rs:2197`) → `BlockContentSnapshot.source_map` (`:2230`) →
+`RuntimeBlockContentInput.source_map` (`crates/verter_compiler/src/framework_common/carrier_compiler.rs:477`),
+i.e. host-supplied preprocessor map data travelling all the way back INTO the compiler. Verter only
+validates it (`valid_source_map_v3`, `crates/verter_session/src/block_content.rs:367`, decoding via
+`oxc_sourcemap::SourceMap::from_json_string` at `:428`); nothing in the repo produces it. All nine fields
+are out of TCM1's scope for the same reason the one already-named field is, and naming the whole chain
+prevents a future pass from re-discovering part of it and mistaking it for missed in-scope work.
