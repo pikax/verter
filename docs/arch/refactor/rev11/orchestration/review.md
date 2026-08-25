@@ -29,6 +29,24 @@ that has not seen it. It receives the charter, architecture and final diff — n
 and looks for missed defects and integration problems. A high-risk candidate may get one additional
 targeted lane.
 
+## Acceptance is not reopened later — two checks that prevent it
+
+Reopening an accepted block is expensive and always has the same two causes.
+
+**A criterion that names a document requires a verified correspondence to that document.** Not "this
+bullet covers it" — an actual comparison, clause by clause, recorded. A block once satisfied
+"distinct identity types from the architecture document" with types that collapsed four of that
+document's variants into one, losing two identity distinctions. Every review passed, the criterion
+looked met, and the divergence surfaced only when a later block became the first consumer and found
+the contract's invariant inexpressible. A coverage mapping would not have caught it: the mapping was
+correct. What was missing was anyone reading the two side by side. Divergence found this way is
+recorded as a deviation for ratification, never resolved silently in either direction.
+
+**An artifact with no consumer has no evidence, and acceptance says so.** The same type had zero
+production callers, so no test could fail and none did. Compilation proved only that it was
+well-formed. Where a block delivers something nothing yet uses, its acceptance states that plainly
+rather than resting on a green gate that never exercised it — and names what would exercise it.
+
 ## Convergence
 
 **Default maximum: two substantive fix cycles per slice.** Not converging means stop and rescope,
