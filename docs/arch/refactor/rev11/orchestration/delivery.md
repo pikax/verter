@@ -344,6 +344,17 @@ handles the reported case and leaves the next one is a ladder with no top; the r
 the property is unbounded. Sweep the range and name the residual bound in the test, so the limit is a
 declared constant rather than wherever the last review happened to stop.
 
+**Errors that all point the same way are pressure, not scatter.** Independent mistakes scatter; a
+sequence of corrections that are every one optimistic — or every one pessimistic — is evidence of a
+force acting on all of them. Stop correcting them individually and find it. In one block every
+intermediate coverage number was optimistic in the same direction, and the pressure was the pull
+toward reading a green run as evidence for the property it was cited for.
+
+**A gate that asserts presence where the criterion claims a property is deficient, not the criterion.**
+Narrowing the criterion to match what the gate measures relaxes a ratified requirement because the
+mechanism fell short. The costumes this takes: presence standing in for a property, a proxy standing
+in for the property, fixtures standing in for a universe, and a cross-check that does not exist.
+
 **A ratifying act names a candidate sha.** "This evidence set", "the current analysis", "as it stands"
 are descriptions, not referents: the next commit invalidates them, and an act whose referent has never
 landed pins nothing anyone can check. One act scoped that way expired itself — the only commit after it
