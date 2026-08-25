@@ -329,6 +329,14 @@ covers these pins", read at the next level as "no record exists to amend" — th
 its own text described how to extend it. Three levels handled that claim and none opened the file.
 One `cat` ends it at any level, and the cost of not doing it is two reversed rulings.
 
+**Striking a claim where it was reported does not strike it where it is restated.** A false claim
+propagates into summaries, registers and gap tables, and a repair aimed at the reported location
+leaves every restatement asserting it. Matching the reported string cannot find them, because a
+restatement is a different sentence saying the same thing — only reading for the claim does. Two
+blocks arrived at this independently on the same day, from a gap register and from a fourth
+occurrence under a different name. It is the document-scale form of repairing the class rather than
+the instance.
+
 **Amending a record forward is not fabricating one backward.** Adding a row that states what is
 pinned as of now is ordinary maintenance; creating a record of a lock that never existed is
 retroactive history. They are different acts and the objection to the second does not reach the
