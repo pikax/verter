@@ -53,6 +53,7 @@ escalates; an agent may not silently invent architecture or override the user.
 | [review.md](review.md) | discovery → closure → acceptance, calibration, routing | by reference |
 | [delivery.md](delivery.md) | code quality, testing, regression prevention | by reference |
 | [prompts/](prompts/) | the dispatch prompt for each role | yes — these are the runtime prompts |
+| [orchestrator-failures.md](orchestrator-failures.md) | what the last orchestrator got wrong — read first | by reference |
 | [design-notes.md](design-notes.md) | why these rules exist, and the failures behind them | **never** |
 
 **Runtime prompts carry only role boundary, inputs, actions, output contract and stop conditions.**
