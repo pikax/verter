@@ -361,6 +361,11 @@ landed pins nothing anyone can check. One act scoped that way expired itself —
 was the one recording its own expiry boundary, which fired on its own bytes while changing no
 disposition it had ratified.
 
+**At freeze, re-derive every digest the candidate quotes — never carry one forward.** A digest that
+was right an hour ago describes a reference that may have moved since, and the drift is in what the
+work is measured against rather than in the work, which is the one class a clean self-check cannot
+surface.
+
 **Ratify last.** Evidence, then freeze the candidate, then issue the act against that frozen sha. An
 act issued before its own consequence is recorded either expires when the recording lands or
 contradicts the evidence it pins — the same defect on two surfaces, and both have happened.
