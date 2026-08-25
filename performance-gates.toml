@@ -128,7 +128,13 @@ operation = "cold_project_batch_component_meta_then_compile_many"
 # The corpus is synthesised in-process by the harness, so it has no fixture
 # directory to fingerprint; the harness source IS the corpus definition and is
 # pinned by blob identity. A run whose harness blob differs is not this cell.
-corpus_fingerprint = "git-blob:a74f90c5d1d06f8fc17a71781d28d0c6ea466853 (crates/verter_bench/examples/attribution_baseline.rs); sha256:1d208e61688efdf6b8e33adce7d0095c1195377e65a06579c26b75b08ea9bb73"
+#
+# Re-pinned from git-blob:a74f90c5d1d06f8fc17a71781d28d0c6ea466853, which the tree stopped
+# holding when the harness module documentation was condensed. The delta is comment-only —
+# every changed line is a `//!` doc line or blank, and no executable line moved — so the
+# corpus and the recorded measurement below are UNCHANGED and were not re-taken. A
+# corpus-identity re-pin, not a re-measured cell.
+corpus_fingerprint = "git-blob:efa9ea54a14772ecd87511d6bb07017aa33940ba (crates/verter_bench/examples/attribution_baseline.rs); sha256:1d208e61688efdf6b8e33adce7d0095c1195377e65a06579c26b75b08ea9bb73"
 # SHA-256 over the exact request description string recorded in
 # evidence/A6/baseline-measurement.md; the Revision 11 normalized product-request
 # type does not exist at lock time, so the request is pinned by its literal
@@ -813,16 +819,33 @@ owner = "B6"
 # arm exists on the B5 tree this cell was locked from; the harness REFUSES the
 # other three rather than reporting a fabricated number for them.
 operation = "route_overhead_direct_prepared_first_prepared_repeat_batch; product=RuntimeClient; frameworks=vue+svelte"
-# Re-pinned from git-blob:6c69bd6e6b0f674eec20d92aff9080aad0f877ad. The harness file
-# arrived unformatted and `cargo fmt --all --check` failed on it at trunk; formatting it
-# moved the blob without touching the corpus. The change is one `assert!` reflowed from
-# four lines onto one at :278 — no statement added, removed or reordered, and no
-# expression altered — so the recorded measurement below is UNCHANGED and was not
-# re-taken. This is a corpus-identity re-pin, not a re-measured cell. Ruling:
-# verify/B6F-2-ruling.md (program orchestrator, 2026-08-24), which also notes this is not
-# a precedent for re-pinning around a semantic corpus change; that would need a real
-# re-measurement.
-corpus_fingerprint = "git-blob:73667b9fa92ef86ec49b5c87b32de6945d8b7e82 (crates/verter_bench/examples/route_overhead_baseline.rs); eight in-process sources (4 Vue, 4 Svelte), no fixture directory, no third-party corpus"
+# Re-pinned from git-blob:73667b9fa92ef86ec49b5c87b32de6945d8b7e82, itself re-pinned from
+# git-blob:6c69bd6e6b0f674eec20d92aff9080aad0f877ad. Both moved the blob without touching
+# the corpus, and neither measurement was re-taken.
+#
+# The first: the harness arrived unformatted, `cargo fmt --all --check` failed on it at
+# trunk, and formatting reflowed one `assert!` from four lines onto one at :278 — no
+# statement added, removed or reordered, and no expression altered.
+#
+# The second: `cargo clippy --workspace --all-targets -- -D warnings` failed on
+# `byte_char_slices` at :164, and the lint's own suggested form was taken —
+# `hasher.update([b'\n'])` became `hasher.update(*b"\n")`. This one DOES alter an
+# expression, so it is not covered by the formatting-only wording of the earlier ruling
+# and is recorded as a deliberate extension of it rather than an application. It is
+# admitted on the ruling's substantive test — proven not to alter behaviour — which here
+# is proven rather than argued: `b'\n'` is `10u8`, so `[b'\n']` and `*b"\n"` are both
+# `[u8; 1] = [10]`, `sha2`'s `update` takes `impl AsRef<[u8]>`, and the bytes reaching the
+# hasher are therefore identical. The digest cannot move. The eight in-process sources are
+# untouched.
+#
+# Both are corpus-identity re-pins, not re-measured cells. Neither is a precedent for
+# re-pinning around a semantic corpus change, which would need a real re-measurement.
+#
+# The blob is what is pinned here, and the validator does not compare this field against
+# the tree — it only checks the field is a non-empty string. So a code change to the
+# harness that is left un-re-pinned leaves this cell naming a corpus the tree no longer
+# holds, with nothing failing and nothing warning.
+corpus_fingerprint = "git-blob:748aa36a22ce9704904cd7aa8e29fc14e9dcca3a (crates/verter_bench/examples/route_overhead_baseline.rs); eight in-process sources (4 Vue, 4 Svelte), no fixture directory, no third-party corpus"
 # SHA-256 over the literal request-identity string frozen in
 # evidence/B6/cell-lock/pre-measure-registration.md section 11 (no trailing newline).
 normalized_product_request_digest = "bf427b56a4f46a151d818c52e9493fd5817da4a7ac2e74352612962ea2f4ab80"

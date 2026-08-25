@@ -161,7 +161,7 @@ fn run_pass() -> PassResult {
         hasher.update(code.as_bytes());
         hasher.update([0]);
         hasher.update(output.styles.len().to_string().as_bytes());
-        hasher.update([b'\n']);
+        hasher.update(*b"\n");
         black_box(code);
         black_box(&output.styles);
     }
