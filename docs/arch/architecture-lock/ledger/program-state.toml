@@ -38,7 +38,7 @@ untracked_count = 0
 # refs/heads/program/architecture-lock's tip on every live-mode run; update
 # whenever that branch advances.
 integration_branch = "program/architecture-lock"
-integration_head_sha = "b5edebdd59bf08415d65031150041c78ebea75d1"
+integration_head_sha = "8fd0f909103903e123bd7835b289808e54e8f4d4"
 
 [orchestration]
 maintainer = "Carlos Rodrigues <carlos@hypermob.co.uk> (GitHub: pikax)"

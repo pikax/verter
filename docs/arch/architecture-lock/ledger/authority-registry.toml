@@ -117,6 +117,9 @@ sha256 = "d7ee747f3adc1c045ccdc66f48c73f859d5d11d011886cb574c9e9a009967049"
 # Registered as a document with no [[authorization]] row: the work it binds is not a
 # DAG block and holds no ledger row, so there is no block status for a row to authorise.
 # It is cited by that work's acceptance-coverage mapping instead.
+# AMD-017 and AMD-020 bind the test-determinism work landed at 8fd0f9091: every
+# selected test executed (zero never-ran), which is the evidence for its ratified
+# criterion — a fail-fast pass cannot establish it.
 [[document]]
 id = "AMD-020-TSGO-MID-FLIGHT-CANCELLATION-REPLY"
 kind = "AMENDMENT"
