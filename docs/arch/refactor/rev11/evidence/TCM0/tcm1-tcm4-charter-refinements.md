@@ -19,10 +19,19 @@ maintainer or the amendment process to adopt when each block is authorized.
   the prior one incomplete; see that file's own hedge). TCM1's acceptance bar should include the FFI wire
   types, not stop at the in-process boundary — otherwise TCM1 leaves a second string-encoded path alive at
   the NAPI/WASM boundary, in tension with the "one clean cutover" rule.
-- **Single point of origin.** TCM1 should replace the discard-to-string pattern at `CodeTransform`'s own
+- **~~Single point of origin.~~ SUPERSEDED 2026-08-23 — `CodeTransform` is NOT a single point of origin.**
+  This bullet originally read: *"TCM1 should replace the discard-to-string pattern at `CodeTransform`'s own
   `generate_map`/`generate_map_json*` (`code_transform/source_map.rs`), not at each downstream consumer
-  site — the typed intermediate (`oxc_sourcemap::SourceMap<'static>`) already exists transiently at
-  exactly that point and is thrown away by every current caller.
+  site — the typed intermediate (`oxc_sourcemap::SourceMap<'static>`) already exists transiently at exactly
+  that point and is thrown away by every current caller."* The premise was checked against source and is
+  false: `CodeTransform` is one of **eight** in-repo producers of encoded map strings, and its two
+  string-returning methods have zero production callers outside `crates/verter_compiler`. Replacing the
+  discard there migrates seven call sites in one crate and leaves every map field in `verter_session`,
+  `verter_lsp`, `verter_protocol`, `verter_napi` and `verter_dx_baseline` untouched. The enumerating
+  instrument is a **value newtype retype**, not a producer replacement — see
+  `mapping-products-string-surface.md`'s closure and `OPEN-GAPS.md`'s `G-STRING-SURFACE-CITATIONS`. This
+  bullet is retained struck-through rather than deleted, because `TCM1.md`'s owned-scope item 1 cites it and
+  a reader tracing that citation must land on the correction, not on the original claim.
 
 ## TCM2 (Content-mapper projection plane)
 
@@ -31,10 +40,15 @@ maintainer or the amendment process to adopt when each block is authorized.
   (bounded-timeout deadlock control build) shape the discriminating test must take. TCM2's charter
   should reference this spec directly as its acceptance criterion for the invariant, rather than
   restating the invariant prose without a concrete test shape.
-- **The exact wire method-name spelling is an open verification gap, not settled fact.** TCM2 must close
-  it (live protocol trace or `typescript-go` source read) before its own implementation can claim
-  fidelity to the upstream protocol — `evidence/TCM0/package-lock-and-semantic-api.md` §3 records
-  strong structural (Go type-name) evidence for the four-step lifecycle but not a byte-exact trace.
+- **~~The exact wire method-name spelling is an open verification gap, not settled fact.~~ SUPERSEDED
+  2026-08-23 — TCM0 has since captured it live.** This bullet originally required TCM2 to close the
+  spelling (live protocol trace or `typescript-go` source read) because §3 recorded only structural (Go
+  type-name) evidence. `probes/probe7-mapper-wire-capture.mjs` now records every frame against a real
+  configured mapper: `initialize` / `openProject` / `transform` / `closeProject`, params shapes, handle
+  format, configuration keys and the 5-second `initialize` timeout
+  (`package-lock-and-semantic-api.md` §3a). What TCM2 still owes is the narrowed residual only: the
+  `transform` RESPONSE body layout. Retained struck-through so a reader tracing the old obligation lands
+  on the closure, not the original claim.
 - **Supplemental outputs supersede, don't approximate, today's virtual-file-naming convention.** The
   protocol's native `SupplementalOutput` field was purpose-built for exactly this ("multiple TypeScript
   files from a single source", upstream's own Astro example) — TCM2 should route Verter's existing
@@ -45,6 +59,21 @@ maintainer or the amendment process to adopt when each block is authorized.
   projection-class-contract.md` records that an omitted `features` field on a wire `SpanMapSegment`
   silently normalizes to `All` upstream — TCM2's acceptance tests must include a negative check that no
   code path can emit a segment without computing this field.
+- **Projection-plane topology selection is TCM2's, by ruling** —
+  `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+  Q2 ratifies the transfer and makes evidence-based projection-plane selection a **blocking exit** of
+  TCM2. The transfer itself needs no further ratification act; what remains is applying it to `TCM2.md`'s
+  own numbered lists, which is the program orchestrator's charter-amendment act and not TCM0's. The text
+  below is the recommended wording for that act (see `OPEN-GAPS.md` §`G-TOPOLOGY`). Proposed owned-scope item 16: *"**Projection-plane topology
+  selection**: select among the surviving projection-plane candidates (native mapper with in-process
+  compiler; thin mapper over a shared native daemon) using the measurement contract in
+  `evidence/TCM0/topology-benchmark-plan.md`."* Proposed numbered exit criterion 14: *"**Projection-plane
+  topology selected on evidence** (owned-scope item 16). Evidence: the current-path baseline captured and
+  committed as the block's FIRST act, per `evidence/TCM0/performance-baselines.md` requirements 6-8; the
+  complete comparison across the surviving candidates over the benchmark plan's full metric list, every
+  timing claim a distribution over N>=10 iterations with raw samples; the non-dominance rule applied as
+  written; and, if multiple candidates remain non-dominated, a stated secondary criterion applied and
+  recorded, as the benchmark plan's selection rule requires."*
 
 ## TCM3 (TypeScript semantic capability closure)
 
@@ -55,14 +84,37 @@ maintainer or the amendment process to adopt when each block is authorized.
   acceptance criterion (a structural/type-state rule if the surrounding language allows it, per this
   program's general preference for structural guards over runtime discipline), not leave it to
   case-by-case caller discipline.
-- **The session-attach topology needs its own certification pass.** TCM0 certified the direct-native-
-  client topology candidate live; it explicitly did NOT probe `API.fromLSPConnection`
-  (`custom/initializeAPISession`) for the session-initialization-hang defect class. TCM3's charter should
-  name this as a required probe before that topology candidate may be selected, not assume it inherits
-  TCM0's certification by association.
+- **~~The session-attach topology needs its own certification pass.~~ SUPERSEDED 2026-08-23 — TCM0 has
+  now run this probe itself.** This bullet originally read: TCM0 certified the direct-native-client
+  topology candidate live; it explicitly did NOT probe `API.fromLSPConnection`
+  (`custom/initializeAPISession`) for the session-initialization-hang defect class, so TCM3's charter
+  should name this as a required probe before that topology candidate may be selected.
+  `probes/probe8-lsp-session-attach.mjs` now drives a real LSP handshake, obtains the API pipe via
+  `custom/initializeAPISession`, attaches, and answers a `Checker` query over it. **No hang.** TCM3 no
+  longer needs to run it to certify the path; what TCM3 inherits instead is a hard constraint TCM0 found
+  while probing — the attach topology is ASYNC-CLIENT-ONLY (`dist/api/sync/client.js:11` refuses socket
+  connections), plus a bind race requiring bounded retry. See `package-lock-and-semantic-api.md`
+  §4a-attach. The original wording is retained struck-through as the record of what was true before the
+  probe existed. (This supersession note previously sat under the cancellation bullet below, which it
+  does not supersede — re-anchored 2026-08-24.)
 - **No cancellation primitive exists in the candidate API.** TCM3 must design its own in-flight-query
   abandonment strategy (fresh snapshot, not server cancel) rather than assuming a cancel-token pattern is
   available to build on.
+- **Semantic-plane topology selection is TCM3's, by ruling** —
+  `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+  Q2 ratifies the transfer and makes evidence-based semantic-plane selection a **blocking exit** of TCM3.
+  The transfer itself needs no further ratification act; what remains is applying it to `TCM3.md`'s own
+  numbered lists, which is the program orchestrator's charter-amendment act and not TCM0's. The text below
+  is the recommended wording for that act (see `OPEN-GAPS.md` §`G-TOPOLOGY`). Proposed owned-scope item 9: *"**Semantic-plane topology selection**:
+  select among the surviving semantic-plane candidates (attach to the editor-owned API session; direct
+  native client; managed process for non-editor hosts) using the measurement contract in
+  `evidence/TCM0/topology-benchmark-plan.md`."* Proposed numbered exit criterion 10: *"**Semantic-plane
+  topology selected on evidence** (owned-scope item 9). Evidence: the current-path baseline captured and
+  committed as the block's FIRST act, per `evidence/TCM0/performance-baselines.md` requirements 6-8; the
+  complete comparison across the surviving candidates over the benchmark plan's full metric list, every
+  timing claim a distribution over N>=10 iterations with raw samples; the non-dominance rule applied as
+  written; and, if multiple candidates remain non-dominated, a stated secondary criterion applied and
+  recorded, as the benchmark plan's selection rule requires."*
 
 ## TCM4 (Atomic activation and deletion)
 
@@ -71,7 +123,11 @@ maintainer or the amendment process to adopt when each block is authorized.
   `feature-ownership-ledger.md` and `diagnostic-ownership-matrix.md` that justify each. TCM4's charter
   should reference that file directly as its deletion manifest rather than re-deriving the list at
   execution time.
-- **Two ledger rows are explicitly NOT ready for deletion.** `register_carrier_member`/
-  `register_carrier_metadata`/`activate_carrier_member(s)` (ledger rows #25-26) require a maintainer
-  ruling before TCM4 may delete them — TCM4's charter should gate on that ruling explicitly rather than
+- **Two ledger rows are RETAINED, and their deletion gate is now explicit.**
+  `register_carrier_member`/`register_carrier_metadata`/`activate_carrier_member(s)` (ledger rows
+  #25-26) are retained under `VerterWithTypeSemanticOracle` per
+  `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+  Q4 — row 25 preserves local content/position conversion and carrier-to-project routing, row 26 preserves
+  oracle working-set activation. TCM4 may remove the tsserver-specific methods **only after TCM3 supplies
+  and tests equivalent semantics**; TCM4's charter should gate on that condition explicitly rather than
   treat "TCM0-TCM3 landed" as sufficient authority to delete everything TCM0 discussed.

@@ -129,13 +129,19 @@ moved the same field.
 
 **Only the program orchestrator dispatches the landing agent.**
 
-**A ready-and-verified report carries the candidate identity, the evidence, and the squash message —
-subject and body.** The manager drafts the message at verification, when what the block did is
-freshest, and it travels upward with the readiness claim. Landing never asks for it.
+**A ready-and-verified report carries the candidate identity, the evidence, the squash message —
+subject and body — and the acceptance-coverage mapping.** The manager drafts both at verification,
+when what the block did is freshest, and they travel upward with the readiness claim. Landing never
+asks for either. Coverage has the same freshness property as the message and more strongly: naming
+which criterion covers a change is harder to reconstruct later than describing the change, and the
+block is the only party that knows why it made each one.
 
-**The landing agent authors no block-scoped content.** A rebase conflict and a commit message are
-both block knowledge; produced at landing time they are unreviewed, with the gate about to run on the
-result. So the landing agent uses the supplied message verbatim and verifies compliance — never
+**The landing agent authors no block-scoped content.** A rebase conflict, a commit message and an
+acceptance-coverage mapping are all block knowledge; produced at landing time they are unreviewed,
+with the gate about to run on the result. Coverage is the sharpest case: a mapping the checker
+invents will always find itself satisfied, because the checker chooses which criterion to point at —
+the same trap as a check that enumerates from the source it validates. The block names the
+identifier; the landing agent verifies the naming and may refuse. So the landing agent uses the supplied message verbatim and verifies compliance — never
 authoring, never rewriting — and either failing cancels the landing and returns it to the block that
 owns the code.
 
@@ -151,28 +157,54 @@ rather than proceeding with a caveat.
 
        cargo clippy --version                 # must match the rust-toolchain.toml pin
        cargo fmt --all --check
+       oxfmt --check <the delta's .ts/.js/.mjs/.cjs files>
        cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
        cargo clippy --workspace --all-targets -- -D warnings
        cargo check --workspace --release
 
    The pin check gates the rest: a lint result from an unpinned toolchain is not evidence about the
-   toolchain CI uses, and it reads exactly like a pass. Steps 3-5 may be skipped only when the delta,
-   **enumerated against the merge-base rather than accepted as a label**, touches none of `*.rs`,
-   `crates/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `build.rs`, `.cargo/**` — a
-   docs-only change that edits a rustdoc comment is still a `.rs` file. Add
-   `pnpm install --frozen-lockfile` and `pnpm test` only when the delta touches `packages/` or the
-   lockfile. Any failure returns the block: this is production source, and a landing agent must not
-   fix it.
-3. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
+   toolchain CI uses, and it reads exactly like a pass.
+
+   **Always run:** the pin check and both formatters. `cargo fmt --all --check` is a whole-workspace
+   check and costs nothing; `oxfmt --check` runs whenever the delta contains any `.ts`, `.js`, `.mjs`
+   or `.cjs` file, **wherever it lives** — the pre-commit hook does not care which directory a script
+   sits in.
+
+   **Skippable — the three cargo builds only** (wasm32 clippy, workspace clippy, release check), and
+   only when the delta, **enumerated against the merge-base rather than accepted as a label**,
+   touches none of `*.rs`, `crates/**`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+   `build.rs`, `.cargo/**` — a docs-only change that edits a rustdoc comment is still a `.rs` file.
+   The skippable set is named rather than numbered on purpose: it was once written as a line range,
+   and inserting one command into the list silently made a formatter skippable and a release build
+   mandatory, inverting both.
+
+   Add `pnpm install --frozen-lockfile` and `pnpm test` only when the delta touches `packages/` or
+   the lockfile — an install-and-test trigger, never the formatting trigger.
+
+   Any failure returns the block: this is production source, and a landing agent must not fix it.
+3. **Check acceptance coverage.** **A candidate may not land carrying work that no ratified
+   acceptance criterion covers.** For every material change in the delta, name the acceptance
+   identifier that covers it; uncovered work is bound by a ratified charter or amendment first, or it
+   is cut from the candidate. Deferring a block's acceptance does not license landing uncovered work —
+   it only moves work nobody owns onto the working branch, where the next block to touch it discovers
+   the gap one item at a time. Naming a logical owner is not binding one.
+4. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
    candidate's sha, and the supplied message must comply — **in its body, not only its subject**.
    Naming the program, its revision or a block identifier, or a commit type `CLAUDE.md` does not
    list, returns the block. Whoever checks did not produce that evidence — that is what makes the
    check worth anything — and may refuse.
-4. **Run the gate.**
+5. **Run the gate.**
 
-**On gate success only:** squash under the supplied message verbatim, then update the ledger, then
-land, then **remove the block's worktree, delete the merged branch and prune** — on a successful
+**On gate success only:** squash under the supplied message verbatim, then land, then update the
+ledger, then **remove the block's worktree, delete the merged branch and prune** — on a successful
 landing only, since a returned block needs its worktree intact.
+
+**The ledger commit goes on top of the landed sha, not before it.** Landing is a fast-forward, so a
+ledger commit written first puts the candidate one behind, forces a rebase, and produces a new sha —
+leaving the row naming a commit the history no longer holds, which is the provenance failure below,
+manufactured by the step order that was supposed to prevent it. Land first and the sha is final when
+it is pinned. Clearing a block ref that landing deleted is not enough on its own: the row must name a
+ref that still resolves and still carries the commit.
 
 **The gate does not run `cargo fmt` or `cargo clippy`.** `CLAUDE.md` keeps them as separate
 end-of-change checks, so without step 2 a candidate can pass rebase, conformance and a full gate and
@@ -188,13 +220,38 @@ stops on the first errors never builds the later targets, so its output is a pre
 not an inventory of it — the same shape as a fail-fast gate. Re-run to green; do not treat the first
 list as the full set.
 
+**A rebase voids the carry-across.** A candidate that has been reformatted AND replayed onto a moved
+working branch differs from the gated tree in two ways, and only one of them is a formatting fix. Do
+not stretch the rule to cover the other; gate it.
+
+**The gate's verdict is read from its telemetry, not its exit status.** `completeness` and
+`terminal.reached` in the telemetry the runner writes under its target directory are the authority; a
+truncated log and a missing terminal summary are corroborating. Do not probe for a working directory
+at the repository root — nothing writes one there, so that check reports absence every time and looks
+like it is working.
+
+**Skipping the pre-commit hook at squash time is permitted only when the health check above passed on
+the exact tree being committed** — re-verify the tree hash immediately before committing rather than
+trusting it has held, and state in the report which path was taken and on which hash. The
+justification is redundancy: the hook runs the same formatters the health check already ran. If the
+health check was skipped, failed, or ran on a different tree, the hook is not a duplicate — it is the
+only thing checking — and it runs. Using it to get past a failure is a gate-bypass, not a skip.
+
 **A formatting-only fix does not invalidate a gate verdict**, so a green result carries across it.
-Nothing else does: a lint repair that changes a signature or control flow produces a tree the gate
-never saw, and its verdict is void. Verify formatting-only by **recomputing** — apply `cargo fmt
---all` to the pre-fix commit and compare blobs — never by reading the diff and judging it to look
-like formatting. `fmt` reorders imports, re-breaks expression chains and adds closure braces, so a
-whitespace-only test fails on a correct result and a non-formatting edit riding inside a reformatted
-hunk reads as formatting.
+That is a statement about the class of change, not about which formatter produced it — it holds for
+`oxfmt` over JavaScript exactly as for `cargo fmt` over Rust. Nothing else does: a lint repair that
+changes a signature or control flow produces a tree the gate never saw, and its verdict is void.
+Verify formatting-only by **recomputing** — apply the formatter to the pre-fix commit and compare
+blobs — never by reading the diff and judging it to look like formatting. `fmt` reorders imports,
+re-breaks expression chains and adds closure braces, so a whitespace-only test fails on a correct
+result and a non-formatting edit riding inside a reformatted hunk reads as formatting.
+
+**Trigger the formatting checks on file EXTENSION, not on directory.** The JavaScript conditional
+below fires on `packages/` and the lockfile, which are the right trigger for installing and testing
+but the wrong one for formatting: a `.mjs` file anywhere in the tree is formatted by `oxfmt` and
+rejected by the pre-commit hook, and a set of probe scripts under `docs/` sailed through rebase,
+health check, conformance and a 516-second gate before the hook caught them at squash time — the
+exact failure this step exists to eliminate, surviving in the language it was not written for.
 
 **Artifact and binary provenance binds to content — a digest over the artifact's own inputs — never a
 commit sha.** Landing rebases and always squashes, so a sha a block recorded moves twice after the

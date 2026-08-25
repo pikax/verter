@@ -15,7 +15,7 @@ Confirmed live (`package-lock-and-semantic-api.md` §4c) and by source read of t
   Verter ("Load and parse each dependency at most once... Cache the parsed state... together").
 - **Explicit change signaling, not disk polling.** `updateSnapshot({ fileChanges: { changed, created,
   deleted, invalidateAll } })` — confirmed live that omitting `fileChanges` does NOT pick up on-disk
-  edits (`package-lock-and-semantic-api.md` §4c, probe4). Any Verter-side file-watcher integration MUST
+  edits (`package-lock-and-semantic-api.md` §4c; the control that demonstrates it is `probes/probe2-stale-snapshot.mjs`, NOT probe4 — probe4 is the WITH-`fileChanges` case. Corrected 2026-08-23). Any Verter-side file-watcher integration MUST
   translate VFS change events into explicit `fileChanges` entries; there is no "just re-open and it'll
   notice" fallback.
 - **A real, reproduced release-timing gap.** The current snapshot's cache is retained until superseded

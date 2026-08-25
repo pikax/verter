@@ -119,24 +119,90 @@ pub struct CompatibilityDomainId(pub &'static str);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct CompatibilityEpoch(pub u32);
 
-/// Parse-owner kind. Closed enum, not a digest; `Managed` carries the
-/// shard that distinguishes one managed owner from another.
+/// Identity of one one-shot direct parse invocation.
+///
+/// Deliberately **not** content-addressed. Two independent direct calls
+/// over identical bytes and options must not compare equal: if they did
+/// they would form the same `(ParseOwnerDomainId, ParseKey)` pair and
+/// therefore share one live result — the hidden process-global direct
+/// parse cache `parse-ownership.md` §2 and ADR-009 both reject. A digest
+/// over a caller descriptor cannot express this, because equal
+/// descriptors encode to equal bytes.
+///
+/// The caller mints the value and owes uniqueness across owners that can
+/// be live, or whose locators can still be dereferenced, at the same
+/// time. This crate mints no uniqueness of its own.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum ParseOwnerDomainId {
-    /// One-shot direct invocation or batch — no retained owner state.
-    DirectOrBatch,
-    /// `PreparedCarrier` progressive-execution owner.
-    PreparedCarrier,
-    /// Managed-engine owner/shard.
-    Managed { shard: u32 },
+pub struct DirectInvocationId(pub u64);
+
+/// Identity of one explicit direct batch owner. A batch shares within
+/// itself and with nothing else, so this is the same caller-minted
+/// live-owner class as [`DirectInvocationId`] — a distinct nominal type
+/// because a batch's sharing scope is not an invocation's.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct DirectBatchId(pub u64);
+
+/// Identity of one retained `PreparedCarrier`. A prepared parse shares
+/// only inside the retained value, so two live carriers over one key must
+/// not compare equal. Caller-minted on the same terms as
+/// [`DirectInvocationId`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct PreparedCarrierId(pub u64);
+
+/// Identity of one managed parse owner: which managed owner, and which
+/// shard inside it.
+///
+/// Both fields are load-bearing. A shard index alone identifies a managed
+/// owner only if shard values are unique across every simultaneously live
+/// managed owner in the process — a property nothing in the architecture
+/// establishes, and one that fails as soon as two managed owners are live
+/// at once. `owner` is deliberately neutral: the
+/// architecture says "named owner/shard" and does not settle whether that
+/// scope is ultimately an engine or a cohort.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ManagedParseOwnerId {
+    /// Caller-minted identity of the managed owner.
+    pub owner: u64,
+    /// Shard local to that managed owner.
+    pub shard: u32,
 }
 
-/// `(ParseOwnerDomainId, ParseKey, instance generation)`.
+/// Which reparse instance, within one owner domain and key, a result
+/// belongs to. Monotonic per `(owner domain, key)`, not a digest: after a
+/// retaining domain evicts under pressure, the next same-key flight is a
+/// new instance, and a stale locator must be rejected rather than read
+/// against it. Not part of the pair on which sharing is scoped.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ParseInstanceGeneration(pub u64);
+
+/// Which owner a parse result belongs to. Each variant carries the
+/// identity of one live owner, so `(ParseOwnerDomainId, ParseKey)` alone
+/// decides sharing: direct calls share iff their [`DirectInvocationId`]s
+/// are equal, batches iff their [`DirectBatchId`]s are, prepared parses
+/// iff their [`PreparedCarrierId`]s are, and managed owners iff their
+/// [`ManagedParseOwnerId`]s are. A unit variant would make two
+/// independent owners of that kind indistinguishable and collapse their
+/// sharing scopes into one (`parse-ownership.md` §2).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ParseOwnerDomainId {
+    /// One-shot direct invocation; dropped at return.
+    DirectInvocation(DirectInvocationId),
+    /// Explicit direct batch owner; bounded by the batch lifetime.
+    DirectBatch(DirectBatchId),
+    /// Retained `PreparedCarrier` owner.
+    Prepared(PreparedCarrierId),
+    /// Managed-engine owner/shard.
+    Managed(ManagedParseOwnerId),
+}
+
+/// `(ParseOwnerDomainId, ParseKey, ParseInstanceGeneration)`. One live
+/// `(owner_domain, key)` has one owner and one active result; the
+/// generation names which instance of it, and is not part of that pair.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ParseInstanceId {
     pub owner_domain: ParseOwnerDomainId,
-    pub parse_key: ParseKey,
-    pub instance_generation: u64,
+    pub key: ParseKey,
+    pub generation: ParseInstanceGeneration,
 }
 
 impl PartialOrd for ParseInstanceId {
@@ -148,8 +214,8 @@ impl Ord for ParseInstanceId {
     fn cmp(&self, other: &Self) -> Ordering {
         self.owner_domain
             .cmp(&other.owner_domain)
-            .then_with(|| self.parse_key.cmp(&other.parse_key))
-            .then_with(|| self.instance_generation.cmp(&other.instance_generation))
+            .then_with(|| self.key.cmp(&other.key))
+            .then_with(|| self.generation.cmp(&other.generation))
     }
 }
 
@@ -444,15 +510,16 @@ mod tests {
     #[test]
     fn parse_instance_id_orders_by_generation_within_same_owner_and_key() {
         let key = ParseKey::from_canonical(&Args(1));
+        let owner = ParseOwnerDomainId::DirectInvocation(DirectInvocationId(7));
         let low = ParseInstanceId {
-            owner_domain: ParseOwnerDomainId::DirectOrBatch,
-            parse_key: key.clone(),
-            instance_generation: 1,
+            owner_domain: owner,
+            key: key.clone(),
+            generation: ParseInstanceGeneration(1),
         };
         let high = ParseInstanceId {
-            owner_domain: ParseOwnerDomainId::DirectOrBatch,
-            parse_key: key,
-            instance_generation: 2,
+            owner_domain: owner,
+            key,
+            generation: ParseInstanceGeneration(2),
         };
         assert!(low < high);
     }

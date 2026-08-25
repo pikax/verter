@@ -29,6 +29,24 @@ that has not seen it. It receives the charter, architecture and final diff — n
 and looks for missed defects and integration problems. A high-risk candidate may get one additional
 targeted lane.
 
+## Acceptance is not reopened later — two checks that prevent it
+
+Reopening an accepted block is expensive and always has the same two causes.
+
+**A criterion that names a document requires a verified correspondence to that document.** Not "this
+bullet covers it" — an actual comparison, clause by clause, recorded. A block once satisfied
+"distinct identity types from the architecture document" with types that collapsed four of that
+document's variants into one, losing two identity distinctions. Every review passed, the criterion
+looked met, and the divergence surfaced only when a later block became the first consumer and found
+the contract's invariant inexpressible. A coverage mapping would not have caught it: the mapping was
+correct. What was missing was anyone reading the two side by side. Divergence found this way is
+recorded as a deviation for ratification, never resolved silently in either direction.
+
+**An artifact with no consumer has no evidence, and acceptance says so.** The same type had zero
+production callers, so no test could fail and none did. Compilation proved only that it was
+well-formed. Where a block delivers something nothing yet uses, its acceptance states that plainly
+rather than resting on a green gate that never exercised it — and names what would exercise it.
+
 ## Convergence
 
 **Default maximum: two substantive fix cycles per slice.** Not converging means stop and rescope,
@@ -81,6 +99,16 @@ P1 block; P2 and P3 are carried and dispositioned later.**
 **Pre-existing and out-of-scope issues go in the reviewer's body, never in a `FINDING` row.** A row is
 a claim on this block's fix budget, so putting an inherited problem there is how a review silently
 expands scope.
+
+**A receipt relocated so that it validates must be proven byte-identical to the original.** Re-filing
+a misnamed or misplaced result is the block owner's act and is legitimate; editing it until it passes
+is not, and the two have the same visible outcome — the mechanical check sees a valid receipt either
+way. Compare digests before and after the move. For the same reason the landing agent never relocates
+a receipt itself: curating the evidence into the place that makes it pass is precisely what that check
+exists to catch.
+
+**`ALL SOUND` is a verdict about form, not outcome.** A `FAIL` is a sound result. A readiness claim
+that reads structural soundness as passing has not read its own evidence.
 
 Verify with `check-results.mjs`, which binds each result to its lane and to the reviewed sha, and
 rejects competing or stale files. The results directory is named for the frozen sha, so a leftover

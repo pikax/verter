@@ -28,7 +28,7 @@ enum ParseOwnerDomainId {
 struct ParseInstanceId {
     owner_domain: ParseOwnerDomainId,
     key: ParseKey,
-    generation: ParseGeneration,
+    generation: ParseInstanceGeneration,
 }
 ```
 

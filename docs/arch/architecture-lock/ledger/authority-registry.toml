@@ -112,7 +112,13 @@ sha256 = "428340c2b5148b5808a1f22124ae715b637f0a54f787f6c6d902c792b71060b4"
 id = "B1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/B1.md"
-sha256 = "ac60d191221fc5e5938e0343091c6809648a482960ca7c1a49596e547d3e28e1"
+sha256 = "d7ee747f3adc1c045ccdc66f48c73f859d5d11d011886cb574c9e9a009967049"
+
+[[document]]
+id = "AMD-015-B1-CONTRACT-VOCABULARY-ALIGNMENT"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-015-b1-contract-vocabulary-alignment.md"
+sha256 = "97d7ba7cb24e0474e561d21d0958fb501bcbed5ae2e5700553b0dbac28faef2f"
 
 [[document]]
 id = "AMD-004"
@@ -268,10 +274,10 @@ scope = "Implementation Lock Record."
 
 [[authorization]]
 block = "B1"
-documents = ["B1-CHARTER"]
-ratified_by = "maintainer (Revision 11 program adoption)"
-ratified_at = "2026-08-10"
-scope = "Neutral contracts, identities, profiles, dependency firewall. Accepted independently of AMD-005 — AMD-005 §1 records B1 as already accepted under charters/B1.md, unchanged."
+documents = ["B1-CHARTER", "AMD-015-B1-CONTRACT-VOCABULARY-ALIGNMENT"]
+ratified_by = "maintainer (Revision 11 program adoption); codex architect (AMD-015, delegated amendment ratification)"
+ratified_at = "2026-08-25"
+scope = "Neutral contracts, identities, profiles, dependency firewall. Accepted independently of AMD-005 — AMD-005 §1 records B1 as already accepted under charters/B1.md, unchanged. AMD-015 authorizes only lexical nominal-type-identifier alignment for B1-declared types when all non-lexical contract substance already agrees; architecture.md supplies the spelling. It authorizes no field or variant change, no carried-semantic-type change, and no change to an invariant, ownership, lifetime, compatibility, behavior or acceptance obligation — any such disagreement remains an abort/rescope condition."
 
 [[authorization]]
 block = "BV0A"
@@ -388,13 +394,13 @@ sha256 = "0bcc283edaf168fe1cc566c66986bc79664f47bf672c63117210e8ffd812789b"
 id = "BV2-FINDING-A"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCH-RULING-BV2-FINDING-A-REPAIR-AND-PLACEMENT.md"
-sha256 = "5429fb247b6fda9d90fa58d2a3cf01b8bd99967daafa8c7d04a4f6c3107b4cea"
+sha256 = "34bb5eb50e9a769aa7fb1c574de88aa7c905525ba97e6ce3254bb5010a2fd568"
 
 [[document]]
 id = "CM1-FINDINGS-BC"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCH-RULING-CM1-FINDINGS-BC.md"
-sha256 = "439ecf43810a30410d6129dbd7798f6dc1cbe8ba99a6c7d3a0d4ecf40611f501"
+sha256 = "97b4c66638b1bd880691dd835a9f060803c387c7cac01244380a6f7a57de4479"
 
 [[authorization]]
 block = "BV2"
