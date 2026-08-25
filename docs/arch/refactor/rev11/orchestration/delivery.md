@@ -84,6 +84,18 @@ likelihood and recurrence risk:
 **Do not** introduce newtypes, type-state, sealed traits, closed gateways or extra architecture
 merely to make every defect theoretically unrepresentable.
 
+**A grandfathered scanner may be maintained, not extended.** "Retained as-is" means no one is
+required to remove or replace it; it does not freeze its contents against a rename. Updating a
+forbidden set so the same coverage survives a renamed symbol or pipeline is maintenance and needs no
+instrument. Adding names so it catches something it did not catch before is extending a name-keyed
+scanner, which the forward-only rule bars — and stating which of the two it is doing is what an
+amendment touching one owes.
+
+**A count answers who calls it; the criterion asks whether the guard can fire.** A mechanism was sized
+by counting a sink's consumers while the feature graph went unchecked, and the guard could not fire at
+all: the test graph enabled the very feature it was gated on, so the fixture compiled with the sink
+exposed. Different questions, and only the second establishes the criterion.
+
 Never land a new name-keyed source scanner: `CLAUDE.md`'s forward-only rule forbids a guard that
 greps the tree for a spelled identifier, path or token, `syn`/AST scanning included.
 
