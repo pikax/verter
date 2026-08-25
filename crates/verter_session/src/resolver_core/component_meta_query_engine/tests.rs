@@ -2373,14 +2373,12 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
     let (winner_release, _winner_park_guard) =
         super::arm_imported_registry_winner_park_for_tests("/singleflight/index.ts");
 
-    // The keyed canonical the WORKERS cold misses contend on — used to
-    // observe the in-flight slot's `Arc` strong count during the
-    // coalescing rendezvous.
-    let inflight_key: crate::component_meta_caches::ImportedRegistryKey = (
-        std::sync::Arc::<str>::from("/singleflight/index.ts"),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        std::sync::Arc::<str>::from("Wide"),
-    );
+    // Arm the joiner-park witness BEFORE spawning so a joiner that
+    // reaches Condvar::wait_while cannot send into an empty slot.
+    let parked = host
+        .project_type_store()
+        .imported_registry_db()
+        .subscribe_joiner_park_for_test();
 
     let results: Vec<(usize, Option<super::ResolvedImportedRegistrySymbol>)> =
         std::thread::scope(|scope| {
@@ -2409,40 +2407,30 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
 
             // Winner-park rendezvous — prove every joiner has coalesced
             // onto the winner's in-flight slot BEFORE releasing the winner.
-            // While the winner is parked the substrate holds exactly
-            // three `Arc`s on the slot (the in-flight table entry, the
-            // winner's `slot` local, and the winner's `panic_guard.slot`);
-            // each of the WORKERS-1 joiners bumps the count by one the
-            // instant it clones its own `Arc` via the slot-acquisition
-            // `table.entry(key).or_insert_with(..).clone()`, past which it
-            // deterministically reaches the cooperative joiner wait branch
-            // (the winner has already published `claimed == true`). The
-            // target strong count is therefore 3 + (WORKERS - 1) ==
-            // WORKERS + 2. `yield_now` (not a busy spin) keeps the main
-            // thread from starving the very workers it is waiting on under
-            // the oversubscribed gate.
-            let db = host.project_type_store().imported_registry_db();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            let mut coalesced = false;
-            while std::time::Instant::now() < deadline {
-                if db
-                    .slot_strong_count_for_test(&inflight_key)
-                    .is_some_and(|count| count >= WORKERS + 2)
-                {
-                    coalesced = true;
-                    break;
-                }
-                std::thread::yield_now();
+            // The joiner-park send fires immediately before `Condvar::wait_while`,
+            // so WORKERS-1 receipts are the exact occupancy proof.
+            let mut coalesced = 0usize;
+            for i in 0..(WORKERS - 1) {
+                parked
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "joiner {i} failed to coalesce onto the winner's in-flight slot \
+                             within 30s — the deterministic singleflight rendezvous is broken"
+                        )
+                    });
+                coalesced += 1;
             }
             // Release the winner BEFORE joining so a coalescing timeout can
             // never deadlock the scope's thread join on the parked winner;
             // the `_winner_park_guard` is a drop-time backstop.
             winner_release.release();
-            assert!(
+            assert_eq!(
                 coalesced,
+                WORKERS - 1,
                 "the {WORKERS} concurrent cold-miss workers failed to coalesce onto ONE \
-                 in-flight slot within 30s — the deterministic singleflight rendezvous is \
-                 broken (the winner-park / slot-strong-count contract no longer holds)",
+                 in-flight slot — the deterministic singleflight rendezvous is \
+                 broken (the winner-park / joiner-park contract no longer holds)",
             );
 
             handles

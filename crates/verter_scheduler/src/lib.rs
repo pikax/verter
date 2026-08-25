@@ -126,6 +126,10 @@ pub mod source_loader;
 pub mod source_root;
 pub mod stage;
 
+#[cfg(test)]
+#[path = "source_root_tests.rs"]
+mod source_root_tests;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use host_cpu_pool::HostCpuPool;
 

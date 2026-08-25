@@ -87,7 +87,15 @@ path = "src/main.rs"
 [dev-dependencies]
 futures-util = "0.3.32"
 tower-service = "0.3.3"
+# Additive feature: unifies onto the main `tokio` dependency for test builds
+# only, activating `start_paused`/virtual-time control so deterministic tests
+# can prove "resolved via a signal, not a timer" as an exact virtual-clock
+# assertion instead of a wall-clock margin.
+tokio = { version = "1.52", features = ["test-util"] }
 verter_macro_dto = { path = "../verter_macro_dto" }
+# Test builds only: activates the snapshot-publication receipt seam a
+# `cfg(test)` on `verter_workspace` could not expose across crates.
+verter_workspace = { path = "../verter_workspace", features = ["test-support"] }
 verter_test_support = { path = "../verter_test_support" }
 paste = "1.0.15"
 # Activates only test seams used by this crate's tests: cache-admission force

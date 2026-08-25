@@ -37,6 +37,35 @@ struct FakeServerState {
     saw_initialize: bool,
     saw_api_session: bool,
     feature_methods: Vec<String>,
+    /// Fires after every recorded overlay event. The control server
+    /// completing its session-end drain proves it WROTE a frame; this
+    /// fires when the fake has READ one, which is what an assertion
+    /// about `opened` / `closed` actually needs.
+    observed: Arc<tokio::sync::Notify>,
+}
+
+/// Wait until `pred` holds over the fake's recorded state. Interest is
+/// enabled before the re-check, so an event landing between the two is
+/// not lost. The timeout is a hang watchdog; its expiry is the failure.
+async fn wait_fake(
+    fake: &Arc<StdMutex<FakeServerState>>,
+    what: &str,
+    mut pred: impl FnMut(&FakeServerState) -> bool,
+) {
+    let observed = fake.lock().unwrap().observed.clone();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let notified = observed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if pred(&fake.lock().unwrap()) {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the fake server never observed {what} (outer watchdog)"));
 }
 
 /// A fake `tsgo --lsp` server behind the relay: answers `initialize` with an
@@ -123,12 +152,16 @@ fn spawn_fake_tsgo_cfg(
                     }
                     (Some("textDocument/didOpen"), None) => {
                         if let Some(uri) = carrier_uri(&msg) {
-                            st.lock().unwrap().opened.push(uri);
+                            let mut state = st.lock().unwrap();
+                            state.opened.push(uri);
+                            state.observed.notify_waiters();
                         }
                     }
                     (Some("textDocument/didClose"), None) => {
                         if let Some(uri) = carrier_uri(&msg) {
-                            st.lock().unwrap().closed.push(uri);
+                            let mut state = st.lock().unwrap();
+                            state.closed.push(uri);
+                            state.observed.notify_waiters();
                         }
                     }
                     _ => {}
@@ -178,6 +211,15 @@ struct Loopback {
     fake: Arc<StdMutex<FakeServerState>>,
     editor_write: tokio::io::WriteHalf<DuplexStream>,
     editor_read: tokio::io::ReadHalf<DuplexStream>,
+    /// The `ControlServer::serve` task. `serve` runs the UNIFIED session-end
+    /// drain (including a `verter/detach` retraction) to completion, THEN
+    /// returns — so awaiting this handle is a deterministic proof that any
+    /// retraction triggered by ending the session has actually finished,
+    /// unlike the client's own `detach()` return (which only proves the ACK
+    /// was queued on a channel a concurrently-running writer task drains;
+    /// the drain and the ack flush are not ordered relative to each other).
+    #[allow(dead_code)]
+    server_task: tokio::task::JoinHandle<()>,
 }
 
 fn wire_loopback(nonce: &str) -> Loopback {
@@ -205,7 +247,7 @@ fn wire_loopback_cfg(nonce: &str, answer_barrier: bool) -> Loopback {
         0xABCD_u64,
         "ctl-1",
     );
-    tokio::spawn(server.serve(cs_r, cs_w));
+    let server_task = tokio::spawn(server.serve(cs_r, cs_w));
     let (cc_r, cc_w) = tokio::io::split(control_client_side);
     let client = ControlClient::from_connection(JsonRpcConnection::connect(cc_r, cc_w));
 
@@ -215,6 +257,7 @@ fn wire_loopback_cfg(nonce: &str, answer_barrier: bool) -> Loopback {
         fake,
         editor_write,
         editor_read,
+        server_task,
     }
 }
 
@@ -336,10 +379,29 @@ async fn control_dispatch_drives_full_attach_lifecycle_through_relay() {
     );
 
     // detach(close_carriers): retracts the carrier and closes THIS control
-    // connection ONLY — a NON-DESTRUCTIVE detach. The retraction reached the fake
-    // server (best-effort; give it a beat).
+    // connection ONLY — a NON-DESTRUCTIVE detach. The client's own
+    // `detach()` return does NOT causally prove the retraction happened —
+    // its ack is queued on a channel a CONCURRENTLY-running writer task
+    // drains, unordered relative to the session-end retraction drain that
+    // runs in the same `serve` call. Instead, await the server's own
+    // `serve` task: it runs the retraction drain to completion and THEN
+    // returns, so its join is a deterministic proof the retraction has
+    // actually finished — not a poll accepting "eventually, sometime
+    // within 2s".
     lb.client.detach(true).await.expect("detach");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(5), &mut lb.server_task)
+        .await
+        .expect("the control server's serve task must end after detach — it hung")
+        .expect("the control server's serve task must not panic");
+    // The serve task returning proves the server WROTE the retraction. The
+    // fake records it only when it READS the frame off the duplex, which is a
+    // separate task — so the server-side join alone is the wrong fence, and
+    // asserting on `closed` straight after it fails whenever the reader has
+    // not been scheduled yet. Wait for the fake's own observation receipt.
+    wait_fake(&lb.fake, "the carrier didClose", |state| {
+        state.closed.iter().any(|u| u == carrier_uri)
+    })
+    .await;
     assert!(
         lb.fake
             .lock()
@@ -474,23 +536,17 @@ async fn abnormal_control_termination_retracts_open_carriers_non_destructively()
 
     // The unified session-end drain must retract the session's still-open carrier (a
     // `didClose` to the real tsgo) even though no `verter/detach` was sent.
-    let mut retracted = false;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        if lb
-            .fake
+    wait_fake(&lb.fake, "the session-end retraction didClose", |state| {
+        state.closed.iter().any(|u| u == carrier_uri)
+    })
+    .await;
+    assert!(
+        lb.fake
             .lock()
             .unwrap()
             .closed
             .iter()
-            .any(|u| u == carrier_uri)
-        {
-            retracted = true;
-            break;
-        }
-    }
-    assert!(
-        retracted,
+            .any(|u| u == carrier_uri),
         "an ABNORMAL control-session termination (pipe drop without detach) must retract \
          the session's open carriers (didClose) — no stale Verter overlay may linger in \
          the editor's tsgo Program"
@@ -583,23 +639,17 @@ async fn sent_but_unsynced_open_is_retracted_on_session_end() {
 
     // The session-end drain must retract the SENT-BUT-UNSYNCED overlay (a `didClose` to the
     // real tsgo) even though its sync barrier never completed.
-    let mut retracted = false;
-    for _ in 0..100 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        if lb
-            .fake
+    wait_fake(&lb.fake, "the session-end retraction didClose", |state| {
+        state.closed.iter().any(|u| u == carrier_uri)
+    })
+    .await;
+    assert!(
+        lb.fake
             .lock()
             .unwrap()
             .closed
             .iter()
-            .any(|u| u == carrier_uri)
-        {
-            retracted = true;
-            break;
-        }
-    }
-    assert!(
-        retracted,
+            .any(|u| u == carrier_uri),
         "a SENT-BUT-UNSYNCED carrier open (didOpen sent, sync barrier never completed) MUST \
          be retracted by the session-end drain (didClose) — otherwise a stale Verter overlay \
          leaks into the editor's own tsgo Program"
@@ -649,10 +699,14 @@ async fn detach_close_carriers_false_opts_out_of_the_session_end_drain() {
     // Detach with the EXPLICIT `closeCarriers: false` opt-out.
     lb.client.detach(false).await.expect("detach");
 
-    // Give the session-end drain ample time to run; the carrier must NOT be retracted
-    // (the opt-out is honored). This can only false-PASS on a too-short wait, never
-    // false-fail — the opt-out leaves the carrier open forever.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // FENCE, not a guessed wait: the session-end drain runs inside `serve`,
+    // which returns only once the drain is complete. Joining it is proof the
+    // drain HAPPENED and emitted nothing, so the absence below is a decision
+    // rather than a race. A fixed sleep could only ever false-PASS.
+    tokio::time::timeout(Duration::from_secs(5), &mut lb.server_task)
+        .await
+        .expect("the control server's serve task must end after detach — it hung")
+        .expect("the control server's serve task must not panic");
     assert!(
         !lb.fake
             .lock()
@@ -985,8 +1039,9 @@ async fn detach_malformed_params_fails_closed_and_retracts_via_drain() {
 ///
 /// This is non-vacuous: an UNBOUNDED drain — each `did_close` awaited with NO overall budget —
 /// blocks forever against a wedged writer, so the outer bound below would fire and the `is_ok()`
-/// assertion would fail; the bounded drain instead returns within its budget, which the
-/// `is_ok()` + elapsed assertions below verify.
+/// assertion would fail; the bounded drain instead returns, which `is_ok()` plus the emptied
+/// open-set prove. The 3s timeout is a hang watchdog only — it does not participate in
+/// correctness. A wall-clock elapsed ceiling would flip under load without proving the bound.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_end_drain_is_bounded_against_a_wedged_writer() {
     let (_editor_endpoint, relay_editor) = tokio::io::duplex(64 * 1024);
@@ -1007,22 +1062,16 @@ async fn session_end_drain_is_bounded_against_a_wedged_writer() {
     // generous but strictly below the 10s production default, so an UNBOUNDED drain (or one
     // that ignores its budget) trips it.
     let budget = Duration::from_millis(300);
-    let start = std::time::Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(3),
         server.retract_open_carriers_within(budget),
     )
     .await;
-    let elapsed = start.elapsed();
 
     assert!(
         outcome.is_ok(),
         "the session-end drain must RETURN bounded against a wedged writer — never block \
          teardown indefinitely (an unbounded drain would hang and trip this outer bound)"
-    );
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "the drain respects its overall budget (~{budget:?}), not the 10s default; elapsed {elapsed:?}"
     );
     assert!(
         server.opened_carriers.is_empty(),
@@ -1294,7 +1343,6 @@ async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
         server.carrier_op_bound = Duration::from_millis(300);
         let uri = "file:///w/src/OpenWedged.vue.tsx";
 
-        let start = std::time::Instant::now();
         let outcome = tokio::time::timeout(
             Duration::from_secs(3),
             server.handle_carrier_did_open_synced(
@@ -1305,14 +1353,9 @@ async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
             ),
         )
         .await;
-        let elapsed = start.elapsed();
         let frame = outcome.expect(
             "handle_carrier_did_open_synced must RETURN bounded against a wedged writer — never pin \
              the serial serve loop (an unbounded send hangs and this outer bound fires)",
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "didOpenSynced honoured its SHORT ~300ms bound, not the 10s default; elapsed {elapsed:?}"
         );
         let value = decode_frame(&frame);
         assert!(
@@ -1335,7 +1378,6 @@ async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
         server.carrier_op_bound = Duration::from_millis(300);
         let uri = "file:///w/src/ChangeWedged.vue.tsx";
 
-        let start = std::time::Instant::now();
         let outcome = tokio::time::timeout(
             Duration::from_secs(3),
             server.handle_carrier_did_change_synced(
@@ -1344,14 +1386,9 @@ async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
             ),
         )
         .await;
-        let elapsed = start.elapsed();
         let frame = outcome.expect(
             "handle_carrier_did_change_synced must RETURN bounded against a wedged writer — never \
              pin the serial serve loop (an unbounded send hangs and this outer bound fires)",
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "didChangeSynced honoured its SHORT ~300ms bound, not the 10s default; elapsed {elapsed:?}"
         );
         let value = decode_frame(&frame);
         assert!(
@@ -1371,21 +1408,15 @@ async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
         let uri = "file:///w/src/Wedged.vue.tsx";
         server.opened_carriers.insert(uri.to_string());
 
-        let start = std::time::Instant::now();
         let outcome = tokio::time::timeout(
             Duration::from_secs(3),
             server
                 .handle_carrier_did_close(&serde_json::json!(3), serde_json::json!({ "uri": uri })),
         )
         .await;
-        let elapsed = start.elapsed();
         let frame = outcome.expect(
             "handle_carrier_did_close must RETURN bounded against a wedged writer — never pin the \
              serial serve loop (an unbounded send hangs and this outer bound fires)",
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "didClose honoured its SHORT ~300ms bound, not the 10s default; elapsed {elapsed:?}"
         );
         let value = decode_frame(&frame);
         assert!(
@@ -1422,20 +1453,14 @@ async fn relay_round_trip_handlers_are_bounded_against_a_wedged_writer() {
         let mut server = ControlServer::new(Arc::clone(&relay), "n", 1, 1, "ctl");
         server.carrier_op_bound = Duration::from_millis(300);
 
-        let start = std::time::Instant::now();
         let outcome = tokio::time::timeout(
             Duration::from_secs(3),
             server.handle_initialize_api_session(&serde_json::json!(4)),
         )
         .await;
-        let elapsed = start.elapsed();
         let frame = outcome.expect(
             "handle_initialize_api_session must RETURN bounded against a wedged writer — never pin \
              the serial serve loop (an unbounded round-trip hangs and this outer bound fires)",
-        );
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "initializeApiSession honoured its SHORT ~300ms bound, not the 10s default; elapsed {elapsed:?}"
         );
         let value = decode_frame(&frame);
         assert!(

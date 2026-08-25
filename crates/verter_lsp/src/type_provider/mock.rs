@@ -318,6 +318,7 @@ mod inner {
     #[derive(Clone)]
     pub struct MockTypeProvider {
         state: Arc<Mutex<MockState>>,
+        call_recorded: Arc<tokio::sync::Notify>,
     }
 
     impl Default for MockTypeProvider {
@@ -330,6 +331,26 @@ mod inner {
         pub fn new() -> Self {
             Self {
                 state: Arc::new(Mutex::new(MockState::default())),
+                call_recorded: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+
+        fn note_recorded(&self) {
+            self.call_recorded.notify_waiters();
+        }
+
+        /// Wait until `pred` holds over the recorded call log. Interest is
+        /// enabled before the re-check so a call landing between the two
+        /// cannot be missed.
+        pub async fn wait_until_calls(&self, mut pred: impl FnMut(&[MockCall]) -> bool) {
+            loop {
+                let notified = self.call_recorded.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if pred(&self.calls()) {
+                    return;
+                }
+                notified.await;
             }
         }
 
@@ -926,6 +947,7 @@ mod inner {
                 };
                 (fail, on_open, block)
             };
+            self.note_recorded();
             if let Some(callback) = on_open {
                 callback();
             }
@@ -945,6 +967,8 @@ mod inner {
                 content: content.to_string(),
             });
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            drop(state);
+            self.note_recorded();
             Box::pin(async move { fail_or_ok(fail, "load_file") })
         }
 
@@ -958,6 +982,8 @@ mod inner {
                 content: content.to_string(),
             });
             let fail = state.fail_file_ops || state.fail_sync_paths.contains(path);
+            drop(state);
+            self.note_recorded();
             Box::pin(async move { fail_or_ok(fail, "open_file_background") })
         }
 
@@ -978,6 +1004,7 @@ mod inner {
                 };
                 (fail, block)
             };
+            self.note_recorded();
             Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();

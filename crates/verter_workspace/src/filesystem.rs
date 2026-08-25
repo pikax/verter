@@ -398,6 +398,13 @@ impl FilesystemWorkspace {
         self.engine.load_published()
     }
 
+    /// TEST-ONLY: subscribe to snapshot publications. See
+    /// [`crate::engine::Engine::subscribe_published`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn subscribe_published(&self) -> std::sync::mpsc::Receiver<u64> {
+        self.engine.subscribe_published()
+    }
+
     /// Add an explicit project to the graph and rebuild the resolver.
     pub fn add_explicit_project(&self, config: VfsProjectConfig) {
         self.engine.set_configured_resolver_projects(None);

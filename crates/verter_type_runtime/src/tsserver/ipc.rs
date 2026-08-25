@@ -483,6 +483,24 @@ const BACKGROUND_IDLE_GRACE: std::time::Duration = std::time::Duration::from_mil
 /// the publish store, so further reloads while one is settling are pure churn.
 const MEMBERSHIP_RECOVERY_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(2000);
 
+/// Subscribe to `notify_waiters` BEFORE the idle re-check. Creating
+/// `Notify::notified()` does not register a waiter; `enable()` does.
+async fn wait_for_interactive_idle_on_gap(
+    pending: &TsserverPendingRequests,
+    mut on_gap: impl FnMut(&TsserverPendingRequests),
+) {
+    loop {
+        let notified = pending.interactive_idle.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if pending.interactive_in_flight.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        on_gap(pending);
+        notified.await;
+    }
+}
+
 impl TsserverTransport {
     fn preempt_background_request(&self) {
         self.pending
@@ -518,13 +536,7 @@ impl TsserverTransport {
     }
 
     async fn wait_for_interactive_idle(&self) {
-        loop {
-            let notified = self.pending.interactive_idle.notified();
-            if self.pending.interactive_in_flight.load(Ordering::Acquire) == 0 {
-                return;
-            }
-            notified.await;
-        }
+        wait_for_interactive_idle_on_gap(&self.pending, |_| {}).await;
     }
 
     /// Charge one round-trip failure toward hang detection, firing the restart
@@ -2552,8 +2564,21 @@ async fn wait_for_carrier_refresh(
     refresh: &TsserverCarrierRefresh,
     generation: u64,
 ) -> Result<(), TypeProviderError> {
+    wait_for_carrier_refresh_on_gap(refresh, generation, |_| {}).await
+}
+
+/// Subscribe to `notify_waiters` BEFORE the applied-generation re-check.
+/// Creating `Notify::notified()` does not register a waiter; `enable()` does.
+/// The producer uses `notify_waiters` (no stored permit).
+async fn wait_for_carrier_refresh_on_gap(
+    refresh: &TsserverCarrierRefresh,
+    generation: u64,
+    mut on_gap: impl FnMut(&TsserverCarrierRefresh),
+) -> Result<(), TypeProviderError> {
     loop {
         let notified = refresh.completion.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if refresh.applied_generation.load(Ordering::Acquire) >= generation {
             return Ok(());
         }
@@ -2567,6 +2592,7 @@ async fn wait_for_carrier_refresh(
                 return Err(error.clone());
             }
         }
+        on_gap(refresh);
         notified.await;
     }
 }

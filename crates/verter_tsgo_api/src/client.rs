@@ -110,11 +110,14 @@ impl TsgoClient {
     }
 
     /// Set the per-request hard deadline applied to every typed call. On
-    /// expiry a call fails with [`TsgoApiError::Timeout`] and the engine is
-    /// TORN DOWN (the single-flight wire cannot recover a wedged request), so
-    /// a hung engine never blocks the caller forever. Batch/standalone drivers
-    /// (e.g. verter-tsc) MUST set this; `None` (the default) keeps unbounded
-    /// waits for interactive lanes.
+    /// expiry a call fails with [`TsgoApiError::Timeout`], so a hung engine
+    /// never blocks the caller forever. Expiry before the actor begins
+    /// serving the request (during queue reservation, or while enqueued)
+    /// leaves the engine running. Once the actor begins the send/serve
+    /// phase, expiry TEARS THE ENGINE DOWN — the write may be partial or
+    /// complete, and the single-flight wire cannot be safely recovered.
+    /// Batch/standalone drivers (e.g. verter-tsc) MUST set this; `None`
+    /// (the default) keeps unbounded waits for interactive lanes.
     pub fn with_request_deadline(mut self, deadline: Duration) -> Self {
         self.request_deadline = Some(deadline);
         self

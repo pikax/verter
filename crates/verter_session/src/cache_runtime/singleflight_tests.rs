@@ -16,18 +16,24 @@ use std::time::Duration;
 /// ONE compute call observed; all return same value.
 #[test]
 fn cooperative_admission_one_winner_others_wait() {
+    const THREAD_COUNT: usize = 100;
+
     let map: DashMap<u32, Arc<String>> = DashMap::new();
     let inflight: InflightTable<u32> = InflightTable::default();
     let compute_count = Arc::new(AtomicUsize::new(0));
 
     let map = Arc::new(map);
     let inflight = Arc::new(inflight);
+    let joiner_parked = Arc::new(std::sync::Mutex::new(Some(
+        inflight.subscribe_joiner_park(),
+    )));
 
-    let handles: Vec<_> = (0..100)
+    let handles: Vec<_> = (0..THREAD_COUNT)
         .map(|_| {
             let map = Arc::clone(&map);
             let inflight = Arc::clone(&inflight);
             let compute_count = Arc::clone(&compute_count);
+            let joiner_parked = Arc::clone(&joiner_parked);
             thread::spawn(move || {
                 cooperative_get_or_insert(
                     &map,
@@ -36,9 +42,18 @@ fn cooperative_admission_one_winner_others_wait() {
                     |entry: &String| Some(entry.clone()),
                     || {
                         compute_count.fetch_add(1, Ordering::SeqCst);
-                        // Hold long enough for other threads to enter
-                        // the joiner branch.
-                        thread::sleep(Duration::from_millis(20));
+                        // Exact witness: each loser sends once immediately
+                        // before parking on the slot condvar.
+                        let parked = joiner_parked
+                            .lock()
+                            .expect("park witness mutex")
+                            .take()
+                            .expect("the winner takes the joiner-park witness once");
+                        for _ in 0..(THREAD_COUNT - 1) {
+                            parked
+                                .recv_timeout(Duration::from_secs(30))
+                                .expect("every losing thread must park on the inflight slot");
+                        }
                         Some("winner".to_string())
                     },
                     |entry: &String| entry.clone(),
@@ -77,9 +92,8 @@ fn cooperative_admission_one_winner_others_wait() {
 ///     race ahead of the winner's claim.
 ///   * `release_barrier` — the winner's `compute` blocks on a
 ///     `Barrier::new(2)` AFTER signalling claim; the test driver
-///     polls the slot strong count and crosses the barrier ONLY
-///     once the joiner has its own `Arc` on the slot (count `>= 4`:
-///     table + winner.slot + winner.panic_guard.slot + joiner.slot).
+///     waits on the joiner-park witness and crosses the barrier
+///     ONLY once the joiner is parked on the slot condvar.
 ///
 /// The winner therefore panics only after the joiner is a proven
 /// slot waiter, so the panic guard's `Drop` `notify_all` wakes the
@@ -88,13 +102,13 @@ fn cooperative_admission_one_winner_others_wait() {
 fn cooperative_admission_panic_wakes_waiters() {
     use std::sync::mpsc;
     use std::sync::Barrier;
-    use std::time::Instant;
 
     // Use a dedicated map per scenario to avoid cross-test races.
     let map: DashMap<u32, Arc<String>> = DashMap::new();
     let inflight: InflightTable<u32> = InflightTable::default();
     let map = Arc::new(map);
     let inflight = Arc::new(inflight);
+    let joiner_parked = inflight.subscribe_joiner_park();
 
     // Joiner that arrives second; will block on the panicking
     // winner's slot.
@@ -174,27 +188,9 @@ fn cooperative_admission_panic_wakes_waiters() {
         result
     });
 
-    // Deterministic wait: poll the inflight table until the joiner
-    // has acquired its own `Arc` on the slot. While the winner is
-    // parked at the release barrier the strong count is 3 (table +
-    // winner.slot + winner.panic_guard.slot); the joiner bumps it to
-    // 4 once it clones its slot Arc, past which it deterministically
-    // reaches the cooperative joiner wait branch.
-    let poll_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if inflight
-            .slot_strong_count(&7u32)
-            .is_some_and(|count| count >= 4)
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < poll_deadline,
-            "joiner failed to acquire inflight slot Arc within 10s — \
-             the deterministic panic-wake rendezvous is broken"
-        );
-        std::hint::spin_loop();
-    }
+    joiner_parked
+        .recv()
+        .expect("joiner must park on the inflight slot before the winner panics");
     // Joiner is a proven slot waiter — release the winner so it
     // panics; the panic guard's `Drop` wakes the joiner with `failed`.
     release_barrier.wait();
@@ -366,9 +362,9 @@ fn cooperative_admission_value_projection_isolated() {
 fn cacheable_joiner_runs_validate_on_its_own_thread() {
     use std::sync::mpsc;
     use std::sync::Barrier;
-    use std::time::{Duration, Instant};
     let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
     let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
+    let joiner_parked = inflight.subscribe_joiner_park();
 
     // Per-thread validate counters. The winner is a cold miss: its
     // warm-hit probe finds an empty map so `validate` is never
@@ -392,14 +388,10 @@ fn cacheable_joiner_runs_validate_on_its_own_thread() {
     //     crosses the barrier.
     //
     // Between `rx_winner_in_compute.recv()` and the barrier release
-    // the test polls the inflight table for the moment the joiner
-    // has acquired its own `Arc<InflightSlot>` (table refcount +
-    // winner refcount + winner.panic_guard refcount + joiner
-    // refcount = 4). Once the joiner holds an Arc to the existing
-    // slot, the winner may retire the table entry without changing
-    // the joiner's view of `state.claimed`/`completed`, and the
-    // joiner deterministically reaches the `map.get(&key) +
-    // validate(&entry_arc)` branch that the discriminator measures.
+    // the test waits on the joiner-park witness (sent immediately
+    // before `Condvar::wait_while`). Once the joiner is a parked
+    // waiter, the winner may publish; the joiner then wakes into
+    // the `map.get(&key) + validate(&entry_arc)` branch.
     let (tx_winner_in_compute, rx_winner_in_compute) = mpsc::channel::<()>();
     let release_barrier = Arc::new(Barrier::new(2));
 
@@ -475,45 +467,9 @@ fn cacheable_joiner_runs_validate_on_its_own_thread() {
         )
     });
 
-    // Deterministic wait: poll the inflight table until the
-    // joiner has acquired its own `Arc<InflightSlot>` for the
-    // key. Strong-count layout for the still-claimed slot:
-    //
-    //   * 1 — table entry holds the slot Arc
-    //   * 1 — winner's `slot` local inside
-    //         `cooperative_admit_with_post_publish`
-    //   * 1 — winner's `panic_guard.slot`, created by
-    //         `InflightPanicGuard::new(Arc::clone(&slot), ...)`
-    //         AFTER `state.claimed = true` (i.e. before the
-    //         winner enters its `compute()` body)
-    //   * 1 — joiner's `slot` local AFTER it executes the
-    //         `table.entry(key).or_insert_with(...).clone()`
-    //         block
-    //
-    // The winner is parked inside its `compute()` body at the
-    // release barrier, so winner.slot and winner.panic_guard.slot
-    // both stay alive — the baseline strong count is 3 before
-    // the joiner arrives and exactly 4 once the joiner has
-    // acquired its Arc on the existing slot. We poll for `>= 4`
-    // so the release barrier crosses only after the joiner has
-    // bumped the refcount.
-    let poll_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let table_guard = inflight.table.lock();
-        if let Some(slot) = table_guard.get(&42u32) {
-            if Arc::strong_count(slot) >= 4 {
-                break;
-            }
-        }
-        drop(table_guard);
-        if Instant::now() >= poll_deadline {
-            panic!(
-                "joiner failed to acquire inflight slot Arc within 10s — \
-                 the deterministic-sync poll below the release barrier is broken"
-            );
-        }
-        std::hint::spin_loop();
-    }
+    joiner_parked
+        .recv()
+        .expect("joiner must park on the inflight slot before the winner is released");
 
     // Release the winner via the barrier. The winner returns
     // Cacheable, publishes, inserts into the map, sets
@@ -570,10 +526,10 @@ fn cacheable_joiner_runs_validate_on_its_own_thread() {
 fn cooperative_get_or_insert_joiner_validate_reject_forks() {
     use std::sync::mpsc;
     use std::sync::Barrier;
-    use std::time::{Duration, Instant};
 
     let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
     let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
+    let joiner_parked = inflight.subscribe_joiner_park();
 
     let winner_compute_count = Arc::new(AtomicUsize::new(0));
     let joiner_compute_count = Arc::new(AtomicUsize::new(0));
@@ -643,22 +599,9 @@ fn cooperative_get_or_insert_joiner_validate_reject_forks() {
         )
     });
 
-    // Poll until the joiner has acquired its own Arc on the slot
-    // (table + winner.slot + winner.panic_guard.slot + joiner.slot).
-    let poll_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let table_guard = inflight.table.lock();
-        if let Some(slot) = table_guard.get(&99u32) {
-            if Arc::strong_count(slot) >= 4 {
-                break;
-            }
-        }
-        drop(table_guard);
-        if Instant::now() >= poll_deadline {
-            panic!("joiner failed to acquire inflight slot Arc within 10s");
-        }
-        std::hint::spin_loop();
-    }
+    joiner_parked
+        .recv()
+        .expect("joiner must park on the inflight slot before the winner is released");
 
     release_barrier.wait();
 
@@ -702,10 +645,10 @@ fn cooperative_get_or_insert_joiner_validate_reject_forks() {
 fn cooperative_admit_joiner_validate_reject_forks() {
     use std::sync::mpsc;
     use std::sync::Barrier;
-    use std::time::{Duration, Instant};
 
     let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
     let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
+    let joiner_parked = inflight.subscribe_joiner_park();
 
     let winner_compute_count = Arc::new(AtomicUsize::new(0));
     let joiner_compute_count = Arc::new(AtomicUsize::new(0));
@@ -776,20 +719,9 @@ fn cooperative_admit_joiner_validate_reject_forks() {
         )
     });
 
-    let poll_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let table_guard = inflight.table.lock();
-        if let Some(slot) = table_guard.get(&7u32) {
-            if Arc::strong_count(slot) >= 4 {
-                break;
-            }
-        }
-        drop(table_guard);
-        if Instant::now() >= poll_deadline {
-            panic!("joiner failed to acquire inflight slot Arc within 10s");
-        }
-        std::hint::spin_loop();
-    }
+    joiner_parked
+        .recv()
+        .expect("joiner must park on the inflight slot before the winner is released");
 
     release_barrier.wait();
 
@@ -827,10 +759,10 @@ fn cooperative_admit_joiner_validate_reject_forks() {
 fn return_only_winner_not_broadcast_cross_view_joiner_forks() {
     use std::sync::mpsc;
     use std::sync::Barrier;
-    use std::time::{Duration, Instant};
 
     let map: Arc<DashMap<u32, Arc<String>>> = Arc::new(DashMap::new());
     let inflight: Arc<InflightTable<u32>> = Arc::new(InflightTable::default());
+    let joiner_parked = inflight.subscribe_joiner_park();
 
     let winner_compute_count = Arc::new(AtomicUsize::new(0));
     let joiner_compute_count = Arc::new(AtomicUsize::new(0));
@@ -899,20 +831,9 @@ fn return_only_winner_not_broadcast_cross_view_joiner_forks() {
         )
     });
 
-    let poll_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let table_guard = inflight.table.lock();
-        if let Some(slot) = table_guard.get(&3u32) {
-            if Arc::strong_count(slot) >= 4 {
-                break;
-            }
-        }
-        drop(table_guard);
-        if Instant::now() >= poll_deadline {
-            panic!("joiner failed to acquire inflight slot Arc within 10s");
-        }
-        std::hint::spin_loop();
-    }
+    joiner_parked
+        .recv()
+        .expect("joiner must park on the inflight slot before the winner is released");
 
     release_barrier.wait();
 
@@ -1377,23 +1298,21 @@ fn by_flight_key_displaced_cleanup_runs_after_its_own_post_publish() {
 /// the by_flight_key adapter — the artifact `lookup` path lowers here.
 #[test]
 fn cold_cacheable_node_computes_once_for_two_joiners() {
-    use std::sync::Barrier;
-
     let map: DashMap<u32, Arc<String>> = DashMap::new();
     let inflight: InflightTable<(u32, u8)> = InflightTable::default();
     let map = Arc::new(map);
     let inflight = Arc::new(inflight);
     let compute_count = Arc::new(AtomicUsize::new(0));
-    // Hold the winner in compute until the joiner is a proven slot
-    // waiter, so the joiner cannot race ahead and start its own compute.
-    let release = Arc::new(Barrier::new(1));
+    let joiner_parked = Arc::new(std::sync::Mutex::new(Some(
+        inflight.subscribe_joiner_park(),
+    )));
 
     let handles: Vec<_> = (0..2)
         .map(|_| {
             let map = Arc::clone(&map);
             let inflight = Arc::clone(&inflight);
             let compute_count = Arc::clone(&compute_count);
-            let release = Arc::clone(&release);
+            let joiner_parked = Arc::clone(&joiner_parked);
             thread::spawn(move || {
                 cooperative_admit_with_post_publish_by_flight_key(
                     &map,
@@ -1403,8 +1322,16 @@ fn cold_cacheable_node_computes_once_for_two_joiners() {
                     |entry: &String| Some(entry.clone()),
                     move || {
                         compute_count.fetch_add(1, Ordering::SeqCst);
-                        thread::sleep(Duration::from_millis(20));
-                        let _ = release;
+                        // Exact witness: the loser sends once immediately
+                        // before parking on the slot condvar.
+                        let parked = joiner_parked
+                            .lock()
+                            .expect("park witness mutex")
+                            .take()
+                            .expect("the winner takes the joiner-park witness once");
+                        parked
+                            .recv()
+                            .expect("the losing thread must park on the inflight slot");
                         ComputeAdmission::Cacheable("one-winner".to_string())
                     },
                     |entry: &String| entry.clone(),

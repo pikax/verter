@@ -32,10 +32,6 @@ use super::server_utils::*;
 use super::sync_orchestration::ImportSyncOutcome;
 use super::VerterLanguageServer;
 
-/// The debounce for edit-triggered publication, matching the sync
-/// coordinator's edit-silence window: one publication per typing burst.
-const EDIT_DEBOUNCE_MS: u64 = 300;
-
 type ModuleReferenceSignature = (
     u8,
     u8,
@@ -161,7 +157,8 @@ impl VerterLanguageServer {
         let uri = uri.clone();
         tokio::spawn(async move {
             if let Some(epoch) = debounce_epoch {
-                tokio::time::sleep(std::time::Duration::from_millis(EDIT_DEBOUNCE_MS)).await;
+                // One publication per typing burst: the shared LSP quiet-window policy.
+                tokio::time::sleep(crate::edit_quiet_window::EDIT_QUIET_WINDOW).await;
                 if !server
                     .import_sync
                     .enqueue_epoch_is_current(&canonical_id, epoch)
@@ -260,7 +257,7 @@ impl VerterLanguageServer {
     /// The workspace `(content_generation, resolver_snapshot_generation)` pair
     /// that keys the DependencyReady receipt. `None` when no published resolver
     /// exists yet (bootstrap) — publication then delivers without minting.
-    pub(super) fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
+    pub(crate) fn import_sync_freshness_key(&self) -> Option<(u64, u64)> {
         let content_generation = self.documents.host().workspace_read().content_generation();
         let snapshot_generation = {
             let ws = self.vfs_workspace.read();

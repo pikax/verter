@@ -156,8 +156,6 @@ pub fn main() {
     // bounds `child.wait()` wedges on its reader joins. Writes its pid to
     // `<exe>.child.pid` so tests can prove the tree kill reaps it.
     if args.iter().any(|a| a == "--verter-fake-hold-pipe") {
-        let pid_file = hold_pipe_pid_file();
-        let _ = std::fs::write(&pid_file, std::process::id().to_string());
         hang_forever();
     }
 
@@ -255,16 +253,24 @@ fn hang_forever() -> ! {
 /// grandchild is deliberately never `wait()`ed on — holding the pipes open
 /// after the direct child exits IS the wedge under test; the bounded probe's
 /// tree kill reaps it.
+///
+/// THIS process records the pid, synchronously, before returning. Letting the
+/// grandchild write its own pid loses a race the test cannot win back: under
+/// load the grandchild may not be scheduled before the probe's bound expires
+/// and the tree kill lands, so the file never appears and no amount of extra
+/// waiting produces it. The spawner already knows the pid and runs strictly
+/// before the wedge begins.
 #[allow(clippy::zombie_processes)]
 fn spawn_pipe_holder() {
     let exe = std::env::current_exe().expect("current exe");
-    let _ = std::process::Command::new(exe)
+    let child = std::process::Command::new(exe)
         .arg("--verter-fake-hold-pipe")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()
         .expect("spawn the pipe-holding grandchild");
+    let _ = std::fs::write(hold_pipe_pid_file(), child.id().to_string());
 }
 
 /// Speak Content-Length-framed JSON-RPC on stdio until EOF or `exit`.

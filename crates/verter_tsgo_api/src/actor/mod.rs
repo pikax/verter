@@ -60,19 +60,35 @@ pub struct RequestOptions {
     /// handle future resolves to [`TsgoApiError::Cancelled`] and the response is
     /// discarded.
     pub cancel: Option<CancelToken>,
-    /// An optional hard deadline for the engine's response, measured from when
-    /// the actor starts serving the request. On expiry the request fails with
-    /// [`TsgoApiError::Timeout`] and the ENGINE IS TORN DOWN (the single-flight
-    /// wire cannot recover a wedged request; the transport is terminated with a
-    /// process-tree kill), so a hung engine can never block a caller forever.
-    /// `None` keeps the legacy unbounded wait (interactive lanes).
+    /// An optional hard deadline covering queue reservation, enqueue,
+    /// provider execution, and the reply, measured from
+    /// [`ClientHandle::request`] entry. On expiry the request fails with
+    /// [`TsgoApiError::Timeout`]. The teardown boundary is the moment the
+    /// actor begins serving the request: expiry during queue reservation,
+    /// or while enqueued but before the actor begins serving, never starts
+    /// a fresh timeout and does NOT tear the engine down. Once the actor
+    /// begins the send/serve phase, expiry TERMINATES THE ENGINE (the
+    /// transport is torn down with a process-tree kill) — the write may be
+    /// partial or complete, and the single-flight wire's state is no
+    /// longer safely recoverable. `None` keeps the unbounded wait
+    /// (interactive lanes).
     pub deadline: Option<std::time::Duration>,
 }
 
 /// A cheap, cloneable cancellation flag.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CancelToken {
     flag: Arc<std::sync::atomic::AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl Default for CancelToken {
+    fn default() -> Self {
+        Self {
+            flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
 }
 
 impl CancelToken {
@@ -84,6 +100,7 @@ impl CancelToken {
     /// Mark the token cancelled.
     pub fn cancel(&self) {
         self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 
     /// Whether the token has been cancelled.
@@ -97,7 +114,10 @@ struct ActorRequest {
     method: String,
     payload: Vec<u8>,
     cancel: Option<CancelToken>,
-    deadline: Option<std::time::Duration>,
+    /// Absolute deadline captured at [`ClientHandle::request`] entry.
+    /// Shared by queue reservation and serve so admission cannot start
+    /// a fresh timeout.
+    deadline_at: Option<tokio::time::Instant>,
     reply: oneshot::Sender<TsgoApiResult<Vec<u8>>>,
 }
 
@@ -105,6 +125,19 @@ struct ActorRequest {
 enum ActorControl {
     /// Shut the actor down: stop reading, drop the transport.
     Shutdown(oneshot::Sender<()>),
+}
+
+/// Test-only waitable receipts for queue admission. `notify_one` stores a
+/// permit, so a test may spawn a request task and then await the matching
+/// receipt without racing the scheduler.
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct AdmissionTrace {
+    /// Signalled the first time `tx.reserve()` returns `Pending` for a request
+    /// (the queue is full; the caller is blocked inside reservation).
+    reserve_pending: Arc<tokio::sync::Notify>,
+    /// Signalled after `permit.send(req)` — the request occupies a queue slot.
+    admitted: Arc<tokio::sync::Notify>,
 }
 
 /// A cloneable handle to the single-writer actor.
@@ -118,6 +151,8 @@ pub struct ClientHandle {
     batch_tx: mpsc::Sender<ActorRequest>,
     control_tx: mpsc::Sender<ActorControl>,
     snapshot: Arc<ArcSwap<OverlaySnapshot>>,
+    #[cfg(test)]
+    admission_trace: AdmissionTrace,
 }
 
 impl ClientHandle {
@@ -143,12 +178,17 @@ impl ClientHandle {
             }
         }
 
+        let deadline_at = opts
+            .deadline
+            .map(|bound| tokio::time::Instant::now() + bound);
+        let timeout_label = opts.deadline.map(|bound| bound.as_millis());
+
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = ActorRequest {
             method: method.to_string(),
             payload,
             cancel: opts.cancel.clone(),
-            deadline: opts.deadline,
+            deadline_at,
             reply: reply_tx,
         };
 
@@ -156,19 +196,37 @@ impl ClientHandle {
             Lane::Interactive => &self.interactive_tx,
             Lane::Batch => &self.batch_tx,
         };
-        tx.send(req).await.map_err(|_| TsgoApiError::Closed)?;
 
-        // Await either the actor's reply or, if a cancel token is provided, a
-        // prompt cancellation. We do not hold any lock here.
-        match &opts.cancel {
-            Some(tok) => {
-                tokio::select! {
-                    biased;
-                    res = reply_rx => res.map_err(|_| TsgoApiError::Closed)?,
-                    () = wait_cancelled(tok.clone()) => Err(TsgoApiError::Cancelled),
-                }
+        // Race queue reservation against cancellation and the SAME
+        // absolute deadline that later covers serve + reply. Do not
+        // start a new timeout after admission.
+        let permit = tokio::select! {
+            biased;
+            permit = reserve_queue_slot(tx, self) => permit.map_err(|_| TsgoApiError::Closed)?,
+            () = wait_optional_cancelled(opts.cancel.clone()) => {
+                return Err(TsgoApiError::Cancelled);
             }
-            None => reply_rx.await.map_err(|_| TsgoApiError::Closed)?,
+            () = sleep_until_optional(deadline_at) => {
+                return Err(TsgoApiError::Timeout(format!(
+                    "`{method}` exceeded its {} ms request deadline while waiting for queue admission",
+                    timeout_label.unwrap_or(0)
+                )));
+            }
+        };
+        permit.send(req);
+        #[cfg(test)]
+        self.admission_trace.admitted.notify_one();
+
+        // Await the actor's reply, a cancel, or the same absolute
+        // deadline (covers sitting in the queue after send).
+        tokio::select! {
+            biased;
+            res = reply_rx => res.map_err(|_| TsgoApiError::Closed)?,
+            () = wait_optional_cancelled(opts.cancel.clone()) => Err(TsgoApiError::Cancelled),
+            () = sleep_until_optional(deadline_at) => Err(TsgoApiError::Timeout(format!(
+                "`{method}` exceeded its {} ms request deadline",
+                timeout_label.unwrap_or(0)
+            ))),
         }
     }
 
@@ -191,15 +249,39 @@ impl ClientHandle {
     }
 }
 
-/// Poll a cancellation token to completion (resolves when cancelled). Uses a
-/// short yielding poll loop — cheap because cancellation is rare and the wire
-/// response usually wins the `select!`.
+async fn wait_optional_cancelled(tok: Option<CancelToken>) {
+    match tok {
+        Some(tok) => wait_cancelled(tok).await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn sleep_until_optional(deadline_at: Option<tokio::time::Instant>) {
+    match deadline_at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Resolve when `tok` is cancelled. Event-driven: `CancelToken::cancel`
+/// notifies waiters, so this does not poll on a timer. Interest is
+/// registered before the cancelled re-check so a cancel between the two
+/// cannot be missed.
 async fn wait_cancelled(tok: CancelToken) {
+    if tok.is_cancelled() {
+        return;
+    }
     loop {
+        let notified = tok.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if tok.is_cancelled() {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        notified.await;
+        if tok.is_cancelled() {
+            return;
+        }
     }
 }
 
@@ -231,6 +313,58 @@ where
         batch_tx,
         control_tx,
         snapshot,
+        #[cfg(test)]
+        admission_trace: AdmissionTrace::default(),
+    }
+}
+
+/// Reserve a slot on `tx`.
+#[cfg(not(test))]
+async fn reserve_queue_slot<'a, T>(
+    tx: &'a mpsc::Sender<T>,
+    _handle: &ClientHandle,
+) -> Result<mpsc::Permit<'a, T>, mpsc::error::SendError<()>> {
+    tx.reserve().await
+}
+
+/// Reserve a slot on `tx`. The first `Pending` poll notifies
+/// `AdmissionTrace::reserve_pending`, so a test observes "blocked inside
+/// reserve" as a receipt instead of guessing the scheduler.
+#[cfg(test)]
+async fn reserve_queue_slot<'a, T>(
+    tx: &'a mpsc::Sender<T>,
+    handle: &ClientHandle,
+) -> Result<mpsc::Permit<'a, T>, mpsc::error::SendError<()>> {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    let fut = tx.reserve();
+    tokio::pin!(fut);
+    let mut signaled_pending = false;
+    poll_fn(|cx| match fut.as_mut().poll(cx) {
+        Poll::Ready(result) => Poll::Ready(result),
+        Poll::Pending => {
+            if !signaled_pending {
+                signaled_pending = true;
+                handle.admission_trace.reserve_pending.notify_one();
+            }
+            Poll::Pending
+        }
+    })
+    .await
+}
+
+#[cfg(test)]
+impl ClientHandle {
+    /// Wait until a request has been sent into the actor queue (`permit.send`).
+    /// `Notify::notify_one` stores a permit, so this is safe after spawn.
+    pub(super) async fn wait_admitted(&self) {
+        self.admission_trace.admitted.notified().await;
+    }
+
+    /// Wait until a request has entered `tx.reserve()` and that reserve is
+    /// `Pending` (the queue is full). Safe after spawn for the same reason.
+    pub(super) async fn wait_reserve_pending(&self) {
+        self.admission_trace.reserve_pending.notified().await;
     }
 }
 
@@ -300,10 +434,22 @@ impl<T: DuplexTransport> Actor<T> {
                 continue;
             };
 
-            // Before sending: honour a pre-send cancellation.
+            // Before serving: honour a pre-service cancellation or an
+            // already-expired absolute deadline. A request refused here
+            // never starts a fresh timeout and never tears the engine
+            // down — service has not begun.
             if let Some(tok) = &req.cancel {
                 if tok.is_cancelled() {
                     let _ = req.reply.send(Err(TsgoApiError::Cancelled));
+                    continue;
+                }
+            }
+            if let Some(at) = req.deadline_at {
+                if tokio::time::Instant::now() >= at {
+                    let _ = req.reply.send(Err(TsgoApiError::Timeout(format!(
+                        "`{}` exceeded its request deadline before the actor began serving it",
+                        req.method
+                    ))));
                     continue;
                 }
             }
@@ -329,21 +475,24 @@ impl<T: DuplexTransport> Actor<T> {
             method,
             payload,
             cancel,
-            deadline,
+            deadline_at,
             reply,
         } = req;
 
         let work = self.serve_frames(&method, &payload, cancel);
-        let outcome = match deadline {
-            Some(bound) => match tokio::time::timeout(bound, work).await {
+        let outcome = match deadline_at {
+            Some(at) => match tokio::time::timeout_at(at, work).await {
                 Ok(outcome) => outcome,
                 Err(_) => {
-                    // The deadline fired: tear the engine down (process-tree
-                    // kill via the transport), answer bounded, end the actor.
+                    // The same absolute deadline fired: tear the engine
+                    // down (process-tree kill via the transport), answer
+                    // bounded, end the actor. Do not start a new timeout.
                     self.transport.terminate().await;
+                    let remaining_ms = at
+                        .saturating_duration_since(tokio::time::Instant::now())
+                        .as_millis();
                     let _ = reply.send(Err(TsgoApiError::Timeout(format!(
-                        "`{method}` exceeded its {} ms request deadline; the engine was terminated",
-                        bound.as_millis()
+                        "`{method}` exceeded its request deadline; the engine was terminated (remaining {remaining_ms} ms at fire)"
                     ))));
                     return Err(TsgoApiError::Timeout(format!(
                         "`{method}` deadline fired; actor ending"
@@ -358,8 +507,16 @@ impl<T: DuplexTransport> Actor<T> {
                 let _ = reply.send(Ok(payload));
                 Ok(())
             }
-            // The request resolved without a reply to send (cancelled mid-flight).
-            Ok(None) => Ok(()),
+            // Cancelled mid-flight: the wire cannot un-send the already-written
+            // request, but the caller must not be left to race the client's own
+            // cancellation-detection poll against a silently-dropped reply
+            // channel (which would resolve to a misleading `Closed`). Send
+            // `Cancelled` explicitly so `ClientHandle::request` observes it
+            // deterministically via `reply_rx` itself, regardless of scheduling.
+            Ok(None) => {
+                let _ = reply.send(Err(TsgoApiError::Cancelled));
+                Ok(())
+            }
             Err(ServeError { error, fatal }) => {
                 let _ = reply.send(Err(error));
                 if fatal {
@@ -424,6 +581,9 @@ impl<T: DuplexTransport> Actor<T> {
                     return Ok(Some(decoded.payload.to_vec()));
                 }
                 MessageType::Error => {
+                    if cancel.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
+                        return Ok(None);
+                    }
                     let msg = String::from_utf8_lossy(decoded.payload).into_owned();
                     return Err(ServeError::non_fatal(TsgoApiError::Transport(format!(
                         "engine error for `{method}`: {msg}"

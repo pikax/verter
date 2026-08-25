@@ -248,6 +248,14 @@ where
     K: Hash + Eq + Clone,
 {
     pub(super) table: Mutex<HashMap<K, Arc<InflightSlot>>>,
+    /// TEST-ONLY: each joiner sends once immediately before
+    /// `Condvar::wait_while`, so a test can wait for an exact parked
+    /// waiter instead of polling `slot_strong_count`. UNBOUNDED: the
+    /// send happens with the slot state mutex held, and the wait loop
+    /// can re-park, so a bounded channel could block a joiner under
+    /// that lock.
+    #[cfg(test)]
+    joiner_park_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 impl<K> Default for InflightTable<K>
@@ -257,6 +265,8 @@ where
     fn default() -> Self {
         Self {
             table: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            joiner_park_tx: Mutex::new(None),
         }
     }
 }
@@ -269,46 +279,30 @@ where
         Self::default()
     }
 
-    /// Read-only count of live in-flight slots. Test-only / observability.
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub fn live_count(&self) -> usize {
-        self.table.lock().len()
-    }
-
     /// Strong-count of the in-flight slot `Arc` currently registered
-    /// under `key`, or `None` if no slot is registered. Test-only —
-    /// drives the deterministic joiner rendezvous: a thread is a
-    /// confirmed cooperative joiner once it has cloned its own `Arc`
-    /// to the winner's in-flight slot, observable as a step up in this
-    /// count. Reading the count through the table's shard guard does
-    /// NOT itself bump the count.
+    /// under `key`, or `None` if no slot is registered. Test-only.
+    /// Joiner rendezvous uses [`Self::subscribe_joiner_park`].
     #[cfg(test)]
     #[allow(dead_code)]
     pub fn slot_strong_count(&self, key: &K) -> Option<usize> {
         self.table.lock().get(key).map(Arc::strong_count)
     }
-}
 
-#[cfg(test)]
-impl<K> InflightTable<super::node::QueryFlightKey<K>>
-where
-    K: Hash + Eq + Clone,
-{
-    /// Test-only strong-count lookup that ignores the
-    /// [`StoreViewCompatToken`](super::node::QueryFlightKey::compat_token)
-    /// half of the flight identity and matches solely on the inner cache
-    /// key. Tests that drive the singleflight rendezvous have only the
-    /// bare cache key in hand and every contending worker shares the
-    /// same store view, so exactly one flight lane is keyed by the bare
-    /// key. Returns `None` when no slot is currently registered for the
-    /// inner key.
-    pub fn slot_strong_count_by_inner_key(&self, inner: &K) -> Option<usize> {
-        let table = self.table.lock();
-        table
-            .iter()
-            .find(|(flight_key, _)| &flight_key.key == inner)
-            .map(|(_, slot)| Arc::strong_count(slot))
+    /// Arm a oneshot-style joiner-park witness. Each joiner sends
+    /// once immediately before parking on the slot condvar.
+    #[cfg(test)]
+    pub fn subscribe_joiner_park(&self) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self.joiner_park_tx.lock() = Some(tx);
+        rx
+    }
+
+    /// TEST-ONLY: fire the armed joiner-park witness, if any.
+    #[cfg(test)]
+    pub(super) fn notify_joiner_park(&self) {
+        if let Some(tx) = self.joiner_park_tx.lock().clone() {
+            let _ = tx.send(());
+        }
     }
 }
 
@@ -719,6 +713,8 @@ where
         let mut state = slot.state.lock();
         if state.claimed {
             // Joiner — wait for the winner to publish or fail.
+            #[cfg(test)]
+            inflight.notify_joiner_park();
             slot.ready.wait_while(&mut state, |s| !s.completed);
             if state.failure.is_some() {
                 // Artifact-path joiner policy: every failure kind surfaces
@@ -1149,6 +1145,8 @@ where
         let mut state = slot.state.lock();
         if state.claimed {
             // Joiner — wait for the winner to publish or fail.
+            #[cfg(test)]
+            inflight.notify_joiner_park();
             slot.ready.wait_while(&mut state, |s| !s.completed);
             if state.failure.is_some() {
                 // Artifact-path joiner policy: every failure kind surfaces

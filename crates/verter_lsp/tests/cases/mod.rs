@@ -25,7 +25,6 @@ mod repro_autoimport_additional_edits;
 mod repro_external_defn_line;
 mod repro_sfc_member_completion;
 mod repro_sfc_tag_completion_double_lt;
-mod shared_provider_live;
 mod single_provider_surface_store;
 mod stale_generation_result_dropped;
 mod stdio_launch_smoke;

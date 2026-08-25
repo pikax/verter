@@ -1,5 +1,7 @@
 mod analysis;
 pub(crate) use analysis::SemanticReady;
+#[cfg(test)]
+pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
 pub mod carrier_structure;
 pub mod line_index;
 pub mod position_map;
@@ -55,6 +57,12 @@ pub struct DocumentRegistry {
     semantic_host: RwLock<Option<Arc<VerterHost>>>,
     semantic_workspace: RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     semantic_enabled: std::sync::atomic::AtomicBool,
+    /// TEST-ONLY: fires once the spawned semantic task has begun and is about
+    /// to arm its quiet-window sleep. Without it, an "it has not published
+    /// yet" assertion taken after `advance()` can hold simply because the task
+    /// was never polled — vacuous rather than causal.
+    #[cfg(test)]
+    pub(crate) semantic_task_armed: tokio::sync::Notify,
     semantic_snapshots: DashMap<String, analysis::SemanticSnapshot>,
     semantic_serial: Arc<tokio::sync::Mutex<()>>,
     semantic_ready_tx: tokio::sync::broadcast::Sender<analysis::SemanticReady>,
@@ -305,6 +313,8 @@ impl DocumentRegistry {
             semantic_host: RwLock::new(None),
             semantic_workspace: RwLock::new(None),
             semantic_enabled: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            semantic_task_armed: tokio::sync::Notify::new(),
             semantic_snapshots: DashMap::new(),
             semantic_serial: Arc::new(tokio::sync::Mutex::new(())),
             semantic_ready_tx,

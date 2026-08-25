@@ -679,7 +679,7 @@ pub(super) async fn handle_did_open(
         server.sync_coordinator.signal(
             canonical_id.clone(),
             uri.as_str().to_string(),
-            std::time::Instant::now(),
+            tokio::time::Instant::now(),
         );
         // Background import-dependency publication (imported carrier APIs +
         // the barrel re-export walk) for the freshly opened document. This —

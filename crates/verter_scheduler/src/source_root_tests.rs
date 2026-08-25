@@ -18,11 +18,11 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{SchedulerSourceDirectory, SourceStateAt};
 use crate::executor::{StageError, StageExecutor};
 use crate::node::{FileNode, SourceSnapshot};
 use crate::scheduler::{Request, Scheduler, SchedulerConfig};
 use crate::source_loader::MemorySourceLoader;
+use crate::source_root::{SchedulerSourceDirectory, SourceStateAt};
 use crate::stage::{Priority, TargetStage};
 use verter_language::FileLanguage;
 
@@ -304,13 +304,26 @@ fn the_invalidate_generation_bump_runs_inside_the_publication_hold() {
     let generation_before = node.generation();
 
     let (holding_tx, holding_rx) = mpsc::channel::<()>();
-    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::sync_channel::<()>(0);
+    // Sample generation FROM THE HOLDER while the publication lock is
+    // still held. The invalidator signals once it has taken the DAG
+    // lock and is about to take the publication hold, so this is an
+    // exact lock-attempt receipt rather than a yield-count race.
     let holder = {
         let directory = Arc::clone(scheduler.source_directory());
+        let node_for_holder = Arc::clone(&node);
         std::thread::spawn(move || {
             directory.publish_transition(move |publication| {
                 holding_tx.send(()).expect("hold signal");
-                release_rx.recv().expect("release signal");
+                release_rx
+                    .recv()
+                    .expect("driver must release after sampling");
+                assert_eq!(
+                    node_for_holder.generation(),
+                    generation_before,
+                    "generation advanced while the publication lock is held — \
+                     bump_generation ran outside the hold"
+                );
                 publication.absent(&canonical("/unrelated.ts"), 1, 1);
             });
         })
@@ -319,22 +332,24 @@ fn the_invalidate_generation_bump_runs_inside_the_publication_hold() {
         .recv_timeout(Duration::from_secs(5))
         .expect("holder must acquire the publication lock");
 
+    let (attempt_tx, attempt_rx) = mpsc::sync_channel::<()>(0);
     let invalidator = {
         let scheduler = Arc::clone(&scheduler);
-        std::thread::spawn(move || scheduler.invalidate("/a.vue"))
+        std::thread::spawn(move || {
+            scheduler.invalidate_signaling_before_publication("/a.vue", attempt_tx);
+        })
     };
-    std::thread::sleep(Duration::from_millis(150));
-
+    attempt_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("invalidator must reach the publication hold");
     assert_eq!(
         node.generation(),
         generation_before,
-        "`invalidate` advanced the node's generation while the publication \
-         lock was held elsewhere — the bump is NOT inside the publication \
-         hold, so a capture can observe the bumped node with an unpublished \
-         root",
+        "generation advanced before the publication hold — bump ran outside it"
     );
-
-    release_tx.send(()).expect("release signal");
+    release_tx
+        .send(())
+        .expect("holder must still be waiting to release");
     holder.join().expect("holder thread");
     invalidator.join().expect("invalidator thread");
 

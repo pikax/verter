@@ -56,9 +56,15 @@ fn fake_engine(scenario: &str) -> PathBuf {
     target
 }
 
+/// Bounds for the fake-engine suites. These are LIVENESS watchdogs for an
+/// external process, not correctness thresholds — none of the tests below
+/// asserts the bound itself (the two that do drive a deliberately hanging
+/// engine and carry their own). A bound that does not clear a cold process
+/// start reports a probe timeout instead of the policy verdict under test,
+/// which is what a 5s probe did on a machine at load 33.
 fn production_validator() -> ProcessValidator {
     ProcessValidator::with_policy(VersionPolicy::production())
-        .with_bounds(Duration::from_secs(5), Duration::from_secs(15))
+        .with_bounds(Duration::from_secs(30), Duration::from_secs(30))
 }
 
 // ── DISCRIMINATING: a fake engine whose probe AND serverInfo agree on a
@@ -119,7 +125,7 @@ async fn policy_rejects_unsupported_and_prerelease_versions() {
 #[tokio::test]
 async fn dev_override_admits_a_nightly_end_to_end() {
     let validator = ProcessValidator::with_policy(VersionPolicy::with_dev_nightly_override())
-        .with_bounds(Duration::from_secs(5), Duration::from_secs(15));
+        .with_bounds(Duration::from_secs(30), Duration::from_secs(30));
     let validated = validator
         .validate(&fake_engine("nightly"), Capability::Lsp)
         .await
@@ -257,12 +263,15 @@ async fn version_probe_is_bounded_when_a_descendant_holds_the_pipes() {
     };
     let _ = std::fs::remove_file(&guard.pid_file);
 
-    // The probe bound is deliberately generous: under full-suite parallel load
-    // the fake's own startup can take a moment, and the discrimination (bounded
-    // return vs the old FOREVER hang on the reader joins) does not depend on a
-    // tight bound.
-    let probe = probe_engine_version_bounded(&engine, Duration::from_secs(3));
-    let outcome = tokio::time::timeout(Duration::from_secs(20), probe)
+    // The probe bound must comfortably exceed the fake engine's COLD START,
+    // not just its steady-state cost: the bound expiring also tears down the
+    // process tree, so a bound that fires before the fake has run at all kills
+    // it before it can spawn the pipe holder and record its pid — which is
+    // what a 3s bound did on a machine at load 50. The discrimination here is
+    // "bounded return" versus the old FOREVER hang on the reader joins, so a
+    // long bound costs wall time and nothing else.
+    let probe = probe_engine_version_bounded(&engine, Duration::from_secs(15));
+    let outcome = tokio::time::timeout(Duration::from_secs(90), probe)
         .await
         .expect(
             "the probe must RETURN within its bound even when a descendant \
@@ -274,26 +283,24 @@ async fn version_probe_is_bounded_when_a_descendant_holds_the_pipes() {
         "the bounded failure must be a Timeout, got {err:?}"
     );
 
-    // The process-tree kill must reach the pipe-holding grandchild. It wrote
-    // its pid before parking; the kill lands before the probe returns, but
-    // allow a moment for the OS to finish reaping it.
-    let mut pid = guard.pid();
-    for _ in 0..200 {
-        if pid.is_some() {
-            break;
+    // The SPAWNER recorded the pid synchronously, before the wedge began, so
+    // the file is already there — no waiting for it, and no race with the
+    // tree kill that used to leave it absent under load.
+    let pid = guard
+        .pid()
+        .expect("the fake engine must record the pipe-holding grandchild's pid at spawn");
+
+    // Reaping is the OS's, not ours: there is no receipt for "this process is
+    // gone", so this polls `kill(pid, 0)` — permitted external-liveness
+    // polling — under one generous watchdog whose expiry IS the failure.
+    let reaped = tokio::time::timeout(Duration::from_secs(60), async {
+        while process_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        pid = guard.pid();
-    }
-    let pid = pid.expect("the hold-pipe grandchild registered its pid");
-    for _ in 0..100 {
-        if !process_alive(pid) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await;
     assert!(
-        !process_alive(pid),
+        reaped.is_ok(),
         "the pipe-holding grandchild (pid {pid}) must not survive the bounded probe"
     );
 }
@@ -304,18 +311,16 @@ async fn version_probe_is_bounded_when_a_descendant_holds_the_pipes() {
 #[tokio::test]
 async fn version_probe_times_out_on_a_hanging_engine() {
     let engine = fake_engine("hang-version");
-    let start = std::time::Instant::now();
-    let err = probe_engine_version_bounded(&engine, Duration::from_secs(1))
-        .await
-        .expect_err("a hanging engine must fail the bounded probe");
+    let err = tokio::time::timeout(
+        Duration::from_secs(90),
+        probe_engine_version_bounded(&engine, Duration::from_secs(15)),
+    )
+    .await
+    .expect("the bounded probe must RETURN on a hanging engine (outer watchdog)")
+    .expect_err("a hanging engine must fail the bounded probe");
     assert!(
         matches!(err, TsgoApiError::Timeout(_)),
         "expected Timeout, got {err:?}"
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(5),
-        "the timeout must actually bound the probe: {:?}",
-        start.elapsed()
     );
 }
 
@@ -324,25 +329,24 @@ async fn version_probe_times_out_on_a_hanging_engine() {
 //    validation). ─────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn lsp_smoke_times_out_on_a_hanging_engine() {
-    // The probe leg is generous (a slow parallel suite must still pass the
-    // version probe reliably); the hang lives at the handshake, so the smoke
+    // Both legs must clear the fake's COLD START, which on a loaded machine is
+    // seconds, not milliseconds; the hang lives at the handshake, so the smoke
     // bound is what fires. The discrimination (bounded LspHandshakeFailed vs a
-    // hung validation) does not depend on tight bounds.
+    // hung validation) does not depend on tight bounds, and an elapsed ceiling
+    // around them would only add a margin that collapses under load — the
+    // outer timeout below is a hang watchdog, and its expiry is the failure.
     let validator = ProcessValidator::with_policy(VersionPolicy::production())
-        .with_bounds(Duration::from_secs(5), Duration::from_secs(3));
-    let start = std::time::Instant::now();
-    let err = validator
-        .validate(&fake_engine("hang-lsp"), Capability::Lsp)
-        .await
-        .expect_err("a handshake-hanging engine must fail the smoke");
+        .with_bounds(Duration::from_secs(20), Duration::from_secs(15));
+    let err = tokio::time::timeout(
+        Duration::from_secs(120),
+        validator.validate(&fake_engine("hang-lsp"), Capability::Lsp),
+    )
+    .await
+    .expect("the smoke must RETURN on a handshake-hanging engine (outer watchdog)")
+    .expect_err("a handshake-hanging engine must fail the smoke");
     assert!(
         matches!(err, RejectionReason::LspHandshakeFailed { .. }),
         "{err:?}"
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(15),
-        "the smoke bound must actually fire: {:?}",
-        start.elapsed()
     );
 }
 
@@ -395,8 +399,11 @@ async fn a_hung_standalone_api_request_times_out_and_kills_the_engine() {
         .expect("connect succeeds — the engine hangs on the first REQUEST")
         .with_request_deadline(Duration::from_secs(2));
 
-    let start = std::time::Instant::now();
-    let outcome = tokio::time::timeout(Duration::from_secs(20), client.initialize()).await;
+    // The outer timeout IS the bound-actually-fires check: an unbounded wait
+    // never returns and the timeout expires. An additional elapsed ceiling
+    // between the deadline and the guard is a load-sensitive margin, not a
+    // discriminator.
+    let outcome = tokio::time::timeout(Duration::from_secs(60), client.initialize()).await;
     let err = outcome
         .expect("a hung engine must fail the request within its deadline (the wait is bounded)")
         .expect_err("a hung engine cannot answer initialize");
@@ -404,30 +411,24 @@ async fn a_hung_standalone_api_request_times_out_and_kills_the_engine() {
         matches!(err, TsgoApiError::Timeout(_)),
         "the bounded request failure must be a Timeout, got {err:?}"
     );
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "the deadline must actually fire: {:?}",
-        start.elapsed()
-    );
 
     // The engine was torn down (process-tree kill + reap): no live child.
-    let mut pid = guard.pid();
-    for _ in 0..100 {
-        if pid.is_some() {
-            break;
+    // The engine writes its own pid at startup and `connect` above already
+    // completed a round-trip with it, so the file is present by now. Reaping
+    // itself is the OS's business with no receipt to wait on, so it polls
+    // `kill(pid, 0)` — permitted external-liveness polling — under ONE
+    // generous watchdog whose expiry is the failure.
+    let pid = guard
+        .pid()
+        .expect("the hang-api engine registered its pid before serving");
+    let reaped = tokio::time::timeout(Duration::from_secs(60), async {
+        while process_alive(pid) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        pid = guard.pid();
-    }
-    let pid = pid.expect("the hang-api engine registered its pid");
-    for _ in 0..100 {
-        if !process_alive(pid) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    })
+    .await;
     assert!(
-        !process_alive(pid),
+        reaped.is_ok(),
         "the hung engine (pid {pid}) must not survive the request deadline"
     );
 }

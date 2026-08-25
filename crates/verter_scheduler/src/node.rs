@@ -22,6 +22,38 @@ use verter_language::FileLanguage;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 
+mod live_generation {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::source_root::SourcePublication;
+
+    /// Opaque live-generation storage. The raw atomic never escapes this
+    /// private module, and the only advancing operation requires the
+    /// publication capability minted under the source-directory hold.
+    #[derive(Debug)]
+    pub(super) struct LiveGenerationCounter {
+        raw: AtomicU64,
+    }
+
+    impl LiveGenerationCounter {
+        pub(super) fn new(generation: u64) -> Self {
+            Self {
+                raw: AtomicU64::new(generation),
+            }
+        }
+
+        pub(super) fn read(&self) -> u64 {
+            self.raw.load(Ordering::Acquire)
+        }
+
+        pub(super) fn advance(&self, _publication: &SourcePublication) -> u64 {
+            self.raw.fetch_add(1, Ordering::AcqRel) + 1
+        }
+    }
+}
+
+use live_generation::LiveGenerationCounter;
+
 /// Opaque host-specific data stored inside snapshots.
 ///
 /// The scheduler is domain-agnostic — it coordinates stages and tracks
@@ -176,6 +208,7 @@ impl std::fmt::Debug for ArtifactSnapshot {
 /// Request-group bookkeeping is OWNED BY THE DAG, not the node. The
 /// node carries only the snapshot triple, the generation counter, the
 /// per-profile artifact slots, and the per-file overlay source buffer.
+#[deny(private_interfaces)]
 pub struct FileNode {
     /// Canonical file identifier.
     pub canonical_id: String,
@@ -183,7 +216,12 @@ pub struct FileNode {
     pub file_language: FileLanguage,
     /// Monotonically increasing generation counter.
     /// Bumped on each source update.
-    pub(crate) generation: AtomicU64,
+    ///
+    /// The private child-module type is deliberately less visible than this
+    /// crate. Together with `deny(private_interfaces)`, widening this field to
+    /// `pub(crate)` is a compile error; the raw atomic remains unreachable even
+    /// if that field visibility is accidentally edited.
+    generation: LiveGenerationCounter,
     /// Current source snapshot (None if not yet loaded).
     pub(crate) source: ArcSwap<Option<Arc<SourceSnapshot>>>,
     /// Current analysis snapshot (None if not yet analyzed).
@@ -215,10 +253,24 @@ static NEXT_INCARNATION_ID: AtomicU64 = AtomicU64::new(1);
 impl FileNode {
     /// Create a new file node with generation 0.
     pub fn new(canonical_id: String, file_language: FileLanguage) -> Self {
+        Self::new_at(canonical_id, file_language, 0)
+    }
+
+    /// Create a file node whose generation is assigned at construction.
+    ///
+    /// Use this for unpublished nodes (first insertion, replacement
+    /// incarnation, generation-floor restart). Live generation advances
+    /// on an already-published node must go through
+    /// [`crate::source_root::SourcePublication::bump_node_generation`].
+    pub(crate) fn new_at(
+        canonical_id: String,
+        file_language: FileLanguage,
+        generation: u64,
+    ) -> Self {
         Self {
             canonical_id,
             file_language,
-            generation: AtomicU64::new(0),
+            generation: LiveGenerationCounter::new(generation),
             source: ArcSwap::new(Arc::new(None)),
             analysis: ArcSwap::new(Arc::new(None)),
             artifacts: DashMap::new(),
@@ -235,17 +287,21 @@ impl FileNode {
 
     /// Current generation (acquire ordering for cross-thread visibility).
     pub fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.generation.read()
     }
 
     /// Bump generation and return the new value.
-    pub(crate) fn bump_generation(&self) -> u64 {
-        self.generation.fetch_add(1, Ordering::AcqRel) + 1
+    ///
+    /// The `_proof` argument is a [`crate::source_root::SourcePublication`],
+    /// which exists only inside [`crate::source_root::SchedulerSourceDirectory::publish_transition`].
+    /// A bare atomic bump from outside that hold does not compile.
+    pub(crate) fn bump_generation(&self, proof: &crate::source_root::SourcePublication) -> u64 {
+        self.generation.advance(proof)
     }
 
     /// Returns the current source snapshot if it matches the node's generation.
     pub fn current_source(&self) -> Option<Arc<SourceSnapshot>> {
-        let node_gen = self.generation.load(Ordering::Acquire);
+        let node_gen = self.generation.read();
         let guard = self.source.load();
         match guard.as_ref() {
             Some(s) if s.generation == node_gen => Some(Arc::clone(s)),
@@ -257,7 +313,7 @@ impl FileNode {
     ///
     /// Coherence: `analysis.generation == source.generation == node.generation`.
     pub fn current_analysis(&self) -> Option<Arc<AnalysisSnapshot>> {
-        let node_gen = self.generation.load(Ordering::Acquire);
+        let node_gen = self.generation.read();
         let src = self.source.load();
         let analysis = self.analysis.load();
         match (src.as_ref(), analysis.as_ref()) {
@@ -272,7 +328,7 @@ impl FileNode {
     ///
     /// Coherence: `artifact.generation == analysis.generation == source.generation == node.generation`.
     pub fn current_artifact(&self, profile_hash: u64) -> Option<Arc<ArtifactSnapshot>> {
-        let node_gen = self.generation.load(Ordering::Acquire);
+        let node_gen = self.generation.read();
         let src_gen = self.source.load().as_deref()?.generation;
         let analysis_gen = self.analysis.load().as_deref()?.generation;
         if src_gen != node_gen || analysis_gen != node_gen {
@@ -300,17 +356,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_node_generation_monotonic() {
+    fn file_node_generation_is_assigned_at_construction() {
         let node = FileNode::new("test.vue".into(), FileLanguage::vue());
         assert_eq!(node.generation(), 0);
-
-        let g1 = node.bump_generation();
-        assert_eq!(g1, 1);
-        assert_eq!(node.generation(), 1);
-
-        let g2 = node.bump_generation();
-        assert_eq!(g2, 2);
-        assert_eq!(node.generation(), 2);
+        let started = FileNode::new_at("test.vue".into(), FileLanguage::vue(), 2);
+        assert_eq!(started.generation(), 2);
     }
 
     #[test]
@@ -321,10 +371,9 @@ mod tests {
 
     #[test]
     fn current_source_returns_some_when_generation_matches() {
-        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
-        let gen = node.bump_generation();
+        let node = FileNode::new_at("test.vue".into(), FileLanguage::vue(), 1);
 
-        let snap = Arc::new(SourceSnapshot::new_empty(Arc::from("hello"), gen));
+        let snap = Arc::new(SourceSnapshot::new_empty(Arc::from("hello"), 1));
         node.source.store(Arc::new(Some(snap)));
 
         let result = node.current_source();
@@ -334,69 +383,75 @@ mod tests {
 
     #[test]
     fn current_source_returns_none_when_generation_stale() {
-        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
-        let gen = node.bump_generation();
+        let node = FileNode::new_at("test.vue".into(), FileLanguage::vue(), 2);
 
-        let snap = Arc::new(SourceSnapshot::new_empty(Arc::from("hello"), gen));
+        let snap = Arc::new(SourceSnapshot::new_empty(Arc::from("hello"), 1));
         node.source.store(Arc::new(Some(snap)));
 
-        // Advance generation — snapshot is now stale
-        node.bump_generation();
         assert!(node.current_source().is_none());
     }
 
     #[test]
     fn current_analysis_coherence() {
-        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
-        let gen = node.bump_generation();
+        let node = FileNode::new_at("test.vue".into(), FileLanguage::vue(), 1);
 
         // No source → analysis must be None
         assert!(node.current_analysis().is_none());
 
         // Set source at gen
-        let src = Arc::new(SourceSnapshot::new_empty(Arc::from("x"), gen));
+        let src = Arc::new(SourceSnapshot::new_empty(Arc::from("x"), 1));
         node.source.store(Arc::new(Some(src)));
 
         // No analysis → still None
         assert!(node.current_analysis().is_none());
 
         // Set analysis at gen
-        let analysis = Arc::new(AnalysisSnapshot::new_empty(gen));
+        let analysis = Arc::new(AnalysisSnapshot::new_empty(1));
         node.analysis.store(Arc::new(Some(analysis)));
 
         // Now coherent
         assert!(node.current_analysis().is_some());
 
-        // Advance generation — breaks coherence
-        node.bump_generation();
-        assert!(node.current_analysis().is_none());
+        // A later incarnation of the same canonical starts at a higher
+        // generation — snapshot identity is construction-assigned, not
+        // a lock-free bump.
+        let advanced = FileNode::new_at("test.vue".into(), FileLanguage::vue(), 2);
+        advanced
+            .source
+            .store(Arc::new(Some(Arc::new(SourceSnapshot::new_empty(
+                Arc::from("x"),
+                1,
+            )))));
+        advanced
+            .analysis
+            .store(Arc::new(Some(Arc::new(AnalysisSnapshot::new_empty(1)))));
+        assert!(advanced.current_analysis().is_none());
     }
 
     #[test]
     fn current_artifact_coherence() {
-        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
-        let gen = node.bump_generation();
+        let node = FileNode::new_at("test.vue".into(), FileLanguage::vue(), 1);
         let ph: u64 = 0xABCD;
 
         // Set source + analysis at gen
         node.source
             .store(Arc::new(Some(Arc::new(SourceSnapshot::new_empty(
                 Arc::from("x"),
-                gen,
+                1,
             )))));
         node.analysis
-            .store(Arc::new(Some(Arc::new(AnalysisSnapshot::new_empty(gen)))));
+            .store(Arc::new(Some(Arc::new(AnalysisSnapshot::new_empty(1)))));
 
         // No artifact yet
         assert!(node.current_artifact(ph).is_none());
 
         // Insert artifact at gen
         let art = Arc::new(ArtifactSnapshot {
-            generation: gen,
+            generation: 1,
             profile_hash: ph,
             data: Arc::new(EmptyData),
         });
-        node.artifacts.insert(ph, art);
+        node.artifacts.insert(ph, Arc::clone(&art));
 
         // Now coherent
         assert!(node.current_artifact(ph).is_some());
@@ -404,11 +459,11 @@ mod tests {
         // Wrong profile hash
         assert!(node.current_artifact(0x9999).is_none());
 
-        // Advance generation — stale
-        node.bump_generation();
-        assert!(node.current_artifact(ph).is_none());
-
-        // But last_known_good still returns it
-        assert!(node.last_known_good_artifact(ph).is_some());
+        // A later construction-assigned generation is stale for this
+        // artifact, but last-known-good still returns it.
+        let advanced = FileNode::new_at("test.vue".into(), FileLanguage::vue(), 2);
+        advanced.artifacts.insert(ph, art);
+        assert!(advanced.current_artifact(ph).is_none());
+        assert!(advanced.last_known_good_artifact(ph).is_some());
     }
 }

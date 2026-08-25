@@ -736,7 +736,17 @@ pub struct RequestContext {
     ///   * `HostConfig::audit_timing_capture` is disabled,
     ///   * the target is `wasm32` (sampler is gated off there), or
     ///   * the registration is `Noop` (filtered kind).
-    pub process_rss_peak_bytes: AtomicU64,
+    ///
+    /// Held behind an `Arc` so the sampler's active-request registry can
+    /// hold a `Weak` to THIS SLOT ALONE. Registering a
+    /// `Weak<RequestContext>` instead would let the sampler thread take
+    /// the last strong reference to a context — and, through its audit
+    /// registration, to the `HostAuditRuntime` — so dropping the upgrade
+    /// would run the registration's `Drop` (which takes the registry's
+    /// WRITE lock the sampler is holding a READ lock on) and then the
+    /// runtime's `Drop` (which joins the sampler thread from the sampler
+    /// thread). A bare counter has no destructor and reaches nothing.
+    pub(crate) process_rss_peak_bytes: Arc<AtomicU64>,
 
     // ─────── Type-resolution counters ───────
     //
@@ -1298,7 +1308,7 @@ impl RequestContext {
             cache_counters: PerRequestCacheCounters::default(),
             parent_request_id,
             scheduler_audit: Mutex::new(None),
-            process_rss_peak_bytes: AtomicU64::new(0),
+            process_rss_peak_bytes: Arc::new(AtomicU64::new(0)),
             type_resolution_hops: AtomicU64::new(0),
             type_resolution_navigations: AtomicU64::new(0),
             type_resolution_expansions: AtomicU64::new(0),

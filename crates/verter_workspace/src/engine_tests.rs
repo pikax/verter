@@ -477,6 +477,38 @@ fn published_root_replacement_advances_strict_authority_when_snapshot_arc_is_reu
 }
 
 #[test]
+fn snapshot_publication_reaches_all_simultaneously_live_subscribers() {
+    let engine = Engine::new();
+    let current = engine.load_published().expect("bootstrap root");
+    let expected_generation = current.snapshot.generation.0;
+    let first = engine.subscribe_published();
+    let second = engine.subscribe_published();
+
+    engine.publish_snapshot(PublishedRoot::with_ext(
+        Arc::clone(&current.snapshot),
+        Box::new(()),
+    ));
+
+    let watchdog = std::time::Duration::from_millis(250);
+    assert_eq!(
+        first
+            .recv_timeout(watchdog)
+            .expect("the first live subscriber must receive the publication"),
+        expected_generation,
+    );
+    assert_eq!(
+        second
+            .recv_timeout(watchdog)
+            .expect("the second live subscriber must receive the same publication"),
+        expected_generation,
+    );
+    assert!(
+        first.try_recv().is_err() && second.try_recv().is_err(),
+        "one publication must emit exactly one receipt to each subscriber",
+    );
+}
+
+#[test]
 fn resolution_only_world_publication_preserves_strict_self_root_authority() {
     let engine = Engine::new();
     let before = engine.current_strict_self_root_generation();

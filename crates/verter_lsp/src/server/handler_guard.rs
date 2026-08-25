@@ -31,13 +31,26 @@ pub(crate) async fn wait_for_handlers_quiet(quiet: std::time::Duration) {
 }
 
 async fn wait_for_idle_counter(active: &std::sync::atomic::AtomicU32, idle: &tokio::sync::Notify) {
+    wait_for_idle_counter_on_gap(active, idle, |_| {}).await;
+}
+
+/// Subscribe to `notify_waiters` BEFORE the idle re-check. Creating
+/// `Notify::notified()` does not register a waiter; `enable()` does. The
+/// producer uses `notify_waiters` (no stored permit), so a notify landing
+/// between an un-enabled future and `.await` is lost.
+async fn wait_for_idle_counter_on_gap(
+    active: &std::sync::atomic::AtomicU32,
+    idle: &tokio::sync::Notify,
+    mut on_gap: impl FnMut(&std::sync::atomic::AtomicU32),
+) {
     loop {
-        // Register the waiter before checking the counter so the transition to
-        // zero cannot be missed between the check and `.await`.
         let notified = idle.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if active.load(std::sync::atomic::Ordering::Acquire) == 0 {
             return;
         }
+        on_gap(active);
         notified.await;
     }
 }
@@ -114,49 +127,120 @@ pub(crate) fn block_in_place_if_available<R>(f: impl FnOnce() -> R) -> R {
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    /// Admission is an event, so it is proven by polling, not by racing two
+    /// wall-clock timeouts: `Pending` while a handler is active, `Ready` on
+    /// the notify, and the virtual clock never moves.
+    #[tokio::test(start_paused = true)]
     async fn background_admission_waits_for_the_last_handler() {
+        use std::task::Poll;
+
         let active = std::sync::atomic::AtomicU32::new(1);
         let idle = tokio::sync::Notify::new();
+        let start = tokio::time::Instant::now();
         let mut waiter = Box::pin(wait_for_idle_counter(&active, &idle));
 
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), &mut waiter)
-                .await
-                .is_err(),
+            matches!(futures_util::poll!(&mut waiter), Poll::Pending),
             "background CPU work must not be admitted while a handler is active"
         );
 
         active.store(0, std::sync::atomic::Ordering::Release);
         idle.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_millis(200), waiter)
-            .await
-            .expect("dropping the last handler must wake background work");
+        waiter.await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start,
+            "dropping the last handler must wake background work through the \
+             notify, without any timer participating"
+        );
     }
 
-    #[tokio::test]
+    /// The quiet window is semantic time, so it is driven on the paused
+    /// clock and read as exact virtual instants. The previous shape raced a
+    /// 15ms real sleep against a 30ms window and a 25ms timeout — three
+    /// margins that collapse into each other on a loaded machine.
+    #[tokio::test(start_paused = true)]
     async fn coarse_background_admission_restarts_its_quiet_window_on_activity() {
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+
         let active = std::sync::atomic::AtomicU32::new(0);
         let idle = tokio::sync::Notify::new();
         let epoch = std::sync::atomic::AtomicU64::new(0);
         let quiet = std::time::Duration::from_millis(30);
+        let start = tokio::time::Instant::now();
         let mut waiter = Box::pin(wait_for_quiet_counter(&active, &idle, &epoch, quiet));
 
-        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-        epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        active.store(1, std::sync::atomic::Ordering::Release);
+        // Enter the wait: idle, so it arms the quiet-window timer.
+        assert!(matches!(futures_util::poll!(&mut waiter), Poll::Pending));
+
+        // Activity halfway through the window.
+        tokio::time::advance(quiet / 2).await;
+        epoch.fetch_add(1, Ordering::AcqRel);
+        active.store(1, Ordering::Release);
+
+        // Crossing the ORIGINAL boundary must not admit — the window restarts.
+        tokio::time::advance(quiet / 2).await;
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), &mut waiter)
-                .await
-                .is_err(),
+            matches!(futures_util::poll!(&mut waiter), Poll::Pending),
             "activity inside the quiet window must defer coarse background work"
         );
+        assert_eq!(tokio::time::Instant::now(), start + quiet);
 
-        active.store(0, std::sync::atomic::Ordering::Release);
-        epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // Idle again: only a COMPLETE window from the new stamp admits.
+        active.store(0, Ordering::Release);
+        epoch.fetch_add(1, Ordering::AcqRel);
         idle.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_millis(100), waiter)
-            .await
-            .expect("a complete idle window should admit background work");
+        assert!(matches!(futures_util::poll!(&mut waiter), Poll::Pending));
+        tokio::time::advance(quiet).await;
+        waiter.await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start + quiet * 2,
+            "admission must land exactly one full quiet window after the last activity"
+        );
+    }
+
+    /// Force the producer's OWN wake primitive — `notify_waiters`, the one
+    /// `HandlerGuard::drop` uses — into the former check-to-await gap.
+    ///
+    /// This is NOT an `enable()` discriminator, and says so: on Tokio 1.52
+    /// `notified()` snapshots the `notify_waiters` counter at CONSTRUCTION,
+    /// so removing `enable()` leaves the test green (planted and observed).
+    /// What it DOES discriminate is the ORDERING — `notify_waiters` stores
+    /// no permit, so constructing the future AFTER the idle re-check loses
+    /// the wake and hangs. Using `notify_one` here would not even prove
+    /// that, because a stored permit survives the gap either way. The
+    /// production pin+enable stays as defense in depth matching
+    /// `RegistrationSignal`. The ordering half was planted and observed
+    /// red at all three gap sites.
+    #[tokio::test(start_paused = true)]
+    async fn idle_wait_does_not_lose_notify_waiters_in_the_check_to_await_gap() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let active = std::sync::atomic::AtomicU32::new(1);
+        let idle = tokio::sync::Notify::new();
+        let fired = AtomicBool::new(false);
+        let start = tokio::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wait_for_idle_counter_on_gap(&active, &idle, |active| {
+                if !fired.swap(true, Ordering::SeqCst) {
+                    active.store(0, Ordering::Release);
+                    idle.notify_waiters();
+                }
+            }),
+        )
+        .await
+        .expect("notify_waiters in the check-to-await gap must resume the waiter");
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "the gap hook must have fired — otherwise the wait took the idle fast path"
+        );
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start,
+            "a captured notify_waiters wake must not consume virtual time"
+        );
     }
 }

@@ -805,10 +805,17 @@ fn without_nextest_bin_exe_resolves_to_the_compile_time_constant() {
     println!("{PLAIN_CARGO_SENTINEL}");
 }
 
+/// Path of the `verter-relay-shim` binary this test process is actually
+/// running against (`NEXTEST_BIN_EXE_*` under nextest, `CARGO_BIN_EXE_*`
+/// outside it). Sibling live tests reuse this so they never spawn cargo.
+pub(super) fn relay_shim_bin() -> PathBuf {
+    bin_exe!("verter-relay-shim")
+}
+
 /// Spawn the REAL shim binary as the editor's `tsgo`, forwarding `--lsp
 /// --stdio` to the real engine.
 fn spawn_shim(tsgo: &Path, control_dir: &Path, session_key: &str) -> Child {
-    Command::new(bin_exe!("verter-relay-shim"))
+    Command::new(relay_shim_bin())
         .arg("--real-tsgo")
         .arg(tsgo)
         .arg("--control-dir")
@@ -1106,7 +1113,16 @@ async fn relay_suppresses_carrier_leak_and_demuxes_verter_ids_end_to_end() {
         .editor
         .wait_for(|m| m["id"] == 100, Duration::from_secs(15))
         .await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    h.editor
+        .send(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 101, "method": "workspace/symbol",
+            "params": { "query": "fence" },
+        }))
+        .await;
+    let _ = h
+        .editor
+        .wait_for(|m| m["id"] == 101, Duration::from_secs(15))
+        .await;
 
     let frames = h.editor.all_frames();
     // (1) No carrier URI / text / basename ever reaches the editor.
@@ -1228,19 +1244,12 @@ async fn verter_detach_is_non_destructive_shim_and_child_survive() {
         .expect("detach");
     let _ = h.ctl.close().await;
 
-    // Give any (erroneous) shim teardown a chance to fire, then assert the shim — and
-    // therefore its OWNED tsgo child — is STILL ALIVE. A pre-fix detach signaled the
-    // shim to kill its child + stop the relay, exiting the shim.
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert!(
-        matches!(h.shim.try_wait(), Ok(None)),
-        "the shim (and its OWNED tsgo child) must stay ALIVE after a non-destructive verter/detach"
-    );
-
-    // The DEFINITIVE discriminator: the relay + control endpoint are still live, so a
-    // FRESH control connection hellos successfully on the SAME advertised endpoint.
-    // A torn-down shim would have aborted its accept loop + removed the advertisement,
-    // so this connect/hello would fail.
+    // The PROTOCOL FENCE first, and it is also the definitive discriminator:
+    // a FRESH control connection hellos successfully on the SAME advertised
+    // endpoint. A torn-down shim would have aborted its accept loop and
+    // removed the advertisement, so this connect/hello would fail. Checking
+    // `try_wait()` before this proves nothing — an erroneous teardown races
+    // it in the SAME direction, so a not-yet-exited process reads as alive.
     let mut ctl2 = ControlClient::connect(&h.adv.endpoint)
         .await
         .expect("a fresh control connection after detach — the shim endpoint is still alive");
@@ -1249,6 +1258,15 @@ async fn verter_detach_is_non_destructive_shim_and_child_survive() {
         .expect("a fresh hello after detach must succeed — the shim was NOT torn down by detach");
     assert_eq!(hello.protocol, PROTOCOL_VERSION);
     let _ = ctl2.close().await;
+
+    // Only now is process liveness meaningful: the shim has demonstrably
+    // accepted a connection and completed a protocol round-trip AFTER the
+    // detach, so this reads a process that was serving, not one that merely
+    // had not exited yet.
+    assert!(
+        matches!(h.shim.try_wait(), Ok(None)),
+        "the shim (and its OWNED tsgo child) must stay ALIVE after a non-destructive verter/detach"
+    );
 
     // Explicit cleanup (the test owns the shim's lifecycle).
     let _ = h.shim.start_kill();

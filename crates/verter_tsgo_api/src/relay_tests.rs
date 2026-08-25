@@ -494,50 +494,67 @@ async fn sync_overlay_tolerates_jsonrpc_error_response() {
 /// request but NEVER answers (the connection stays OPEN — not an EOF/Closed) must not
 /// stall the carrier lifecycle. Bounded by its timeout, `sync_overlay` fails CLOSED with
 /// `TsgoApiError::Timeout` within the bound rather than blocking forever.
-#[tokio::test]
+///
+/// The invariant is "fires at EXACTLY its own configured `timeout` argument",
+/// not merely "fires before some outer wall-clock guard". A generous outer
+/// guard (even 100x the bound) cannot discriminate that: an implementation
+/// that ignores the argument but happens to have some OTHER hardcoded
+/// timeout comfortably under the guard would still pass — e.g. hardcoding
+/// 4s against a 50ms bound still passes a 5s outer guard.
+///
+/// Runs on tokio's PAUSED virtual clock instead and asserts the elapsed
+/// virtual time is EXACTLY the configured bound, probed with two different
+/// bounds so a hardcoded-duration implementation cannot coincidentally match
+/// one probe. Zero real wall-clock cost either way.
+#[tokio::test(start_paused = true)]
 async fn sync_overlay_times_out_when_barrier_never_answers() {
-    // A black-hole server: it drains inbound bytes and NEVER responds, holding its
-    // write half so the client never sees EOF (distinct from the Closed case).
-    let (client, server) = tokio::io::duplex(64 * 1024);
-    let (mut sr, sw) = tokio::io::split(server);
-    let black_hole = tokio::spawn(async move {
-        let _keep_write_open = sw; // never respond; never EOF the client
-        let mut chunk = [0u8; 8192];
-        loop {
-            match sr.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => { /* drain, never answer */ }
+    async fn assert_times_out_at_exactly(bound: Duration) {
+        // A black-hole server: it drains inbound bytes and NEVER responds, holding its
+        // write half so the client never sees EOF (distinct from the Closed case).
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (mut sr, sw) = tokio::io::split(server);
+        let black_hole = tokio::spawn(async move {
+            let _keep_write_open = sw; // never respond; never EOF the client
+            let mut chunk = [0u8; 8192];
+            loop {
+                match sr.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => { /* drain, never answer */ }
+                }
             }
-        }
-    });
+        });
 
-    let (cr, cw) = tokio::io::split(client);
-    let conn = JsonRpcConnection::connect(cr, cw);
-    let overlays = StdMutex::new(HashSet::new());
-    let taint = StdMutex::new(HashSet::new());
-    let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
+        let (cr, cw) = tokio::io::split(client);
+        let conn = JsonRpcConnection::connect(cr, cw);
+        let overlays = StdMutex::new(HashSet::new());
+        let taint = StdMutex::new(HashSet::new());
+        let channel = CarrierInjectionChannel::new(&conn, &overlays, &taint);
 
-    let started = tokio::time::Instant::now();
-    // The OUTER guard proves the barrier does not hang (a pre-timeout sync_overlay would
-    // block until this 5s guard fired); the INNER 50ms bound is what must actually fire.
-    let err = tokio::time::timeout(
-        Duration::from_secs(5),
-        channel.sync_overlay_with_timeout("file:///ws/Slow.vue.tsx", Duration::from_millis(50)),
-    )
-    .await
-    .expect("the bounded barrier must resolve well within the outer guard — never hang")
-    .expect_err("a barrier that never round-trips within its bound must FAIL, not return Ok");
-    assert!(
-        matches!(err, TsgoApiError::Timeout(_)),
-        "the fail-closed barrier must surface TsgoApiError::Timeout, got {err:?}"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "the barrier must fail closed within its small bound, not the outer guard"
-    );
+        let start = tokio::time::Instant::now();
+        let err = channel
+            .sync_overlay_with_timeout("file:///ws/Slow.vue.tsx", bound)
+            .await
+            .expect_err(
+                "a barrier that never round-trips within its bound must FAIL, not return Ok",
+            );
+        assert_eq!(
+            tokio::time::Instant::now(),
+            start + bound,
+            "the fail-closed barrier must fire at EXACTLY its own configured bound \
+             ({bound:?}) — any other elapsed value means the implementation is not \
+             honoring the `timeout` argument"
+        );
+        assert!(
+            matches!(err, TsgoApiError::Timeout(_)),
+            "the fail-closed barrier must surface TsgoApiError::Timeout, got {err:?}"
+        );
 
-    conn.close().await.unwrap();
-    let _ = black_hole.await;
+        conn.close().await.unwrap();
+        let _ = black_hole.await;
+    }
+
+    assert_times_out_at_exactly(Duration::from_millis(50)).await;
+    assert_times_out_at_exactly(Duration::from_millis(200)).await;
 }
 
 // ────────────────────────────────────────────────────────────────────────────

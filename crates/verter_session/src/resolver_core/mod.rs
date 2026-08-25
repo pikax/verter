@@ -2127,6 +2127,14 @@ where
     /// builds (the field exists only under `cfg(test)`).
     #[cfg(test)]
     non_retained_seam_hook: SeamHookSlot,
+    /// TEST-ONLY: each joiner sends once immediately before parking on
+    /// the flight condvar, so a test waits on an exact park receipt
+    /// instead of polling `test_flight_strong_count`. UNBOUNDED: the
+    /// send happens with the flight state mutex held, and the wait loop
+    /// can re-park, so a bounded channel could block a joiner under
+    /// that lock.
+    #[cfg(test)]
+    joiner_park_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 #[derive(Debug)]
@@ -2288,6 +2296,8 @@ where
             flights: Mutex::new(FlightTable::default()),
             #[cfg(test)]
             non_retained_seam_hook: SeamHookSlot::default(),
+            #[cfg(test)]
+            joiner_park_tx: Mutex::new(None),
         }
     }
 }
@@ -2614,8 +2624,20 @@ where
                     // in the block above; any thread that reaches the loop in
                     // `Pending` state is racing a sibling that is about to
                     // claim leadership — wait for the transition.
-                    FlightInner::Pending => state.ready.wait(&mut inner),
-                    FlightInner::Running { .. } => state.ready.wait(&mut inner),
+                    FlightInner::Pending => {
+                        #[cfg(test)]
+                        if let Some(tx) = self.joiner_park_tx.lock().clone() {
+                            let _ = tx.send(());
+                        }
+                        state.ready.wait(&mut inner)
+                    }
+                    FlightInner::Running { .. } => {
+                        #[cfg(test)]
+                        if let Some(tx) = self.joiner_park_tx.lock().clone() {
+                            let _ = tx.send(());
+                        }
+                        state.ready.wait(&mut inner)
+                    }
                     FlightInner::Done(result) => {
                         let result = result.clone();
                         drop(inner);
@@ -2683,6 +2705,16 @@ where
             .get(&lane_key)
             .map(Arc::strong_count)
             .unwrap_or(0)
+    }
+
+    /// TEST-ONLY: each joiner sends once immediately before parking on
+    /// the flight condvar. Interest must be armed before followers are
+    /// spawned.
+    #[cfg(test)]
+    pub fn subscribe_joiner_park(&self) -> std::sync::mpsc::Receiver<()> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        *self.joiner_park_tx.lock() = Some(tx);
+        rx
     }
 
     /// **Test-only.** Install the non-retained seam hook (see
@@ -3754,6 +3786,7 @@ mod tests {
             session: Some(SESSION_ID),
             validity_fingerprint: 0,
         };
+        let parked = singleflight.subscribe_joiner_park();
         let leader_baseline = singleflight.test_flight_strong_count(&"node".to_string(), run_lane);
         assert_eq!(
             leader_baseline, 3,
@@ -3780,47 +3813,14 @@ mod tests {
             })
         };
 
-        // Wait until the straggler has provably committed INTO
-        // `run_retaining` on the leader's lane — past its pre-flight
-        // `try_get_cached` peek — so it joins the in-flight leader as a
-        // Follower rather than reading a warm cache hit the leader is about
-        // to publish. Poll the run-lane strong count deterministically
-        // instead of sleeping a fixed wall-clock duration.
-        //
-        // The straggler adds its refs in TWO distinct steps, and only the
-        // SECOND proves it is past its cache peek:
-        //   +1 its `participate` guard clone — taken at the top of
-        //      `run_stable_request`, BEFORE the line-619 `try_get_cached`
-        //      peek (`leader_baseline + 1`). This alone does NOT prove the
-        //      straggler has missed the cache.
-        //   +1 its `run_retaining` clone — taken AFTER the peek, as it joins
-        //      the Running lane and parks on the condvar as a
-        //      Follower-in-waiting (`leader_baseline + 2`).
-        // Gating on `leader_baseline + 2` is therefore the off-by-one-free
-        // condition: it fires ONLY once the straggler holds BOTH refs, i.e.
-        // it has provably passed its peek and committed as a Follower, so the
-        // leader's `store_stable` publish below cannot turn the straggler
-        // into a pre-flight `Cache` hit. (The previous gate fired at the
-        // straggler's `participate` step — `leader_baseline + 1` == 4 — which
-        // let the leader publish while the straggler was still BEFORE its
-        // peek, producing the intermittent `Cache`-instead-of-`Follower`
-        // flake under CPU contention.)
-        let mut spins = 0;
-        loop {
-            let count = singleflight.test_flight_strong_count(&"node".to_string(), run_lane);
-            if count >= leader_baseline + 2 {
-                break;
-            }
-            spins += 1;
-            assert!(
-                spins < 10_000_000,
-                "straggler never committed into `run_retaining` on the `session: Some(id)` run \
-                 lane (count stuck below leader_baseline + 2). This means the straggler \
-                 pinned/joined a DIFFERENT lane than the leader's run lane (P1a: pin lane \
-                 drifted off the run lane).",
+        // Wait until the straggler has parked on the leader's condvar —
+        // that send fires after the cache peek, as a Follower-in-waiting.
+        parked
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect(
+                "straggler never parked on the leader's run lane (P1a: pin lane \
+                 drifted off the run lane)",
             );
-            std::thread::yield_now();
-        }
 
         // Release the leader; both requests complete.
         {
@@ -4542,11 +4542,6 @@ mod tests {
 
         const N_FOLLOWERS: usize = 4;
         const SUCCESS_VALUE: usize = 77;
-        // Total strong refs on the lane once all followers are parked as
-        // waiters while the leader is mid-compute:
-        //   1 leader's `state` binding + 1 map entry
-        // + N_FOLLOWERS run-claim clones (each parked follower holds one).
-        const FOLLOWERS_COMMITTED_COUNT: usize = 2 + N_FOLLOWERS;
 
         let group = Arc::new(SingleflightGroup::<String, usize, &'static str>::default());
         let token = StoreViewCompatToken {
@@ -4556,9 +4551,10 @@ mod tests {
         };
         let leader_in_compute = Arc::new((Mutex::new(false), Condvar::new()));
         let recompute_count = Arc::new(AtomicUsize::new(0));
+        let parked = group.subscribe_joiner_park();
 
-        // Leader: enters `compute`, waits until every follower has committed
-        // as a waiter on its lane, then PANICS.
+        // Leader: enters `compute`, waits until every follower has parked
+        // on its lane, then PANICS.
         let leader = {
             let group = Arc::clone(&group);
             let leader_in_compute = Arc::clone(&leader_in_compute);
@@ -4574,19 +4570,12 @@ mod tests {
                             *lock.lock() = true;
                             cv.notify_all();
                         }
-                        // Wait until all followers are parked as waiters on
-                        // this lane, so the abort genuinely has to WAKE
-                        // committed waiters (the exact deadlock surface).
-                        let mut spins = 0;
-                        while group.test_flight_strong_count(&"node".to_string(), token)
-                            < FOLLOWERS_COMMITTED_COUNT
-                        {
-                            spins += 1;
-                            assert!(
-                                spins < 10_000_000,
-                                "followers never committed onto the leader's lane",
-                            );
-                            std::thread::yield_now();
+                        for i in 0..N_FOLLOWERS {
+                            parked
+                                .recv_timeout(std::time::Duration::from_secs(30))
+                                .unwrap_or_else(|_| {
+                                    panic!("follower {i} never parked on the leader's lane")
+                                });
                         }
                         panic!("leader compute boom");
                     },

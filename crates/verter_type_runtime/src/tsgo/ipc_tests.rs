@@ -479,34 +479,65 @@ async fn an_answered_request_emits_no_cancellation() {
 /// The hop must be bounded by the caller's ambient request deadline, not by its
 /// own configured timeout, whenever the deadline is tighter. This is what makes
 /// the inner bound fire first and the failure attribute to the engine.
-#[tokio::test]
+///
+/// The invariant is "fires at EXACTLY the ambient deadline (400ms)", not
+/// merely "fires before some generous outer guard". A wall-clock outer guard
+/// (even 25x the deadline) cannot discriminate that: an implementation that
+/// ignores the ambient deadline but happens to have some OTHER hardcoded
+/// timeout comfortably under the guard — e.g. a 5s fallback — would still
+/// pass, having never actually honored the 400ms budget under test, and
+/// still produce a "timed out" error string either way.
+///
+/// Runs on tokio's PAUSED virtual clock instead and asserts elapsed virtual
+/// time is EXACTLY the ambient deadline. With nothing else in this fixture
+/// ever answering the request (the receiver side of `stdin_tx` is dropped),
+/// the ONLY timer that can fire is whichever bound is actually wired up —
+/// the 400ms ambient deadline if correct, or a hardcoded fallback if not —
+/// and the exact elapsed value tells them apart with zero wall-clock cost
+/// even if the fallback were the full 30s configured timeout.
+#[tokio::test(start_paused = true)]
 async fn a_hop_times_out_inside_the_callers_request_deadline() {
     let (stdin_tx, _stdin_rx) = mpsc::channel(16);
     let pending = Arc::new(PendingRequests::default());
     let transport = test_transport_with_pending(stdin_tx, Arc::clone(&pending));
 
-    let started = std::time::Instant::now();
-    // Configured timeout 30s; ambient deadline 400ms. The deadline must win.
-    let result = crate::deadline::with_deadline(
-        std::time::Duration::from_millis(400),
-        transport.request_with_priority(
-            "textDocument/hover",
-            serde_json::json!({}),
-            Some(30),
-            ProviderPriority::Interactive,
+    let deadline = std::time::Duration::from_millis(400);
+    let start = tokio::time::Instant::now();
+    // A generous outer hang-guard: under paused time this costs nothing when
+    // the deadline fires correctly (its own timer is the earliest pending
+    // one), but still catches the degenerate case of a hop that arms NO
+    // timer at all (a genuine deadlock, which the virtual clock alone cannot
+    // auto-advance past) rather than hanging the test for real.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        crate::deadline::with_deadline(
+            deadline,
+            transport.request_with_priority(
+                "textDocument/hover",
+                serde_json::json!({}),
+                Some(30),
+                ProviderPriority::Interactive,
+            ),
         ),
     )
-    .await;
-    let elapsed = started.elapsed();
+    .await
+    .expect("the hop must not hang — no timer fired at all");
+    // The hop reserves `HOP_MARGIN` below the ambient deadline for its own
+    // cleanup (crate::deadline::hop_budget), so the correct fire point is
+    // `deadline - HOP_MARGIN`, not the bare deadline itself.
+    let expected_bound = deadline - crate::deadline::HOP_MARGIN;
+    assert_eq!(
+        tokio::time::Instant::now(),
+        start + expected_bound,
+        "the hop must fire at EXACTLY the ambient deadline minus its reserved \
+         margin ({expected_bound:?}) — any other elapsed value means it fired \
+         from some other (e.g. hardcoded) bound instead of the deadline under test"
+    );
 
     let err = result.expect_err("an unanswered hop must fail, never hang");
     assert!(
         err.to_string().contains("timed out"),
         "the failure must attribute to the provider hop timing out, got: {err}"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_millis(400),
-        "the hop must fire strictly INSIDE the request deadline, took {elapsed:?}"
     );
     assert_eq!(
         pending.len(),

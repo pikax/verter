@@ -37,6 +37,51 @@ fn pid(b: u8) -> ProjectIdentity {
     ProjectIdentity([b; 16])
 }
 
+/// Drive `fut` until it has fired the gate-parked witness and then stayed
+/// `Pending`. The witness fires immediately before `gate.lock().await`.
+///
+/// On a `#[tokio::test]` current-thread runtime, a drive that CAN complete
+/// without waiting on the gate WILL complete the next time it is polled —
+/// the Change/Close sink in these tests is instant. A drive that is
+/// genuinely parked on `gate.lock()` stays `Pending`. The Notify is the
+/// readiness receipt; the timeout is only a hang watchdog.
+async fn poll_until_pending_behind_gate<F>(
+    fut: &mut std::pin::Pin<&mut F>,
+    parked: &tokio::sync::Notify,
+) where
+    F: std::future::Future,
+{
+    use std::future::Future;
+    use std::task::{Context, Poll};
+    let notified = parked.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        std::future::poll_fn(|cx: &mut Context<'_>| {
+            if notified.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            match fut.as_mut().poll(cx) {
+                Poll::Ready(_) => panic!(
+                    "drive completed while another op still holds the per-carrier \
+                     gate — it did not block on the gate"
+                ),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await;
+        match futures_util::poll!(fut.as_mut()) {
+            Poll::Ready(_) => panic!(
+                "drive signalled gate-park and then completed without \
+                 waiting on the gate"
+            ),
+            Poll::Pending => {}
+        }
+    })
+    .await
+    .expect("drive never parked on the per-carrier gate");
+}
+
 fn env_dims(identity: ProjectIdentity) -> EnvDims {
     EnvDims {
         parse_env_hash: [1u8; 16],
@@ -1163,17 +1208,18 @@ async fn concurrent_open_and_change_orders_open_barrier_before_change() {
     open_entered.notified().await;
 
     // B: a concurrent CHANGE (v2) — must BLOCK on the per-carrier gate until A's Open
-    // barrier completes (no didChange races ahead of the didOpen).
-    let b = {
-        let state = Arc::clone(&state);
-        let sink = make_sink();
-        tokio::spawn(async move {
-            state
-                .drive(carrier, PendingKind::Inject(Arc::from("v2")), sink)
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // barrier completes (no didChange races ahead of the didOpen). B is polled from
+    // THIS task, not spawned: on the current-thread runtime a drive that can complete
+    // without the gate Ready's on poll, and a drive parked on `gate.lock()` stays
+    // Pending. See `poll_until_pending_behind_gate`.
+    let state_for_b = Arc::clone(&state);
+    let sink_b = make_sink();
+    let mut b = std::pin::pin!(async move {
+        state_for_b
+            .drive(carrier, PendingKind::Inject(Arc::from("v2")), sink_b)
+            .await
+    });
+    poll_until_pending_behind_gate(&mut b, state.gate_parked_notify()).await;
     assert_eq!(
         *record.lock().unwrap(),
         vec!["open:v1".to_string()],
@@ -1184,7 +1230,7 @@ async fn concurrent_open_and_change_orders_open_barrier_before_change() {
     // Release A's Open barrier: A commits, then B proceeds with the latest content.
     release_open.notify_one();
     a.await.unwrap().expect("open ok");
-    b.await.unwrap().expect("change ok");
+    b.await.expect("change ok");
 
     assert_eq!(
         *record.lock().unwrap(),
@@ -1263,21 +1309,22 @@ async fn failed_first_open_does_not_drop_a_later_committed_change() {
     open_entered.notified().await;
 
     // B: a concurrent CHANGE (v2), blocked on the gate behind A's failing first-open.
-    let b = {
-        let state = Arc::clone(&state);
-        let sink = make_sink();
-        tokio::spawn(async move {
-            state
-                .drive(carrier, PendingKind::Inject(Arc::from("v2")), sink)
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Poll B's future on this current-thread runtime until it is Pending behind
+    // the gate (see `poll_until_pending_behind_gate`): a broken non-gated drive
+    // would Ready on that poll rather than slip through a 300ms window.
+    let state_for_b = Arc::clone(&state);
+    let sink_b = make_sink();
+    let mut b = std::pin::pin!(async move {
+        state_for_b
+            .drive(carrier, PendingKind::Inject(Arc::from("v2")), sink_b)
+            .await
+    });
+    poll_until_pending_behind_gate(&mut b, state.gate_parked_notify()).await;
 
     // Release A: its first-open barrier FAILS → retract + drop the slot; THEN B runs.
     release_open.notify_one();
     let a_res = a.await.unwrap();
-    let b_res = b.await.unwrap();
+    let b_res = b.await;
     assert!(
         a_res.is_err(),
         "the failed first-open surfaces its error (fail-closed)"
@@ -1460,13 +1507,13 @@ async fn close_is_ordered_through_the_gate_behind_an_in_flight_open() {
     open_entered.notified().await;
 
     // B: a concurrent CLOSE — must BLOCK on the per-carrier gate until A's Open barrier
-    // completes (no didClose interleaved with the in-flight didOpen).
-    let b = {
-        let state = Arc::clone(&state);
-        let sink = make_sink();
-        tokio::spawn(async move { state.drive(carrier, PendingKind::Close, sink).await })
-    };
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // completes (no didClose interleaved with the in-flight didOpen). Poll B's future
+    // until it is Pending behind the gate; a broken non-gated close would Ready.
+    let state_for_b = Arc::clone(&state);
+    let sink_b = make_sink();
+    let mut b =
+        std::pin::pin!(async move { state_for_b.drive(carrier, PendingKind::Close, sink_b).await });
+    poll_until_pending_behind_gate(&mut b, state.gate_parked_notify()).await;
     assert_eq!(
         *record.lock().unwrap(),
         vec!["open:v1".to_string()],
@@ -1477,7 +1524,7 @@ async fn close_is_ordered_through_the_gate_behind_an_in_flight_open() {
     // Release A's Open barrier: A commits (slot open + synced), then B closes it.
     release_open.notify_one();
     a.await.unwrap().expect("open ok");
-    b.await.unwrap().expect("close ok");
+    b.await.expect("close ok");
 
     // The final wire order is open THEN close (ordered), and the carrier is CLOSED —
     // never reopened after the committed close.
@@ -1633,23 +1680,21 @@ async fn close_does_not_prune_when_a_newer_op_is_queued() {
     };
     close_entered.notified().await;
 
-    // B: a REOPEN queued behind the in-flight close (records its pending op + fetches
-    // the gate Arc, then blocks on the gate).
-    let b = {
-        let state = Arc::clone(&state);
-        let sink = make_sink();
-        tokio::spawn(async move {
-            state
-                .drive(carrier, PendingKind::Inject(Arc::from("v2")), sink)
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // B: a REOPEN queued behind the in-flight close. Poll B's future until it is
+    // Pending behind the gate; a broken non-gated reopen would Ready.
+    let state_for_b = Arc::clone(&state);
+    let sink_b = make_sink();
+    let mut b = std::pin::pin!(async move {
+        state_for_b
+            .drive(carrier, PendingKind::Inject(Arc::from("v2")), sink_b)
+            .await
+    });
+    poll_until_pending_behind_gate(&mut b, state.gate_parked_notify()).await;
 
     // Release the close: it must NOT prune the gate/pending because B is queued.
     release_close.notify_one();
     a.await.unwrap().expect("close ok");
-    b.await.unwrap().expect("reopen ok");
+    b.await.expect("reopen ok");
 
     // B reopened the carrier — the queued op survived the close (never orphaned onto a
     // fresh gate Arc).
@@ -2445,18 +2490,29 @@ async fn coalesced_away_no_drain_prunes_idle_gate_and_pending_state() {
     // D then E: two more closes queued behind A on the SAME gate. Each records its pending op
     // (raising the newest seq) and blocks on the gate; their eventual drains find the slot
     // already retracted (no sink call), so only A ever blocks. D is queued before E (FIFO).
+    // The gate-park witness fires immediately before `gate.lock().await`, so
+    // awaiting it is exact proof that the drive reached the gate. Registering
+    // interest before each spawn, and awaiting D's park before spawning E,
+    // also fixes their FIFO order — which a pair of sleeps only made likely.
+    let parked = state.gate_parked_notify();
+    let d_parked = parked.notified();
+    tokio::pin!(d_parked);
+    d_parked.as_mut().enable();
     let d = {
         let state = Arc::clone(&state);
         let sink = make_sink();
         tokio::spawn(async move { state.drive(carrier, PendingKind::Close, sink).await })
     };
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    d_parked.await;
+    let e_parked = parked.notified();
+    tokio::pin!(e_parked);
+    e_parked.as_mut().enable();
     let e = {
         let state = Arc::clone(&state);
         let sink = make_sink();
         tokio::spawn(async move { state.drive(carrier, PendingKind::Close, sink).await })
     };
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    e_parked.await;
 
     // While A holds the gate and D, E wait, the carrier is served by exactly ONE gate — never
     // split across two live gates.
@@ -2510,12 +2566,11 @@ async fn coalesced_away_no_drain_prunes_idle_gate_and_pending_state() {
 /// releasing the gate. The internal wrapper honouring the injected short bound is what returns
 /// `Err` in-test, so the assertions below observe the internal timeout firing rather than an
 /// outer deadline.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn bounded_close_internal_timeout_fires_and_releases_gate() {
-    use std::time::Instant;
-
     // A SHORT injected close bound — the internal wrapper must honour it, not the 10s default.
-    let state = CarrierSyncState::with_close_barrier_bound(Duration::from_millis(50));
+    let bound = Duration::from_millis(50);
+    let state = CarrierSyncState::with_close_barrier_bound(bound);
     let carrier = "/ws/WedgedClose.vue.tsx";
 
     // Open + commit so the close has an open slot to retract (the close reaches the sink).
@@ -2529,8 +2584,8 @@ async fn bounded_close_internal_timeout_fires_and_releases_gate() {
         .expect("open ok");
 
     // A close whose `didClose` NEVER resolves — driven with NO outer deadline. The INTERNAL bound
-    // is the ONLY thing that can return it.
-    let start = Instant::now();
+    // is the ONLY thing that can return it. Paused clock: elapsed virtual time is EXACTLY `bound`.
+    let start = tokio::time::Instant::now();
     let closed = state
         .drive(
             carrier,
@@ -2543,16 +2598,15 @@ async fn bounded_close_internal_timeout_fires_and_releases_gate() {
             },
         )
         .await;
-    let elapsed = start.elapsed();
 
     assert!(
         closed.is_err(),
         "a never-answering close must fail closed via the INTERNAL bound (never hang)"
     );
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "the internal ~50ms bound fired, not the 10s default or an unbounded await; elapsed \
-         {elapsed:?}"
+    assert_eq!(
+        tokio::time::Instant::now(),
+        start + bound,
+        "the internal bound must fire at EXACTLY {bound:?}, not the 10s default or an unbounded await"
     );
     // The slot stays a reconcilable PossiblyOpenUnsynced shell — never Vacant, never served.
     assert!(

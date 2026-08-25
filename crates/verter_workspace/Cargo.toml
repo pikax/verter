@@ -19,6 +19,10 @@ currency_probe = []
 # (Testing-Hermeticity): excluded from the default canonical run; enable
 # explicitly with `--features external-corpus`.
 external-corpus = []
+# Test-only observation seams (currently the snapshot-publication receipt).
+# Off by default; requested by dependent crates' dev-dependencies so a
+# cross-crate test can see a seam `cfg(test)` on THIS crate would hide.
+test-support = []
 
 [dependencies]
 verter_debug_assert = { workspace = true }

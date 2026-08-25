@@ -798,7 +798,7 @@ pub(crate) fn await_imported_registry_post_peek_barrier_for_tests(canonical_id: 
 /// later arrival is forced onto the joiner branch) and BEFORE it runs
 /// the resolution / publishes / retires the slot. The test releases the
 /// winner only once it has PROVEN, via
-/// [`InflightTable::slot_strong_count`](crate::cooperative_admission::InflightTable::slot_strong_count),
+/// [`InflightTable::subscribe_joiner_park`](crate::cooperative_admission::InflightTable::subscribe_joiner_park),
 /// that all `WORKERS - 1` joiners have coalesced onto the winner's slot.
 /// No worker is then left mid-flight between its map miss and its slot
 /// claim, so no second winner can form: exactly one resolution runs and

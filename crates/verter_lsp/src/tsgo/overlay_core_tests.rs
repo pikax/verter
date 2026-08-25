@@ -186,15 +186,19 @@ async fn lifecycle_record_does_not_block_on_establishment() {
     // Wait until the establishment is in flight (blocked).
     establishing.notified().await;
 
-    // The OWNED lifecycle content record must NOT block behind the in-flight SHARED
-    // establishment — it is OFF the OWNED critical path.
-    let start = tokio::time::Instant::now();
-    core.record_content("/ws/Foo.vue.tsx", "v1");
-    let elapsed = start.elapsed();
+    // Causal proof, not a timing sample: `record_content` is a sync map insert
+    // that MUST return while establishment is still blocked. If it joined the
+    // in-flight `ensure`, it would not return until `release` fires — and this
+    // assertion would be unreachable. Averaging 2,000 calls hid a first-call
+    // join behind later cheap inserts.
+    core.record_content("/ws/Foo.vue.tsx", "v0");
     assert!(
-        elapsed < Duration::from_millis(250),
-        "the lifecycle content record must NOT block on an in-flight SHARED establishment \
-         (off the OWNED critical path); took {elapsed:?}"
+        !bg.is_finished(),
+        "record_content must not complete the blocked SHARED establishment"
+    );
+    assert!(
+        core.current().await.is_none(),
+        "record_content must not establish a transport (off the OWNED critical path)"
     );
 
     // Let the background establishment finish so the test task exits cleanly.
@@ -553,7 +557,7 @@ async fn failed_dirty_injection_is_not_synced_so_query_fails_closed() {
 ///
 /// RED before the fix: `feed_close` awaited an UNBOUNDED `transport.retract`, so a
 /// never-answering relay hung the composite `close_file` (degrading the OWNED lifecycle).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn retract_is_bounded_when_the_relay_close_never_answers() {
     let core = LazyOverlayCore::<FakeTransport>::new();
     core.record_content("/ws/Foo.vue.tsx", "v1");
@@ -571,15 +575,15 @@ async fn retract_is_bounded_when_the_relay_close_never_answers() {
         .await
         .expect("establishes");
 
-    // The retract never answers; `retract_bounded` must return within its SHORT bound.
+    // The retract never answers; `retract_bounded` must return at its SHORT
+    // bound on the paused clock — exact Instant, not a wall-clock ceiling.
+    let bound = Duration::from_millis(150);
     let start = tokio::time::Instant::now();
-    core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_millis(150))
-        .await;
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(2),
-        "a never-answering relay close must NOT hang the composite close (bounded, \
-         fail-closed); took {elapsed:?}"
+    core.retract_bounded("/ws/Foo.vue.tsx", bound).await;
+    assert_eq!(
+        tokio::time::Instant::now(),
+        start + bound,
+        "a never-answering relay close must fail closed at EXACTLY its bound"
     );
 
     // The recorded content is dropped regardless — the carrier is closed locally.
@@ -1801,7 +1805,7 @@ async fn stale_close_after_a_reconnect_does_not_retract_on_the_new_transport() {
 /// This guards against a regression where the gate acquisition is placed OUTSIDE the
 /// deadline (additive/unbounded): with the gate held forever, such an impl blocks the close
 /// indefinitely, while the correct impl returns at the deadline.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn retract_bounded_respects_the_close_deadline_when_the_gate_is_held() {
     let core = Arc::new(LazyOverlayCore::<FakeTransport>::new());
     core.record_content("/ws/Foo.vue.tsx", "v1");
@@ -1812,25 +1816,26 @@ async fn retract_bounded_respects_the_close_deadline_when_the_gate_is_held() {
     let gate = core.carrier_gate("/ws/Foo.vue.tsx");
     let held = gate.lock().await;
 
+    let bound = Duration::from_millis(150);
     let start = tokio::time::Instant::now();
     let close = {
         let core = Arc::clone(&core);
         tokio::spawn(async move {
-            core.retract_bounded("/ws/Foo.vue.tsx", Duration::from_millis(150))
-                .await;
+            core.retract_bounded("/ws/Foo.vue.tsx", bound).await;
         })
     };
-    // A correct impl returns ~150ms (deadline); a regression acquiring the gate OUTSIDE the
-    // deadline blocks forever on the held gate. Bound the observation well below "forever".
+    // Watchdog: 2s virtual. A correct impl returns at the 150ms Instant
+    // without acquiring `held`. Completing while we still hold the gate
+    // is the structural proof it did not wait on the mutex.
     let outcome = tokio::time::timeout(Duration::from_secs(2), close).await;
     assert!(
         outcome.is_ok(),
         "retract_bounded exceeded its close deadline (the held gate acquisition was not bounded)"
     );
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "the held carrier gate must not let the close exceed its original deadline; took {elapsed:?}"
+    assert_eq!(
+        tokio::time::Instant::now(),
+        start + bound,
+        "the held carrier gate must fail closed at EXACTLY the original deadline"
     );
     drop(held);
 }

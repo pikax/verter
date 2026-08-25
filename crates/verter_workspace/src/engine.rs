@@ -406,6 +406,15 @@ pub(crate) struct Engine {
     /// `background_init` builds the full project graph, a real snapshot with
     /// `ownership_ready: true` is published.
     pub(crate) published_state: ArcSwapOption<PublishedRoot>,
+    /// TEST-ONLY: each publish sends the new snapshot generation so a
+    /// waiter observes an exact publication receipt instead of polling
+    /// `load_published`. UNBOUNDED on purpose — this send happens inside
+    /// `mutate_resolution_world`, so a bounded channel with an armed but
+    /// undrained receiver would stall a publish while the resolution world
+    /// is locked. Gated to `test` / the opt-in `test-support` feature, so
+    /// no production build carries the slot or the send.
+    #[cfg(any(test, feature = "test-support"))]
+    published_tx: Mutex<Vec<std::sync::mpsc::Sender<u64>>>,
 
     /// Per-project ambient TypeScript lib registry.
     ///
@@ -513,6 +522,8 @@ impl Engine {
             dir_index: RwLock::new(DirIndex::new()),
             vfs_provenance: VfsProvenance::default(),
             published_state: ArcSwapOption::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            published_tx: Mutex::new(Vec::new()),
             ambient_libs: ArcSwap::from_pointee(AmbientLibsByProject::default()),
             default_resolve_extensions: ArcSwap::from_pointee(initial_extensions),
             workspace_default_env_hashes: ArcSwapOption::new(None),
@@ -610,11 +621,35 @@ impl Engine {
         self.mutate_resolution_world(|world| {
             let root = Arc::new(root);
             self.published_state.store(Some(Arc::clone(&root)));
+            #[cfg(any(test, feature = "test-support"))]
+            self.notify_published(root.snapshot.generation.0);
             world.replace_published(root, &self.registered_session_context_keys(), || {
                 self.next_resolution_fact_version()
             });
             ((), true)
         });
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn notify_published(&self, generation: u64) {
+        // Every live subscriber gets the receipt; a dropped receiver makes its
+        // sender fail and is pruned here.
+        self.published_tx
+            .lock()
+            .retain(|tx| tx.send(generation).is_ok());
+    }
+
+    /// TEST-ONLY: subscribe to snapshot publications. Arm before the
+    /// publish that should wake the waiter; a publication that already
+    /// landed is observed by `load_published` first.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn subscribe_published(&self) -> std::sync::mpsc::Receiver<u64> {
+        // Subscribers ACCUMULATE. A single-slot design silently orphans an
+        // earlier waiter the moment a test subscribes twice, which surfaces as
+        // an unexplained hang rather than an error.
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.published_tx.lock().push(tx);
+        rx
     }
 
     pub(crate) fn current_content_generation(&self) -> u64 {
@@ -2319,6 +2354,8 @@ impl Engine {
                 project_identity_hashes,
             ));
             self.published_state.store(Some(Arc::clone(&published)));
+            #[cfg(any(test, feature = "test-support"))]
+            self.notify_published(published.snapshot.generation.0);
             world.replace_published(published, &self.registered_session_context_keys(), || {
                 self.next_resolution_fact_version()
             });

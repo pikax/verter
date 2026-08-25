@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::{service_fs_callback, spawn_actor, CancelToken, RequestOptions};
+use super::{service_fs_callback, spawn_actor, ActorRequest, CancelToken, RequestOptions};
 use crate::lane::Lane;
 use crate::proto::frame::{decode_frame, encode_frame, MessageType};
 use crate::snapshot::OverlaySnapshot;
@@ -66,6 +66,7 @@ async fn a_request_deadline_times_out_terminates_and_ends_the_actor() {
     struct WedgedTransport {
         sent: mpsc::Sender<Vec<u8>>,
         terminated: Arc<AtomicBool>,
+        terminated_notify: Arc<tokio::sync::Notify>,
     }
 
     impl super::transport::DuplexTransport for WedgedTransport {
@@ -83,18 +84,20 @@ async fn a_request_deadline_times_out_terminates_and_ends_the_actor() {
 
         async fn terminate(&mut self) {
             self.terminated.store(true, Ordering::SeqCst);
+            self.terminated_notify.notify_waiters();
         }
     }
 
     let terminated = Arc::new(AtomicBool::new(false));
+    let terminated_notify = Arc::new(tokio::sync::Notify::new());
     let (outbound_tx, mut to_engine) = mpsc::channel::<Vec<u8>>(64);
     let transport = WedgedTransport {
         sent: outbound_tx,
         terminated: Arc::clone(&terminated),
+        terminated_notify: Arc::clone(&terminated_notify),
     };
     let handle = spawn_actor(transport, OverlaySnapshot::builder().build(), 8);
 
-    let start = std::time::Instant::now();
     let err = handle
         .request(
             "initialize",
@@ -111,11 +114,16 @@ async fn a_request_deadline_times_out_terminates_and_ends_the_actor() {
         matches!(err, TsgoApiError::Timeout(_)),
         "the bounded failure must be a Timeout, got {err:?}"
     );
-    assert!(
-        start.elapsed() < Duration::from_secs(5),
-        "the deadline must actually fire: {:?}",
-        start.elapsed()
-    );
+    if !terminated.load(Ordering::SeqCst) {
+        let notified = terminated_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !terminated.load(Ordering::SeqCst) {
+            tokio::time::timeout(Duration::from_secs(5), notified)
+                .await
+                .expect("an admitted deadline must terminate the transport");
+        }
+    }
     assert!(
         terminated.load(Ordering::SeqCst),
         "the deadline must terminate the transport (the engine teardown)"
@@ -300,24 +308,325 @@ async fn cancel_in_flight_resolves_cancelled_and_drains_response() {
     let tok = CancelToken::new();
     let tok2 = tok.clone();
 
-    // Engine: receive the request, then delay before responding. We cancel in
-    // the gap.
+    // Deterministic ordering AND a deterministic observation point:
+    //
+    // (1) Cancel must happen only once the request is genuinely in flight
+    // (received by the engine), not before it is even sent — that earlier
+    // case is `cancel_before_send_skips_the_request`, a different code path.
+    // `received_tx`/`received_rx` proves that ordering.
+    //
+    // (2) The engine sends its (late) response only AFTER `cancelled_rx`
+    // resolves, and the canceller only signals `cancelled_tx` AFTER calling
+    // `tok2.cancel()`. A oneshot channel's send/receive is a real
+    // synchronization edge (not a timing guess), so by the time the actor
+    // reads the response frame off the wire, `tok.is_cancelled()` is
+    // guaranteed to observe `true`.
+    //
+    // (3) Critically, we bypass `ClientHandle::request` and its
+    // `select! { reply_rx, wait_cancelled(tok) }` entirely, observing the
+    // actor's raw reply oneshot directly. Going through `request()` would
+    // reintroduce a genuine, scheduling-dependent race on the CLIENT side:
+    // `wait_cancelled` is a pin-enable-recheck `Notify` loop over
+    // `tok.is_cancelled()`, which — with `biased` ordering — only loses
+    // to `reply_rx` when the actor's send is already ready at the select.
+    // Under normal scheduling the cancel notify frequently wins FIRST
+    // (the engine round-trip above crosses several task-scheduling hops),
+    // so `wait_cancelled` alone can produce `Cancelled` even from the OLD,
+    // buggy `Ok(None) => Ok(())` actor arm that silently dropped the reply
+    // channel — the client-side race can mask the exact bug this test
+    // exists to catch. Awaiting the raw reply channel directly removes that
+    // masking: the assertion below reflects ONLY what the actor itself sent
+    // on the reply channel, unconditionally.
+    let (received_tx, received_rx) = tokio::sync::oneshot::channel::<()>();
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Engine: receive the request, signal it is in flight, then wait for
+    // confirmation that the token has been cancelled before responding, then
+    // serve one more, differently-named request — proving the actor actually
+    // DRAINED (consumed) the late response rather than leaving it on the wire
+    // to be misdelivered as the next request's reply (which would trip the
+    // name-correlation check in `serve_frames`).
     let engine = tokio::spawn(async move {
         let raw = to_engine.recv().await.unwrap();
         let (req, _) = decode_frame(&raw, 0).unwrap();
-        // Give the canceller a moment to trip the token.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = received_tx.send(());
+        cancelled_rx
+            .await
+            .expect("canceller must signal before dropping");
         let resp = encode_frame(MessageType::Response, req.name, b"late");
-        // The actor should drain (discard) this response after cancellation.
+        // The actor must drain (discard) this response after cancellation.
+        let _ = from_engine.send(resp).await;
+
+        let raw2 = to_engine.recv().await.unwrap();
+        let (req2, _) = decode_frame(&raw2, 0).unwrap();
+        assert_eq!(
+            req2.name, b"followUp",
+            "the follow-up request must arrive un-corrupted: a stale late \
+             response left undrained would desync the wire"
+        );
+        let resp2 = encode_frame(MessageType::Response, req2.name, b"ok");
+        from_engine.send(resp2).await.unwrap();
+    });
+
+    let canceller = tokio::spawn(async move {
+        received_rx
+            .await
+            .expect("engine must signal before dropping");
+        tok2.cancel();
+        let _ = cancelled_tx.send(());
+    });
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let req = ActorRequest {
+        method: "getSemanticDiagnostics".to_string(),
+        payload: b"{}".to_vec(),
+        cancel: Some(tok),
+        deadline_at: None,
+        reply: reply_tx,
+    };
+    handle
+        .interactive_tx
+        .send(req)
+        .await
+        .expect("actor lane must accept the request");
+
+    let result = reply_rx
+        .await
+        .expect("the actor must answer the reply channel, not drop it");
+    assert!(
+        matches!(result, Err(crate::error::TsgoApiError::Cancelled)),
+        "cancelled in-flight request must resolve Cancelled on the actor's \
+         own reply channel, got {result:?}"
+    );
+
+    // The wire must be clean: a follow-up request on the SAME handle proves
+    // the actor actually consumed (drained) the late response above, rather
+    // than merely racing the client to a `Cancelled` outcome while leaving
+    // the response frame unread.
+    let follow_up = handle
+        .request("followUp", b"{}".to_vec(), RequestOptions::default())
+        .await
+        .expect("the wire must be clean for the next request after a drained cancellation");
+    assert_eq!(follow_up, b"ok");
+
+    engine.await.unwrap();
+    canceller.await.unwrap();
+}
+
+// ── A THIRD, distinct cancellation entrance: a request cancelled while it is
+//    genuinely QUEUED — enqueued but not yet dequeued by the actor — must be
+//    skipped by the pre-send check in `Actor::run` (mod.rs) rather than
+//    written to the wire. This is neither `cancel_before_send_skips_the_request`
+//    (cancelled before `ClientHandle::request` even enqueues) nor
+//    `cancel_in_flight_resolves_cancelled_and_drains_response` (cancelled after
+//    the request frame is already on the wire). We bypass `ClientHandle::request`
+//    and enqueue an already-cancelled `ActorRequest` directly so there is no
+//    ordering ambiguity about when the cancellation took effect relative to
+//    enqueue; a first "hold" request keeps the actor busy (blocked reading its
+//    response) so the queued, cancelled request cannot be dequeued until we
+//    release the hold — giving full deterministic control with real channel
+//    rendezvous only, no sleeps.
+#[tokio::test]
+async fn cancel_while_queued_is_never_written_to_the_wire() {
+    let (stream, from_engine, mut to_engine) = duplex();
+    let handle = spawn_actor(stream, OverlaySnapshot::builder().build(), 8);
+
+    let (hold_received_tx, hold_received_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let engine = tokio::spawn(async move {
+        // 1. The actor writes the "hold" request; signal it is genuinely
+        // in-flight (blocked reading a response), then wait to be released.
+        let raw = to_engine.recv().await.unwrap();
+        let (req, _) = decode_frame(&raw, 0).unwrap();
+        assert_eq!(req.name, b"hold");
+        let _ = hold_received_tx.send(());
+        release_rx.await.expect("test must release the hold");
+        let resp = encode_frame(MessageType::Response, req.name, b"held");
+        from_engine.send(resp).await.unwrap();
+
+        // 2. The NEXT frame the engine sees must be "followUp" — the
+        // cancelled "toCancel" request must never reach the wire.
+        let raw2 = to_engine.recv().await.unwrap();
+        let (req2, _) = decode_frame(&raw2, 0).unwrap();
+        assert_eq!(
+            req2.name, b"followUp",
+            "a request cancelled while still queued must never be written to \
+             the wire"
+        );
+        let resp2 = encode_frame(MessageType::Response, req2.name, b"ok");
+        from_engine.send(resp2).await.unwrap();
+    });
+
+    let hold_task = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .request("hold", b"{}".to_vec(), RequestOptions::default())
+                .await
+        }
+    });
+
+    // Wait until the actor is genuinely blocked serving "hold" before
+    // queueing the cancelled request — otherwise it could race the actor's
+    // own dequeue and land on the `cancel_before_send_skips_the_request`
+    // path inside `ClientHandle::request` instead of the actor-side check
+    // this test targets.
+    hold_received_rx
+        .await
+        .expect("engine must signal hold is in flight");
+
+    // Enqueue an already-cancelled request directly (bypassing
+    // `ClientHandle::request`'s own pre-submission check) so there is no
+    // ambiguity about when cancellation took effect: the actor can only ever
+    // observe it as already-cancelled once it dequeues.
+    let tok = CancelToken::new();
+    tok.cancel();
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let queued = ActorRequest {
+        method: "toCancel".to_string(),
+        payload: b"{}".to_vec(),
+        cancel: Some(tok),
+        deadline_at: None,
+        reply: reply_tx,
+    };
+    handle
+        .interactive_tx
+        .send(queued)
+        .await
+        .expect("actor lane must accept the queued request");
+
+    // Release the hold: the actor loops back, dequeues the cancelled
+    // request, and must skip it without writing a frame.
+    let _ = release_tx.send(());
+
+    let queued_result = reply_rx
+        .await
+        .expect("the actor must answer the queued reply channel, not drop it");
+    assert!(
+        matches!(queued_result, Err(crate::error::TsgoApiError::Cancelled)),
+        "a request cancelled while queued must resolve Cancelled, got {queued_result:?}"
+    );
+
+    assert_eq!(
+        hold_task
+            .await
+            .unwrap()
+            .expect("the hold request itself must still complete normally"),
+        b"held"
+    );
+
+    // A genuinely fresh request proves the wire is clean: the actor moved
+    // straight from "hold" to "followUp" without ever writing "toCancel".
+    let follow_up = handle
+        .request("followUp", b"{}".to_vec(), RequestOptions::default())
+        .await
+        .expect("the wire must be clean after skipping the queued cancellation");
+    assert_eq!(follow_up, b"ok");
+
+    engine.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancel_in_flight_error_frame_resolves_cancelled() {
+    let (stream, from_engine, mut to_engine) = duplex();
+    let handle = spawn_actor(stream, OverlaySnapshot::builder().build(), 8);
+
+    let tok = CancelToken::new();
+    let tok2 = tok.clone();
+    let (received_tx, received_rx) = tokio::sync::oneshot::channel::<()>();
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let engine = tokio::spawn(async move {
+        let raw = to_engine.recv().await.unwrap();
+        let (req, _) = decode_frame(&raw, 0).unwrap();
+        let _ = received_tx.send(());
+        cancelled_rx
+            .await
+            .expect("canceller must signal before dropping");
+        let err = encode_frame(MessageType::Error, req.name, b"late-error");
+        let _ = from_engine.send(err).await;
+
+        let raw2 = to_engine.recv().await.unwrap();
+        let (req2, _) = decode_frame(&raw2, 0).unwrap();
+        assert_eq!(
+            req2.name, b"followUp",
+            "a cancelled error frame must be drained, not misdelivered"
+        );
+        let resp2 = encode_frame(MessageType::Response, req2.name, b"ok");
+        from_engine.send(resp2).await.unwrap();
+    });
+
+    let canceller = tokio::spawn(async move {
+        received_rx
+            .await
+            .expect("engine must signal before dropping");
+        tok2.cancel();
+        let _ = cancelled_tx.send(());
+    });
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    handle
+        .interactive_tx
+        .send(ActorRequest {
+            method: "getSemanticDiagnostics".to_string(),
+            payload: b"{}".to_vec(),
+            cancel: Some(tok),
+            deadline_at: None,
+            reply: reply_tx,
+        })
+        .await
+        .expect("actor lane must accept the request");
+
+    let result = reply_rx
+        .await
+        .expect("the actor must answer the reply channel, not drop it");
+    assert!(
+        matches!(result, Err(crate::error::TsgoApiError::Cancelled)),
+        "a cancelled in-flight request that completes with an Error frame \
+         must still resolve Cancelled, got {result:?}"
+    );
+
+    let follow_up = handle
+        .request("followUp", b"{}".to_vec(), RequestOptions::default())
+        .await
+        .expect("the wire must be clean after draining a cancelled error frame");
+    assert_eq!(follow_up, b"ok");
+
+    engine.await.unwrap();
+    canceller.await.unwrap();
+}
+
+#[tokio::test]
+async fn cancel_in_flight_via_client_handle_resolves_cancelled() {
+    let (stream, from_engine, mut to_engine) = duplex();
+    let handle = spawn_actor(stream, OverlaySnapshot::builder().build(), 8);
+
+    let tok = CancelToken::new();
+    let tok2 = tok.clone();
+    let (received_tx, received_rx) = tokio::sync::oneshot::channel::<()>();
+    let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let engine = tokio::spawn(async move {
+        let raw = to_engine.recv().await.unwrap();
+        let (req, _) = decode_frame(&raw, 0).unwrap();
+        let _ = received_tx.send(());
+        cancelled_rx
+            .await
+            .expect("canceller must signal before dropping");
+        let resp = encode_frame(MessageType::Response, req.name, b"late");
         let _ = from_engine.send(resp).await;
     });
 
     let canceller = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        received_rx
+            .await
+            .expect("engine must signal before dropping");
         tok2.cancel();
+        let _ = cancelled_tx.send(());
     });
 
-    let err = handle
+    let result = handle
         .request(
             "getSemanticDiagnostics",
             b"{}".to_vec(),
@@ -327,9 +636,13 @@ async fn cancel_in_flight_resolves_cancelled_and_drains_response() {
                 deadline: None,
             },
         )
-        .await
-        .expect_err("cancelled in-flight request resolves to Cancelled");
-    assert!(matches!(err, crate::error::TsgoApiError::Cancelled));
+        .await;
+    assert!(
+        matches!(result, Err(crate::error::TsgoApiError::Cancelled)),
+        "ClientHandle::request must resolve Cancelled via the Notify wake, \
+         not a 2ms poll race, got {result:?}"
+    );
+
     engine.await.unwrap();
     canceller.await.unwrap();
 }
@@ -339,18 +652,25 @@ async fn interactive_lane_drains_before_batch() {
     let (stream, from_engine, mut to_engine) = duplex();
     let handle = spawn_actor(stream, OverlaySnapshot::builder().build(), 8);
 
-    // Engine: respond to each request by echoing its payload, recording the
-    // order methods arrived in.
+    // Engine: record the order methods arrive in and echo a reply. The FIRST
+    // request is held unanswered until the test releases it — that wedge is
+    // what makes the ordering deterministic rather than a race, because it
+    // keeps the actor inside `serve_one` while both lanes fill.
     let order = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
     let order2 = order.clone();
+    let (release_wedge_tx, release_wedge_rx) = tokio::sync::oneshot::channel::<()>();
     let engine = tokio::spawn(async move {
-        for _ in 0..2 {
+        let mut release = Some(release_wedge_rx);
+        for _ in 0..3 {
             let raw = to_engine.recv().await.unwrap();
             let (req, _) = decode_frame(&raw, 0).unwrap();
             order2
                 .lock()
                 .await
                 .push(String::from_utf8_lossy(req.name).into_owned());
+            if let Some(release) = release.take() {
+                release.await.expect("the test releases the wedge");
+            }
             from_engine
                 .send(encode_frame(MessageType::Response, req.name, b"ok"))
                 .await
@@ -358,51 +678,81 @@ async fn interactive_lane_drains_before_batch() {
         }
     });
 
-    // Submit a batch request and an interactive request as fast as possible.
-    // Because the actor biases the interactive lane, when both are queued the
-    // interactive one is served first. To make the race deterministic we hold
-    // the engine by not reading until both are enqueued: we submit batch first
-    // (fills the queue), then interactive, then drive. We assert the actor
-    // picked interactive before batch by checking arrival order is not
-    // "batch-before-interactive" when both were ready.
-    let h2 = handle.clone();
-    let batch = tokio::spawn(async move {
-        h2.request(
-            "batchOp",
-            b"{}".to_vec(),
-            RequestOptions {
-                lane: Lane::Batch,
-                cancel: None,
-                deadline: None,
-            },
-        )
-        .await
+    // Wedge the wire: this request reaches the engine, which holds it. The
+    // actor is now inside `serve_one` and will not pick from either lane
+    // until it is answered.
+    let wedge_handle = handle.clone();
+    let wedge = tokio::spawn(async move {
+        wedge_handle
+            .request(
+                "wedgeOp",
+                b"{}".to_vec(),
+                RequestOptions {
+                    lane: Lane::Interactive,
+                    cancel: None,
+                    deadline: None,
+                },
+            )
+            .await
     });
-    // Tiny delay so the batch request is enqueued first.
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    let inter = handle
-        .request(
-            "interactiveOp",
-            b"{}".to_vec(),
-            RequestOptions {
-                lane: Lane::Interactive,
-                cancel: None,
-                deadline: None,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(inter, b"ok");
+    handle.wait_admitted().await;
+
+    // Fill the BATCH lane first, then the INTERACTIVE lane. Both are admitted
+    // receipts, so both requests are provably sitting in their lanes before
+    // the actor is free to choose — which is what makes the choice, rather
+    // than the arrival race, the thing under test.
+    let batch_handle = handle.clone();
+    let batch = tokio::spawn(async move {
+        batch_handle
+            .request(
+                "batchOp",
+                b"{}".to_vec(),
+                RequestOptions {
+                    lane: Lane::Batch,
+                    cancel: None,
+                    deadline: None,
+                },
+            )
+            .await
+    });
+    handle.wait_admitted().await;
+    let interactive_handle = handle.clone();
+    let inter = tokio::spawn(async move {
+        interactive_handle
+            .request(
+                "interactiveOp",
+                b"{}".to_vec(),
+                RequestOptions {
+                    lane: Lane::Interactive,
+                    cancel: None,
+                    deadline: None,
+                },
+            )
+            .await
+    });
+    handle.wait_admitted().await;
+
+    // Release the wedge. The actor now picks between two FULL lanes.
+    release_wedge_tx
+        .send(())
+        .expect("the engine holds the wedge");
+    assert_eq!(wedge.await.unwrap().unwrap(), b"ok");
+    assert_eq!(inter.await.unwrap().unwrap(), b"ok");
     batch.await.unwrap().unwrap();
     engine.await.unwrap();
 
     let seen = order.lock().await.clone();
-    assert_eq!(seen.len(), 2);
-    // Both methods were served; the interactive one must appear (priority is a
-    // best-effort bias on a single-flight wire — we assert both completed and
-    // the interactive one is present).
-    assert!(seen.contains(&"interactiveOp".to_string()));
-    assert!(seen.contains(&"batchOp".to_string()));
+    assert_eq!(
+        seen,
+        vec![
+            "wedgeOp".to_string(),
+            "interactiveOp".to_string(),
+            "batchOp".to_string(),
+        ],
+        "with BOTH lanes provably full, the actor must take the interactive \
+         lane first — asserting only that both methods appear passes just as \
+         well with the priority bias removed or reversed"
+    );
 }
 
 #[tokio::test]
@@ -517,4 +867,205 @@ fn service_fs_callback_file_exists_and_realpath_and_entries() {
 
     // NEGATIVE: an unknown callback name is a typed error string.
     assert!(service_fs_callback(&snap, "totallyUnknown", br#""/x""#).is_err());
+}
+
+/// A transport that accepts frames but NEVER responds.
+struct WedgedTransport {
+    sent: mpsc::Sender<Vec<u8>>,
+    terminated: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl super::transport::DuplexTransport for WedgedTransport {
+    async fn send_frame(&mut self, bytes: &[u8]) -> crate::error::TsgoApiResult<()> {
+        self.sent
+            .send(bytes.to_vec())
+            .await
+            .map_err(|_| crate::error::TsgoApiError::Transport("sink closed".into()))
+    }
+
+    async fn recv_frame(&mut self) -> crate::error::TsgoApiResult<Option<Vec<u8>>> {
+        std::future::pending().await
+    }
+
+    async fn terminate(&mut self) {
+        self.terminated
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Fill a depth-1 queue (A in serve, B occupying the slot) so C blocks
+/// on reservation. Cancelling C must complete before A ever replies.
+#[tokio::test(start_paused = true)]
+async fn full_queue_cancel_completes_before_admission() {
+    use crate::error::TsgoApiError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let terminated = Arc::new(AtomicBool::new(false));
+    let (outbound_tx, mut to_engine) = mpsc::channel::<Vec<u8>>(8);
+    let handle = spawn_actor(
+        WedgedTransport {
+            sent: outbound_tx,
+            terminated: Arc::clone(&terminated),
+        },
+        OverlaySnapshot::builder().build(),
+        1,
+    );
+
+    let a = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .request("initialize", b"null".to_vec(), RequestOptions::default())
+                .await
+        })
+    };
+    handle.wait_admitted().await;
+    let _written = to_engine
+        .recv()
+        .await
+        .expect("A must have been written to the wedged engine");
+
+    let b = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .request(
+                    "getSemanticDiagnostics",
+                    b"{}".to_vec(),
+                    RequestOptions::default(),
+                )
+                .await
+        })
+    };
+    handle.wait_admitted().await;
+
+    let tok = CancelToken::new();
+    let c = {
+        let handle = handle.clone();
+        let tok = tok.clone();
+        tokio::spawn(async move {
+            handle
+                .request(
+                    "getCompletions",
+                    b"{}".to_vec(),
+                    RequestOptions {
+                        lane: Lane::Interactive,
+                        cancel: Some(tok),
+                        deadline: None,
+                    },
+                )
+                .await
+        })
+    };
+    handle.wait_reserve_pending().await;
+    assert!(
+        !c.is_finished(),
+        "C must still be waiting for queue admission"
+    );
+    tok.cancel();
+    let err = c
+        .await
+        .expect("cancel task")
+        .expect_err("full-queue cancel must complete before admission");
+    assert!(matches!(err, TsgoApiError::Cancelled), "got {err:?}");
+    assert!(
+        to_engine.try_recv().is_err(),
+        "C must never have reached the wire"
+    );
+    assert!(
+        !terminated.load(Ordering::SeqCst),
+        "cancel-before-admission must not tear the engine down"
+    );
+    assert!(!a.is_finished(), "A is still wedged");
+    assert!(!b.is_finished(), "B is still queued behind A");
+}
+
+/// Same full queue, but the waiter carries a deadline. The deadline
+/// must fire on the original Instant (paused time) without waiting
+/// for the wedged request to complete, and without tearing the
+/// engine down — the actor never began serving the waiter.
+#[tokio::test(start_paused = true)]
+async fn full_queue_deadline_completes_before_admission() {
+    use crate::error::TsgoApiError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let terminated = Arc::new(AtomicBool::new(false));
+    let (outbound_tx, mut to_engine) = mpsc::channel::<Vec<u8>>(8);
+    let handle = spawn_actor(
+        WedgedTransport {
+            sent: outbound_tx,
+            terminated: Arc::clone(&terminated),
+        },
+        OverlaySnapshot::builder().build(),
+        1,
+    );
+
+    let _a = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .request("initialize", b"null".to_vec(), RequestOptions::default())
+                .await
+        })
+    };
+    handle.wait_admitted().await;
+    let _ = to_engine
+        .recv()
+        .await
+        .expect("A must have been written to the wedged engine");
+
+    let _b = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .request(
+                    "getSemanticDiagnostics",
+                    b"{}".to_vec(),
+                    RequestOptions::default(),
+                )
+                .await
+        })
+    };
+    handle.wait_admitted().await;
+
+    let start = tokio::time::Instant::now();
+    let c = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .request(
+                    "getCompletions",
+                    b"{}".to_vec(),
+                    RequestOptions {
+                        lane: Lane::Interactive,
+                        cancel: None,
+                        deadline: Some(Duration::from_millis(50)),
+                    },
+                )
+                .await
+        })
+    };
+    handle.wait_reserve_pending().await;
+    assert!(!c.is_finished(), "C must be waiting for queue admission");
+    tokio::time::advance(Duration::from_millis(50)).await;
+    let err = c
+        .await
+        .expect("deadline task")
+        .expect_err("full-queue deadline must complete before admission");
+    assert!(matches!(err, TsgoApiError::Timeout(_)), "got {err:?}");
+    assert_eq!(
+        tokio::time::Instant::now().saturating_duration_since(start),
+        Duration::from_millis(50),
+        "the deadline must be the original Instant, not a fresh timeout after admission"
+    );
+    assert!(
+        to_engine.try_recv().is_err(),
+        "C must never have reached the wire"
+    );
+    assert!(
+        !terminated.load(Ordering::SeqCst),
+        "deadline-before-admission must not tear the engine down"
+    );
 }

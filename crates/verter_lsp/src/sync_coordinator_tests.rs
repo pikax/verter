@@ -9,6 +9,8 @@ use super::*;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::ProjectSyncMode;
 use futures_util::{FutureExt, StreamExt};
+use std::time::Duration;
+use tokio::time::Instant;
 use tower_lsp_server::{LspService, Server};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
@@ -57,7 +59,7 @@ async fn sync_coordinator_coalesces_rapid_changes() {
         handle.signal(
             "C:/project/src/App.vue".to_string(),
             format!("file:///C:/project/src/App.vue?v={version}"),
-            std::time::Instant::now(),
+            tokio::time::Instant::now(),
         );
     }
 
@@ -2408,33 +2410,32 @@ async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
     handle.signal(
         canonical_id.clone(),
         uri.as_str().to_string(),
-        std::time::Instant::now(),
+        tokio::time::Instant::now(),
     );
 
-    // Debounce is 300ms; poll for the publish's recomputed verter cache entry.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(entry) = cached_verter_diags.get(uri.as_str()) {
-            let has_unused_hint = entry.2.iter().any(|d| {
-                matches!(
-                    d.code.as_ref(),
-                    Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+    handle
+        .await_until(
+            || {
+                cached_verter_diags.get(uri.as_str()).is_some_and(|entry| {
+                    entry.2.iter().any(|d| {
+                        matches!(
+                            d.code.as_ref(),
+                            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+                        )
+                    })
+                })
+            },
+            || {
+                panic!(
+                    "the provider-less coordinator must publish Verter-owned diagnostics \
+                     (verter/no-unused-props) for a signaled open file; cache: {:?}",
+                    cached_verter_diags
+                        .get(uri.as_str())
+                        .map(|entry| entry.2.clone())
                 )
-            });
-            if has_unused_hint {
-                break;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the provider-less coordinator must publish Verter-owned diagnostics \
-             (verter/no-unused-props) for a signaled open file; cache: {:?}",
-            cached_verter_diags
-                .get(uri.as_str())
-                .map(|entry| entry.2.clone())
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+            },
+        )
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2481,28 +2482,24 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
             crate::external_ts::CarrierTransactionCoordinator::new(),
         ),
     };
-    let _handle = spawn_sync_coordinator(deps);
+    let handle = spawn_sync_coordinator(deps);
     documents.schedule_semantic_analysis(&uri);
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let hint_ready = cached_verter_diags.get(uri.as_str()).is_some_and(|entry| {
-            entry.2.iter().any(|diagnostic| {
-                matches!(
-                    diagnostic.code.as_ref(),
-                    Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
-                )
-            })
-        });
-        if hint_ready {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "semantic completion must trigger a diagnostics-only publish"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    handle
+        .await_until(
+            || {
+                cached_verter_diags.get(uri.as_str()).is_some_and(|entry| {
+                    entry.2.iter().any(|diagnostic| {
+                        matches!(
+                            diagnostic.code.as_ref(),
+                            Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+                        )
+                    })
+                })
+            },
+            || panic!("semantic completion must trigger a diagnostics-only publish"),
+        )
+        .await;
     assert!(
         provider.calls().is_empty(),
         "optional semantic completion must not open/update provider files or query an uncommitted surface: {:?}",
@@ -2791,19 +2788,12 @@ fn debounce_probe_deps() -> (SyncCoordinatorDeps, Arc<DashSet<String>>) {
     (deps, needs_provider_sync)
 }
 
-/// A settle budget far below `DEBOUNCE_MS`, so letting the coordinator run can
-/// never be mistaken for the debounce elapsing.
-const SETTLE_MS: u64 = 20;
-
-/// Hand the runtime to the coordinator long enough for it to drain its inbox
-/// and re-arm its timer. The `sleep` parks the time driver (a `yield_now` loop
-/// alone never does, so an already-elapsed `sleep_until` would not fire); the
-/// yields then let the loop run its remaining iterations.
-async fn settle() {
-    tokio::time::sleep(Duration::from_millis(SETTLE_MS)).await;
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
-    }
+/// Wait for one coordinator loop tick. The caller must have already made
+/// a select arm ready (a wake in the inbox, or a timer that has already
+/// been advanced to). Awaiting a tick that is not going to fire would
+/// auto-advance the paused clock to the next quiet-window deadline.
+async fn pump_tick(handle: &crate::sync_coordinator::SyncCoordinatorHandle) {
+    handle.await_loop_tick().await;
 }
 
 /// REPRODUCES https://github.com/pikax/verter/issues/96.
@@ -2838,38 +2828,28 @@ async fn debounce_window_restarts_at_inbox_drain_instead_of_signal_receipt() {
         signalled_at,
     );
 
-    // The backlog. `std::thread::sleep` on the current-thread runtime blocks
-    // the ONE worker, so the coordinator provably cannot drain during it.
+    // The issue #96 shape: `std::thread::sleep` on the current-thread
+    // runtime blocks the ONE worker, so the coordinator cannot drain
+    // while time passes. `tokio::time::advance` cannot model this — it
+    // yields and the coordinator runs. This sleep is test setup, not a
+    // correctness assertion.
     let backlog = Duration::from_millis(DEBOUNCE_MS * 4);
     std::thread::sleep(backlog);
-    let inbox_wait = signalled_at.elapsed();
-    assert!(
-        inbox_wait >= backlog,
-        "test setup: the signal must have waited at least {backlog:?} in the inbox, waited {inbox_wait:?}"
-    );
 
     // A second file is signalled immediately before the drain. It has NOT been
     // quiet and must still be debounced — it is what keeps the fix honest.
     handle.signal(
         just_typed_id.clone(),
         "file:///workspace/src/Sidebar.vue".to_string(),
-        std::time::Instant::now(),
+        Instant::now(),
     );
 
-    // Hand the coordinator the thread. Both signals drain in one batch.
-    settle().await;
+    let quiet = Arc::clone(&needs_provider_sync);
+    let quiet_id_for_wait = quiet_id.clone();
+    handle
+        .await_until(|| !quiet.contains(&quiet_id_for_wait), || {})
+        .await;
 
-    assert!(
-        !needs_provider_sync.contains(&quiet_id),
-        "issue #96: {quiet_id} was signalled {inbox_wait:?} ago — {}x the \
-         {DEBOUNCE_MS}ms debounce interval — and has been quiet that entire \
-         time, so its sync is overdue and must fire on the coordinator's first \
-         look at the inbox. It has not fired. The coordinator stamped the quiet \
-         window with the instant it DRAINED the inbox instead of the instant \
-         the signal was received, discarding the {inbox_wait:?} the signal \
-         already waited and restarting the full {DEBOUNCE_MS}ms wait.",
-        inbox_wait.as_millis() / u128::from(DEBOUNCE_MS)
-    );
     assert!(
         needs_provider_sync.contains(&just_typed_id),
         "{just_typed_id} was signalled immediately before the drain and has not \
@@ -2882,7 +2862,7 @@ async fn debounce_window_restarts_at_inbox_drain_instead_of_signal_receipt() {
 /// Positive control for the fix to #96: the debounce must still debounce.
 /// Passes on `main` and must keep passing after the fix — it is what fails if
 /// the fix degenerates into "dispatch on every drain".
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn debounce_still_waits_for_quiet_before_dispatching() {
     let (deps, needs_provider_sync) = debounce_probe_deps();
     let canonical_id = "/workspace/src/App.vue".to_string();
@@ -2892,25 +2872,82 @@ async fn debounce_still_waits_for_quiet_before_dispatching() {
     handle.signal(
         canonical_id.clone(),
         "file:///workspace/src/App.vue".to_string(),
-        std::time::Instant::now(),
+        Instant::now(),
     );
 
-    // Well inside the quiet window.
-    settle().await;
+    pump_tick(&handle).await;
     assert!(
         needs_provider_sync.contains(&canonical_id),
-        "a file quiet for only ~{SETTLE_MS}ms must not have synced yet — the \
+        "a file quiet for 0ms must not have synced yet — the \
          {DEBOUNCE_MS}ms debounce is what stops rapid typing from flooding the \
          type provider"
     );
 
-    // Past it. `tokio::time::sleep` (not `std::thread::sleep`) so the
-    // coordinator keeps the thread and its timer can fire.
-    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
-    settle().await;
+    tokio::time::advance(Duration::from_millis(DEBOUNCE_MS)).await;
+    pump_tick(&handle).await;
     assert!(
         !needs_provider_sync.contains(&canonical_id),
         "a file quiet for longer than {DEBOUNCE_MS}ms must have synced"
+    );
+}
+
+/// The quiet-window policy is semantic time: prove the boundary under a paused
+/// Tokio clock. Nothing dispatches at `window - ε`; a later edit resets the
+/// window; advancing to the new boundary dispatches exactly once.
+///
+/// What this pins is that the COORDINATOR's window is the shared
+/// [`crate::edit_quiet_window::EDIT_QUIET_WINDOW`] policy value, not that the
+/// policy is 300ms. Both sides read the same constant, so changing the policy
+/// moves the test with it — deliberately: the number is policy, the identity
+/// is the invariant ("a second 300 ms constant is a bug"). The discriminating
+/// mutation is therefore in `coordinator_loop`'s `debounce` binding, not in
+/// the constant: replacing it with any other duration turns the `window - ε`
+/// assertion (shorter) or the final dispatch assertion (longer) red. Verified
+/// by planting `Duration::from_millis(150)` there.
+#[tokio::test(start_paused = true)]
+async fn quiet_window_boundary_under_paused_time() {
+    use crate::edit_quiet_window::EDIT_QUIET_WINDOW;
+
+    let (deps, needs_provider_sync) = debounce_probe_deps();
+    let canonical_id = "/workspace/src/App.vue".to_string();
+    needs_provider_sync.insert(canonical_id.clone());
+
+    let handle = spawn_sync_coordinator(deps);
+    handle.signal(
+        canonical_id.clone(),
+        "file:///workspace/src/App.vue".to_string(),
+        Instant::now(),
+    );
+    pump_tick(&handle).await;
+
+    let epsilon = Duration::from_millis(1);
+    tokio::time::advance(EDIT_QUIET_WINDOW - epsilon).await;
+    tokio::task::yield_now().await;
+    assert!(
+        needs_provider_sync.contains(&canonical_id),
+        "nothing must dispatch at quiet_window - ε"
+    );
+
+    // A later edit resets the window: advancing another (window - ε) from the
+    // first stamp would have crossed the original boundary, but must not fire.
+    handle.signal(
+        canonical_id.clone(),
+        "file:///workspace/src/App.vue".to_string(),
+        Instant::now(),
+    );
+    pump_tick(&handle).await;
+    tokio::time::advance(EDIT_QUIET_WINDOW - epsilon).await;
+    tokio::task::yield_now().await;
+    assert!(
+        needs_provider_sync.contains(&canonical_id),
+        "a later edit must reset the quiet window so the original boundary does not fire"
+    );
+
+    tokio::time::advance(epsilon).await;
+    pump_tick(&handle).await;
+    assert!(
+        !needs_provider_sync.contains(&canonical_id),
+        "advancing to the reset quiet-window boundary must dispatch exactly once"
     );
 }
 
@@ -2933,7 +2970,7 @@ async fn debounce_still_waits_for_quiet_before_dispatching() {
 /// all — so the ticket release is the only thing that can wake it. A handler
 /// that returns WITHOUT signalling (a virtual document, a style-only edit) must
 /// therefore still wake it, or an already-overdue sync waits forever.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn releasing_a_ticket_without_signalling_wakes_the_gated_coordinator() {
     let (deps, needs_provider_sync) = debounce_probe_deps();
     let canonical_id = "/workspace/src/App.vue".to_string();
@@ -2947,15 +2984,16 @@ async fn releasing_a_ticket_without_signalling_wakes_the_gated_coordinator() {
         signalled_at,
     );
 
-    // Make the receipt genuinely overdue. `std::thread::sleep` on the
-    // single-threaded runtime blocks the one worker, so the coordinator provably
-    // cannot look at the inbox during it.
-    std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 4));
+    tokio::time::advance(Duration::from_millis(DEBOUNCE_MS * 4)).await;
+    assert_eq!(
+        Instant::now(),
+        signalled_at + Duration::from_millis(DEBOUNCE_MS * 4)
+    );
 
     // A later change arrives and takes a ticket, then its handler returns
     // without ever signalling.
     let ticket = handle.change_received(canonical_id.clone());
-    settle().await;
+    pump_tick(&handle).await;
     assert!(
         needs_provider_sync.contains(&canonical_id),
         "a document with a change in flight is not quiet, however overdue its \
@@ -2963,7 +3001,7 @@ async fn releasing_a_ticket_without_signalling_wakes_the_gated_coordinator() {
     );
 
     drop(ticket);
-    settle().await;
+    pump_tick(&handle).await;
     assert!(
         !needs_provider_sync.contains(&canonical_id),
         "releasing the last in-flight ticket must wake the coordinator: it holds \
@@ -3045,25 +3083,46 @@ async fn a_backlog_of_received_changes_still_collapses_to_one_provider_sync() {
     let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
     let handle = spawn_sync_coordinator(deps);
 
-    // The control's receipt, taken here so it ages by REAL elapsed time across
-    // the calibration below. `Instant::now() - d` would be simpler but panics on
-    // underflow on a machine that booted moments ago.
+    // Taken here so the control receipt ages across calibration. The
+    // calibration wait plus one quiet window makes it overdue before the burst.
     let control_received_at = Instant::now();
 
     // ---- Calibrate: what does ONE dispatched sync of this document cost?
     let baseline = provider_syncs_for(&provider, &canonical_id);
+    let published_before_calibration = handle.diags_published_count();
     needs_provider_sync.insert(canonical_id.clone());
     {
         let change = handle.change_received(canonical_id.clone());
         let _ = documents.did_change(&uri, 2, &revision("v2"));
         change.signal(uri.as_str().to_string());
     }
-    let unit = wait_for_provider_syncs(&provider, &canonical_id, baseline + 1).await - baseline;
+    // Ticket Drop already woke the coordinator. The production quiet-window
+    // timer fires on the real clock; settlement is the provider-sync receipt.
+    let synced = wait_for_provider_syncs(&provider, &canonical_id, baseline + 1).await;
     assert!(
-        unit > 0,
+        synced > baseline,
         "calibration must observe a real dispatch, otherwise the burst assertion \
          below compares zero against zero and cannot fail"
     );
+
+    // A dispatch is not finished at its provider-sync receipt: the tick
+    // SPAWNS the diagnostics publish after `sync_file` returns, and that
+    // publish makes its own provider calls. Settling on `diag_tasks_live
+    // == 0` alone is vacuous here (the task has not been spawned yet), and
+    // a fixed sleep is exactly the mechanism these fences replace.
+    // The monotonic publication count makes the tick's completion exact, so
+    // `unit` is the FULL per-dispatch cost and the burst baseline below is
+    // taken after every call this dispatch will ever make.
+    handle
+        .await_until(
+            || handle.diags_published_count() > published_before_calibration,
+            || {},
+        )
+        .await;
+    handle
+        .await_until(|| handle.diag_tasks_live() == 0, || {})
+        .await;
+    let unit = provider_syncs_for(&provider, &canonical_id) - baseline;
 
     // ---- The backlog. Every handler is entered (ticket taken) before any of
     // them finishes, which is the shape a typing burst produces: the tickets
@@ -3075,15 +3134,42 @@ async fn a_backlog_of_received_changes_still_collapses_to_one_provider_sync() {
         .map(|_| handle.change_received(canonical_id.clone()))
         .collect();
 
-    // The ungated control is signalled with an equally overdue receipt. The
-    // calibration above sleeps for at least `DEBOUNCE_MS * 2` inside
-    // `wait_for_provider_syncs`, so this receipt is already expired; load can
-    // only make it more so.
-    let control_age = control_received_at.elapsed();
-    assert!(
-        control_age >= Duration::from_millis(DEBOUNCE_MS),
-        "test setup: the control's receipt must already be overdue, aged {control_age:?}"
-    );
+    // Each handler commits and signals in turn. Tickets stay live, so App.vue
+    // is gated; the coordinator drains each signal without dispatching it.
+    //
+    // The receipts are stamped ALREADY OVERDUE — the shape the issue
+    // describes, where serialized handlers push the coordinator's first look
+    // seconds past the last keystroke. Stamping them "now" would leave the
+    // DEBOUNCE, not the gate, deferring App for the whole burst window, and
+    // the zero below would then hold with the gate ripped out entirely. It
+    // did: disabling `quiescent` outright still passed 34 runs in 35.
+    let backlog_received_at = control_received_at;
+    for (index, _ticket) in tickets.iter().enumerate() {
+        let version = 3 + index as i32;
+        needs_provider_sync.insert(canonical_id.clone());
+        let _ = documents.did_change(&uri, version, &revision(&format!("v{version}")));
+        handle.signal(
+            canonical_id.clone(),
+            uri.as_str().to_string(),
+            backlog_received_at,
+        );
+    }
+
+    // FENCE, not a hope: the control's dispatch only proves App did not
+    // dispatch if the coordinator had already TAKEN App's signals. Wait for
+    // the inbox to drain them, and only then signal the control — so the
+    // tick that dispatches the control is a tick that looked at App and
+    // declined. Signalling the control first would let it dispatch while
+    // App's signals were still sitting in the inbox, and the zero below
+    // would say nothing about the gate.
+    handle
+        .await_until(|| !handle.inbox_contains(&canonical_id), || {})
+        .await;
+
+    // Read the dispatch-arm count BEFORE the control is signalled, so the arm
+    // that serves the control is necessarily past it — and if such an arm has
+    // already run, the predicate below is already true and nothing waits.
+    let dispatches_before_control = handle.dispatch_ticks();
     needs_provider_sync.insert(control_id.clone());
     handle.signal(
         control_id.clone(),
@@ -3091,24 +3177,23 @@ async fn a_backlog_of_received_changes_still_collapses_to_one_provider_sync() {
         control_received_at,
     );
 
-    // Each handler commits and signals in turn, yielding the runtime in between
-    // exactly as a serialized backlog does.
-    for (index, ticket) in tickets.iter().enumerate() {
-        let version = 3 + index as i32;
-        needs_provider_sync.insert(canonical_id.clone());
-        let _ = documents.did_change(&uri, version, &revision(&format!("v{version}")));
-        ticket.signal(uri.as_str().to_string());
-        settle().await;
-    }
+    // The control's provider-sync receipt is the reproduced liveness fence: it
+    // proves the coordinator processed an overdue, ungated document while App
+    // remained held. The dispatch-tick half is retained as conservative extra
+    // progress evidence, but is not independently established as necessary for
+    // this discriminator. The reproduced load-bearing setup is the already-
+    // overdue App receipt above; stamping the burst at ticket time lets the
+    // debounce, rather than the in-flight gate, defer App throughout the sample.
+    handle
+        .await_until(
+            || {
+                provider_syncs_for(&provider, &control_id) > control_baseline
+                    && handle.dispatch_ticks() > dispatches_before_control
+            },
+            || {},
+        )
+        .await;
 
-    let control_during_burst =
-        wait_for_provider_syncs(&provider, &control_id, control_baseline + 1).await
-            - control_baseline;
-    assert!(
-        control_during_burst > 0,
-        "the ungated control must sync while the backlog is in flight — without \
-         it, App.vue's zero below would prove nothing about the gate"
-    );
     let during_burst = provider_syncs_for(&provider, &canonical_id) - burst_baseline;
     assert_eq!(
         during_burst, 0,
@@ -3117,12 +3202,30 @@ async fn a_backlog_of_received_changes_still_collapses_to_one_provider_sync() {
          without the in-flight gate makes every backlogged handler's already-\
          expired receipt fire its own sync — one provider sync per keystroke"
     );
+    let control_during_burst = provider_syncs_for(&provider, &control_id) - control_baseline;
+    assert!(
+        control_during_burst > 0,
+        "the ungated control must sync while the backlog is in flight — without \
+         it, App.vue's zero above would prove nothing about the gate"
+    );
 
     // ---- The backlog drains. Exactly one sync, for the newest revision.
+    let published_before_drain = handle.diags_published_count();
     tickets.clear();
-    let after_burst = wait_for_provider_syncs(&provider, &canonical_id, burst_baseline + unit)
-        .await
-        - burst_baseline;
+    let _ = wait_for_provider_syncs(&provider, &canonical_id, burst_baseline + unit).await;
+    // Same completion fence as the calibration: count the drain tick's full
+    // cost, including the provider calls its diagnostics publish makes, so a
+    // storm cannot hide behind a half-observed tick.
+    handle
+        .await_until(
+            || handle.diags_published_count() > published_before_drain,
+            || {},
+        )
+        .await;
+    handle
+        .await_until(|| handle.diag_tasks_live() == 0, || {})
+        .await;
+    let after_burst = provider_syncs_for(&provider, &canonical_id) - burst_baseline;
     assert_eq!(
         after_burst, unit,
         "a backlog of {BURST} received changes must cost exactly what ONE change \
@@ -3138,21 +3241,32 @@ async fn a_backlog_of_received_changes_still_collapses_to_one_provider_sync() {
     );
 }
 
-/// Poll until `provider` has recorded at least `want` file-sync calls for
-/// `canonical_id`, then keep watching for a further debounce interval so an extra
-/// dispatch cannot hide behind the return. Bounded by a generous deadline; a
-/// caller asserts on the returned count, never on how long this took.
+/// Wait until `provider` has recorded at least `want` file-sync calls for
+/// `canonical_id`. The mock's call-recorded Notify is the receipt; the
+/// timeout is only a hang watchdog.
 async fn wait_for_provider_syncs(
     provider: &MockTypeProvider,
     canonical_id: &str,
     want: usize,
 ) -> usize {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while provider_syncs_for(provider, canonical_id) < want && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 2)).await;
-    settle().await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        provider.wait_until_calls(|calls| {
+            calls
+                .iter()
+                .filter(|call| match call {
+                    MockCall::OpenFile { path, .. }
+                    | MockCall::OpenFileBackground { path, .. }
+                    | MockCall::LoadFile { path, .. }
+                    | MockCall::UpdateFile { path, .. } => path.starts_with(canonical_id),
+                    _ => false,
+                })
+                .count()
+                >= want
+        }),
+    )
+    .await
+    .expect("provider file-sync calls never reached the expected count");
     provider_syncs_for(provider, canonical_id)
 }
 
@@ -3166,7 +3280,7 @@ async fn wait_for_provider_syncs(
 /// Both coalescing points are covered: the inbox (`signal`, when the two
 /// deposits land between the same pair of drains) and the coordinator's pending
 /// map (the drain arm, when they land in different drains).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_late_arriving_older_receipt_does_not_walk_the_quiet_window_backwards() {
     let (deps, needs_provider_sync) = debounce_probe_deps();
     let same_drain = "/workspace/src/SameDrain.vue".to_string();
@@ -3174,10 +3288,12 @@ async fn a_late_arriving_older_receipt_does_not_walk_the_quiet_window_backwards(
     needs_provider_sync.insert(same_drain.clone());
     needs_provider_sync.insert(later_drain.clone());
 
-    // An instant that is genuinely older than the debounce window. The blocking
-    // sleep runs before the coordinator is spawned, so nothing is starved.
     let stale = Instant::now();
-    std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 4));
+    tokio::time::advance(Duration::from_millis(DEBOUNCE_MS * 4)).await;
+    assert_eq!(
+        Instant::now(),
+        stale + Duration::from_millis(DEBOUNCE_MS * 4)
+    );
 
     let handle = spawn_sync_coordinator(deps);
 
@@ -3201,13 +3317,13 @@ async fn a_late_arriving_older_receipt_does_not_walk_the_quiet_window_backwards(
         "file:///workspace/src/LaterDrain.vue".to_string(),
         Instant::now(),
     );
-    settle().await;
+    pump_tick(&handle).await;
     handle.signal(
         later_drain.clone(),
         "file:///workspace/src/LaterDrain.vue".to_string(),
         stale,
     );
-    settle().await;
+    pump_tick(&handle).await;
 
     assert!(
         needs_provider_sync.contains(&same_drain),
@@ -3401,15 +3517,17 @@ async fn await_projection_via_coordinator(
         uri.as_str().to_string(),
         Instant::now(),
     );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while documents.get_projection(uri).is_none() {
-        assert!(
-            Instant::now() < deadline,
-            "{case}: the debounced tick must install the projection the failed open \
-             never built; without it the document fails closed downstream forever"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    handle
+        .await_until(
+            || documents.get_projection(uri).is_some(),
+            || {
+                panic!(
+                    "{case}: the debounced tick must install the projection the failed open \
+                     never built; without it the document fails closed downstream forever"
+                )
+            },
+        )
+        .await;
 }
 
 /// Build a provider-less coordinator (`project_sync: None`, `type_provider:
@@ -3619,7 +3737,14 @@ async fn verter_diagnostics_track_edits_on_a_provider_less_route() {
                 Instant::now(),
             );
 
-            await_publish_for_version(&cached_verter_diags, uri.as_str(), version, carrier).await;
+            await_publish_for_version(
+                &handle,
+                &cached_verter_diags,
+                uri.as_str(),
+                version,
+                carrier,
+            )
+            .await;
             let published =
                 diagnostic_identities(&compute_verter_diagnostics(&observer, &canonical_id, &uri));
             let expected = if broken {
@@ -3671,26 +3796,28 @@ async fn identities_when_opened(
 /// real debounced publish rather than sleeping for one. The caller then compares
 /// the complete Verter-owned set, ranges included, against the open-path control.
 async fn await_publish_for_version(
+    handle: &crate::sync_coordinator::SyncCoordinatorHandle,
     cached_verter_diags: &DashMap<String, crate::server::CachedVerterDiagEntry>,
     uri_str: &str,
     version: i32,
     carrier: &str,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Some(entry) = cached_verter_diags.get(uri_str) {
-            if entry.0 == version {
-                return;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{carrier}: the coordinator never published diagnostics for v{version}; \
-             cached entry: {:?}",
-            cached_verter_diags.get(uri_str).map(|entry| entry.0)
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    handle
+        .await_until(
+            || {
+                cached_verter_diags
+                    .get(uri_str)
+                    .is_some_and(|entry| entry.0 == version)
+            },
+            || {
+                panic!(
+                    "{carrier}: the coordinator never published diagnostics for v{version}; \
+                     cached entry: {:?}",
+                    cached_verter_diags.get(uri_str).map(|entry| entry.0)
+                )
+            },
+        )
+        .await;
 }
 
 /// An edit followed by a CLOSE before the quiet window elapses must not make
@@ -3712,7 +3839,7 @@ async fn await_publish_for_version(
 /// whether or not the reloaded file would go on to compile (in a fixture with no
 /// file on disk it would not, which makes a compile-count assertion vacuous
 /// here).
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn a_closed_documents_pending_tick_never_reaches_into_the_host() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
@@ -3746,8 +3873,11 @@ async fn a_closed_documents_pending_tick_never_reaches_into_the_host() {
     host.evict(&canonical_id);
 
     let before = host.provenance_snapshot().ensure_loaded_calls;
-    // Well past the debounce, so the tick has certainly run.
-    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 4)).await;
+    // Drive the quiet window under paused time: the wake, then the
+    // exact debounce Instant. The tick must run and still not load.
+    pump_tick(&handle).await;
+    tokio::time::advance(Duration::from_millis(DEBOUNCE_MS)).await;
+    pump_tick(&handle).await;
     let loads = host.provenance_snapshot().ensure_loaded_calls - before;
 
     assert_eq!(
@@ -3779,22 +3909,17 @@ async fn a_closed_documents_pending_tick_never_reaches_into_the_host() {
         Instant::now(),
     );
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let now = host.provenance_snapshot();
-        if now.ensure_loaded_calls > before_open.ensure_loaded_calls
-            && now.compile_cold_runs > before_open.compile_cold_runs
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the tick for an OPEN document must still reach the host AND compile — \
-             otherwise the closed-file zero above is vacuous and Verter's own \
-             diagnostics never refresh"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    pump_tick(&handle).await;
+    tokio::time::advance(Duration::from_millis(DEBOUNCE_MS)).await;
+    pump_tick(&handle).await;
+    let now = host.provenance_snapshot();
+    assert!(
+        now.ensure_loaded_calls > before_open.ensure_loaded_calls
+            && now.compile_cold_runs > before_open.compile_cold_runs,
+        "the tick for an OPEN document must still reach the host AND compile — \
+         otherwise the closed-file zero above is vacuous and Verter's own \
+         diagnostics never refresh"
+    );
 }
 
 // ─── Cross-file republish: a child's settled edit re-arms its open parents ───
@@ -3848,28 +3973,34 @@ async fn parent_diagnostics_when_opened_against(child_source: &str) -> Vec<Diagn
 /// `await_publish_for_version` uses, keyed on content rather than version
 /// because a cross-file republish does not move the parent's version.
 async fn await_parent_republish_with(
+    handle: &crate::sync_coordinator::SyncCoordinatorHandle,
     cached_verter_diags: &DashMap<String, crate::server::CachedVerterDiagEntry>,
     parent_uri: &str,
     what: &str,
     satisfied: impl Fn(&[Diagnostic]) -> bool,
 ) -> Vec<Diagnostic> {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        if let Some(entry) = cached_verter_diags.get(parent_uri) {
-            if satisfied(&entry.2) {
-                return entry.2.clone();
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the coordinator never republished the parent's diagnostics: {what}; \
-             the parent's cached entry is now {:?}",
-            cached_verter_diags
-                .get(parent_uri)
-                .map(|entry| (entry.0, entry.2.clone()))
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+    handle
+        .await_until(
+            || {
+                cached_verter_diags
+                    .get(parent_uri)
+                    .is_some_and(|entry| satisfied(&entry.2))
+            },
+            || {
+                panic!(
+                    "the coordinator never republished the parent's diagnostics: {what}; \
+                     the parent's cached entry is now {:?}",
+                    cached_verter_diags
+                        .get(parent_uri)
+                        .map(|entry| (entry.0, entry.2.clone()))
+                )
+            },
+        )
+        .await;
+    cached_verter_diags
+        .get(parent_uri)
+        .map(|entry| entry.2.clone())
+        .expect("the awaited parent republish satisfied the predicate")
 }
 
 /// Editing a CHILD component must make its OPEN parents re-report diagnostics.
@@ -3982,6 +4113,7 @@ async fn a_childs_settled_edit_republishes_each_open_parents_diagnostics() {
     );
 
     let republished = await_parent_republish_with(
+        &handle,
         &observer.cached_verter_diags,
         parent_uri.as_str(),
         "the child renamed its prop, so the parent's `label` usage became an \
@@ -4010,6 +4142,7 @@ async fn a_childs_settled_edit_republishes_each_open_parents_diagnostics() {
     );
 
     await_parent_republish_with(
+        &handle,
         &observer.cached_verter_diags,
         parent_uri.as_str(),
         "the child restored its prop, so the parent's stale `verter/unknown-prop` \
@@ -4179,21 +4312,19 @@ async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the
             )
             .count()
     };
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while parent_pulls(&provider) == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "the coordinator never republished the Svelte parent after the \
-             child's settled edit — no fresh provider pull for {parent_ide_path}; \
-             provider calls: {:?}",
-            provider.calls()
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-
-    // Bounded fan-out: give any storm time to surface, then count. Five
-    // keystrokes must coalesce — not one parent republish per keystroke.
-    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 4)).await;
+    handle
+        .await_until(
+            || parent_pulls(&provider) > 0 && handle.diag_tasks_live() == 0,
+            || {
+                panic!(
+                    "the coordinator never republished the Svelte parent after the \
+                     child's settled edit — no fresh provider pull for {parent_ide_path}; \
+                     provider calls: {:?}",
+                    provider.calls()
+                )
+            },
+        )
+        .await;
     let pulls = parent_pulls(&provider);
     assert!(
         (1..=2).contains(&pulls),
@@ -4409,6 +4540,7 @@ async fn an_inflight_parent_computation_never_satisfies_a_read_after_the_arm() {
     );
 
     await_parent_republish_with(
+        &handle,
         &observer.cached_verter_diags,
         parent_uri.as_str(),
         "the armed republish must replace a stale-but-validating entry with \
@@ -4657,6 +4789,7 @@ async fn open_importer_arming_reaches_transitive_open_only_without_cascade() {
     );
 
     await_parent_republish_with(
+        &handle,
         &observer.cached_verter_diags,
         parent_uri.as_str(),
         "the open direct parent must republish `verter/unknown-prop` after the \
