@@ -512,6 +512,22 @@ be read as work being lost, where a containment predicate found it in three. Pre
 answers the question over eyeballing a capped list; as with a match set wider than the defect, the
 instrument's shape produced the result rather than the tree's contents.
 
+**Fix the threshold before you know the count.** A decision criterion chosen after the measurement
+justifies whichever answer arrived: thirteen of eighty-three needing a carve-out settles a question
+only because ~15 was the threshold before the count existed. Pre-register the signatures a run must
+not produce, and report them as signatures that did not fire.
+
+**Never let an error branch print the word a pass prints.** A `grep -qF` sampling a line beginning
+with a dash read it as an option, errored, fell to the `else`, and the script printed "ok" — a failed
+check and a passing check emitting the same word. Pass the pattern after `-e` or `--`, and make the
+error path say error. This is the filter-matching-nothing family one step worse: there, success and
+emptiness coincide; here, failure is reported as success.
+
+**Match the brief to what the worker can actually do.** A tool that cannot commit inside a linked
+worktree is told to stop at edits and leave the tree dirty, with the dispatcher committing — rather
+than being asked for something it will fail at silently. An earlier pass died mid-flight with
+uncommitted work nobody knew existed.
+
 **A check needs a control on a known-good AND a known-bad run.** A step that can fail may still be
 measuring the wrong thing, and a match set wider than the defect inverts under noise without
 announcing it: a completeness check matched 25 occurrences on a green run and 16 on a red one,
