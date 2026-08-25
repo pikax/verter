@@ -706,6 +706,12 @@ sha256 = "881eaf4e4a11e5a346e5f28006f446ec116d709768ecfeff3ebaf01d2b663b2a"
 # 8799580e161, taken unmodified from block/module-resolver-core so the two
 # stay identical across that block's eventual landing.
 [[document]]
+id = "RULING-2026-08-25-C1-STAGE2-CUTOVER"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-25-C1-STAGE2-CUTOVER.md"
+sha256 = "95d893994fead0c5b419cb112ab777b0cdc838455991122a76315175db69e30a"
+
+[[document]]
 id = "C1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/C1.md"
