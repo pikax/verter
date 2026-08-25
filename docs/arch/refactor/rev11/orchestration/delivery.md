@@ -417,6 +417,13 @@ Detaching a long dispatch is necessary and not sufficient — a detached run has
 output while a smaller one dispatched later survived, so keep dispatch output small: an exhaustive
 reading surface, no unprompted context pulls, and the receipt emitted first.
 
+**Opening AN object is not enough — open the AUTHORITATIVE one.** A document's own header is not
+what classifies it. A charter read as unratified because its status line said DRAFT was ratified in
+the registry, which nobody opened; the registry says in terms that a charter is never classified by
+its own status prose. Ask which artifact is authoritative for the property you are asserting, then
+open that one. Verifying against the wrong artifact produces the same confidence as verifying against
+the right one.
+
 **Open the object before ruling on a claim about it.** A claim travelling upward arrives as a phrase,
 and each reader inherits the phrase rather than the thing. A step was ruled vacuous on "no lock record
 covers these pins", read at the next level as "no record exists to amend" — the record existed, and
