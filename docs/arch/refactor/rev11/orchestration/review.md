@@ -89,6 +89,21 @@ scope; calibrated severity; the minimal sufficient fix.
 **A blocking severity requires direct reproduction, incontrovertible evidence, or independent
 verification before an implementer is interrupted.**
 
+## What a review does not cover
+
+**A review answers the question it was asked, not the document it was pointed at.** An artifact can
+accumulate passing rounds while a false sentence inside it is never in any lane's frame. A claim in
+an evidence document survived three rounds — a categorical assertion that a count-only canary could
+not catch a regression, contradicted by that block's own measured delta — because every lane was
+scoped to the tests and none to the prose.
+
+So prose claims are unreviewed however many rounds the artifact survived, unless a lane was scoped to
+the prose explicitly. Where a document's assertions are load-bearing, scope a lane to them and say so.
+
+**A PASS with zero blockers is not readiness while findings are open.** Dispositioning carried
+findings is new work, not a further fix cycle, and a candidate is not ready until each is adopted,
+deferred with its owner and gate named, or rejected with evidence.
+
 ## Result contract
 
 Every reviewer ends its output with exactly this block, and writes the two marker lines nowhere else:
