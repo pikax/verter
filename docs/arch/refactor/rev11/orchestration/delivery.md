@@ -309,6 +309,16 @@ conflict and still produce a defect — one narrowing what an inventory collects
 fact from that inventory. Conflict markers do not detect semantic conflict, so integration is
 verified on its own.
 
+## Ratification admissibility
+
+**A proof gap may ratify as a recorded unmet obligation. An internal contradiction or a false command
+claim may not.** The first states honestly what is not yet established and leaves it visible; the
+second asserts something untrue about the artifact or about what a command does, and ratifying it
+binds the untruth.
+
+**Naming a Git object identifies a set; it does not resolve one.** A rationale claiming a named
+object resolves to a particular member is a false command claim, however reasonable it reads.
+
 ## The trap under all the others
 
 **An asserted scope wider than the scope actually examined.** Nearly every stall, false claim and
@@ -347,6 +357,13 @@ restated in a summary, a justification or a sufficiency argument becomes a secon
 so a repair applied to one leaves the others asserting the old value — and nothing reports the
 divergence, because each reads as prose. A reference may name the owner; it never repeats origin,
 value or status. Summary sections survive as crosswalks to owners, sufficiency sections as indexes.
+
+**The unit is a complete truth-bearing proposition, not an attribute of one — and the default action
+at a non-owner occurrence is deletion.** Enumerating what a restatement must not repeat (origin,
+value, status, mechanism, cardinality) produces a list that grows every round, because each repair
+removes the attribute a review named and leaves its siblings asserting the same claim. Delete the
+whole sentence, cell or heading instead: a deletion cannot partially retain a predicate, and a
+rewrite can — twice did.
 
 **More careful editing is not the remedy.** A block ran an explicit conceptual sweep for one such
 claim and still left an independently authored restatement standing; a line-scoped filter cannot see
