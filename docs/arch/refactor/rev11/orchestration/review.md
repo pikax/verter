@@ -147,6 +147,17 @@ rejects competing or stale files. The results directory is named for the frozen 
 file from an earlier freeze cannot answer for a lane that produced nothing. An absent, truncated or
 inconclusive result is BLOCKED, never a pass.
 
+## Shaping a consult
+
+**A seat that can only choose among the offered options will choose among them.** Give every consult
+an explicit escape — if the information does not determine the answer, say so and say what would —
+or a forced choice comes back looking like a finding.
+
+**Supply the facts, not the inference.** Give the assignments and let the pattern be reachable;
+naming it as a precedent tells the seat what to conclude. Never state a distinction as an argument
+toward an answer when it can be stated as a fact about the subject, and never frame a choice as
+binary when a third shape is available from the same facts.
+
 ## Model routing
 
 Capabilities, not model names. Keep assignments here rather than repeated across prompts.
