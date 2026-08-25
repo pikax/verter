@@ -87,6 +87,25 @@ merely to make every defect theoretically unrepresentable.
 Never land a new name-keyed source scanner: `CLAUDE.md`'s forward-only rule forbids a guard that
 greps the tree for a spelled identifier, path or token, `syn`/AST scanning included.
 
+## Dispatch preflight — establish at the start what is otherwise found at the end
+
+Most rounds are spent rediscovering facts that were knowable before implementation began. A block
+establishes these **before its first line of work**, and reports them in its first message:
+
+- **Ancestry.** What its base actually contains, by `merge-base` and `--contains` — not what a plan
+  says it accumulates.
+- **The authoritative artifacts.** Which document is authoritative for each property it will assert,
+  opened, not inferred from a status line or a neighbouring summary.
+- **Its acceptance surface.** Every criterion it must satisfy, enumerated from the ratified source,
+  with the mapping built as work proceeds rather than assembled at ready.
+- **Uncovered work.** Anything in scope that no criterion covers, raised then — not after a gate.
+- **The instruments it will need.** Named up front and authored in one pass, not one per finding.
+- **Its gates.** For each criterion, whether the gate exists, and whether it establishes the property
+  or merely something adjacent to it.
+
+None of this weakens a block. It moves the same findings earlier, where they cost a paragraph instead
+of a round — and every one of these was found late at least once.
+
 ## Health check at every write boundary
 
 **When an implementer or fix agent finishes, run `cargo fmt --all` and
