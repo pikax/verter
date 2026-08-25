@@ -366,6 +366,16 @@ was right an hour ago describes a reference that may have moved since, and the d
 work is measured against rather than in the work, which is the one class a clean self-check cannot
 surface.
 
+**Correct a document where its pin is authored, not where its bytes are convenient.** A branch that
+inherits a registry byte-for-byte and authors none of it cannot correct what that registry pins: it
+would hold new bytes against the old digest it inherited, a live mismatch. Changing the document and
+its pin together, on the side that authors the pin, leaves every copy self-consistent at every point
+— old-and-old before the rebase, new-and-new after.
+
+**When a cost argument and a consistency argument disagree, the cost argument was never the
+criterion.** One rebind versus two is a heuristic; a digest that does not match its bytes is a defect.
+Reach for the count only where correctness does not decide.
+
 **An act pins the content it ratifies — named files and their digests — never a tree sha.** A tree
 sha covers everything, including the record of the act itself, so recording the act changes the tree
 and unpins it. That is unavoidable by ordering: the consequence of an act is an evidence change, so
