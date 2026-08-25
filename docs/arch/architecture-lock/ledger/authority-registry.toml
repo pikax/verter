@@ -133,6 +133,12 @@ path = "docs/arch/refactor/rev11/amendments/AMD-018-inherited-stale-response-deb
 sha256 = "ed21633e8a99ba4c7387bc680b9f994d92cc6cc908653bca4201e48852e20225"
 
 [[document]]
+id = "AMD-023-TCM0-OBLIGATION-RELOCATION"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-023-tcm0-obligation-relocation.md"
+sha256 = "1fea3d6503a88c2340262f267d07d130ab67bb3cc3fbb32151eb11b156301283"
+
+[[document]]
 id = "AMD-016-J1-OPEN-OBLIGATIONS-BOUND"
 kind = "AMENDMENT"
 path = "docs/arch/refactor/rev11/amendments/AMD-016-j1-open-obligations-bound.md"
@@ -563,7 +569,7 @@ sha256 = "a9f1b3e71d6fe7890b982971615d55a5e69be67146bbfed102367d1aea1c4575"
 
 [[authorization]]
 block = "TCM0"
-documents = ["TCM0-CHARTER", "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS", "TCM-STEERING", "TCM-PACKAGE-CERTIFICATION-SETTLED"]
+documents = ["TCM0-CHARTER", "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS", "TCM-STEERING", "TCM-PACKAGE-CERTIFICATION-SETTLED", "AMD-023-TCM0-OBLIGATION-RELOCATION"]
 ratified_by = "maintainer"
 ratified_at = "2026-08-22"
 scope = "Authorises TCM0 only: a READ-ONLY investigation and architecture lock over the current TypeScript content-mapper and semantic-API contracts. It changes no production route and ships no code. Corrected 2026-08-23: TCM0 does not itself certify a package by INVESTIGATION AUTHORITY ALONE (this authorization record grants TCM0 the right to investigate and produce evidence, not the right to declare a package production-certified on its own say-so) — but TCM-PACKAGE-CERTIFICATION-SETTLED, cited below as a second document backing this same record, is the maintainer's OWN ruling doing exactly that certification directly; TCM0's investigation evidence (package-lock-and-semantic-api.md) is the record that ruling certifies. TCM0 deletes nothing. TCM1-TCM4 remain LOCKED and each requires its own record. TCM-STEERING and TCM-PACKAGE-CERTIFICATION-SETTLED added 2026-08-23: the former is the maintainer's original steering directive landed verbatim as a citable authority document (previously referenced only informally); the latter is the maintainer ruling settling the one open certification hedge TCM0's own package-lock-and-semantic-api.md left (Status: production-certified, not merely candidate-discovery-certified), superseding an architecture-consult finding that read that hedge as a blocker rather than a TCM3 design constraint. Neither document authorises TCM1-TCM4 to leave LOCKED; TCM1-CHARTER/TCM2-CHARTER/TCM3-CHARTER/TCM4-CHARTER are registered below as documents only (charter-structure implementation-ready, digest-bound; TCM0's own remaining evidence-completeness gaps are tracked in evidence/TCM0/OPEN-GAPS.md and gate TCM0's OWN acceptance, not these charters' readiness) — each still requires its own [[authorization]] record, gated on TCM0's (and, for TCM2-TCM4, TCM1's) acceptance, before dispatch."
