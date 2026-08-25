@@ -547,19 +547,19 @@ sha256 = "646bbe2e41f8e28e9ebb6fb3faf29f2b70cd948c76240deb89656e3168cf0ae0"
 id = "TCM1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM1.md"
-sha256 = "2886c796307ac8b28e3288de5062a207a3262f9f78fa407ecf31637e90cc4a28"
+sha256 = "36ce3e91698f630e1744ee5964ce4241ed46561478b57402e13994aeb5f57b46"
 
 [[document]]
 id = "TCM2-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM2.md"
-sha256 = "3cae6cef57c87b1eba9a1d6143adba11ab390eb838783de3daa19dee353b1af2"
+sha256 = "dab2533396bb612a2181c0f988cc482aff13b6447662611b560cfc2a92d75e9d"
 
 [[document]]
 id = "TCM3-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM3.md"
-sha256 = "78efb323bf669b81e235ecef7225e33bb622a83be1470c36ee898c52f981e752"
+sha256 = "265d8ecd5b6d3eebcc75113a7dd4d7911e3f4031567af96aa20785414d05a433"
 
 [[document]]
 id = "TCM4-CHARTER"
