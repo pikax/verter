@@ -62,6 +62,21 @@ the whole block.** Sub-block reviews establish each part; that final pair establ
 compose, and it is where cross-sub-block defects are caught. Neither pass substitutes for the other,
 and neither substitutes for the sub-block reviews.
 
+## Ask a reviewer to defeat a gate, not to check it
+
+**A reviewer asked to check a gate reads it; a reviewer asked to defeat it runs it.** Set the task as
+construction: make this gate pass while something it exists to catch is broken. That found a totality
+check asking whether each scope item had at least one row rather than whether that item's obligations
+were present — ten of eleven rows could be deleted and the gate stayed admissible.
+
+**A gate that cannot fail invalidates every result it ever produced.** Not only the current one: each
+earlier pass was weaker than it was reported to be, so fixing it means re-running everything it
+cleared. Half-fixing it is worse than leaving it alone, because the passes then split into two classes
+nobody can tell apart.
+
+**An instruction is evidence about what its sender believed when they wrote it, never about the
+current state.** Refuse one that a later verdict has overtaken, and say which verdict overtook it.
+
 ## Review churn — stop the reviewer prospecting
 
 **A reviewer may always find a new path.** But if two consecutive rounds surface previously-unexamined
