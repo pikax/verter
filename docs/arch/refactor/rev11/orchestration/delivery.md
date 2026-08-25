@@ -323,6 +323,17 @@ excluded; a compile-fail fixture proving two types differ while claiming the dec
 a one-sided absence read as a two-sided fact; a check whose own command line contained the pattern it
 matched. Each was true of what it examined and asserted about something larger.
 
+**Open the object before ruling on a claim about it.** A claim travelling upward arrives as a phrase,
+and each reader inherits the phrase rather than the thing. A step was ruled vacuous on "no lock record
+covers these pins", read at the next level as "no record exists to amend" — the record existed, and
+its own text described how to extend it. Three levels handled that claim and none opened the file.
+One `cat` ends it at any level, and the cost of not doing it is two reversed rulings.
+
+**Amending a record forward is not fabricating one backward.** Adding a row that states what is
+pinned as of now is ordinary maintenance; creating a record of a lock that never existed is
+retroactive history. They are different acts and the objection to the second does not reach the
+first — conflating them blocked the legitimate move for two rounds.
+
 The discipline that catches it is one question, asked of your own claim before anyone else reads it:
 **what exactly did this examine, and is that the same as what I am about to say?** Where the answer
 is uncertain, the claim is settled by the compiler, a tool, or an independent reader — self-review
