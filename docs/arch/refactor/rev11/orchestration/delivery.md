@@ -323,6 +323,13 @@ excluded; a compile-fail fixture proving two types differ while claiming the dec
 a one-sided absence read as a two-sided fact; a check whose own command line contained the pattern it
 matched. Each was true of what it examined and asserted about something larger.
 
+**A check needs a control on a known-good AND a known-bad run.** A step that can fail may still be
+measuring the wrong thing, and a match set wider than the defect inverts under noise without
+announcing it: a completeness check matched 25 occurrences on a green run and 16 on a red one,
+because passing test names contained the word it searched for. One-sided evidence would have read
+that as the green run being worse. Prefer the tool's own machine-readable marker over matching prose
+— the same check against nextest's marker gave 0 and 2.
+
 **A waiter exits on receipt OR process-gone, never receipt alone.** A receipt-only poll reports a
 dead run as in flight indefinitely, and silent death read as progress costs more than the death.
 Detaching a long dispatch is necessary and not sufficient — a detached run has died at 1.4 MB of
