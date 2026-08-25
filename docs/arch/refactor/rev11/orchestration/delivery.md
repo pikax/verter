@@ -176,12 +176,18 @@ rather than proceeding with a caveat.
    the lockfile — an install-and-test trigger, never the formatting trigger.
 
    Any failure returns the block: this is production source, and a landing agent must not fix it.
-3. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
+3. **Check acceptance coverage.** **A candidate may not land carrying work that no ratified
+   acceptance criterion covers.** For every material change in the delta, name the acceptance
+   identifier that covers it; uncovered work is bound by a ratified charter or amendment first, or it
+   is cut from the candidate. Deferring a block's acceptance does not license landing uncovered work —
+   it only moves work nobody owns onto the working branch, where the next block to touch it discovers
+   the gap one item at a time. Naming a logical owner is not binding one.
+4. **Check conformance.** Each claimed result must exist, reach a conclusion, and bind to the
    candidate's sha, and the supplied message must comply — **in its body, not only its subject**.
    Naming the program, its revision or a block identifier, or a commit type `CLAUDE.md` does not
    list, returns the block. Whoever checks did not produce that evidence — that is what makes the
    check worth anything — and may refuse.
-4. **Run the gate.**
+5. **Run the gate.**
 
 **On gate success only:** squash under the supplied message verbatim, then land, then update the
 ledger, then **remove the block's worktree, delete the merged branch and prune** — on a successful
