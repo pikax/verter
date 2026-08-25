@@ -91,6 +91,17 @@ instrument. Adding names so it catches something it did not catch before is exte
 scanner, which the forward-only rule bars — and stating which of the two it is doing is what an
 amendment touching one owes.
 
+**A proof that deletes every member never tests deleting one.** Aggregate deletion shows a check
+notices total absence; only per-member deletion shows it binds each member. Ten obligations living
+inside one sentence meant any surviving sibling kept the claim satisfied, so "delete all ten and it
+refuses" was true and tested nothing that mattered.
+
+**Derive a gate's universe from every section it governs, not from the one that prompted it.** A gate
+derived only from the section whose defect prompted it left two other sections underived, so several
+rows — including the one an entire acceptance turned on — carried no claims and were bound by nothing.
+This is the ruling-scoped-to-its-instance defect applied to a gate, and it has now been committed by a
+block that had recorded the rule minutes earlier.
+
 **A count answers who calls it; the criterion asks whether the guard can fire.** A mechanism was sized
 by counting a sink's consumers while the feature graph went unchecked, and the guard could not fire at
 all: the test graph enabled the very feature it was gated on, so the fixture compiled with the sink
