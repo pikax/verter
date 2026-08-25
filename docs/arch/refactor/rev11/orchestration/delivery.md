@@ -401,6 +401,13 @@ notification lands nowhere.
 
 **A waiter exits on receipt OR process-gone, never receipt alone.** A receipt-only poll reports a
 dead run as in flight indefinitely, and silent death read as progress costs more than the death.
+
+**A template for evidence, placed in the input, becomes indistinguishable from the evidence once the
+input is echoed.** A receipt block carried in a prompt so a dying run still emits one is echoed back
+verbatim, so a waiter matching on its markers fires at second zero and hands back the empty template
+as a verdict. Any marker appearing in both the prompt and the answer cannot discriminate between them
+on its own: require a FILLED result, reject the placeholder, and read the LAST matching block rather
+than the first.
 Detaching a long dispatch is necessary and not sufficient — a detached run has died at 1.4 MB of
 output while a smaller one dispatched later survived, so keep dispatch output small: an exhaustive
 reading surface, no unprompted context pulls, and the receipt emitted first.
