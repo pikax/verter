@@ -52,6 +52,14 @@ rather than resting on a green gate that never exercised it — and names what w
 **Default maximum: two substantive fix cycles per slice.** Not converging means stop and rescope,
 replace a failing agent, or request an architecture decision — never buy another round.
 
+**The cap is a signal, never a reason to land or supersede a block that can be made correct.** It
+exists because repeating a round that is not working wastes a lane; it does not exist to force a
+block out of the program. Where the work is genuinely closable and the only obstacle is a round
+count — the block's own or this one — the count is lifted and the block continues until it is
+correct. Superseding a block that could have finished, or landing one that is not finished, are both
+worse outcomes than another round. Rescope when the approach is wrong; lift the limit when only the
+budget is.
+
 ## Reviewer calibration
 
 Every reviewer dispatch says this, because reviewers otherwise inflate:
