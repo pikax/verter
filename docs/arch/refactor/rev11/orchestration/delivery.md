@@ -438,6 +438,15 @@ an act pinned to a whole tree that must record it unpins itself the moment it is
 the ratified set instead closes the loop, because recording the act elsewhere in the tree cannot
 touch it.
 
+**A field checked only for non-emptiness can be destroyed invisibly.** Replacing a long ratified
+scope with a short string passes every automated check, because nothing tests what it says — so an
+edit to such a field states its requirement as a **prefix relation**: every byte of the existing value
+preserved, the addition appended. That is citation-by-identity applied to content rather than
+location, and unlike quoting the current text it cannot go stale as the field grows.
+
+**A table is read as a shape before it is read as rows.** Where one row's healthy value differs from
+every other's, say so beside it — a reader scanning a column of zeros reads the one as the defect.
+
 **A pin fixes drift, not contradiction.** Pinning content guarantees the bytes have not moved; it
 guarantees nothing about whether those bytes agree with the act. One act named an execution model
 while the document it pinned still described that model as unnamed and the choice as later work's —
