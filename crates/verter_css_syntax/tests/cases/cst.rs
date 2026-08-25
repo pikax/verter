@@ -1546,3 +1546,402 @@ fn production_dependency_closure_is_framework_neutral() {
         "declared normal/build dependency drift across target predicates"
     );
 }
+
+// @ai-generated - dialect-coverage parity for Sass/Stylus in the CST construct suite.
+//
+// Sass and Stylus are ALWAYS routed through the indentation-aware layout parser
+// (`should_use_layout` returns true for them unconditionally, braces or not), unlike Scss/Less
+// which only fall into it when brace-free and indented. That gives braced Sass/Stylus input a
+// second, structurally distinct code path versus Css/Scss/Less's direct recursive-descent
+// parser for the exact same braced syntax — this test pins that the two paths still agree on
+// CST shape for constructs the layout parser must classify itself (custom properties, block
+// values, nested functional pseudos, variable declarations) instead of only exercising braces.
+#[test]
+fn sass_and_stylus_cst_construct_coverage_parity_with_css_and_less() {
+    const DIALECTS: [CssDialect; 5] = [
+        CssDialect::Css,
+        CssDialect::Scss,
+        CssDialect::Less,
+        CssDialect::Sass,
+        CssDialect::Stylus,
+    ];
+
+    fn kinds(input: &str, dialect: CssDialect) -> Vec<SyntaxKind> {
+        let cst = parse_lossless(
+            CssSource::new(Arc::from(input), 0).unwrap(),
+            dialect,
+            CssEntryPoint::Stylesheet,
+            CssParseMode::Strict,
+        )
+        .unwrap_or_else(|error| panic!("{dialect:?} failed to parse {input:?}: {error:?}"));
+        assert!(cst.diagnostics().is_empty(), "{dialect:?}: {input}");
+        assert_eq!(cst.reconstruct(), input, "{dialect:?}: {input}");
+        cst.nodes().iter().map(SyntaxNode::kind).collect()
+    }
+
+    fn count(kinds: &[SyntaxKind], kind: SyntaxKind) -> usize {
+        kinds.iter().filter(|found| **found == kind).count()
+    }
+
+    // A custom property whose value is a balanced `{ ... }` block stays exactly what it is in
+    // Css/Scss/Less: one opaque, lossless value block under one CustomPropertyDeclaration, not a
+    // nested statement list. This is the regression case: before the layout parser distinguished
+    // a declaration's block VALUE from a rule's block BODY, the inner `fg: #fff` and
+    // `nested: [a,b]` were mis-classified as their own top-level Declaration statements.
+    let block_value = ".host { --theme: { fg: #fff; nested: [a,b] }; color: red; }";
+    let css_block_value_kinds = kinds(block_value, CssDialect::Css);
+    for dialect in DIALECTS {
+        let found = kinds(block_value, dialect);
+        assert_eq!(
+            count(&found, SyntaxKind::CustomPropertyDeclaration),
+            1,
+            "{dialect:?}"
+        );
+        assert_eq!(
+            count(&found, SyntaxKind::Declaration),
+            count(&css_block_value_kinds, SyntaxKind::Declaration),
+            "{dialect:?} must not spill the custom property's block value into sibling \
+             declarations"
+        );
+        assert_eq!(
+            count(&found, SyntaxKind::ComponentValueBlock),
+            count(&css_block_value_kinds, SyntaxKind::ComponentValueBlock),
+            "{dialect:?}"
+        );
+        assert_eq!(found, css_block_value_kinds, "{dialect:?}");
+    }
+
+    // A colon immediately followed by its block value, with zero whitespace (only an optional
+    // comment) in between, stays exactly what it is under Css/Scss/Less: still one clean
+    // declaration whose value is the balanced block, not a rule body. This is the exact
+    // regression case `sass_and_stylus_cst_construct_coverage_parity_with_css_and_less` missed
+    // the first time — every earlier block-value case here has actual whitespace before the `{`,
+    // and `colon_starts_declaration`'s adjacency check (comments transparent, whitespace not)
+    // read a comment-but-no-whitespace gap the same as a *pseudo-selector's* touching colon
+    // (`a:hover`), sending `--raw-block:{ ... }` and `color:/**/{}` through the rule-body path
+    // instead of the declaration's block-value path. Custom properties compound this: a
+    // `--`-prefixed colon is a declaration unconditionally, wired through
+    // `immediate_custom_property_colons_ignore_whitespace_and_comments`'s four adjacency forms.
+    let custom_property_adjacency = concat!(
+        ".host {",
+        " --raw-function /**/ : /**/ var(--fallback);",
+        r#" \-\-escaped-function/**/:rgb(1 2 3);"#,
+        " --raw-block /* before colon */ : /**/ { foreground: red };",
+        r#" \-\-escaped-block/**/ :{ foreground: blue };"#,
+        " }",
+    );
+    let css_custom_property_adjacency_kinds = kinds(custom_property_adjacency, CssDialect::Css);
+    assert_eq!(
+        count(
+            &css_custom_property_adjacency_kinds,
+            SyntaxKind::CustomPropertyDeclaration
+        ),
+        4
+    );
+    for dialect in DIALECTS {
+        assert_eq!(
+            kinds(custom_property_adjacency, dialect),
+            css_custom_property_adjacency_kinds,
+            "{dialect:?}"
+        );
+    }
+
+    // A custom property's colon starts its declaration unconditionally, even when the token
+    // right after the colon would otherwise read as a pseudo-class name. `--theme:hover { … }`
+    // is a custom property whose value is the balanced block, never a `--theme` type selector
+    // with a `:hover` pseudo — a `--`-prefixed name cannot host a pseudo. This is the sole
+    // assertion covering `colon_starts_declaration`'s custom-property arm: every other
+    // block-value case here reaches the same verdict through the `{`-follows-colon rule, so
+    // deleting that arm leaves them all green.
+    let custom_property_pseudo_collision = ".host { --theme:hover { color: red }; color: blue; }";
+    let css_custom_property_pseudo_collision_kinds =
+        kinds(custom_property_pseudo_collision, CssDialect::Css);
+    assert_eq!(
+        count(
+            &css_custom_property_pseudo_collision_kinds,
+            SyntaxKind::CustomPropertyDeclaration
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &css_custom_property_pseudo_collision_kinds,
+            SyntaxKind::QualifiedRule
+        ),
+        1,
+        "the block value must not become a second nested rule"
+    );
+    for dialect in DIALECTS {
+        assert_eq!(
+            kinds(custom_property_pseudo_collision, dialect),
+            css_custom_property_pseudo_collision_kinds,
+            "{dialect:?}"
+        );
+    }
+
+    // A value carrying a `{ ... }` block AND other top-level content is a RULE prelude that
+    // happens to contain a colon, never a declaration with a block value. `foo: bar { … }` is
+    // the discriminating shape: a sole-block value (`color: { … }`) and a block-plus-`!important`
+    // value are declarations, but the moment another top-level value joins the block it is a
+    // qualified rule. The layout parser approximated this with byte adjacency and classified
+    // `foo: bar { … }` as one Declaration while Css read a QualifiedRule.
+    let mixed_block_value = ".host { foo: bar { color: red } }";
+    let css_mixed_block_value_kinds = kinds(mixed_block_value, CssDialect::Css);
+    assert_eq!(
+        count(&css_mixed_block_value_kinds, SyntaxKind::QualifiedRule),
+        2,
+        "the inner block-plus-value shape is a rule, not a declaration"
+    );
+    assert_eq!(
+        count(&css_mixed_block_value_kinds, SyntaxKind::Declaration),
+        1,
+        "only `color: red` is a declaration"
+    );
+    for dialect in DIALECTS {
+        assert_eq!(
+            kinds(mixed_block_value, dialect),
+            css_mixed_block_value_kinds,
+            "{dialect:?}"
+        );
+    }
+
+    // The same zero-whitespace adjacency for an ORDINARY (non-custom-property) declaration's
+    // sole block value, mirroring `ordinary_declaration_values_allow_sole_block_and_important`.
+    let ordinary_block_adjacency = concat!(
+        ".host {",
+        " color:/**/{};",
+        r#" background: /**/ { foreground: red } !/**/\69mportant;"#,
+        " border: fn({});",
+        " }",
+    );
+    let css_ordinary_block_adjacency_kinds = kinds(ordinary_block_adjacency, CssDialect::Css);
+    assert_eq!(
+        count(&css_ordinary_block_adjacency_kinds, SyntaxKind::Declaration),
+        3
+    );
+    assert_eq!(
+        count(
+            &css_ordinary_block_adjacency_kinds,
+            SyntaxKind::CustomPropertyDeclaration
+        ),
+        0
+    );
+    for dialect in DIALECTS {
+        assert_eq!(
+            kinds(ordinary_block_adjacency, dialect),
+            css_ordinary_block_adjacency_kinds,
+            "{dialect:?}"
+        );
+    }
+
+    // Escaped custom-property names use the same decoded-identifier custom-property routing.
+    let escaped = r#".host { \-\-theme: red; }"#;
+    let css_escaped_kinds = kinds(escaped, CssDialect::Css);
+    for dialect in DIALECTS {
+        assert_eq!(kinds(escaped, dialect), css_escaped_kinds, "{dialect:?}");
+    }
+
+    // A bare `--identifier { ... }` with no colon is a nested type-selector rule, never a custom
+    // property: the "does this have an immediate declaration colon" gate is dialect-neutral.
+    let no_colon = ".host { --widget { color: red; } }";
+    let css_no_colon_kinds = kinds(no_colon, CssDialect::Css);
+    for dialect in DIALECTS {
+        let found = kinds(no_colon, dialect);
+        assert_eq!(
+            count(&found, SyntaxKind::CustomPropertyDeclaration),
+            0,
+            "{dialect:?}"
+        );
+        assert_eq!(found, css_no_colon_kinds, "{dialect:?}");
+    }
+
+    // Comment-transparent nested functional pseudo selectors (`article:/**/is(.a, .b) { ... }`)
+    // stay nested QualifiedRules, not declarations: the regression case here was the layout
+    // parser's colon/pseudo disambiguation treating a comment between the colon and the pseudo
+    // name as if it separated a declaration name from its value.
+    let nested_pseudo = concat!(
+        ".host {",
+        " article:/**/is(.a, .b) { color: red; }",
+        " section:where(.active) { color: blue; }",
+        " main:has(> .child) { display: block; }",
+        " }",
+    );
+    let css_nested_pseudo_kinds = kinds(nested_pseudo, CssDialect::Css);
+    assert_eq!(
+        count(&css_nested_pseudo_kinds, SyntaxKind::QualifiedRule),
+        4
+    );
+    assert_eq!(count(&css_nested_pseudo_kinds, SyntaxKind::Declaration), 3);
+    for dialect in DIALECTS {
+        assert_eq!(
+            kinds(nested_pseudo, dialect),
+            css_nested_pseudo_kinds,
+            "{dialect:?}"
+        );
+    }
+
+    // A declaration's sole block value plus a trailing `!important` stays one clean declaration.
+    let important = ".host { background: /**/ { foreground: red } !/**/important; }";
+    let css_important_kinds = kinds(important, CssDialect::Css);
+    for dialect in DIALECTS {
+        assert_eq!(
+            kinds(important, dialect),
+            css_important_kinds,
+            "{dialect:?}"
+        );
+    }
+
+    // `@media` groups keep their nested declaration and rule intact around dialect-neutral
+    // constructs, mirroring `scss_variables_in_group_and_keyframe_rule_lists_resume_following_rules`.
+    let media = "@media screen { .a { color: red; } }";
+    let css_media_kinds = kinds(media, CssDialect::Css);
+    for dialect in DIALECTS {
+        assert_eq!(kinds(media, dialect), css_media_kinds, "{dialect:?}");
+    }
+
+    // An unrecognized at-rule's body stays one opaque, balanced component-value region — never
+    // statement-parsed into nested rules/declarations — mirroring
+    // `unknown_at_rule_blocks_are_opaque_balanced_component_values`. The nested bare
+    // `{bar:baz}` component-value block inside the body is the discriminating part: naively
+    // statement-parsing this body (as every classified directive kind did before this fix)
+    // finds that inner `{` first and misreads it as the at-rule's OWN closing structure.
+    let unknown_at_rule = "@future x { foo; {bar:baz} fn([q]); }";
+    let css_unknown_at_rule_kinds = kinds(unknown_at_rule, CssDialect::Css);
+    assert_eq!(
+        count(&css_unknown_at_rule_kinds, SyntaxKind::UnknownAtRule),
+        1
+    );
+    assert!(!css_unknown_at_rule_kinds.contains(&SyntaxKind::Declaration));
+    assert!(!css_unknown_at_rule_kinds.contains(&SyntaxKind::QualifiedRule));
+    assert!(!css_unknown_at_rule_kinds.contains(&SyntaxKind::Recovery));
+    for dialect in DIALECTS {
+        assert_eq!(
+            kinds(unknown_at_rule, dialect),
+            css_unknown_at_rule_kinds,
+            "{dialect:?}"
+        );
+    }
+
+    // The SAME at-rule body opacity in the layout parser's actual reason to exist: brace-free
+    // indented Sass/Stylus. Every other case in this test feeds the layout parser braced input
+    // that Css can mirror, which never exercises the indented body path at all. An unrecognized
+    // at-rule's body is opaque component values whichever surface syntax delimits it, so the
+    // indented form must classify no statements either.
+    for (dialect, indented) in [
+        (CssDialect::Sass, "@future x\n  foo: bar\n  baz\n"),
+        (CssDialect::Stylus, "@future x\n  foo: bar\n  baz\n"),
+    ] {
+        let source = CssSource::new(Arc::from(indented), 0).unwrap();
+        let cst = parse_lossless(
+            source,
+            dialect,
+            CssEntryPoint::Stylesheet,
+            CssParseMode::Strict,
+        )
+        .unwrap_or_else(|error| panic!("{dialect:?} failed to parse {indented:?}: {error:?}"));
+        let found: Vec<SyntaxKind> = cst.nodes().iter().map(SyntaxNode::kind).collect();
+        assert_eq!(count(&found, SyntaxKind::UnknownAtRule), 1, "{dialect:?}");
+        assert_eq!(
+            count(&found, SyntaxKind::Declaration),
+            0,
+            "{dialect:?}: an indented unknown at-rule body must not be statement-parsed"
+        );
+        assert_eq!(count(&found, SyntaxKind::QualifiedRule), 0, "{dialect:?}");
+        assert!(cst.diagnostics().is_empty(), "{dialect:?}");
+        assert_eq!(cst.reconstruct(), indented, "{dialect:?}");
+    }
+
+    // A sibling statement after the indented body dedents out of it: the opaque region must stop
+    // at the dedent, not swallow the rest of the stylesheet.
+    for dialect in [CssDialect::Sass, CssDialect::Stylus] {
+        let input = "@future x\n  foo: bar\n.after\n  color: red\n";
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let cst = parse_lossless(
+            source,
+            dialect,
+            CssEntryPoint::Stylesheet,
+            CssParseMode::Strict,
+        )
+        .unwrap_or_else(|error| panic!("{dialect:?} failed to parse {input:?}: {error:?}"));
+        let found: Vec<SyntaxKind> = cst.nodes().iter().map(SyntaxNode::kind).collect();
+        assert_eq!(count(&found, SyntaxKind::UnknownAtRule), 1, "{dialect:?}");
+        assert_eq!(
+            count(&found, SyntaxKind::QualifiedRule),
+            1,
+            "{dialect:?}: the dedented sibling rule must survive the opaque body"
+        );
+        assert_eq!(
+            count(&found, SyntaxKind::Declaration),
+            1,
+            "{dialect:?}: only the sibling rule's declaration is classified"
+        );
+        assert_eq!(cst.reconstruct(), input, "{dialect:?}");
+    }
+
+    // Variable declarations use each dialect's own real syntax: Sass keeps Scss's `$name:` sigil
+    // (both lower through the direct-parser-shaped ScssVariable token), while Stylus variables
+    // are bare `name = value` assignments with no sigil at all. Both classify as the layout
+    // parser's dedicated VariableDeclaration statement kind at both root and nested scope.
+    for (dialect, input) in [
+        (
+            CssDialect::Sass,
+            "$tone: red;\n.host { $accent: blue; color: red; }",
+        ),
+        (
+            CssDialect::Stylus,
+            "tone = red;\n.host { accent = blue; color: red; }",
+        ),
+    ] {
+        let found = kinds(input, dialect);
+        assert_eq!(
+            count(&found, SyntaxKind::VariableDeclaration),
+            2,
+            "{dialect:?}"
+        );
+        assert_eq!(count(&found, SyntaxKind::Declaration), 1, "{dialect:?}");
+        assert_eq!(count(&found, SyntaxKind::QualifiedRule), 1, "{dialect:?}");
+    }
+
+    // A malformed variable name (an extra token before the colon) is never silently accepted as
+    // a clean variable declaration. Both parsers REJECT it — that is the shared invariant — but
+    // they name the failure differently, and this pins the difference rather than hiding it:
+    // the direct parser reports `ExpectedRuleBlock` and emits a `Recovery` node
+    // (`root_variable_declarations_reject_intervening_non_trivia_and_css_idents`), while the
+    // layout parser reports its own `AmbiguousStatement`, which is that parser's vocabulary for
+    // a statement it cannot classify and which the direct parser has no notion of. Unifying the
+    // two diagnostic vocabularies is convergence work, not this block's; what must hold here is
+    // that neither accepts it and both stay lossless.
+    let malformed = "$tone junk: red;";
+    let source = CssSource::new(Arc::from(malformed), 0).unwrap();
+    let strict = parse_lossless(
+        source.clone(),
+        CssDialect::Sass,
+        CssEntryPoint::Stylesheet,
+        CssParseMode::Strict,
+    );
+    assert!(matches!(
+        strict,
+        Err(CssParseFailure::Diagnostic(diagnostic))
+            if diagnostic.kind == CssDiagnosticKind::AmbiguousStatement
+    ));
+    let recovered = parse_lossless(
+        source,
+        CssDialect::Sass,
+        CssEntryPoint::Stylesheet,
+        CssParseMode::Recover,
+    )
+    .unwrap();
+    assert!(!recovered
+        .nodes()
+        .iter()
+        .any(|node| node.kind() == SyntaxKind::VariableDeclaration));
+    assert!(!recovered
+        .nodes()
+        .iter()
+        .any(|node| node.kind() == SyntaxKind::Declaration));
+    assert!(recovered
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.kind == CssDiagnosticKind::AmbiguousStatement));
+    assert_eq!(recovered.reconstruct(), malformed);
+}

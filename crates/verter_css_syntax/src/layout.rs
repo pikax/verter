@@ -9,8 +9,14 @@ use crate::diagnostic::{
 use crate::dialect::CssDialect;
 use crate::event::{NodeFlags, ParseEvent, ParseEventSink, ParseSummary, SyntaxKind};
 use crate::lexer::Lexer;
-use crate::parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource};
-use crate::token::{css_identifier_eq_ignore_ascii_case, SyntaxToken, TokenFlags, TokenKind};
+use crate::parser::{
+    classify_at_rule, declaration_value_shape_admits, parse_with_sink, CssEntryPoint, CssParseMode,
+    CssSource,
+};
+use crate::token::{
+    css_identifier_eq_ignore_ascii_case, css_identifier_starts_with, SyntaxToken, TokenFlags,
+    TokenKind,
+};
 
 pub(crate) fn should_use_layout(source: &CssSource, dialect: CssDialect) -> bool {
     match dialect {
@@ -211,7 +217,16 @@ impl<'a> LayoutParser<'a> {
 
         let outer_kind = match class {
             StatementClass::Rule => SyntaxKind::QualifiedRule,
-            StatementClass::Declaration => SyntaxKind::Declaration,
+            StatementClass::Declaration => {
+                let first = self.tokens[start_index];
+                if first.kind() == TokenKind::Ident
+                    && css_identifier_starts_with(self.source.token_text(first), "--")
+                {
+                    SyntaxKind::CustomPropertyDeclaration
+                } else {
+                    SyntaxKind::Declaration
+                }
+            }
             StatementClass::Variable => SyntaxKind::VariableDeclaration,
             StatementClass::Directive(kind) => kind,
             StatementClass::MixinOrFunction => SyntaxKind::MixinOrFunctionHeader,
@@ -270,7 +285,28 @@ impl<'a> LayoutParser<'a> {
             self.start(sink, block_kind, opener.start, false)?;
             self.emit_token(sink, opener)?;
             self.cursor = boundary.index + 1;
-            self.parse_list(sink, None, true)?;
+            if class == StatementClass::Directive(SyntaxKind::UnknownAtRule) {
+                // An unrecognized at-rule's body stays one opaque component-value list — never
+                // statement-parsed — mirroring the direct recursive-descent parser's
+                // `UnknownAtRule` dispatch (`parse_component_values(sink, Some(RightBrace))`).
+                // Find the TRUE matching `}` for this opener first (brace-depth balanced, so a
+                // nested bare `{...}` component-value block inside the body is never mistaken
+                // for the at-rule's own closer) instead of letting a generic statement scan
+                // misread the body's nested braces as nested rules/declarations.
+                let body_end = find_matching_right_brace(&self.tokens, boundary.index)
+                    .unwrap_or(self.tokens.len());
+                if body_end > self.cursor {
+                    self.replay_subparse_unwrapped(
+                        sink,
+                        CssEntryPoint::ComponentValueList,
+                        self.cursor,
+                        body_end,
+                    )?;
+                }
+                self.cursor = body_end;
+            } else {
+                self.parse_list(sink, None, true)?;
+            }
             if self
                 .tokens
                 .get(self.cursor)
@@ -307,9 +343,26 @@ impl<'a> LayoutParser<'a> {
                     .get(self.cursor)
                     .map_or(end, |token| token.start);
                 self.start(sink, SyntaxKind::IndentedBlock, block_start, false)?;
-                self.indent_levels.push(child_indent.clone());
-                self.parse_list(sink, Some(&child_indent), false)?;
-                self.indent_levels.pop();
+                if class == StatementClass::Directive(SyntaxKind::UnknownAtRule) {
+                    // Same opacity as the braced arm above: an unrecognized at-rule's body is
+                    // never statement-parsed, whichever surface syntax delimits it. Its extent
+                    // is purely the indented region, so it is found by indentation rather than
+                    // by classifying the statements inside it.
+                    let body_end = self.indented_block_end(self.cursor, &child_indent);
+                    if body_end > self.cursor {
+                        self.replay_subparse_unwrapped(
+                            sink,
+                            CssEntryPoint::ComponentValueList,
+                            self.cursor,
+                            body_end,
+                        )?;
+                    }
+                    self.cursor = body_end;
+                } else {
+                    self.indent_levels.push(child_indent.clone());
+                    self.parse_list(sink, Some(&child_indent), false)?;
+                    self.indent_levels.pop();
+                }
                 end = self.current_position();
                 self.finish(sink, SyntaxKind::IndentedBlock, end)?;
             }
@@ -334,7 +387,7 @@ impl<'a> LayoutParser<'a> {
             {
                 SyntaxKind::ControlDirective
             } else {
-                SyntaxKind::UnknownAtRule
+                classify_at_rule(name)
             };
             return StatementClass::Directive(kind);
         }
@@ -342,7 +395,21 @@ impl<'a> LayoutParser<'a> {
             first.kind(),
             TokenKind::ScssVariable | TokenKind::LessVariable
         ) {
-            return StatementClass::Variable;
+            // A variable name must be followed by nothing but trivia before its colon;
+            // an intervening token (`$tone junk: red`) is malformed, not a clean variable.
+            let colon = self.tokens[start..end]
+                .iter()
+                .position(|token| token.kind() == TokenKind::Colon)
+                .map(|offset| start + offset);
+            return if colon.is_some_and(|colon| {
+                self.tokens[start + 1..colon]
+                    .iter()
+                    .all(|token| token.kind().is_trivia())
+            }) {
+                StatementClass::Variable
+            } else {
+                StatementClass::Ambiguous
+            };
         }
         if self.dialect == CssDialect::Less
             && is_less_mixin_header(&self.tokens[start..end], self.source)
@@ -384,8 +451,12 @@ impl<'a> LayoutParser<'a> {
             return StatementClass::Ambiguous;
         }
         if has_body {
+            // Deliberately `[start..]`, not `[start..end]`: the shared value-shape predicate
+            // needs to see the statement's `{ ... }` block to tell a declaration's sole block
+            // value from a rule's body, and it applies its own top-level `;` / `}` stop — the
+            // same window the direct parser's lexer clone walks.
             if explicit_colon.is_some_and(|colon| {
-                colon_starts_declaration(&self.tokens[start..end], colon - start)
+                colon_starts_declaration(self.source, &self.tokens[start..], colon - start)
             }) {
                 return StatementClass::Declaration;
             }
@@ -459,11 +530,81 @@ impl<'a> LayoutParser<'a> {
         if kind == SyntaxKind::ComponentValueList {
             self.replay_subparse(sink, CssEntryPoint::ComponentValueList, start, end)
         } else {
-            let start_pos = self.tokens[start].start;
-            self.start(sink, kind, start_pos, false)?;
-            self.replay_subparse(sink, CssEntryPoint::ComponentValueList, start, end)?;
-            self.finish(sink, kind, self.tokens[end - 1].end)
+            // `CssEntryPoint::ComponentValueList` always wraps its own replayed content in one
+            // ComponentValueList node; retag that outer node as `kind` instead of nesting a
+            // second wrapper around it, matching the direct recursive-descent parser's
+            // `AtRulePrelude`, which contains its tokens directly with no extra wrapping node.
+            self.replay_subparse_retagged(sink, kind, start, end)
         }
+    }
+
+    /// Runs a subparse over `[start, end)` and returns its raw event stream without replaying it
+    /// — the shared primitive `replay_subparse`/`replay_subparse_retagged`/
+    /// `replay_subparse_unwrapped` slice a subspan, subparse it, and each replay the resulting
+    /// events differently (as-is, with the outer wrapper node retagged, or with the outer
+    /// wrapper node dropped entirely).
+    fn subparse_events(
+        &self,
+        entry: CssEntryPoint,
+        start: usize,
+        end: usize,
+    ) -> Result<Vec<ParseEvent>, CssParseFailure> {
+        let start_pos = self.tokens[start].start;
+        let end_pos = self.tokens[end - 1].end;
+        let text: Arc<str> = self.source.slice(Span::new(start_pos, end_pos)).into();
+        let source = CssSource::new(text, start_pos).expect("subspan remains in the source domain");
+        let mut events = VecSink::default();
+        parse_with_sink(&source, self.dialect, entry, self.mode, &mut events)?;
+        Ok(events.events)
+    }
+
+    fn replay_subparse_retagged(
+        &mut self,
+        sink: &mut impl ParseEventSink,
+        kind: SyntaxKind,
+        start: usize,
+        end: usize,
+    ) -> Result<(), CssParseFailure> {
+        let mut events = self.subparse_events(CssEntryPoint::ComponentValueList, start, end)?;
+        if let Some(ParseEvent::StartNode {
+            kind: node_kind, ..
+        }) = events.first_mut()
+        {
+            *node_kind = kind;
+        }
+        if let Some(ParseEvent::FinishNode {
+            kind: node_kind, ..
+        }) = events.last_mut()
+        {
+            *node_kind = kind;
+        }
+        for event in events {
+            self.emit(sink, event)?;
+        }
+        Ok(())
+    }
+
+    /// Replays a subparse's events with its outer wrapping node dropped entirely, instead of
+    /// retagged (`replay_subparse_retagged`) or kept as-is (`replay_subparse`). Used to splice an
+    /// unrecognized at-rule's body directly into its `AtRuleBlock` as bare component-value
+    /// content — matching the direct recursive-descent parser's `UnknownAtRule` dispatch
+    /// (`parse_component_values`), which never wraps that content in a `ComponentValueList`.
+    fn replay_subparse_unwrapped(
+        &mut self,
+        sink: &mut impl ParseEventSink,
+        entry: CssEntryPoint,
+        start: usize,
+        end: usize,
+    ) -> Result<(), CssParseFailure> {
+        let mut events = self.subparse_events(entry, start, end)?;
+        if !events.is_empty() {
+            events.remove(0);
+            events.pop();
+        }
+        for event in events {
+            self.emit(sink, event)?;
+        }
+        Ok(())
     }
 
     fn replay_subparse(
@@ -473,21 +614,48 @@ impl<'a> LayoutParser<'a> {
         start: usize,
         end: usize,
     ) -> Result<(), CssParseFailure> {
-        let start_pos = self.tokens[start].start;
-        let end_pos = self.tokens[end - 1].end;
-        let text: Arc<str> = self.source.slice(Span::new(start_pos, end_pos)).into();
-        let source = CssSource::new(text, start_pos).expect("subspan remains in the source domain");
-        let mut events = VecSink::default();
-        parse_with_sink(&source, self.dialect, entry, self.mode, &mut events)?;
-        for event in events.events {
+        for event in self.subparse_events(entry, start, end)? {
             self.emit(sink, event)?;
         }
         Ok(())
     }
 
+    /// Exclusive token index where an indented block at `expected` indentation ends: the first
+    /// significant token whose line indent is not `expected` or deeper. Used only for a body that
+    /// is replayed opaquely, where the statements inside are never classified — so the extent is
+    /// decided by indentation alone rather than by `parse_list`'s per-statement walk.
+    fn indented_block_end(&self, start: usize, expected: &[u8]) -> usize {
+        let mut index = start;
+        let mut end = start;
+        // `indent_prefix` describes the LINE a token opens, so it is only meaningful at a line
+        // start; asked about a mid-line token it reports an empty prefix, which would end the
+        // block at the first token that does not follow trivia.
+        let mut at_line_start = true;
+        while index < self.tokens.len() {
+            let token = self.tokens[index];
+            if token.kind().is_trivia() {
+                if token.flags & TokenFlags::CONTAINS_NEWLINE != 0 {
+                    at_line_start = true;
+                }
+                index += 1;
+                continue;
+            }
+            if at_line_start
+                && !indent_prefix(self.source, &self.tokens, index).starts_with(expected)
+            {
+                break;
+            }
+            at_line_start = false;
+            index += 1;
+            end = index;
+        }
+        end
+    }
+
     fn find_boundary(&self, start: usize) -> Boundary {
         let mut delimiters: Vec<(TokenKind, bool)> = Vec::new();
         let mut index = start;
+        let mut declaration_colon: Option<usize> = None;
         while index < self.tokens.len() {
             let token = self.tokens[index];
             match token.kind() {
@@ -501,6 +669,25 @@ impl<'a> LayoutParser<'a> {
                 | TokenKind::LessInterpolationStart
                 | TokenKind::StylusInterpolationStart => {
                     delimiters.push((TokenKind::RightBrace, true));
+                }
+                TokenKind::Colon if delimiters.is_empty() && declaration_colon.is_none() => {
+                    declaration_colon = Some(index);
+                }
+                // A declaration's value keeps its own `{ ... }` block opaque (mirroring the
+                // recursive-descent parser's `parse_component_values_until_declaration_boundary`)
+                // instead of treating it as a nested rule/at-rule body: only an unguarded `{`
+                // that is NOT a declaration's block value is a statement-owning block boundary.
+                TokenKind::LeftBrace
+                    if delimiters.is_empty()
+                        && declaration_colon.is_some_and(|colon| {
+                            colon_starts_declaration(
+                                self.source,
+                                &self.tokens[start..],
+                                colon - start,
+                            )
+                        }) =>
+                {
+                    delimiters.push((TokenKind::RightBrace, false));
                 }
                 TokenKind::LeftBrace if delimiters.is_empty() => {
                     return Boundary {
@@ -808,7 +995,31 @@ fn has_top_level_assignment(tokens: &[SyntaxToken], source: &CssSource) -> bool 
     false
 }
 
-fn colon_starts_declaration(tokens: &[SyntaxToken], colon: usize) -> bool {
+/// Finds the index of the `}` that closes the `{` at `tokens[open_index]`, tracking brace depth
+/// only (a plain component-value block or a dialect interpolation start both close on an
+/// ordinary `RightBrace`; parens/brackets/functions never affect brace balance and so need no
+/// separate tracking here, unlike `find_boundary`'s general statement-boundary scan).
+fn find_matching_right_brace(tokens: &[SyntaxToken], open_index: usize) -> Option<usize> {
+    let mut depth: u32 = 1;
+    for (offset, token) in tokens[open_index + 1..].iter().enumerate() {
+        match token.kind() {
+            TokenKind::LeftBrace
+            | TokenKind::ScssInterpolationStart
+            | TokenKind::LessInterpolationStart
+            | TokenKind::StylusInterpolationStart => depth += 1,
+            TokenKind::RightBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open_index + 1 + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn colon_starts_declaration(source: &CssSource, tokens: &[SyntaxToken], colon: usize) -> bool {
     let significant_before: Vec<_> = tokens[..colon]
         .iter()
         .filter(|token| !token.kind().is_trivia())
@@ -821,14 +1032,20 @@ fn colon_starts_declaration(tokens: &[SyntaxToken], colon: usize) -> bool {
     {
         return false;
     }
-    let separator = tokens[colon];
-    let Some(next) = tokens[colon + 1..]
-        .iter()
-        .find(|token| !token.kind().is_trivia())
-    else {
+    let name = significant_before[0];
+    // A custom property's colon always starts a declaration, regardless of what follows: a
+    // pseudo-class/pseudo-element can never collide with a `--`-prefixed name (mirroring the
+    // direct recursive-descent parser's `looks_like_declaration`, which admits a custom
+    // property unconditionally before considering the value's shape at all).
+    if name.kind() == TokenKind::Ident && css_identifier_starts_with(source.token_text(*name), "--")
+    {
         return true;
-    };
-    next.start != separator.end
+    }
+    // Otherwise the value's SHAPE decides, through the same predicate the direct
+    // recursive-descent parser uses. A colon touching its next token (`a:hover`) is not
+    // special-cased here: the shared rule already rejects it, because a value carrying both a
+    // `{ ... }` block and other top-level content is a rule prelude, not a declaration value.
+    declaration_value_shape_admits(source, tokens[colon + 1..].iter().copied())
 }
 
 fn continues_after(

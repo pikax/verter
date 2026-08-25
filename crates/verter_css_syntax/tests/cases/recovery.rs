@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use verter_css_syntax::{
     parse_lossless, CssDiagnosticKind, CssDialect, CssEntryPoint, CssParseFailure, CssParseMode,
-    CssSource, CssSourceTooLarge, RecoveryKind, SourceSize, SyntaxKind,
+    CssSource, CssSourceTooLarge, RecoveryKind, SourceSize, StructureOverflowKind, SyntaxKind,
 };
 
 #[test]
@@ -602,4 +602,203 @@ fn url_content_then_whitespace_at_eof_is_typed_as_unterminated_url() {
         verter_css_syntax::TokenFlags::UNTERMINATED
     );
     assert_eq!(recovered.reconstruct(), input);
+}
+
+// @ai-generated - dialect-coverage parity for Sass/Stylus in the recovery suite.
+//
+// `CssEntryPoint::ComponentValueList` and `CssEntryPoint::SelectorList` never route through the
+// indentation-aware layout parser regardless of dialect (only `Stylesheet` can), so lexical and
+// component-value recovery is dialect-neutral there by construction; this pins that neutrality
+// for Sass/Stylus explicitly instead of leaving it CSS/Less-only. The `Stylesheet`-entry case
+// covers the one construct layout-parser statement classification must still get right on its
+// own: a comment sitting between a pseudo-selector's colon and its name must not be mistaken for
+// a declaration's "value follows the colon" shape.
+#[test]
+fn sass_and_stylus_recovery_coverage_parity_with_css_and_less() {
+    const DIALECTS: [CssDialect; 5] = [
+        CssDialect::Css,
+        CssDialect::Scss,
+        CssDialect::Less,
+        CssDialect::Sass,
+        CssDialect::Stylus,
+    ];
+
+    // Lexical corruption (unterminated comment/string/url) is typed identically in strict mode
+    // and explicit identically in recover mode for every dialect.
+    for (input, expected) in [
+        ("/*", CssDiagnosticKind::UnterminatedComment),
+        ("\"x", CssDiagnosticKind::UnterminatedString),
+        ("\"x\n", CssDiagnosticKind::BadString),
+        ("url(foo", CssDiagnosticKind::UnterminatedUrl),
+        ("url(a b)", CssDiagnosticKind::BadUrl),
+    ] {
+        for dialect in DIALECTS {
+            let strict = parse_lossless(
+                CssSource::new(Arc::from(input), 5).unwrap(),
+                dialect,
+                CssEntryPoint::ComponentValueList,
+                CssParseMode::Strict,
+            );
+            assert!(
+                matches!(
+                    strict,
+                    Err(CssParseFailure::Diagnostic(diagnostic)) if diagnostic.kind == expected
+                ),
+                "{dialect:?}: {input}"
+            );
+
+            let recovered = parse_lossless(
+                CssSource::new(Arc::from(input), 5).unwrap(),
+                dialect,
+                CssEntryPoint::ComponentValueList,
+                CssParseMode::Recover,
+            )
+            .unwrap();
+            assert_eq!(
+                recovered.diagnostics()[0].kind,
+                expected,
+                "{dialect:?}: {input}"
+            );
+            assert_eq!(
+                recovered.diagnostics()[0].recovery,
+                RecoveryKind::AdvanceOneToken,
+                "{dialect:?}: {input}"
+            );
+            assert!(
+                recovered
+                    .nodes()
+                    .iter()
+                    .any(|node| node.kind() == SyntaxKind::Recovery),
+                "{dialect:?}: {input}"
+            );
+            assert_eq!(recovered.reconstruct(), input, "{dialect:?}: {input}");
+        }
+    }
+
+    // Excessive component-value nesting (`(((...)))`) is a typed structure overflow, not a stack
+    // hazard or a plain diagnostic, in every dialect.
+    let deep = format!("{}x{}", "(".repeat(129), ")".repeat(129));
+    for dialect in DIALECTS {
+        let result = parse_lossless(
+            CssSource::new(Arc::from(deep.as_str()), 0).unwrap(),
+            dialect,
+            CssEntryPoint::ComponentValueList,
+            CssParseMode::Strict,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CssParseFailure::Structure(error))
+                    if error.kind == StructureOverflowKind::NestingDepth
+            ),
+            "{dialect:?}"
+        );
+    }
+
+    // A comment between a selector's pseudo-class colon and its name must not be misread as a
+    // declaration's "colon, then some intervening trivia, then the value" shape: the four
+    // comment-transparent pseudo forms Css already covers stay nested QualifiedRules in every
+    // dialect. Before this parity fix, Sass/Stylus's layout-parser statement classifier used raw
+    // byte adjacency (`next.start == separator.end`) to detect "touching colon = pseudo", so a
+    // comment between the colon and the pseudo name (which is still touching in every real
+    // sense) broke the heuristic and misclassified each case as a declaration with an opaque
+    // block value instead of a nested rule.
+    let input = concat!(
+        ".host {",
+        " item:/**/hover { color:red; }",
+        " widget:/**/is(.x) { color:blue; }",
+        " thing:/**/:/**/before { color:green; }",
+        " slot:/**/:/**/part(foo) { color:black; }",
+        " }",
+    );
+    for dialect in DIALECTS {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let cst = parse_lossless(
+            source.clone(),
+            dialect,
+            CssEntryPoint::Stylesheet,
+            CssParseMode::Strict,
+        )
+        .unwrap_or_else(|error| panic!("{dialect:?} failed to parse: {error:?}"));
+        let pseudos: Vec<_> = cst
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind(),
+                    SyntaxKind::PseudoClass
+                        | SyntaxKind::PseudoElement
+                        | SyntaxKind::PseudoSelectorList
+                )
+            })
+            .map(|node| source.slice(node.span()))
+            .collect();
+
+        assert_eq!(
+            pseudos,
+            vec![
+                ":/**/hover",
+                ":/**/is(.x)",
+                ":/**/:/**/before",
+                ":/**/:/**/part(foo)",
+            ],
+            "{dialect:?}"
+        );
+        assert_eq!(
+            cst.nodes()
+                .iter()
+                .filter(|node| node.kind() == SyntaxKind::QualifiedRule)
+                .count(),
+            5,
+            "{dialect:?}"
+        );
+        assert_eq!(
+            cst.nodes()
+                .iter()
+                .filter(|node| node.kind() == SyntaxKind::Declaration)
+                .count(),
+            4,
+            "{dialect:?}"
+        );
+        assert!(
+            !cst.nodes()
+                .iter()
+                .any(|node| node.kind() == SyntaxKind::Recovery),
+            "{dialect:?}"
+        );
+        assert!(cst.diagnostics().is_empty(), "{dialect:?}");
+        assert_eq!(cst.reconstruct(), input, "{dialect:?}");
+    }
+
+    // A malformed rule never swallows a clean, newline-separated sibling: each dialect's own
+    // statement boundary between the two rules is real, even though *how* the malformed rule
+    // itself is classified is dialect-appropriate rather than byte-identical (Sass/Stylus flag
+    // the headless `broken` prelude as one ambiguous statement instead of Css/Less/Scss's
+    // attempted nested-rule reparse of the bare word).
+    let sibling_input = ".a { broken }\n.b { color:red; }\n";
+    for dialect in DIALECTS {
+        let source = CssSource::new(Arc::from(sibling_input), 0).unwrap();
+        let recovered = parse_lossless(
+            source.clone(),
+            dialect,
+            CssEntryPoint::Stylesheet,
+            CssParseMode::Recover,
+        )
+        .unwrap();
+        assert!(!recovered.diagnostics().is_empty(), "{dialect:?}");
+        assert!(
+            recovered
+                .nodes()
+                .iter()
+                .any(|node| node.kind() == SyntaxKind::QualifiedRule
+                    && source.slice(node.span()) == ".b { color:red; }"),
+            "{dialect:?}: sibling rule must survive intact: {:#?}",
+            recovered
+                .nodes()
+                .iter()
+                .map(|node| node.kind())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(recovered.reconstruct(), sibling_input, "{dialect:?}");
+    }
 }

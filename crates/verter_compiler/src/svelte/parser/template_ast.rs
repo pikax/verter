@@ -146,8 +146,8 @@ pub struct ScriptBodyProbe {
 /// allocates it at the upstream `read_style` body-parse position (BEFORE the `style_duplicate`
 /// check) so a malformed CSS body's exact parse code arbitrates by the order official discovers
 /// it (which, for the 2nd `<style>`, is BEFORE `style_duplicate`). The parser mints only the
-/// slot; the official-reject gate fills it by running a faithful port of upstream's
-/// `read/style.js` parse control flow from [`content_start`](Self::content_start).
+/// slot; the official-reject gate fills it by projecting the first CSS parse
+/// code from a [`StyleSyntaxIr`] parse of [`content`](Self::content).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StyleBodyProbe {
     /// The parser's monotonic discovery sequence reserved for this style's CSS body parse —
@@ -155,12 +155,12 @@ pub struct StyleBodyProbe {
     /// check) so a body parse failure arbitrates against the other parse-defect rails by minimum
     /// `encounter_order`.
     pub encounter_order: u32,
-    /// The byte offset where the CSS body BEGINS (just past the `<style …>` open tag's `>`). The
-    /// gate's CSS reader parses from HERE into the rest of the source (honouring upstream's
-    /// `</style`-or-EOF body-loop finish predicate), so a nested CSS reader that runs into the
-    /// literal `</style>` reproduces the exact upstream code. The REPORT anchor for a CSS body
-    /// failure and equal-order normative span tie-break.
-    pub content_start: u32,
+    /// The parser-minted CSS body span (just past the `<style …>` open tag's
+    /// `>` through the recognised close, or EOF when unclosed). The reject
+    /// gate parses this span through `StyleSyntaxIr`; it does not rescan for
+    /// `</style>`. The span start is the REPORT anchor for a CSS body failure
+    /// and equal-order normative span tie-break.
+    pub content: Span,
 }
 
 /// One RESOLVED `<svelte:options customElement={EXPR}>` validation slot. The

@@ -210,11 +210,83 @@ fn selector_list_prunes_trailing_unused_run_after_comma() {
 }
 
 #[test]
+fn selector_list_prune_boundary_search_skips_a_comment_holding_its_own_comma() {
+    // `.card, .dead, /* x,y */ .title` — `.dead` is the sole unused run
+    // between two USED selectors, and the comment separating `.dead` from
+    // `.title` itself contains a comma (`x,y`). The pruning boundary search
+    // must land on the REAL selector-list delimiter (the comma right after
+    // `.dead`), never on the comma INSIDE the comment: a naive "first comma
+    // found" scan (forward or backward) over the raw bytes between `.dead`
+    // and `.title` hits the comment's own `x,y` comma first and splits the
+    // comment in half, corrupting it.
+    let (code, hash) = rendered(".card, .dead, /* x,y */ .title { color: red; }");
+    assert_eq!(
+        code,
+        format!(".card.{hash} /* (unused) .dead*/, /* x,y */ .title.{hash} {{ color: red; }}")
+    );
+    // Should-NOT: the interior comment is split/corrupted (a truncated
+    // `/* x,*/` with a dangling `y */` outside any comment is invalid CSS).
+    assert!(
+        code.contains("/* x,y */"),
+        "the interior comment survives intact: {code}"
+    );
+    assert!(
+        !code.contains("x,*/"),
+        "the interior comment must not be split: {code}"
+    );
+}
+
+#[test]
+fn selector_list_prune_boundary_lands_on_the_comma_past_trailing_whitespace() {
+    // `.card, .dead   , /* x,y */ .title` — same shape as the comment test
+    // above (the sole unused `.dead` run between two USED selectors, with a
+    // comma-holding comment further along), but with three extra spaces
+    // between `.dead` and ITS OWN delimiter comma. The close boundary is
+    // read directly off `ComplexSelector::span().end` — a parser fact: the
+    // parser consumes ALL trailing trivia (whitespace included) before
+    // closing the selector node exactly at the comma's own start byte —
+    // never re-derived via a trim-then-forward-scan over `.dead`'s raw
+    // text. A boundary computation that instead stopped at `.dead`'s
+    // trimmed content (skipping the deleted scan's own comment/whitespace
+    // handling) would land the closing `*/` three bytes too early, leaving
+    // trailing spaces outside the wrap as bare (invalid) selector-list
+    // text; a computation that used the NEXT selector's untrimmed start
+    // would land too late, corrupting the delimiter comma into the wrap.
+    let (code, hash) = rendered(".card, .dead   , /* x,y */ .title { color: red; }");
+    assert_eq!(
+        code,
+        format!(".card.{hash} /* (unused) .dead   */, /* x,y */ .title.{hash} {{ color: red; }}")
+    );
+    // Should-NOT: the trailing spaces are trimmed off the wrap, or the
+    // delimiter comma itself ends up inside it.
+    assert!(
+        !code.contains(".dead*/"),
+        "the three trailing spaces stay INSIDE the wrap, at the parser's own comma-start \
+         boundary, not trimmed off it: {code}"
+    );
+    assert!(
+        !code.contains(",*/"),
+        "the delimiter comma itself must stay OUTSIDE (after) the wrap: {code}"
+    );
+}
+
+#[test]
 fn comment_close_inside_unused_rule_is_escaped() {
     let (code, _hash) = rendered(".missing { /* x*/ color: red; }");
     // The wrapping unused-comment must survive an interior `*/` — the
     // official renderer escapes the close to `*\/`.
     assert_eq!(code, "/* (unused) .missing { /* x*\\/ color: red; }*/");
+}
+
+#[test]
+fn comment_close_escape_ignores_a_comment_shaped_string_literal() {
+    // `/*b*/` inside the string is string content, never a real comment — a
+    // hand-rolled byte scanner that tracks `/*`/`*/` state without
+    // understanding string tokens would wrongly "escape" the string's own
+    // bytes here, corrupting the value. The wrapping comment must survive
+    // with the string untouched.
+    let (code, _hash) = rendered(r#".missing { content: "a/*b*/c"; }"#);
+    assert_eq!(code, r#"/* (unused) .missing { content: "a/*b*/c"; }*/"#);
 }
 
 #[test]
@@ -331,234 +403,29 @@ fn plan_populates_css_code_for_proven_template_and_unprovable_never_plans() {
 
 // ─── fail-closed hardening: malformed spans refuse, never panic ─────────────
 //
-// `render_stylesheet` runs on every PROVEN styled component during refusal
-// classification; a pathological AST/span must surface as a typed refusal
-// (the caller keeps the component refused), never a host panic. Each test
-// below panicked at a distinct render site before the hardening.
-
-/// Parse + analyze `source`'s style body — a WELL-FORMED base AST the
-/// pathological tests then corrupt one span/flag at a time.
-fn analyzed_ast(source: &str) -> super::types::StyleSheet {
-    let mut ast = super::parse::parse_style_body(source, body_span(source)).expect("body parses");
-    super::analyze::analyze_stylesheet(source, &mut ast).expect("body analyzes");
-    ast
-}
-
-#[test]
-fn render_fails_closed_on_out_of_range_selector_span() {
-    // The prune comma back-scan starts past the source end.
-    let source = "<style>.a,.b { color: red; }</style>";
-    let mut ast = analyzed_ast(source);
-    let super::types::StyleChild::Rule(rule) = &mut ast.children[0] else {
-        panic!("the sheet's child is a rule");
-    };
-    rule.prelude.children[0].metadata.used = false;
-    rule.prelude.children[1].metadata.used = true;
-    rule.prelude.children[1].span = Span::new(10_000, 10_002);
-    let result =
-        super::render::render_stylesheet(source, &ast, "svelte-x", &[], false, None, false);
-    assert_eq!(
-        result,
-        Err(super::render::RenderError {
-            span: Span::new(10_000, 10_002)
-        })
-    );
-}
-
-#[test]
-fn render_fails_closed_when_comma_scan_reaches_offset_zero() {
-    // A pruned-run close whose span sits BEFORE any comma: the official
-    // back-scan would walk past offset 0 (the `comma -= 1` underflow).
-    let source = "<style>.a,.b { color: red; }</style>";
-    let mut ast = analyzed_ast(source);
-    let super::types::StyleChild::Rule(rule) = &mut ast.children[0] else {
-        panic!("the sheet's child is a rule");
-    };
-    rule.prelude.children[0].metadata.used = false;
-    rule.prelude.children[1].metadata.used = true;
-    rule.prelude.children[1].span = Span::new(1, 3);
-    let result =
-        super::render::render_stylesheet(source, &ast, "svelte-x", &[], false, None, false);
-    assert_eq!(
-        result,
-        Err(super::render::RenderError {
-            span: Span::new(1, 3)
-        })
-    );
-}
-
-#[test]
-fn render_fails_closed_on_global_marker_without_leading_pseudo_class() {
-    // `is_global` set on a compound that does NOT lead with a pseudo-class —
-    // the inconsistent-metadata shape (previously an `unreachable!`).
-    let source = "<style>.a { color: red; }</style>";
-    let mut ast = analyzed_ast(source);
-    let super::types::StyleChild::Rule(rule) = &mut ast.children[0] else {
-        panic!("the sheet's child is a rule");
-    };
-    rule.prelude.children[0].metadata.used = true;
-    rule.prelude.children[0].children[0].metadata.is_global = true;
-    let result =
-        super::render::render_stylesheet(source, &ast, "svelte-x", &[], false, None, false);
-    assert!(result.is_err(), "an inconsistent is_global marker refuses");
-}
-
-#[test]
-fn render_fails_closed_on_out_of_range_stylesheet_span() {
-    // The final trim's remove range extends past the source end (the
-    // checked-transform refusal path).
-    let source = "<style>.a { color: red; }</style>";
-    let mut ast = analyzed_ast(source);
-    ast.span = Span::new(ast.span.start, source.len() as u32 + 40);
-    let result =
-        super::render::render_stylesheet(source, &ast, "svelte-x", &[], false, None, false);
-    assert!(result.is_err(), "an out-of-range sheet span refuses");
-}
-
-#[test]
-fn valid_css_still_renders_ok_through_the_fallible_signature() {
-    // The hardening must not change the faithful output for valid CSS: the
-    // same analyzed AST renders Ok with the exact pre-hardening bytes.
-    let source = "<style>.a { color: red; }</style>";
-    let mut ast = analyzed_ast(source);
-    let super::types::StyleChild::Rule(rule) = &mut ast.children[0] else {
-        panic!("the sheet's child is a rule");
-    };
-    rule.prelude.children[0].metadata.used = true;
-    rule.prelude.children[0].children[0].metadata.scoped = true;
-    let code = super::render::render_stylesheet(source, &ast, "svelte-x", &[], false, None, false)
-        .expect("valid css renders")
-        .code;
-    assert_eq!(code, ".a.svelte-x { color: red; }");
-}
-
-// ─── fail-closed hardening: out-of-range span-SCAN anchors refuse (never a
-// silent skip / partial stylesheet) ──────────────────────────────────────────
-
-/// The `animation: spin` declaration inside `.card`, with `spin` a LOCAL
-/// keyframe — the base shape whose declaration span the tests then
-/// mis-anchor. Returns `(ast, keyframes)` ready for a direct render.
-fn keyframed_ast(source: &str) -> (super::types::StyleSheet, Vec<super::types::KeyframeName>) {
-    let mut ast = super::parse::parse_style_body(source, body_span(source)).expect("body parses");
-    let analysis = super::analyze::analyze_stylesheet(source, &mut ast).expect("body analyzes");
-    // Mark everything used/scoped so the render walks the declaration.
-    fn mark(children: &mut [super::types::StyleChild]) {
-        for child in children {
-            match child {
-                super::types::StyleChild::Rule(rule) => {
-                    for sel in &mut rule.prelude.children {
-                        sel.metadata.used = true;
-                    }
-                }
-                super::types::StyleChild::Atrule(_) => {}
-            }
-        }
-    }
-    mark(&mut ast.children);
-    (ast, analysis.keyframes)
-}
-
-/// Reach the `animation` declaration of the LAST rule in the sheet.
-fn animation_declaration(ast: &mut super::types::StyleSheet) -> &mut super::types::Declaration {
-    let super::types::StyleChild::Rule(rule) = ast.children.last_mut().expect("a last child")
-    else {
-        panic!("the last child is the .card rule");
-    };
-    let super::types::BlockChild::Declaration(decl) =
-        rule.block.children.first_mut().expect("a declaration")
-    else {
-        panic!("the rule's first block child is the animation declaration");
-    };
-    decl
-}
-
-#[test]
-fn render_fails_closed_on_past_eof_animation_declaration_span() {
-    // THE out-of-range span-scan leak: a declaration span whose derived scan
-    // anchor (`span.start + property.len() + 1`) lands PAST the source end.
-    // Without the fail-closed guard the token scan silently does not execute
-    // and the render returns a PARTIAL stylesheet — the keyframes rename to
-    // `<hash>-spin` while the `animation: spin` reference stays UNREWRITTEN
-    // (a broken animation at runtime). The guard turns it into a refusal.
-    let source =
-        "<style>@keyframes spin { from { opacity: 0 } }\n.card { animation: spin; }</style>";
-    let (mut ast, keyframes) = keyframed_ast(source);
-    assert_eq!(keyframes.len(), 1, "spin is a local keyframe");
-    let decl = animation_declaration(&mut ast);
-    assert_eq!(decl.property, "animation");
-    // Mis-anchor the declaration START past EOF (the span end follows suit —
-    // only the derived scan anchor matters).
-    decl.span = Span::new(10_000, 10_010);
-    let mis_anchored = decl.span;
-    let result =
-        super::render::render_stylesheet(source, &ast, "svelte-x", &keyframes, false, None, false);
-    assert_eq!(
-        result,
-        Err(super::render::RenderError { span: mis_anchored }),
-        "a past-EOF animation scan anchor must refuse the WHOLE render — never \
-         a partial stylesheet with an unrewritten animation reference"
-    );
-}
-
-#[test]
-fn render_fails_closed_on_at_eof_anchor_with_nonempty_animation_value() {
-    // The boundary case: the derived anchor lands EXACTLY at the source end
-    // while the declaration still claims a NON-EMPTY value — its tokens are
-    // unreachable, so a silent no-scan would drop the rewrite. Refuse.
-    let source =
-        "<style>@keyframes spin { from { opacity: 0 } }\n.card { animation: spin; }</style>";
-    let (mut ast, keyframes) = keyframed_ast(source);
-    let decl = animation_declaration(&mut ast);
-    // `span.start + "animation".len() + 1 == source.len()`.
-    let start = (source.len() - "animation".len() - 1) as u32;
-    decl.span = Span::new(start, source.len() as u32);
-    let mis_anchored = decl.span;
-    let result =
-        super::render::render_stylesheet(source, &ast, "svelte-x", &keyframes, false, None, false);
-    assert_eq!(
-        result,
-        Err(super::render::RenderError { span: mis_anchored })
-    );
-}
+// `render_stylesheet` fails closed rather than panics on a pathological
+// span/tree shape — every `self.fail(...)` site in `render.rs` guards
+// against a malformed selector/declaration span or an inconsistent analysis
+// fact (e.g. an `is_global` marker set without a leading `:global`
+// component) that no real parse of `verter_css_syntax::StyleSyntaxIr` can
+// produce: the tree is immutable (private fields, built only by the trusted
+// parse sink), so there is no supported way to construct that corrupted
+// state from this crate's own admission path. The guards stay in place as
+// defense-in-depth rather than dead code. The escaped `:global`/`@keyframes`
+// keyword tests near the end of this file are the LIVE render-refusal
+// coverage — a real, unprivileged CSS input a user can author that hits a
+// render-stage fail-closed guard.
 
 #[test]
 fn well_anchored_animation_declaration_still_rewrites() {
-    // The guard must not change the faithful path: the untouched AST renders
-    // Ok with BOTH the keyframes rename AND the animation token rewrite.
-    let source =
-        "<style>@keyframes spin { from { opacity: 0 } }\n.card { animation: spin; }</style>";
-    let (ast, keyframes) = keyframed_ast(source);
-    let code =
-        super::render::render_stylesheet(source, &ast, "svelte-x", &keyframes, false, None, false)
-            .expect("valid css renders")
-            .code;
-    assert!(code.contains("@keyframes svelte-x-spin"), "{code}");
-    assert!(code.contains("animation: svelte-x-spin;"), "{code}");
+    // The faithful path: a used `.card` rule with a local-keyframe
+    // `animation` reference renders with BOTH the keyframes rename AND the
+    // animation token rewrite.
+    let (code, hash) =
+        rendered("@keyframes spin { from { opacity: 0 } }\n.card { animation: spin; }");
+    assert!(code.contains(&format!("@keyframes {hash}-spin")), "{code}");
+    assert!(code.contains(&format!("animation: {hash}-spin;")), "{code}");
     assert!(!code.contains("animation: spin"), "{code}");
-}
-
-#[test]
-fn render_fails_closed_on_past_eof_minify_declaration_span() {
-    // The minify colon-collapse shares the same derived-anchor shape
-    // (`span.start + property.len() + 1`) for NON-animation declarations — a
-    // past-EOF anchor refuses there too, never a silent skip.
-    let source = "<style>.card { color: red; }</style>";
-    let mut ast = analyzed_ast(source);
-    let super::types::StyleChild::Rule(rule) = &mut ast.children[0] else {
-        panic!("the sheet's child is a rule");
-    };
-    rule.prelude.children[0].metadata.used = true;
-    let super::types::BlockChild::Declaration(decl) =
-        rule.block.children.first_mut().expect("a declaration")
-    else {
-        panic!("the rule's first block child is the color declaration");
-    };
-    decl.span = Span::new(10_000, 10_010);
-    let result = super::render::render_stylesheet(source, &ast, "svelte-x", &[], true, None, false);
-    assert!(
-        result.is_err(),
-        "a past-EOF minify collapse anchor must refuse: {result:?}"
-    );
 }
 
 // ─── the `*` TypeSelector scope path: content-only `update`, never append ────
@@ -592,19 +459,6 @@ fn star_selector_update_preserves_prune_close_at_its_start_boundary() {
 
 // ─── the css source map: produced on demand from the SAME shared transform ───
 
-/// An analyzed AST with the lone `.card` selector marked used + scoped — the
-/// minimal PROVEN shape for a direct render (the matcher verdicts set by
-/// hand, exactly like the fail-closed fixtures above).
-fn scoped_card_ast(source: &str) -> super::types::StyleSheet {
-    let mut ast = analyzed_ast(source);
-    let super::types::StyleChild::Rule(rule) = &mut ast.children[0] else {
-        panic!("the sheet's child is a rule");
-    };
-    rule.prelude.children[0].metadata.used = true;
-    rule.prelude.children[0].children[0].metadata.scoped = true;
-    ast
-}
-
 #[test]
 fn source_map_is_produced_only_on_demand_with_identical_code() {
     // A/B on `want_source_map`: OFF ⇒ `None`; ON ⇒ `Some(valid JSON)` whose
@@ -612,30 +466,34 @@ fn source_map_is_produced_only_on_demand_with_identical_code() {
     // the rendered css bytes are IDENTICAL either way (the map demand is
     // map-only, never a render input).
     let source = "<div class=\"card\">x</div>\n<style>\n.card { color: red; }\n</style>";
-    let ast = scoped_card_ast(source);
-    let off = super::render::render_stylesheet(
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    let ir = lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
+    let off = build_style_scope_plan(
         source,
-        &ast,
-        "svelte-x",
-        &[],
-        false,
+        body_span(source),
         Some("App.svelte"),
+        CssMode::External,
+        &ir,
         false,
     )
-    .expect("valid css renders");
+    .expect("valid css plans");
     assert_eq!(off.source_map, None, "no demand, no map");
-    let on = super::render::render_stylesheet(
+    let on = build_style_scope_plan(
         source,
-        &ast,
-        "svelte-x",
-        &[],
-        false,
+        body_span(source),
         Some("App.svelte"),
+        CssMode::External,
+        &ir,
         true,
     )
-    .expect("valid css renders");
+    .expect("valid css plans");
     assert_eq!(
-        on.code, off.code,
+        on.css_code, off.css_code,
         "the map demand never changes the rendered bytes"
     );
     let json = on.source_map.expect("a map on demand");
@@ -665,14 +523,23 @@ fn source_map_names_fall_back_to_unknown_and_basename_like_official() {
     // mappings and the FULL component source embedded; `src/Foo.svelte` (or
     // the Windows spelling) ⇒ `"Foo.svelte"` for both.
     let source = "<div class=\"card\">x</div>\n<style>\n.card { color: red; }\n</style>";
-    let ast = scoped_card_ast(source);
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions::default();
+    let ir = lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
     let render = |filename: Option<&str>| {
-        let rendered =
-            super::render::render_stylesheet(source, &ast, "svelte-x", &[], false, filename, true)
-                .expect("valid css renders");
-        let json = rendered.source_map.expect("a map on demand");
+        let plan = build_style_scope_plan(
+            source,
+            body_span(source),
+            filename,
+            CssMode::External,
+            &ir,
+            true,
+        )
+        .expect("valid css plans");
+        let json = plan.source_map.expect("a map on demand");
         (
-            rendered.code,
+            plan.css_code,
             oxc_sourcemap::OwnedSourceMap::from_json_string(&json).expect("valid source-map JSON"),
         )
     };
@@ -1087,5 +954,22 @@ fn escaped_keyframes_keyword_fails_closed_not_wrong_offset_splice() {
     assert!(
         try_plan(literal).is_ok(),
         "a literal @keyframes with a non-ASCII name still plans"
+    );
+}
+
+#[test]
+fn comment_close_inside_an_unused_rule_selector_prelude_is_escaped() {
+    // The interior comment sits in the SELECTOR PRELUDE, not the declaration
+    // block. Its close must still be escaped, or the wrapping
+    // `/* (unused) … */` terminates at it and the emitted CSS is malformed.
+    let (code, _hash) = rendered(".missing /* x */ span { color: red; }");
+    assert_eq!(
+        code,
+        "/* (unused) .missing /* x *\\/ span { color: red; }*/"
+    );
+    // Should-NOT: the raw, unescaped close survives inside the wrap.
+    assert!(
+        !code.contains("/* x */"),
+        "the prelude comment's close must be escaped: {code}"
     );
 }

@@ -1,22 +1,24 @@
-//! The Svelte-OWNED CSS substrate: span-bearing body parse, scope-hash
+//! The Svelte-OWNED CSS substrate: shared-grammar parse, scope-hash
 //! derivation, and scoping analysis for component `<style>` blocks.
 //!
 //! This module owns the CSS DOMAIN of the Svelte runtime pipeline. It is
 //! fully separate from the Vue style pipeline (`crate::css`) — the Svelte
-//! scoping semantics are a faithful port of the official `svelte@5.56.10`
-//! compiler (`phases/1-parse/read/style.js`, `phases/2-analyze/css/*`,
+//! scoping semantics match the official `svelte@5.56.10` compiler
+//! (`phases/2-analyze/css/*`, `phases/3-transform/css/*`,
 //! `phases/css.js`), operating on byte spans of the ORIGINAL component
 //! source so downstream source-position edits map exactly.
 //!
-//! Pipeline: [`parse::parse_style_body`] builds the span-bearing AST →
-//! [`analyze::analyze_stylesheet`] populates selector metadata + collects
+//! Pipeline: [`verter_css_syntax::parse_style_ir`] parses the css body ONCE
+//! into the shared [`StyleSyntaxIr`] → [`analyze::analyze_stylesheet`]
+//! validates `:global`/nesting placement, builds the `Span`-keyed selector
+//! metadata side table ([`analyze::CssAnalysis`]), and collects
 //! keyframes/global facts → [`matcher::match_stylesheet`] runs the
 //! selector-to-template matcher (the `css-prune.js` port) over the runtime
-//! IR, marking the used/scoped selector verdicts and producing the
-//! per-element scope facts → [`hash::css_scope_hash`] derives the
-//! `svelte-<djb2>` scope hash → [`render::render_stylesheet`] produces the
-//! scoped stylesheet text (the official `css.code`) by source-position edits
-//! over the ORIGINAL component source → the facts assemble into the
+//! IR, writing the used/scoped selector verdicts into the SAME side table and
+//! producing the per-element scope facts → [`hash::css_scope_hash`] derives
+//! the `svelte-<djb2>` scope hash → [`render::render_stylesheet`] produces
+//! the scoped stylesheet text (the official `css.code`) by source-position
+//! edits over the ORIGINAL component source → the facts assemble into the
 //! per-`<style>` [`ProvenStyleScopePlan`](types::ProvenStyleScopePlan) side
 //! table (the ONE shared fact both scope-class injection sites and the css
 //! emitter read). Every failure mode — a css parse/analysis failure, an
@@ -25,23 +27,65 @@
 
 pub mod analyze;
 pub mod hash;
+mod match_relsel;
 #[path = "match.rs"]
 pub mod matcher;
-pub mod parse;
 pub mod render;
 pub mod types;
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
-use verter_css_syntax::{
-    parse_style_ir, ComplexSelectorPart, CssDialect, CssParseMode, CssSource, SelectorCompleteness,
-    SelectorComponent, SelectorComponentKind, SelectorList, StyleCompleteness, StyleStatement,
-    StyleSyntaxIr,
-};
+use rustc_hash::FxHashMap;
+use verter_css_syntax::{parse_style_ir, CssDialect, CssParseMode, CssSource, StyleSyntaxIr};
 use verter_span::Span;
 
+thread_local! {
+    /// Parse-once admission cache: `admit_style_body` (the official-reject
+    /// probe) retains a clean IR so `analyze_style_body` does not parse the
+    /// same body again. Keyed by the parser-minted content span. Thread-local
+    /// because the probe and the analysis run on the same compile-request
+    /// thread. It is not a reject-shape classifier — `svelte_reject_from_ir`
+    /// neither reads nor writes this map. Unconsumed entries live until the
+    /// next `clear_admitted_style_irs` / `take_admitted_style_ir` on this
+    /// thread (the parse-once cache's lifecycle, not reject projection).
+    static ADMITTED_STYLE_IRS: RefCell<FxHashMap<(u32, u32), StyleSyntaxIr>> =
+        RefCell::new(FxHashMap::default());
+}
+
+pub(super) fn clear_admitted_style_irs() {
+    ADMITTED_STYLE_IRS.with(|cache| cache.borrow_mut().clear());
+}
+
+/// Parse the style body once for the official-reject race. On a Svelte CSS
+/// parse code, return it; on a clean body, retain the IR for
+/// [`analyze_style_body`].
+pub(super) fn admit_style_body(source: &str, content: Span) -> Option<&'static str> {
+    match verter_css_syntax::parse_style_body(source, content) {
+        Ok(ir) => {
+            if let Some(code) = verter_css_syntax::svelte_reject_from_ir(&ir) {
+                return Some(code);
+            }
+            ADMITTED_STYLE_IRS.with(|cache| {
+                cache.borrow_mut().insert((content.start, content.end), ir);
+            });
+            None
+        }
+        Err(_) => Some("css_expected_identifier"),
+    }
+}
+
+fn take_admitted_style_ir(content: Span) -> Option<StyleSyntaxIr> {
+    ADMITTED_STYLE_IRS.with(|cache| cache.borrow_mut().remove(&(content.start, content.end)))
+}
+// `ComplexSelectorPart`/`StyleStatement` are read only by the alloc-probe
+// bridge below (`reread_cached_css_facts_for_alloc_probe`, itself gated the
+// same way).
+#[cfg(any(test, feature = "test-support"))]
+use verter_css_syntax::{ComplexSelectorPart, StyleStatement};
+
 use super::ir::SvelteRuntimeIr;
-use types::{CssMode, ProvenStyleScopePlan, StyleSheet};
+use types::{CssMode, ProvenStyleScopePlan};
 
 /// A typed style-plan failure — the ONLY way a `<style>` block does not
 /// produce a [`ProvenStyleScopePlan`]. Fail-closed: the caller refuses
@@ -80,43 +124,35 @@ pub enum StylePlanFailureClass {
     /// selector⇄template relation
     /// ([`match_stylesheet`](matcher::match_stylesheet)).
     SelectorUnprovable,
-    /// The scoped render refused (a malformed span/AST shape the renderer
+    /// The scoped render refused (a malformed span/tree shape the renderer
     /// fails closed on instead of panicking).
     RenderInvariant,
 }
 
 /// The parsed + analyzed css body — the CSS-DOMAIN half of the plan build,
 /// produced by [`analyze_style_body`] BEFORE the runtime IR exists. Carrying
-/// it forward into [`complete_style_scope_plan`] keeps the body parsed once
+/// it forward into [`complete_style_scope_plan`] keeps the body parsed ONCE
 /// while letting the css-analysis diagnostic surface FIRST (a css failure is
 /// reported before any template-lowering failure — the css-first diagnostic
 /// order). The two halves are one pipeline, not alternative paths.
 pub struct AnalyzedStyleBody {
-    /// The span-bearing CSS AST with the ANALYZER metadata populated (the
-    /// matcher verdicts land later, in the completion stage).
-    ast: StyleSheet,
-    /// Shared syntax authority used for trust/completeness admission. The
-    /// Svelte-specific AST remains temporarily for exact 5.56.10 behavior.
-    syntax: StyleSyntaxIr,
-    /// The analyzer facts (keyframes / global collection).
+    /// The shared syntax tree — the SOLE parse of the css body.
+    tree: StyleSyntaxIr,
+    /// The analyzer facts (keyframes/global collection + the `Span`-keyed
+    /// selector metadata side table; the matcher verdicts land later, in the
+    /// completion stage).
     analysis: analyze::CssAnalysis,
 }
 
 /// The CSS-DOMAIN half of the plan build: parse the css body at `content`
-/// (absolute offsets into `source`) and run the scoping analysis. Runs BEFORE
-/// template lowering, so a css parse/analysis failure is the FIRST diagnostic
-/// a style component reports.
+/// (absolute offsets into `source`) ONCE and run the scoping analysis. Runs
+/// BEFORE template lowering, so a css parse/analysis failure is the FIRST
+/// diagnostic a style component reports.
 pub fn analyze_style_body(
     source: &str,
     content: Span,
 ) -> Result<AnalyzedStyleBody, StylePlanFailure> {
     verter_audit::attribute_scope!(StyleAnalysis);
-    let mut ast = parse::parse_style_body(source, content).map_err(|err| StylePlanFailure {
-        class: StylePlanFailureClass::ParseAnalysis,
-        code: err.code,
-        span: err.span,
-        construct: None,
-    })?;
     let css = source
         .get(content.start as usize..content.end as usize)
         .ok_or(StylePlanFailure {
@@ -125,14 +161,16 @@ pub fn analyze_style_body(
             span: content,
             construct: None,
         })?;
-    let syntax_source =
-        CssSource::new(Arc::from(css), content.start).map_err(|_| StylePlanFailure {
-            class: StylePlanFailureClass::ParseAnalysis,
-            code: "css_expected_identifier",
-            span: content,
-            construct: None,
-        })?;
-    let syntax =
+    let tree = if let Some(admitted) = take_admitted_style_ir(content) {
+        admitted
+    } else {
+        let syntax_source =
+            CssSource::new(Arc::from(css), content.start).map_err(|_| StylePlanFailure {
+                class: StylePlanFailureClass::ParseAnalysis,
+                code: "css_expected_identifier",
+                span: content,
+                construct: None,
+            })?;
         parse_style_ir(syntax_source, CssDialect::Css, CssParseMode::Recover).map_err(|_| {
             StylePlanFailure {
                 class: StylePlanFailureClass::ParseAnalysis,
@@ -140,89 +178,123 @@ pub fn analyze_style_body(
                 span: content,
                 construct: None,
             }
-        })?;
-    validate_svelte_style_ir(syntax.statements())?;
-    let analysis =
-        analyze::analyze_stylesheet(source, &mut ast).map_err(|err| StylePlanFailure {
-            class: StylePlanFailureClass::ParseAnalysis,
-            code: err.code,
-            span: err.span,
-            construct: None,
-        })?;
-    Ok(AnalyzedStyleBody {
-        ast,
-        syntax,
-        analysis,
-    })
+        })?
+    };
+    // `analyze_stylesheet` rejects any parse-recovery artifact or
+    // dynamic-class/interpolation selector shape inline, at the same visit
+    // its single statement walk (`Analyzer::analyze_statements`) analyzes
+    // each statement — never a separate shape-validation pre-pass over the
+    // SAME tree this function parsed; that rejection surfaces as
+    // `svelte-runtime-unsupported-style-selector` and keeps the
+    // `SelectorUnprovable` class + `construct` the matcher's own refusal
+    // below uses for the same code, distinguishing it from a css-domain
+    // parse/placement failure.
+    let analysis = analyze::analyze_stylesheet(source, &tree)
+        .map_err(|err| {
+            if err.code == "svelte-runtime-unsupported-style-selector" {
+                StylePlanFailure {
+                    class: StylePlanFailureClass::SelectorUnprovable,
+                    code: err.code,
+                    span: err.span,
+                    construct: Some("untrusted-style-syntax-ir"),
+                }
+            } else {
+                StylePlanFailure {
+                    class: StylePlanFailureClass::ParseAnalysis,
+                    code: err.code,
+                    span: err.span,
+                    construct: None,
+                }
+            }
+        })?
+        .into_analysis();
+    Ok(AnalyzedStyleBody { tree, analysis })
 }
 
-fn validate_svelte_style_ir(statements: &[StyleStatement]) -> Result<(), StylePlanFailure> {
-    for statement in statements {
-        let body = match statement {
-            StyleStatement::Rule(rule) => {
-                if rule.completeness() != StyleCompleteness::Complete
-                    || !selector_list_is_static_or_nesting(rule.selector_list())
-                {
-                    return Err(StylePlanFailure {
-                        class: StylePlanFailureClass::SelectorUnprovable,
-                        code: "svelte-runtime-unsupported-style-selector",
-                        span: rule.selector_list().span(),
-                        construct: Some("untrusted-style-syntax-ir"),
-                    });
+// ── Allocation probe (test/`test-support`-only) ──
+//
+// `crates/verter_compiler/tests/allocator_canaries.rs` is a SEPARATE
+// integration-test crate: it can only reach `pub` items, and this whole
+// `css` module is otherwise private (`mod css;` in `runtime/mod.rs`). These
+// two functions — re-exported under the same `test-support` opt-in seam
+// `compile_client` uses (`runtime/mod.rs`) — are the narrow bridge that
+// binary needs to drive the probe: analyze once, then re-read a compound's
+// grammar-gap classification and an at-rule's prelude text through the SAME
+// accessors production code (`analyze.rs`/`match_relsel.rs`/`render.rs`)
+// uses, asserting the re-read allocates nothing — the executable proof that
+// both are parser-minted struct fields, never re-derived from source bytes.
+
+/// Analyze `source`'s `<style>` body at `content` for the allocation probe.
+/// Test/guard observability only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn analyze_style_body_for_alloc_probe(source: &str, content: Span) -> AnalyzedStyleBody {
+    analyze_style_body(source, content).expect("a clean body analyzes for the alloc probe")
+}
+
+/// Re-read every compound's [`analyze::CompoundTail`] fact and every
+/// at-rule's prelude text `analyzed` holds, through the SAME
+/// `CssAnalysis::compound_facts` / `StyleDirective::prelude_text` accessors
+/// production code uses. `source` is the FULL original component source
+/// `analyzed` was built from (the same string passed to
+/// [`analyze_style_body_for_alloc_probe`] — `is_keyframes_node` indexes it
+/// with the tree's ABSOLUTE spans, not the CSS-body-only substring
+/// `analyzed`'s own `StyleSyntaxIr::source()` carries). Test/guard
+/// observability only — the caller wraps this call in a counting-allocator
+/// measurement window.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reread_cached_css_facts_for_alloc_probe(source: &str, analyzed: &AnalyzedStyleBody) {
+    fn walk(source: &str, analysis: &analyze::CssAnalysis, statements: &[StyleStatement]) {
+        for statement in statements {
+            match statement {
+                StyleStatement::Rule(rule) => {
+                    for complex in rule.selector_list().selectors() {
+                        for part in complex.parts() {
+                            if let ComplexSelectorPart::Compound(compound) = part {
+                                std::hint::black_box(analysis.compound_facts(compound));
+                            }
+                        }
+                    }
+                    walk(source, analysis, rule.body().statements());
                 }
-                Some(rule.body())
+                StyleStatement::AtRule(atrule) => {
+                    if analyze::is_keyframes_node(source, atrule) {
+                        std::hint::black_box(atrule.prelude_text());
+                    }
+                    if let Some(block) = atrule.body() {
+                        walk(source, analysis, block.statements());
+                    }
+                }
+                StyleStatement::Declaration(_)
+                | StyleStatement::MixinOrFunction(_)
+                | StyleStatement::Unknown(_) => {}
             }
-            StyleStatement::Declaration(declaration) => declaration.body(),
-            StyleStatement::AtRule(rule) => rule.body(),
-            StyleStatement::MixinOrFunction(rule) => rule.body(),
-            StyleStatement::Unknown(unknown) => {
-                return Err(StylePlanFailure {
-                    class: StylePlanFailureClass::SelectorUnprovable,
-                    code: "svelte-runtime-unsupported-style-selector",
-                    span: unknown.span(),
-                    construct: Some("untrusted-style-syntax-ir"),
-                });
-            }
-        };
-        if let Some(body) = body {
-            validate_svelte_style_ir(body.statements())?;
         }
     }
-    Ok(())
+    walk(source, &analyzed.analysis, analyzed.tree.statements());
 }
 
-fn selector_list_is_static_or_nesting(list: &SelectorList) -> bool {
-    list.facts().completeness() == SelectorCompleteness::Complete
-        && list.selectors().iter().all(|selector| {
-            selector.parts().iter().all(|part| match part {
-                ComplexSelectorPart::Combinator(_) => true,
-                ComplexSelectorPart::Compound(compound) => compound
-                    .components()
-                    .iter()
-                    .all(selector_component_is_static_or_nesting),
-            })
+/// The css body's raw text at `content` (the tree's own recorded source
+/// span) sliced out of `source`. `content` is a fact the tree itself
+/// carries, so this should always be in bounds — but a caller passing a
+/// `source`/`analyzed` pair that does not agree with what was actually
+/// parsed (out of bounds, or a span landing off a UTF-8 char boundary) is a
+/// malformed-shape condition, not a recoverable default: silently hashing an
+/// empty string in its place would produce a wrong-but-plausible-looking
+/// scope class instead of surfacing the mismatch. Fails closed with the same
+/// `RenderInvariant` class the renderer's own malformed-span refusals use.
+fn css_body_text_for(source: &str, content: Span) -> Result<&str, StylePlanFailure> {
+    source
+        .get(content.start as usize..content.end as usize)
+        .ok_or(StylePlanFailure {
+            class: StylePlanFailureClass::RenderInvariant,
+            code: "css_render_failed",
+            span: content,
+            construct: None,
         })
 }
 
-fn selector_component_is_static_or_nesting(component: &SelectorComponent) -> bool {
-    if matches!(
-        component.kind(),
-        SelectorComponentKind::DynamicClass | SelectorComponentKind::Interpolation
-    ) {
-        return false;
-    }
-    component
-        .nested_components()
-        .iter()
-        .all(selector_component_is_static_or_nesting)
-        && component
-            .pseudo()
-            .and_then(|pseudo| pseudo.selector_list())
-            .is_none_or(selector_list_is_static_or_nesting)
-}
-
 /// The TEMPLATE-DOMAIN half of the plan build: run the selector-to-template
-/// matcher over the component's runtime IR (populating the used/scoped
+/// matcher over the component's runtime IR (writing the used/scoped
 /// selector metadata + the per-element scope facts), derive the scope hash
 /// from the official css-hash input (`filename`, falling back to the raw css
 /// text), and render the scoped stylesheet. `mode` is the parse-domain css
@@ -245,22 +317,18 @@ pub fn complete_style_scope_plan(
     ir: &SvelteRuntimeIr<'_>,
     want_source_map: bool,
 ) -> Result<ProvenStyleScopePlan, StylePlanFailure> {
-    let AnalyzedStyleBody {
-        mut ast,
-        syntax,
-        analysis,
-    } = analyzed;
-    verter_debug_assert_eq!(syntax.dialect(), CssDialect::Css);
-    let content = ast.span;
-    let facts = matcher::match_stylesheet(&mut ast, ir).map_err(|refusal| StylePlanFailure {
-        class: StylePlanFailureClass::SelectorUnprovable,
-        code: "svelte-runtime-unsupported-style-selector",
-        span: refusal.span,
-        construct: Some(refusal.construct),
+    let AnalyzedStyleBody { tree, mut analysis } = analyzed;
+    verter_debug_assert_eq!(tree.dialect(), CssDialect::Css);
+    let content = Span::new(tree.source().origin(), tree.source().end());
+    let facts = matcher::match_stylesheet(source, &tree, &mut analysis, ir).map_err(|refusal| {
+        StylePlanFailure {
+            class: StylePlanFailureClass::SelectorUnprovable,
+            code: "svelte-runtime-unsupported-style-selector",
+            span: refusal.span,
+            construct: Some(refusal.construct),
+        }
     })?;
-    let css_text = source
-        .get(content.start as usize..content.end as usize)
-        .unwrap_or("");
+    let css_text = css_body_text_for(source, content)?;
     // The scope class: a RESOLVED `cssHash` override (the user callback's result,
     // computed OUTSIDE the compiler and preserved byte-exact) REPLACES the default
     // `svelte-<hash>` derivation at this SINGLE construction point; absent, the
@@ -271,16 +339,17 @@ pub fn complete_style_scope_plan(
         None => hash::css_scope_hash(filename, css_text),
     };
     // The scoped render consumes the matcher's PROVEN used/scoped verdicts on
-    // the AST metadata and produces the official `css.code`. The render is
-    // MODE-FAITHFUL: the injected `$$css` payload renders the official
-    // minified form (`state.minify = inject_styles && !dev`; Verter refuses
-    // dev codegen, so the flag is exactly the mode), the external artifact
-    // the non-minified form. A render refusal (a malformed span/AST shape)
-    // surfaces as the typed RenderInvariant failure — never a panic, never a
-    // partial stylesheet.
+    // the analysis side table and produces the official `css.code`. The
+    // render is MODE-FAITHFUL: the injected `$$css` payload renders the
+    // official minified form (`state.minify = inject_styles && !dev`; Verter
+    // refuses dev codegen, so the flag is exactly the mode), the external
+    // artifact the non-minified form. A render refusal (a malformed span/tree
+    // shape) surfaces as the typed RenderInvariant failure — never a panic,
+    // never a partial stylesheet.
     let render = render::render_stylesheet(
         source,
-        &ast,
+        &tree,
+        &analysis,
         &hash,
         &analysis.keyframes,
         matches!(mode, CssMode::Injected),
@@ -302,7 +371,6 @@ pub fn complete_style_scope_plan(
         global_keyframes: analysis.global_keyframes,
         has_global: analysis.has_global,
         mode,
-        ast,
         facts,
     })
 }
@@ -317,13 +385,15 @@ pub(crate) fn style_selector_certainties_for_test(
     content: Span,
     ir: &SvelteRuntimeIr<'_>,
 ) -> Result<Vec<(Span, matcher::MatchCertainty)>, StylePlanFailure> {
-    let AnalyzedStyleBody { ast, .. } = analyze_style_body(source, content)?;
-    matcher::match_stylesheet_certainties_for_test(&ast, ir).map_err(|refusal| StylePlanFailure {
-        class: StylePlanFailureClass::SelectorUnprovable,
-        code: "svelte-runtime-unsupported-style-selector",
-        span: refusal.span,
-        construct: Some(refusal.construct),
-    })
+    let AnalyzedStyleBody { tree, mut analysis } = analyze_style_body(source, content)?;
+    matcher::match_stylesheet_certainties_for_test(source, &tree, &mut analysis, ir).map_err(
+        |refusal| StylePlanFailure {
+            class: StylePlanFailureClass::SelectorUnprovable,
+            code: "svelte-runtime-unsupported-style-selector",
+            span: refusal.span,
+            construct: Some(refusal.construct),
+        },
+    )
 }
 
 /// Build the per-`<style>` scope plan in one call — [`analyze_style_body`]
@@ -350,11 +420,39 @@ mod render_tests;
 #[cfg(test)]
 mod tests {
     use super::types::{CssMode, ProvenStyleScopePlan};
-    use super::{build_style_scope_plan, StylePlanFailure, StylePlanFailureClass};
+    use super::{
+        build_style_scope_plan, css_body_text_for, StylePlanFailure, StylePlanFailureClass,
+    };
     use crate::svelte::parser::parse_svelte;
     use crate::svelte::runtime::{lower_parsed_svelte_to_ir, SvelteRuntimeOptions};
     use oxc_allocator::Allocator;
     use verter_span::Span;
+
+    #[test]
+    fn css_body_text_for_a_span_within_bounds_slices_cleanly() {
+        assert_eq!(css_body_text_for("abcdef", Span::new(1, 4)).unwrap(), "bcd");
+    }
+
+    #[test]
+    fn css_body_text_for_an_out_of_bounds_span_fails_closed() {
+        // A span whose end exceeds `source`'s length — the mismatch this
+        // guards against (the tree's own recorded span disagreeing with the
+        // `source` string actually passed in).
+        let err = css_body_text_for("abc", Span::new(0, 10))
+            .expect_err("an out-of-bounds span must fail closed, not silently yield \"\"");
+        assert_eq!(err.class, StylePlanFailureClass::RenderInvariant);
+        assert_eq!(err.code, "css_render_failed");
+        assert_eq!(err.span, Span::new(0, 10));
+    }
+
+    #[test]
+    fn css_body_text_for_a_non_char_boundary_span_fails_closed() {
+        // "é" is 2 bytes (0xC3 0xA9); index 1 lands mid-character.
+        let err = css_body_text_for("é", Span::new(1, 2))
+            .expect_err("a non-char-boundary span must fail closed, not silently yield \"\"");
+        assert_eq!(err.class, StylePlanFailureClass::RenderInvariant);
+        assert_eq!(err.code, "css_render_failed");
+    }
 
     fn body_span(source: &str) -> Span {
         let start = source.find("<style>").expect("open tag") + "<style>".len();
@@ -402,18 +500,17 @@ mod tests {
             "an undemanded css map never lands on the plan"
         );
         assert_eq!(plan.mode, CssMode::External);
-        assert_eq!(plan.ast.children.len(), 2);
-        // The matcher ran: `.card` matched the `<div>` — one scoped element,
-        // and the selector is marked used on the AST metadata. A constructed
-        // plan carries its PROVEN facts directly (no outcome state).
+        // The matcher ran: `.card` matched the `<div>` — one scoped element.
+        // A constructed plan carries its PROVEN facts directly (no outcome
+        // state).
         assert_eq!(plan.facts.scoped.len(), 1);
         let scope = plan.scope_facts();
         assert_eq!(scope.hash, plan.hash);
         assert_eq!(scope.scoped, plan.facts.scoped);
-        let super::types::StyleChild::Rule(rule) = &plan.ast.children[1] else {
-            panic!("the second child is the `.card` rule");
-        };
-        assert!(rule.prelude.children[0].metadata.used);
+        assert!(
+            plan.css_code.contains(&format!(".card.{}", plan.hash)),
+            "the scoped `.card` rule carries the scope class in the rendered output"
+        );
     }
 
     #[test]
@@ -483,45 +580,144 @@ mod tests {
 
     #[test]
     fn render_refusal_fails_the_plan_with_a_render_invariant_failure() {
-        // The `RenderError → StylePlanFailure` mapping: a render refusal (a
-        // malformed selector span the renderer refuses) surfaces as the typed
-        // `RenderInvariant` failure carrying `css_render_failed` + the
-        // offending span — never a panic, never a partial plan.
-        let source = "<div class=\"b\">x</div>\n<style>.a,.b { color: red; }</style>";
+        // The `RenderError → StylePlanFailure` mapping: a render refusal
+        // surfaces as the typed `RenderInvariant` failure — never a panic,
+        // never a partial plan. A CSS-escaped `:global` keyword
+        // (`:\67 lobal(.x)`, decoding to `:global(...)` for parse/analyze/
+        // match purposes) is a NATURAL render-stage refusal: the renderer's
+        // `:global(...)` removal anchor adds the literal keyword's BYTE
+        // length, which desyncs from the escaped spelling — oracle-confirmed
+        // against svelte@5.56.10 itself mangling this shape (see
+        // `render.rs`'s `remove_global_pseudo_class` doc).
+        let source = "<div class=\"x\">y</div>\n<style>:\\67 lobal(.x){color:red}</style>";
+        let err = plan_for(source, None).expect_err("an escaped :global keyword fails closed");
+        assert_eq!(err.class, StylePlanFailureClass::RenderInvariant);
+        assert_eq!(err.code, "css_render_failed");
+    }
+
+    // ── single-parse-per-style-block call-count proof ──
+    //
+    // The counter lives INSIDE `verter_css_syntax::parse_style_ir` itself
+    // (`parse_style_ir_thread_invocations`) — the SOLE parse entry point
+    // every caller goes through — so it observes every call to that
+    // function, not just the one this pipeline's own call site happens to
+    // make. `parse_style_ir_thread_invocations_counts_every_call_site`
+    // below proves that directly: a second, unrelated `parse_style_ir` call
+    // moves the same counter these two tests read.
+
+    #[test]
+    fn single_parse_per_style_block_call_count() {
+        // A full plan build over ONE `<style>` block performs exactly ONE
+        // `parse_style_ir` call.
+        let before = verter_css_syntax::parse_style_ir_thread_invocations();
+        let source = "<div class=\"card\">x</div>\n<style>.card { color: red; }</style>";
+        plan_for(source, None).expect("a clean body plans");
+        assert_eq!(
+            verter_css_syntax::parse_style_ir_thread_invocations() - before,
+            1,
+            "exactly one shared-grammar parse per style-block plan build"
+        );
+    }
+
+    // ── the converged pipeline hides no second parse/reconstruct ──
+    //
+    // SCOPE NOTE: this is J1-A11e's registered acceptance test (J1.md:311),
+    // proving row 5's convergence (Svelte's OWN former grammar —
+    // `parse.rs`/`types.rs`/`analyze.rs`/`match.rs`/`hash.rs`/`render.rs` —
+    // into `parse_style_ir`) hides no admission-time reparse, over the
+    // `analyze_style_body` → `complete_style_scope_plan` pipeline `plan_for`
+    // exercises. J1-A16's reject-gate parse is covered by
+    // `compile_client_parses_a_style_body_once` below, which drives the
+    // production `official_reject_gate` → `analyze_style_body` path.
+
+    #[test]
+    fn svelte_convergence_introduces_no_hidden_second_parse_or_reconstruct() {
+        // Same call-count proof as above, exercised over a MULTI-CONSTRUCT
+        // stylesheet (nested rules, an at-rule, a pseudo-class argument
+        // list, `:global`) that would touch every analyze/match/render
+        // recursion path this convergence introduced — if any of those
+        // paths hid an admission-time reparse of the css text (rather than
+        // reading typed facts off the one shared tree), this call count
+        // would exceed 1.
+        let before = verter_css_syntax::parse_style_ir_thread_invocations();
+        let source = "<div class=\"card\"><p class=\"title\">x</p></div>\n<style>\
+            @media (min-width: 1px) { .card :is(.title, .other) { color: red; } }\n\
+            .card { :global(.x) { color: blue; } }\n\
+            @keyframes spin { from { opacity: 0; } }\n\
+            .card { animation: spin; }\
+            </style>";
+        plan_for(source, None).expect("a multi-construct body plans");
+        assert_eq!(
+            verter_css_syntax::parse_style_ir_thread_invocations() - before,
+            1,
+            "exactly one shared-grammar parse regardless of construct diversity"
+        );
+    }
+
+    #[test]
+    fn compile_client_parses_a_style_body_once() {
+        // Production path: official_reject_gate admits the IR, then
+        // analyze_style_body reuses it. Two grammars or a second
+        // parse_style_ir would make this 2 (or more).
+        use crate::svelte::runtime::compile_client;
+        let before = verter_css_syntax::parse_style_ir_thread_invocations();
+        let source = "<div class=\"x\"></div>\n<style>.x { color: red }</style>";
         let alloc = Allocator::default();
         let parsed = parse_svelte(source);
-        let opts = SvelteRuntimeOptions::default();
-        let ir =
-            lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
-        let mut analyzed =
-            super::analyze_style_body(source, body_span(source)).expect("the body analyzes");
-        // Corrupt the `.b` complex selector's span out of range: the matcher
-        // still proves (`.b` matches the div; `.a` stays unused), then the
-        // unused-run prune back-scan hits the malformed span and refuses.
-        {
-            let super::types::StyleChild::Rule(rule) = &mut analyzed.ast.children[0] else {
-                panic!("the sheet's child is a rule");
-            };
-            rule.prelude.children[1].span = Span::new(10_000, 10_002);
-        }
-        let err = super::complete_style_scope_plan(
+        compile_client(
             source,
-            analyzed,
-            None,
-            None,
-            CssMode::External,
-            &ir,
+            &parsed,
+            &SvelteRuntimeOptions {
+                filename: Some("App.svelte".to_string()),
+                ..Default::default()
+            },
+            &alloc,
+            false,
             false,
         )
-        .expect_err("a render refusal fails the plan");
+        .expect("a clean component compiles");
         assert_eq!(
-            err,
-            StylePlanFailure {
-                class: StylePlanFailureClass::RenderInvariant,
-                code: "css_render_failed",
-                span: Span::new(10_000, 10_002),
-                construct: None,
-            }
+            verter_css_syntax::parse_style_ir_thread_invocations() - before,
+            1,
+            "official-reject + style pipeline share one parse_style_ir"
+        );
+    }
+
+    // ── discrimination proof: the counter observes EVERY call site ──
+
+    #[test]
+    fn parse_style_ir_thread_invocations_counts_every_call_site() {
+        // Unlike a counter a caller bumps beside its own call site (which
+        // only proves that ONE call site ran once), this counter lives
+        // inside `parse_style_ir` itself — so a completely unrelated,
+        // direct call to it (bypassing `analyze_style_body`/`plan_for`
+        // entirely) must ALSO move it. This is what makes
+        // `single_parse_per_style_block_call_count` and
+        // `svelte_convergence_introduces_no_hidden_second_parse_or_reconstruct`
+        // able to actually catch a hidden second parse anywhere in the
+        // pipeline, rather than only re-observing their own one known call.
+        use std::sync::Arc;
+        use verter_css_syntax::{parse_style_ir, CssDialect, CssParseMode, CssSource};
+
+        let before = verter_css_syntax::parse_style_ir_thread_invocations();
+        let source = "<div class=\"card\">x</div>\n<style>.card { color: red; }</style>";
+        plan_for(source, None).expect("a clean body plans");
+        assert_eq!(
+            verter_css_syntax::parse_style_ir_thread_invocations() - before,
+            1,
+            "the pipeline's own one call moved the counter by exactly one"
+        );
+
+        // A direct, unrelated `parse_style_ir` call — nothing to do with
+        // `analyze_style_body` — must move the SAME counter.
+        let extra_source = CssSource::new(Arc::from(".x { color: red; }"), 0).unwrap();
+        parse_style_ir(extra_source, CssDialect::Css, CssParseMode::Recover)
+            .expect("a clean body parses");
+        assert_eq!(
+            verter_css_syntax::parse_style_ir_thread_invocations() - before,
+            2,
+            "a second, unrelated parse_style_ir call also moves the counter — proving \
+             the two tests above would catch a hidden second parse anywhere"
         );
     }
 }

@@ -1,32 +1,36 @@
-//! Unit tests for the `svelte_compat` faithful `read/style.js` CSS body reader port.
+//! Unit tests for the Svelte reject projection over [`StyleSyntaxIr`].
 //!
 //! Each expectation is grounded against the pinned `svelte@5.56.10` compiler (a `None` here ⇔ the
 //! pinned compiler ACCEPTS the style body / reports `style_duplicate` for a duplicate race; a
 //! `Some(code)` ⇔ the pinned compiler throws that exact CSS parse code at `read_style`). The
-//! reader is fed the WHOLE component source + the CSS body's content-start so a nested reader can
-//! run past `</style>` exactly as upstream does.
+//! projection is fed the parser-minted body span (open `>` through `</style` or EOF) — the same
+//! span Verter's Svelte tokenizer records on `StyleBodyProbe`.
 //!
-//! Ported from the former `crates/verter_compiler/src/svelte/runtime/css_reject_tests.rs`
-//! (verbatim case coverage) as part of relocating the reader into this crate — the ONE crate
-//! authority for CSS-family parsing — as a Svelte compatibility validation profile (J1-A16). One
-//! case (`bare_unterminated_style_is_the_raw_block_strict_error_not_unexpected_eof`) exercised the
-//! FULL Svelte official-reject gate rather than this isolated reader and stayed in
+//! One case (`bare_unterminated_style_is_the_raw_block_strict_error_not_unexpected_eof`)
+//! exercised the FULL Svelte official-reject gate rather than this isolated reader and stayed in
 //! `verter_compiler`'s own test suite (`svelte_parse_defect_exact_codes.rs`) — it needs the
 //! compiler's parser + gate, which this crate does not and must not depend on.
 
 use verter_css_syntax::style_body_reject_code;
+use verter_span::Span;
 
-/// The byte offset just past the FIRST `<style>`/`<style …>` open tag's `>` in `source` — the CSS
-/// content start the parser would reserve. Panics if there is no `<style …>` open tag.
+/// The parser-minted CSS body span of the FIRST `<style>` in `source`.
+fn first_style_content_span(source: &str) -> Span {
+    let start = first_style_content_start(source);
+    let rest = &source[start..];
+    let end = start + rest.find("</style").unwrap_or(rest.len());
+    Span::new(start as u32, end as u32)
+}
+
 fn first_style_content_start(source: &str) -> usize {
     let open = source.find("<style").expect("a <style> tag");
     let gt = source[open..].find('>').expect("the <style> open tag's >");
     open + gt + 1
 }
 
-/// The CSS parse code the reader reports for the FIRST `<style>` body in `source`.
+/// The CSS parse code the projection reports for the FIRST `<style>` body in `source`.
 fn code(source: &str) -> Option<&'static str> {
-    style_body_reject_code(source, first_style_content_start(source))
+    style_body_reject_code(source, first_style_content_span(source))
 }
 
 // ── clean bodies parse cleanly (no defect ⇒ duplicate / unsupported-style rail wins) ──
@@ -63,10 +67,32 @@ fn multiple_rules_and_at_rule_are_clean() {
 
 #[test]
 fn nth_child_an_b_of_selector_is_clean() {
-    // `:nth-child(2n+1 of .x)` — upstream `REGEX_NTH_OF` includes the `\s+of\s+` arm, so the
-    // `<An+B> of <selector>` form PARSES (the `.x` selector reads through the normal loop).
-    // Grounded: pinned svelte@5.56.10 ACCEPTS this CSS.
+    // `:nth-child(2n+1 of .x)` — upstream `REGEX_NTH_OF` includes the `\s+of(\s+|(?=[.#[*:&]))`
+    // arm, so the `<An+B> of <selector>` form PARSES (the `.x` selector reads through the
+    // normal loop). Grounded: pinned svelte@5.56.10 ACCEPTS this CSS.
     assert_eq!(code("<style>p:nth-child(2n+1 of .x) {}</style>"), None);
+}
+
+#[test]
+fn nth_child_of_without_whitespace_before_simple_selector_is_clean() {
+    // Pinned svelte@5.56.10 `REGEX_NTH_OF` allows `of` followed immediately by a simple-selector
+    // start (`.`, `#`, `[`, `*`, `:`, `&`) with no whitespace. A `\s+of\s+` matcher wrongly
+    // rejects `2n of.x` as `css_expected_identifier`.
+    assert_eq!(code("<style>p:nth-child(2n of.x) {}</style>"), None);
+    assert_eq!(code("<style>p:nth-child(2n of#x) {}</style>"), None);
+    assert_eq!(code("<style>p:nth-child(2n of[x]) {}</style>"), None);
+    assert_eq!(code("<style>p:nth-child(2n of*) {}</style>"), None);
+    assert_eq!(code("<style>p:nth-child(2n of:x) {}</style>"), None);
+    assert_eq!(code("<style>p:nth-child(2n of&) {}</style>"), None);
+}
+
+#[test]
+fn nth_child_of_without_whitespace_before_of_is_not_the_of_arm() {
+    // `2nof.x` is one dimension token; official REGEX_NTH_OF requires `\s+` before `of`.
+    assert_eq!(
+        code("<style>p:nth-child(2nof.x) {}</style>"),
+        Some("css_expected_identifier"),
+    );
 }
 
 #[test]
@@ -268,7 +294,7 @@ fn unterminated_html_comment_reports_expected_token() {
 /// reader runs past `</style>` exactly as upstream's `read_style` does.
 fn swallow_code(frag: &str) -> Option<&'static str> {
     let src = format!("<script>let c = $state(0);</script>\n{frag}");
-    style_body_reject_code(&src, first_style_content_start(&src))
+    style_body_reject_code(&src, first_style_content_span(&src))
 }
 
 #[test]
@@ -338,6 +364,129 @@ fn bare_at_rule_reports_css_expected_identifier() {
 }
 
 #[test]
+fn at_rule_with_empty_name_and_block_reports_css_expected_identifier() {
+    assert_eq!(
+        code("<style>@ {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn empty_global_parens_report_css_expected_identifier() {
+    assert_eq!(
+        code("<style>:global() {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn empty_global_parens_with_whitespace_report_css_expected_identifier() {
+    assert_eq!(
+        code("<style>:global( ) {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn empty_global_parens_with_comment_report_css_expected_identifier() {
+    assert_eq!(
+        code("<style>:global(/**/) {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn unknown_functional_pseudos_with_arguments_stay_clean() {
+    // `:lang(en)` / `:dir(rtl)` / `:foo(.a)` are functional but NOT selector-list
+    // pseudos: the shared parser leaves `selector_list` absent. That must not be
+    // treated as trivia-only-empty the way `:global( )` is.
+    assert_eq!(code("<style>:lang(en) {}</style>"), None);
+    assert_eq!(code("<style>:dir(rtl) {}</style>"), None);
+    assert_eq!(code("<style>:foo(.a) {}</style>"), None);
+}
+
+#[test]
+fn trivia_only_unknown_functional_pseudo_reports_css_expected_identifier() {
+    // Official `read_selector_list` still requires a selector after skipping
+    // trivia, for ANY parenthesized pseudo — including unknown `:lang` / `:foo`.
+    assert_eq!(
+        code("<style>:lang( ) {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+    assert_eq!(
+        code("<style>:lang(/**/) {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn dangling_combinator_reports_css_selector_invalid() {
+    assert_eq!(
+        code("<style>.a > {}</style>\n<button>x</button>\n"),
+        Some("css_selector_invalid"),
+    );
+}
+
+#[test]
+fn dangling_plus_combinator_reports_css_selector_invalid() {
+    assert_eq!(
+        code("<style>.a + {}</style>\n<button>x</button>\n"),
+        Some("css_selector_invalid"),
+    );
+}
+
+#[test]
+fn empty_global_then_dangling_combinator_reports_css_expected_identifier() {
+    // Official svelte fails inside `:global()` first and never reaches the
+    // outer dangling-combinator check. The combinator candidate must not win
+    // just because it was recorded with the whole selector span.
+    assert_eq!(
+        code("<style>:global() > {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn nth_dangling_plus_then_combinator_reports_css_expected_identifier() {
+    assert_eq!(
+        code("<style>p:nth-child(2n+) > {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn empty_id_selector_reports_css_expected_identifier() {
+    assert_eq!(
+        code("<style># {}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn nth_child_dangling_plus_after_an_reports_css_expected_identifier() {
+    assert_eq!(
+        code("<style>p:nth-child(2n+){}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
+fn nth_child_dangling_plus_after_n_reports_css_selector_invalid() {
+    assert_eq!(
+        code("<style>p:nth-child(n+){}</style>\n<button>x</button>\n"),
+        Some("css_selector_invalid"),
+    );
+}
+
+#[test]
+fn nth_last_child_dangling_plus_after_an_reports_css_expected_identifier() {
+    assert_eq!(
+        code("<style>p:nth-last-child(2n+){}</style>\n<button>x</button>\n"),
+        Some("css_expected_identifier"),
+    );
+}
+
+#[test]
 fn declaration_without_value_reports_css_empty_declaration() {
     // `.b { color }` — a declaration with no `:`/value (and not a `--` custom prop) is
     // `css_empty_declaration`.
@@ -350,24 +499,24 @@ fn declaration_without_value_reports_css_empty_declaration() {
 // ── the body is read relative to content_start within the FULL source ──
 
 #[test]
-fn reader_uses_content_start_not_an_isolated_slice() {
-    // Two styles in one source: the SECOND style's malformed body is read from its own
-    // content-start and runs past its `</style>` into the trailing template. The reader for the
-    // 2nd style reports the CSS code; the 1st (clean) reports None.
+fn reader_uses_content_span_not_an_isolated_guess() {
+    // Two styles in one source: the SECOND style's malformed body is projected from its own
+    // parser-minted content span. The 1st (clean) reports None; the 2nd reports the CSS code.
     let src =
         "<style>.a {}</style>\n<style>.b {</style>\n<button onclick={() => c++}>{c}</button>\n";
-    let first_start = first_style_content_start(src);
     assert_eq!(
-        style_body_reject_code(src, first_start),
+        style_body_reject_code(src, first_style_content_span(src)),
         None,
         "1st style clean"
     );
-    // content-start of the 2nd style:
-    let second_open = src[first_start..].find("<style").unwrap() + first_start;
+    let first_end = first_style_content_span(src).end as usize;
+    let second_open = src[first_end..].find("<style").unwrap() + first_end;
     let second_gt = src[second_open..].find('>').unwrap();
     let second_start = second_open + second_gt + 1;
+    let second_rest = &src[second_start..];
+    let second_end = second_start + second_rest.find("</style").unwrap_or(second_rest.len());
     assert_eq!(
-        style_body_reject_code(src, second_start),
+        style_body_reject_code(src, Span::new(second_start as u32, second_end as u32)),
         Some("css_expected_identifier"),
         "2nd style malformed body reports the CSS code"
     );

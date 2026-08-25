@@ -1,44 +1,72 @@
-//! Unit tests for the CSS scoping analysis — each pinned against the official
-//! `svelte@5.56.10` `css-analyze.js` / `css/utils.js` / `css.js` behavior:
-//! keyframes collection (with the `-global-` / `:global {}` exclusions),
-//! `is_global` / `is_global_like` / `is_global_block` metadata, `has_global`,
-//! and the `:global` / nesting placement validation family.
+//! Tests for [`super::analyze_stylesheet`]'s shared `StyleSyntaxIr` +
+//! `Span`-keyed `CssAnalysis` side table — each case is an oracle-pinned
+//! assertion against `svelte@5.56.10`'s own `css-analyze.js` semantics, read
+//! through `analysis.rule_facts(rule)` / `.complex_facts(complex)` /
+//! `.compound_facts(compound)`.
 
-use crate::svelte::runtime::css::analyze::{analyze_stylesheet, is_outer_global, CssAnalysis};
-use crate::svelte::runtime::css::parse::parse_style_body;
-use crate::svelte::runtime::css::types::{BlockChild, Rule, StyleChild, StyleSheet};
+use std::sync::Arc;
+
+use verter_css_syntax::{
+    parse_style_ir, ComplexSelector, ComplexSelectorPart, CssDialect, CssParseMode, CssSource,
+    SelectorCompound, StyleRule, StyleStatement, StyleSyntaxIr,
+};
 use verter_span::Span;
 
+use super::{analyze_stylesheet, is_outer_global, CompoundTail, CssAnalysis};
+
 /// Parse + analyze `css` wrapped in a component (absolute spans), returning
-/// `(source, analyzed stylesheet, analysis)`.
-fn analyzed(css: &str) -> (String, StyleSheet, CssAnalysis) {
+/// `(source, tree, analysis)`.
+fn analyzed(css: &str) -> (String, StyleSyntaxIr, CssAnalysis) {
     let source = format!("<div>x</div>\n<style>{css}</style>\n");
     let start = source.find("<style>").expect("open tag") + "<style>".len();
     let end = source.rfind("</style>").expect("close tag");
-    let mut sheet = parse_style_body(&source, Span::new(start as u32, end as u32))
+    let body = &source[start..end];
+    let css_source = CssSource::new(Arc::from(body), start as u32).expect("valid css source");
+    let tree = parse_style_ir(css_source, CssDialect::Css, CssParseMode::Recover)
         .expect("the fixture body parses");
-    let analysis = analyze_stylesheet(&source, &mut sheet).expect("the fixture analyzes clean");
-    (source, sheet, analysis)
+    let analysis = analyze_stylesheet(&source, &tree)
+        .expect("the fixture analyzes clean")
+        .into_analysis();
+    (source, tree, analysis)
 }
 
-/// Parse + analyze `css`, expecting an analysis ERROR; returns `(source, code,
-/// span)`.
+/// Parse + analyze `css`, expecting an analysis ERROR; returns `(source,
+/// code, span)`.
 fn analysis_error(css: &str) -> (String, &'static str, Span) {
     let source = format!("<div>x</div>\n<style>{css}</style>\n");
     let start = source.find("<style>").expect("open tag") + "<style>".len();
     let end = source.rfind("</style>").expect("close tag");
-    let mut sheet = parse_style_body(&source, Span::new(start as u32, end as u32))
+    let body = &source[start..end];
+    let css_source = CssSource::new(Arc::from(body), start as u32).expect("valid css source");
+    let tree = parse_style_ir(css_source, CssDialect::Css, CssParseMode::Recover)
         .expect("the fixture body parses");
-    let err = analyze_stylesheet(&source, &mut sheet).expect_err("the fixture fails analysis");
+    let err = analyze_stylesheet(&source, &tree).expect_err("the fixture fails analysis");
     (source, err.code, err.span)
 }
 
-/// The first rule of the sheet.
-fn first_rule(sheet: &StyleSheet) -> &Rule {
-    match &sheet.children[0] {
-        StyleChild::Rule(rule) => rule,
+/// The first rule of the tree.
+fn first_rule(tree: &StyleSyntaxIr) -> &StyleRule {
+    match &tree.statements()[0] {
+        StyleStatement::Rule(rule) => rule,
         other => panic!("a style rule, got {other:?}"),
     }
+}
+
+/// The first complex selector of a rule's prelude.
+fn first_complex(rule: &StyleRule) -> &ComplexSelector {
+    &rule.selector_list().selectors()[0]
+}
+
+/// The first compound (relative-selector) of a complex selector.
+fn first_compound(complex: &ComplexSelector) -> &SelectorCompound {
+    complex
+        .parts()
+        .iter()
+        .find_map(|part| match part {
+            ComplexSelectorPart::Compound(compound) => Some(compound),
+            ComplexSelectorPart::Combinator(_) => None,
+        })
+        .expect("a compound part")
 }
 
 // ── keyframes collection ─────────────────────────────────────────────────────
@@ -85,28 +113,28 @@ fn global_prefixed_keyframes_are_excluded_and_recorded_for_prefix_strip() {
 
 #[test]
 fn keyframes_inside_a_global_block_are_excluded_from_both_lists() {
-    let (_, sheet, analysis) = analyzed(":global { @keyframes k { from { opacity: 0 } } }");
+    let (_, tree, analysis) = analyzed(":global { @keyframes k { from { opacity: 0 } } }");
     assert!(analysis.keyframes.is_empty());
     assert!(analysis.global_keyframes.is_empty());
     // The `:global {}` block rule carries NO declarations, so `has_global`
     // stays false (the official declaration-count gate).
     assert!(!analysis.has_global);
-    assert!(first_rule(&sheet).metadata.is_global_block);
+    assert!(analysis.rule_facts(first_rule(&tree)).is_global_block);
 }
 
 // ── selector metadata + has_global ──────────────────────────────────────────
 
 #[test]
 fn global_selector_rule_sets_metadata_and_has_global() {
-    let (_, sheet, analysis) = analyzed(":global(.x) { color: red; }");
-    let rule = first_rule(&sheet);
-    let complex = &rule.prelude.children[0];
-    assert!(complex.metadata.is_global);
+    let (_, tree, analysis) = analyzed(":global(.x) { color: red; }");
+    let rule = first_rule(&tree);
+    let complex = first_complex(rule);
+    assert!(analysis.complex_facts(complex).is_global);
     // A global selector is used by definition.
-    assert!(complex.metadata.used);
-    assert!(complex.children[0].metadata.is_global);
-    assert!(rule.metadata.has_global_selectors);
-    assert!(!rule.metadata.has_local_selectors);
+    assert!(analysis.complex_facts(complex).used);
+    assert!(analysis.compound_facts(complex.compounds()[0]).is_global);
+    assert!(analysis.rule_facts(rule).has_global_selectors);
+    assert!(!analysis.rule_facts(rule).has_local_selectors);
     // A global-selector rule WITH declarations flips the component-wide
     // `has_global`.
     assert!(analysis.has_global);
@@ -114,18 +142,18 @@ fn global_selector_rule_sets_metadata_and_has_global() {
 
 #[test]
 fn local_selectors_stay_unmarked_and_unused_before_matching() {
-    let (_, sheet, analysis) = analyzed(".card { color: blue; }\nh2 { font-weight: bold; }");
-    for child in &sheet.children {
-        let StyleChild::Rule(rule) = child else {
+    let (_, tree, analysis) = analyzed(".card { color: blue; }\nh2 { font-weight: bold; }");
+    for statement in tree.statements() {
+        let StyleStatement::Rule(rule) = statement else {
             panic!("a style rule");
         };
-        let complex = &rule.prelude.children[0];
-        assert!(!complex.metadata.is_global);
+        let complex = first_complex(rule);
+        assert!(!analysis.complex_facts(complex).is_global);
         // `used` is the MATCHER's fact; analysis leaves local selectors
         // unmarked.
-        assert!(!complex.metadata.used);
-        assert!(rule.metadata.has_local_selectors);
-        assert!(!rule.metadata.has_global_selectors);
+        assert!(!analysis.complex_facts(complex).used);
+        assert!(analysis.rule_facts(rule).has_local_selectors);
+        assert!(!analysis.rule_facts(rule).has_global_selectors);
     }
     assert!(!analysis.has_global);
 }
@@ -134,41 +162,46 @@ fn local_selectors_stay_unmarked_and_unused_before_matching() {
 fn global_with_trailing_scoped_class_is_not_global() {
     // `:global(.x).y` — the `.y` keeps the selector SCOPED (the official
     // `is_global` every()-gate over unscoped pseudo-classes / pseudo-elements).
-    let (_, sheet, _) = analyzed(":global(.x).y { color: red; }");
-    let rule = first_rule(&sheet);
-    assert!(!rule.prelude.children[0].children[0].metadata.is_global);
-    assert!(rule.metadata.has_local_selectors);
+    let (_, tree, analysis) = analyzed(":global(.x).y { color: red; }");
+    let rule = first_rule(&tree);
+    let compound = first_complex(rule).compounds()[0];
+    assert!(!analysis.compound_facts(compound).is_global);
+    assert!(analysis.rule_facts(rule).has_local_selectors);
 }
 
 #[test]
 fn global_with_trailing_unscoped_pseudo_class_stays_global() {
     // `:global(.x):hover` — `:hover` is an unscoped pseudo-class, so the
     // compound stays global.
-    let (_, sheet, _) = analyzed(":global(.x):hover { color: red; }");
-    let rule = first_rule(&sheet);
-    assert!(rule.prelude.children[0].children[0].metadata.is_global);
-    assert!(rule.metadata.has_global_selectors);
+    let (_, tree, analysis) = analyzed(":global(.x):hover { color: red; }");
+    let rule = first_rule(&tree);
+    let compound = first_complex(rule).compounds()[0];
+    assert!(analysis.compound_facts(compound).is_global);
+    assert!(analysis.rule_facts(rule).has_global_selectors);
 }
 
 #[test]
 fn global_with_scoped_has_is_not_global_but_is_outer_global() {
     // `:global(.x):has(.y)` — `:has` re-scopes the compound (`is_global`
     // false) while `is_outer_global` stays true (the official distinction).
-    let (_, sheet, _) = analyzed(":global(.x):has(.y) { color: red; }");
-    let rule = first_rule(&sheet);
-    let relative = &rule.prelude.children[0].children[0];
-    assert!(!relative.metadata.is_global);
-    assert!(is_outer_global(relative));
+    let (source, tree, analysis) = analyzed(":global(.x):has(.y) { color: red; }");
+    let rule = first_rule(&tree);
+    let compound = first_complex(rule).compounds()[0];
+    assert!(!analysis.compound_facts(compound).is_global);
+    assert!(is_outer_global(&source, compound));
 }
 
 #[test]
 fn host_root_and_view_transition_are_global_like() {
-    let (_, sheet, _) = analyzed(":host { color: red; }\n:root { color: red; }\n::view-transition { color: red; }\n:root:has(.x) { color: red; }");
-    let global_like: Vec<bool> = sheet
-        .children
+    let (_, tree, analysis) = analyzed(":host { color: red; }\n:root { color: red; }\n::view-transition { color: red; }\n:root:has(.x) { color: red; }");
+    let global_like: Vec<bool> = tree
+        .statements()
         .iter()
-        .map(|child| match child {
-            StyleChild::Rule(rule) => rule.prelude.children[0].children[0].metadata.is_global_like,
+        .map(|statement| match statement {
+            StyleStatement::Rule(rule) => {
+                let compound = first_complex(rule).compounds()[0];
+                analysis.compound_facts(compound).is_global_like
+            }
             other => panic!("a style rule, got {other:?}"),
         })
         .collect();
@@ -176,35 +209,39 @@ fn host_root_and_view_transition_are_global_like() {
     // scoped (the official `:has` exception).
     assert_eq!(global_like, vec![true, true, true, false]);
     // A global-LIKE selector is marked used by the analysis walk.
-    let StyleChild::Rule(host_rule) = &sheet.children[0] else {
+    let StyleStatement::Rule(host_rule) = &tree.statements()[0] else {
         panic!("a style rule");
     };
-    assert!(host_rule.prelude.children[0].metadata.used);
+    assert!(analysis.complex_facts(first_complex(host_rule)).used);
 }
 
 #[test]
 fn global_block_descendant_marks_trailing_selectors_global_like() {
     // `:global x { … }` — the block form; the trailing `x` compound is
     // global-LIKE (unscoped) per the official rule-loop marking.
-    let (_, sheet, _) = analyzed(":global x { color: red; }");
-    let rule = first_rule(&sheet);
-    assert!(rule.metadata.is_global_block);
-    let complex = &rule.prelude.children[0];
-    assert!(complex.children[1].metadata.is_global_like);
-    assert!(complex.metadata.is_global);
+    let (_, tree, analysis) = analyzed(":global x { color: red; }");
+    let rule = first_rule(&tree);
+    assert!(analysis.rule_facts(rule).is_global_block);
+    let complex = first_complex(rule);
+    assert!(
+        analysis
+            .compound_facts(complex.compounds()[1])
+            .is_global_like
+    );
+    assert!(analysis.complex_facts(complex).is_global);
 }
 
 #[test]
 fn nesting_selector_inside_global_rule_marks_used() {
     // `&:hover` nested in `:global(.foo) { … }` is marked used (the official
     // nesting-scope rule).
-    let (_, sheet, _) = analyzed(":global(.foo) { &:hover { color: green; } }");
-    let outer = first_rule(&sheet);
-    let BlockChild::Rule(nested) = &outer.block.children[0] else {
+    let (_, tree, analysis) = analyzed(":global(.foo) { &:hover { color: green; } }");
+    let outer = first_rule(&tree);
+    let StyleStatement::Rule(nested) = &outer.body().statements()[0] else {
         panic!("a nested rule");
     };
-    assert!(nested.metadata.is_nested);
-    assert!(nested.prelude.children[0].metadata.used);
+    assert!(analysis.rule_facts(nested).is_nested);
+    assert!(analysis.complex_facts(first_complex(nested)).used);
 }
 
 // ── `:global` placement validation (the official `e.css_*` family) ──────────
@@ -229,10 +266,10 @@ fn global_in_the_middle_of_a_selector_is_invalid() {
 fn global_at_selector_edges_is_valid() {
     // Leading and trailing `:global(...)` are both legal; consecutive
     // `:global(...)` runs too.
-    let (_, sheet, _) = analyzed(
+    let (_, tree, _) = analyzed(
         ":global(.x) .a { color: red; }\n.a :global(.x) { color: red; }\n:global(.x) :global(.y) { color: red; }",
     );
-    assert_eq!(sheet.children.len(), 3);
+    assert_eq!(tree.statements().len(), 3);
 }
 
 #[test]
@@ -255,8 +292,8 @@ fn multi_selector_global_arg_in_a_complex_selector_is_invalid() {
     let (_, code, _) = analysis_error(".a :global(.x, .y) { color: red; }");
     assert_eq!(code, "css_global_invalid_selector");
     // The standalone form analyzes clean.
-    let (_, sheet, _) = analyzed(":global(.x, .y) { color: red; }");
-    assert_eq!(sheet.children.len(), 1);
+    let (_, tree, _) = analyzed(":global(.x, .y) { color: red; }");
+    assert_eq!(tree.statements().len(), 1);
 }
 
 #[test]
@@ -265,8 +302,8 @@ fn leading_combinator_is_invalid_at_top_level_only() {
     assert_eq!(code, "css_selector_invalid");
     assert_eq!(&source[span.start as usize..span.end as usize], ">");
     // …but is LEGAL inside `:has(...)` args and inside a nested rule.
-    let (_, sheet, _) = analyzed(".x:has(> .a) { color: red; }\n.b { > .c { color: red; } }");
-    assert_eq!(sheet.children.len(), 2);
+    let (_, tree, _) = analyzed(".x:has(> .a) { color: red; }\n.b { > .c { color: red; } }");
+    assert_eq!(tree.statements().len(), 2);
 }
 
 #[test]
@@ -274,8 +311,8 @@ fn nesting_selector_outside_a_nested_rule_is_invalid() {
     let (_, code, _) = analysis_error("& { color: red; }");
     assert_eq!(code, "css_nesting_selector_invalid_placement");
     // The one legal top-level form: a lone `:global(&)`.
-    let (_, sheet, _) = analyzed(":global(&) { color: red; }");
-    assert_eq!(sheet.children.len(), 1);
+    let (_, tree, _) = analyzed(":global(&) { color: red; }");
+    assert_eq!(tree.statements().len(), 1);
 }
 
 #[test]
@@ -296,9 +333,9 @@ fn global_block_with_non_descendant_combinator_is_invalid() {
     let (_, code, _) = analysis_error(".x > :global { color: red; }");
     assert_eq!(code, "css_global_block_invalid_combinator");
     // The DESCENDANT form is legal.
-    let (_, sheet, _) = analyzed(".x :global { color: red; }");
-    let rule = first_rule(&sheet);
-    assert!(rule.metadata.is_global_block);
+    let (_, tree, analysis) = analyzed(".x :global { color: red; }");
+    let rule = first_rule(&tree);
+    assert!(analysis.rule_facts(rule).is_global_block);
 }
 
 #[test]
@@ -306,8 +343,8 @@ fn lone_global_block_with_a_direct_declaration_is_invalid() {
     let (_, code, _) = analysis_error(":global { color: red; }");
     assert_eq!(code, "css_global_block_invalid_declaration");
     // A lone `:global` with only NESTED RULES is legal.
-    let (_, sheet, _) = analyzed(":global { .x { color: red; } }");
-    assert!(first_rule(&sheet).metadata.is_global_block);
+    let (_, tree, analysis) = analyzed(":global { .x { color: red; } }");
+    assert!(analysis.rule_facts(first_rule(&tree)).is_global_block);
 }
 
 #[test]
@@ -320,25 +357,110 @@ fn global_block_selector_lists_must_be_all_global() {
     let (_, code, _) = analysis_error(":global x, .y { color: red; }");
     assert_eq!(code, "css_global_block_invalid_list");
     // Preprocessor-shaped `:global x, :global y { … }` is LEGAL.
-    let (_, sheet, _) = analyzed(":global x, :global y { color: red; }");
-    assert!(first_rule(&sheet).metadata.is_global_block);
+    let (_, tree, analysis) = analyzed(":global x, :global y { color: red; }");
+    assert!(analysis.rule_facts(first_rule(&tree)).is_global_block);
 }
 
 #[test]
 fn scoped_styles_fixture_css_analyzes_clean_and_local() {
     // The committed `css/scoped_styles.svelte` body: three local rules, no
     // globals, no keyframes.
-    let (_, sheet, analysis) = analyzed(
+    let (_, tree, analysis) = analyzed(
         "\n\t.card {\n\t\tcolor: blue;\n\t\tpadding: 1rem;\n\t}\n\n\t.card.active {\n\t\tcolor: green;\n\t}\n\n\th2 {\n\t\tfont-weight: bold;\n\t}\n",
     );
-    assert_eq!(sheet.children.len(), 3);
+    assert_eq!(tree.statements().len(), 3);
     assert!(analysis.keyframes.is_empty());
     assert!(!analysis.has_global);
-    for child in &sheet.children {
-        let StyleChild::Rule(rule) = child else {
+    for statement in tree.statements() {
+        let StyleStatement::Rule(rule) = statement else {
             panic!("a style rule");
         };
-        assert!(rule.metadata.has_local_selectors);
-        assert!(!rule.metadata.has_global_selectors);
+        assert!(analysis.rule_facts(rule).has_local_selectors);
+        assert!(!analysis.rule_facts(rule).has_global_selectors);
     }
+}
+
+#[test]
+fn compound_tail_caches_the_keyframe_percentage_classification_once() {
+    // `50%` inside `@keyframes` — a keyframe-step percentage compound: the
+    // general CSS3 grammar recognizes zero typed components for it, and the
+    // shared parser decides `CompoundTail::Percentage` ONCE, when the
+    // compound's own node is built — `analysis.compound_facts(compound).tail`
+    // is a straight read of that stored fact, and `match_relsel`'s matcher
+    // walk reads the SAME fact later, never re-deriving it.
+    let (_, tree, analysis) = analyzed("@keyframes spin { 50% { opacity: 0; } }");
+    let StyleStatement::AtRule(atrule) = &tree.statements()[0] else {
+        panic!("an at-rule");
+    };
+    let block = atrule.body().expect("a keyframes block");
+    let StyleStatement::Rule(step_rule) = &block.statements()[0] else {
+        panic!("a keyframe-step rule");
+    };
+    let compound = first_compound(first_complex(step_rule));
+    assert!(
+        compound.components().is_empty(),
+        "the general grammar recognizes no typed component for `50%`"
+    );
+    assert!(
+        matches!(
+            analysis.compound_facts(compound).tail,
+            CompoundTail::Percentage(_)
+        ),
+        "expected a cached Percentage classification, got {:?}",
+        analysis.compound_facts(compound).tail
+    );
+}
+
+#[test]
+fn compound_tail_stays_claimed_for_an_ordinary_fully_recognized_compound() {
+    // A plain `.card` compound: every byte belongs to its one recognized
+    // `Class` component, so there is no unclaimed trailing run to classify.
+    let (_, tree, analysis) = analyzed(".card { color: red; }");
+    let compound = first_compound(first_complex(first_rule(&tree)));
+    assert!(!compound.components().is_empty());
+    assert_eq!(
+        analysis.compound_facts(compound).tail,
+        CompoundTail::Claimed
+    );
+}
+
+// ── single-walk traversal proof ──────────────────────────────────────────────
+//
+// `analyze_stylesheet` must be ONE walk over the statement tree — shape
+// validation and analysis happening at the SAME visit of each statement —
+// never a shape-validation pre-pass followed by a separate analysis pass
+// over the same nodes. Comparing OUTCOMES (accepted/rejected, the produced
+// `CssAnalysis` facts) cannot tell a one-walk implementation apart from a
+// two-walk one: both produce byte-identical results for every case above.
+//
+// This counts calls to `selector_list_is_static_or_nesting` instead — the
+// ONE per-rule shape-check primitive both the historical two-pass
+// `validate_style_tree_shape` (removed by the commit that introduced this
+// counter) and the current single walk call to decide the same thing. A
+// counter placed inside `analyze_statements`'s own loop body is NOT
+// discriminating here: a reintroduced sibling pre-pass function has its own
+// independent loop and never touches a counter embedded in a DIFFERENT
+// function's loop body (confirmed empirically by reintroducing the
+// historical function verbatim ahead of `analyze_statements` — a
+// loop-body-placed counter stayed unchanged). `selector_list_is_static_or_nesting`
+// is the correct instrumentation point because it is the actual shared
+// call site: the historical pre-pass's `Rule` arm called it once per rule,
+// and `analyze_statements`'s `Rule` arm still does — so a reintroduced
+// pre-pass doubles this count even though it never calls into
+// `analyze_statements` at all.
+#[test]
+fn analyze_stylesheet_visits_each_statement_exactly_once() {
+    super::reset_statement_visit_counter();
+    // 3 rules (`.a`, the nested `.b`, `.c`) each need exactly one shape
+    // check; the 3 declarations (`color: red/blue/green`) carry no shape
+    // check of their own (see `analyze_statements`'s `Declaration` arm).
+    let css = ".a { color: red; .b { color: blue; } } .c { color: green; }";
+    let (_source, _tree, _analysis) = analyzed(css);
+    assert_eq!(
+        super::statement_visit_count(),
+        3,
+        "a single walk shape-checks each of the 3 rules exactly once; a \
+         shape-validation pre-pass followed by a separate analysis pass \
+         would shape-check every rule twice (6), not once"
+    );
 }

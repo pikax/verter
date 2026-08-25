@@ -188,6 +188,14 @@ pub use client_compile::{ClientCompileError, GeneratedSourceMapInvalidReason};
 pub use compile_options::{
     resolve_svelte_compile_options, ResolvedSvelteCompileOptions, SvelteFragments, SvelteNamespace,
 };
+// `css` is a private module (`mod css;` above) — these two re-exports exist
+// SOLELY so `verter_compiler`'s `tests/allocator_canaries.rs` (a separate
+// integration-test crate, reachable only through `pub` items) can drive the
+// allocation probe: build an analyzed style body once, then re-read its
+// compound-tail / at-rule-prelude facts and assert the re-read allocates
+// nothing. Same opt-in seam as `compile_client` above.
+#[cfg(any(test, feature = "test-support"))]
+pub use css::{analyze_style_body_for_alloc_probe, reread_cached_css_facts_for_alloc_probe};
 pub use expr::StateLowering;
 pub use helpers::SvelteHelperMask;
 pub use html::{DynamicSlot, NodePathPlan, PathBase};

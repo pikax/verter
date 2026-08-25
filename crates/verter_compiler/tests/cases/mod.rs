@@ -20,6 +20,7 @@ mod svelte_client_emit_topology;
 mod svelte_client_fail_matrix;
 mod svelte_client_official_reject_matrix;
 mod svelte_conformance_trace_zero_cost_guard;
+mod svelte_css_grammar_path_absence;
 mod svelte_css_hash_no_component_id_guard;
 mod svelte_css_matcher_uses_analyzed_expr_ir;
 mod svelte_css_no_vue_reuse_guard;

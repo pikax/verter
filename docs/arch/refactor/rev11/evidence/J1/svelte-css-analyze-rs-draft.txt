@@ -1,80 +1,49 @@
-//! The Svelte CSS scoping analysis, built on the shared
-//! `verter_css_syntax::StyleSyntaxIr` — matches the official
+//! The Svelte CSS scoping analysis — a faithful port of the official
 //! `svelte@5.56.10` `phases/2-analyze/css/css-analyze.js` (the zimmerframe
 //! visitor walk), `phases/2-analyze/css/utils.js` (`is_global` /
 //! `is_unscoped_pseudo_class` / `is_outer_global`), and `phases/css.js`
 //! (`is_keyframes_node` / `remove_css_prefix`).
 //!
-//! This walks [`StyleSyntaxIr`] — the SOLE CSS-family syntax authority —
-//! directly; it builds no competing AST. `StyleSyntaxIr`'s node types
-//! (`StyleRule` / `ComplexSelector` / `SelectorCompound` /
+//! This walks `verter_css_syntax::StyleSyntaxIr` — the SOLE CSS-family syntax
+//! authority — directly; it builds no competing AST. `StyleSyntaxIr`'s node
+//! types (`StyleRule` / `ComplexSelector` / `SelectorCompound` /
 //! `SelectorComponent`) are immutable and carry no slot for Svelte's own
-//! scoping facts, so this analysis builds an out-of-band side table
-//! (`CssAnalysis`) instead of mutating the shared tree.
+//! scoping facts (`is_global_block` / `is_nested` / `has_global_selectors` /
+//! per-compound `is_global` / `is_global_like` / per-complex `used`), so this
+//! analysis builds an out-of-band, pointer-identity-keyed side table
+//! (`CssAnalysis`) instead of mutating the shared tree — see
+//! `docs/arch/refactor/rev11/evidence/J1/svelte-css-grammar-convergence-design.md`
+//! §3 for the design rationale (including the `&StyleSyntaxIr` vs
+//! `&mut StyleSyntaxIr` deviation flagged there for review).
 //!
-//! ## Fact-table keying: `Span`, not pointer identity
-//!
-//! Keying the side tables by `&T as *const _ as usize` pointer identity is
-//! unsound: a `StyleSyntaxIr` value can be DROPPED (its `Vec`s deallocated)
-//! and a LATER, UNRELATED tree's allocation can reuse the exact same address
-//! (the classic ABA hazard) — a stale/wrong-tree lookup would then silently
-//! return a wrong-but-plausible default `Facts` value instead of failing
-//! loudly. `Span` is used instead: every node this module keys on
-//! (`StyleRule`, `ComplexSelector`, `SelectorCompound`) occupies a distinct,
-//! non-overlapping-with-siblings byte range in a single valid parse (no two
-//! *different* rules, complex selectors, or compounds can share an identical
-//! span — each is a disjoint sub-range of its parent's span), so a `Span` is
-//! as stable and as collision-free a key as pointer identity was intended to
-//! be, without the reuse-after-free hazard: a `Span` cannot "come back" after
-//! its tree is dropped and mean something else, because a `Span` carries no
-//! address at all. [`AnalyzedStylesheet`] additionally lifetime-couples the
-//! analysis to the exact tree it was computed from, so a caller cannot even
-//! construct a mismatched `(tree, analysis)` pair to begin with.
+//! The JS visitors read ancestor context through `context.path` /
+//! `state.rule` / `metadata.parent_rule` object pointers; this port carries
+//! the same facts on an explicit ancestor-rule frame stack (pushed before
+//! each rule's block descent), preserving the official VISIT ORDER — the
+//! rule-level global-block loop first, then the prelude (per relative
+//! selector: the leading-combinator check, the selector metadata, the
+//! argument descent; then the complex-selector placement checks + metadata),
+//! then the rule facts, then the block. A validation failure surfaces as a
+//! typed [`CssAnalysisError`] carrying the exact official `e.css_*` code —
+//! never a panic, never a silent accept.
 //!
 //! A "relative selector" (the official `RelativeSelector` node: an optional
 //! leading combinator plus one compound's simple selectors) has no 1:1
-//! shared-CST type — [`ComplexSelector::parts()`] interleaves
-//! `Compound`/`Combinator` items in source order instead. This module
-//! reconstructs the pairing via [`relative_steps`]: each [`SelectorCompound`]
-//! pairs with the immediately PRECEDING [`SelectorCombinator`] part (`None`
-//! for the first compound), matching the official "the combinator joining
-//! this compound to the previous one" definition.
-//!
-//! ## Declaration-value / at-rule-prelude / keyframe-name reconstruction
-//!
-//! The official `Atrule.prelude` (and `Declaration.value`) is `read_value`'s
-//! trimmed, comment-stripped (except inside a case-SENSITIVE unquoted
-//! `url(...)`), quote-respecting raw text. A plain `str::trim` over the raw
-//! prelude span is NOT sufficient (confirmed: `URL(/*x*/foo)` strips its
-//! comment while `url(/*x*/foo)` does not — a byte-literal case-sensitive
-//! distinction the general CSS grammar's case-INsensitive `url(` token
-//! recognition cannot reproduce after the fact). The shared parser decodes
-//! that text once, via [`verter_css_syntax::svelte_read_value_text`], when a
-//! `StyleDirective` node is built, and stores it on
-//! [`StyleDirective::prelude_text`](verter_css_syntax::StyleDirective::prelude_text)
-//! — this module reads that field directly, never re-deriving it from the
-//! [`ComponentValueTree`](verter_css_syntax::ComponentValueTree) span itself.
-//!
-//! The official keyframe-name span (the position the renderer prefixes with
-//! `<hash>-`) is likewise read as a TYPED fact —
-//! [`verter_css_syntax::svelte_first_significant_value_span`] walks the
-//! at-rule's already-parsed value list for the first non-trivia,
-//! non-comment value — rather than a positional byte scan over raw prelude
-//! text (a byte scan that skips only literal space characters would
-//! misidentify a leading comment as the name, e.g. `@keyframes /* c */ spin`).
+//! shared-CST type — `verter_css_syntax::ComplexSelector::parts()`
+//! interleaves `Compound`/`Combinator` items in source order instead. This
+//! module reconstructs the pairing via [`relative_steps`]: each
+//! [`SelectorCompound`] pairs with the immediately PRECEDING [`Combinator`]
+//! part (`None` for the first compound), matching the official
+//! "the combinator joining this compound to the previous one" definition.
 
 use rustc_hash::FxHashMap;
 use verter_span::Span;
 
 use verter_css_syntax::{
-    decode_css_identifier, svelte_first_significant_value_span, CombinatorKind, ComplexSelector,
-    ComplexSelectorPart, SelectorCombinator, SelectorCompleteness, SelectorComponent,
-    SelectorComponentKind, SelectorCompound, SelectorList, SelectorPseudo, StyleBlock,
-    StyleCompleteness, StyleDirective, StyleRule, StyleStatement, StyleSyntaxIr,
+    decode_css_identifier, CombinatorKind, ComplexSelector, ComplexSelectorPart, SelectorCombinator,
+    SelectorComponent, SelectorComponentKind, SelectorCompound, SelectorPseudo, StyleBlock,
+    StyleDirective, StyleRule, StyleStatement, StyleSyntaxIr,
 };
-
-pub(crate) use super::types::{GlobalKeyframeName, KeyframeName};
-pub use verter_css_syntax::CompoundTail;
 
 /// A typed CSS analysis failure: the official validation code + the byte
 /// span of the offending node.
@@ -96,76 +65,33 @@ impl CssAnalysisError {
 
 type AnalyzeResult = Result<(), CssAnalysisError>;
 
-// Test-only rule-shape-check counter — proves the tree is validated for
-// shape (rule completeness + [`selector_list_is_static_or_nesting`]) at
-// MOST ONCE per rule, not by a separate shape-validation pre-pass ahead of
-// [`Analyzer::analyze_statements`]'s own walk.
-//
-// The counter is bumped inside [`selector_list_is_static_or_nesting`]
-// itself, NOT inside `analyze_statements`'s loop body. This placement is
-// load-bearing, not cosmetic: the historical two-pass implementation this
-// guards against (`validate_style_tree_shape`, removed by the commit that
-// introduced this counter) was a SEPARATE function with its own independent
-// `for statement in statements` loop — a bump placed inside
-// `analyze_statements`'s own loop body is invisible to a reintroduced
-// sibling function that never calls back into `analyze_statements` at all,
-// so it cannot discriminate a two-pass regression from a one-pass
-// implementation (confirmed empirically: reintroducing the historical
-// `validate_style_tree_shape` verbatim ahead of `analyze_statements` left a
-// loop-body-placed counter unchanged, i.e. GREEN, because the reintroduced
-// function's own loop never touched it).
-//
-// `selector_list_is_static_or_nesting` is different: it is the ONE
-// per-rule shape-check primitive BOTH the historical pre-pass and the
-// current single walk call to decide the exact same thing (whether a
-// rule's selector list is a supported static-or-nesting shape) — the
-// historical `validate_style_tree_shape`'s `Rule` arm called it, and
-// `analyze_statements`'s `Rule` arm still calls it today. A reintroduced
-// pre-pass that duplicates the historical shape check therefore doubles
-// THIS call count even though it never touches `analyze_statements`'s loop.
-#[cfg(test)]
-thread_local! {
-    static RULE_SHAPE_CHECK_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+/// A local `@keyframes` name — a member of the scope-RENAME list (the
+/// official `analysis.css.keyframes` entry).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyframeName {
+    /// The keyframes name exactly as the official analysis records it (the
+    /// raw trimmed prelude text).
+    pub name: String,
+    /// The span of the name token inside the at-rule prelude (the region the
+    /// renderer prefixes with `<hash>-`).
+    pub name_span: Span,
 }
 
-/// Reset the test-only rule-shape-check counter to zero. Call before the
-/// walk under measurement — `cargo nextest` gives per-test process
-/// isolation (the counter starts at zero already), but this keeps the test
-/// correct under any harness that reuses a thread across tests.
-#[cfg(test)]
-pub(crate) fn reset_statement_visit_counter() {
-    RULE_SHAPE_CHECK_COUNT.with(|count| count.set(0));
+/// A `-global-`-prefixed `@keyframes` name — EXCLUDED from the rename list;
+/// the renderer strips the `-global-` prefix instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalKeyframeName {
+    /// The name WITHOUT the `-global-` prefix.
+    pub name: String,
+    /// The span of the FULL prefixed name token inside the at-rule prelude
+    /// (the first 8 bytes are the `-global-` prefix the renderer removes).
+    pub name_span: Span,
 }
-
-/// Read the test-only rule-shape-check counter.
-#[cfg(test)]
-pub(crate) fn statement_visit_count() -> u32 {
-    RULE_SHAPE_CHECK_COUNT.with(std::cell::Cell::get)
-}
-
-#[cfg(test)]
-fn bump_statement_visit_counter() {
-    RULE_SHAPE_CHECK_COUNT.with(|count| count.set(count.get() + 1));
-}
-
-/// A `Span`-keyed newtype identifying a [`StyleRule`] in [`CssAnalysis::rules`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct RuleKey(Span);
-
-/// A `Span`-keyed newtype identifying a [`ComplexSelector`] in
-/// [`CssAnalysis::complex`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ComplexKey(Span);
-
-/// A `Span`-keyed newtype identifying a [`SelectorCompound`] in
-/// [`CssAnalysis::compounds`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct CompoundKey(Span);
 
 /// The official `Rule.metadata` analysis facts (minus the `parent_rule`
 /// object back-pointer — walkers carry ancestor context instead; the stored
 /// [`is_nested`](Self::is_nested) fact records parent-rule EXISTENCE), keyed
-/// by [`StyleRule`] span in [`CssAnalysis::rules`].
+/// by [`StyleRule`] pointer identity in [`CssAnalysis::rules`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuleFacts {
     /// Whether ANY prelude selector is global (`:global(...)`-only or
@@ -182,7 +108,7 @@ pub struct RuleFacts {
 }
 
 /// The official `ComplexSelector.metadata` analysis facts (minus the `rule`
-/// object back-pointer), keyed by [`ComplexSelector`] span in
+/// object back-pointer), keyed by [`ComplexSelector`] pointer identity in
 /// [`CssAnalysis::complex`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ComplexFacts {
@@ -193,18 +119,10 @@ pub struct ComplexFacts {
     pub used: bool,
 }
 
-/// [`CompoundTail`] is the shared grammar's own grammar-gap classification —
-/// decided ONCE by the parser, when a compound's own node is built (see
-/// [`SelectorCompound::tail`](verter_css_syntax::SelectorCompound::tail)).
-/// This analysis, [`match_relsel`](super::match_relsel), and the
-/// `:global(...)` placement validation below all read that stored fact
-/// through [`CssAnalysis::compound_facts`] — never re-deriving it from raw
-/// source bytes.
-///
 /// The official `RelativeSelector.metadata` analysis facts, keyed by
-/// [`SelectorCompound`] span in [`CssAnalysis::compounds`] (see the module
-/// doc for why a compound stands in for the official `RelativeSelector`
-/// node).
+/// [`SelectorCompound`] pointer identity in [`CssAnalysis::compounds`] (see
+/// the module doc for why a compound stands in for the official
+/// `RelativeSelector` node).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CompoundFacts {
     /// Whether the compound is `:global(...)` / `:global` per the official
@@ -218,14 +136,15 @@ pub struct CompoundFacts {
     /// Whether the compound matched a template element and receives the
     /// scope class (set by the selector-to-template matcher).
     pub scoped: bool,
-    /// The compound's [`CompoundTail`] classification — a straight read of
-    /// [`SelectorCompound::tail`](verter_css_syntax::SelectorCompound::tail),
-    /// the parser's own stored fact, never re-derived here.
-    pub tail: CompoundTail,
 }
 
 /// The analysis facts extracted from one stylesheet: the keyframes/global
-/// collection plus the `Span`-keyed selector-metadata side table.
+/// collection plus the pointer-identity-keyed selector-metadata side table.
+/// See the module doc for why this is a side table rather than fields on the
+/// shared `StyleSyntaxIr` node types — pointer identity is stable for the
+/// lifetime of one owned, NEVER-CLONED `StyleSyntaxIr` value (its `Vec`s are
+/// built once by the parse sink and never reallocated afterward); cloning
+/// the tree after analysis silently invalidates every key here.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CssAnalysis {
     /// The LOCAL `@keyframes` rename list (the official
@@ -237,121 +156,93 @@ pub struct CssAnalysis {
     /// Whether the component's css includes GLOBAL css (the official
     /// `analysis.css.has_global`).
     pub has_global: bool,
-    rules: FxHashMap<RuleKey, RuleFacts>,
-    complex: FxHashMap<ComplexKey, ComplexFacts>,
-    compounds: FxHashMap<CompoundKey, CompoundFacts>,
+    /// Per-[`StyleRule`] facts, keyed by `&StyleRule as *const _ as usize`.
+    pub rules: FxHashMap<usize, RuleFacts>,
+    /// Per-[`ComplexSelector`] facts, keyed by
+    /// `&ComplexSelector as *const _ as usize`.
+    pub complex: FxHashMap<usize, ComplexFacts>,
+    /// Per-[`SelectorCompound`] facts, keyed by
+    /// `&SelectorCompound as *const _ as usize`.
+    pub compounds: FxHashMap<usize, CompoundFacts>,
+}
+
+fn rule_key(rule: &StyleRule) -> usize {
+    std::ptr::from_ref(rule) as usize
+}
+
+fn complex_key(complex: &ComplexSelector) -> usize {
+    std::ptr::from_ref(complex) as usize
+}
+
+fn compound_key(compound: &SelectorCompound) -> usize {
+    std::ptr::from_ref(compound) as usize
 }
 
 impl CssAnalysis {
-    /// The rule facts for `rule`. `rule_facts_mut` is called unconditionally
-    /// as the first step of `Analyzer::analyze_rule`, so every `StyleRule`
-    /// reachable from the analyzed tree has an entry by the time any reader
-    /// (this analyzer's own later passes, the matcher, the renderer) asks
-    /// for it — a miss here means a rule the analyzer walk never visited is
-    /// being queried, which would otherwise silently substitute all-`false`
-    /// facts (an un-flagged `:global` rule scoped, or a scoped rule treated
-    /// as global). A miss panics in every build — fail closed, not a
-    /// silent default.
+    /// The rule facts for `rule` (default/unset when the rule was never
+    /// visited by the analyzer — never the case for a rule reachable from
+    /// the analyzed tree).
     #[must_use]
     pub fn rule_facts(&self, rule: &StyleRule) -> RuleFacts {
-        let key = RuleKey(rule.span());
-        self.rules.get(&key).copied().unwrap_or_else(|| {
-            panic!(
-                "rule_facts miss: this rule was never visited by analyze_rule — \
-                 a fact-table write was skipped"
-            )
-        })
+        self.rules.get(&rule_key(rule)).copied().unwrap_or_default()
     }
 
-    /// The complex-selector facts for `complex`. `complex_facts_mut` is
-    /// always called at the end of `Analyzer::analyze_complex_selector`
-    /// (and by the matcher's `mark_used`) before any reader asks for the
-    /// SAME complex's facts — see `rule_facts`'s doc for why a miss is a
-    /// bug, not a legitimate default.
+    /// The complex-selector facts for `complex`.
     #[must_use]
     pub fn complex_facts(&self, complex: &ComplexSelector) -> ComplexFacts {
-        let key = ComplexKey(complex.span());
-        self.complex.get(&key).copied().unwrap_or_else(|| {
-            panic!(
-                "complex_facts miss: this complex selector was never visited by \
-                 analyze_complex_selector — a fact-table write was skipped"
-            )
-        })
+        self.complex
+            .get(&complex_key(complex))
+            .copied()
+            .unwrap_or_default()
     }
 
-    /// The compound (relative-selector) facts for `compound`. `tail` is
-    /// always the parser's own stored [`SelectorCompound::tail`] — never
-    /// this side table's (which never writes it).
-    ///
-    /// Unlike `rule_facts`/`complex_facts`, a genuinely UNWRITTEN entry here
-    /// is not always a bug: `Analyzer::analyze_relative_selector` reads a
-    /// compound's own IN-PROGRESS `is_global_like` accumulator (line ~1077)
-    /// BEFORE writing it, by design — a `:global {}`-block compound may be
-    /// marked `is_global_like` earlier in `analyze_rule`'s block-detection
-    /// loop, or may never be marked at all, and either way the default
-    /// (`false`) is the correct starting value for the accumulation, not a
-    /// missed-write symptom. So this accessor keeps its `unwrap_or_default`
-    /// fallback un-asserted — asserting here would fail on the legitimate
-    /// pre-write read.
+    /// The compound (relative-selector) facts for `compound`.
     #[must_use]
     pub fn compound_facts(&self, compound: &SelectorCompound) -> CompoundFacts {
-        let mut facts = self
-            .compounds
-            .get(&CompoundKey(compound.span()))
+        self.compounds
+            .get(&compound_key(compound))
             .copied()
-            .unwrap_or_default();
-        facts.tail = compound.tail();
-        facts
+            .unwrap_or_default()
     }
 
     fn rule_facts_mut(&mut self, rule: &StyleRule) -> &mut RuleFacts {
-        self.rules.entry(RuleKey(rule.span())).or_default()
+        self.rules.entry(rule_key(rule)).or_default()
     }
 
     fn complex_facts_mut(&mut self, complex: &ComplexSelector) -> &mut ComplexFacts {
-        self.complex.entry(ComplexKey(complex.span())).or_default()
+        self.complex.entry(complex_key(complex)).or_default()
     }
 
     fn compound_facts_mut(&mut self, compound: &SelectorCompound) -> &mut CompoundFacts {
-        self.compounds
-            .entry(CompoundKey(compound.span()))
-            .or_default()
-    }
-
-    /// Record (or update) the matcher's `scoped` verdict for `compound` —
-    /// the ONE write the matcher performs against this side table (analysis
-    /// itself never sets `scoped`).
-    pub fn mark_scoped(&mut self, compound: &SelectorCompound) {
-        self.compound_facts_mut(compound).scoped = true;
-    }
-
-    /// Record (or update) the matcher's `used` verdict for `complex` — the
-    /// matcher's other side-table write.
-    pub fn mark_used(&mut self, complex: &ComplexSelector) {
-        self.complex_facts_mut(complex).used = true;
+        self.compounds.entry(compound_key(compound)).or_default()
     }
 }
 
-/// One compound step of a complex selector — the reconstruction of the
-/// official `RelativeSelector` node described in the module doc. A dangling
-/// trailing combinator with no following compound (only reachable from a
-/// malformed/incomplete selector, which the shared parser's admission gate
-/// already rejects before analysis runs) is dropped rather than
-/// represented.
-pub(crate) fn relative_steps(
-    complex: &ComplexSelector,
-) -> Vec<(Option<&SelectorCombinator>, &SelectorCompound)> {
-    complex.relative_steps()
+/// One (leading combinator, compound) step of a complex selector — the
+/// reconstruction of the official `RelativeSelector` node described in the
+/// module doc. A dangling trailing combinator with no following compound
+/// (only reachable from a malformed/incomplete selector, which
+/// `validate_svelte_style_ir` already rejects before analysis runs) is
+/// dropped rather than represented.
+fn relative_steps(complex: &ComplexSelector) -> Vec<(Option<&SelectorCombinator>, &SelectorCompound)> {
+    let mut steps = Vec::new();
+    let mut pending: Option<&SelectorCombinator> = None;
+    for part in complex.parts() {
+        match part {
+            ComplexSelectorPart::Combinator(combinator) => pending = Some(combinator),
+            ComplexSelectorPart::Compound(compound) => {
+                steps.push((pending.take(), compound));
+            }
+        }
+    }
+    steps
 }
 
 /// The decoded name of a pseudo-class/pseudo-element/functional-pseudo
 /// component (a span-slice + the SAME shared decode function
 /// `verter_css_syntax::selector` itself uses — never independent
 /// classification), or `None` for a component with no name span.
-pub(crate) fn component_name<'a>(
-    source: &'a str,
-    component: &SelectorComponent,
-) -> Option<std::borrow::Cow<'a, str>> {
+fn component_name<'a>(source: &'a str, component: &SelectorComponent) -> Option<std::borrow::Cow<'a, str>> {
     let span = component.name_span()?;
     decode_css_identifier(&source[span.start as usize..span.end as usize]).ok()
 }
@@ -361,7 +252,7 @@ pub(crate) fn component_name<'a>(
 /// `FunctionalPseudo` (`:is`/`:where`/`:not`/`:has`/`:global`/`:nth-child`/
 /// any other functional pseudo-class), both of which the official Svelte AST
 /// represents as the SAME `SimpleSelector::PseudoClass` node.
-pub(crate) fn is_pseudo_class_component(component: &SelectorComponent) -> bool {
+fn is_pseudo_class_component(component: &SelectorComponent) -> bool {
     matches!(
         component.kind(),
         SelectorComponentKind::PseudoClass | SelectorComponentKind::FunctionalPseudo
@@ -393,27 +284,40 @@ pub(super) fn atrule_name_span(atrule: &StyleDirective) -> Span {
 }
 
 /// The at-rule's decoded NAME (the official `Atrule.name`).
-pub(super) fn atrule_name<'a>(
-    source: &'a str,
-    atrule: &StyleDirective,
-) -> std::borrow::Cow<'a, str> {
+pub(super) fn atrule_name<'a>(source: &'a str, atrule: &StyleDirective) -> std::borrow::Cow<'a, str> {
     let span = atrule_name_span(atrule);
     decode_css_identifier(&source[span.start as usize..span.end as usize])
         .unwrap_or(std::borrow::Cow::Borrowed(""))
 }
 
-/// The span of the keyframes NAME token inside the at-rule prelude — read as
-/// a TYPED fact off the already-parsed value list
-/// ([`svelte_first_significant_value_span`]), never a positional byte scan
-/// over raw prelude text (see the module doc for the leading-comment
-/// counterexample a byte scan misreads). Falls back to the whole prelude
-/// span when the (already keyframes-classified, hence non-empty) prelude
-/// carries no typed value at all — defensive only; `is_keyframes_node`
-/// already confirmed a real "keyframes" name token was decoded from this
-/// same at-rule's head, so its prelude value list is never actually empty.
-pub(super) fn keyframes_name_token_span(atrule: &StyleDirective) -> Span {
-    svelte_first_significant_value_span(atrule.opaque_args())
-        .unwrap_or_else(|| atrule.opaque_args().span())
+/// The at-rule's TRIMMED prelude text (the official `Atrule.prelude` —
+/// `read_value`'s trimmed result). `opaque_args().span()` is byte-identical
+/// to the official `prelude_span` (both run from right after the name token
+/// to right before the block/terminator), so trimming its raw source text
+/// with the SAME JS-whitespace rule `read_value` itself uses reproduces the
+/// official trimmed prelude without a second parse.
+pub(super) fn atrule_prelude<'a>(source: &'a str, atrule: &StyleDirective) -> &'a str {
+    let span = atrule.opaque_args().span();
+    verter_css_syntax::svelte_trim_js_whitespace(&source[span.start as usize..span.end as usize])
+}
+
+/// The span of the keyframes NAME token inside the at-rule prelude — the
+/// official renderer's scan (skip the spaces after the at-rule name, then
+/// collect to the first `{` or space), anchored on the parsed name span
+/// (positionally exact even for an escaped at-rule name). A post-parse
+/// POSITIONAL scan over already-delimited raw source, not new CSS
+/// classification.
+pub(super) fn keyframes_name_token_span(source: &str, atrule: &StyleDirective) -> Span {
+    let bytes = source.as_bytes();
+    let mut start = atrule_name_span(atrule).end as usize;
+    while bytes.get(start) == Some(&b' ') {
+        start += 1;
+    }
+    let mut end = start;
+    while end < bytes.len() && bytes[end] != b'{' && bytes[end] != b' ' {
+        end += 1;
+    }
+    Span::new(start as u32, end as u32)
 }
 
 /// One ancestor-rule frame — the facts the official visitors read through
@@ -451,158 +355,20 @@ struct OwnRuleFacts {
     allowed_nesting_span: Option<Span>,
 }
 
-/// One `<style>` block's freshly analyzed state: the [`CssAnalysis`] side
-/// table, lifetime-coupled to the exact [`StyleSyntaxIr`] it was computed
-/// from (`'ast`) so a caller cannot construct a mismatched `(tree,
-/// analysis)` pair — [`analyze_stylesheet`] borrows `tree` for the whole
-/// walk, and that borrow's lifetime is baked into this return type even
-/// though the tree reference itself is not retained past construction (the
-/// caller already owns `tree` separately and threads it alongside the
-/// extracted [`CssAnalysis`], per [`super::AnalyzedStyleBody`]).
-pub struct AnalyzedStylesheet<'ast> {
-    _tree: std::marker::PhantomData<&'ast StyleSyntaxIr>,
-    analysis: CssAnalysis,
-}
-
-impl std::fmt::Debug for AnalyzedStylesheet<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AnalyzedStylesheet")
-            .field("analysis", &self.analysis)
-            .finish_non_exhaustive()
-    }
-}
-
-impl AnalyzedStylesheet<'_> {
-    /// Consume this value, returning the analysis facts alone.
-    #[must_use]
-    pub fn into_analysis(self) -> CssAnalysis {
-        self.analysis
-    }
-}
-
 /// Analyze `tree` (already parsed through the shared `StyleSyntaxIr`
 /// authority): validate `:global` / nesting placement, build the selector
-/// metadata side table, and collect the keyframes + global facts. `source`
-/// is the ORIGINAL component source (the tree's own span-bearing text is a
-/// SUBSTRING of it, addressed by the same absolute offsets); every read of
-/// `source` in this module is a span-slice into an already-parsed offset,
-/// never an independent scan.
-///
-/// A single pre-order walk of `tree` — [`Analyzer::analyze_statements`] —
-/// both rejects any statement shape the analyzer/matcher below cannot
-/// handle (a parse-recovery artifact, `SelectorCompleteness::Recovered` /
-/// `StyleCompleteness::Recovered` from [`CssParseMode::Recover`], or a
-/// dynamic-class/interpolation selector component) AND builds the analysis
-/// facts, at the SAME visit of each statement: there is no separate
-/// shape-validation pre-pass over the tree before analysis begins.
-pub fn analyze_stylesheet<'ast>(
+/// metadata side table, and collect the keyframes + global facts.
+pub fn analyze_stylesheet(
     source: &str,
-    tree: &'ast StyleSyntaxIr,
-) -> Result<AnalyzedStylesheet<'ast>, CssAnalysisError> {
+    tree: &StyleSyntaxIr,
+) -> Result<CssAnalysis, CssAnalysisError> {
     let mut analyzer = Analyzer {
         source,
         analysis: CssAnalysis::default(),
     };
     let mut rules = Vec::new();
     analyzer.analyze_statements(tree.statements(), &mut rules)?;
-    Ok(AnalyzedStylesheet {
-        _tree: std::marker::PhantomData,
-        analysis: analyzer.analysis,
-    })
-}
-
-/// Type-witness anchor: `analyze_stylesheet` is nominally typed against the
-/// shared `StyleSyntaxIr` — a re-parse-and-recover shim with the same
-/// runtime shape would fail to unify here.
-const _: for<'ast> fn(
-    &str,
-    &'ast StyleSyntaxIr,
-) -> Result<AnalyzedStylesheet<'ast>, CssAnalysisError> = analyze_stylesheet;
-
-/// Shape-only validation for a [`StyleDeclaration`]/[`StyleMixinOrFunction`]
-/// body — the two statement kinds [`Analyzer::analyze_statements`] does not
-/// otherwise recurse into, because neither carries any analysis facts of its
-/// own. Neither construct is ever produced under [`CssDialect::Css`] today
-/// (a mixin/function header is Sass/Stylus-grammar-only; a plain CSS
-/// declaration never carries a nested block), so this is DEAD on every real
-/// production tree — but a body attached under [`CssParseMode::Recover`]
-/// must still fail closed rather than silently skip validation, so this
-/// stays as a small defensive recursive helper. It is NOT the two-pass
-/// duplication [`analyze_stylesheet`]'s single walk removes: that walk
-/// covers the Rule/AtRule tree every real `<style>` block actually produces;
-/// this helper's own recursion is scoped to a sub-tree the main walk never
-/// visits at all (declaration/mixin bodies), so it never doubles a visit the
-/// main walk already made.
-fn validate_nested_body_shape_only(body: &StyleBlock) -> AnalyzeResult {
-    for statement in body.statements() {
-        match statement {
-            StyleStatement::Rule(rule) => {
-                if rule.completeness() != StyleCompleteness::Complete
-                    || !selector_list_is_static_or_nesting(rule.selector_list())
-                {
-                    return Err(CssAnalysisError::at(
-                        "svelte-runtime-unsupported-style-selector",
-                        rule.selector_list().span(),
-                    ));
-                }
-                validate_nested_body_shape_only(rule.body())?;
-            }
-            StyleStatement::Declaration(declaration) => {
-                if let Some(body) = declaration.body() {
-                    validate_nested_body_shape_only(body)?;
-                }
-            }
-            StyleStatement::AtRule(atrule) => {
-                if let Some(body) = atrule.body() {
-                    validate_nested_body_shape_only(body)?;
-                }
-            }
-            StyleStatement::MixinOrFunction(rule) => {
-                if let Some(body) = rule.body() {
-                    validate_nested_body_shape_only(body)?;
-                }
-            }
-            StyleStatement::Unknown(unknown) => {
-                return Err(CssAnalysisError::at(
-                    "svelte-runtime-unsupported-style-selector",
-                    unknown.span(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn selector_list_is_static_or_nesting(list: &SelectorList) -> bool {
-    #[cfg(test)]
-    bump_statement_visit_counter();
-    list.facts().completeness() == SelectorCompleteness::Complete
-        && list.selectors().iter().all(|selector| {
-            selector.parts().iter().all(|part| match part {
-                ComplexSelectorPart::Combinator(_) => true,
-                ComplexSelectorPart::Compound(compound) => compound
-                    .components()
-                    .iter()
-                    .all(selector_component_is_static_or_nesting),
-            })
-        })
-}
-
-fn selector_component_is_static_or_nesting(component: &SelectorComponent) -> bool {
-    if matches!(
-        component.kind(),
-        SelectorComponentKind::DynamicClass | SelectorComponentKind::Interpolation
-    ) {
-        return false;
-    }
-    component
-        .nested_components()
-        .iter()
-        .all(selector_component_is_static_or_nesting)
-        && component
-            .pseudo()
-            .and_then(|pseudo| pseudo.selector_list())
-            .is_none_or(selector_list_is_static_or_nesting)
+    Ok(analyzer.analysis)
 }
 
 struct Analyzer<'src> {
@@ -612,10 +378,7 @@ struct Analyzer<'src> {
 
 impl Analyzer<'_> {
     /// Visit a rule-position statement list (the stylesheet top level, or an
-    /// at-rule/rule block) — the SOLE walk over the Rule/AtRule tree: each
-    /// statement is shape-checked (rejecting a parse-recovery artifact or an
-    /// unsupported selector shape) and analyzed at the SAME visit, never in
-    /// a separate pass over the same nodes.
+    /// at-rule/rule block).
     fn analyze_statements(
         &mut self,
         statements: &[StyleStatement],
@@ -623,41 +386,17 @@ impl Analyzer<'_> {
     ) -> AnalyzeResult {
         for statement in statements {
             match statement {
-                StyleStatement::Rule(rule) => {
-                    if rule.completeness() != StyleCompleteness::Complete
-                        || !selector_list_is_static_or_nesting(rule.selector_list())
-                    {
-                        return Err(CssAnalysisError::at(
-                            "svelte-runtime-unsupported-style-selector",
-                            rule.selector_list().span(),
-                        ));
-                    }
-                    self.analyze_rule(rule, rules)?
-                }
+                StyleStatement::Rule(rule) => self.analyze_rule(rule, rules)?,
                 StyleStatement::AtRule(atrule) => self.analyze_atrule(atrule, rules)?,
-                // Declarations carry no analysis of their own; a body
-                // attached under parse recovery (never produced under
-                // `CssDialect::Css` today) still gets shape-checked so it
-                // cannot smuggle an unsupported construct past the analyzer
-                // silently.
-                StyleStatement::Declaration(declaration) => {
-                    if let Some(body) = declaration.body() {
-                        validate_nested_body_shape_only(body)?;
-                    }
-                }
-                // `MixinOrFunction` cannot occur under `CssDialect::Css`
-                // (Sass/Stylus grammar) — defensive shape-check only.
-                StyleStatement::MixinOrFunction(rule) => {
-                    if let Some(body) = rule.body() {
-                        validate_nested_body_shape_only(body)?;
-                    }
-                }
-                StyleStatement::Unknown(unknown) => {
-                    return Err(CssAnalysisError::at(
-                        "svelte-runtime-unsupported-style-selector",
-                        unknown.span(),
-                    ));
-                }
+                // Declarations carry no analysis. `MixinOrFunction`/`Unknown`
+                // statements cannot occur under `CssDialect::Css` (Sass/Stylus
+                // grammar / parse-recovery artifacts respectively) and
+                // `validate_svelte_style_ir` already rejects any `Unknown`
+                // reaching this point — both stay a defensive no-op rather
+                // than a panic.
+                StyleStatement::Declaration(_)
+                | StyleStatement::MixinOrFunction(_)
+                | StyleStatement::Unknown(_) => {}
             }
         }
         Ok(())
@@ -672,23 +411,19 @@ impl Analyzer<'_> {
     ) -> AnalyzeResult {
         if is_keyframes_node(self.source, atrule) {
             let in_global_block = rules.iter().any(|frame| frame.is_global_block);
-            // The parser decoded this at-rule's prelude once, when its own
-            // `StyleDirective` node was built — the renderer's later
-            // `is_keyframes_node` visit reads the SAME `prelude_text()`
-            // field, never a second reconstruction.
-            let prelude = atrule.prelude_text().to_string();
+            let prelude = atrule_prelude(self.source, atrule).to_string();
             if !prelude.starts_with("-global-") && !in_global_block {
-                let name_span = keyframes_name_token_span(atrule);
+                let name_span = keyframes_name_token_span(self.source, atrule);
                 self.analysis.keyframes.push(KeyframeName {
                     name: prelude,
                     name_span,
                 });
-            } else if let Some(stripped) = prelude.strip_prefix("-global-") {
+            } else if prelude.starts_with("-global-") {
                 // The keyframe is global even if its block is empty.
                 self.analysis.has_global |= is_unscoped(rules);
-                let name_span = keyframes_name_token_span(atrule);
+                let name_span = keyframes_name_token_span(self.source, atrule);
                 self.analysis.global_keyframes.push(GlobalKeyframeName {
-                    name: stripped.to_string(),
+                    name: prelude["-global-".len()..].to_string(),
                     name_span,
                 });
             }
@@ -873,15 +608,8 @@ impl Analyzer<'_> {
         let steps = relative_steps(complex);
 
         // `context.next()` — the RelativeSelector children.
-        for (index, (combinator, compound)) in steps.iter().enumerate() {
-            self.analyze_relative_selector(
-                *combinator,
-                compound,
-                index,
-                rules,
-                own,
-                in_pseudo_args,
-            )?;
+        for (index, (_, compound)) in steps.iter().enumerate() {
+            self.analyze_relative_selector(compound, index, rules, own, in_pseudo_args)?;
         }
 
         // ── `:global` placement over the whole complex selector. ──
@@ -890,13 +618,10 @@ impl Analyzer<'_> {
             .position(|(_, compound)| is_global(self.source, compound))
         {
             let global_compound = steps[global_idx].1;
-            let first = &global_compound.components()[0];
+            let first = global_compound.components()[0];
             let first_span = first.span();
             let first_args_present = is_pseudo_class_component(first)
-                && first
-                    .pseudo()
-                    .and_then(SelectorPseudo::selector_list)
-                    .is_some();
+                && first.pseudo().and_then(SelectorPseudo::selector_list).is_some();
             // A block-form `:global` nested inside a pseudo-class is invalid.
             if in_pseudo_args && !first_args_present {
                 return Err(CssAnalysisError::at(
@@ -958,21 +683,6 @@ impl Analyzer<'_> {
                             next.span(),
                         ));
                     }
-                } else if let CompoundTail::TrailingIdentifier(trailing_span) =
-                    self.analysis.compound_facts(compound).tail
-                {
-                    // No SEPARATE typed component follows `component` in this
-                    // compound, but the general CSS3 grammar never builds a
-                    // type-selector component out of position (type/universal
-                    // must be FIRST in a compound) — a bare identifier
-                    // immediately after `:global(...)` with no combinator
-                    // (`:global(.x)div`) is Svelte's own lenient
-                    // implicit-type-selector shape and is unclaimed trailing
-                    // text in the compound's own span, not a missing case.
-                    return Err(CssAnalysisError::at(
-                        "css_type_selector_invalid_placement",
-                        trailing_span,
-                    ));
                 }
                 // `:global(...)` must contain a single selector (a standalone
                 // `:global()` with multiple selectors is OK).
@@ -1028,80 +738,37 @@ impl Analyzer<'_> {
     /// The official `RelativeSelector` visitor (the leading-combinator check,
     /// the `is_global` / `is_global_like` metadata, the used-marking, then
     /// the `context.next()` descent into pseudo-class arguments + nesting
-    /// selectors). `compound` is the relative selector's compound; `combinator`
-    /// is its leading combinator (if any), already paired up by the caller
-    /// via [`relative_steps`].
+    /// selectors). `compound` is the relative selector's compound; its
+    /// leading combinator (if any) was already read by the caller from
+    /// [`relative_steps`].
     fn analyze_relative_selector(
         &mut self,
-        combinator: Option<&SelectorCombinator>,
         compound: &SelectorCompound,
         index: usize,
         rules: &[RuleFrame],
         own: &OwnRuleFacts,
         in_pseudo_args: bool,
     ) -> AnalyzeResult {
-        // A leading combinator is invalid on a top-level rule's first
-        // compound (legal inside a pseudo-class's arguments and inside a
-        // nested rule).
-        if let Some(combinator) = combinator {
-            if !own.is_nested && index == 0 && !in_pseudo_args {
-                return Err(CssAnalysisError::at(
-                    "css_selector_invalid",
-                    combinator.span(),
-                ));
-            }
-        }
-
+        // NOTE: the leading-combinator INVALID-PLACEMENT check
+        // (`css_selector_invalid` on a non-nested top-level first compound)
+        // is performed by the caller ([`Self::analyze_complex_selector`])
+        // reading `relative_steps`' combinator directly — kept there because
+        // `relative_steps` already computed the pairing once; duplicating it
+        // here would re-walk `complex.parts()`.
         let components = compound.components();
-
-        // The parser already decided this compound's unclaimed trailing
-        // byte run — see [`CompoundTail`]'s doc. Every reader of this
-        // compound's grammar-gap shape ([`match_relsel`](super::match_relsel),
-        // the `:global(...)` placement validation later in this walk) reads
-        // the SAME stored fact through `compound.tail()`, never re-deriving
-        // it.
-        let tail = compound.tail();
-
-        // A `.` immediately followed by a byte that can never start a CSS
-        // identifier (confirmed: a leading digit, `.1bad`): the general CSS3
-        // grammar's compound-parsing loop does not recognize `.` as starting
-        // ANY simple selector unless an adjacent `Ident` token follows it —
-        // no diagnostic, no component, the `.` and the unrecognized run
-        // simply never enter the compound at all, closing it with ZERO
-        // components (confirmed directly: `.1bad`'s compound has
-        // `components().len() == 0`, its own span covering the full `.1bad`
-        // text). Svelte's own hand-rolled `read_identifier` reader FAILS this
-        // shape outright (`css_expected_identifier`). Scoped to the
-        // zero-component-compound-starting-with-`.`  shape only — a
-        // Percentage (`50%`) or lenient-nth (`2n+1`) empty compound never
-        // starts with `.`, so this cannot misclassify either of those
-        // grammar-gap shapes.
-        if let CompoundTail::Unclassified {
-            starts_with_dot: true,
-            ..
-        } = tail
-        {
-            let at = compound.span().start + 1;
-            return Err(CssAnalysisError::at(
-                "css_expected_identifier",
-                Span::new(at, at),
-            ));
-        }
 
         // ── The metadata. ──
         let compound_is_global = !components.is_empty() && is_global(self.source, compound);
 
         let mut global_like = self.analysis.compound_facts(compound).is_global_like;
         if !components.is_empty()
-            && components.iter().all(|component| {
-                is_pseudo_class_component(component)
-                    || component.kind() == SelectorComponentKind::PseudoElement
-            })
+            && components
+                .iter()
+                .all(|component| is_pseudo_class_component(component) || component.kind() == SelectorComponentKind::PseudoElement)
         {
             global_like |= match components[0].kind() {
                 SelectorComponentKind::PseudoClass | SelectorComponentKind::FunctionalPseudo => {
-                    component_name(self.source, &components[0])
-                        .is_some_and(|name| name.as_ref() == "host")
+                    component_name(self.source, &components[0]).is_some_and(|name| name.as_ref() == "host")
                 }
                 SelectorComponentKind::PseudoElement => component_name(self.source, &components[0])
                     .is_some_and(|name| {
@@ -1122,8 +789,7 @@ impl Analyzer<'_> {
         // inside `:has(...)` should stay scoped.
         let has_root = components.iter().any(|component| {
             is_pseudo_class_component(component)
-                && component_name(self.source, component)
-                    .is_some_and(|name| name.as_ref() == "root")
+                && component_name(self.source, component).is_some_and(|name| name.as_ref() == "root")
         });
         let has_has = components.iter().any(|component| {
             is_pseudo_class_component(component)
@@ -1165,6 +831,7 @@ impl Analyzer<'_> {
             }
         }
 
+        let _ = index;
         Ok(())
     }
 
@@ -1307,10 +974,7 @@ pub fn is_global(source: &str, compound: &SelectorCompound) -> bool {
     if name.as_ref() != "global" {
         return false;
     }
-    let args_present = first
-        .pseudo()
-        .and_then(SelectorPseudo::selector_list)
-        .is_some();
+    let args_present = first.pseudo().and_then(SelectorPseudo::selector_list).is_some();
     !args_present
         || components.iter().all(|component| {
             is_unscoped_pseudo_class(source, component)
@@ -1338,7 +1002,11 @@ pub fn is_unscoped_pseudo_class(source: &str, component: &SelectorComponent) -> 
         // scoped.
         && (name.as_ref() != "not"
             || args.is_none()
-            || args.is_some_and(|list| list.selectors().iter().all(|complex| relative_steps(complex).len() == 1)));
+            || args.is_some_and(|list| {
+                list.selectors()
+                    .iter()
+                    .all(|complex| relative_steps(complex).len() == 1)
+            }));
     scoped_family_ok
         || args.is_none()
         || args.is_some_and(|list| {
@@ -1371,10 +1039,7 @@ pub fn is_outer_global(source: &str, compound: &SelectorCompound) -> bool {
     if name.as_ref() != "global" {
         return false;
     }
-    let args_present = first
-        .pseudo()
-        .and_then(SelectorPseudo::selector_list)
-        .is_some();
+    let args_present = first.pseudo().and_then(SelectorPseudo::selector_list).is_some();
     !args_present
         || components.iter().all(|component| {
             is_pseudo_class_component(component)

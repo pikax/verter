@@ -634,12 +634,29 @@ impl<'a> Parser<'a> {
             return true;
         }
 
-        let mut depth = 0u32;
-        let mut top_level_brace_blocks = 0u32;
-        let mut other_top_level_values = 0u32;
-        let mut penultimate_top_level = None;
-        let mut last_top_level = None;
-        for token in clone {
+        declaration_value_shape_admits(self.source, clone)
+    }
+}
+
+/// The value-shape half of `looks_like_declaration`: given every token AFTER a declaration
+/// colon, does the value read as a declaration's value rather than a rule's body?
+///
+/// A value may contain at most one top-level `{ ... }` block, and only as its SOLE value (an
+/// optional trailing `!important` excepted) — `color: { … }` is a declaration, `foo: bar { … }`
+/// is a qualified rule whose prelude happens to contain a colon. Shared so the indentation-aware
+/// layout parser reaches the identical verdict instead of approximating it: `foo: bar { … }`
+/// classified as a declaration there and as a rule here, for exactly that reason.
+pub(crate) fn declaration_value_shape_admits(
+    source: &CssSource,
+    tokens: impl Iterator<Item = SyntaxToken>,
+) -> bool {
+    let mut depth = 0u32;
+    let mut top_level_brace_blocks = 0u32;
+    let mut other_top_level_values = 0u32;
+    let mut penultimate_top_level = None;
+    let mut last_top_level = None;
+    {
+        for token in tokens {
             match token.kind() {
                 TokenKind::Function => {
                     if depth == 0 {
@@ -679,20 +696,21 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
-        if top_level_brace_blocks == 0 {
-            return true;
-        }
-        let terminal_important = last_top_level.is_some_and(|token| {
-            token.kind() == TokenKind::Ident
-                && css_identifier_eq_ignore_ascii_case(self.source.token_text(token), "important")
-        }) && penultimate_top_level.is_some_and(|token| {
-            token.kind() == TokenKind::Delim && self.source.token_text(token) == "!"
-        });
-        let remaining_other_values =
-            other_top_level_values.saturating_sub(if terminal_important { 2 } else { 0 });
-        top_level_brace_blocks == 1 && remaining_other_values == 0
     }
+    if top_level_brace_blocks == 0 {
+        return true;
+    }
+    let terminal_important = last_top_level.is_some_and(|token| {
+        token.kind() == TokenKind::Ident
+            && css_identifier_eq_ignore_ascii_case(source.token_text(token), "important")
+    }) && penultimate_top_level
+        .is_some_and(|token| token.kind() == TokenKind::Delim && source.token_text(token) == "!");
+    let remaining_other_values =
+        other_top_level_values.saturating_sub(if terminal_important { 2 } else { 0 });
+    top_level_brace_blocks == 1 && remaining_other_values == 0
+}
 
+impl<'a> Parser<'a> {
     fn parse_declaration(
         &mut self,
         sink: &mut impl ParseEventSink,
@@ -1466,7 +1484,7 @@ fn next_adjacent_after_comments(probe: &mut Lexer<'_>) -> Option<(SyntaxToken, u
     }
 }
 
-fn classify_at_rule(name: &str) -> SyntaxKind {
+pub(crate) fn classify_at_rule(name: &str) -> SyntaxKind {
     if identifier_is_any(name, &["keyframes", "-webkit-keyframes"]) {
         SyntaxKind::KeyframesAtRule
     } else if identifier_is_any(

@@ -25,12 +25,12 @@
 //!   `<svelte:options>`, magic identifier) so the reject-parity matrix can classify
 //!   every committed reject row to one rule.
 
+use super::css;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionExpression, CallExpression, Expression, Function, Program, Statement,
 };
 use rustc_hash::FxHashSet;
-use verter_css_syntax::style_body_reject_code;
 use verter_span::Span;
 
 use super::cross_slot_redeclaration;
@@ -72,6 +72,7 @@ pub(super) fn official_reject_gate_with_runes(
     parsed: &ParsedSvelte,
     runes_override: Option<bool>,
 ) -> Option<OfficialRejection> {
+    css::clear_admitted_style_irs();
     // ─── PARSE PHASE (official `phases/1-parse`) — the SINGLE parser-owned,
     // encounter-ordered defect stream is the SOLE parse-error arbitration source. Every
     // parse defect (close-tag / strict-parse / script-domain / explicit-`</p>` autoclose)
@@ -666,13 +667,14 @@ pub(crate) fn deferred_parse_defects_excluding_css(
 fn deferred_css_style_defects(source: &str, parsed: &ParsedSvelte) -> Vec<SelectedParseDefect> {
     let mut defects = Vec::new();
     for probe in &parsed.style_body_probes {
-        if let Some(code) = style_body_reject_code(source, probe.content_start as usize) {
+        if let Some(code) = css::admit_style_body(source, probe.content) {
             defects.push(SelectedParseDefect {
                 encounter_order: probe.encounter_order,
                 span: Span::new(
-                    probe.content_start,
+                    probe.content.start,
                     probe
-                        .content_start
+                        .content
+                        .start
                         .saturating_add(1)
                         .min(source.len() as u32),
                 ),
