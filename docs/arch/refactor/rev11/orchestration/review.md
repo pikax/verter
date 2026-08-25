@@ -149,6 +149,17 @@ inconclusive result is BLOCKED, never a pass.
 
 ## Shaping a consult
 
+**Name the class, not the finding.** A prompt pointing at the row where a defect was found tests
+whether that fix landed. A prompt stating the defect as a general check — an invariant narrower or
+wider than the gate its document names — tests whether the class is gone, and only the second finds
+instances nobody has seen. Give the seat the surface and the questions; keep the block's conclusions
+out of it.
+
+**Before carrying a citation forward, open it.** A cite that no reader can follow reads as a
+transcription error rather than as the deletion it records, and a finding whose only carrier died
+with a branch needs its live carrier named instead of its dead one reproduced.
+
+
 **A seat that can only choose among the offered options will choose among them.** Give every consult
 an explicit escape — if the information does not determine the answer, say so and say what would —
 or a forced choice comes back looking like a finding.
