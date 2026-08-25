@@ -3000,23 +3000,6 @@ struct RuntimePropExtraction {
     default_values: Vec<AnalyzedDefaultValue>,
 }
 
-/// Map a runtime constructor name to its TypeScript type string.
-fn constructor_to_ts_type(name: &str) -> Option<&'static str> {
-    match name {
-        "String" => Some("string"),
-        "Number" => Some("number"),
-        "Boolean" => Some("boolean"),
-        "Array" => Some("Array<any>"),
-        "Object" => Some("object"),
-        "Function" => Some("Function"),
-        "Symbol" => Some("symbol"),
-        "Date" => Some("Date"),
-        "RegExp" => Some("RegExp"),
-        "Promise" => Some("Promise<any>"),
-        _ => None,
-    }
-}
-
 /// Whether a runtime prop's `as` assertion carries an authored payload TYPE
 /// position. Presence-only — the payload position is stamped at the macro's
 /// final index; the typed body is demanded through the shared dispatch on read.
@@ -3025,7 +3008,7 @@ fn constructor_to_ts_type(name: &str) -> Option<&'static str> {
 /// - `X as PropType<T>` → the `T` argument position
 /// - `X as () => T` / `X as new () => T` → the return-type position
 /// - Other assertions → no authored payload (caller falls back to
-///   `constructor_to_ts_type`)
+///   the identity-owned display mapping)
 fn has_authored_prop_type_assertion(ts_as: &TSAsExpression<'_>) -> bool {
     match &ts_as.type_annotation {
         TSType::TSTypeReference(type_ref) => {
@@ -3046,7 +3029,8 @@ fn has_authored_prop_type_assertion(ts_as: &TSAsExpression<'_>) -> bool {
 
 /// Resolve one runtime-constructor-position identifier against the shared
 /// owner-aware binding index: the gate (`Global`/`Local`/`Indeterminate`)
-/// plus the existing display-text mapping (`constructor_to_ts_type`),
+/// plus the identity-owned display-text mapping
+/// ([`verter_type_expr::RuntimeConstructorIdentity::display_ts_type`]),
 /// applied ONLY when the gate answers `Global` — a `Local`/`Indeterminate`
 /// identifier is never folded to a runtime-constructor display string, so
 /// its type resolves through the general authored-value-reference route
@@ -3060,7 +3044,7 @@ pub(crate) fn resolve_runtime_constructor_identifier(
         entry.resolution,
         verter_type_expr::ConstructorBindingOutcome::Global
     )
-    .then(|| constructor_to_ts_type(&id.name))
+    .then(|| entry.identity.display_ts_type())
     .flatten()
     .map(str::to_string);
     (display, entry)
@@ -3077,7 +3061,7 @@ pub(crate) fn resolve_runtime_constructor_identifier(
 /// `expectedType === "null"` as `valid = value === null` — i.e. `[String,
 /// null]` means "this prop accepts a `String`-typed value OR the literal
 /// value `null`", the ordinary nullable-constructor idiom. The fold below
-/// (`primitive_of` in `component_meta.rs`) publishes it as
+/// ([`verter_type_expr::RuntimeConstructorIdentity::primitive`]) publishes it as
 /// `PrimitiveName::Null` alongside any other `Global`-resolved spelling in
 /// the same array.
 pub(crate) fn resolve_runtime_constructor_array(
@@ -3097,11 +3081,11 @@ pub(crate) fn resolve_runtime_constructor_array(
                 crate::analysis::root_binding_index::resolve_constructor_binding(binding_index, id)
             }
             ArrayExpressionElement::NullLiteral(_) => verter_type_expr::ConstructorBindingEntry {
-                spelling: std::sync::Arc::from("null"),
+                identity: verter_type_expr::RuntimeConstructorIdentity::NullLiteral,
                 resolution: verter_type_expr::ConstructorBindingOutcome::Global,
             },
             _ => verter_type_expr::ConstructorBindingEntry {
-                spelling: std::sync::Arc::from("<unrecognized>"),
+                identity: verter_type_expr::RuntimeConstructorIdentity::Unclassifiable,
                 resolution: verter_type_expr::ConstructorBindingOutcome::Indeterminate,
             },
         })
@@ -3169,7 +3153,7 @@ fn extract_prop_fields_from_runtime(
                             "type" => {
                                 // Try to extract an explicit type assertion first (`X as PropType<T>`,
                                 // `X as () => T`, `X as new () => T`), then fall back to mapping the
-                                // base constructor identifier via `constructor_to_ts_type`, gated by
+                                // base constructor identifier via the typed identity, gated by
                                 // the owner-aware binding index.
                                 if let Expression::TSAsExpression(ts_as) = &sp.value {
                                     if has_authored_prop_type_assertion(ts_as) {

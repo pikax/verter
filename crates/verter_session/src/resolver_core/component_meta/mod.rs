@@ -165,7 +165,7 @@ mod collect_local_constructor_binding_keys_tests {
         let macros = vec![define_props_macro(vec![constructor_prop_field(
             "label",
             vec![ConstructorBindingEntry {
-                spelling: std::sync::Arc::from("String"),
+                identity: verter_type_expr::RuntimeConstructorIdentity::String,
                 resolution: ConstructorBindingOutcome::Local(key.clone()),
             }],
         )])];
@@ -179,11 +179,11 @@ mod collect_local_constructor_binding_keys_tests {
             "label",
             vec![
                 ConstructorBindingEntry {
-                    spelling: std::sync::Arc::from("String"),
+                    identity: verter_type_expr::RuntimeConstructorIdentity::String,
                     resolution: ConstructorBindingOutcome::Global,
                 },
                 ConstructorBindingEntry {
-                    spelling: std::sync::Arc::from("Number"),
+                    identity: verter_type_expr::RuntimeConstructorIdentity::Number,
                     resolution: ConstructorBindingOutcome::Indeterminate,
                 },
             ],
@@ -209,7 +209,7 @@ mod collect_local_constructor_binding_keys_tests {
                 description: None,
                 tags: Vec::new(),
                 constructor_bindings: vec![ConstructorBindingEntry {
-                    spelling: std::sync::Arc::from("Array"),
+                    identity: verter_type_expr::RuntimeConstructorIdentity::Array,
                     resolution: ConstructorBindingOutcome::Local(key.clone()),
                 }],
             }],

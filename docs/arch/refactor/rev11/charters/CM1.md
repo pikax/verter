@@ -113,9 +113,12 @@ CM1 owns, and is the sole owner of:
    to `ClosedTypeFact::Primitive` at analysis time. Not a copy of the Options path's string switch into
    the macro path, not a display-text parse, not a mapping at the output seam. Covers the shorthand
    (`label: String`) and expanded (`{ type: String }`) forms, `required`/`has_default`/default-value
-   combinations, constructor-array (`[String, Number]`) and nullable forms. Existing correct paths —
-   custom-class constructors, `PropType<T>` assertions — stay on their current authored-payload route and
-   must remain green, unmodified in substance.
+   combinations, constructor-array (`[String, Number]`) and nullable forms. The one existing correct
+   authored-payload path — a custom-class constructor whose class is module-owned or imported — stays on
+   that route and must remain green, unmodified in substance. `PropType<T>` assertions and
+   `<script setup>`-local custom classes are NOT on a correct path: both publish `unknown`, so neither
+   can discriminate "stayed on the correct path" from "broke". Both are discharged as deferred captures
+   instead — see Required exits.
 5. **The benchmark's `Present → UnraisableSource` hard error.** Construct or isolate a minimized fixture
    that genuinely drives an exposed/prop position to `SourcePosition::Present` and fails the strict raise
    (`raise_semantic_type_source_to_hot_strict`) against a disposition `output_sink.rs:1216-1273`
@@ -170,8 +173,8 @@ CM1's required exit is proven across the full cross of these axes, not the singl
 |---|---|
 | `defineExpose` shape | simple / multiple / refs / computed refs / methods / mixed full-API |
 | `defineExpose` type position | imported / local; source-local / project-aware |
-| `defineProps` runtime form | shorthand (`label: String`) / expanded (`{ type: String }`) / required / optional / `required: true` / with default / constructor array (`[String, Number]`) / nullable / mixed runtime + type-declared |
-| Constructor kind | `String` / `Number` / `Boolean` (positive); custom class / `PropType<T>` assertion (negative control, must stay on the existing correct path) |
+| `defineProps` runtime form | shorthand (`label: String`) / expanded (`{ type: String }`) / required / optional / `required: true` / with default / constructor array (`[String, Number]`) / nullable / mixed runtime + type-declared — EXCLUDED: deferred authored runtime-assertion type-publication capture; not a demanded CM1 cell |
+| Constructor kind | `String` / `Number` / `Boolean` (positive); module-owned or imported custom class (negative control, must stay on the existing correct path). `PropType<T>` and `<script setup>`-local custom classes are EXCLUDED from the control — both publish `unknown` and cannot discriminate; both are captured, not demanded |
 | Invocation | cold / warm (same session, resolved twice) / sequential / `Promise.all`-equivalent concurrent / batch (`get_component_meta_output_batch`) |
 | Surface | native / `@verter/component-meta/compat` |
 | Request-view scope | overlay / base session |
@@ -189,6 +192,23 @@ graph state; no request-view bypass; native and compat surfaces agree.
 independently discriminating (each fails against the pre-repair tree and passes against the post-repair
 tree), and existing component-meta suites (`crates/verter_session/src/meta_tests.rs` and the wider
 `meta_resolve`/`component_meta` gate coverage) stay green, unmodified in substance.
+
+Three axis values are EXCLUDED from the demanded cells and discharged as deferred captures
+instead: `PropType<T>` resolution, `<script setup>`-local custom-class resolution, and the
+`mixed runtime + type-declared` runtime form. They are TWO distinct defects, not three — the counts
+differ because two of those values are two spellings of the same loss. The third was ratified separately in
+[`rulings/ARCHITECT-RULING-2026-08-25-CM1-AUTHORED-ASSERTION-CAPTURE.md`](../rulings/ARCHITECT-RULING-2026-08-25-CM1-AUTHORED-ASSERTION-CAPTURE.md),
+which supersedes an earlier ruling that had held the value satisfiable: detection accepts both
+`PropType<T>` and `X as () => T`, but the authored payload is discarded at one shared publication
+point, so the value cannot be demanded green. `PropType<T>` and `X as () => T` are two spellings of
+ONE defect; the `<script setup>`-local class is a separate mechanism turning on declaration site,
+and the two are deliberately not merged. Each is carried as one
+`#[ignore]`d discriminating test — passing against a correct implementation, failing today for its own
+stated reason — naming the post-program maintainer type-correction work as its owner, per
+[`rulings/MAINTAINER-RULING-BUGS-AND-TYPES.md`](../rulings/MAINTAINER-RULING-BUGS-AND-TYPES.md) rule 3,
+which waives type-correctness work from every block for the program's duration. An `#[ignore]`d capture
+documents a deferred defect and is NOT green evidence, so these three cells are not demanded. Under this
+amendment no demanded cell is unevidenced.
 
 ## Structural confinement
 
@@ -243,7 +263,15 @@ Do not relitigate here; preserve the ruling's and root-cause investigation's evi
    (`program-dag.toml`) — its prior three predecessors are preserved, not replaced. C2 already
    reconverges B5 and C1. Beta.4 requires both branches accepted; E1 is not the owner of these
    regressions and does not receive a deferral.
-6. **Blast-radius findings assigned elsewhere — decided.** The declaration-output fidelity gap
+6. **Acceptance-matrix amendment — ratified.** Recorded in-tree at
+   [`rulings/ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md`](../rulings/ARCHITECT-RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT.md)
+   (`RULING-2026-08-24-CM1-CONTROL-AXIS-AMENDMENT`, RATIFIED). The charter as first written was unsatisfiable: it
+   demanded green evidence at `:118`, `:174` and `:187` for authored routes that publish `unknown`, so
+   a cell could be neither satisfied nor honestly dropped. The negative control is restricted to
+   module-owned and imported custom classes; `PropType<T>` and `<script setup>`-local custom classes
+   leave the control and survive solely as the two `#[ignore]`d captures above. Repair ownership is
+   settled elsewhere and is not reopened here.
+7. **Blast-radius findings assigned elsewhere — decided.** The declaration-output fidelity gap
    (`tsc/script.rs:6003,6015`) and the framework-surface memberless-runtime-macro gap
    (`typeinfo/framework_surface/vue_exec/mod.rs:533`) belong to BV2's already-approved scope (added as
    acceptance coverage, not a new DAG edge), because both are Vue declaration/tooling and source-local

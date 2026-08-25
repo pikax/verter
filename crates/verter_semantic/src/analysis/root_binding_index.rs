@@ -792,7 +792,7 @@ pub(crate) fn resolve_constructor_binding(
     ident: &IdentifierReference<'_>,
 ) -> verter_type_expr::ConstructorBindingEntry {
     verter_type_expr::ConstructorBindingEntry {
-        spelling: std::sync::Arc::from(ident.name.as_str()),
+        identity: verter_type_expr::RuntimeConstructorIdentity::classify(ident.name.as_str()),
         resolution: index
             .resolve_value_identifier(ident.span.into(), StartScope::ProgramRoot)
             .into(),

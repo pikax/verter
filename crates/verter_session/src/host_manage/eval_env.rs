@@ -461,6 +461,37 @@ impl VerterHost {
         ))
     }
 
+    /// Request-view-bound sibling of [`Self::resolve_value_export_route_identity`].
+    ///
+    /// Threads the CALLER's `ResolverContext` into the shared export-route
+    /// walk (`build_named_type_export_route_entry_with_context`) instead of
+    /// passing the bare host. Under an overlay session that difference is
+    /// load-bearing: a barrel or alias surface edited in the session must be
+    /// read through the session's view, not the base host's, or the walk
+    /// resolves against a file the requester cannot see.
+    pub(crate) fn resolve_value_export_route_identity_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        dep_canonical_id: &str,
+        imported_name: &str,
+    ) -> Option<ValueDeclIdentity> {
+        let (route_result, chain_facts) = self.build_named_type_export_route_entry_with_context(
+            ctx,
+            dep_canonical_id,
+            imported_name,
+        )?;
+        crate::fact_signature_helpers::observe_fact_signature(&chain_facts);
+        let (canonical_id, owner, name) = route_result.resolved()?;
+        let canonical_id = self
+            .normalized_analysis_canonical(canonical_id)
+            .into_owned();
+        Some(ValueDeclIdentity {
+            canonical_id,
+            owner,
+            name: name.to_string(),
+        })
+    }
+
     fn resolve_value_export_route_identity(
         &self,
         dep_canonical_id: &str,
@@ -1122,6 +1153,10 @@ impl VerterHost {
                     false,
                 ),
             );
+            // The expansion closure's own parameter is also named `ctx`
+            // (the per-field context), so the resolver context is aliased
+            // here to stay reachable inside it.
+            let resolver_ctx = ctx;
             let mut engine = crate::resolver_core::ComponentMetaQueryEngine::new(ctx);
             verter_semantic::analysis::type_eval_build::expand_macro_types_impl_with_expander(
                 snapshot.macros.as_ref(),
@@ -1197,13 +1232,41 @@ impl VerterHost {
                         ) {
                             use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
                             if let [MacroPathSegment::Member(name)] = ctx.output_path.as_ref() {
+                                // An IMPORT alias binds no value declaration
+                                // in THIS file. A locator anchored here would
+                                // address a body that does not exist, and the
+                                // strict sink would correctly refuse to invent
+                                // one — the position fails as
+                                // `UnraisableSource`. Re-anchor it,
+                                // content-free, onto the exporting module
+                                // through the shared value-export authority;
+                                // the raise
+                                // already routes by the anchor's own
+                                // canonical, so the existing dereference and
+                                // sink need no change. A name that is not an
+                                // import resolves `None` and keeps the local
+                                // anchor.
+                                let (canonical_id, owner, symbol) = self
+                                    .resolve_binding_import_origin(
+                                        resolver_ctx,
+                                        canonical,
+                                        ctx.scope_owner,
+                                        name.as_ref(),
+                                    )
+                                    .unwrap_or_else(|| {
+                                        (
+                                            std::sync::Arc::from(canonical),
+                                            ctx.scope_owner,
+                                            std::sync::Arc::clone(name),
+                                        )
+                                    });
                                 return Some(SemanticTypeSource::Authored(
                                     AuthoredBodyLocator::DeclBody(
                                         verter_type_expr::locators::TypeBodySlot {
                                             anchor: verter_type_expr::locators::AuthoredAnchor {
-                                                canonical_id: std::sync::Arc::from(canonical),
-                                                owner: ctx.scope_owner,
-                                                symbol: std::sync::Arc::clone(name),
+                                                canonical_id,
+                                                owner,
+                                                symbol,
                                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                                             },
                                             path: std::sync::Arc::from(
@@ -1813,3 +1876,98 @@ impl VerterHost {
 #[cfg(test)]
 #[path = "eval_env_tests.rs"]
 mod eval_env_tests;
+
+/// Where a top-level value binding's declaration body actually lives, when
+/// the binding is an IMPORT alias rather than a local declaration.
+///
+/// An import alias binds no value declaration in the importing file, so a
+/// body locator anchored there addresses nothing and fails the strict raise.
+/// This resolves the alias to `(exporting canonical, exported name)` so the
+/// locator can be re-anchored content-free onto the module that really owns
+/// the body. `None` means the name is not an import — the caller keeps its
+/// local anchor.
+///
+/// Two existing authorities, in the same order and for the same reason as
+/// `bare_name_resolve`'s import lookup; neither is a new resolution path:
+///
+/// 1. The cached owner import surface, which walks re-export chains to a
+///    FINAL root identity. It is keyed by local name alone and so covers
+///    only the file's ordinary top-level owner.
+/// 2. The prepared-decl bundle's owner-scoped import bindings, which are
+///    keyed by `(owner, local name)` and therefore reach a carrier region
+///    the flat surface cannot see — a Vue `<script setup>` import lives on
+///    the instance owner, not the module owner.
+impl crate::VerterHost {
+    /// Where a top-level value binding's declaration body actually lives,
+    /// when the binding is an IMPORT alias rather than a local declaration.
+    ///
+    /// An import alias binds no value declaration in the importing file, so a
+    /// body locator anchored there addresses nothing and fails the strict
+    /// raise. This resolves the alias to the module that really owns the body.
+    /// `None` means the name is not an import, or the route could not be
+    /// resolved — the caller keeps its local anchor and the position fails
+    /// closed rather than being anchored somewhere invented.
+    ///
+    /// Three shared authorities, no local re-implementation of any of them:
+    ///
+    /// 1. `ShallowFileState::import_target_in` — the OWNER-QUALIFIED import
+    ///    table. The name-only `resolve_owner_direct_import` surface is not
+    ///    usable here: it can select a sibling script/setup binding that
+    ///    happens to share a local spelling, the hazard
+    ///    `project_semantic_dispatch::walk`'s `InstanceTypeOf` arm documents.
+    /// 2. `ResolverContext::resolve_type_dependency_canonical` — the one
+    ///    specifier-to-canonical resolver.
+    /// 3. [`Self::resolve_value_export_route_identity_with_context`] — the
+    ///    shared VALUE-export route walk, threaded with the CALLER's context.
+    ///    It walks the export route (so a barrel or alias re-export resolves
+    ///    to its true root rather than stopping at the first hop, which would
+    ///    anchor on a file that declares nothing), observes every chain
+    ///    participant's version facts into the active fact tracer so the
+    ///    consuming query invalidates on a retarget or a leaf edit, and
+    ///    returns the target's OWN owner. Nothing here fabricates ownership.
+    ///
+    /// Every read is made through `ctx`, never through the bare host: under an
+    /// overlay session a barrel edited in that session has to resolve against
+    /// the session's view.
+    ///
+    /// The route stops at the EXPORTED declaration and deliberately does not
+    /// peel the value alias chain. A locator wants the authored declaration,
+    /// which exists and is raisable; peeling further would additionally pull
+    /// in a base-bound alias reader, reintroducing the very overlay hole this
+    /// threading closes. The shared raise resolves any remaining alias through
+    /// its own already-view-correct path.
+    fn resolve_binding_import_origin(
+        &self,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        local_name: &str,
+    ) -> Option<(
+        std::sync::Arc<str>,
+        verter_type_expr::TopLevelOwnerId,
+        std::sync::Arc<str>,
+    )> {
+        let serve = ctx.ensure_indexed_ready_serve(canonical)?;
+        let import_target = serve
+            .indexed
+            .shallow_state
+            .import_target_in(owner, local_name)?;
+        // A namespace import binds the module object, not one exported
+        // value; it has no single declaration body to anchor to.
+        if import_target.is_namespace {
+            return None;
+        }
+        let dep_canonical =
+            ctx.resolve_type_dependency_canonical(canonical, &import_target.source_specifier)?;
+        let target = self.resolve_value_export_route_identity_with_context(
+            ctx,
+            &dep_canonical,
+            import_target.imported_name.as_str(),
+        )?;
+        Some((
+            std::sync::Arc::from(target.canonical_id.as_str()),
+            target.owner,
+            std::sync::Arc::from(target.name.as_str()),
+        ))
+    }
+}

@@ -111,6 +111,115 @@ describe("ComponentMetaChecker session requirement", () => {
     expect(getComponentMeta).toHaveBeenCalledWith("c:/project/src/App.vue");
   });
 
+  // @ai-generated - Proves checker batch dispatch stays one native call and preserves positional slots.
+  it("dispatches one positional native batch without scalar component-meta calls", async () => {
+    const nativeMeta = (filePath: string, propName: string): any => ({
+      filePath,
+      optionsApi: false,
+      props: [
+        {
+          name: propName,
+          type: { kind: "primitive", name: "string" },
+          ...resolvedTypeRow("string"),
+          required: true,
+          hasDefault: false,
+        },
+      ],
+      events: [],
+      slots: [],
+      models: [],
+      exposed: [],
+      components: [],
+      templateRefs: [],
+      imports: [],
+      bindings: [],
+      vueApiCalls: [],
+      styles: [],
+      flags: {
+        asyncSetup: false,
+        hasReactiveState: false,
+        hasComputed: false,
+        hasWatchers: false,
+        hasLifecycleHooks: false,
+        hasProvide: false,
+        hasInject: false,
+        hasInheritAttrsFalse: false,
+        hasStoreUsage: false,
+      },
+      acceptedProps: [],
+      acceptedEvents: [],
+      acceptedSurfaceCompleteness: "exact",
+      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+      fallthroughSurface: { kind: "none", reason: "noTemplate" },
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
+    });
+    const getComponentMeta = vi.fn();
+    const getComponentMetaBatch = vi.fn(() => [
+      nativeMeta("/project/src/Zebra.vue", "first"),
+      null,
+      nativeMeta("/project/src/Alpha.vue", "third"),
+    ]);
+    const getEffectiveSource = vi.fn(() => `<script setup lang="ts"></script>`);
+    const checker = new ComponentMetaChecker({ upsert: vi.fn() }, "/project", {}, {
+      closed: false,
+      engine: { state: "active" as const },
+      upsert() {},
+      delete() {},
+      getComponentMeta,
+      getComponentMetaBatch,
+      getProvenance() {
+        return "{}";
+      },
+      getEffectiveSource,
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    } as any);
+
+    // Deliberately not lexicographically sorted: the call assertions must catch
+    // an implementation that reorders inputs while keeping the missing slot in the middle.
+    const result = await checker.getComponentMetaBatch([
+      "src/Zebra.vue",
+      "src/Missing.vue",
+      "src/Alpha.vue",
+    ]);
+
+    expect(getComponentMetaBatch).toHaveBeenCalledTimes(1);
+    expect(getComponentMetaBatch).toHaveBeenCalledWith([
+      "/project/src/Zebra.vue",
+      "/project/src/Missing.vue",
+      "/project/src/Alpha.vue",
+    ]);
+    expect(getComponentMeta).toHaveBeenCalledTimes(0);
+    expect(getEffectiveSource).toHaveBeenCalledTimes(3);
+    expect(getEffectiveSource.mock.calls).toEqual([
+      ["/project/src/Zebra.vue"],
+      ["/project/src/Missing.vue"],
+      ["/project/src/Alpha.vue"],
+    ]);
+    expect(result.map((meta) => meta.props.map((prop) => prop.name))).toEqual([
+      ["first"],
+      [],
+      ["third"],
+    ]);
+    expect(result[1]).toEqual({
+      type: 0,
+      props: [],
+      events: [],
+      slots: [],
+      exposed: [],
+    });
+  });
+
   it("propagates native component-meta budget errors to callers", async () => {
     const checker = new ComponentMetaChecker(
       {
@@ -155,6 +264,39 @@ describe("ComponentMetaChecker session requirement", () => {
     );
 
     await expect(checker.getComponentMeta("App.vue")).rejects.toThrow(/step budget exceeded/i);
+  });
+
+  // @ai-generated - Proves a native per-id batch failure rejects the whole compat batch.
+  it("propagates native component-meta batch budget errors to callers", async () => {
+    const checker = new ComponentMetaChecker({ upsert: vi.fn() }, "/project", {}, {
+      closed: false,
+      engine: { state: "active" as const },
+      upsert() {},
+      delete() {},
+      getComponentMeta: vi.fn(),
+      getComponentMetaBatch() {
+        throw new Error(
+          "component-meta external type resolution step budget exceeded (maxSteps=2000)",
+        );
+      },
+      getProvenance() {
+        return "{}";
+      },
+      getEffectiveSource() {
+        return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
+      },
+      hasFile() {
+        return true;
+      },
+      trackedFileIds() {
+        return [];
+      },
+      close() {},
+    } as any);
+
+    await expect(checker.getComponentMetaBatch(["src/App.vue"])).rejects.toThrow(
+      /step budget exceeded/i,
+    );
   });
 
   it("uses one canonical native query for public Verter compat output and _verter", async () => {

@@ -40,6 +40,7 @@ describe("Walker constants are pinned to plan §7.1 / D35 / D58", () => {
     expect(new Set(ALLOWED_NATIVE_SESSION_METHODS)).toEqual(
       new Set([
         "getComponentMeta",
+        "getComponentMetaBatch",
         "getEffectiveSource",
         "delete",
         "restoreBaseFile",
@@ -92,6 +93,7 @@ describe("compat_native_call_surface_allowlist", () => {
         private _session: any = null;
         run(p: string) {
           this._session.getComponentMeta(p);
+          this._session.getComponentMetaBatch([p]);
           this._session.getEffectiveSource(p);
           this._session.delete(p);
           this._session.restoreBaseFile(p);

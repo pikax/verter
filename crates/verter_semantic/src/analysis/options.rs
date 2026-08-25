@@ -177,16 +177,19 @@ fn extract_options_props(
                     Expression::Identifier(id) => {
                         let (_display, entry) =
                             resolve_runtime_constructor_identifier(id, binding_index);
-                        // `type_constructor` carries the RAW spelling (unlike
-                        // the macro path's `type_annotation`, which carries
-                        // the display-mapped TS text) — gated the same way:
-                        // only a `Global` resolution is a genuine runtime
+                        // `type_constructor` carries the DISPLAY spelling of
+                        // the producer-minted identity (unlike the macro
+                        // path's `type_annotation`, which carries the
+                        // display-mapped TS text) — gated the same way: only
+                        // a `Global` resolution is a genuine runtime
                         // constructor name.
                         let type_constructor = matches!(
                             entry.resolution,
                             verter_type_expr::ConstructorBindingOutcome::Global
                         )
-                        .then(|| id.name.to_string());
+                        .then(|| entry.identity.spelling())
+                        .flatten()
+                        .map(str::to_string);
                         Some(AnalyzedOptionsProp {
                             name,
                             span,
@@ -244,13 +247,16 @@ fn extract_options_props(
                                                     id,
                                                     binding_index,
                                                 );
-                                            // Raw spelling, gated the same
-                                            // way as the shorthand form above.
+                                            // Identity display spelling,
+                                            // gated the same way as the
+                                            // shorthand form above.
                                             type_constructor = matches!(
                                                 entry.resolution,
                                                 verter_type_expr::ConstructorBindingOutcome::Global
                                             )
-                                            .then(|| id.name.to_string());
+                                            .then(|| entry.identity.spelling())
+                                            .flatten()
+                                            .map(str::to_string);
                                             constructor_bindings = vec![entry];
                                         }
                                         Expression::ArrayExpression(arr) => {
