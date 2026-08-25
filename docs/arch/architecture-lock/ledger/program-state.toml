@@ -1518,7 +1518,7 @@ notes = ""
 [[block]]
 id = "J1"
 status = "IN_PROGRESS"
-charter_digest = "afa872a77ddc0f2c6185578b80cf89dbcfa88a80db451ea0ece364679cf2c205"
+charter_digest = "285e96e4280320516014f0b9cb7f026d039f1215a4015174f03530ac3e180b3c"
 context_packet_digest = ""
 base_sha = "39dd20abb45b7bd5e8630d388282258baa8c5450"
 implementation_candidate_sha = "6d225a80214712ef482c14114c38b9e23eed27c5"

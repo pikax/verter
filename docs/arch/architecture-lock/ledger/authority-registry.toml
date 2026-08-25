@@ -484,7 +484,7 @@ sha256 = "4cabfde198cfc246f60e44393ac6b11ef9ef9969c3dca140ea07cf41df9d65b9"
 id = "J1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/J1.md"
-sha256 = "afa872a77ddc0f2c6185578b80cf89dbcfa88a80db451ea0ece364679cf2c205"
+sha256 = "285e96e4280320516014f0b9cb7f026d039f1215a4015174f03530ac3e180b3c"
 
 [[document]]
 id = "RULING-2026-08-23-CSS-WORK-REACHES-J1"

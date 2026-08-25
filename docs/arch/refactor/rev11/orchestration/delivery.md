@@ -384,6 +384,11 @@ landed pins nothing anyone can check. One act scoped that way expired itself —
 was the one recording its own expiry boundary, which fired on its own bytes while changing no
 disposition it had ratified.
 
+**An enumeration you truncate for readability is an enumeration you did not run.** Truncation
+converts a set into a sample silently, and a conclusion drawn from the sample reads exactly like one
+drawn from the set — a sweep cut at a column width missed an occurrence a quarter of the way into a
+long line and wrote "different claim, out of scope" about a claim it had not finished reading.
+
 **Whether work accumulated on one line is a git fact, not a policy statement.** "It accumulates" said
 as intent reads identically to "it accumulated" said as observation, and two branches described as one
 line turned out to be siblings sharing only their fork point — with the criteria a precondition named
