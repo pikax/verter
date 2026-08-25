@@ -118,6 +118,12 @@ sha256 = "d7ee747f3adc1c045ccdc66f48c73f859d5d11d011886cb574c9e9a009967049"
 # DAG block and holds no ledger row, so there is no block status for a row to authorise.
 # It is cited by that work's acceptance-coverage mapping instead.
 [[document]]
+id = "AMD-018-INHERITED-STALE-RESPONSE-DEBT-RECORD"
+kind = "AMENDMENT"
+path = "docs/arch/refactor/rev11/amendments/AMD-018-inherited-stale-response-debt-record.md"
+sha256 = "8882bdf35845c8e78b13b5072d9f595c9634114bba815d4c46170e5cb7df8cde"
+
+[[document]]
 id = "AMD-017-TSGO-REQUEST-DEADLINE-QUEUE-ADMISSION"
 kind = "AMENDMENT"
 path = "docs/arch/refactor/rev11/amendments/AMD-017-tsgo-request-deadline-queue-admission.md"
