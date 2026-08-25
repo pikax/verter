@@ -144,6 +144,23 @@ EVENT named so the check is on the event rather than the agent), or complete (st
 do not resume). Sweep it on a cadence: compare the roster against what is actually running, resume
 anything non-complete that stopped, and check whether a parked block's event has fired.
 
+**A worker stamps its stop reason** — reported-and-complete, reported-and-owed, waiting on an
+external run, blocked on a decision. Without it a sweep sees stop-to-resume time and cannot tell idle
+from working, so the cost of a cadence is unmeasurable.
+
+**Sweep cadence is the cheapest lever and the first one to take.** Expected idle per stop is half the
+interval; shortening it cuts idle proportionally at no coordination cost. Take that before adding a
+seat.
+
+**Add a second orchestrator seat only above roughly five non-complete blocks, or when blocks need
+real-time adjudication rather than resumption** — below that a sweep services them and the cost is
+idle minutes. Two seats double the surface for divergent judgement without doubling the checking, and
+this program's expensive failures have been judgement, not throughput. If block count forces it: block
+ownership is disjoint in the roster so no block is addressable twice; one decision authority per
+question class, or two seats rule differently on the same doctrine and both cite it; the roster is the
+only coordination artifact, never seat-to-seat messages about state; and escalation precedence is
+defined, so a trigger neither arrives twice nor is assumed sent by the other seat.
+
 **A standing check that depends on the checker surviving is not standing.** Write the roster to disk,
 where it outlives the session that maintains it; a schedule is ephemeral and the file is not. The
 successor's first act is to read it.
