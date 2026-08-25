@@ -365,6 +365,12 @@ because passing test names contained the word it searched for. One-sided evidenc
 that as the green run being worse. Prefer the tool's own machine-readable marker over matching prose
 — the same check against nextest's marker gave 0 and 2.
 
+**A long external consult runs backgrounded, and the dispatcher does not fully yield.** A foreground
+consult is killed at roughly ten minutes, so anything past that dies with no receipt — and the death
+presents as a prompt or model problem, which is how several were misdiagnosed. The dispatcher is
+notified on completion, so it must stay alive to receive that: a full yield ends the turn and the
+notification lands nowhere.
+
 **A waiter exits on receipt OR process-gone, never receipt alone.** A receipt-only poll reports a
 dead run as in flight indefinitely, and silent death read as progress costs more than the death.
 Detaching a long dispatch is necessary and not sufficient — a detached run has died at 1.4 MB of
