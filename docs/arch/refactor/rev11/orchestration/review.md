@@ -82,6 +82,16 @@ P1 block; P2 and P3 are carried and dispositioned later.**
 a claim on this block's fix budget, so putting an inherited problem there is how a review silently
 expands scope.
 
+**A receipt relocated so that it validates must be proven byte-identical to the original.** Re-filing
+a misnamed or misplaced result is the block owner's act and is legitimate; editing it until it passes
+is not, and the two have the same visible outcome — the mechanical check sees a valid receipt either
+way. Compare digests before and after the move. For the same reason the landing agent never relocates
+a receipt itself: curating the evidence into the place that makes it pass is precisely what that check
+exists to catch.
+
+**`ALL SOUND` is a verdict about form, not outcome.** A `FAIL` is a sound result. A readiness claim
+that reads structural soundness as passing has not read its own evidence.
+
 Verify with `check-results.mjs`, which binds each result to its lane and to the reviewed sha, and
 rejects competing or stale files. The results directory is named for the frozen sha, so a leftover
 file from an earlier freeze cannot answer for a lane that produced nothing. An absent, truncated or

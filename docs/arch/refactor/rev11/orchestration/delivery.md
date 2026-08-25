@@ -151,6 +151,7 @@ rather than proceeding with a caveat.
 
        cargo clippy --version                 # must match the rust-toolchain.toml pin
        cargo fmt --all --check
+       oxfmt --check <the delta's .ts/.js/.mjs/.cjs files>
        cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings
        cargo clippy --workspace --all-targets -- -D warnings
        cargo check --workspace --release
@@ -196,12 +197,20 @@ not an inventory of it — the same shape as a fail-fast gate. Re-run to green; 
 list as the full set.
 
 **A formatting-only fix does not invalidate a gate verdict**, so a green result carries across it.
-Nothing else does: a lint repair that changes a signature or control flow produces a tree the gate
-never saw, and its verdict is void. Verify formatting-only by **recomputing** — apply `cargo fmt
---all` to the pre-fix commit and compare blobs — never by reading the diff and judging it to look
-like formatting. `fmt` reorders imports, re-breaks expression chains and adds closure braces, so a
-whitespace-only test fails on a correct result and a non-formatting edit riding inside a reformatted
-hunk reads as formatting.
+That is a statement about the class of change, not about which formatter produced it — it holds for
+`oxfmt` over JavaScript exactly as for `cargo fmt` over Rust. Nothing else does: a lint repair that
+changes a signature or control flow produces a tree the gate never saw, and its verdict is void.
+Verify formatting-only by **recomputing** — apply the formatter to the pre-fix commit and compare
+blobs — never by reading the diff and judging it to look like formatting. `fmt` reorders imports,
+re-breaks expression chains and adds closure braces, so a whitespace-only test fails on a correct
+result and a non-formatting edit riding inside a reformatted hunk reads as formatting.
+
+**Trigger the formatting checks on file EXTENSION, not on directory.** The JavaScript conditional
+below fires on `packages/` and the lockfile, which are the right trigger for installing and testing
+but the wrong one for formatting: a `.mjs` file anywhere in the tree is formatted by `oxfmt` and
+rejected by the pre-commit hook, and a set of probe scripts under `docs/` sailed through rebase,
+health check, conformance and a 516-second gate before the hook caught them at squash time — the
+exact failure this step exists to eliminate, surviving in the language it was not written for.
 
 **Artifact and binary provenance binds to content — a digest over the artifact's own inputs — never a
 commit sha.** Landing rebases and always squashes, so a sha a block recorded moves twice after the
