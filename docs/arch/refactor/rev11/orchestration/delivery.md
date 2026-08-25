@@ -344,6 +344,15 @@ handles the reported case and leaves the next one is a ladder with no top; the r
 the property is unbounded. Sweep the range and name the residual bound in the test, so the limit is a
 declared constant rather than wherever the last review happened to stop.
 
+**A ratifying act names a candidate sha.** "This evidence set", "the current analysis", "as it stands"
+are descriptions, not referents: the next commit invalidates them, and an act whose referent has never
+landed pins nothing anyone can check. One act scoped that way expired itself — the only commit after it
+was the one recording its own expiry boundary, which fired on its own bytes while changing no
+disposition it had ratified.
+
+**A narrow grant with a drifting referent is the worst pair:** it expires early and cannot be checked.
+Narrowness is right; it has to be pinned.
+
 **Capture before delete.** A criterion that measures or rehomes something a pending cutover removes
 must have its capture and rehoming land *inside* that cutover, never after it. Land the deletion first
 and a counter criterion passes for the wrong reason — nothing remains to charge it — while a
