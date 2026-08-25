@@ -52,6 +52,15 @@ rather than resting on a green gate that never exercised it — and names what w
 **Default maximum: two substantive fix cycles per slice.** Not converging means stop and rescope,
 replace a failing agent, or request an architecture decision — never buy another round.
 
+**Every third round, an architecture consult joins the next cycle.** Not to review the candidate
+again — to ask why three rounds have not closed it. Three failed cycles on one slice is evidence
+about the approach, not about the fixes: the same defect class keeps reappearing in new instances,
+or the mechanism cannot express what its criterion requires, or the work sits with an owner who
+cannot finish it. A fix cycle cannot see any of those, because it is looking at the finding.
+
+The consult is given the round history and the findings, and asked what is producing them. Its answer
+shapes the next cycle rather than being another verdict on the current one.
+
 **The cap is a signal, never a reason to land or supersede a block that can be made correct.** It
 exists because repeating a round that is not working wastes a lane; it does not exist to force a
 block out of the program. Where the work is genuinely closable and the only obstacle is a round
