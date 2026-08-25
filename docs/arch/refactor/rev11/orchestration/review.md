@@ -62,6 +62,28 @@ the whole block.** Sub-block reviews establish each part; that final pair establ
 compose, and it is where cross-sub-block defects are caught. Neither pass substitutes for the other,
 and neither substitutes for the sub-block reviews.
 
+## When rounds are the wrong instrument
+
+**A population no one has enumerated cannot be cleared by sampling it.** One block's surface held 47
+non-owner restatements; a review round finds one to six. That is roughly twenty rounds, and twenty-one
+had run without converging — not for want of reviewer or repair quality, but because rounds were the
+wrong instrument at any quality. Enumerate the population, then repair the class.
+
+**An inventory column is evidence, not a verdict.** Applied literally it manufactures findings —
+most flagged identity bindings were correct by construction, since a plan must define a derived
+identity before it exists. Discarding it loses the class. The defect was narrower than the column: a
+derived identity used as the *pin* for a measurement or a source location.
+
+**A receipt's count is a claim about what the producer found, never about what it delivered.** An
+enumeration reported 477 rows and 47 findings and delivered 120 rows containing 9, with its prompt
+already requiring it to declare truncation. Counting the artifact's own rows against its receipt is
+what exposed it, so require both numbers — rows found and rows listed — and a truncation flag when
+they differ. This is the truncation family again, and the first instance where the truncation was in
+the producer rather than the reader.
+
+**Treat a predicate miss as formatting before treating it as absence.** A receipt delivered as a
+table rather than marker lines read as zero results. Require markers at column one.
+
 ## Ask a reviewer to defeat a gate, not to check it
 
 **A reviewer asked to check a gate reads it; a reviewer asked to defeat it runs it.** Set the task as
