@@ -323,19 +323,34 @@ excluded; a compile-fail fixture proving two types differ while claiming the dec
 a one-sided absence read as a two-sided fact; a check whose own command line contained the pattern it
 matched. Each was true of what it examined and asserted about something larger.
 
+**A waiter exits on receipt OR process-gone, never receipt alone.** A receipt-only poll reports a
+dead run as in flight indefinitely, and silent death read as progress costs more than the death.
+Detaching a long dispatch is necessary and not sufficient — a detached run has died at 1.4 MB of
+output while a smaller one dispatched later survived, so keep dispatch output small: an exhaustive
+reading surface, no unprompted context pulls, and the receipt emitted first.
+
 **Open the object before ruling on a claim about it.** A claim travelling upward arrives as a phrase,
 and each reader inherits the phrase rather than the thing. A step was ruled vacuous on "no lock record
 covers these pins", read at the next level as "no record exists to amend" — the record existed, and
 its own text described how to extend it. Three levels handled that claim and none opened the file.
 One `cat` ends it at any level, and the cost of not doing it is two reversed rulings.
 
-**Striking a claim where it was reported does not strike it where it is restated.** A false claim
-propagates into summaries, registers and gap tables, and a repair aimed at the reported location
-leaves every restatement asserting it. Matching the reported string cannot find them, because a
-restatement is a different sentence saying the same thing — only reading for the claim does. Two
-blocks arrived at this independently on the same day, from a gap register and from a fourth
-occurrence under a different name. It is the document-scale form of repairing the class rather than
-the instance.
+**One owning statement per mutable proposition. Every other mention is a reference.** A mutable fact
+restated in a summary, a justification or a sufficiency argument becomes a second store of that fact,
+so a repair applied to one leaves the others asserting the old value — and nothing reports the
+divergence, because each reads as prose. A reference may name the owner; it never repeats origin,
+value or status. Summary sections survive as crosswalks to owners, sufficiency sections as indexes.
+
+**More careful editing is not the remedy.** A block ran an explicit conceptual sweep for one such
+claim and still left an independently authored restatement standing; a line-scoped filter cannot see
+a block-level strike; a substitution keyed on one of three surface forms of a literal reported success
+while missing a site. Reading for the claim rather than matching its string is detection, and worth
+doing — it is not prevention.
+
+**A rule stated for others and not applied to oneself is the recurring signature.** The document that
+taught this one already required invoking an owner rather than partially restating it, "because
+omissions become invisible" — for an external cell, while restating its own facts throughout. Four
+findings that looked like a family of related defects were this single one at four scales.
 
 **Amending a record forward is not fabricating one backward.** Adding a row that states what is
 pinned as of now is ordinary maintenance; creating a record of a lock that never existed is
