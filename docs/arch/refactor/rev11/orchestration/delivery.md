@@ -611,6 +611,11 @@ four rows is fixed by writing four, never by authoring a fifth. The tempting rep
 self-consistent by adding content nobody wrote, and a worker optimising for consistency will take it
 unless told not to.
 
+**Three kinds of slot are exempt from the deletion remedy: one that carries a VALUE, one that
+identifies a ROW, and one that states the DISTINCTION a status depends on.** A clause justifying a
+status is not a restatement of the section that defines the terms — it is the status's reason, and
+removing it turned an honest UNMET into what reads as a denial of an established fact.
+
 **The deletion remedy applies to PROSE ASSERTIONS, never to a value-carrying or identity slot.** A
 table row's key cell is not restating the section that defines it — it *is* the row's identity, and
 reducing it to a pointer makes rows indistinguishable, two of them literal duplicates. Frontmatter

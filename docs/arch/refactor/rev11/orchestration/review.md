@@ -64,6 +64,18 @@ and neither substitutes for the sub-block reviews.
 
 ## When rounds are the wrong instrument
 
+**A complete list closes its class and says nothing about any other.** Eighty-three enumerated
+restatements were repaired to two, and two internal contradictions then surfaced for the first time in
+twenty-three rounds — they had never been enumerated, so no amount of repairing against that list
+could reach them. That sharpens the enumeration thesis rather than weakening it: enumerate the class
+you intend to close, and do not read its closure as coverage of another.
+
+**Iterative repair on a large interlocking document can introduce defects as fast as it removes
+them.** Where a count plateaus and new findings trace to previous rounds' own edits, the method is the
+suspect, not the effort. Pre-register the disconfirming result before the next round runs — and treat
+reaching it as a question about the method rather than a failure of the block, the same shape as
+stopping rounds that cannot enumerate.
+
 **Never judge convergence on count.** One block's finding counts across nine rounds ran 5, 5, 6, 4,
 5, 6, 7, 6, 6 — flat, and by that measure nine rounds of nothing. Underneath, its blockers went from
 six against legacy text to two against text written in the previous round, and its dominant class from
