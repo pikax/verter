@@ -186,6 +186,12 @@ moved the same field.
 
 **Only the program orchestrator dispatches the landing agent.**
 
+**The working branch is frozen from the moment a candidate freezes until it lands or returns.** Every
+commit to it while a landing is in flight puts the candidate behind again, and the candidate cannot
+rebase without moving the subject a lane is measuring. The cost lands entirely on the landing: either
+a replay onto the moved tip, producing a tree the gate never saw, or a wait. Orchestrator commits are
+almost never urgent; the landing always is. Hold them.
+
 **Landing is acceptance. A block does not land until it is accepted, and landing sets it in stone.**
 There is no integration-milestone landing with acceptance deferred: a candidate reaching the working
 branch is the block's final state, so everything acceptance requires happens first — every acceptance
