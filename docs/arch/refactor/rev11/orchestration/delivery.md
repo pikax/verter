@@ -635,6 +635,12 @@ trigger rows differ in count; it reported eight of eight preserved, and six were
 session had already verified one table by content after this class bit there, and then verified
 another by count — the rule did not transfer between two tables in one sitting.
 
+**Check the sibling arms before concluding a mechanism is absent.** A file-scoped search of a seam
+cannot see correct handling on a neighbouring arm of the very branch that fails, and every enclosing
+scope looks right. One marker was applied on a function's error arm and skipped by an early return
+seventeen lines above it — an asymmetry inside one match, not a missing capability, which is cheaper
+to fix and far harder to defend.
+
 **A contract that cannot be tested is a finding about the production code, not about the test.** A
 row is re-scoped when the ROW is wrong, never when the CODE is — otherwise an implementation edits its
 own acceptance criteria by being deficient, and re-scoping ratifies the violation the criterion exists

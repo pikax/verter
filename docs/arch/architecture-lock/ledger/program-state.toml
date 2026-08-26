@@ -39,6 +39,17 @@ untracked_count = 0
 # whenever that branch advances.
 integration_branch = "program/architecture-lock"
 integration_head_sha = "8fd0f909103903e123bd7835b289808e54e8f4d4"
+# PROGRAM-LEVEL DEFECT, CONFIRMED LIVE ON TRUNK, OWNER REQUIRED: a resolver driver returns None for
+# every disposition — genuine miss, terminal failure, transient load failure, and a 256-attempt budget
+# fallthrough alike. The consuming seam returns a context on that None, skipping the marker that would
+# have recorded incomplete provenance, so the query is set, no non-admission is recorded, and the result
+# is ADMITTED CACHEABLE. That breaches the cache-runtime rule that a return-only outcome — overflow,
+# budget exhaustion, cancellation — never publishes. Severity is above a persisted wrong answer: a breach
+# means input consumption never completed, so the recorded fact signature is itself incomplete and the
+# facts that would later invalidate the bad negative may be absent from it — editing the file that would
+# have resolved the query may not clear it. The mechanism is present and applied on a sibling arm of the
+# same function, so this is an asymmetry inside one match rather than an absent capability. Verified in
+# the source by two readers independently. It is NOT the discovering block's to absorb.
 
 [orchestration]
 maintainer = "Carlos Rodrigues <carlos@hypermob.co.uk> (GitHub: pikax)"
