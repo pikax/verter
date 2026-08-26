@@ -60,6 +60,17 @@ tests; the change is formatting, naming or mechanical movement; or mutation woul
 excessively expensive, or weaker than an available proof. Not using it needs no waiver — the manager
 records the evidence that does exist.
 
+**A description of a defect is not a specification of the fix.** The sentence naming what went wrong
+is usually less precise than the analysis that follows it, so a fix held to the literal wording can
+preserve the defect the wording described. Where a block proposes something narrower than the
+instruction, judge the argument rather than the deviation.
+
+**Two shell hazards, both nearly destructive and neither announcing itself.** A redirect truncates its
+target before the command validates its arguments, so `cmd <rev>:<path> > <path>` with a mangled
+argument destroys the file it was meant to restore. And a bare `$VAR:path` is parsed as a parameter
+modifier — brace it. That one has bitten in both directions in a single session: once producing a
+false "file DIFFERS", once destroying files.
+
 **The control must be the REVERT, not a plant.** A plant answers "does this test notice this edit";
 only reverting the fix answers "does this test notice the absence of the fix". A kill matrix planted
 an always-fire mutation that a short input did reach, so the test went red and looked discriminating —
