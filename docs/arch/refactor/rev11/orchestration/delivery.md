@@ -90,8 +90,15 @@ single-line kill: a red result that looked exactly right for the wrong reason. C
 parts of the fix too; that is what separates "I killed one line" from "I am testing a different tree
 than I think I am."
 
-**Record a discarded run in the evidence.** A near-miss that is deleted teaches nobody, and the next
-reader repeats it.
+**Superseded evidence is marked, never removed — and once removed it is described, never recreated.**
+A near-miss that is deleted teaches nobody and the next reader repeats it. But reconstructing the
+output from memory under a heading promising retained evidence is worse than the deletion it covers,
+because that banner is trusted precisely on the basis that what sits beneath it is what ran. Write an
+account, say in its first sentence that it is an account, and name what is gone.
+
+**The judgment and the authority to act on it are separate.** Deciding that evidence should be
+withdrawn can be right while executing the withdrawal is not yours — a block reached that distinction
+about its own deletion unprompted, which is the form of it worth citing.
 
 **Prove a plant applied** — present, unique and new. `perl`, `sed` and `grep` exit 0 on a non-match,
 so an exit code never proves a mutation landed, and a verification search hitting a pre-existing
