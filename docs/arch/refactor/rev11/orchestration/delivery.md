@@ -635,6 +635,18 @@ trigger rows differ in count; it reported eight of eight preserved, and six were
 session had already verified one table by content after this class bit there, and then verified
 another by count — the rule did not transfer between two tables in one sitting.
 
+**A contract that cannot be tested is a finding about the production code, not about the test.** A
+row is re-scoped when the ROW is wrong, never when the CODE is — otherwise an implementation edits its
+own acceptance criteria by being deficient, and re-scoping ratifies the violation the criterion exists
+to prevent.
+
+**A `.flatten()` over a nested Option is a discarded distinction, not a missing one.** The type carried
+the difference between a driver's disposition and a genuine not-found; the code erased it
+deliberately. That is smaller to repair and much harder to defend than an absent capability.
+
+**An untyped loop bound is unrepresented, not unobservable.** The first needs a type; the second needs
+an instrument. Do not answer one with the other.
+
 **A true fact with no witness is not a discharged row.** What discharges a row is the instrument, not
 the observation — a fact nothing asserts is one refactor away from being false with nobody notified.
 
