@@ -103,6 +103,16 @@ certify a hollow test; a revert cannot.
 positive and a non-discriminating test were one hole from both sides: the test that should have caught
 the first was placed exactly where the condition never fires.
 
+**A test carrying N scenarios needs a control per scenario, not one per test.** A full revert reddened
+one boundary test through a single scenario, so the others had no proof they discriminate at all —
+hidden behind a red that something else produced. One red says the test noticed something; it does not
+say which scenario noticed. Revert the narrowest thing that isolates each clause.
+
+**Delete a duplicate by construction, not by policy.** A test-only twin existed because production
+took a narrower reader type than it needed; widening production left the twin nothing to do. A
+duplicate removed by policy can be recreated by the next lane hitting the same narrow type — one
+removed by construction cannot.
+
 **A plant must assert the SURVIVORS, not only the victim.** Proving a mutation is present, unique and
 new checks the victim — and a restore that silently failed leaves a tree where the plant correctly
 finds nothing to change, so victim-side verification passes vacuously. One capture staged its restore
