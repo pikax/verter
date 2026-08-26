@@ -635,6 +635,18 @@ trigger rows differ in count; it reported eight of eight preserved, and six were
 session had already verified one table by content after this class bit there, and then verified
 another by count — the rule did not transfer between two tables in one sitting.
 
+**A per-case scan cannot see a per-case assertion made centrally.** Counting assertion references
+inside each test body found two and nearly reported twenty-two tests vacuous — the assertion lived in
+a shared helper and applied to all of them. Follow one case through its helpers before reporting a
+population of missing assertions. Same false negative as counting table rows instead of reading cells:
+both mistake the shape of the search for the shape of the code.
+
+**A gate that can decline to fire and say nothing is a gate you do not have.** One assertion's
+applicability keyed on a thread name and returned silently when absent, so a single test-runner flag
+could have disabled every witness assertion in a suite while everything stayed green. Its contingency
+was a knob nobody would think to check. Make the decline loud: this is the same class as a wrong
+result routed through an error path.
+
 **Retiring one arm of a differential silently strengthens every assertion written against its
 normalised view.** Those assertions were written under the comparison layer's equivalences and
 exclusions — one read as "a manifest consult exists, under the ratified boundary difference" and
