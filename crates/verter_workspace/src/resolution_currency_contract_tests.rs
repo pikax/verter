@@ -3738,3 +3738,231 @@ fn context_selection_change_advances_dependent_decision() {
         "and every witness rooted on that decision must stop validating"
     );
 }
+
+/// Builds an Engine whose configured projects form a `chain0 -> chain1 -> …`
+/// project-reference chain of `len` projects. Every link declares the next
+/// link's tsconfig in `references`; the LAST link resolves `specifier` to its
+/// own `src/index` through `baseUrl` + `paths`, so the chain is resolvable
+/// end-to-end and the ONLY thing that can stop the walk is the traversal's
+/// own stack-safety fuse.
+fn engine_with_project_reference_chain(len: usize, specifier: &str) -> Engine {
+    engine_with_chain_tail(len, specifier, Vec::new())
+}
+
+/// As [`engine_with_project_reference_chain`], but the LAST link declares
+/// `tail_references` instead of nothing — so a test can put a specific edge
+/// shape exactly where the fuse lands.
+fn engine_with_chain_tail(len: usize, specifier: &str, tail_references: Vec<String>) -> Engine {
+    let configs = (0..len)
+        .map(|index| {
+            let root = format!("/workspace/packages/chain{index}");
+            let references = if index + 1 == len {
+                tail_references.clone()
+            } else {
+                vec![format!(
+                    "/workspace/packages/chain{}/tsconfig.json",
+                    index + 1
+                )]
+            };
+            let compiler_options = if index + 1 == len {
+                crate::resolver::IdeProjectCompilerOptions {
+                    base_url: Some(format!("{root}/src")),
+                    paths: vec![(specifier.to_string(), vec!["index".to_string()])],
+                    ..Default::default()
+                }
+            } else {
+                crate::resolver::IdeProjectCompilerOptions::default()
+            };
+            crate::project_graph::VfsProjectConfig {
+                root: root.clone(),
+                rank: crate::project_graph::ProjectRank::Discovered,
+                tsconfig_path: Some(format!("{root}/tsconfig.json")),
+                root_files: Vec::new(),
+                extensions: vec![".ts".to_string()],
+                workspace_root: "/workspace".to_string(),
+                workspace_aliases: Vec::new(),
+                compiler_options,
+                references,
+                membership: crate::ConfiguredMembership::match_all_under_root(
+                    &crate::CanonicalPath::new(&root),
+                ),
+            }
+        })
+        .collect();
+    let engine = Engine::new();
+    *engine.project_graph.write() = crate::project_graph::ProjectGraph::from_configs(configs);
+    engine.rebuild_and_publish();
+    engine
+}
+
+fn chain_reader(len: usize) -> ContractReader {
+    let reader = ContractReader::new();
+    reader.insert(
+        &format!("/workspace/packages/chain{}/src/index.ts", len - 1),
+        "export const value = 1;",
+    );
+    reader
+}
+
+const CHAIN_IMPORTER: &str = "/workspace/packages/chain0/src/App.ts";
+
+/// A project-reference walk that terminates on its stack-safety depth fuse has
+/// NOT proven the specifier absent — it abandoned a branch that, walked to the
+/// end, resolves. Publishing that `None` caches a WRONG negative, and worse:
+/// the fact signature it publishes under never observed the projects the fuse
+/// cut off, so editing them cannot invalidate it. Budget exhaustion is
+/// `ReturnOnly`.
+///
+/// This covers the REASON. That the negative is also kept out of the cache is
+/// asserted separately, in
+/// [`budget_refused_negative_never_enters_the_resolution_cache`], because an
+/// assertion sitting after this one would never run under a control.
+#[test]
+fn project_reference_depth_fuse_refuses_admission() {
+    const SPECIFIER: &str = "chain-lib";
+
+    // Fixture invariant: the SAME chain shape, short enough to walk to the
+    // end, resolves. So the long chain's `None` below is a fuse artifact and
+    // not a genuine miss.
+    let short_len = 10;
+    let short_engine = engine_with_project_reference_chain(short_len, SPECIFIER);
+    let short_reader = chain_reader(short_len);
+    let short =
+        short_engine.resolve_import_outcome(&short_reader, CHAIN_IMPORTER, SPECIFIER, CONTEXT);
+    assert_eq!(
+        short.result().map(|result| result.source_id.as_str()),
+        Some("/workspace/packages/chain9/src/index.ts"),
+        "fixture invariant: a chain inside the depth fuse must resolve end-to-end"
+    );
+
+    // The same chain, past the fuse.
+    let long_len = 300;
+    let engine = engine_with_project_reference_chain(long_len, SPECIFIER);
+    let reader = chain_reader(long_len);
+    let outcome = engine.resolve_import_outcome(&reader, CHAIN_IMPORTER, SPECIFIER, CONTEXT);
+
+    assert!(
+        outcome.result().is_none(),
+        "fixture invariant: the depth fuse must cut the walk short of the resolving link"
+    );
+    assert_eq!(
+        outcome.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::BudgetExceeded),
+        "a walk that stopped on its own budget never proved absence, so its \
+         negative must never be admitted"
+    );
+}
+
+/// The refusal has to keep the wrong negative OUT of the cache, not merely
+/// stamp a reason on it — that is the whole severity claim, so it is asserted
+/// where a revert can reach it.
+///
+/// It lived inside the refusal test until the reason assertion there was found
+/// to panic first, which meant this one never executed under any control at
+/// all. Standing alone on the same fixture, it is red under a full production
+/// revert directly.
+///
+/// The body is a lone negative assertion, and it does NOT need a positive half
+/// bolted on: the revert control supplies one. Under the revert the fence does
+/// not exist, the negative is admitted, the query IS cached, and this reddens —
+/// which is simultaneously the proof that this accessor can return `Some` for
+/// this fixture, i.e. that the `is_none()` is not passing vacuously.
+///
+/// It also fails safe if the fixture drifts: a chain too short to reach the
+/// fuse resolves, the positive is cached, and this goes red rather than
+/// quietly green.
+#[test]
+fn budget_refused_negative_never_enters_the_resolution_cache() {
+    const SPECIFIER: &str = "chain-lib";
+
+    let long_len = 300;
+    let engine = engine_with_project_reference_chain(long_len, SPECIFIER);
+    let reader = chain_reader(long_len);
+    let outcome = engine.resolve_import_outcome(&reader, CHAIN_IMPORTER, SPECIFIER, CONTEXT);
+    assert!(
+        outcome.result().is_none(),
+        "fixture invariant: the depth fuse must cut the walk short of the resolving link"
+    );
+
+    let population = reader.resolution_population();
+    assert!(
+        engine
+            .cached_resolution_query_for_test(CHAIN_IMPORTER, SPECIFIER, CONTEXT, population)
+            .is_none(),
+        "a budget-refused negative must not enter the workspace resolution cache"
+    );
+}
+
+/// The fence must not over-fire, and the place that can only be tested is the
+/// fuse boundary itself.
+///
+/// Reaching `remaining_depth == 0` does NOT mean work was dropped. By the time
+/// that branch runs, the current project's own aliases, `paths` and `baseUrl`
+/// have already been checked in the same iteration; the ONLY thing the fuse
+/// suppresses is recursion into that project's `references`. When the deepest
+/// project the walk enters has no onward references, nothing was skipped, the
+/// `None` is a proven absence, and it must stay cacheable.
+///
+/// All three cases below trip the fuse at the SAME depth and differ only in
+/// the shape of the deepest-entered project's `references` — no onward edge,
+/// a self-edge the descent would have skipped as a back-edge, and a real
+/// onward edge — which is exactly the predicate under test. The last case
+/// also pins the boundary: if the chain were too short to reach the fuse at
+/// all, it could not report `BudgetExceeded`, and this test would stop
+/// characterizing anything.
+#[test]
+fn fuse_reached_with_nothing_left_to_walk_still_admits_its_negative() {
+    const UNUSED: &str = "chain-lib";
+    const ABSENT: &str = "absent-lib";
+
+    // The walk enters `chain257` (the last link, no onward references) and
+    // hits the fuse there with nothing left to descend into.
+    let at_boundary = 258;
+    let engine = engine_with_project_reference_chain(at_boundary, UNUSED);
+    let reader = chain_reader(at_boundary);
+    let outcome = engine.resolve_import_outcome(&reader, CHAIN_IMPORTER, ABSENT, CONTEXT);
+    assert!(
+        outcome.result().is_none(),
+        "fixture invariant: nothing in the chain resolves this specifier"
+    );
+    assert_eq!(
+        outcome.non_admission_reason(),
+        None,
+        "the fuse suppressed no reference the walk had not already skipped, so \
+         absence was fully proven and stays cacheable"
+    );
+
+    // Same length, but the link the fuse lands on references ITSELF. The real
+    // descent inserts that edge into the active set before recursing, so it
+    // would be skipped as a back-edge and nothing would be walked — the
+    // predicate has to reason about the active set the descent WOULD have
+    // had, not the one in hand when the fuse is checked. A degenerate config,
+    // but a legal one.
+    let self_edge = vec![format!(
+        "/workspace/packages/chain{}/tsconfig.json",
+        at_boundary - 1
+    )];
+    let engine = engine_with_chain_tail(at_boundary, UNUSED, self_edge);
+    let reader = chain_reader(at_boundary);
+    let outcome = engine.resolve_import_outcome(&reader, CHAIN_IMPORTER, ABSENT, CONTEXT);
+    assert_eq!(
+        outcome.non_admission_reason(),
+        None,
+        "the only onward edge is a self-edge the descent would have skipped as \
+         a back-edge, so nothing was dropped and absence stays proven"
+    );
+
+    // One link longer: the fuse now lands on a project that DOES have an
+    // onward reference, so a branch really is dropped and the negative is
+    // refused. Same fuse depth, opposite verdict.
+    let past_boundary = at_boundary + 1;
+    let engine = engine_with_project_reference_chain(past_boundary, UNUSED);
+    let reader = chain_reader(past_boundary);
+    let outcome = engine.resolve_import_outcome(&reader, CHAIN_IMPORTER, ABSENT, CONTEXT);
+    assert_eq!(
+        outcome.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::BudgetExceeded),
+        "fixture invariant: this chain really does reach the fuse — an onward \
+         reference left unwalked must be refused"
+    );
+}
