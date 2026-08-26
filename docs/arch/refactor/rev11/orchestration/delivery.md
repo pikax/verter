@@ -281,6 +281,91 @@ as a property of how it observes, so the argument does not go stale the way an i
 for something known to be present with the identical probe, or report the count the probe matched
 before filtering. Both cost one command.
 
+
+## Controls: four ways a red lies
+
+A control that passes both ways is not evidence of anything until you know **which** of four causes produced
+it. They are indistinguishable from the result alone, and only the first is "the instrument is hollow":
+
+1. **The instrument is blind** — it can no longer see what it denies (see absence fixtures above).
+2. **The mutation never applied.** `perl`/`sed`/`grep` exit 0 on a non-match, so an exit code never proves a
+   plant landed. Prove it present, unique and **new** in the source.
+3. **The mutation applied to the wrong subject.** Proven applied, fixture sound, control green — because the
+   experiment re-opened a method while the fixture observes the type's closure. This is the most expensive
+   because every check we have passes.
+4. **The mutation was invalid.** It did not build. Seen twice in one hour wearing opposite disguises:
+   `rc=101` impersonating a red, and no `test result` line at all impersonating a filter miss. Neither reads
+   as "the experiment did not run".
+
+**So a control's evidence is a named test result line — never an exit status, never the absence of an
+error.** Confirm the tree still builds; do not read the return code.
+
+**Ask what the mutation was applied to — the code, or the thing watching the code.** Evidence that a property
+holds is routinely filed as evidence that the instrument detects the property, because both produce a
+satisfying red. A seal was proven to fire and the compile-fail fixture watching that seal was never
+exercised; both reds were real, and only one was about the fixture. Same experiment, different subject.
+
+**The expected error text identifies the subject of the experiment.** This is the third independent reason to
+assert the code and location rather than "it fails to compile": one lane found its own mis-aimed control by
+reading what its fixture expected. A bare compile failure cannot tell you where to aim.
+
+**Error-code inspection and the red control answer different questions.** Checking that a `.stderr` carries
+the stated code proves the fixture fails *correctly*. Only the control proves it would *stop* failing if the
+guarantee were removed. Identity and cause; two obligations, not one.
+
+**A gate that names what it found turns a future failure into a diagnosis instead of a search.** Print the
+offending node, path or symbol, not merely that one exists.
+
+**A crash is not a finding, it is a curtain.** Never close a crash investigation on the fix that stops the
+crash: restore the ability to observe, then run the assertion the crash prevented from being evaluated. An
+abort was traced to frame growth, and behind it sat a lost budget signal that would have shipped silently.
+Raising a limit is a diagnostic step and never the repair.
+
+**A blanket revert is a mutation.** `git checkout -- .`, `reset --hard`, `clean -fd` write exactly as a plant
+writes, and need the same before/after proof. One lane discarded its own correct repointing this way and
+found it by counting stale-versus-correct rather than trusting that "clean" meant clean of the right things.
+
+## Numbers, artifacts and identity
+
+**A number that passes through a relay stops being a measurement and becomes a quotation.** Quoting yourself
+is how a stale count survives its own correction: a figure measured before a final edit was relayed twice and
+was wrong at both stops. Re-derive every count you pass on, or mark it explicitly as unverified relay.
+
+**Every count names the baseline it was measured against.** "Two files" and "forty files" were both true of
+one candidate — one against the reviewed sha, one against trunk — and a count without its frame reads as a
+candidate gone badly wrong.
+
+**Verify by type, not by appearance. Format is not identity.** A well-formed wrong value announces nothing: a
+fabricated 40-hex sha and a real one are indistinguishable by shape, and an empty-string digest is a valid
+SHA-256. `git cat-file -t` the sha; compare the digest against a known value. Both failures happened here
+within an hour, and one was caught only by recognising a constant by sight, which is not a control.
+
+**An echoed value proves a lane read the brief, not that it examined the thing.** Declared = echoed =
+**re-derived from the tree** is three checks and only the third is evidence.
+
+**Corroborate rather than confirm.** Computing a value independently *before* reading the document that
+states it is materially stronger than running the document's command; agreement then comes from two
+directions instead of one.
+
+**Count by field, not by pattern, and suspect your own instrument first.** A regex census read 50 rows where
+there were 52, because two status cells carried a trailing qualifier.
+
+**Every artifact that certifies a tree carries that tree's identity inside it**, so a copy cannot certify a
+different tree by being found in the right place. A superseded lane's genuine `PASS` reading as current is a
+live failure mode, not a contrived one.
+
+**Any location a consumer looks up by convention needs an identity in the name**, or a leftover answers for a
+producer that never ran. Proven on three surfaces in one night: an evidence package whose squash message
+belonged to the previous block, a results directory, and a gate log whose stale twin carried `rc=127` from
+the day before. **A missing artifact asks a question; a stale one answers it.**
+
+**A command written into a coverage document is a citation, and a citation a reader cannot open is worse than
+none.** Run every documented command verbatim out of the file. One document shipped a digest command that
+would have produced a *mismatch* for anyone who ran it — correct behaviour reading as a broken verdict, which
+manufactures a false finding inside the one document meant to be trusted.
+
+**Put the explanation where the reader lands, not where it belongs.** A correct account in a file opened
+second fails exactly as a stale filename does.
 **Repairing a blind instrument has two obligations, and the second is the one that gets skipped: the
 instrument must be able to see, and the place you put it must be somewhere the gate looks.** A fix
 that relocates a blind fixture into an excluded package is *indistinguishable from a fix* — the
@@ -1022,3 +1107,74 @@ test iterating its own map, a residue check reusing the pattern it verifies, or 
 comparing against the recorded sha it is checking, cannot fail for the case it exists to catch.
 Verify against an independent oracle: the directory, not the list; the shape, not the pattern; the
 live tree, not the pinned baseline.
+
+## Preconditions, boundaries and authorisation
+
+**A precondition that runs concurrently with what it must precede is not a precondition — it is a race that
+usually wins.** Three instances in one session, all orchestrator-side: a freeze announced at current trunk
+while the candidate's base sat one commit behind; a health check verified before the final write; a reader
+registration in flight while the seat was already reading. Each usually works, which is why none looked like
+a defect until it cost something.
+
+**A precondition verified before the last mutation is verified against a tree that no longer exists.**
+Recording the verdict is itself a write. The final health check runs after the final write, including that
+one — otherwise a lane certifies a tree that cannot be committed.
+
+**Announce a freeze at the candidate's base, not at current trunk.** A hold announced at "current trunk" is a
+hold on future movement; the first thing it protects is the gap.
+
+**In a fixpoint lane a moving trunk costs a whole lane, not a rebase.** The fast-forward needs a rebase, the
+rebase moves the freeze, and the verdict is void. Everywhere else drift is a delay. Rebase, then freeze.
+
+**Declare a lane's subject as an explicit path set, plus a content digest, before it runs**, and repeat it in
+the receipt beside the reviewed sha. It costs nothing while the brief is being written and converts the next
+drift from an argument into one command. **The difference between a bounded verdict and a post-hoc excuse is
+entirely when the boundary was written down.** A boundary drawn around a result already in hand is not a
+boundary, however true the facts inside it are.
+
+**A declared boundary that never refuses anything is indistinguishable from no boundary.** A lane that stops
+rather than widening is the evidence that the boundary bound. Widen deliberately, declare the new subject
+before restarting, and never let a lane decide its own scope after a result.
+
+**Verify an exclusion; do not accept the claim.** Filtering the excluded path and counting what remains is
+one command, and it is the difference between a claim and a fact.
+
+**A precondition expressed as a failing test beats one expressed as an obligation** — it discharges when a
+named assertion goes green rather than when someone judges the work done. It carries three things or it
+becomes the weakest form instead of the strongest: the named test, proof it is currently red **for the right
+reason**, and an explicit bar on editing it. The cheapest way to make a failing test pass is to change it.
+
+**No landing authorisation without the review mandates named and bound to the candidate sha.** A census is
+not a mandate; a gate is not a mandate; an admissible verdict is not a mandate. This program landed a block
+that had none of the three, on a readiness report that carried everything except the answer to the first
+question the ledger asks — and nobody asked across two rounds and a returned candidate, because **strong
+evidence of one kind reads as sufficiency.** A weaker package would have prompted the question.
+
+**Read an ambiguous grant as the narrower one.** "Proceed under the usual authorisation" was written loosely
+and read as the stop it should have been.
+
+**A record of a refusal is worth most exactly where the refusal was hardest**, so state what was declined,
+what made it attractive, and what accepting would have cost. A refusal carries information in proportion to
+how nearly it went the other way; anyone can record declining something obviously wrong.
+
+**Every discarded verdict records why it was discarded, in the artifact.** The thread dies with the session.
+A later reader meeting the same condition needs the reasoning and the check, not a precedent for waving one
+through.
+
+**A STOP is not a verdict.** A stopped run's silence covers strictly more than the condition it named: it
+reports one failure, and the absence of others reads as everything-before-was-fine when everything *after* is
+simply unexamined. Re-verification after a STOP starts at the beginning, never at the stop point.
+
+**Landed-and-unaccepted is an honest state that no status field can express** — so the row's text has to.
+Never advance a status to match a landing.
+
+## Agent plumbing
+
+**A nested agent cannot address its dispatcher unless the address is in its brief.** Otherwise a completed
+success reads to the waiting seat as indefinite silence — a failure mode invisible on the successful path.
+
+**A register entry that cannot be matched to reality cannot answer the question the register exists to
+answer.** Put the agent id in the row; a row without one reads as a stray.
+
+**Register, then dispatch.** Everything that must be true before an actor starts happens before it starts,
+not alongside.
