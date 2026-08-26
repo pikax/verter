@@ -641,6 +641,11 @@ only on an unlanded branch; three readers each believed they had verified it, an
 steps were verified correctly at the production ref, which is what made it survive. The defect was
 real at a different site — but nothing in the report said which tree any step came from.
 
+**A chain with three sound links and one unsourced link reads as verified**, because every check
+anyone runs lands on a link that holds. Two readers each verified the steps the other had not, and
+neither checked the one step neither had. Verify the step nobody has named a source for, not the step
+you find easiest to confirm.
+
 **The hinge is where the damage lands, not where the fix goes.** A fix belongs at the site that can
 tell the causes apart. An arm returning a result on an empty value may be correct for a genuine miss
 and have no information to distinguish it from a budget trip, so fixing it there is fixing the wrong
