@@ -742,6 +742,12 @@ path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-INPUT-RE
 sha256 = "0c67a42b367728b148b68a3456adb20b2cd51c8490081e82c249e63bcad879cc"
 
 [[document]]
+id = "RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION.md"
+sha256 = "20b1fa75537b67cd941f48ca0c4c410754f3ec2710172812319053168c7239d3"
+
+[[document]]
 id = "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-SOURCE-POLICY-EVIDENCE.md"
@@ -781,7 +787,7 @@ sha256 = "1e44da3d4104cb2866f75d267cf3cdf6cebc719c099ba890760f6b6c1c64a834"
 
 [[authorization]]
 block = "C1"
-documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION", "RULING-C1-THREE-GAPS-ADDENDUM", "RULING-2026-08-25-C1-STAGE2-CUTOVER", "RULING-2026-08-26-C1-LANDING-PATH", "RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY", "RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY", "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE", "RULING-2026-08-26-C1-INPUT-RESOLUTION-BUDGET-AUTHORITY"]
+documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION", "RULING-C1-THREE-GAPS-ADDENDUM", "RULING-2026-08-25-C1-STAGE2-CUTOVER", "RULING-2026-08-26-C1-LANDING-PATH", "RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY", "RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY", "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE", "RULING-2026-08-26-C1-INPUT-RESOLUTION-BUDGET-AUTHORITY", "RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION"]
 ratified_by = "architecture ruling seat under explicit maintainer delegation"
 ratified_at = "2026-08-24"
 scope = "Ratifies the C1 charter text — converging ModuleResolverCore and the non-flow TypeInfoCore — as digest-bound authority, with ARCH-ADDENDUM-C1-THREE-GAPS.md governing wherever it conflicts: sealing over semantic-owned snapshots with no foreign implementations, enumerated per-module move/stay/split dispositions in place of a literal relocation, and one closed non-overridable inherent gateway in place of the exhaustive-coverage proof C1-AC-5 specifies. It is charter authority ONLY and dispatches nothing: C1 stays LOCKED, its predecessor set is unsatisfied (CM1 was REVIEW when this was written and is now ACCEPTED with all three mandates PASS; the predecessor condition is met), and RULING-2026-08-24-C1-CHARTER-RATIFIABILITY leaves two findings open against it — Stage 2 requires a separately ratified, digest-bound execution plan binding an exact rebased baseline, caller/deletion inventory, Cargo-edge and guard transition and atomic abort conditions, and no block-branch registry delta may substitute for authorization authored here. Execution authority requires a further record."
@@ -800,6 +806,29 @@ dispatched_candidate_tree = "bb6dcd1908b3b81c5350ed777e1051b12cdc3a62"
 evidence_table_digest = "ad09432e769adb4b37d879db0229f47aa012d2a40c0121ab3a1bc174bcd3074c"
 successor_obligation = "C2-AC-C1-A6-CONTINUATION-001"
 gap3_successor_obligation = "C2-AC-C1-GAP3-TYPEINFO-GATEWAY-001"
+final_subject_performance_exception_ids = ["C1-A6-WALL-REL-002", "C1-APM002-ALLOC-REL-001", "C1-A6-CONTROL-STABILITY-001"]
+final_subject_performance_base_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
+final_subject_performance_base_tree = "2e7cf8637ec5c52b0fa04572d99672b052f1f85f"
+final_subject_performance_subject_sha = "22532f39faa649c5d818baa67dee0a78ab18bb3a"
+final_subject_performance_subject_tree = "f4691f3efcaceabe0161511324bfac0fe1f5294e"
+final_subject_performance_prompt_sha256 = "c6522a20f42d062dd8ea2053ab85a4da115e261673701782525eaa07279d411e"
+final_subject_performance_authority_input_sha256 = "1ee8063adca40eb70b9cb1e9b46671b76aa2c357b323b167c01568e3ea463d26"
+final_subject_performance_authority_output_sha256 = "f59115c217d35a0f29b9861d7318b6439f0b8564bd633d6e28e8ae8f814aeff8"
+final_subject_performance_raw_manifest_entries = 69
+final_subject_performance_raw_manifest_sha256 = "7d3735f7146ba8e7ef97861240ad0d2c9e9cdf7d123bdbb355d7031207338ed3"
+final_subject_performance_harness_git_blob = "efa9ea54a14772ecd87511d6bb07017aa33940ba"
+final_subject_performance_harness_sha256 = "5e06d35dda284a8ef049bf0dd3dc39974b904729f740da58c650ec59e806f632"
+final_subject_performance_enabled_base_sha256 = "bf161e0dc7c13173f0d4db3dd195e713244013203b249f696e041543fcda06bc"
+final_subject_performance_enabled_subject_sha256 = "ead41678886d081233b7e6368d2e0a9b34fbc30bf5374ac427cd752190574f61"
+final_subject_performance_disabled_base_sha256 = "7c159ec75c14ae05a3d2ca5077fb7919b60b958c3c9f3bfd71c25f913a19bf79"
+final_subject_performance_disabled_subject_sha256 = "c34775e019238a99f6ffe2d96ffe99413386eab8f9cf6b536df4aa08783eade7"
+final_subject_performance_relative_wall_result = "FAIL: +12.606274% > 3%"
+final_subject_performance_allocation_count_result = "FAIL: 477374 -> 599479; +25.578477%"
+final_subject_performance_allocation_bytes_result = "FAIL: 104034454 -> 137459420; +32.128747%"
+final_subject_performance_control_stability_result = "FAIL: protocol2 +11.913095957% > 3%"
+final_subject_performance_retained_wall_result = "PASS after exact control-predicate exception: 96.025 ms <= 100 ms"
+final_subject_performance_retained_rss_result = "PASS after exact control-predicate exception: 76087296 B <= 268435456 B and +1.652621% <= +4.952%"
+final_subject_performance_successor_obligations = ["C2-AC-C1-A6-CONTINUATION-001", "C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001"]
 
 # Three-question architecture ruling taken on 7dac2b614, the tip of the unowned
 # branch block/lsp-durable-fence (lane architecture-lspfence-ownership,
