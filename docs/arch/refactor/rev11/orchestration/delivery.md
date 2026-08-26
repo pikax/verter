@@ -214,6 +214,92 @@ exposed. Different questions, and only the second establishes the criterion.
 Never land a new name-keyed source scanner: `CLAUDE.md`'s forward-only rule forbids a guard that
 greps the tree for a spelled identifier, path or token, `syn`/AST scanning included.
 
+## Instruments that observe absence
+
+An absence fixture — a compile-fail test, a DELETE roster, a "this path no longer exists" assertion —
+fails in a direction ordinary tests do not: **it reports success when it has gone blind.** A test that
+asserts presence goes red when it can no longer see. A test that asserts absence goes green.
+
+**An absence fixture must live somewhere that retains the ability to name the surface it denies.** A
+roster living in one crate and denying paths in another was coupled to the dependency edge between
+them. When that edge was deleted, every error became `E0433` with the caret on the crate segment — the
+fixture could no longer name the crate at all, and **would have failed identically if every forbidden
+path still existed.** Five of eight lines permanently unobservable, reporting success throughout.
+
+**A transition that deletes a dependency edge blinds every absence fixture that looked across it.**
+Witness and witnessed are coupled through the very edge the work removes, so the transition
+necessarily blinds its own instrument. This is a structural property of deletion work, not an
+oversight: any block whose job is removing an edge inherits it, and should enumerate the affected
+fixtures before moving anything rather than discovering one at a time.
+
+**Control an absence fixture in both directions.** Re-introduce a deleted path: the expectation must
+stop matching and the test must fail. Remove it again: it must pass. A fixture that passes both ways
+is hollow, and blindness and success are otherwise the same observation. This is the revert control
+inverted, and it is mandatory on deletion work rather than advisory.
+
+**Assert the error code and its location, never merely that compilation failed.** A fixture that
+accepts any compile error accepts its own blindness. `E0433` on a crate segment and `E0432`/`E0603` on
+a path tail are different findings, and only the code distinguishes them.
+
+**Keep an absence fixture homogeneous.** A must-resolve line inside a must-not-resolve fixture cannot
+discriminate: it supplies a guaranteed error in the successful case and can mask the disappearance of
+the errors that matter. Every line fails for the same reason, so a failure is attributable to the line
+that changed.
+
+**Repairing a blind instrument has two obligations, and the second is the one that gets skipped: the
+instrument must be able to see, and the place you put it must be somewhere the gate looks.** A fix
+that relocates a blind fixture into an excluded package is *indistinguishable from a fix* — the
+fixture is correct, its control passes, and nothing ever runs it. Verify inclusion by reading the
+exclusion list, never by assuming it because most packages are included.
+
+**A structural argument that bounds a population beats a scan that enumerates it.** Seventeen source
+hits on a removed crate name were dismissed without inspection: a live reference could not compile
+without the dependency, so every survivor is necessarily a comment. That argument cannot go stale the
+way a seventeen-file review can.
+
+## What an instrument is allowed to prove
+
+**A prohibition describes a route; the property describes the destination.** Forbidding the three
+known ways to reach a bad state leaves the fourth. State the property that must hold and enforce it
+where it can be observed, or the instrument ages into a list of the routes someone once thought of.
+
+**Make the counted path structurally hard to leave.** Three sub-blocks in one block defeated the same
+warning by three different mechanisms, none of them illegitimate on its own. When leaving the
+instrumented path is easy and silent, the instrument measures compliance rather than behaviour.
+
+**A cache key that is a strict subset of what determines correctness is a wrong-answer generator**,
+not a stale-answer risk. It returns a confidently wrong result for an input it has never seen and
+believes it has.
+
+**Prefer a counter to a boolean.** A boolean records that something happened; a counter records how
+often, which is what distinguishes "fired once as designed" from "fires on every request". Several
+instruments here were sized from a boolean and answered the wrong question.
+
+**A rationale can be written from belief; a falsifier cannot be written without knowing the fact it
+turns on.** This is why requiring a falsifier produces work before anything is falsified: the author
+must find the fact in order to write the sentence.
+
+**Four justifications that can be swapped without either becoming false are one blanket exemption in
+four costumes.** Test the set, not each entry: if the reasons are interchangeable, only one reason
+exists and it has not been stated.
+
+**A universe defined by a naming convention is a universe defined by what its authors remembered to
+name consistently.** An inventory keyed on an identifier shape missed a route that does the thing
+without carrying the name — the name-keyed defect this repo bars for landed enforcement, arriving as
+an *inventory* rather than as a guard, where nobody is looking for it.
+
+## Repairing a test the change made hollow
+
+**Demonstrate the repair with a mutation run against both trees: green before, red after.** A green
+suite says the code passes its tests. This says the tests can now fail for the right reason and
+previously could not — a claim about the instrument, which no amount of green says.
+
+**Prefer removal by construction to removal by policy.** A duplicate that no longer exists, with a
+working control proving it, cannot be re-adopted by the next lane. A duplicate that is merely
+forbidden can.
+
+Demonstrated or asserted; there is nothing between them.
+
 ## Dispatch preflight — establish at the start what is otherwise found at the end
 
 **The preflight runs as a high-effort architecture consult, not as the block's own survey.** It is
@@ -278,6 +364,18 @@ moved the same field.
 ## Landing
 
 **Only the program orchestrator dispatches the landing agent.**
+
+**The landing agent's closing statement is the tree hash at every point, not "the gate passed."** The
+question a landing must answer is whether the tree moved between the health check, the gate, the
+pre-squash re-verification, the squash and the trunk tip. Identical at all five is what makes the gate
+bind to the landed commit; a passing gate without that sentence has proven nothing about what landed.
+Three gates were void here before one closed this way, and every one of them exited zero.
+
+**`--no-verify` is justified by a fact about the tree, never by a fact about the process.** "The
+health check already covered this" is an argument; "`fmt --all --check` is zero diffs on the committed
+tree and the commit contains no file the other hook would touch, therefore the hook would find what
+the check already found" is a proof, and it takes one command each. Take the second.
+
 
 **A frozen candidate does not mutate, and the freeze binds both ends.** A gate compiles the working
 tree, not the commit, so an edit landing mid-run produces a result attributable to no tree at all —
