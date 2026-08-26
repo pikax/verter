@@ -652,6 +652,18 @@ only on an unlanded branch; three readers each believed they had verified it, an
 steps were verified correctly at the production ref, which is what made it survive. The defect was
 real at a different site — but nothing in the report said which tree any step came from.
 
+**Correcting a claim is not the end of it — enumerate what was derived from it while it stood.** One
+unsourced link produced three artifacts before anyone checked it: the escalation that framed it as
+production, a ledger row that inherited its scope, and an implementation brief naming symbols that do
+not exist. Each was written by someone acting correctly on the previous one. The claim is one
+artifact; the instruments built on it are the expensive ones, and they do not self-correct when it
+does.
+
+**Evidence produced BY the implementer is not a review, however good.** A package can carry a failing
+test seen failing, a kill matrix, discrimination in both directions and a discarded-run record, and
+still contain no independent verdict. Check a package for what it does not contain — the request that
+produced it is where the omission usually lives.
+
 **A chain with three sound links and one unsourced link reads as verified**, because every check
 anyone runs lands on a link that holds. Two readers each verified the steps the other had not, and
 neither checked the one step neither had. Verify the step nobody has named a source for, not the step
