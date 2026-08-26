@@ -38,24 +38,27 @@ untracked_count = 0
 # refs/heads/program/architecture-lock's tip on every live-mode run; update
 # whenever that branch advances.
 integration_branch = "program/architecture-lock"
-integration_head_sha = "8fd0f909103903e123bd7835b289808e54e8f4d4"
-# PROGRAM-LEVEL DEFECT, CONFIRMED LIVE ON TRUNK, OWNER REQUIRED. CORRECTED: an earlier revision of this
-# note named a driver that does not exist on trunk — it is unlanded code on a block branch, read by
-# three people who each believed they had verified it. The live collapse site is the project-reference
-# depth fuse in the workspace resolver, which returns a bare Option and collapses a fuse trip, a cycle
-# back-edge and a genuine miss into one empty result. SCOPE CORRECTED, verified in source by the
-# landing seat: only the budget trip breaches. A genuine miss is correctly cacheable and is not a
-# defect; terminal and transient load failures already route to typed non-admission through the
-# sibling observe-path arm. The row named four dispositions collapsing alike and the evidence supports
-# one — the escalation was right and its scope was wider than what was shown. The consuming seam returns a context on that None, skipping the marker that would
-# have recorded incomplete provenance, so the query is set, no non-admission is recorded, and the result
-# is ADMITTED CACHEABLE. That breaches the cache-runtime rule that a return-only outcome — overflow,
-# budget exhaustion, cancellation — never publishes. Severity is above a persisted wrong answer: a breach
-# means input consumption never completed, so the recorded fact signature is itself incomplete and the
-# facts that would later invalidate the bad negative may be absent from it — editing the file that would
-# have resolved the query may not clear it. The mechanism is present and applied on a sibling arm of the
-# same function, so this is an asymmetry inside one match rather than an absent capability. Verified in
-# the source by two readers independently. It is NOT the discovering block's to absorb.
+integration_head_sha = "618ec0e4629eafc73b40df4f25f2bf7897d58932"
+# PROGRAM-LEVEL DEFECT — CLOSED ON TRUNK at 618ec0e4629eafc73b40df4f25f2bf7897d58932 (tree
+# 94e708f6d8b319979f76fbe5223e481136c114f1), by a fence dispatched off trunk rather than absorbed by the
+# discovering block. History of the record, kept because the corrections are the finding: an earlier
+# revision named a driver that does not exist on trunk — unlanded code on a block branch, read by three
+# people who each believed they had verified it. A second revision named four dispositions collapsing
+# alike where the evidence supported one; the escalation was right and its scope was wider than what was
+# shown. WHAT WAS ACTUALLY WRONG, and is now fenced: the project-reference depth fuse in the workspace
+# resolver returned a bare Option, so a budget trip was indistinguishable from a genuine miss at the
+# consuming seam, which returned a context on that None, skipped the incomplete-provenance marker, and
+# ADMITTED THE NEGATIVE CACHEABLE. That breached the cache-runtime rule that a return-only outcome —
+# overflow, budget exhaustion, cancellation — never publishes. Severity was above a persisted wrong
+# answer: input consumption never completed, so the recorded fact signature was itself incomplete and
+# the facts that would later invalidate the bad negative could be absent from it — editing the file that
+# would have resolved the query might not clear it. A genuine miss remains correctly cacheable and was
+# never the defect; terminal and transient load failures already routed to typed non-admission through
+# the sibling arm, which is why this was an asymmetry inside one match rather than an absent capability.
+# RESIDUAL, INHERENT RATHER THAN DEBT: the fence refuses admission for the causes it can name. A future
+# third non-miss cause of None leaks until fenced at its own source — the shape of the defect is
+# preserved, not the instance. The tracked follow-on (recovering admission where the dropped subtree is
+# provably covered) is a frequency question, not a soundness one, and nothing depends on it.
 
 [orchestration]
 maintainer = "Carlos Rodrigues <carlos@hypermob.co.uk> (GitHub: pikax)"
