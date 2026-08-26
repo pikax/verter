@@ -635,6 +635,15 @@ trigger rows differ in count; it reported eight of eight preserved, and six were
 session had already verified one table by content after this class bit there, and then verified
 another by count — the rule did not transfer between two tables in one sitting.
 
+**A true fact with no witness is not a discharged row.** What discharges a row is the instrument, not
+the observation — a fact nothing asserts is one refactor away from being false with nobody notified.
+
+**"Became assessable" is a third state, distinct from moved and from not moved.** Collapsing it into
+moved launders evidence into proof; collapsing it into not moved invites redoing work already done.
+
+**Report movement backwards separately, never netted.** A net direction hides the rows that went the
+wrong way, and those are the ones worth knowing about.
+
 **A per-case scan cannot see a per-case assertion made centrally.** Counting assertion references
 inside each test body found two and nearly reported twenty-two tests vacuous — the assertion lived in
 a shared helper and applied to all of them. Follow one case through its helpers before reporting a
