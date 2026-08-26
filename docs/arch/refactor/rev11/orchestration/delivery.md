@@ -509,6 +509,17 @@ than on everything moving at once. Carrying both past the block's own close is t
 the architecture rules forbid, so the deletion is the block's last sub-block at the latest, never a
 follow-up.
 
+**A crate-scoped run is blind to tree-scanning guards.** Testing the crates you touched reports green
+while a guard that walks the whole tree is red, because your crates are not where it looks. Run the
+tree-scanning guards on any change that moves, deletes or relocates files, whatever its crate
+footprint — one relocation would have shipped with two red.
+
+**Take the baseline before implementing, in a separate worktree.** A pre-implementation run tells you
+which failures were already there; without it every carried failure is attributed to your change. One
+relocation started from 176/2 already red and finished 178/0 — a claim to be better than where it
+started, which is only available because the baseline existed. A separate worktree keeps in-flight
+work untouched and keeps the shared stash out of it.
+
 **Capture before delete.** A criterion that measures or rehomes something a pending cutover removes
 must have its capture and rehoming land *inside* that cutover, never after it. Land the deletion first
 and a counter criterion passes for the wrong reason — nothing remains to charge it — while a
