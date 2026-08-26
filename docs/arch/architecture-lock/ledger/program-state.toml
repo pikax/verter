@@ -38,7 +38,7 @@ untracked_count = 0
 # refs/heads/program/architecture-lock's tip on every live-mode run; update
 # whenever that branch advances.
 integration_branch = "program/architecture-lock"
-integration_head_sha = "ee03874f5e5b538f350681950fe16cc42d401881"
+integration_head_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
 # PROGRAM-LEVEL DEFECT — CLOSED ON TRUNK at 618ec0e4629eafc73b40df4f25f2bf7897d58932 (tree
 # 94e708f6d8b319979f76fbe5223e481136c114f1), by a fence dispatched off trunk rather than absorbed by the
 # discovering block. History of the record, kept because the corrections are the finding: an earlier
@@ -887,8 +887,8 @@ notes = "Created by the maintainer's beta.4 regression-intake directive to own F
 
 [[block]]
 id = "C1"
-status = "LOCKED"
-# LANDING-PATH RULING STORED, NOT RATIFIED (work freeze in force).
+status = "IN_PROGRESS"
+# LANDING-PATH RULING REGISTERED under the performance-authority act.
 # rulings/ARCHITECT-RULING-2026-08-26-C1-LANDING-PATH.md, digest
 # 71ce7601448d75012855a28bb0de1036dc6dff0a755148277b1350c28c9690d7 — 9 steps,
 # 3 items CUT (the origin-by-destination sweep replaced by an identity join;
@@ -908,17 +908,23 @@ status = "LOCKED"
 # cell (performance-gates.toml:137) pins one blob under two identities whose
 # hashes disagree — it cannot validate as written; possibly a one-line ledger
 # correction if the harness is callable.
-# THIS LOCKED STATUS IS STALE BOOKKEEPING, NOT A LIVE GATE: the row gated on
-# a predecessor that is now ACCEPTED. Left as-is under the freeze; the
-# unlock is part of the ruling's step 1 when work resumes.
-charter_digest = ""
-context_packet_digest = ""
-base_sha = ""
-candidate_sha = ""
-candidate_tree = ""
+# The earlier Stage-1 work predates the qualifying context packet and trunk-side
+# execution authorization. That historical-authority deviation is recorded, not
+# backdated or restamped; the packet binds the remaining Stage-2 dispatch only.
+charter_digest = "12653a27a1cedf0c0070a7e198cd9d0776c4a97cbd1a8bd35dc91699b62dcdba"
+context_packet_digest = "de488b6e10c4bb59b47826f23a2b31d1c1fb17f1b85546cf9f22e80dba53a8f2"
+base_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
+implementation_candidate_sha = "7ddbba827e15b9698850a7e01c21a9e41638aec3"
+implementation_ref = "refs/heads/block/module-resolver-core"
+landing_order = 1
+candidate_sha = "7ddbba827e15b9698850a7e01c21a9e41638aec3"
+candidate_tree = "bb6dcd1908b3b81c5350ed777e1051b12cdc3a62"
 accepted_sha = ""
 accepted_tree = ""
 landing_equivalence_digest = ""
+# No final exact-candidate evidence digest exists yet: the candidate-tree A6
+# evidence identities are pinned by the registered performance-authority ruling,
+# and the final waiver-application receipt remains owed at landing Step 6.
 evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
@@ -931,7 +937,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = ""
-notes = " STATUS CHANGED READY -> LOCKED 2026-08-20: the beta.4 regression intake added CM1 as a C1 predecessor (C1 now A6, B1, B2, CM1) so C1 must preserve CM1's corrected component-meta behaviour and migrate its regression tests. C1 was dependency-eligible and awaiting charter ratification; it is now additionally gated on CM1 acceptance, which is itself gated on BS1. This is a real critical-path change, not bookkeeping: C1 is the heaviest fan-in node remaining and is no longer next-dispatchable. CORRECTION 2026-08-22 (round 3): CM1's status is REVIEW, not ACCEPTED — its review mandates genuinely returned BLOCK and no maintainer override of that verdict exists (see CM1's own row note and evidence/CM1/2026-08-22-acceptance-repair.md). C1 remains NOT dependency-eligible; it stays gated on CM1 until CM1's dedicated corrective follow-up track closes its four disclosed gaps and earns a genuine PASS on all three review mandates. STALE ROW CORRECTED (program orchestrator; this entry is the act). The registered Stage-2 ruling still records its registration row as unmet while the tree carries both modules declared and the suite selected and running. The row is DISCHARGED; the ruling text is not edited and its digest is not disturbed, because the defect is a stale status rather than a wrong decision and re-pinning a ratified instrument mid-block moves a document its own work is measured against. STALE-FAVOURABLE IS THE MORE DANGEROUS DIRECTION: nobody re-checks a row that under-claims, so it survives every review that would have caught the opposite. Verified against the tree, not accepted on report."
+notes = " STATUS CHANGED READY -> LOCKED 2026-08-20: the beta.4 regression intake added CM1 as a C1 predecessor (C1 now A6, B1, B2, CM1) so C1 must preserve CM1's corrected component-meta behaviour and migrate its regression tests. C1 was dependency-eligible and awaiting charter ratification; it is now additionally gated on CM1 acceptance, which is itself gated on BS1. This is a real critical-path change, not bookkeeping: C1 is the heaviest fan-in node remaining and is no longer next-dispatchable. CORRECTION 2026-08-22 (round 3): CM1's status is REVIEW, not ACCEPTED — its review mandates genuinely returned BLOCK and no maintainer override of that verdict exists (see CM1's own row note and evidence/CM1/2026-08-22-acceptance-repair.md). C1 remains NOT dependency-eligible; it stays gated on CM1 until CM1's dedicated corrective follow-up track closes its four disclosed gaps and earns a genuine PASS on all three review mandates. STALE ROW CORRECTED (program orchestrator; this entry is the act). The registered Stage-2 ruling still records its registration row as unmet while the tree carries both modules declared and the suite selected and running. The row is DISCHARGED; the ruling text is not edited and its digest is not disturbed, because the defect is a stale status rather than a wrong decision and re-pinning a ratified instrument mid-block moves a document its own work is measured against. STALE-FAVOURABLE IS THE MORE DANGEROUS DIRECTION: nobody re-checks a row that under-claims, so it survives every review that would have caught the opposite. Verified against the tree, not accepted on report. AUTHORITY REGISTRATION 2026-08-26: C1 moves LOCKED -> IN_PROGRESS under the digest-bound addendum, Stage-2, landing-path, and performance-authority rulings. HISTORICAL-AUTHORITY DEVIATION: Stage 1 predates the qualifying context packet and trunk-side execution authority; this is recorded as historical fact and no packet, measurement, verdict, or evidence is backdated or restamped. WAIVER C1-A6-WALL-REL-001 applies only to A6_META_COMPILE_40_COLD_RUST wall_ns median no_regression_percent_max 3.0 for the exact registered production subject. The literal relative result is FAIL at +11.264925%; this is not A6 PASS. Evidence identities at dispatched candidate 7ddbba827e15b9698850a7e01c21a9e41638aec3 are wall-diagnostic 63c632006b5f5df404876389f48c7b1e7858919388f736f52c3fa149ab44ebb9, pure-reuse-feasibility 737244cc8d18ff5ad0c5d84717c02f42d065a2ad3a22feb06559eba32b4d2ee6, frontier-resume-architecture-consult b336e2509d64ce769e48928780ed6551a8a72b685997643f5bd6715a52d25520, unblock-architecture-consult 7531f5811957eb5cc0fb0a71f0a43502c24e22ed37a3d1f99e1fe382110df7a8, residual-244-diagnostic 3e28f8b2bd15c954c2342015732d92edc0ace214f60e2a6b743a8a01bb7e90ea, and receipt 8c33ba2d16a47205d7c24f052e042d7d21fa1088d14f0e8acdfa58754354015a; accepted wall raw-manifest digest 306745db699e0b7244d40176d3885bc30bad650bfcad040ebfa2687a8920289a. RETAINED BLOCKING GATES: wall_ns <= 100000000 ns; absolute and relative RSS; every enabled counter, zero-counter assertion, and output digest including normalization <= 11313, dispatch 4216, cold builds 1063, admissions 1063, and component-meta digest 7161214711717846280; result, ordered LoadSet, wave, consumed-observation, replay, and witness correctness; full C1 acceptance mapping, mutation/revert controls, canonical gate, three independent exact-candidate reviews, landing-equivalence proof, and atomic landing sequence. Any production, harness, corpus, toolchain, performance-configuration, or semantic-evidence change voids the waiver. The final exact-candidate waiver-application receipt and final evidence_digest remain pending at landing-path Step 6; all three review fields remain PENDING and carry no reviewed SHA."
 
 [[block]]
 id = "C2"
@@ -956,7 +962,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = ""
-notes = ""
+notes = "CODEX-DEFER C2-AC-C1-A6-CONTINUATION-001. Owner: C2. Ruling: docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY.md. Resolution gate: ratify this obligation into C2's eventual charter before that charter is ratified or C2 is dispatched; close it before C2 acceptance and no later than Revision 11 plan close. Required contract: typed request-local continuation identity covering operation/request, originating and current snapshots, exact ResolutionBasis, frontier/candidate ordering, and every consumed observation/fact version; revalidate every skipped observation-derived result and whole-restart on any basis/order/configuration/fact mismatch; keep retained AttemptOutput sealed and unpublished, discard on invalidation/terminal failure/cancellation/no-progress, and merge/publish each ordered witness exactly once only on completion; explicitly amend F18 rules 3 and 9 and F24 replay/witness obligations; private request-local state machine only, with no cross-request cache, reusable warm state, new retention authority, or public continuation DTO. Required tests: changed, appeared, and disappeared observations; basis change; invalidated prefix; terminal after resume; duplicate and missing replay; independent requests; clean-preloaded equivalence; and mutations omitting each revalidation. Required acceptance evidence: fresh A6 evidence restores the original relative wall gate while every absolute wall, RSS, counter, digest, and correctness lock remains green."
 
 [[block]]
 id = "C3"
