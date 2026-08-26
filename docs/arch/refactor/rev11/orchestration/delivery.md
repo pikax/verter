@@ -248,11 +248,22 @@ that changed.
 
 **An absence gate introduced by a deletion has a one-shot red, and it expires when the deletion
 lands.** The gate asserts a thing is gone. Its failing state exists only while the thing still
-exists — so the red half is available exactly once, before the change, and never again. Skip it and
+exists — so the red half is available in that window and, for some gates, never again. Skip it and
 the gate arrives **unfalsifiable from birth**: its passing state has never been distinguished from
 the state of a gate that cannot fail, and nothing afterwards can tell the difference. Run it before
 the deletion, record the red verbatim, land the record with the change. **If it does not go red
 pre-deletion, stop** — it is already unfalsifiable and the deletion is not the cause.
+
+**Classify the red before assuming it is gone: cheap now, artificial later, or genuinely
+unrecoverable.** A gate observing a manifest reddens post-deletion from a one-line scratch edit — a
+dependency assertion is recoverable whenever you like. A gate observing a deleted tree is not: a
+partial restore is not the pre-deletion state, so the red either happens in the window or never
+honestly happens at all. The middle class is the trap — an artificial red proves the gate *can* fire,
+never that it fired against the real prior state, and the two are easy to write up identically. An
+audit that assumes every red is unrecoverable over-reports; one that assumes every red is recoverable
+misses exactly the gates that matter. Classify each, and record which class the recorded red belongs
+to.
+
 
 This is capture-before-delete applied to an instrument's falsifiability rather than to a
 measurement, and it is the forward-looking form of *a gate that cannot fail invalidates every result
