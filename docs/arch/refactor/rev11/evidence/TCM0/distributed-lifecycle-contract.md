@@ -1,8 +1,8 @@
 # TCM0 §13 — Distributed lifecycle ownership
 
-Scope: steering §13 ("Distributed lifecycle ownership"). This contract was named by the maintainer's
-steering but never written up as its own TCM0 artifact — closed here as part of the TCM-plan
-integration, not deferred to TCM1-TCM4 to invent independently.
+Scope: steering §13 ("Distributed lifecycle ownership") in
+`docs/arch/refactor/rev11/rulings/MAINTAINER-STEERING-TCM-CONTENT-MAPPERS.md`. This artifact documents
+that required contract for TCM-plan integration; it does not itself assert a separate settlement act.
 
 ## The rule
 

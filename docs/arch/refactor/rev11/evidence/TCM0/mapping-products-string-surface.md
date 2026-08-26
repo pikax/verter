@@ -191,8 +191,9 @@ a specific total as if it were exact.
 
 `CodeTransform` (`crates/verter_compiler/src/code_transform/code_transform.rs:48`) holds **no field of
 any of the four product types** — only `chunks: Vec<Chunk<'a>>` (the geometry authority a typed
-`SourceProjectionMap` would be derived from). The only typed intermediate anywhere in this surface is
-`oxc_sourcemap::SourceMap<'static>` (an EXTERNAL crate type, not Verter-owned) returned transiently by
+`SourceProjectionMap` would be derived from). Typed mapping intermediates on the inspected production
+surface also include `MappedCode`/`SourceMapping` and `CodeTransform` chunks;
+`oxc_sourcemap::SourceMap<'static>` is an EXTERNAL crate type returned transiently by
 `CodeTransform::generate_map()` — and every production caller found (`compile/mod.rs:2102`,
 `style_planner.rs:308-310`, `svelte/runtime/output.rs:204`, `svelte/runtime/css/render.rs:171`,
 `svelte/ide/projector/mod.rs:317`) discards it to a string within the same call expression.
@@ -298,12 +299,12 @@ product's most load-bearing projection maps, and it is invisible to a `CodeTrans
 
 ### What a sound mechanical proof requires
 
-The instrument that actually enumerates this surface exhaustively is a **type change, not a deletion**:
+For map-carrying fields already discovered, the structural enforcement instrument is a **type change, not a deletion**:
 introduce a value newtype over the encoded map (e.g. `EncodedSourceMap`) with a private inner field and no
 `From<String>`, in a crate every consumer depends on, and retype the map-carrying fields to it. The moment
 a field stops being `String`, the compiler enumerates every producer and every consumer of that field —
-including producers 1-8, which a producer deletion cannot reach. The retype IS the enumeration; no
-starting count is needed, and no name-keyed scanner is involved, so it satisfies this program's
+including producers 1-8, which a producer deletion cannot reach. Retyping enumerates uses of each selected
+field, but structural discovery is still required to find unknown map fields; no name-keyed scanner is involved, so it satisfies this program's
 structural-enforcement rule the same way the deletion argument was intended to.
 
 Two details make the difference between a real chokepoint and another partial one:
@@ -321,12 +322,12 @@ Two details make the difference between a real chokepoint and another partial on
 
 The open sub-question closes with an answer neither option anticipated:
 
-- **An exhaustive pre-count is NOT required.** The row's own reasoning stands: three manual attempts is not
-  a plan, and the inventory in this file remains an explicitly non-exhaustive migration aid.
+- **A complete starting inventory is still required to identify every field to retype.** Three manual
+  attempts are not a plan, and the inventory in this file remains an explicitly non-exhaustive migration aid.
 - **The deletion-based proof as written is NOT sufficient**, and this is a defect in `TCM1.md`'s owned-scope
   item 1 and exit criterion 1, verifiable against source today — not a matter of judgement.
-- **The sound proof is the newtype retype**, which is exhaustive by construction and structural rather than
-  name-keyed.
+- **The newtype retype structurally enforces each discovered field**, but is not exhaustive over fields
+  the starting inventory did not discover.
 
 `TCM1.md` is a ratified, digest-pinned document (`authority-registry.toml`, `TCM1-CHARTER`, sha256
 `2886c796307ac8b28e3288de5062a207a3262f9f78fa407ecf31637e90cc4a28`). **This evidence pass does not edit it
@@ -343,8 +344,9 @@ Q1 returns the round-3 candidate as wrongly scoped, lands this work as a NON-ACC
 and hands the incomplete contract remainder to a successor block **with fresh verification**. Two things
 this file states about itself are exactly why: the inventory is "explicitly not claimed exhaustive" after
 two manual passes each found the prior one incomplete, and one exhaustiveness count in the closure text
-itself had to be corrected mid-pass. `G-STRING-SURFACE-CITATIONS` is therefore OPEN with the successor as
-owner (`successor-block-scope.md`).
+itself had to be corrected mid-pass. **The successor block this once named does not exist** — the round limit was
+lifted under act `4f0efc5e9`, and this obligation was relocated to `TCM1` by `AMD-023`. **Owner and status: see
+`closure-register.md`.**
 
 ### One further correction to this file's own inventory
 

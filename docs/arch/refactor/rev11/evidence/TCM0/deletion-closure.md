@@ -12,14 +12,10 @@ accumulation-at-creation mechanism worked out below ("Closure, 2026-08-23: items
 retained as evidence — TCM1, TCM2 and TCM3 each recording what they introduce or orphan, so TCM4 verifies
 a handed-over list instead of re-deriving one.
 
-**Its "therefore CLOSED" verdict is WITHDRAWN.** `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
-Q1 returns this block's round-3 candidate as wrongly scoped, lands its work as a NON-ACCEPTANCE evidence
-package, and hands the incomplete contract remainder to a **successor block with fresh verification**. A
-closure that needs fresh verification is not a closure, so `G-DELETION-CLOSURE-ITEMS-17-18` is OPEN with
-the successor as its owner (`OPEN-GAPS.md`; scope: `successor-block-scope.md`). The mechanism below is
-the proposal the successor must independently verify and have adopted, not a settled resolution. See the
-"Items 1-11 and 13..." paragraph below for the full accounting of which items had a located mechanism at
-TCM0 time versus which close only once TCM1-TCM3 land.
+The current obligation status and receiving criteria for items 17-18 are owned exclusively by
+`closure-register.md` row `S9.c`; this manifest does not repeat that row's value. The material below
+retains the historical derivation of the accumulation mechanism. See the "Items 1-11 and 13..."
+paragraph below for the accounting of which items had a located mechanism at TCM0 time.
 
 ## Deleted (named now, executed only in TCM4)
 
@@ -98,7 +94,7 @@ execution time (the charter's own rule: "Do not defer this inventory to TCM4").
 
 | # | Steering item | Located mechanism | Disposition |
 |---|---|---|---|
-| 1 | `@verter/typescript-plugin` | `packages/typescript-plugin/` | **Deleted.** Its carrier-publication role is superseded by TCM2's content mapper; any surviving IDE-only helper (e.g. cursor-geometry utilities with no carrier-publication role) must show a proven non-TypeScript-contract owner before TCM4 may keep it — default is deletion. |
+| 1 | `@verter/typescript-plugin` | `packages/typescript-plugin/` | **Deleted.** Its carrier-publication role is superseded by TCM2's content mapper; any surviving IDE-only helper (e.g. cursor-geometry utilities with no carrier-publication role) must show a proven non-TypeScript-contract owner before TCM4 may keep it — default is deletion.  **Capability note, `15db16e7b`:** this package is the sole server of go-to-implementation, which is RULED to MIGRATE to a legal semantic owner and NOT to be removed. Deleting the package does not delete the capability, and this row must not be executed as though it did. Removal of the capability remains available only as an explicit act stating the user-facing consequence. |
 | 2 | Carrier injection into TypeScript | `crates/verter_lsp/src/carrier_registry.rs`, `carrier_provider_projection.rs` | **OPEN — disposition withdrawn 2026-08-23**, was "Deleted, the injection half only". The stated reasoning (TypeScript no longer needs Verter to inject carrier identity once the mapper's own `virtualFileName`/`canonicalSourceFileName` fields carry it) is the SAME reasoning as ledger rows #25-26, and that reasoning rests on a premise now proved inverted: the carrier-registration path is tsserver-family and hydrates a content cache plus a carrier-to-project map, not merely identity strings (`crates/verter_type_runtime/src/tsserver/ipc.rs:3126`). Identity fields do not obviously subsume a content cache. That ruling was taken: `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md` Q4 RETAINS rows #25-26 under `VerterWithTypeSemanticOracle`, and this item's injection half is gated on the same condition Q4 sets for them — **TCM4 may remove the tsserver-specific methods only after TCM3 supplies and tests equivalent semantics**. Nothing here is waiting on a ruling to be re-requested. See `OPEN-GAPS.md` `G-TCM0-ACCEPTANCE-ROWS-25-26` and this file's "Both rows are RETAINED" section below. |
 | 3 | Carrier-only generated-file stores | provider-side generated-companion storage feeding the deleted relay path (row 1/2 of the "Deleted" table above) | **Deleted** — already named in row 1/2 above; listed here to confirm it is the steering's item 3, not a separate undiscovered mechanism. |
 | 4 | Carrier-only external synchronization | `crates/verter_lsp/src/external_ts_sync.rs`'s carrier-specific half (its non-carrier dependency-edge bookkeeping survives per `external-source-decision-table.md` row #6) | **Deleted, carrier-specific half only** — the `ExternalSourceRequest`/`ExternalBlockKind` dependency-tracking mechanism itself survives (already named in the "Survives" table above); only its carrier-file-sync consumer goes. |
@@ -114,16 +110,15 @@ execution time (the charter's own rule: "Do not defer this inventory to TCM4").
 | 14 | Private TypeScript semantic-query protocols | any bespoke JSON-RPC/IPC shape Verter invented to talk to tsgo/tsserver outside the certified content-mapper + official semantic-API contracts | **Deleted** — TCM3's charter forbids retaining one ("Do not retain a private legacy query protocol"); this item names the deletion consequence of that forbidding rule. |
 | 15 | Carrier lifecycle methods on `TypeProvider` | feature-ownership-ledger.md rows #23 (`configure_paths`), #24 (`notify_carrier_changed`, partially — its oracle-session half SURVIVES), #25-26 (gated, see below) | **Deleted where the row's TCM4-deletes column says so; rows #25-26 are RETAINED by Q4, and TCM4 may remove their tsserver-specific methods only after TCM3 supplies and tests equivalent semantics** (feature-ownership-ledger.md's correction section, and "Both rows are RETAINED" below) — not a blanket deletion, since some carrier-lifecycle methods have a surviving oracle-session owner. |
 | 16 | The broad `TypeProvider` abstraction when no surviving caller requires it | `crates/verter_type_runtime/src/traits.rs:130-512` (the trait itself) | **Deleted only once every one of the 31 ledger rows has zero remaining caller of the OLD trait shape** — the trait is not deleted until its capability ledger is fully green, per the charter's own "Do not delete the old query plane before its capability ledger is green" rule; this is the terminal item, not an early one. |
-| 17 | Old APIs and DTOs whose only owner was the removed route | any DTO type whose sole producer/consumer pair is entirely inside the deleted rows 1-16 above | **OPEN — owned by the successor block. The "Closure, 2026-08-23: items 17-18 resolved" section below is the PROPOSAL the successor must independently verify and have adopted, not a settled resolution; its "therefore CLOSED" verdict is withdrawn per this file's header. See `OPEN-GAPS.md`'s `G-DELETION-CLOSURE-ITEMS-17-18` row.** Not independently enumerable here without re-deriving TCM1-TCM3's own implementation, which has not happened yet — the PROPOSED mechanism is ACCUMULATION AT CREATION: TCM1, TCM2 and TCM3 each record, as an added exit criterion, every DTO/API type they introduce or orphan whose sole producer/consumer pair lies inside the deleted set, appended to this file as each block lands, and TCM4 verifies rather than re-derives that list. |
-| 18 | Historical content-mapper codecs | any interim/versioned codec a TCM2 implementation might have carried during its own development before converging on the ONE certified codec | **OPEN — owned by the successor block. The "Closure, 2026-08-23: items 17-18 resolved" section below is the PROPOSAL the successor must independently verify and have adopted, not a settled resolution; its "therefore CLOSED" verdict is withdrawn per this file's header. See `OPEN-GAPS.md`'s `G-DELETION-CLOSURE-ITEMS-17-18` row.** No codec exists yet at TCM0 time, so the PROPOSED closure is an **empty list, established by a negative check**: TCM2's added exit criterion proves it ships exactly one codec and never carried an interim versioned one into its landed tree; if that check ever fails, the interim codec is named at that moment and enters item 17's accumulated list instead. |
+| 17 | Old APIs and DTOs whose only owner was the removed route | any DTO type whose sole producer/consumer pair is entirely inside the deleted rows 1-16 above | See `closure-register.md` row `S9.c`, the sole owner of this obligation's status and receiving criteria. This manifest records only the mechanism: TCM1, TCM2 and TCM3 record every DTO/API type they introduce or orphan whose sole producer/consumer pair lies inside the deleted set, and TCM4 verifies that accumulated list rather than re-deriving it. |
+| 18 | Historical content-mapper codecs | any interim/versioned codec a TCM2 implementation might have carried during its own development before converging on the ONE certified codec | See `closure-register.md` row `S9.c`, the sole owner of this obligation's status and receiving criteria. This manifest records only the check: TCM2 proves it ships exactly one codec and names any interim codec if that check fails; TCM4 verifies the recorded result. |
 | 19 | Compatibility feature flags and fallback branches | any `if legacy_route_enabled` / env-var-gated fallback a TCM1-TCM4 implementation might be tempted to add during migration | **Forbidden from ever landing, not merely deleted after the fact** — each TCM1-TCM4 charter's Forbidden section names this explicitly; TCM4's acceptance invariant "no silent fallback exists" is the terminal check. |
 
 Items 1-11 and 13 have a located, named mechanism today. Items 12, 15-16, 19 are policy/structural items
-whose "location" is a rule about the FINAL state, not a single file. Items 17-18 genuinely cannot be
-enumerated before TCM1-TCM3 exist (there is no DTO or codec yet to name); the accumulation-at-creation
-mechanism proposed below ("Closure, 2026-08-23: items 17-18 resolved") is TCM0's answer to that, and its
-closure verdict is withdrawn to the successor block per `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
-Q1. See `OPEN-GAPS.md`'s `G-DELETION-CLOSURE-ITEMS-17-18` row.
+whose "location" is a rule about the FINAL state, not a single file. Items 17-18 could not be enumerated
+before TCM1-TCM3 existed, so the historical derivation below records the accumulation-at-creation
+mechanism. `closure-register.md` row `S9.c` alone owns the obligation's current status and receiving
+criteria.
 
 ## RETAINED by ruling (ledger rows #25-26)
 
@@ -141,10 +136,13 @@ conversion and carrier-to-project routing, row 26 preserves oracle working-set a
 remove the tsserver-specific methods only after TCM3 supplies and tests equivalent semantics.** That is
 the deletion gate; it is no longer an open governance question and no longer gates TCM0.
 
-## Closure, 2026-08-23: items 17-18 resolved, and why only one resolution is legal (`G-DELETION-CLOSURE-ITEMS-17-18`)
+## Historical derivation, 2026-08-23: items 17-18 and the accumulation mechanism
 
-`OPEN-GAPS.md`'s `G-DELETION-CLOSURE-ITEMS-17-18` row states that TCM0's acceptance must decide between
-two resolutions before TCM0 leaves LOCKED:
+This section preserves TCM0's elimination argument and the mechanism it derived. It is not the owner of
+the obligation's current status or receiving criteria; consult `closure-register.md` row `S9.c` for both.
+
+The then-current `OPEN-GAPS.md` row `G-DELETION-CLOSURE-ITEMS-17-18` stated that TCM0's acceptance had
+to decide between two resolutions before leaving LOCKED:
 
 > (a) items 17-18 stay genuinely unenumerable until TCM1-TCM3 exist, and TCM0's acceptance record
 > explicitly ratifies a per-type execution-time discovery method as the closure mechanism for exactly
@@ -162,9 +160,11 @@ un-preferred.
 
 That leaves (a) — but (a) as the row phrases it, "a per-type execution-time discovery method", is exactly
 what round-2 review already rejected as an unassigned exception, and ratifying it verbatim would re-adopt
-the thing the gap was opened to prevent. TCM0 ratifies a strengthened form instead.
+the thing the gap was opened to prevent. TCM0 therefore derived the strengthened form below.
 
-### Ratified: items 17-18 close by ACCUMULATION AT CREATION, not by discovery at deletion
+**Inherited limit — the receiving owner must re-check this, not assume it.** The coverage that placed this obligation was derived by `probes/receiving-coverage-derivation.mjs`, which reads every numbered exit criterion in the receiving charters. **Its part list is hand-authored**: the closure bars it decomposes are prose, so nothing machine-readable states what an obligation's parts are and the script CANNOT detect an omitted part. It also cannot see a criterion that binds a part in different words than the part's literals. Before acting on this row, read the closure bar against `evidence/TCM0/receiving-coverage.md` and name any part that is missing. This is a recorded unmet obligation travelling WITH the work, not a caveat filed elsewhere.
+
+### Derived mechanism: ACCUMULATION AT CREATION, not discovery at deletion
 
 The steering's rule is *"Do not defer this inventory to TCM4"*. That rule is about who must hand TCM4 a
 named list — not about when the names have to exist. The names cannot exist at TCM0 time because the
@@ -187,7 +187,7 @@ passes, item 18 has nothing to delete and closes as "empty by construction". If 
 codec TCM2 carried is named by TCM2 at that moment and enters item 17's accumulated list. Either way TCM4
 receives names, never a search.
 
-### Why this is a closure and not a rephrased deferral
+### Why this would be a closure and not a rephrased deferral, if adopted
 
 The distinction is who holds the obligation and when it is discharged. Execution-time discovery leaves the
 obligation with TCM4 and discharges it by search, which is what the steering forbids and what
@@ -195,29 +195,33 @@ obligation with TCM4 and discharges it by search, which is what the steering for
 deletion list at execution time"*. Accumulation-at-creation moves the obligation to the three blocks that
 can actually discharge it, at the only moment they can — and leaves TCM4 doing exactly what its charter
 already says it does. `TCM4.md`'s required-outcomes item 3, owned-scope item 9 and exit criterion 5 are
-already written to defer to whichever resolution TCM0 ratifies, so this resolution needs no amendment to
-TCM4's charter and resolves its internal contradiction rather than preserving it.
+already written to defer to whichever resolution is adopted for this gap, so the proposal needs no
+amendment to TCM4's charter and would resolve its internal contradiction rather than preserving it.
 
-### The amendments this would require before dispatch
+### Receiving-criteria derivation record
 
-The accumulation obligation is new work for TCM1, TCM2 and TCM3, and their charters are ratified,
-digest-pinned documents (`authority-registry.toml`: `TCM1-CHARTER`, `TCM2-CHARTER`, `TCM3-CHARTER`). **This
-evidence pass does not edit them and does not re-pin their digests.** These amendment texts are carried
-forward as proposals, not as a settled mandate: because the closure verdict above is withdrawn to the
-successor block, the amendments derived from it transfer with it (`OPEN-GAPS.md`
-§`G-CHARTER-AMENDMENTS`). They are named here and in `OPEN-GAPS.md`:
+**All three added exit criteria now exist**, and `receiving-coverage.md` derives which criterion binds which
+part from the charters themselves. What follows is the record of what was required, not of what is
+outstanding. **Owner and status: see `closure-register.md`.**
+
+The accumulation obligation concerns TCM1, TCM2 and TCM3, whose charters are digest-pinned documents
+(`authority-registry.toml`: `TCM1-CHARTER`, `TCM2-CHARTER`, `TCM3-CHARTER`). This evidence pass does not
+edit or re-pin them. The text below records the criteria that the derivation mapped; current ownership
+and status remain exclusively in `closure-register.md` row `S9.c`:
 
 - **TCM1, TCM2, TCM3** — one added exit criterion each: record every DTO/API type the block introduces or
   orphans whose sole producer/consumer pair lies inside the deleted set, appended to
   `deletion-closure.md`'s item-17 list. For TCM1 this folds into the charter amendment
   `G-STRING-SURFACE-CITATIONS` already requires, so TCM1 needs one amendment act, not two.
-- **TCM2** — one added exit criterion: prove exactly one content-mapper codec ships, with no interim
-  versioned codec in the landed tree (item 18's negative check).
+- ~~**TCM2** — one added exit criterion: prove exactly one content-mapper codec ships, with no interim
+  versioned codec in the landed tree (item 18's negative check).~~ **STRUCK — TCM2 ALREADY HAS IT.**
+  `charters/TCM2.md`'s numbered exit criterion 1 requires exactly one codec to ship, evidenced by a
+  negative test asserting no second codec path. Proposing to add it would have duplicated a criterion
+  that exists. This was written when the coverage was asserted from reading rather than derived; the
+  derivation at `receiving-coverage.md` reports it covered, and the derivation is why the duplication
+  was caught at all.
 - **TCM4** — none. Its existing deferral wording consumes this resolution as written.
 
-Items 17 and 18 therefore have a **worked-out closure mechanism with its obligations mapped to named
-blocks and its residue reduced to a list of charter amendments** — which is what TCM0 produced and what
-lands here as evidence. What TCM0 does NOT have is an accepted closure: per
-`docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
-Q1 the verdict is withdrawn and `G-DELETION-CLOSURE-ITEMS-17-18` passes to the successor block for fresh,
-independently checkable verification.
+Items 17 and 18 therefore have a worked-out accumulation mechanism mapped to named blocks. This
+manifest records that mechanism only; `closure-register.md` row `S9.c` is the sole owner of the
+obligation's status and receiving criteria.

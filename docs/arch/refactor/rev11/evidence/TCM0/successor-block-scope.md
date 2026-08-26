@@ -1,5 +1,18 @@
 # Successor block — scope
 
+> **SUPERSEDED IN WHOLE, 2026-08-25. The construct this file scopes does not exist.** That is settled by
+> an act, not by this file's own say-so: `program-state.toml`'s entry at commit
+> `4f0efc5e9a2050968bd61435e87709a4640623c2` cancels the successor construct, records that no successor
+> block exists or is to be created, lifts the round limit, and places the remainder on this block. Until
+> that act existed the cancellation had been decided in correspondence only, and this banner asserted it
+> with nothing behind it. The round limit
+> that made a successor necessary was lifted, and TCM0 closes its own remainder; the two obligations
+> TCM0's authority cannot discharge are relocated to named existing owners by their own instrument,
+> not to a successor. The continuation surface is `closure-register.md`, derived from the charter, and
+> `probes/closure-validator.mjs` is the gate that reads it. This file is retained as the record of
+> what was scoped and why, and **must not be used as a source of scope**. One of its claims was also
+> false; see the strike below.
+
 **This is a scoping note, not a charter.** It is not digest-pinned, not registered in
 `docs/arch/architecture-lock/ledger/authority-registry.toml`, and not a node in
 `docs/arch/refactor/rev11/program-dag.toml`. It carries no authority and dispatches nothing. Authorizing
@@ -40,10 +53,20 @@ real production code behind no `TypeProvider` method, each located to a `file:li
 served by a typescript-plugin carrier-routing override, not by a `TypeProvider` method and not absent. Six
 per-row citations were wrong and are corrected.
 
-**Unproven.** The ledger's own disposition concedes it: TCM0 records the "uniformly `VerterNative`,
-uniformly unaffected by TCM1-TCM4" characterisation as a finding and explicitly **does not ratify it as an
-ownership assignment for the 14 capabilities it did not individually analyse**. Fourteen capabilities
-therefore have a plausible verdict and no analysis behind it.
+~~**Unproven.** The ledger's own disposition concedes it: TCM0 records the "uniformly `VerterNative`,
+uniformly unaffected by TCM1-TCM4" characterisation as a finding and explicitly does not ratify it as an
+ownership assignment for the 14 capabilities it did not individually analyse.~~
+
+**SUPERSEDED by the capability-disposition act in `docs/arch/architecture-lock/ledger/program-state.toml`'s
+TCM0 notes; the characterisation it restates is FALSE.**
+`probes/capability-provider-hop-walk.mjs` walked all seventeen request paths individually instead of
+characterising fourteen of them at once, and one DOES reach a provider: rename preparation calls
+`TypeProvider::get_rename_locations` at `crates/verter_lsp/src/server/rename_prepare.rs:181`. The
+uniform verdict is struck in `feature-ownership-ledger.md`, and this paragraph restated it after that
+strike — which is the finding worth keeping: **striking a claim where it was reported does not strike
+it where it is restated, and only reading sentences rather than matching the reported string finds
+the restatement.** The row is closed by the ratified per-capability derivation, not by characterisation
+(`docs/arch/architecture-lock/ledger/program-state.toml`, TCM0 capability-disposition act; `closure-register.md` `S3.e`).
 
 ### 2. `G-SEMANTIC-API-CERTIFICATION`
 
@@ -52,9 +75,9 @@ and assert discriminating properties; their transcript is committed. Q1 admits t
 constraints binding on TCM2/TCM3 fell out of them, and two of the guards are proven to discriminate by
 planting the reversal.
 
-**Unproven.** No ruling decides whether the block that is ACCEPTED must itself run charter item 2's bulk
-probes, or whether an amendment reallocates that obligation. Until that is decided, the certification
-verdict has no owner — the probes are evidence, but nobody has been authorized to close item 2 on them.
+**Current disposition.** `closure-register.md` Scope 2, rows `S2.a` through `S2.k`, owns the obligation
+status and maps each clause to its probe. The earlier question here about who could close item 2 is
+historical.
 
 ### 3. `G-PROJECTION-MASK-TOTALITY`
 
@@ -62,7 +85,7 @@ verdict has no owner — the probes are evidence, but nobody has been authorized
 composing by AND, with the relation factor derived from the shipped source and `OWNER_WIRE_ELIGIBLE`
 derived from the ownership ledger.
 
-**Unproven.** Totality itself. The claim quantifies over all fifteen `class × relation` cells and all
+**Unproven.** Totality itself. The claim quantifies over all eighteen `class-domain member × relation` cells and all
 twenty feature bits, and it is exactly the kind of claim that is only established by an independent
 re-derivation of the table.
 
@@ -85,9 +108,8 @@ cycle, provable from `program-dag.toml`. Accumulation-at-creation — each of TC
 it introduces or orphans, so TCM4 verifies a handed-over list — is a method that satisfies the steering's
 "do not defer this inventory to TCM4" rule without requiring names that cannot exist yet.
 
-**Unproven.** That the method binds anyone. It requires an added exit criterion in three ratified,
-digest-pinned charters; until those amendments are adopted, items 17-18 have a proposal and no obligation,
-and TCM4's exit criterion 5 would verify a list nobody was required to write.
+**Current disposition.** `closure-register.md` row `S9.c` and `receiving-coverage.md` parts `B1`–`B3`
+record the binding placement across TCM1–TCM4; this file's earlier unbound-proposal statement is historical.
 
 ### 6. `G-CHARTER-AMENDMENTS` — the residual TCM1/TCM2/TCM3 rows only
 
@@ -134,9 +156,9 @@ bar — every one of these rows already had an evidence file asserting it.
 
 | gate | what closes it |
 |---|---|
-| `G-LEDGER-SCOPE` | Either a per-capability analysis for each of the 14 — the request path walked, the absence of any `TypeProvider`/engine hop shown, and an owner assigned on that basis — or an explicit, ratified decision that a located verdict without an ownership row is the correct and complete entry against the steering's acceptance line. Whichever is chosen, the residue the ledger currently concedes must be gone or ratified, not restated. |
+| `G-LEDGER-SCOPE` | Current disposition and proof are owned by `closure-register.md` row `S3.e` and the per-capability derivation in `capability-provider-hop-walk.md`; this historical scope file does not restate them. |
 | `G-SEMANTIC-API-CERTIFICATION` | A decision on record — ruling or amendment — naming who must run charter item 2's bulk probes and against what. If that is this block, then a re-execution of probes 1-8 against the pin from a clean checkout, its transcript committed, and each item-2 clause mapped to the specific assertions covering it, with the mapping checkable by re-reading the probe sources. |
-| `G-PROJECTION-MASK-TOTALITY` | An independent re-derivation of the mask table: all fifteen `class × relation` cells and all twenty bits recomputed from the five factors by someone other than its author, agreeing with the committed table cell for cell, with each factor's derivation re-checked against the shipped source it cites. A mechanical derivation that a reader can re-run beats a hand table. |
+| `G-PROJECTION-MASK-TOTALITY` | An independent re-derivation of the mask table: all eighteen `class-domain member × relation` cells and all twenty bits recomputed from the five factors by someone other than its author, agreeing with the committed table cell for cell, with each factor's derivation re-checked against the shipped source it cites, and the AND-only composition checked to be capable of producing every value the table shows. A mechanical derivation that a reader can re-run beats a hand table. |
 | `G-STRING-SURFACE-CITATIONS` | A structural enumeration rather than a fourth manual pass: introduce the value newtype (or an equivalent compiler-enforced instrument), retype the map-carrying fields, and let the compiler produce the complete producer list. The count is then a build output, not a claim. `pub use oxc_sourcemap;` must be dispositioned in the same work, since it is the documented escape hatch around any such instrument. |
 | `G-DELETION-CLOSURE-ITEMS-17-18` | The three charter amendments actually adopted and digest-re-pinned by the authority that owns them, so the accumulation obligation binds TCM1/TCM2/TCM3 — plus, if the mechanical-rail exposure is to be closed rather than only disclosed, a check that fails when a block is dispatched with its charter unamended. |
 | `G-CHARTER-AMENDMENTS` (residual rows) | Discharged row by row as the amendments above are adopted. No row closes on a proposal; each closes on the ratification act and the re-pinned digest. |

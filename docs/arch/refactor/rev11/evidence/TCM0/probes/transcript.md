@@ -1,21 +1,24 @@
 # TCM0 probe transcript
 
-Produced by `regenerate-transcript.sh`, which runs every probe in this directory against
-`typescript@7.1.0-dev.20260822.1` and redacts absolute paths (`<FIXTURE>` for the per-run OS temp
-fixture root, `<ABS>` for any other absolute path). Nothing else is altered.
+Produced by `regenerate-transcript.sh`, which runs all ten numbered TCM0 probes against
+`typescript@7.1.0-dev.20260822.1` and applies TWO transformations to each probe's output:
+absolute paths are redacted (`<FIXTURE>` for the per-run OS temp fixture root, `<ABS>` for any
+other absolute path), and Go runtime STACK-FRAME lines are filtered out (probe 6 provokes a Go
+panic deliberately; its header line survives, its hundreds of build-specific frames do not).
+Nothing else is altered.
 
 | field | value |
 |---|---|
-| date (UTC) | 2026-08-24 10:56:52 |
+| date (UTC) | 2026-08-25 22:32:26 |
 | host platform | Darwin 25.6.0 arm64 |
 | host state | CONTENDED — other builds and agent processes were running concurrently |
 | node | v20.20.2 |
 | package version | 7.1.0-dev.20260822.1 |
 | package gitHead | d6c4afddb2c55f4a9dea7b59293a99a8fdea1799 |
 
-Probe 1 is measurement only and asserts nothing beyond "the cold path completes"; probes 2-8 exit
-non-zero if any assertion fails. No figure in probe 1 is an acceptance threshold — see
-`../performance-baselines.md`.
+Probe 1 asserts no TIMING; its one assertion is that the cold path completes, so it too exits
+non-zero on a hang. Probes 2-10 exit non-zero if any assertion fails. No figure in probe 1 is an
+acceptance threshold — see `../performance-baselines.md`.
 
 ## `probe1-init-timing.mjs`
 
@@ -23,13 +26,13 @@ non-zero if any assertion fails. No figure in probe 1 is an acceptance threshold
 
 == probe1 init timing — typescript@7.1.0-dev.20260822.1 (gitHead d6c4afddb2c55f4a9dea7b59293a99a8fdea1799)
   iterations: 10
-  API construction: min=1ms median=3ms max=7ms  (spread 5x)
-  first updateSnapshot (cold, opens project): min=49ms median=79ms max=319ms  (spread 7x)
-  second updateSnapshot (unchanged): min=0ms median=1ms max=5ms  (spread 10x)
-  warm median as a fraction of cold median: 0.7%
-  raw construction (ms): 7 3 3 3 3 6 3 1 5 2
-  raw cold (ms): 319 179 77 88 83 69 49 69 72 81
-  raw warm (ms): 1 4 5 1 1 0 0 0 0 1
+  API construction: min=1ms median=1ms max=2ms  (spread 3x)
+  first updateSnapshot (cold, opens project): min=32ms median=33ms max=36ms  (spread 1x)
+  second updateSnapshot (unchanged): min=0ms median=0ms max=0ms  (spread 1x)
+  warm median as a fraction of cold median: 0.5%
+  raw construction (ms): 2 1 1 1 1 1 1 1 1 1
+  raw cold (ms): 34 32 34 35 32 33 36 33 32 36
+  raw warm (ms): 0 0 0 0 0 0 0 0 0 0
   PASS  the cold session path completes on all 10 iterations (no hang) — 10/10, each opening exactly one project
   NOTE: every figure above is an observation on a shared machine, not an acceptance threshold
 
@@ -228,15 +231,141 @@ exit=0
 ```
 
 == probe8 LSP API-session attach — typescript@7.1.0-dev.20260822.1
-  LSP initialize (ms): 20
+  LSP initialize (ms): 7
   PASS  the LSP server advertises real capabilities — positionEncoding=utf-16
-  PASS  custom/initializeAPISession returns a session id and a pipe, without hanging — sessionId=api-session-1 in 2ms
+  PASS  custom/initializeAPISession returns a session id and a pipe, without hanging — sessionId=api-session-1 in 0ms
   PASS  the SYNC client CANNOT attach over a pipe — it refuses by design — threw: Socket connections are not yet supported in the sync client (dist/api/sync/client.js:11)
-  async fromLSPConnection + first updateSnapshot (ms): 69
+  async fromLSPConnection + first updateSnapshot (ms): 21
   PASS  an API client ATTACHED to the LSP session resolves the project and its files — 64 files visible over the attached pipe
   PASS  the attached client answers a real semantic query, not just metadata — resolved interface W with members [id,size] over the attached pipe
-  PASS  NO session-attach hang was observed on this path — session request 2ms, attach+first snapshot 69ms, both well inside the 20000ms budget
+  PASS  NO session-attach hang was observed on this path — session request 0ms, attach+first snapshot 21ms, both well inside the 20000ms budget
   PASS  this harness answered the server's OWN requests, so a hang here would be the server's — 1 server-initiated request(s) answered
+
+FAILURES: 0
+exit=0
+```
+
+## `probe9-transform-response-contract.mjs`
+
+```
+
+== probe9 content-mapper transform RESPONSE contract — typescript@7.1.0-dev.20260822.1
+ok   extension+text alone compiles
+ok   extension alone (text optional)
+ok   missing extension is rejected
+ok   'text' IS the virtual source
+ok   'content' is an ignored unknown field
+ok   unknown fields ignored
+ok   extension .ts accepted
+ok   extension .tsx accepted
+ok   extension .js accepted
+ok   extension .jsx accepted
+ok   extension .mts accepted
+ok   extension .cts accepted
+ok   extension .mjs accepted
+ok   extension .cjs accepted
+ok   extension .d.ts rejected
+ok   extension 'ts' (no dot) rejected
+ok   6-value entry decodes
+ok   5-value entry decodes (features omitted)
+ok   4-value entry rejected
+ok   7-value entry rejected
+ok   object entry rejected
+ok   (start,LENGTH): [2,8,0,8,0] decodes
+ok   (start,END) reading refuted: [2,10,0,8,0] rejected
+ok   vStart+vLen > len(text) rejected
+ok   oStart+oLen > len(original) rejected
+ok   independent lengths: [0,2,0,0,1] (vLen 2, oLen 0)
+ok   nonzero starts legal: [4,4,4,4,0]
+ok   verbatim mismatch -> TS100029
+ok   kind 3 -> TS100040
+ok   features > All -> TS100039
+ok   overlapping virtual spans -> TS100037
+ok   entries may be given out of virtual order
+ok   kind 0 accepted
+ok   kind 1 accepted
+ok   kind 2 accepted
+ok   verbatim maps the error to its exact column (1,5)
+ok   atom collapses the error to the span start (1,1)
+ok   no mappings -> 'no corresponding location' note
+ok   supplemental output accepted
+ok   supplemental #0 is named <file>.0.<ext>
+ok   diagnostics entry surfaces as <source><code>: <messageText>
+ok   diagnostic 'start' is a VIRTUAL offset, mapped back
+ok   diagnostic span outside text rejected
+ok   diagnosticDirectives is an object with two array members
+ok   diagnosticDirectives array form rejected
+ok   directives member is independently optional
+ok   unusedExpectDirectiveDiagnostics member is independently optional
+ok   directives member must be an array
+ok   unusedExpectDirectiveDiagnostics member must be an array
+ok   diagnostic directive 5-value tuple decodes
+ok   diagnostic directive 6-value tuple decodes
+ok   diagnostic directive 4-value tuple rejected
+ok   diagnostic directive 7-value tuple rejected
+ok   diagnostic directive object entry rejected
+ok   diagnostic directive slot 0 must be numeric
+ok   diagnostic directive slot 1 must be numeric
+ok   diagnostic directive slot 2 must be numeric
+ok   diagnostic directive slot 3 must be numeric
+ok   diagnostic directive slot 4 must be numeric
+ok   diagnostic directive slot 5 must be numeric
+ok   directive slot 0 is originalStart
+ok   directive slot 1 is originalLength
+ok   directive slot 2 virtualStart includes diagnostic at offset 4
+ok   directive slot 2 virtualStart excludes diagnostic when moved to 5
+ok   directive slot 3 virtualEnd includes diagnostic through offset 5
+ok   directive slot 3 virtualEnd excludes diagnostic when moved to 4
+ok   directive slot 4 policy 1 reports an unused-expect diagnostic
+ok   directive slot 4 rejects policy 2
+ok   directive slot 5 selects one shared unused-expect diagnostic
+ok   omitted slot 5 rejected when shared unused-expect count is not one
+ok   slot 5 out-of-range unused-expect index rejected
+ok   unused-expect diagnostic code is numeric and prefixes the mapper code
+ok   unused-expect diagnostic messageText is the surfaced message
+ok   unused-expect diagnostic string code rejected
+ok   unused-expect diagnostic numeric messageText rejected
+ok   missing unused-expect code decodes as zero
+ok   missing unused-expect messageText decodes but panics when rendered
+
+FAILURES: 0
+exit=0
+```
+
+## `probe10-external-source-unit.mjs`
+
+```
+
+== probe10 external-source-unit contract — typescript@7.1.0-dev.20260822.1
+
+--- 1. transform input identity ---
+ok   1.0 program type-checks
+ok   1.1 exactly two transforms (carrier + external unit)
+ok   1.2 external unit received a transform of its own
+ok   1.3 carrier's `content` is the CARRIER's own bytes, byte-exact
+ok   1.4 external unit's `content` is the EXTERNAL FILE's own bytes, byte-exact
+ok   1.5 external `content` carries NO carrier bytes (not the referencing file)
+ok   1.6 external `content` is not a concatenation (length == own file length)
+ok   1.7 carrier `content` carries NO external bytes
+ok   1.8 NON-VACUITY: external unit emitting a string breaks the carrier (TS2322)
+
+--- 2. project identity / reachability ---
+ok   2a.1 exactly one project opened
+ok   2a.2 external unit outside `include` IS transformed
+ok   2a.3 external unit runs under the SAME projectHandle as the carrier
+ok   2b specifier ./ext/thing.tplx -> resolves + transforms
+ok   2b specifier ./ext/thing -> TS2307, no transform
+ok   2b specifier ./ext/thing.js -> TS2307, no transform
+ok   2c.1 unreferenced, unincluded external unit is NEVER transformed
+ok   2d.1 `include` membership alone transforms it, with no reference at all
+
+--- 3. configuration identity ---
+ok   3.0 both projects type-check
+ok   3.1 two projects opened, distinct handles
+ok   3.2 each project reports its OWN compilerOptions.target
+ok   3.3 the ONE shared external unit is transformed ONCE PER OWNING PROJECT
+ok   3.4 its two transforms carry the two DISTINCT owning-project handles
+ok   3.5 compile-visible: per-project option reaches the external unit's transform
 
 FAILURES: 0
 exit=0

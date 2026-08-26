@@ -1,25 +1,23 @@
 # TCM0 — Open gaps tracked explicitly
 
+> **HISTORICAL RECORD. `closure-register.md` owns obligation status and ownership; this file owns neither.**
+> Every row below was written while a SUCCESSOR BLOCK was to inherit the remainder. That construct does not
+> exist: the round limit that made one necessary was lifted, this block closed its own remainder (act
+> `4f0efc5e9`), and the
+> two obligations it could not discharge were relocated to named existing owners. Passages naming a
+> successor as owner are kept as the record of what was decided at the time and are NOT current.
+> A reader wanting an obligation's owner or status goes to the register.
+
+The relocation is recorded by `AMD-023` in `docs/arch/architecture-lock/ledger/program-state.toml`'s
+TCM0 entry and bound by acts `54b9d2c29` and `04df58021`.
+
 This file is TCM0's gap register. Each row is either CLOSED, with the evidence that closed it, or
 OPEN, with a named owner and a resolution gate. No row is left unassigned, and "blocked" is not a
 disposition.
 
-**Status, 2026-08-24 — rewritten from the ratified rulings.** Every disposition below is derived
-from `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`. There are
-**16 rows**: **6 CLOSED** and **10 OPEN**. There is no PARTIALLY CLOSED tier.
-
-- **CLOSED by the ruling (5):** `G-TOPOLOGY` (Q2), `G-PERF-NUMBERS` (Q3),
-  `G-TCM0-ACCEPTANCE-ROWS-25-26` (Q4), `G-TCM4-DELETION-ROWS-25-26` (Q4),
-  `G-DIAGNOSTIC-CONVERGENCE` (Q6).
-- **CLOSED on external evidence (1):** `G-LEDGER-VALIDATOR-VIOLATIONS` — closed by another block's
-  landing, an externally verifiable fact, not by TCM0 self-certification.
-- **OPEN, owned by the successor block (6):** `G-LEDGER-SCOPE`, `G-SEMANTIC-API-CERTIFICATION`,
-  `G-PROJECTION-MASK-TOTALITY`, `G-STRING-SURFACE-CITATIONS`, `G-DELETION-CLOSURE-ITEMS-17-18`,
-  `G-CHARTER-AMENDMENTS` (hybrid — its `TCM0.md` row is DISCHARGED by Q2; its two
-  `G-TOPOLOGY`-sourced `TCM2.md`/`TCM3.md` rows are standing pre-dispatch mandates owned by the
-  program orchestrator; its three withdrawn-closure rows transfer to the successor).
-- **OPEN, owners outside TCM0 (4):** `G-CONFORMANCE-FIXTURES-TCM2`, `G-CONFORMANCE-FIXTURES-TCM3`,
-  `G-CONFORMANCE-FIXTURES-TCM4`, `G-TEMPLATE-SRC-PROJECT-CONTEXT-CONTRACT`.
+**Current disposition.** This historical file does not count or label current outcomes. Consult the
+matching obligation in `closure-register.md`, including rows `S3.e`, `S2.a`–`S2.k`, `S5.b`, `S3.g`,
+`S9.c`, `S7.b`, `S10.a`, `A.e`, `X.b`, and `X.c`; that register alone owns their current status.
 
 Every one of the sixteen is a section heading in this file, and every section heading is named
 above.
@@ -58,8 +56,8 @@ is what
 untrue
   of the tree; both paths already share `VerterHost`, the resolver/cache substrate, and the tsgo `--api`
   client crate.
-- The candidate package **has no project-wide references primitive**, refuses completion lists
-needing
+- The candidate package **has no project-wide references primitive**; the probed identifier-position
+  completion needing
   auto-imports, and delivers diagnostics in a wire shape that is not the classic TypeScript one.
 
 **What this pass itself got wrong, and review caught.** Recorded here rather than quietly amended,
@@ -107,7 +105,7 @@ content conflicts (contracts/stacked-prs.md, MAINTAINER-RULING-CONCURRENCY-CEILI
 FAIL: 1 violation(s) ... (mode live)
 ```
 
-`node scripts/effective-state.mjs` exits `0` (69 blocks, 66 rulings, 0 findings, no contradictions).
+`node scripts/effective-state.mjs` exits `0` (69 blocks, 75 rulings, 0 findings, no contradictions).
 
 The three `context_packet_digest` violations were owned by `block/ledger-subordinate-to-code` and
 closed by its landing; that row is therefore **CLOSED**. The one remaining violation is a CM1
@@ -205,7 +203,7 @@ its FIRST act, before any implementation of its own exists, commit that capture,
 in advance, and report distributions over N>=10 iterations with raw samples. That satisfies charter
 item 10's actual rule.
 
-**OPEN half — every absolute figure is WITHDRAWN.** An earlier revision of this row claimed a
+**Historical withdrawn figures; for the current disposition see `closure-register.md` row `S10.a`.** An earlier revision of this row claimed a
 measured warm figure of 2 ms "replaces the defect-derived one" and hardened it into a restatement of
 hard requirement 1. All three legs rejected that, and all three were right:
 
@@ -216,8 +214,8 @@ improvement
   did not exist.
 - The bar is not reproducible. Ten-iteration characterisation on this host gives
 double-digit-or-larger
-  fastest-to-slowest spreads for construction, cold and warm within a single run, and the exact multiple
-  drifts with every re-run: `probes/transcript.md` has recorded 11x/6x/30x, then 54x/6x/2x, then 5x/7x/10x
+  fastest-to-slowest spreads for construction, cold and warm within a single run, and the recorded multiple
+  has varied across committed runs: `probes/transcript.md` has recorded 11x/6x/30x, then 54x/6x/2x, then 5x/7x/10x
   across three different committed versions — see `performance-baselines.md`'s addendum for the current
   figures rather than a number pinned here, which would go stale on the next regeneration. The certified
   candidate fails the "single-digit-millisecond" bar derived from itself in a substantial fraction of runs.
@@ -385,7 +383,7 @@ the previous revision can see the claim was retired on evidence rather than quie
 
 ---
 
-# OPEN — owned by the successor block
+# The rows that were OPEN, and were then owned by the successor block
 
 Six rows. Five of them were marked CLOSED by this branch's own closure pass; that self-certification
 does not stand. `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md` Q1
@@ -397,7 +395,7 @@ withdrawn. The sixth row (`G-CHARTER-AMENDMENTS`) is a hybrid: its `TCM0.md` row
 Q2, and its remaining rows transfer with the closures they derive from. Scope:
 `successor-block-scope.md`.
 
-## G-LEDGER-SCOPE — OPEN (successor block)
+## G-LEDGER-SCOPE — as it stood
 
 **WITHDRAWN as a closure, 2026-08-24 — this row is OPEN.** The findings below stand as evidence and
 are not retracted. What is withdrawn is the "therefore CLOSED" verdict, which was TCM0's own
@@ -406,13 +404,10 @@ Q1 returns this block's round-3 candidate as wrongly scoped, lands its accurate 
 NON-ACCEPTANCE evidence package, and hands the incomplete contract remainder to a **successor block
 with fresh verification**. A closure that needs fresh verification is not a closure.
 
-This row's own text is the clearest case: it discloses that TCM0 "does not ratify" the capability
-characterisation for **14 capabilities it did not individually analyse**. A row with a self-declared
-unratified residue is not closed.
+This was the row's historical residue. Its current disposition is recorded only in
+`closure-register.md` row `S3.e`, backed by the per-capability walk.
 
-**Owner.** The successor block (`successor-block-scope.md`). **Gate.** Fresh, independently
-checkable verification — the successor's closure claim must be verifiable by someone who did not
-produce it.
+**Owner and status: see `closure-register.md`.** This file records what a gap WAS and how it came to be understood; it is not a source of either. The successor block it used to name does not exist — the round limit that made one necessary was lifted and this block closed its own remainder under act `4f0efc5e9`.
 
 **The question.** The steering's charter item 3 names capabilities beyond the `TypeProvider` trait's
 44 methods; `feature-ownership-ledger.md` scopes itself to those 44. Nobody had checked row-by-row
@@ -445,21 +440,32 @@ load-bearing and
 **Why this closes.** The steering scopes the inventory to *"every method, call site, capability, and
 background consumer **of the current `TypeProvider`**"* (`:275`), and its acceptance line reads
 *"every
-existing `TypeProvider` capability has a complete row"* (`:370`). The 14 are not `TypeProvider`
-capabilities — none has a trait method and none has a provider in its request path — so the correct
-entry against that bar is a located verdict, not an ownership row. All 32 checklist items are now
-answered: 17 by an existing row, 14 by a "not a `TypeProvider` capability" verdict with its real
-location, and one (`implementation`) by the same located verdict at a different layer — the
-typescript-plugin carrier-routing override, not a `TypeProvider` method and not a proven absence
-(ledger §3).
+existing `TypeProvider` capability has a complete row"* (`:370`). Against that bar the correct entry
+for a capability with no provider in its request path is a located verdict, not an ownership row.
 
-**Residue, disclosed not hidden — and it is why this row is open.** The 14 are uniformly
-Verter-served today and uniformly unaffected by TCM1-TCM4 (no TypeScript engine is in any of their
-request paths, so becoming a content mapper changes none of them). TCM0 records that
-characterisation as a finding and does **not** ratify it as an ownership assignment for 14 rows it
-did not individually analyse.
+**CORRECTED 2026-08-25 — the uniform claim this paragraph used to make was FALSE, and it is struck.**
+Earlier text here read "The 14 are not `TypeProvider` capabilities — none has a trait method and none
+has a provider in its request path", and `feature-ownership-ledger.md` carried the same blanket
+characterisation. `probes/capability-provider-hop-walk.mjs` walked all seventeen request paths
+individually rather than characterising them together, and **one of them does reach a provider**:
+rename preparation calls `TypeProvider::get_rename_locations` at
+`crates/verter_lsp/src/server/rename_prepare.rs:181`. Rename is therefore a `TypeProvider` capability
+in part, and its provider half belongs to ledger row #15. The remaining sixteen paths reach no
+provider — three further reported hops were read individually and are an identifier collision twice
+over plus one dead `Option<()>` placeholder field.
 
-## G-SEMANTIC-API-CERTIFICATION — OPEN (successor block)
+**The shape of the error is worth more than the correction.** Fourteen paths were located to
+`file:line` and then characterised ALL AT ONCE with a claim none of them had been checked against —
+an assertion wider than the examination that produced it. The claim was even wrong over its own
+citation. Nothing but walking each path separately could have found it, which is exactly why the
+sixteen negatives are now recorded as sixteen results rather than as one sentence.
+
+**Residue, disclosed not hidden.** The remaining sixteen have no TypeScript engine in their request
+paths, so becoming a content mapper changes none of them — but that is now a derived result with a
+re-runnable falsifier (`capability-provider-hop-walk.mjs --check`) rather than an unratified
+characterisation, and the row closes on the derivation, not on the sentence.
+
+## G-SEMANTIC-API-CERTIFICATION — as it stood
 
 **WITHDRAWN as a closure, 2026-08-24 — this row is OPEN.** The findings below stand as evidence and
 are not retracted. What is withdrawn is the "therefore CLOSED" verdict, which was TCM0's own
@@ -473,9 +479,7 @@ discriminating properties — but **no ruling decides** whether the block that i
 run charter item 2's bulk probes, or whether an amendment reallocates them. That undecided question
 is precisely a contract remainder, and it goes to the successor.
 
-**Owner.** The successor block (`successor-block-scope.md`). **Gate.** Fresh, independently
-checkable verification — the successor's closure claim must be verifiable by someone who did not
-produce it.
+**Owner and status: see `closure-register.md`.** This file records what a gap WAS and how it came to be understood; it is not a source of either. The successor block it used to name does not exist — the round limit that made one necessary was lifted and this block closed its own remainder under act `4f0efc5e9`.
 
 **The question.** Charter item 2 requires live probes of project/source-file lookup, `Program` and
 `TypeChecker` operations, bulk symbol/type/reference queries, completions, diagnostics, cancellation
@@ -528,7 +532,7 @@ now CLOSED" at the end of this file). What remains delegated is the `transform` 
 (TCM2); the attach path leaves TCM3 a constraint rather than a probe: the topology is
 ASYNC-CLIENT-ONLY.
 
-## G-PROJECTION-MASK-TOTALITY — OPEN (successor block)
+## G-PROJECTION-MASK-TOTALITY — as it stood
 
 **WITHDRAWN as a closure, 2026-08-24 — this row is OPEN.** The findings below stand as evidence and
 are not retracted. What is withdrawn is the "therefore CLOSED" verdict, which was TCM0's own
@@ -537,13 +541,11 @@ Q1 returns this block's round-3 candidate as wrongly scoped, lands its accurate 
 NON-ACCEPTANCE evidence package, and hands the incomplete contract remainder to a **successor block
 with fresh verification**. A closure that needs fresh verification is not a closure.
 
-Totality is a claim over all fifteen `class × relation` cells and all twenty feature bits; it is
+Totality is a claim over all eighteen `class-domain member × relation` cells and all twenty feature bits; it is
 established only by someone re-deriving the table, which is what "independently checkable" means
 here.
 
-**Owner.** The successor block (`successor-block-scope.md`). **Gate.** Fresh, independently
-checkable verification — the successor's closure claim must be verifiable by someone who did not
-produce it.
+**Owner and status: see `closure-register.md`.** This file records what a gap WAS and how it came to be understood; it is not a source of either. The successor block it used to name does not exist — the round limit that made one necessary was lifted and this block closed its own remainder under act `4f0efc5e9`.
 
 **The question.** The terminal policy named five factors but wrote two class baselines as prose
 conditionals, leaving several of the 20 `SpanMapFeature` bits undecided — a contract that reads as
@@ -551,7 +553,7 @@ terminal but is not.
 
 **What closed it** (detail: `projection-class-contract.md` → closure). The policy is now a total
 function: five factors, each a total map from a closed domain to a 20-bit constant, composing by
-AND, with an explicit computed value for all fifteen `class × relation` cells. Every conditional was
+AND, with an explicit computed value for all eighteen `class-domain member × relation` cells. Every conditional was
 either relocated to the factor that actually decides it or given a fail-closed default with a closed
 widening set:
 
@@ -578,7 +580,7 @@ bits and
 `TokenCompletion` grouping remains TCM1/TCM2's named task. The mask function is total over the class
 axis; choosing a span's class is a different question and this closure makes no claim about it.
 
-## G-STRING-SURFACE-CITATIONS — OPEN (successor block)
+## G-STRING-SURFACE-CITATIONS — as it stood
 
 **WITHDRAWN as a closure, 2026-08-24 — this row is OPEN.** The findings below stand as evidence and
 are not retracted. What is withdrawn is the "therefore CLOSED" verdict, which was TCM0's own
@@ -592,11 +594,9 @@ This row's subject is prior undercounting, and the closure pass undercounted ins
 is explicitly "not claimed exhaustive" after two manual passes each found the prior one incomplete.
 Its charter-amendment consequence for `TCM1.md` transfers with it (`G-CHARTER-AMENDMENTS`).
 
-**Owner.** The successor block (`successor-block-scope.md`). **Gate.** Fresh, independently
-checkable verification — the successor's closure claim must be verifiable by someone who did not
-produce it.
+**Owner and status: see `closure-register.md`.** This file records what a gap WAS and how it came to be understood; it is not a source of either. The successor block it used to name does not exist — the round limit that made one necessary was lifted and this block closed its own remainder under act `4f0efc5e9`.
 
-**The open sub-question.** Is an exhaustive starting count required before TCM1 may be dispatched,
+**Historical sub-question; for the current owner and disposition see `closure-register.md` row `S3.g`.** Is an exhaustive starting count required before TCM1 may be dispatched,
 or is `TCM1.md`'s exit-criterion-1 deletion-based discovery sufficient without one?
 
 **The answer is neither option as posed** (detail: `mapping-products-string-surface.md` → closure).
@@ -638,7 +638,7 @@ change.
 dispatched. Carried as `G-CHARTER-AMENDMENTS` below. This pass does **not** edit `TCM1.md` and does
 not re-pin its digest.
 
-## G-DELETION-CLOSURE-ITEMS-17-18 — OPEN (successor block)
+## G-DELETION-CLOSURE-ITEMS-17-18 — as it stood
 
 **WITHDRAWN as a closure, 2026-08-24 — this row is OPEN.** The findings below stand as evidence and
 are not retracted. What is withdrawn is the "therefore CLOSED" verdict, which was TCM0's own
@@ -647,14 +647,10 @@ Q1 returns this block's round-3 candidate as wrongly scoped, lands its accurate 
 NON-ACCEPTANCE evidence package, and hands the incomplete contract remainder to a **successor block
 with fresh verification**. A closure that needs fresh verification is not a closure.
 
-The accumulation-at-creation mechanism is a proposal that has to be adopted into three ratified
-charters before it can bind anyone; until it is, items 17-18 have a method and no obligation. Its
-charter-amendment consequences for `TCM1.md`/`TCM2.md`/`TCM3.md` transfer with it
-(`G-CHARTER-AMENDMENTS`).
+This paragraph recorded the pre-relocation state. For the current binding and ownership of items 17-18,
+see `closure-register.md` row `S9.c` and `receiving-coverage.md` parts `B1`–`B3`.
 
-**Owner.** The successor block (`successor-block-scope.md`). **Gate.** Fresh, independently
-checkable verification — the successor's closure claim must be verifiable by someone who did not
-produce it.
+**Owner and status: see `closure-register.md`.** This file records what a gap WAS and how it came to be understood; it is not a source of either. The successor block it used to name does not exist — the round limit that made one necessary was lifted and this block closed its own remainder under act `4f0efc5e9`.
 
 **The question.** Which of two resolutions applies — (a) execution-time discovery ratified as the
 closure mechanism, or (b) TCM0 held in LOCKED until TCM1-TCM3 make items 17-18 enumerable?
@@ -663,7 +659,9 @@ closure mechanism, or (b) TCM0 held in LOCKED until TCM1-TCM3 make items 17-18 e
 `TCM3.predecessors = ["TCM0","TCM1"]` — none may be dispatched until TCM0 is ACCEPTED, so requiring
 their output first is the same cycle rejected for the rows #25-26 gate and for `G-TOPOLOGY`. Struck.
 
-**(a) is ratified in a strengthened form** (detail: `deletion-closure.md` → closure). Verbatim (a)
+**(a) was adopted in a strengthened form by `AMD-023`, recorded in
+`docs/arch/architecture-lock/ledger/program-state.toml`'s TCM0 entry and bound by acts `54b9d2c29` and
+`04df58021`** (detail: `deletion-closure.md` → closure). Verbatim (a)
 would re-adopt the execution-time discovery round-2 review already rejected as unassigned. Instead,
 items 17-18 close by **accumulation at creation**: each of TCM1/TCM2/TCM3 records every DTO or API
 type it introduces or orphans whose sole producer/consumer pair lies inside the deleted set,
@@ -675,10 +673,11 @@ entering item 17's list at that moment.
 This preserves the steering's *"Do not defer this inventory to TCM4"* rule (TCM4 still receives
 names, never a search) and resolves `TCM4.md`'s internal contradiction rather than preserving it.
 TCM4 needs no amendment: its required-outcomes item 3, owned-scope item 9 and exit criterion 5
-already defer to whichever resolution TCM0 ratifies. TCM1/TCM2/TCM3 each need one added exit
-criterion — carried as `G-CHARTER-AMENDMENTS` below.
+already defer to whichever resolution is adopted. **The three added exit criteria have since LANDED** on
+`TCM1.md`, `TCM2.md` and `TCM3.md`, and the register records the result; the sentence that said they were
+still needed was true when written and is not now.
 
-## G-CHARTER-AMENDMENTS — OPEN (successor block), and partly DISCHARGED
+## G-CHARTER-AMENDMENTS — as it stood, and partly DISCHARGED
 
 **Disposition, split three ways.**
 
@@ -717,9 +716,7 @@ for `TCM1.md`/`TCM2.md`/`TCM3.md`, and `TCM2.md`'s single-codec negative check (
 from a withdrawn closure cannot stand on its own, so these three rows move to the successor block
 with the closures that generate them.
 
-**Owner.** The successor block (`successor-block-scope.md`). **Gate.** Fresh, independently
-checkable verification — the successor's closure claim must be verifiable by someone who did not
-produce it. The successor must re-establish the underlying findings on independently checkable
+**Owner and status: see `closure-register.md`.** This file records what a gap WAS and how it came to be understood; it is not a source of either. The successor block it used to name does not exist — the round limit that made one necessary was lifted and this block closed its own remainder under act `4f0efc5e9`. The successor must re-establish the underlying findings on independently checkable
 grounds before any charter amendment is proposed from them. This owner and this gate govern the
 three transferred rows only; the two `G-TOPOLOGY`-sourced rows above carry their own.
 
@@ -739,6 +736,10 @@ same restraint already exercised for `MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATIO
 | `TCM3.md` (`TCM3-CHARTER`, sha256 `78efb323…`) | Add owned-scope item 9 and numbered exit criterion 10: the equivalent requirement for the surviving semantic-plane candidates — select using `topology-benchmark-plan.md`; capture and commit the current-path baseline as the block's first act under `performance-baselines.md` requirements 6-8; report the complete comparison; record a stated secondary criterion if multiple candidates remain non-dominated. Proposal text: `tcm1-tcm4-charter-refinements.md`. | `G-TOPOLOGY` |
 | `TCM4.md` | **None identified.** Its existing deferral wording consumes whichever items-17-18 resolution is eventually accepted; since that resolution is withdrawn to the successor, this row is a prediction rather than a settled finding. | — |
 
+**Who acted.** The three added exit criteria LANDED, and the digests were re-pinned, by the act `AMD-023` names.
+The paragraph below records who owns that act and is retained because it is still true of any FUTURE amendment;
+the criteria it describes as outstanding are not.
+
 **Who acts.** Charter re-ratification and digest re-pinning in
 `docs/arch/architecture-lock/ledger/authority-registry.toml` are the program orchestrator's and
 maintainer's acts, never this block's. **No `TCM0-CHARTER` amendment is required before TCM0
@@ -748,10 +749,8 @@ acceptance** — Q2 discharged that row. Of the rows that remain, the split is:
   **proposals** resting on findings the successor must first re-establish; they are not standing
   mandates this register holds open against those blocks' dispatch.
 - The two rows sourced to `G-TOPOLOGY` (`TCM2.md` item 16 / exit 14, `TCM3.md` item 9 / exit 10)
-  **ARE standing mandates**, held open by this register against TCM2's and TCM3's dispatch. Their
-  finding is settled by Q2 and needs no re-establishment; only the adoption act is outstanding, and
-  it is the program orchestrator's. Adopting them is what makes topology selection a blocking exit of
-  those blocks at all.
+  are historical amendment rows here. Their current disposition is owned by `closure-register.md`
+  row `X.b`; this file does not restate it.
 
 **This gate has no mechanical rail, and that is a real weakness rather than an oversight.** Nothing
 in `validate-program-state.mjs` or the authority registry fails if TCM1 is dispatched with its
@@ -793,7 +792,25 @@ The activation/deletion slice — attestation, trust, JSONC safety, missing/malf
 mappers, multi-installation monorepos, project references. **Owner:** TCM4. **Gate:** TCM4's own
 Numbered Exit Criteria. Unchanged by this pass.
 
-## G-TEMPLATE-SRC-PROJECT-CONTEXT-CONTRACT — OPEN
+## G-TEMPLATE-SRC-PROJECT-CONTEXT-CONTRACT — CLOSED by probe (2026-08-25)
+
+**Closed by evidence built, not by a verdict recorded.** `probes/probe10-external-source-unit.mjs`
+establishes all three missing identities against the pinned candidate — transform input is the
+external file's own bytes; the unit is transformed under the referencing project's handle, with
+include-membership not a precondition and a `--build` multi-project case producing one transform PER
+project on distinct handles; and configuration is resolved independently per referencing project. Each
+assertion has an injectable rival hypothesis that drives it red, all four observed failing. The
+contract and the bounds of the proof are written up at `external-source-decision-table.md` §7a.
+Row 7's model moves from NOT YET PROVEN to PROVEN.
+
+**TCM2's own criterion is untouched.** `TCM2.md` requires a positive `<template src>` fixture, and
+that requirement stands word for word: what TCM2 inherits here is a derived contract and a runnable
+probe, which is a head start and not a discharge. A reallocation would need a TCM2 charter amendment,
+and this is not one.
+
+The original row, retained because it records what was missing:
+
+## G-TEMPLATE-SRC-PROJECT-CONTEXT-CONTRACT — the gap as it stood
 
 `external-source-decision-table.md` row 7 asserts `<template src>` is content-mapped because it
 needs the same template→TSX transform as an inline template, which establishes the transform KIND
@@ -807,52 +824,68 @@ rejection test. Unchanged by this pass.
 
 ---
 
-# Two former delegations, now CLOSED by probing rather than by re-delegating
+# Two former delegations: the WORK is done, the OBLIGATIONS are not discharged
 
 Both of these were recorded as deliberate TCM0 decisions to delegate onward, and a review leg
 challenged both as shortfalls against the steering's literal assignment to TCM0. The challenge was
-right, and the resolution was to do the work rather than defend the delegation:
+right, and the resolution was to do the work rather than defend the delegation.
 
-- **The exact content-mapper wire method-name spelling — CLOSED.** §3 had recorded it as
+**Read this section against the distinction it turns on, because an earlier revision of it did not.**
+Running a probe produces EVIDENCE. Discharging an obligation that a ratified, digest-pinned document
+assigns to a named block is a GOVERNANCE ACT, and only a fresh ratification act performs it. TCM0 has
+the evidence. It does not have the act, and it cannot perform one on its own authority — which is
+exactly the restraint it applied when it declined to edit the ruling itself. So neither obligation
+below is discharged, neither downstream block is released from its ratified duty, and what follows
+records probe findings, not closures. Every "CLOSED" verdict this section previously carried is
+WITHDRAWN; the probes and their findings are untouched, because evidence is not what was overstated.
+
+- **The exact content-mapper wire method-name spelling — PROBED; the obligation stands with TCM2.** §3 had recorded it as
 unobtainable from
   a stripped binary via static `strings` extraction and delegated it to TCM2. It IS obtainable, by running
   the compiler: `probes/probe7-mapper-wire-capture.mjs` captures every frame TypeScript sends to a real
   configured mapper. The methods are `initialize` / `openProject` / `transform` / `closeProject`, with
   their params shapes, the `{package}@{version}:{n}` handle format, the configuration keys, and a 5-second
-  `initialize` timeout (§3a). Residual, narrowed and still TCM2's: the `transform` RESPONSE body layout.
-- **The `API.fromLSPConnection` session-attach probe — CLOSED.** §4a had recorded it as out of probe
-budget
+  `initialize` timeout (§3a). Probe 9 subsequently derived the `transform` response body, including the
+  `diagnosticDirectives` entry layouts; §3b names the four limits that remain outside that derivation.
+  TCM2's ratified duty is unchanged: it owns the wire spelling and must satisfy itself of it. What TCM0
+  hands it is evidence that should make that cheap, not a release from the duty.
+- **The `API.fromLSPConnection` session-attach probe — PROBED; the obligation stands with TCM3.** §4a had
+recorded it as out of probe budget
   and delegated it to TCM3. `probes/probe8-lsp-session-attach.mjs` drives a real LSP handshake, obtains the
   API pipe, attaches, and answers a semantic query over it. No hang. It also produced a finding stronger
   than the gap it closed: **attach is ASYNC-CLIENT-ONLY** — the sync client refuses socket connections
   (`dist/api/sync/client.js:11`) — which constrains TCM3's topology choice in a way nothing had recorded.
 
-**A ratified ruling now recites these as open, and TCM0 does not edit it.**
+**A ratified ruling holds these open, and it GOVERNS.**
 `rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md` clause 2 states that "the two open
-verification gaps stay open", gated to TCM2 (wire spelling) and TCM3 (attach probe). On the facts,
-both are now closed by TCM0's own probes. That ruling is a maintainer-ratified, digest-pinned
-document (`authority-registry.toml`), so this evidence pass **does not edit it and does not re-pin
-its digest** — the same restraint applied to the TCM1/TCM2/TCM3 charters, and the same reason:
-rebinding a ratified document's digest without a fresh ratification act is itself a governance
-violation.
+verification gaps stay open", gated to TCM2 (wire spelling) and TCM3 (attach probe). That ruling is a
+maintainer-ratified, digest-pinned document (`authority-registry.toml`), so this evidence pass **does
+not edit it and does not re-pin its digest** — the same restraint applied to the TCM1/TCM2/TCM3
+charters, and the same reason: rebinding a ratified document's digest without a fresh ratification act
+is itself a governance violation.
+
+**That restraint is only coherent if the register respects the ruling's effect as well as its bytes.**
+An earlier revision of this passage declined to edit the ruling and then, four lines later, recorded
+the gaps it holds open as closed and told the downstream blocks they need not repeat the work. That is
+the same violation performed indirectly, and it is the one this pass corrects: leaving a ratified
+document untouched while overriding what it says is not restraint. **Both gaps are OPEN. TCM2 owns the
+wire spelling and TCM3 owns the attach probe, exactly as ratified, until a fresh ratification act says
+otherwise.**
 
 `decisions/ADR-021-typescript-content-mapper-dual-plane.md` carries the same two carry-forward items
 in its own text, and Q1/Q8 exclude every `ADR-021` change from this package, so that document
 likewise stands at its ratified text and does not record probes 7 and 8.
 
-The situation is therefore recorded, not resolved: **both documents are superseded on the facts and
-need a fresh ratification act to say so.** Until that act exists, a reader consulting the ruling
-will be told two gaps are open that the evidence shows are closed. That contradiction is disclosed
-here rather than hidden, and it is a governance item for the maintainer, not something TCM0 may
-settle by editing the artifact that disagrees with it. It does not reopen either gap — probes 7 and
-8 are the evidence, and evidence is not undone by a stale recital — but it does mean the ruling and
-this register disagree until the maintainer acts.
+The situation is therefore recorded, not resolved: **TCM0 holds evidence that would support a fresh
+ratification act narrowing or closing both gaps, and it does not hold the act.** Proposing that act is
+a governance item for the maintainer. Until it exists, the ruling stands as written and this register
+agrees with it rather than contradicting it.
 
-**Nothing downstream is loosened by the closures.** TCM2 still owns the `transform` RESPONSE body
-layout (the narrowed residual of the wire gap) and TCM3 still owns every semantic-plane obligation
-its charter names; what changed is that neither has to re-derive a fact TCM0 has now established,
-and TCM3 inherits a new hard constraint (attach is async-client-only) it would otherwise have
-discovered late.
+**Nothing downstream is loosened.** TCM2 still owns the wire spelling in full, including the
+`transform` RESPONSE body layout it must still obtain; TCM3 still owns the attach probe and every
+other semantic-plane obligation its charter names. What each inherits is evidence and one hard
+constraint TCM0 found while probing (attach is async-client-only) that would otherwise have surfaced
+late — a head start on the work, never a substitute for it.
 
 **The lesson, recorded because it generalises.** Both delegations were honest about what had NOT
 been done, and both were wrong about what COULD be done. "Unobtainable from static analysis" is not

@@ -2,8 +2,8 @@
 // only inventoried: project and source-file lookup, `Program` and `Checker` operations, bulk
 // symbol/type/reference queries, completions, diagnostics, cancellation, and failure behaviour.
 //
-// Every check below executes a real RPC against the candidate's native binary. Nothing here is read
-// from a type declaration.
+// The checks below exercise the live candidate: API operations execute real RPCs against its native
+// binary, while the cancellation check reflects over live client objects. Nothing is read from a type declaration.
 import {
   resolveCandidate,
   loadSyncApi,

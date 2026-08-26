@@ -61,11 +61,18 @@ is no fourth fallback tier.
    fails closed correctly). TCM3 enforces this structurally (a type-state/lifetime rule) wherever the
    surrounding language allows it, per this program's stated preference for structural guards over
    runtime discipline — not left to case-by-case caller diligence.
-4. **The session-attach topology certification TCM0 explicitly did not run.** TCM0 certified the
-   direct-native-client topology candidate live but did NOT probe `API.fromLSPConnection`
-   (`custom/initializeAPISession`) for the session-initialization-hang defect class. TCM3 must run that
-   probe itself before selecting the attach topology candidate — it does not inherit TCM0's certification
-   by association (`tcm1-tcm4-charter-refinements.md`'s TCM3 note).
+4. **The session-attach topology certification, which TCM3 must run itself.** Corrected 2026-08-25:
+   this item read that TCM0 "explicitly did not run" the probe and did NOT probe `API.fromLSPConnection`.
+   **That is false on the evidence** — `evidence/TCM0/probes/probe8-lsp-session-attach.mjs` drives a real
+   LSP handshake, obtains the API pipe via `custom/initializeAPISession`, attaches a second client and
+   answers a `Checker` query over it, finding **no hang**.
+   **The obligation is unchanged**: `rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md`
+   gates this probe to TCM3, and one probe run by another block is evidence, never a discharge of a
+   ratified assignment — TCM3 still runs it before selecting the attach topology candidate and does not
+   inherit certification by association. What TCM3 additionally inherits is a constraint that probe found
+   and nothing had recorded: **attach is ASYNC-CLIENT-ONLY** — the sync client refuses socket connections
+   — plus a bind race requiring bounded retry (`package-lock-and-semantic-api.md` §4a-attach,
+   `tcm1-tcm4-charter-refinements.md`'s TCM3 note).
 5. **A designed cancellation strategy.** The certified candidate's API surface has NO cancellation
    primitive (`package-lock-and-semantic-api.md` §4e: exhaustive grep across both sync and async API
    surfaces, zero hits for `cancel`/`Cancel`/`AbortSignal`). TCM3 designs its own in-flight-query
