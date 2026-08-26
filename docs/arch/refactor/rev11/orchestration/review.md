@@ -76,6 +76,20 @@ suspect, not the effort. Pre-register the disconfirming result before the next r
 reaching it as a question about the method rather than a failure of the block, the same shape as
 stopping rounds that cannot enumerate.
 
+**An explanation can be true and insufficient.** One block's non-convergence was diagnosed as
+resampling a proper subset, and a stop was lifted on that basis for one enumeration over the correct
+universe. The sweep was genuinely better — 1715 rows across 50 artifacts against 1164 across 21 — and
+an independent lane then found roughly thirteen more of the same species. The diagnosis accounted for
+the 39% nobody had examined and did not account for defects surviving a complete enumeration of the
+right population.
+
+**A lifted stop that produces a better result and still does not converge is the outcome most likely
+to be filed as progress.** Say both halves: it was better, and it was not sufficient. Where a surface
+has now failed to converge under two explanations, the disposition for its prose class is
+accept-as-debt with the residue named — never a further round. Structural findings close regardless
+and are not folded into that debt: a gate whose reach is narrower than its claim is not prose drift,
+and a row proven against a different candidate is not a wording defect.
+
 **Never judge convergence on count.** One block's finding counts across nine rounds ran 5, 5, 6, 4,
 5, 6, 7, 6, 6 — flat, and by that measure nine rounds of nothing. Underneath, its blockers went from
 six against legacy text to two against text written in the previous round, and its dominant class from
