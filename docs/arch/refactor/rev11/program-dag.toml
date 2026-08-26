@@ -170,13 +170,13 @@ predecessors = ["B5"]
 
 [[block]]
 id = "C1"
-name = "ModuleResolverCore and non-flow TypeInfoCore"
+name = "ModuleResolverCore convergence and non-flow semantic basis"
 class = "foundational"
 predecessors = ["A6", "B1", "B2", "CM1"]
 
 [[block]]
 id = "C2"
-name = "Staged compile transaction and sealed facade"
+name = "TypeInfo gateway, staged compile transaction, and sealed facade"
 class = "foundational"
 predecessors = ["B3", "B6", "C1"]
 

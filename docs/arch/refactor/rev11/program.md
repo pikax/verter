@@ -218,21 +218,21 @@ Add explicit borrowed/owned preparation, prepare-once/emit-many, inspectable ret
 
 # 6. Track C — One non-flow semantic core and closed compile projections
 
-## C1 — Converge `ModuleResolverCore` and non-flow `TypeInfoCore`
+## C1 — Converge `ModuleResolverCore` and preserve the non-flow semantic basis
 
 **Predecessors:** `A6`, `B1`, `B2`.
 
-Preserve correct current resolution/index/fact foundations, remove alternate resolver semantics, use immutable observation views, and return batched `NeedInputs`. Flow semantics are excluded.
+Preserve correct current resolution/index/fact foundations, remove alternate resolver semantics, use immutable observation views, and return batched `NeedInputs` across both production module-resolution attempt entries. `C1-AC-5A-MODULE-RESOLVER` is C1's accepted attempt surface. Flow semantics and the absent C2-facing `TypeInfoCore::attempt(NonFlowOperation)` gateway are excluded; the gateway remains fully binding under `C2-AC-C1-GAP3-TYPEINFO-GATEWAY-001` rather than being treated as vacuously complete.
 
-**Exit:** lifecycle differs; module/name/type/relation meaning does not.
+**Exit:** lifecycle differs while module/name/type/relation meaning does not; module resolution is I/O-free and attempt-shaped, and the deferred TypeInfo gateway has a registered C2 owner and gate.
 
-## C2 — Staged compile transaction and concrete sealed facade
+## C2 — TypeInfo gateway, staged compile transaction, and concrete sealed facade
 
 **Predecessors:** `B3`, `B6`, `C1`.
 
-Implement prepare/plan/project/emit, anti-replay plan/fact tokens, concrete `CompileTypeInfo`, first-party lifecycle modes, no public semantic trait object, no blanket `Send + Sync`, and bounded load/retry behavior.
+First implement `C2-AC-C1-GAP3-TYPEINFO-GATEWAY-001` as C2's semantic-owned `TypeInfoCore::attempt(NonFlowOperation)` slice, deriving the closed operation table from the real concrete `CompileTypeInfo` projection surface. Then implement prepare/plan/project/emit, anti-replay plan/fact tokens, first-party lifecycle modes, no public semantic trait object, no blanket `Send + Sync`, and bounded load/retry behavior.
 
-**Exit:** project-aware compilation cannot accept another semantic engine or stale/mismatched facts.
+**Exit:** every concrete `CompileTypeInfo` operation routes through the one private, exhaustive, non-blocking TypeInfo gateway, and project-aware compilation cannot accept another semantic engine or stale/mismatched facts.
 
 ## C3 — Closed Vue runtime macro projection
 
