@@ -736,6 +736,12 @@ path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-AC5-GAP3
 sha256 = "7b26645f49a62a7c5de06c6630a87f0d934ae06898c98aedf6a7e46c600ee2de"
 
 [[document]]
+id = "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-SOURCE-POLICY-EVIDENCE.md"
+sha256 = "6c4c1869faef8779867219ef024054a9e11f3dd3c1df7ecc9d3bb222c9bf5193"
+
+[[document]]
 id = "C1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/C1.md"
@@ -769,7 +775,7 @@ sha256 = "1e44da3d4104cb2866f75d267cf3cdf6cebc719c099ba890760f6b6c1c64a834"
 
 [[authorization]]
 block = "C1"
-documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION", "RULING-C1-THREE-GAPS-ADDENDUM", "RULING-2026-08-25-C1-STAGE2-CUTOVER", "RULING-2026-08-26-C1-LANDING-PATH", "RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY", "RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY"]
+documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION", "RULING-C1-THREE-GAPS-ADDENDUM", "RULING-2026-08-25-C1-STAGE2-CUTOVER", "RULING-2026-08-26-C1-LANDING-PATH", "RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY", "RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY", "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE"]
 ratified_by = "architecture ruling seat under explicit maintainer delegation"
 ratified_at = "2026-08-24"
 scope = "Ratifies the C1 charter text — converging ModuleResolverCore and the non-flow TypeInfoCore — as digest-bound authority, with ARCH-ADDENDUM-C1-THREE-GAPS.md governing wherever it conflicts: sealing over semantic-owned snapshots with no foreign implementations, enumerated per-module move/stay/split dispositions in place of a literal relocation, and one closed non-overridable inherent gateway in place of the exhaustive-coverage proof C1-AC-5 specifies. It is charter authority ONLY and dispatches nothing: C1 stays LOCKED, its predecessor set is unsatisfied (CM1 was REVIEW when this was written and is now ACCEPTED with all three mandates PASS; the predecessor condition is met), and RULING-2026-08-24-C1-CHARTER-RATIFIABILITY leaves two findings open against it — Stage 2 requires a separately ratified, digest-bound execution plan binding an exact rebased baseline, caller/deletion inventory, Cargo-edge and guard transition and atomic abort conditions, and no block-branch registry delta may substitute for authorization authored here. Execution authority requires a further record."

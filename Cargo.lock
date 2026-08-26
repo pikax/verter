@@ -4240,6 +4240,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_json",
+ "sha2",
  "static_assertions",
  "syn 2.0.117",
  "tempfile",
