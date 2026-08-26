@@ -1178,3 +1178,38 @@ answer.** Put the agent id in the row; a row without one reads as a stray.
 
 **Register, then dispatch.** Everything that must be true before an actor starts happens before it starts,
 not alongside.
+
+## Deferrals and design lanes
+
+**A deferral's stated cost is only as complete as the inventory available when it was taken.** One
+deferral recorded two bounded consequences, honestly and as completely as it could be stated. A later
+file-by-file mapping found four files with no covering owner — a cost nobody could have written down,
+because the inventory did not exist yet. **"State the cost carefully" does not prevent this.** What
+prevents it is a trigger: **re-state a deferral's cost whenever new inventory touches its scope**,
+because nothing announces the divergence — the deferral row still reads exactly as it did when it was
+right.
+
+**Do not give orphaned files their own owner to close a coverage gap.** Files map to a deferred unit
+because that unit is the work that touches them; splitting them out manufactures one body of work
+across two decompositions. Undefer the unit, or leave the gap named and open.
+
+**A design lane that can edit source will resolve a hard design question by writing one.** So a task
+whose real content is design is dispatched as design, forbidden from editing source, settled by its
+owner, and only then implemented. An implementation lane running against an unsettled design reaches
+for whatever makes the gate green — one produced a cache that returned before the parse counter, which
+is a design answer written as a bug.
+
+**A task that needs a design decision is a design task however it is written up.** Recognise it by
+what it must decide, not by what the plan calls it.
+
+## Identity of work, not of branches
+
+**A duplicate check keyed on branch NAME cannot see the same work under a second name at a different
+base.** Two refs held one body of work — 53 of 54/55 delta entries shared, the same deletions, the
+same gate — and looked like two independent lines. Compare **delta against each ref's own base**, not
+tree against tree: a tree diff conflates base drift with content and reports divergence that is not
+there. Run a control against an unrelated branch so the shared count means something.
+
+**Establish supersession by body, never by name, date or branch status.** A reverted branch carrying a
+byte-identical file is a copy, not a third instrument; a fixture asserting the identical error on the
+identical symbol is subsumed, not merged.
