@@ -246,6 +246,30 @@ discriminate: it supplies a guaranteed error in the successful case and can mask
 the errors that matter. Every line fails for the same reason, so a failure is attributable to the line
 that changed.
 
+**An absence gate introduced by a deletion has a one-shot red, and it expires when the deletion
+lands.** The gate asserts a thing is gone. Its failing state exists only while the thing still
+exists — so the red half is available exactly once, before the change, and never again. Skip it and
+the gate arrives **unfalsifiable from birth**: its passing state has never been distinguished from
+the state of a gate that cannot fail, and nothing afterwards can tell the difference. Run it before
+the deletion, record the red verbatim, land the record with the change. **If it does not go red
+pre-deletion, stop** — it is already unfalsifiable and the deletion is not the cause.
+
+This is capture-before-delete applied to an instrument's falsifiability rather than to a
+measurement, and it is the forward-looking form of *a gate that cannot fail invalidates every result
+it produced*. The usual case is discovered afterwards, when the results are already spent. This one
+is preventable, and only in a window that closes.
+
+**An absence gate that observes out-of-band survives removal of the edge it observes across.** A
+fixture that observes through the type system is coupled to the dependency graph and dies with it; a
+gate that shells out against the dependency graph, or asks the filesystem whether a path exists,
+observes through neither and cannot be blinded that way. When an absence must outlive the removal of
+the edge it looks across, reach for the out-of-band observation — and state the immunity structurally,
+as a property of how it observes, so the argument does not go stale the way an inspection does.
+
+**An empty result with a working control is a measurement; an empty result alone is silence.** Probe
+for something known to be present with the identical probe, or report the count the probe matched
+before filtering. Both cost one command.
+
 **Repairing a blind instrument has two obligations, and the second is the one that gets skipped: the
 instrument must be able to see, and the place you put it must be somewhere the gate looks.** A fix
 that relocates a blind fixture into an excluded package is *indistinguishable from a fix* — the
