@@ -77,6 +77,14 @@ visibility to reach it. Four acceptance rows then wired to a test-only copy of t
 and reverting the production fix left all four green. Ban the state you must not end in, not the
 motion you imagine producing it.
 
+**A row moved to a table the gate does not read is indistinguishable from a row that was closed.** An
+obligation that is genuinely blocked must block visibly; filing it where the instrument cannot see it
+is a deletion wearing a label.
+
+**A zero from a widened instrument needs a positive control.** Widening a file set and finding nothing
+is exactly where people stop checking — plant into the newly-reached directories and watch them fire,
+or the zero is a silent filter rather than a result.
+
 **Dating the debt does not date the defect.** A duplicate that pre-existed at HEAD is inherited debt;
 wiring acceptance rows to it is a fresh act. And delete the dead duplicate once nothing calls it — a
 parallel implementation left in place leaves the next lane the same trap.

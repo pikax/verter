@@ -83,6 +83,11 @@ an independent lane then found roughly thirteen more of the same species. The di
 the 39% nobody had examined and did not account for defects surviving a complete enumeration of the
 right population.
 
+**Accept-as-debt covers claims wider than their evidence, and nothing else.** A present-tense
+assertion that a ratified act has already settled is stale with an authority behind it, not imprecise
+— that gets a ruling, not a debt row. Getting the disposition right for the right reason matters,
+because the wrong reason sends the next instance to the wrong instrument.
+
 **A lifted stop that produces a better result and still does not converge is the outcome most likely
 to be filed as progress.** Say both halves: it was better, and it was not sufficient. Where a surface
 has now failed to converge under two explanations, the disposition for its prose class is
