@@ -71,8 +71,21 @@ argument destroys the file it was meant to restore. And a bare `$VAR:path` is pa
 modifier — brace it. That one has bitten in both directions in a single session: once producing a
 false "file DIFFERS", once destroying files.
 
+**Write scope prohibitions against the OUTCOME, not the act.** "Do not build a parallel driver" was
+honoured exactly: the lane built nothing and reused the duplicate already present, widening its
+visibility to reach it. Four acceptance rows then wired to a test-only copy of the production loop,
+and reverting the production fix left all four green. Ban the state you must not end in, not the
+motion you imagine producing it.
+
+**Dating the debt does not date the defect.** A duplicate that pre-existed at HEAD is inherited debt;
+wiring acceptance rows to it is a fresh act. And delete the dead duplicate once nothing calls it — a
+parallel implementation left in place leaves the next lane the same trap.
+
 **The control must be the REVERT, not a plant.** A plant answers "does this test notice this edit";
-only reverting the fix answers "does this test notice the absence of the fix". A kill matrix planted
+only reverting the fix answers "does this test notice the absence of the fix". This has now proved
+itself at two seats independently — one block lost a review round to a hollow test its symmetric kill
+matrix had certified, another caught four hollow acceptance rows on its first application — so the
+revert is the control, not a refinement of the plant. A kill matrix planted
 an always-fire mutation that a short input did reach, so the test went red and looked discriminating —
 against the mutation the implementer chose, not against the change under review. The same test passed
 identically against the unfixed code, because its input never reached the changed branch. A plant can
