@@ -1874,6 +1874,24 @@ status = "RESCOPE_REQUIRED"
 # defect shape it was created to remove. Every ADMISSIBLE that instrument
 # issued is worth less than it says, so re-assessing an individual finding
 # ahead of it repeats the error at a smaller scale.
+#
+# REMEDIATION RULING RECEIVED AND STORED, NOT RATIFIED (work freeze in force).
+# rulings/ARCHITECT-RULING-2026-08-26-TCM0-REMEDIATION.md, digest
+# d5aca4b4b5c42a82bfb77f1cc9a91074004c6876a7532850306622b703ff66c7 — 9 steps,
+# 32 findings must close, 4 admissible only as named ratified residue, zero
+# rejected. Its instrument ruling SUPERSEDES the interim design above:
+# derive-not-declare is binding, the disclosed-limit floor is overturned as
+# insufficient (it trusts the author to disclose), any input status field is
+# schema-invalid, the register becomes generated output with the remainder
+# COMPUTED as claim atoms minus covered atoms, ADMISSIBLE renames to
+# READY_FOR_MANDATES, and a bounded proof is never independently
+# acceptance-admissible. BLOCKING PREREQUISITE, MAINTAINER-RESERVED: step 2
+# amends this block's charter and adds receiving criteria to four LOCKED
+# digest-bound charters (TCM1-TCM4) — a new authorization no registered act
+# grants; the ruling is executable except where it needs that grant. Known
+# correction owed at briefing time: step 3's 44-method parity figure must
+# carry the reconciliation recorded later in this row (43 classified + 1
+# ruled dead and deleted), or an implementer trips on the deleted method.
 charter_digest = "2ea41dd85befd978e06364d952eb3b262c9b6edba1f1ac8ce37eba9845b91e97"
 context_packet_digest = ""
 base_sha = "fdf754c882c1c8a4ff4cac7395326eeef6fe46a3"
