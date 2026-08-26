@@ -622,6 +622,23 @@ four rows is fixed by writing four, never by authoring a fifth. The tempting rep
 self-consistent by adding content nobody wrote, and a worker optimising for consistency will take it
 unless told not to.
 
+**Four kinds of slot are exempt from the deletion remedy: one that carries a VALUE, one that
+identifies a ROW, one that states the DISTINCTION a status depends on, and one that states the
+CONDITION A GATE FIRES ON.** An abort trigger's text *is* the trigger — a condition nobody can read
+cannot fire. Six of eight triggers were reduced to bare section pointers, and the one that read "the
+harness is deleted only after its conversion is in place" became unreadable; a worker then deleted the
+harness and twenty-four differential cases with it. This bound has now cost a document defect, a false
+status, and a lost test suite, each time by the same remedy applied one category too widely.
+
+**A cardinality control cannot detect a gutted cell.** The pre-registered signature was that the eight
+trigger rows differ in count; it reported eight of eight preserved, and six were hollow. The same
+session had already verified one table by content after this class bit there, and then verified
+another by count — the rule did not transfer between two tables in one sitting.
+
+**Ask for the deletion inventory, not just the delta.** Net removal proves a relocation is not a copy
+and says nothing about whether what was removed was supposed to survive. Reviewing a change by its
+line counts and its passing gates leaves that question unasked.
+
 **Three kinds of slot are exempt from the deletion remedy: one that carries a VALUE, one that
 identifies a ROW, and one that states the DISTINCTION a status depends on.** A clause justifying a
 status is not a restatement of the section that defines the terms — it is the status's reason, and
