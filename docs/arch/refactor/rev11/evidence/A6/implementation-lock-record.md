@@ -584,6 +584,22 @@ blocks are not unlocked here; locking a competitor ratio now would freeze a thre
 shape is unknown. Adding those cells is an extension requiring a new lock record digest and the same
 independent review class — never a relaxation of what is locked now.
 
+**Conformance-oracle corpus pins (added by forward amendment).** FORWARD-STATED: this records what is
+pinned as of this amendment, and asserts nothing about what was locked before it. These pins were not
+previously in this record; that absence was real and is not being rewritten.
+
+| oracle | pinned version | authority in the tree | what compares against it |
+|---|---|---|---|
+| Svelte conformance corpus | `5.56.10` | root `package.json`, `pnpm-lock.yaml`, `scripts/svelte-golden-lib.mjs` (`SVELTE_ORACLE_VERSION`), and each golden's own `oracleVersion` field | the `verter_svelte_conformance` golden corpus suite and the `verter_css_syntax` Svelte compatibility profile |
+| Vue CSS-transform oracle | `@vue/compiler-sfc@3.6.0-rc.5` | root `package.json` | the Vue-owned CSS transform acceptance evidence |
+
+Changing either version is a §4.1 recalibration — written cause, retained old/new calibration data, an
+independent reviewer, amendment of this record, and rerun of affected evidence — never a local edit.
+
+**Explicitly NOT locked by this amendment:** `SVELTE_CASE_ID_SALT` (`svelte-5.56.8`). It is a frozen
+identity-namespace constant, not a version tracker; its own record requires that it never be updated to
+follow the live oracle, and moving it would change existing conformance case identifiers.
+
 **Owner memory budgets and allocator slack.** Not applicable at this lock: the Revision 11 owner
 memory model does not exist, so there is no per-owner budget to state. Whole-process memory **is**
 gated, by the peak-RSS metrics in the locked cell. §11 row U-6.

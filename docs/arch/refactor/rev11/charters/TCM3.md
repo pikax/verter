@@ -172,6 +172,10 @@ this correctly; no edge change is required.
    snapshot correctness across cancellation/regeneration, and the oracle-boundary Unicode/large-file
    classes that reach `TypeSemanticOracle`.
 
+10. **Introduced-or-orphaned type recording** (relocated by AMD-023, derived part `B1`): every DTO or
+    API type this block introduces or orphans whose sole producer/consumer pair lies inside the deleted
+    set is recorded in the deletion manifest's item-17 list. Recording is the obligation; TCM4 verifies.
+
 ## 6. Forbidden
 
 - Routing all existing `TypeProvider` methods through a new IPC layer merely to preserve their old shape.

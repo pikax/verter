@@ -19,6 +19,21 @@ Spawns one manager and resumes it while it remains effective, priming it with th
 architecture and current slice — not the whole doctrine. Validates scope and completion without
 duplicating code review. Sends compact events upward. Never implements.
 
+**A block drives itself to ready. Everything inside its charter is its decision, including the
+authority instruments its own work needs.** It determines which instrument is required, authors it,
+obtains its ratification by consult — that verdict is the decision, not advice — performs the
+ratifying acts its own scope covers, and dispositions its own findings. It does not ask permission to
+proceed with work it owns.
+
+Instruments and evidence accumulate on the block's own line. **The program orchestrator places and
+registers them once, from the ready package, at landing** — not one at a time, mid-flight. A block
+that escalates each instrument as it is produced converts its own authority into a queue.
+
+**Escalate only four things:** a conflict with another block, a change to program structure or a
+dependency edge, an act on an artifact another block owns, or a consult returning inconclusive after
+one attempt. Everything else is the block's, and a question that could be settled by reading the
+charter or the tree is not an escalation.
+
 **A block owner gets its own rulings.** Design, wording, in-charter scope and evidence questions go
 to an architecture consult (`prompts/architect.md`) — read-only, question-shaped and unprimed, asking
 whether something violates a named invariant rather than asking for confirmation. That verdict is the
@@ -117,6 +132,38 @@ slices. Sequential slices when ownership overlaps; parallel only for genuinely i
 
 A block that does not converge after targeted fix cycles is resliced or escalated, not reviewed
 harder.
+
+## Liveness
+
+**A worker stops when it reports and stays stopped.** That is correct for finished work and a defect
+for unfinished work, and nothing notices the difference on its own. Twice in one session a block sat
+idle with work owed, surfaced only because someone happened to ask.
+
+**Keep a roster, not a memory.** Every block is non-complete (live, or parked with the unblocking
+EVENT named so the check is on the event rather than the agent), or complete (stopping is correct;
+do not resume). Sweep it on a cadence: compare the roster against what is actually running, resume
+anything non-complete that stopped, and check whether a parked block's event has fired.
+
+**A worker stamps its stop reason** — reported-and-complete, reported-and-owed, waiting on an
+external run, blocked on a decision. Without it a sweep sees stop-to-resume time and cannot tell idle
+from working, so the cost of a cadence is unmeasurable.
+
+**Sweep cadence is the cheapest lever and the first one to take.** Expected idle per stop is half the
+interval; shortening it cuts idle proportionally at no coordination cost. Take that before adding a
+seat.
+
+**Add a second orchestrator seat only above roughly five non-complete blocks, or when blocks need
+real-time adjudication rather than resumption** — below that a sweep services them and the cost is
+idle minutes. Two seats double the surface for divergent judgement without doubling the checking, and
+this program's expensive failures have been judgement, not throughput. If block count forces it: block
+ownership is disjoint in the roster so no block is addressable twice; one decision authority per
+question class, or two seats rule differently on the same doctrine and both cite it; the roster is the
+only coordination artifact, never seat-to-seat messages about state; and escalation precedence is
+defined, so a trigger neither arrives twice nor is assumed sent by the other seat.
+
+**A standing check that depends on the checker surviving is not standing.** Write the roster to disk,
+where it outlives the session that maintains it; a schedule is ephemeral and the file is not. The
+successor's first act is to read it.
 
 ## Machine resources
 

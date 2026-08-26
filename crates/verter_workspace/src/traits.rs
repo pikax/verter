@@ -103,6 +103,23 @@ pub trait WorkspaceRead: Send + Sync {
         }
     }
 
+    /// Report that a resolver traversal terminated on a stack-safety /
+    /// compute budget rather than on proven absence.
+    ///
+    /// A bounded walk that runs out of budget abandons branches it never
+    /// looked at, so the `None` it hands back is NOT a witness of absence and
+    /// its fact signature never observed the inputs the walk skipped. Any
+    /// reader that carries a resolution transaction must therefore refuse
+    /// cache admission for the attempt: publishing the negative would cache a
+    /// wrong answer under a signature no later edit to the unwalked inputs
+    /// can invalidate.
+    ///
+    /// This is the exact seam [`Self::probe_path`] already uses to route the
+    /// sibling case — an I/O outcome that could not prove absence — to typed
+    /// non-admission. The provided body is a no-op for readers with no
+    /// transaction to refuse on; those callers already produce no admission.
+    fn note_resolution_budget_exhausted(&self) {}
+
     /// Whether every resolver-visible backend mutation is serialized through
     /// this workspace's resolution-world publisher.
     ///

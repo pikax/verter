@@ -846,7 +846,42 @@ impl ProjectResolver {
 
             // Transitive descent, gated by the stack-safety fuse. Exhaustion
             // terminates only this branch; siblings still run.
+            //
+            // Reaching the fuse is NOT by itself a loss of information. This
+            // project's own aliases, `paths` and `baseUrl` were already
+            // checked above in this same iteration; the only thing the fuse
+            // suppresses is the descent into `project.references`. So report
+            // exhaustion only when that descent would have walked something:
+            // a reference that names a known project and is not already on
+            // the active path. A reference already on the active path would
+            // have been skipped as a back-edge anyway, and one naming no
+            // known project contributes nothing — in neither case is any
+            // observation missing, and the negative remains fully proven.
+            //
+            // The active set to reason against is the one the descent WOULD
+            // have had, which is the current set plus `reference` itself
+            // (inserted just below, before recursing). Without that, a project
+            // whose references name itself looks like an onward edge here
+            // while the real descent would skip it as a back-edge.
+            //
+            // When something IS dropped, the branch is UNWALKED rather than
+            // proven empty, so the attempt's observations no longer cover
+            // everything its answer depends on. A transaction-carrying reader
+            // then refuses cache admission for the whole attempt, because a
+            // negative published here would be wrong and its signature —
+            // which never witnessed the skipped projects — could not be
+            // invalidated by editing them.
             if state.remaining_depth == 0 {
+                let descent_would_walk_something = project.references.iter().any(|onward| {
+                    onward.as_str() != reference.as_str()
+                        && !state.active.contains(onward.as_str())
+                        && self.projects.iter().any(|candidate| {
+                            candidate.tsconfig_path.as_deref() == Some(onward.as_str())
+                        })
+                });
+                if descent_would_walk_something {
+                    reader.note_resolution_budget_exhausted();
+                }
                 continue;
             }
             state.remaining_depth -= 1;

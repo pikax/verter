@@ -166,6 +166,10 @@ Every TCM2 timing-sensitive mechanism is classified using `architecture.md` §1.
     completion plus one independent real monotonic watchdog; a test fails if sleep, idle, or polling
     substitutes for a protocol frame.
 
+14. **Introduced-or-orphaned type recording** (relocated by AMD-023, derived part `B1`): every DTO or
+    API type this block introduces or orphans whose sole producer/consumer pair lies inside the deleted
+    set is recorded in the deletion manifest's item-17 list. Recording is the obligation; TCM4 verifies.
+
 ## 5. Forbidden
 
 - A TypeScript-Go historical protocol, semver-selected wire formats, a fallback codec, or a compatibility

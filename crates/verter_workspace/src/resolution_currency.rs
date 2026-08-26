@@ -2492,6 +2492,10 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         outcome
     }
 
+    fn note_resolution_budget_exhausted(&self) {
+        self.transaction.lock().mark_budget_exhausted();
+    }
+
     fn resolution_event_bridge_complete(&self) -> bool {
         true
     }
@@ -2715,6 +2719,18 @@ impl ResolutionTransaction {
 
     pub(crate) fn mark_incomplete_provenance(&mut self) {
         self.non_admission = Some(verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance);
+    }
+
+    /// A resolver traversal stopped on its own bounded budget instead of on
+    /// proven absence, so this attempt consumed only part of its inputs.
+    ///
+    /// Refusing admission is not merely conservative here: the observations
+    /// this attempt recorded do not cover the branches the budget cut off, so
+    /// an admitted negative would be wrong AND unreachable by the ordinary
+    /// invalidation route — a later edit to an unwalked input would not
+    /// invalidate a signature that never witnessed it.
+    pub(crate) fn mark_budget_exhausted(&mut self) {
+        self.non_admission = Some(verter_audit::NonAdmissionReason::BudgetExceeded);
     }
 
     pub(crate) fn mark_untracked_backend(&mut self) {

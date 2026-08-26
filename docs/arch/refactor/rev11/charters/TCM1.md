@@ -262,6 +262,14 @@ into the compiler-core type.
     independently reimplementing the same expected geometry twice in a way that could agree with the same
     bug (steering's own warning under "Required conformance coverage").
 
+11. **`oxc_sourcemap` re-export disposition** (relocated by AMD-023, derived part `A4`): the re-export is
+    dispositioned explicitly — retained with its consumer named, or removed. Criteria 1 and 3 already
+    cover the producer chain and the wire boundary and are not replaced.
+
+12. **Introduced-or-orphaned type recording** (relocated by AMD-023, derived part `B1`): every DTO or
+    API type this block introduces or orphans whose sole producer/consumer pair lies inside the deleted
+    set is recorded in the deletion manifest's item-17 list. Recording is the obligation; TCM4 verifies.
+
 ## 5. Forbidden
 
 - Rescanning generated output to reconstruct semantic mappings.
