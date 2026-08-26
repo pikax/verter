@@ -888,6 +888,29 @@ notes = "Created by the maintainer's beta.4 regression-intake directive to own F
 [[block]]
 id = "C1"
 status = "LOCKED"
+# LANDING-PATH RULING STORED, NOT RATIFIED (work freeze in force).
+# rulings/ARCHITECT-RULING-2026-08-26-C1-LANDING-PATH.md, digest
+# 71ce7601448d75012855a28bb0de1036dc6dff0a755148277b1350c28c9690d7 — 9 steps,
+# 3 items CUT (the origin-by-destination sweep replaced by an identity join;
+# the permanent body-reading metaguard dropped as conflicting with the
+# landed-scanner rule, obligation kept; gutted-cell prose re-ratification
+# deferred outside this block). One atomic commit is ruled the right shape;
+# 6b5a87144 is NOT yet a verified candidate. Mandates attach post-rebase
+# pre-squash to one frozen final-review sha, receipts naming it exactly,
+# never restamped. This block's OWN ratified charter is the mandate
+# authority; the refused block's 36 findings are not a checklist here.
+# LIVE DEFECT verified under freeze: resolution_conversion_tests.rs at the
+# candidate has 24 tests over 18 witness rows with a bare if-let and no else
+# — six converted cases silently assert nothing while the file's own comment
+# forbids exactly that; the historical-preservation claim rests on commit
+# prose. Step 5 (independent re-evidencing) is therefore not optional.
+# PRE-EXISTING TRUNK DEFECT flagged for the A6 owner: the A6 performance
+# cell (performance-gates.toml:137) pins one blob under two identities whose
+# hashes disagree — it cannot validate as written; possibly a one-line ledger
+# correction if the harness is callable.
+# THIS LOCKED STATUS IS STALE BOOKKEEPING, NOT A LIVE GATE: the row gated on
+# a predecessor that is now ACCEPTED. Left as-is under the freeze; the
+# unlock is part of the ruling's step 1 when work resumes.
 charter_digest = ""
 context_packet_digest = ""
 base_sha = ""
