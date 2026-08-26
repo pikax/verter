@@ -635,6 +635,17 @@ trigger rows differ in count; it reported eight of eight preserved, and six were
 session had already verified one table by content after this class bit there, and then verified
 another by count — the rule did not transfer between two tables in one sitting.
 
+**A verification that does not name its tree is not reproducible. Read a production claim at the
+production ref, and state the ref in the claim.** A defect was reported against a site that exists
+only on an unlanded branch; three readers each believed they had verified it, and the surrounding
+steps were verified correctly at the production ref, which is what made it survive. The defect was
+real at a different site — but nothing in the report said which tree any step came from.
+
+**The hinge is where the damage lands, not where the fix goes.** A fix belongs at the site that can
+tell the causes apart. An arm returning a result on an empty value may be correct for a genuine miss
+and have no information to distinguish it from a budget trip, so fixing it there is fixing the wrong
+end.
+
 **Check the sibling arms before concluding a mechanism is absent.** A file-scoped search of a seam
 cannot see correct handling on a neighbouring arm of the very branch that fails, and every enclosing
 scope looks right. One marker was applied on a function's error arm and skipped by an early return

@@ -39,9 +39,11 @@ untracked_count = 0
 # whenever that branch advances.
 integration_branch = "program/architecture-lock"
 integration_head_sha = "8fd0f909103903e123bd7835b289808e54e8f4d4"
-# PROGRAM-LEVEL DEFECT, CONFIRMED LIVE ON TRUNK, OWNER REQUIRED: a resolver driver returns None for
-# every disposition — genuine miss, terminal failure, transient load failure, and a 256-attempt budget
-# fallthrough alike. The consuming seam returns a context on that None, skipping the marker that would
+# PROGRAM-LEVEL DEFECT, CONFIRMED LIVE ON TRUNK, OWNER REQUIRED. CORRECTED: an earlier revision of this
+# note named a driver that does not exist on trunk — it is unlanded code on a block branch, read by
+# three people who each believed they had verified it. The live collapse site is the project-reference
+# depth fuse in the workspace resolver, which returns a bare Option and collapses a fuse trip, a cycle
+# back-edge and a genuine miss into one empty result. The consuming seam returns a context on that None, skipping the marker that would
 # have recorded incomplete provenance, so the query is set, no non-admission is recorded, and the result
 # is ADMITTED CACHEABLE. That breaches the cache-runtime rule that a return-only outcome — overflow,
 # budget exhaustion, cancellation — never publishes. Severity is above a persisted wrong answer: a breach
