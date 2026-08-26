@@ -1824,19 +1824,33 @@ notes = ""
 
 [[block]]
 id = "TCM0"
-status = "IN_PROGRESS"
-# ACCEPTANCE IS OWED AND THE STATUS SAYS SO. This candidate landed on the
-# strength of a bounded acceptance lane (PASS, 0 findings, subject declared
-# before it ran), an ADMISSIBLE admission gate proven to discriminate on two
-# independent refusal paths, a full workspace gate, and a 52-row census with
-# 0 OPEN. That is a substantial evidence set and it is NOT the three review
-# mandates, which have never been dispatched against this sha. An attempt to
-# record ACCEPTED here was refused by the validator naming all three, and the
-# refusal was correct: the block is landed and unaccepted, which is the state
-# the maintainer's landing-is-acceptance ruling exists to prevent. The order
-# was inverted rather than the rule waived — the mandates are owed against
-# ee03874f5, and the status stays IN_PROGRESS until they PASS rather than
-# being advanced to match the landing.
+status = "RESCOPE_REQUIRED"
+# LANDED AND REFUSED. The three mandates have now been dispatched against
+# ee03874f5 and all three returned FAIL — conformance 9 findings, architecture
+# 15, adversarial 12, 36 total, zero lanes clean. Each lane had its subject
+# declared before it ran (the 40-path delta, both shas literal), all three
+# receipts echo the same 40-path subject, the lanes ran concurrently and none
+# saw another's mandate, findings or existence. The row previously read that
+# acceptance was owed on a strong evidence package; the mandates were the thing
+# that package did not contain, and they disagree with it.
+#
+# THE LANDING STANDS AND ACCEPTANCE IS REFUSED. Reverting 40 files of evidence
+# repairs nothing: the tree is not wrong, the claims made about it are. The
+# status is RESCOPE_REQUIRED rather than IN_PROGRESS because the block no
+# longer owes a review round — it owes a redrawn scope whose first item is the
+# instrument, and re-entering a begun status re-runs the full sequencing gate.
+#
+# THE ACCEPTANCE INSTRUMENT IS REMEDIATED FIRST, BEFORE ANY OF THE OTHER 35
+# FINDINGS IS RE-ASSESSED. The architecture lane demonstrated on a scratch copy
+# that flipping one register row from PROVEN-BOUNDED to PROVEN and deleting its
+# REMAINDER and OWNER markers still yields ADMISSIBLE: the markers are checked
+# only while the status declares a bound, so the cheapest way to shed a
+# remainder is to stop declaring one, and a bounded row launders into a full
+# proof by changing one word. The status was added by this program as an honest
+# fourth vocabulary item and its enforcement is optional, which is the same
+# defect shape it was created to remove. Every ADMISSIBLE that instrument
+# issued is worth less than it says, so re-assessing an individual finding
+# ahead of it repeats the error at a smaller scale.
 charter_digest = "2ea41dd85befd978e06364d952eb3b262c9b6edba1f1ac8ce37eba9845b91e97"
 context_packet_digest = ""
 base_sha = "fdf754c882c1c8a4ff4cac7395326eeef6fe46a3"
@@ -1865,11 +1879,18 @@ evidence_digest = ""
 stack_id = ""
 stack_snapshot_digest = ""
 stack_layer = 0
-conformance_review = "PENDING"
+# All three FAILED against candidate ee03874f5. The paired reviewed_sha fields
+# are EMPTY because the validator forbids a non-PASS mandate from carrying one
+# — so the ledger can bind a PASS to the candidate it was issued against and
+# CANNOT bind a FAIL, and the binding survives here in prose only. That
+# asymmetry is a defect on the orchestrator-owned rail and is recorded as owed,
+# not worked around: a reader must not infer from three empty sha fields that
+# the mandates were never run.
+conformance_review = "BLOCKING"
 conformance_reviewed_sha = ""
-architecture_review = "PENDING"
+architecture_review = "BLOCKING"
 architecture_reviewed_sha = ""
-adversarial_review = "PENDING"
+adversarial_review = "BLOCKING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = "DISC-2026-08-22-TYPESCRIPT-CONTENT-MAPPERS"
