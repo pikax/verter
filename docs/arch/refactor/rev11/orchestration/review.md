@@ -201,6 +201,30 @@ the prose explicitly. Where a document's assertions are load-bearing, scope a la
 findings is new work, not a further fix cycle, and a candidate is not ready until each is adopted,
 deferred with its owner and gate named, or rejected with evidence.
 
+## Dispatch invariants for a lane
+
+**Pin every diff range to a frozen sha or the merge-base, never a moving branch name.** A lane told to
+diff against a branch that advances mid-review reports the candidate DELETING whatever the branch
+ADDED — the most alarming finding class there is, a block appearing to destroy someone else's work.
+It has cost the opening minutes of two triages to disprove, and it is entirely an artifact of the
+range.
+
+**State the universe and its selection criterion before sweeping, and justify it against what the
+block is answerable for — never against what its diff contains.** A sweep whose universe was one
+block's changed files read exactly like a complete sweep: same enumerator, same per-item evidence,
+same completeness claim. The universe is the one part a report never checks, so a complete sweep of
+the wrong universe is indistinguishable from a complete one.
+
+**A different universe is a first round, not a fourth.** Where a convergence stop was calibrated on
+resampling a proper subset, iterative repair was never under test and the stop does not apply to the
+first sweep over the correct set.
+
+**Fixing a broken gate is never "repair" under a no-repair stop.** A stop halts work on the artifact,
+never on the instrument — every verdict a broken instrument issued means less than it says, including
+the verdicts the stop itself rests on. One existence check matched only executables while its register
+named eighteen markdown proofs, so eighteen of thirty rows certified without being opened, and a
+planted nonexistent proof returned admissible.
+
 ## Result contract
 
 Every reviewer ends its output with exactly this block, and writes the two marker lines nowhere else:
