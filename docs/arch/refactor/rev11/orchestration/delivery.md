@@ -85,6 +85,17 @@ is a deletion wearing a label.
 is exactly where people stop checking — plant into the newly-reached directories and watch them fire,
 or the zero is a silent filter rather than a result.
 
+**Argue a disposition on which axis it improves.** A permanently-cold correct path is a performance
+defect; an uninvalidatable wrong negative is a correctness defect — a candidate that trades the second
+for the first strictly improves the worse axis, and saying so settles the disposition without
+pretending the cost is zero. Carry the unbounded question WITH the tracked item: how often the cold
+path is hit does not change the disposition, it ranks the follow-on, so it travels with it.
+
+**Evidence about the answer is not evidence about the observation.** A later sibling succeeding says
+the result is obtainable; it says nothing about what the failed attempt observed. A flag recording
+observation coverage cannot be cleared by a fact about the answer, and the closing condition is
+therefore to prove coverage, never to observe a success.
+
 **Dating the debt does not date the defect.** A duplicate that pre-existed at HEAD is inherited debt;
 wiring acceptance rows to it is a fresh act. And delete the dead duplicate once nothing calls it — a
 parallel implementation left in place leaves the next lane the same trap.
@@ -102,6 +113,28 @@ certify a hollow test; a revert cannot.
 **When two findings look independent, check whether one is the reason the other survived.** A false
 positive and a non-discriminating test were one hole from both sides: the test that should have caught
 the first was placed exactly where the condition never fires.
+
+**Ask of every assertion: does it get evaluated against a tree where it could fail?** One question,
+four answers, all found in one block.
+
+- **Assertion shadowing.** An assertion that panics before a later one runs leaves the later one with
+  no control under any revert — every revert reddens the first. Scenario shadowing hides which case
+  noticed; assertion shadowing hides whether the assertion ran at all, and both are invisible in a
+  green suite and in a red one. It bites the most load-bearing check systematically, because a summary
+  assertion is habitually written after the specific one that fails first.
+- **Fold in, or split out.** Fold an assertion in when it is hollow alone and needs a positive
+  neighbour to reach the changed path; split it out when a neighbour firing first prevents it running.
+  Prefer splitting to neutralising the neighbour — neutralising is a plant, proving the property once
+  by a technique nobody re-runs, where a split makes it provable by the control every round already
+  does.
+- **A bare negative is not hollow when a revert reddens it.** The red is itself the demonstration that
+  the property can be violated in this fixture, and it is better than a paired positive for the same
+  reason. **Say so in the mapping** — otherwise a later reader correctly recognises the unpaired
+  pattern and "fixes" it by bolting on a redundant positive, which is a correct rule applied where its
+  precondition does not hold.
+- **Ask how the test fails when its fixture drifts.** Drift producing green is a time bomb; drift
+  producing red defends itself. One test's predecessor drifted to green, which is exactly what made it
+  hollow.
 
 **A test carrying N scenarios needs a control per scenario, not one per test.** A full revert reddened
 one boundary test through a single scenario, so the others had no proof they discriminate at all —
