@@ -221,9 +221,16 @@ not a failure, a void. One amend at 03:21 against a build that started at 03:10 
 produced nothing usable, and the single failure it reported was exactly the signature of old code
 meeting a new test, which is what a torn build looks like and is not evidence either way.
 
-**When a candidate returns for repair, the landing seat stops.** Gating a candidate that is
-simultaneously being fixed is the same defect from the other side, and the orchestrator that sends a
-candidate back owes the landing seat that instruction in the same message.
+**When a candidate returns for repair, EVERY seat reading that tree stops — not only the landing
+seat.** A gate, a review lane and an adjudicating consult all read the working tree, and all three
+are void if it moves under them. Two were lost to this within twenty minutes, from opposite
+directions: one orchestrator did not stop a gate before sending the candidate back, the other
+authorised a write without checking who was reading.
+
+**Neither could see the other's reader, and that is the fixable half.** Record readers per worktree
+where both can see them — the liveness roster is the place — so "who is reading this tree" is a
+lookup rather than a question nobody thought to ask. A worktree with an active reader is not
+writable, and the check is worth more than the rule it enforces.
 
 **The working branch is frozen from the moment a candidate freezes until it lands or returns.** Every
 commit to it while a landing is in flight puts the candidate behind again, and the candidate cannot
