@@ -60,6 +60,17 @@ tests; the change is formatting, naming or mechanical movement; or mutation woul
 excessively expensive, or weaker than an available proof. Not using it needs no waiver — the manager
 records the evidence that does exist.
 
+**The control must be the REVERT, not a plant.** A plant answers "does this test notice this edit";
+only reverting the fix answers "does this test notice the absence of the fix". A kill matrix planted
+an always-fire mutation that a short input did reach, so the test went red and looked discriminating —
+against the mutation the implementer chose, not against the change under review. The same test passed
+identically against the unfixed code, because its input never reached the changed branch. A plant can
+certify a hollow test; a revert cannot.
+
+**When two findings look independent, check whether one is the reason the other survived.** A false
+positive and a non-discriminating test were one hole from both sides: the test that should have caught
+the first was placed exactly where the condition never fires.
+
 **A plant must assert the SURVIVORS, not only the victim.** Proving a mutation is present, unique and
 new checks the victim — and a restore that silently failed leaves a tree where the plant correctly
 finds nothing to change, so victim-side verification passes vacuously. One capture staged its restore
