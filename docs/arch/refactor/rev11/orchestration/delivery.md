@@ -215,6 +215,16 @@ moved the same field.
 
 **Only the program orchestrator dispatches the landing agent.**
 
+**A frozen candidate does not mutate, and the freeze binds both ends.** A gate compiles the working
+tree, not the commit, so an edit landing mid-run produces a result attributable to no tree at all —
+not a failure, a void. One amend at 03:21 against a build that started at 03:10 cost 28 minutes and
+produced nothing usable, and the single failure it reported was exactly the signature of old code
+meeting a new test, which is what a torn build looks like and is not evidence either way.
+
+**When a candidate returns for repair, the landing seat stops.** Gating a candidate that is
+simultaneously being fixed is the same defect from the other side, and the orchestrator that sends a
+candidate back owes the landing seat that instruction in the same message.
+
 **The working branch is frozen from the moment a candidate freezes until it lands or returns.** Every
 commit to it while a landing is in flight puts the candidate behind again, and the candidate cannot
 rebase without moving the subject a lane is measuring. The cost lands entirely on the landing: either
