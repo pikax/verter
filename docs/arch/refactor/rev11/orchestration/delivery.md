@@ -635,6 +635,18 @@ trigger rows differ in count; it reported eight of eight preserved, and six were
 session had already verified one table by content after this class bit there, and then verified
 another by count — the rule did not transfer between two tables in one sitting.
 
+**Retiring one arm of a differential silently strengthens every assertion written against its
+normalised view.** Those assertions were written under the comparison layer's equivalences and
+exclusions — one read as "a manifest consult exists, under the ratified boundary difference" and
+became "this exact variant exists" the moment that layer went. The conversion preserved the assertion
+and dropped the normalisation it depended on.
+
+**The failing one is the only assertion that announced itself.** A lost normalisation can equally make
+an assertion pass vacuously or pass on the wrong fact, and the surviving greens are silent on the
+question because they never exercise the changed arm. Enumerate the cross product — every equivalence
+and exclusion the deleted layer applied, against every assertion converted out from under it — rather
+than resting on the tests that still pass.
+
 **Ask for the deletion inventory, not just the delta.** Net removal proves a relocation is not a copy
 and says nothing about whether what was removed was supposed to survive. Reviewing a change by its
 line counts and its passing gates leaves that question unasked.
