@@ -43,7 +43,11 @@ integration_head_sha = "8fd0f909103903e123bd7835b289808e54e8f4d4"
 # note named a driver that does not exist on trunk — it is unlanded code on a block branch, read by
 # three people who each believed they had verified it. The live collapse site is the project-reference
 # depth fuse in the workspace resolver, which returns a bare Option and collapses a fuse trip, a cycle
-# back-edge and a genuine miss into one empty result. The consuming seam returns a context on that None, skipping the marker that would
+# back-edge and a genuine miss into one empty result. SCOPE CORRECTED, verified in source by the
+# landing seat: only the budget trip breaches. A genuine miss is correctly cacheable and is not a
+# defect; terminal and transient load failures already route to typed non-admission through the
+# sibling observe-path arm. The row named four dispositions collapsing alike and the evidence supports
+# one — the escalation was right and its scope was wider than what was shown. The consuming seam returns a context on that None, skipping the marker that would
 # have recorded incomplete provenance, so the query is set, no non-admission is recorded, and the result
 # is ADMITTED CACHEABLE. That breaches the cache-runtime rule that a return-only outcome — overflow,
 # budget exhaustion, cancellation — never publishes. Severity is above a persisted wrong answer: a breach
