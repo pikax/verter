@@ -1555,6 +1555,29 @@ landing_order = 2
 # that has not seen it remains owed.
 candidate_sha = "6d225a80214712ef482c14114c38b9e23eed27c5"
 candidate_tree = "f03ebb10f9d69372939fb62602e1dc811e1eec38"
+# RESTRUCTURE RULING RATIFIED (program orchestrator; this comment is the act).
+# rulings/ARCHITECT-RULING-2026-08-26-J1-RESTRUCTURE.md, digest
+# a83195ea292b39c25715ef42d7dcab17357d4c4bea0a52e88196bb7b65fc73e4, 16 steps,
+# is ratified whole: block/j1-slice4 is NOT landable as-is; its content is
+# donor material. J1 stays ONE acceptance unit; the thirteen sub-blocks are
+# private train layers, never DAG blocks; sub-block 13 is the atomic cutover
+# boundary. The per-file triage lane previously assigned by this orchestrator
+# is CANCELLED, superseded by the ruling's hunk-level obligation mapping
+# (step 2), which includes css-cutover as an obligation source. The three
+# mandates attach once, to the final post-rebase frozen cumulative sha;
+# sub-block reviews are iteration checks only. Sub-blocks 1-5 and 6b get full
+# retroactive re-verification; 6a is designed anew; 13 and the A1/A2 gate are
+# produced anew with their own RED/GREEN, never inherited from css-cutover.
+# Step 10a's "all eleven canaries" figure is CONFIRMED against source: exactly
+# 11 canary! invocations in crates/verter_compiler/tests/allocator_canaries.rs.
+# TWO PREREQUISITES THE RULING REQUIRES AND DOES NOT PROVISION, both in step 14
+# where VERIFIED is defined, both maintainer-owned and BLOCKING that step, not
+# J1's to solve: (1) re-enabling the skipped shipped-configuration lane
+# (SHIPPED_CFG_LANE_ENABLED, scripts/gate-internals.mjs), which may surface
+# failures J1 did not cause; (2) an adequately resourced isolated runner —
+# none exists in the repo docs or the recorded facts.
+# WORK FREEZE (maintainer, 2026-08-26): all NEW work is stopped as of this
+# ratification; in-flight seats finish their current write and hold.
 accepted_sha = ""
 accepted_tree = ""
 landing_equivalence_digest = ""
