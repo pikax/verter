@@ -60,6 +60,17 @@ tests; the change is formatting, naming or mechanical movement; or mutation woul
 excessively expensive, or weaker than an available proof. Not using it needs no waiver — the manager
 records the evidence that does exist.
 
+**A plant must assert the SURVIVORS, not only the victim.** Proving a mutation is present, unique and
+new checks the victim — and a restore that silently failed leaves a tree where the plant correctly
+finds nothing to change, so victim-side verification passes vacuously. One capture staged its restore
+into the index rather than the worktree, so the run re-executed the pre-fix tree while logging a clean
+single-line kill: a red result that looked exactly right for the wrong reason. Count the untouched
+parts of the fix too; that is what separates "I killed one line" from "I am testing a different tree
+than I think I am."
+
+**Record a discarded run in the evidence.** A near-miss that is deleted teaches nobody, and the next
+reader repeats it.
+
 **Prove a plant applied** — present, unique and new. `perl`, `sed` and `grep` exit 0 on a non-match,
 so an exit code never proves a mutation landed, and a verification search hitting a pre-existing
 occurrence is a false positive. A green planted run means the plant failed until proven otherwise.
