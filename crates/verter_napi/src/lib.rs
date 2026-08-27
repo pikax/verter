@@ -11,8 +11,6 @@
 //! This crate exposes the same `VerterHost` API as [`verter_wasm`] with
 //! CSS entry points that require a Node.js runtime:
 //!
-//! - **`processStyle`** — live conflated CSS processor (scoped CSS, CSS
-//!   Modules, `v-bind()` replacement). Remains exported.
 //! - **`prepareStyleForPreprocessor`** — rewrites `v-bind()` in AUTHORED
 //!   style content before it is handed to an external SCSS/Less/Stylus
 //!   preprocessor.
@@ -112,96 +110,13 @@ fn host_error(err: host::HostError) -> Error {
 // Available in NAPI but not WASM because CSS preprocessing (LESS/SCSS/Stylus)
 // requires Node.js. The WASM host processes styles inline during compilation.
 //
-// Live export: `processStyle` (conflated processor). Dual-exported beside it:
+// Three-way explicit-boundary CSS API:
 // - `prepareStyleForPreprocessor` — AUTHORED-dialect v-bind rewrite, before
 //   an external SCSS/Less/Stylus preprocessor.
 // - `transformVueStyle` — v-bind + CSS-Modules + scoped-selector cascade
 //   over CSS the caller already treats as plain.
 // - `analyzeStyle` — read-only fact extraction, no rewrite.
 // =============================================================================
-
-#[napi(object)]
-#[derive(Default)]
-pub struct ProcessStyleOptions {
-    /// Scope ID string (e.g., "a4f2eed6")
-    pub scopeId: String,
-    /// Whether this style block is scoped
-    pub scoped: Option<bool>,
-    /// Whether this is a CSS module block
-    pub isModule: Option<bool>,
-    /// Custom module name (None = "$style")
-    pub moduleName: Option<String>,
-    /// Source filename for source map generation
-    pub filename: Option<String>,
-    /// Whether to generate source maps
-    pub sourcemap: Option<bool>,
-}
-
-#[napi(object)]
-pub struct ProcessStyleVBind {
-    /// The original expression text (e.g., "color" or "theme.color")
-    pub expression: String,
-    /// The generated CSS variable name (e.g., "--a4f2eed6-color")
-    pub varName: String,
-}
-
-#[napi(object)]
-pub struct ProcessStyleResult {
-    /// Transformed CSS code
-    pub code: String,
-    /// Source map as JSON string (if sourcemap was requested)
-    pub sourceMap: Option<String>,
-    /// CSS module class mappings (original → hashed), each entry is [original, hashed]
-    pub moduleClasses: Vec<Vec<String>>,
-    /// CSS module variable name (e.g. "$style" or custom name from `<style module="...">`)
-    pub moduleName: Option<String>,
-    /// v-bind() expressions found and replaced
-    pub vBindVars: Vec<ProcessStyleVBind>,
-}
-
-/// Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
-///
-/// Called by the Vite plugin after preprocessing SCSS/Less/Stylus to valid CSS.
-/// For plain CSS blocks, the Rust compiler handles this inline during compileForVite().
-///
-/// @param css - Valid CSS string (already preprocessed if originally SCSS/Less/etc.)
-/// @param options - Processing options (scope ID, scoped, modules, etc.)
-/// @returns Processed CSS with scoping/modules applied, plus v-bind metadata
-#[napi]
-pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<ProcessStyleResult> {
-    let css = buffer_to_string(css)?;
-    catch_panic(std::panic::AssertUnwindSafe(|| {
-        let core_options = verter_compiler::css::ProcessStyleOptions {
-            scope_id: &options.scopeId,
-            scoped: options.scoped.unwrap_or(false),
-            is_module: options.isModule.unwrap_or(false),
-            module_name: options.moduleName.as_deref(),
-            filename: options.filename.as_deref(),
-            sourcemap: options.sourcemap.unwrap_or(false),
-        };
-
-        verter_compiler::css::process_style(&css, &core_options)
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
-    }))?
-    .map(|result| ProcessStyleResult {
-        code: result.code.into_owned(),
-        sourceMap: result.source_map,
-        moduleClasses: result
-            .module_classes
-            .into_iter()
-            .map(|(k, v)| vec![k, v])
-            .collect(),
-        moduleName: result.module_name,
-        vBindVars: result
-            .v_bind_vars
-            .into_iter()
-            .map(|v| ProcessStyleVBind {
-                expression: v.expression,
-                varName: v.var_name,
-            })
-            .collect(),
-    })
-}
 
 fn css_dialect(value: Option<&str>) -> verter_css_syntax::CssDialect {
     match value {
@@ -1673,7 +1588,8 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 //         getVirtualFile, listVirtualFiles, remove, setImportDependencies,
 //         getAnalysis, getTsx, lint, getCodeActions, getLintRuleMetadata,
 //         getDocumentSymbols, matchCssSelectors, computeCrossFileOptimizations
-// - NAPI-only: processStyle (requires Node.js), getTsc, compileMany, getMetrics
+// - NAPI-only: prepareStyleForPreprocessor / transformVueStyle / analyzeStyle
+//   (CSS entry points), getTsc, compileMany, getMetrics
 // =============================================================================
 
 // ═══════════════════════════════════════════════════════════════════════════

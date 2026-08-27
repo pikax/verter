@@ -1,11 +1,9 @@
-//! Three-way style boundary: prepare / transform / analyze, dual-exported
-//! beside live `process_style`.
+//! Three-way style boundary: prepare / transform / analyze.
 
 use napi::bindgen_prelude::Buffer;
 use verter_napi::{
-    analyze_style, prepare_style_for_preprocessor, process_style, transform_vue_style,
-    AnalyzeStyleOptions, AnalyzeStyleResult, PrepareStyleForPreprocessorOptions,
-    PrepareStyleForPreprocessorResult, ProcessStyleOptions, ProcessStyleResult,
+    analyze_style, prepare_style_for_preprocessor, transform_vue_style, AnalyzeStyleOptions,
+    AnalyzeStyleResult, PrepareStyleForPreprocessorOptions, PrepareStyleForPreprocessorResult,
     TransformVueStyleOptions, TransformVueStyleResult,
 };
 
@@ -165,11 +163,6 @@ fn analyze_style_keeps_valid_classes_beside_an_untrusted_selector() {
             .all(|entry| !entry[0].starts_with("bad")),
         "a dynamic selector must not invent a static module-class fact"
     );
-}
-
-#[test]
-fn public_process_style_remains_exported() {
-    let _: fn(Buffer, ProcessStyleOptions) -> napi::Result<ProcessStyleResult> = process_style;
 }
 
 #[test]

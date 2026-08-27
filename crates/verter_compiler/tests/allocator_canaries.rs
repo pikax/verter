@@ -14,12 +14,12 @@
 //!
 //! # Style-pipeline allocation instruments
 //!
-//! This binary records live allocations through both the lightningcss
-//! `css::process_style` entry point and `style_planner::run_vue_style_cascade`,
-//! one count per `crates/verter_bench/benches/css_bench.rs` generator category
-//! (the same input generators `verter_bench::css_identities` registers). The
-//! numbers this binary prints (`eprintln!` markers, `cargo test -- --nocapture`)
-//! are the live instruments. The 1.2x ceiling lives in
+//! This binary records live allocations through
+//! `style_planner::run_vue_style_cascade`, one count per
+//! `crates/verter_bench/benches/css_bench.rs` generator category (the same
+//! input generators `verter_bench::css_identities` registers). The numbers
+//! this binary prints (`eprintln!` markers, `cargo test -- --nocapture`) are
+//! the live instruments. The 1.2x ceiling lives in
 //! `converged_style_pipeline_allocation_within_ratified_ceiling`, which
 //! compares each category against the recaptured legacy counts committed in
 //! this file.
@@ -197,84 +197,8 @@ mod style_planner_gen {
     }
 }
 
-mod legacy_process_style_allocation_baseline {
-    //! One canary per `css_bench.rs` generator category, each driving the
-    //! generated CSS through the `css::process_style` entry point with a
-    //! fixed representative option set (`scoped: true`, `is_module: false`)
-    //! so counts are comparable across categories and, later, against the
-    //! `style_planner` pipeline. `scoped: true` is used uniformly (rather
-    //! than mirroring each generator's own bench group's options) because
-    //! the ratified bound compares ALLOCATION COUNT PER CATEGORY across the
-    //! two pipelines, not per exact option permutation — a fixed option set
-    //! removes that as a confound.
-
-    use verter_compiler::css::{process_style, ProcessStyleOptions};
-
-    use super::style_planner_gen::*;
-    use super::{alloc_count, reset_alloc_counter};
-
-    pub(super) fn measure(css: &str) -> u64 {
-        let options = ProcessStyleOptions {
-            scope_id: "a4f2eed6",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        };
-        // Warm any one-time lazy initialisation before the measured call.
-        let _ = process_style(css, &options).unwrap();
-        reset_alloc_counter();
-        let result = process_style(css, &options).unwrap();
-        let count = alloc_count();
-        std::hint::black_box(&result);
-        count
-    }
-
-    macro_rules! canary {
-        ($name:ident, $marker:literal, $css:expr) => {
-            #[test]
-            fn $name() {
-                let css = $css;
-                let count = measure(&css);
-                eprintln!("J1_LEGACY_ALLOC[{}] = {count}", $marker);
-                assert!(
-                    count > 0,
-                    "baseline sanity: `{}` must observe non-zero allocations \
-                     through legacy css::process_style",
-                    $marker
-                );
-            }
-        };
-    }
-
-    canary!(class_rules, "class_rules", generate_class_rules(N));
-    canary!(
-        descendant_selectors,
-        "descendant_selectors",
-        generate_descendant_selectors(N)
-    );
-    canary!(
-        pseudo_selectors,
-        "pseudo_selectors",
-        generate_pseudo_selectors(N)
-    );
-    canary!(selector_lists, "selector_lists", generate_selector_lists(N));
-    canary!(v_bind_rules, "v_bind_rules", generate_v_bind_rules(N));
-    canary!(v_bind_dotted, "v_bind_dotted", generate_v_bind_dotted(N));
-    canary!(deep_rules, "deep_rules", generate_deep_rules(N));
-    canary!(slotted_rules, "slotted_rules", generate_slotted_rules(N));
-    canary!(mixed_vue, "mixed_vue", generate_mixed_vue(N));
-    canary!(global_rules, "global_rules", generate_global_rules(N));
-    canary!(
-        repeated_classes,
-        "repeated_classes",
-        generate_repeated_classes(5, 10)
-    );
-}
-
 mod style_planner_allocation_baseline {
-    //! Counterpart to `legacy_process_style_allocation_baseline`.
+    //! Live allocation canaries for the converged style pipeline.
     //!
     //! Same generated CSS inputs (the shared `super::style_planner_gen`
     //! module), driven through `style_planner::run_vue_style_cascade` — the
@@ -380,26 +304,18 @@ mod style_planner_allocation_baseline {
     }
 }
 
-/// Dual-pipeline instrument: both pipelines measured in one process against
-/// the same generated CSS. Asserts each half is non-zero. The 1.2x ratio is
+/// Dual-pipeline instrument: the converged pipeline measured in one process
+/// against the same generated CSS. Asserts non-zero. The 1.2x ratio is
 /// `converged_style_pipeline_allocation_within_ratified_ceiling`.
 mod dual_pipeline_allocation_instrument {
-    use super::legacy_process_style_allocation_baseline as lightningcss;
     use super::style_planner_allocation_baseline as planner;
     use super::style_planner_gen::all_categories;
 
     #[test]
-    fn each_category_observes_both_pipelines() {
+    fn each_category_observes_the_converged_pipeline() {
         for (name, css) in all_categories() {
-            let lightningcss_count = lightningcss::measure(&css);
             let planner_count = planner::measure(&css);
-            eprintln!(
-                "J1_ALLOC_BOTH[{name}] lightningcss={lightningcss_count} planner={planner_count}"
-            );
-            assert!(
-                lightningcss_count > 0,
-                "{name}: lightningcss pipeline must allocate"
-            );
+            eprintln!("J1_ALLOC_CONVERGED[{name}] planner={planner_count}");
             assert!(
                 planner_count > 0,
                 "{name}: style_planner pipeline must allocate"
@@ -431,7 +347,6 @@ mod dual_pipeline_allocation_instrument {
 mod allocation_ceiling {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::legacy_process_style_allocation_baseline as legacy;
     use super::style_planner_allocation_baseline as converged;
     use super::style_planner_gen::all_categories;
 
@@ -599,20 +514,6 @@ mod allocation_ceiling {
         measured.insert("class_rules", (base * 12) / 10); // exactly 1.2x
         check_allocation_ceiling(&universe, &retained, &measured)
             .expect("exactly 1.2x is within the ceiling");
-    }
-
-    #[test]
-    fn retained_legacy_allocation_matches_live_legacy_pipeline() {
-        let retained = retained_map();
-        let mut live = BTreeMap::new();
-        for (name, css) in all_categories() {
-            live.insert(name, legacy::measure(&css));
-        }
-        assert_eq!(
-            live, retained,
-            "live legacy counts must equal the recapture committed in this file \
-             — a copied donor table that drifted from this tree fails here"
-        );
     }
 
     #[test]

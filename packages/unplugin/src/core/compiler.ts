@@ -3,8 +3,6 @@ import { createRequire } from "module";
 import type {
   VerterHost,
   Workspace,
-  ProcessStyleOptions,
-  ProcessStyleResult,
   TransformVueStyleOptions,
   TransformVueStyleResult,
 } from "@verter/native";
@@ -61,10 +59,6 @@ export function peekHost(): VerterHost | null {
 export function resetHost(): void {
   host?.close();
   host = null;
-}
-
-export function processStyle(css: string, options: ProcessStyleOptions): ProcessStyleResult {
-  return loadNative().processStyle(css, options);
 }
 
 export function transformVueStyle(

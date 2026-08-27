@@ -19,6 +19,7 @@ mod client_framework_manifest_ts_freshness;
 mod component_meta_audit;
 mod component_meta_audit_corpus;
 mod corpus_audit_tests;
+mod css_attribution_chargeable;
 mod defect_b_corpus_prevention_gate;
 mod exposed_binding_regression;
 mod fact_matrix;

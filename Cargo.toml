@@ -40,7 +40,6 @@ sha2 = "0.11"
 syn = { version = "2.0", features = ["full", "visit"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-lightningcss = { version = "1.0.0-alpha.71", features = ["visitor"] }
 verter_css_syntax = { path = "crates/verter_css_syntax" }
 verter_debug_assert = { path = "crates/verter_debug_assert" }
 verter_macro_dto = { path = "crates/verter_macro_dto" }

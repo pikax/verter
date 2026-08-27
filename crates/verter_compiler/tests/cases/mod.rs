@@ -4,6 +4,7 @@ mod css_class_extraction_uses_style_syntax_ir;
 mod ide_no_baked_prefix_overwrite;
 mod ide_script_recovery_guard;
 mod indexed_prop_lookup;
+mod no_lightningcss_dependency;
 mod no_post_codegen_string_surgery;
 mod no_session_dependency;
 mod official_parse_manifest_guard;

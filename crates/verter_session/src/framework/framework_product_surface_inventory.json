@@ -1,10 +1,10 @@
 {
-  "note": "The reachable public/default request surface for framework PRODUCTS other than Vue runtime-render output. One row per SEMANTIC case; transport spellings that converge on the same typed host request are listed as routeAliases of that one case, never as separate cases. `hostEntryPoint` rows are proven live by the tests in framework_product_surface_tests.rs (calling them is the existence proof the compiler enforces); `routeAliases` are read-verified citations by default; the ones the feature-gated transport suite DRIVES are the NAPI and WASM host methods listed in NAPI_EXECUTED / WASM_EXECUTED (transport_route_equivalence_tests.rs) plus the NAPI free function `processStyle`, and the bundler aliases itemized below. The three-way CSS NAPI exports (`prepareStyleForPreprocessor`, `transformVueStyle`, `analyzeStyle`) are classified below as module exports unused by bundlers; `processStyle` remains the live bundler-facing CSS spelling. A driven ALIAS is held to route identity plus publication — the bundler's product must equal the in-process host's product for the same typed request — never to a semantic case of its own.",
+  "note": "The reachable public/default request surface for framework PRODUCTS other than Vue runtime-render output. One row per SEMANTIC case; transport spellings that converge on the same typed host request are listed as routeAliases of that one case, never as separate cases. `hostEntryPoint` rows are proven live by the tests in framework_product_surface_tests.rs (calling them is the existence proof the compiler enforces); `routeAliases` are read-verified citations by default; the ones the feature-gated transport suite DRIVES are the NAPI and WASM host methods listed in NAPI_EXECUTED / WASM_EXECUTED (transport_route_equivalence_tests.rs) plus the NAPI free function `transformVueStyle`, and the bundler aliases itemized below. The CSS NAPI exports `prepareStyleForPreprocessor` and `analyzeStyle` are classified below as module exports unused by bundlers; `transformVueStyle` is the live bundler-facing CSS spelling. A driven ALIAS is held to route identity plus publication — the bundler's product must equal the in-process host's product for the same typed request — never to a semantic case of its own.",
   "bundlerAliasStatus": [
     "DRIVEN, route identity + publication: the style lane (packages/unplugin/src/index.ts:68) and the virtual-node inventory listing beside it (index.ts:63), reached through the Svelte carrier transform, by the_bundler_style_lane_publishes_the_hosts_style_products_and_none_without_a_style_block. It loads every style sub-request the published wrapper points at, compares code + whole map against the host's Style{0} node for the profile that entry builds, and rests its count on a Vue carrier with no `<style>`, which must publish none.",
     "DRIVEN, route identity + publication: the load lane (index.ts:668), by the_bundler_load_lane_serves_the_hosts_node_and_nothing_for_an_unregistered_carrier. A `?vue&type=template` request is never cached by the carrier transform, so answering it means the lane fell through to the host; the product is compared against the host's Template node, and the same request for a carrier the plugin never transformed must publish nothing.",
     "DRIVEN, route identity + publication: the runtime-render batch lane (index.ts:101), by the_bundler_inline_transform_publishes_the_hosts_runtime_render_batch_product. The non-Vite inline product is compared against compile_many on the RuntimeRender lane for the same canonical and an equivalent profile. That lane is documented to publish the same Main bytes as the host-backed lane and the test MEASURES that equality, so the identity proves the bundler publishes the host's render product but does not by itself discriminate which of the two host lanes produced it; a divergence turns the measurement red and makes the test able to tell them apart.",
-    "DRIVEN, route identity + publication: the non-Vite CSS scoping lane (index.ts:863) and the processStyle wrapper beneath it (packages/unplugin/src/core/compiler.ts:64), by the_non_vite_style_lane_scopes_through_the_shared_css_processor. The request carries `&scoped` because an unscoped request is returned byte-for-byte and would be indistinguishable from a lane that never ran, and the CSS carries a `v-bind()` payload whose rewrite names the component id of the cached profile the lane read. The product is compared against verter_compiler::css::process_style on the same bytes and scope id; the same request for a carrier the plugin never transformed must come back untouched.",
+    "DRIVEN, route identity + publication: the non-Vite CSS scoping lane (index.ts applyNonViteStyleLane) and the transformVueStyle wrapper beneath it (packages/unplugin/src/core/compiler.ts), by the_non_vite_style_lane_scopes_through_the_shared_css_processor. The request carries `&scoped` because an unscoped request is returned byte-for-byte and would be indistinguishable from a lane that never ran, and the CSS carries a `v-bind()` payload whose rewrite names the component id of the cached profile the lane read. The product is compared against verter_compiler::style_planner::transform_vue_style on the same bytes and scope id; the same request for a carrier the plugin never transformed must come back untouched.",
     "DRIVEN, route identity + publication + write attribution: the recompile lane (index.ts:803), by the_bundler_pre_compile_lane_publishes_the_hosts_products_for_a_real_project and the_bundler_cross_file_recompile_write_is_attributed_to_the_recompile_call. buildStart is driven over a real two-file project with a production config and pre-compile on, and both published modules are compared against the host Main nodes; that first test still makes no claim about the cross-file block, because a recompiled module is byte-identical to the pre-compiled one (crates/verter_session/src/host_resolve/virtual_file_pipeline.rs passes prop_constness_overrides: None) and the products cannot tell the two apart. The second test attributes the block against the SHIPPED native artifact rather than a session_metrics-enabled build: an observation of host.getVirtualFile taken WHILE buildStart runs names the recompile call. The hook reaches that call at TWO places, not one — the recompile block and the compiled-style read the SVELTE pre-compile branch performs (readCompiledStyleArtifacts at index.ts:785, calling getVirtualFile at :68) — so the attribution rests on three things rather than on that count: the lane fixture is two .vue files so the Svelte branch cannot fire, the two reads differ in request shape (a bare canonical versus a ?verter&type=style&index=... request) and the test asserts EQUALITY against the bare child canonical, and the crossFileOptimize-off control observes zero on the same fixture. The observation is taken at the native module boundary on the same @verter/native the plugin resolves, by a wrapper that delegates and returns the real value. Three readings: the lane observes exactly one read and it is the CHILD; the same drive with crossFileOptimize off observes NONE while still publishing both host products; and a run in which the boundary substitutes a marked value for that one return publishes, for the child and only the child, the host product followed by exactly that marker, which is the write. Each reading is proven discriminating by a plant in the plugin source itself (dropping the call, dropping the cache write while keeping the call, and ignoring the crossFileOptimize flag), every plant proven present, unique and new before its run and restored byte-identically."
   ],
   "corpusProperties": [
@@ -328,7 +328,7 @@
       "id": "css.transform-vue-style",
       "hostEntryPoint": null,
       "requestType": "(plain CSS bytes, TransformVueStyleOptions)",
-      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:334 is a NAPI module export that verifies the bytes through the shared native-CSS parse entry and wraps verter_compiler::style_planner::transform_vue_style. A requested map is published only when cascade_requested_source_map returns a composed or identity map for the returned bytes. Bundlers do not yet call it.",
+      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs is a NAPI module export that verifies the bytes through the shared native-CSS parse entry and wraps verter_compiler::style_planner::transform_vue_style. A requested map is published only when cascade_requested_source_map returns a composed or identity map for the returned bytes. This is the live bundler-facing CSS spelling.",
       "products": [
         "css",
         "source-map",
@@ -346,12 +346,22 @@
       "routeAliases": [
         {
           "transport": "napi",
-          "entryPoint": "crates/verter_napi/src/lib.rs:334",
+          "entryPoint": "crates/verter_napi/src/lib.rs",
           "spelling": "transformVueStyle (free function, not a host method)"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/core/compiler.ts",
+          "spelling": "transformVueStyle -> loadNative().transformVueStyle"
+        },
+        {
+          "transport": "bundler",
+          "entryPoint": "packages/unplugin/src/index.ts",
+          "spelling": "transformVueStyle (Vite and non-Vite CSS scoping lanes)"
         }
       ],
       "successForRepresentativeInput": {
-        "vue": "yes; unused by bundlers",
+        "vue": "yes",
         "svelte": "n/a — this is a Vue plain-CSS transform"
       }
     },
@@ -379,47 +389,6 @@
       "successForRepresentativeInput": {
         "vue": "yes; unused by bundlers",
         "svelte": "n/a — this is a Vue style fact surface"
-      }
-    },
-    {
-      "id": "css.process-style",
-      "hostEntryPoint": null,
-      "requestType": "(css bytes, ProcessStyleOptions)",
-      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:171 calls verter_compiler::css::process_style directly; it never constructs or consults a VerterHost, so it carries no compile slot, no diagnostics snapshot and no publication relationship to any other product. This remains the live NAPI module export.",
-      "products": [
-        "css",
-        "source-map",
-        "css-module-classes",
-        "v-bind-vars"
-      ],
-      "profileAxes": [
-        "scoped",
-        "isModule",
-        "moduleName",
-        "filename",
-        "scopeId",
-        "sourcemap (ACCEPTED AND IGNORED: both return sites of crates/verter_compiler/src/css/mod.rs hard-code source_map: None at :110 and :145)"
-      ],
-      "routeAliases": [
-        {
-          "transport": "napi",
-          "entryPoint": "crates/verter_napi/src/lib.rs:171",
-          "spelling": "processStyle (free function, not a host method)"
-        },
-        {
-          "transport": "bundler",
-          "entryPoint": "packages/unplugin/src/core/compiler.ts:64",
-          "spelling": "processStyle -> loadNative().processStyle"
-        },
-        {
-          "transport": "bundler",
-          "entryPoint": "packages/unplugin/src/index.ts:863",
-          "spelling": "processStyle (non-Vite CSS scoping lane)"
-        }
-      ],
-      "successForRepresentativeInput": {
-        "vue": "yes",
-        "svelte": "n/a — the Vite/Vue style lane is its only caller"
       }
     }
   ],

@@ -1,7 +1,7 @@
 /**
  * @ai-generated - Tests for @verter/native exports.
- * Verifies that VerterHost, live `processStyle`, and the three-way CSS
- * style API (transformVueStyle / prepareStyleForPreprocessor / analyzeStyle)
+ * Verifies that VerterHost and the three-way CSS style API
+ * (transformVueStyle / prepareStyleForPreprocessor / analyzeStyle)
  * work correctly with both string and Buffer inputs.
  */
 import { basename, sep } from "node:path";
@@ -9,7 +9,6 @@ import { execFileSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
 import {
   VerterHost,
-  processStyle,
   transformVueStyle,
   prepareStyleForPreprocessor,
   analyzeStyle,
@@ -942,9 +941,9 @@ describe("VerterHost type declarations in sync with native binary", () => {
     ).toEqual([]);
   });
 
-  it("top-level exports should include processStyle, the three-way CSS style API, and VerterHost", () => {
+  it("top-level exports should include the three-way CSS style API and VerterHost", () => {
     const native = require("./index.js");
-    expect(typeof native.processStyle).toBe("function");
+    expect(typeof native.processStyle).toBe("undefined");
     expect(typeof native.transformVueStyle).toBe("function");
     expect(typeof native.prepareStyleForPreprocessor).toBe("function");
     expect(typeof native.analyzeStyle).toBe("function");
@@ -986,26 +985,6 @@ describe("VerterHost type declarations in sync with native binary", () => {
   });
 });
 
-describe("processStyle", () => {
-  it("should scope CSS selectors (string input)", () => {
-    const result = processStyle(".foo { color: red }", {
-      scopeId: "abc123",
-      scoped: true,
-    });
-
-    expect(result.code).toContain("abc123");
-  });
-
-  it("should scope CSS selectors (Buffer input)", () => {
-    const result = processStyle(Buffer.from(".foo { color: red }"), {
-      scopeId: "abc123",
-      scoped: true,
-    });
-
-    expect(result.code).toContain("abc123");
-  });
-});
-
 describe("transformVueStyle", () => {
   const SOURCE = ".foo { color: red }";
   // Minimal surgical edit: the scoped-selector rewrite inserts the scope
@@ -1030,6 +1009,15 @@ describe("transformVueStyle", () => {
     });
 
     expect(result.code).toBe(EXPECTED);
+  });
+
+  it("leaves bytes a Vue-owned transform does not touch identical to the authored input", () => {
+    const result = transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: false,
+    });
+
+    expect(result.code).toBe(SOURCE);
   });
 
   it("publishes a requested source map with real multi-point authored coordinates", () => {

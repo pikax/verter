@@ -153,6 +153,24 @@ impl<'a> AuthoredStyleInput<'a> {
         self.prepared = Some(ir);
         self
     }
+
+    /// Authored input whose dialect is native CSS — for fact-only callers
+    /// that do not name `CssDialect` themselves.
+    #[must_use]
+    pub const fn new_css(
+        code: &'a str,
+        source_name: &'a str,
+        source_space_token: &'a str,
+        content_artifact_token: &'a str,
+    ) -> Self {
+        Self::new(
+            code,
+            CssDialect::Css,
+            source_name,
+            source_space_token,
+            content_artifact_token,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -626,8 +644,7 @@ fn build_transform_output(
 }
 
 /// `want_source_map` mirrors the caller's `RuntimeCompileOptions::source_map`
-/// intent (`css::process_style`'s `ProcessStyleOptions::sourcemap` has the
-/// same role). `CodeTransform::generate_map` + `to_json_string()` are not
+/// intent. `CodeTransform::generate_map` + `to_json_string()` are not
 /// free — a caller that does not want a source map must not pay for building
 /// and stringifying one. When `false`, `emit` skips that machinery and
 /// returns an empty `source_map` / `raw_map: None`, matching the
@@ -702,6 +719,18 @@ pub fn transform_vue_v_bind(
         facts,
         true,
     )
+}
+
+/// Fact-only v-bind extraction over an already-parsed IR. Does not itself
+/// call `parse_style_ir`. `Err` means at least one `v-bind()` target in this
+/// block was too ambiguous to trust — callers must fail OPEN (never treat
+/// this as "no v-binds present").
+pub fn v_bind_vars_from_parsed_ir(
+    ir: &StyleSyntaxIr,
+    dialect: CssDialect,
+    scope_id: &str,
+) -> Result<Vec<VBindVar>, StyleRewriteFailure> {
+    v_bind_edits_from_ir(ir, dialect, scope_id).map(|(_edits, vars)| vars)
 }
 
 /// Collects the authored v-bind edits/vars from an already-parsed IR, without
@@ -1563,6 +1592,7 @@ pub fn run_vue_style_cascade(
     scoped: bool,
     want_source_map: bool,
 ) -> VueStyleCascadeOutcome {
+    verter_audit::attribute_scope!(CssTransform);
     let mut owned: Option<(String, MapComposition)> = None;
     let mut facts = VueStyleFacts::default();
     let mut stage_failures = Vec::new();
@@ -1668,6 +1698,7 @@ pub fn run_vue_style_cascade_verified(
     scoped: bool,
     want_source_map: bool,
 ) -> VueStyleCascadeOutcome {
+    verter_audit::attribute_scope!(CssTransform);
     let code = verified.code();
     let source = StyleSourceIdentity {
         source_name,
@@ -1793,6 +1824,7 @@ pub fn run_vue_style_cascade_post_preprocess(
     scoped: bool,
     want_source_map: bool,
 ) -> VueStyleCascadeOutcome {
+    verter_audit::attribute_scope!(CssTransform);
     let mut facts = VueStyleFacts::default();
     let mut stage_failures = Vec::new();
     let post = run_post_v_bind_stages(

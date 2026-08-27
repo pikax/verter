@@ -1848,74 +1848,117 @@ fn build_style_analyses_from_inventory(
             continue;
         };
 
-        let prepass_result = vue_style_semantics.then(|| {
+        let analysis_lang = analysis_lang(dialect, lang_attr);
+        let prepared_ir = verter_semantic::analysis::parse_style_ir_for_analysis(
+            css_content,
+            content_offset,
+            analysis_lang,
+        )
+        .map(verter_compiler::style_planner::PreparedStyleIr::new);
+
+        // v-bind facts. `Err` means at least one `v-bind()` target in this
+        // block was too ambiguous for the rewrite stage to trust — fail OPEN
+        // below (never silently "no v-binds"). Spans from a shared parse are
+        // already SFC-absolute (`CssSource` origin = `content_offset`); the
+        // fallback `transform_vue_v_bind` parse is origin-0 and needs the
+        // offset added.
+        let v_bind_result = vue_style_semantics.then(|| {
             let component_name = verter_compiler::compile::extract_component_name(canonical_id);
             let scope_id = verter_compiler::compile::get_hash(&component_name);
-            verter_compiler::css::prepass::prepass(css_content, &scope_id)
+            if let Some(prepared) = &prepared_ir {
+                verter_compiler::style_planner::v_bind_vars_from_parsed_ir(
+                    prepared.ir(),
+                    prepared.ir().dialect(),
+                    &scope_id,
+                )
+                .map(|vars| (vars, true))
+            } else {
+                let input = verter_compiler::style_planner::AuthoredStyleInput::new_css(
+                    css_content,
+                    "vue-style-analysis",
+                    "vue-style-analysis",
+                    "vue-style-analysis",
+                );
+                verter_compiler::style_planner::transform_vue_v_bind(input, &scope_id).map(
+                    |outcome| {
+                        let vars = match outcome {
+                            verter_compiler::style_planner::StyleRewriteOutcome::Unchanged {
+                                facts,
+                            }
+                            | verter_compiler::style_planner::StyleRewriteOutcome::Rewritten {
+                                facts,
+                                ..
+                            } => facts.v_bind_vars,
+                        };
+                        (vars, false)
+                    },
+                )
+            }
         });
 
-        // Build VueStyleInput from prepass results. Each v-bind carries its
-        // authored expression span (SFC-absolute) and the SOUND OXC-derived free
-        // identifier roots — the single owning usage fact consumed by liveness
-        // marking and compile-input assembly.
         let vue_input = verter_semantic::analysis::VueStyleInput {
-            v_binds: prepass_result
-                .iter()
-                .flat_map(|prepass| &prepass.v_bind_vars)
-                .map(|vb| {
-                    let roots = verter_compiler::compile::style_usage::expression_free_roots(
-                        &vb.expression,
-                    );
-                    verter_semantic::analysis::VBindInput {
-                        expression: vb.expression.clone(),
-                        quoted: false,
-                        start: content_offset + vb.expr_start,
-                        end: content_offset + vb.expr_end,
-                        generated_var_name: Some(vb.var_name.clone()),
-                        roots_complete: roots.is_some(),
-                        expr_roots: roots.unwrap_or_default(),
-                    }
-                })
-                .collect(),
+            v_binds: match v_bind_result {
+                Some(Ok((vars, already_absolute))) => {
+                    let span_base = if already_absolute { 0 } else { content_offset };
+                    vars.into_iter()
+                        .map(|vb| {
+                            let roots =
+                                verter_compiler::compile::style_usage::expression_free_roots(
+                                    &vb.expression,
+                                );
+                            verter_semantic::analysis::VBindInput {
+                                expression: vb.expression.clone(),
+                                quoted: false,
+                                start: span_base + vb.expr_start,
+                                end: span_base + vb.expr_end,
+                                generated_var_name: Some(vb.var_name.clone()),
+                                roots_complete: roots.is_some(),
+                                expr_roots: roots.unwrap_or_default(),
+                            }
+                        })
+                        .collect()
+                }
+                Some(Err(_)) => vec![verter_semantic::analysis::VBindInput {
+                    expression: String::new(),
+                    quoted: false,
+                    start: content_offset,
+                    end: content_offset,
+                    generated_var_name: None,
+                    roots_complete: false,
+                    expr_roots: Vec::new(),
+                }],
+                None => Vec::new(),
+            },
             special_pseudos: vec![],
         };
 
         let sfc_source_len = source.len() as u32;
-        let analysis_lang = analysis_lang(dialect, lang_attr);
-        let (mut analysis, prepared_ir) =
-            match verter_semantic::analysis::parse_style_ir_for_analysis(
-                css_content,
-                content_offset,
-                analysis_lang,
-            ) {
-                Some(ir) => {
-                    let analysis = verter_semantic::analysis::build_scanned_style_analysis_from_ir(
-                        analysis_lang,
-                        &ir,
-                        vue_input,
-                        !vue_style_semantics || *scoped,
-                        is_module,
-                        module_name,
-                        content_offset,
-                    );
-                    (
-                        analysis,
-                        Some(verter_compiler::style_planner::PreparedStyleIr::new(ir)),
-                    )
-                }
-                None => (
-                    verter_semantic::analysis::build_scanned_style_analysis(
-                        analysis_lang,
-                        css_content,
-                        vue_input,
-                        !vue_style_semantics || *scoped,
-                        is_module,
-                        module_name,
-                        content_offset,
-                    ),
-                    None,
+        let (mut analysis, prepared_ir) = match prepared_ir {
+            Some(prepared) => {
+                let analysis = verter_semantic::analysis::build_scanned_style_analysis_from_ir(
+                    analysis_lang,
+                    prepared.ir(),
+                    vue_input,
+                    !vue_style_semantics || *scoped,
+                    is_module,
+                    module_name,
+                    content_offset,
+                );
+                (analysis, Some(prepared))
+            }
+            None => (
+                verter_semantic::analysis::build_scanned_style_analysis(
+                    analysis_lang,
+                    css_content,
+                    vue_input,
+                    !vue_style_semantics || *scoped,
+                    is_module,
+                    module_name,
+                    content_offset,
                 ),
-            };
+                None,
+            ),
+        };
         analysis.block_ref = inventory.block_ref(*id);
         if let Some(css) = &analysis.css {
             css.debug_assert_valid_spans(sfc_source_len);

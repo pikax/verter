@@ -8,7 +8,8 @@
 //! Exposes the same `VerterHost` API as [`verter_napi`], minus platform-only
 //! features that require Node.js:
 //!
-//! - **Missing:** `processStyle` (CSS preprocessing needs Node.js).
+//! - **Missing:** the NAPI CSS three-way (`prepareStyleForPreprocessor` /
+//!   `transformVueStyle` / `analyzeStyle`) — CSS preprocessing needs Node.js.
 //!
 //! ## FFI architecture
 //!
@@ -257,7 +258,7 @@ fn default_known_dependency_extensions() -> Vec<String> {
 // API parity with NAPI (crates/verter_napi):
 // - Both: new, resolve, upsert, applyBlockOverrides, getVirtualFile,
 //         listVirtualFiles, remove, setImportDependencies, getAnalysis
-// - NAPI-only: processStyle (requires Node.js)
+// - NAPI-only: prepareStyleForPreprocessor / transformVueStyle / analyzeStyle
 // =============================================================================
 
 /// In-memory virtual file host for Vue SFC compilation (WASM variant).

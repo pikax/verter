@@ -1165,6 +1165,7 @@ pub fn parse_style_ir(
     dialect: CssDialect,
     mode: CssParseMode,
 ) -> Result<StyleSyntaxIr, CssParseFailure> {
+    verter_audit::attribute_n!(CssParse, source.text().len());
     #[cfg(any(test, feature = "test-support"))]
     STYLE_IR_PARSE_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
 

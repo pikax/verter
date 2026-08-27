@@ -40,7 +40,6 @@ pub mod code_transform;
 // independently-drifting version of it.
 pub use oxc_sourcemap;
 
-pub mod css;
 pub mod js_number;
 pub mod strip_types;
 

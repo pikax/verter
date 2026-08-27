@@ -10,9 +10,11 @@
 
 use std::hint::black_box;
 
-use verter_compiler::css::{
-    modules::apply_css_modules, prepass::prepass, scoped::apply_scoped, ProcessStyleOptions,
+use verter_compiler::style_planner::{
+    run_vue_style_cascade, transform_vue_css_modules, transform_vue_scoped_css,
+    transform_vue_v_bind, AuthoredStyleInput, PlainCssInput, StyleRewriteOutcome,
 };
+use verter_css_syntax::CssDialect;
 
 /// The scope id every benchmark and allocation probe uses.
 pub const SCOPE_ID: &str = "a4f2eed6";
@@ -157,16 +159,55 @@ pub fn allocation_category_universe() -> Vec<(&'static str, String)> {
 // =============================================================================
 
 /// The exact measured pipeline call behind one benchmark identity.
+///
+/// Variant names keep the pre-cutover identity strings (`process_style/...`)
+/// so the A31 exact-set comparison against the committed legacy baseline
+/// stays the same set. Bodies drive `style_planner`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CssMeasuredOp {
-    /// Full `css::process_style` pipeline with the given option axes.
+    /// Full Vue style cascade with the given option axes.
     ProcessStyle { scoped: bool, is_module: bool },
-    /// Isolated `css::prepass::prepass`.
+    /// Isolated authored `v-bind()` rewrite.
     Prepass,
-    /// Isolated `css::scoped::apply_scoped`.
+    /// Isolated scoped-selector rewrite.
     ApplyScoped,
-    /// Isolated `css::modules::apply_css_modules`.
+    /// Isolated CSS-Modules class rewrite.
     ApplyCssModules,
+}
+
+fn authored_input(css: &str) -> AuthoredStyleInput<'_> {
+    AuthoredStyleInput::new(
+        css,
+        CssDialect::Css,
+        "<style>",
+        "standalone:carrier",
+        "standalone:carrier-bytes",
+    )
+}
+
+fn plain_input(css: &str) -> PlainCssInput<'_> {
+    PlainCssInput::try_new(
+        css,
+        CssDialect::Css,
+        "<style>",
+        "standalone:carrier",
+        "standalone:carrier-bytes",
+    )
+    .expect("plain CSS input")
+}
+
+fn observe_rewrite(outcome: StyleRewriteOutcome) {
+    match outcome {
+        StyleRewriteOutcome::Unchanged { facts } => {
+            black_box(&facts.v_bind_vars);
+            black_box(&facts.module_classes);
+        }
+        StyleRewriteOutcome::Rewritten { code, facts, .. } => {
+            black_box(&code);
+            black_box(&facts.v_bind_vars);
+            black_box(&facts.module_classes);
+        }
+    }
 }
 
 impl CssMeasuredOp {
@@ -175,35 +216,34 @@ impl CssMeasuredOp {
     pub fn run(&self, css: &str) {
         match *self {
             CssMeasuredOp::ProcessStyle { scoped, is_module } => {
-                let options = ProcessStyleOptions {
-                    scope_id: SCOPE_ID,
-                    scoped,
+                let outcome = run_vue_style_cascade(
+                    authored_input(black_box(css)),
+                    black_box(SCOPE_ID),
                     is_module,
-                    module_name: None,
-                    filename: None,
-                    sourcemap: false,
-                };
-                let result =
-                    verter_compiler::css::process_style(black_box(css), black_box(&options))
-                        .unwrap();
-                black_box(&result.code);
-                black_box(&result.module_classes);
-                black_box(&result.v_bind_vars);
+                    scoped,
+                    false,
+                );
+                black_box(&outcome.code);
+                black_box(&outcome.facts.module_classes);
+                black_box(&outcome.facts.v_bind_vars);
             }
             CssMeasuredOp::Prepass => {
-                let result = prepass(black_box(css), black_box(SCOPE_ID));
-                black_box(&result.css);
-                black_box(&result.v_bind_vars);
+                let outcome =
+                    transform_vue_v_bind(authored_input(black_box(css)), black_box(SCOPE_ID))
+                        .expect("v-bind rewrite");
+                observe_rewrite(outcome);
             }
             CssMeasuredOp::ApplyScoped => {
-                let result = apply_scoped(black_box(css), black_box(SCOPE_ID)).unwrap();
-                black_box(result);
+                let outcome =
+                    transform_vue_scoped_css(plain_input(black_box(css)), black_box(SCOPE_ID))
+                        .expect("scoped rewrite");
+                observe_rewrite(outcome);
             }
             CssMeasuredOp::ApplyCssModules => {
-                let (out, mapping) =
-                    apply_css_modules(black_box(css), black_box(SCOPE_ID)).unwrap();
-                black_box(out);
-                black_box(mapping);
+                let outcome =
+                    transform_vue_css_modules(plain_input(black_box(css)), black_box(SCOPE_ID))
+                        .expect("modules rewrite");
+                observe_rewrite(outcome);
             }
         }
     }

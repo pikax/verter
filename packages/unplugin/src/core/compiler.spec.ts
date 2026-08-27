@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { createHash } from "node:crypto";
-import { loadHost, resetHost, generateComponentId, getHash, processStyle } from "./compiler";
+import { loadHost, resetHost, generateComponentId, getHash } from "./compiler";
 
 describe("loadHost", () => {
   beforeEach(() => {
@@ -79,20 +79,12 @@ describe("style wrappers", () => {
   // (e.g. a re-introduced full AST reprint) fails this test.
   const EXPECTED = ".foo[data-v-abc123] { color: red }";
 
-  it("exports processStyle as the live native wrapper", () => {
-    expect(typeof processStyle).toBe("function");
+  it("does not export processStyle", async () => {
+    const mod = await import("./compiler");
+    expect(typeof (mod as { processStyle?: unknown }).processStyle).toBe("undefined");
   });
 
-  it("processStyle still scopes CSS selectors", () => {
-    const result = processStyle(SOURCE, {
-      scopeId: "abc123",
-      scoped: true,
-    });
-    expect(result.code).toContain("abc123");
-    expect(result.code).toContain(".foo");
-  });
-
-  it("exports transformVueStyle beside processStyle", async () => {
+  it("exports transformVueStyle as the live native wrapper", async () => {
     const mod = await import("./compiler");
     expect(typeof mod.transformVueStyle).toBe("function");
   });
@@ -104,6 +96,15 @@ describe("style wrappers", () => {
       scoped: true,
     });
     expect(result.code).toBe(EXPECTED);
+  });
+
+  it("leaves bytes a Vue-owned transform does not touch identical to the authored input", async () => {
+    const mod = await import("./compiler");
+    const result = mod.transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: false,
+    });
+    expect(result.code).toBe(SOURCE);
   });
 
   it("transformVueStyle reports an empty refusals list on an ordinary successful transform", async () => {

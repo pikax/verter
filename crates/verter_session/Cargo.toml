@@ -16,6 +16,10 @@ default = []
 # `default`; requested ONLY by the `verter_bench` measurement harness, never by
 # a production edge (`verter_napi`, `verter_lsp`, `verter_wasm`, `verter_tsc`).
 currency_probe = ["verter_workspace/currency_probe"]
+# Measurement-only: forwards `verter_audit/attribution` so A27 chargeability
+# tests can read the CSS-domain counters. NOT in `default`; requested by this
+# crate's test self-edge only. No production binary enables it.
+attribution = ["verter_audit/attribution"]
 # Opt-in test-support seam for items the SEPARATE integration-test binary
 # (`tests/cases/**`) must see but a normal `cargo build` / `pnpm run build:lsp`
 # / `pnpm dev-extension` (debug or release) must NOT compile. The integration
@@ -258,7 +262,9 @@ verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 # by any non-dev edge). This is the same idiom as the `verter_scheduler`
 # `test-support` edge above; it is what lets the reverse-materialization fence
 # be compiler-enforced in EVERY build profile rather than release-only.
-verter_session = { path = ".", features = ["test-support"] }
+# `attribution` is measurement-only and is what lets A27 read CSS-domain
+# counters from this crate's integration tests.
+verter_session = { path = ".", features = ["test-support", "attribution"] }
 # Activates the `test-support` feature on `verter_compiler` for
 # `cargo test --package verter_session` (and example/bench) builds only —
 # `compile_with_parsed`/`compile`/`svelte::runtime::compile_client` are

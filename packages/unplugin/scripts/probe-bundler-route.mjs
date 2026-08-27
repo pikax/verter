@@ -164,9 +164,8 @@ const results = {
   // classified out of scope on a claim.
   defaultIsVerterVue: module_.default === module_.VerterVue,
   nativeEntry: nativeRequire.resolve("@verter/native").split(path.sep).join("/"),
-  // Presence of both native style ops. Live bundler lanes still call
-  // `processStyle`; `transformVueStyle` is exported beside it and unused
-  // by those lanes.
+  // Presence of the live native style op. Live bundler lanes call
+  // `transformVueStyle`; `processStyle` is gone.
   nativeStyleOps: {
     processStyle: typeof nativeModule.processStyle,
     transformVueStyle: typeof nativeModule.transformVueStyle,
@@ -468,7 +467,7 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
 // the non-Vite CSS scoping lane
 //
 // A Rollup-shaped plugin (no resolved Vite config) routes a style sub-request
-// through the native `processStyle` rather than through `compileStyleAsync`.
+// through the native `transformVueStyle` rather than through `compileStyleAsync`.
 // Its include gate additionally requires a NON-`css` lang there, so the request
 // carries `lang.scss`; it carries `&scoped` because an unscoped request returns
 // its input byte-for-byte and would prove nothing.
@@ -479,19 +478,12 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
   const id = "/probe/Plug.vue";
   const styleId = "/probe/Plug.vue?vue&type=style&index=0&scoped&lang.scss";
   const unregisteredStyleId = "/probe/Unregistered.vue?vue&type=style&index=0&scoped&lang.scss";
-  const publishedProcessStyle = nativeModule.processStyle;
   const publishedTransformVueStyle = nativeModule.transformVueStyle;
   const styleNativeOpsCalled = [];
-  nativeModule.processStyle = function observedProcessStyle(...args) {
-    styleNativeOpsCalled.push("processStyle");
-    return publishedProcessStyle.apply(this, args);
+  nativeModule.transformVueStyle = function observedTransformVueStyle(...args) {
+    styleNativeOpsCalled.push("transformVueStyle");
+    return publishedTransformVueStyle.apply(this, args);
   };
-  if (typeof publishedTransformVueStyle === "function") {
-    nativeModule.transformVueStyle = function observedTransformVueStyle(...args) {
-      styleNativeOpsCalled.push("transformVueStyle");
-      return publishedTransformVueStyle.apply(this, args);
-    };
-  }
   let plugin;
   try {
     plugin = module_.VerterVue.rollup({});
@@ -534,10 +526,7 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
       styleNativeOpsCalled,
     };
   } finally {
-    nativeModule.processStyle = publishedProcessStyle;
-    if (typeof publishedTransformVueStyle === "function") {
-      nativeModule.transformVueStyle = publishedTransformVueStyle;
-    }
+    nativeModule.transformVueStyle = publishedTransformVueStyle;
     if (typeof plugin?.closeBundle === "function") await plugin.closeBundle.call(context);
   }
 }

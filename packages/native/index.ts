@@ -6,10 +6,9 @@
 export * from "./audit";
 
 // =============================================================================
-// Standalone CSS Style Processing (for preprocessed CSS from Vite plugin)
+// Standalone CSS Style Processing
 //
-// Live export: `processStyle`. Dual-exported beside it (not yet consumed by
-// bundlers):
+// Three-way explicit-boundary API:
 // - `prepareStyleForPreprocessor` — rewrite v-bind() in AUTHORED (possibly
 //   non-CSS) style content before an external SCSS/Less/Stylus preprocessor
 //   runs.
@@ -18,91 +17,6 @@ export * from "./audit";
 // - `analyzeStyle` — read-only style fact extraction (static + CSS-Modules
 //   class names), no rewrite.
 // =============================================================================
-
-/**
- * Options for processing a CSS style block
- */
-export interface ProcessStyleOptions {
-  /**
-   * Scope ID string (e.g., "a4f2eed6")
-   */
-  scopeId: string;
-  /**
-   * Whether this style block is scoped
-   */
-  scoped?: boolean;
-  /**
-   * Whether this is a CSS module block
-   */
-  isModule?: boolean;
-  /**
-   * Custom module name (None = "$style")
-   */
-  moduleName?: string;
-  /**
-   * Source filename for source map generation
-   */
-  filename?: string;
-  /**
-   * Whether to generate source maps
-   */
-  sourcemap?: boolean;
-}
-
-/**
- * A v-bind() expression that was replaced with a CSS variable
- */
-export interface ProcessStyleVBind {
-  /**
-   * The original expression text (e.g., "color" or "theme.color")
-   */
-  expression: string;
-  /**
-   * The generated CSS variable name (e.g., "--a4f2eed6-color")
-   */
-  varName: string;
-}
-
-/**
- * Result of processing a CSS style block
- */
-export interface ProcessStyleResult {
-  /**
-   * Transformed CSS code
-   */
-  code: string;
-  /**
-   * Source map as JSON string (if sourcemap was requested)
-   */
-  sourceMap?: string;
-  /**
-   * CSS module class mappings (each entry is [original, hashed])
-   */
-  moduleClasses: [string, string][];
-  /**
-   * Resolved CSS module name (e.g., "$style" or a custom name)
-   */
-  moduleName?: string;
-  /**
-   * v-bind() expressions found and replaced
-   */
-  vBindVars: ProcessStyleVBind[];
-}
-
-/**
- * Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
- *
- * Called by the Vite plugin after preprocessing SCSS/Less/Stylus to valid CSS.
- * For plain CSS blocks, the Rust compiler handles this inline during compilation.
- *
- * @param css - Valid CSS as a string or Buffer (UTF-8 bytes).
- * @param options - Processing options (scope ID, scoped, modules, etc.)
- * @returns Processed CSS with scoping/modules applied, plus v-bind metadata
- */
-export declare function processStyle(
-  css: string | Buffer,
-  options: ProcessStyleOptions,
-): ProcessStyleResult;
 
 /** A v-bind() expression that was replaced with a CSS variable. */
 export interface VueStyleVBind {

@@ -74,16 +74,11 @@ function currentNapiTriple(): string | null {
  */
 function buildSentinelModuleSource(): string {
   // A CJS module that records calls and exposes the binding surface the
-  // wrapper expects: processStyle plus the three-way CSS style API
+  // wrapper expects: the three-way CSS style API
   // (free fns) + the four classes with the prototype methods the
   // wrapper overrides.
   return `
-const calls = { processStyle: [], transformVueStyle: [], upsertBase: [], sessionUpsert: [] };
-
-function processStyle(css, options) {
-  calls.processStyle.push({ css, isBuffer: Buffer.isBuffer(css), options });
-  return { code: "/* sentinel */", moduleClasses: [], vBindVars: [] };
-}
+const calls = { transformVueStyle: [], upsertBase: [], sessionUpsert: [] };
 
 function prepareStyleForPreprocessor(css, options) {
   return { code: "/* sentinel */", vBindVars: [] };
@@ -120,7 +115,6 @@ const SENTINEL = Symbol.for("verter-native-issue90-sentinel");
 module.exports = {
   __SENTINEL__: SENTINEL,
   __calls__: calls,
-  processStyle,
   prepareStyleForPreprocessor,
   transformVueStyle,
   analyzeStyle,
@@ -200,13 +194,8 @@ describe("issue #90 — @verter/native optional-dependency fallback", () => {
         expect(loaded.MetaProject).toBe(sentinelMod.MetaProject);
 
         // The wrapper's Buffer coercion still applies: a string css must
-        // arrive at the sentinel processStyle as a Buffer.
-        const result = loaded.processStyle("body { color: red }", { scopeId: "abc123" });
-        expect(result.code).toBe("/* sentinel */");
-        const styleCalls = sentinelMod.__calls__.processStyle as Array<{ isBuffer: boolean }>;
-        expect(styleCalls).toHaveLength(1);
-        expect(styleCalls[0].isBuffer).toBe(true);
-
+        // arrive at the sentinel transformVueStyle as a Buffer.
+        expect(typeof loaded.processStyle).toBe("undefined");
         const transformed = loaded.transformVueStyle("body { color: red }", { scopeId: "abc123" });
         expect(transformed.code).toBe("/* sentinel */");
         const transformCalls = sentinelMod.__calls__.transformVueStyle as Array<{

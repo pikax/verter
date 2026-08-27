@@ -32,7 +32,6 @@ function toBuffer(v) {
 }
 
 const {
-  processStyle: _processStyle,
   prepareStyleForPreprocessor: _prepareStyleForPreprocessor,
   transformVueStyle: _transformVueStyle,
   analyzeStyle: _analyzeStyle,
@@ -49,10 +48,6 @@ const {
 
 const ComponentMetaHost = MetaProject;
 const ComponentMetaSession = MetaSession;
-
-function processStyle(css, options) {
-  return _processStyle(toBuffer(css), options);
-}
 
 function prepareStyleForPreprocessor(css, options) {
   return _prepareStyleForPreprocessor(toBuffer(css), options);
@@ -112,7 +107,6 @@ if (MetaSession) {
   };
 }
 
-module.exports.processStyle = processStyle;
 module.exports.prepareStyleForPreprocessor = prepareStyleForPreprocessor;
 module.exports.transformVueStyle = transformVueStyle;
 module.exports.analyzeStyle = analyzeStyle;

@@ -56,9 +56,8 @@ describe("unplugin factory", () => {
     expect((plugin as any).name).toBe("unplugin-verter");
   });
 
-  // Plugin-source discriminators: Vite still calls compileStyleAsync,
-  // non-Vite still calls processStyle, and the compiler wrapper exports
-  // transformVueStyle beside processStyle. Searches every `.ts` file
+  // Plugin-source discriminators: both bundler lanes call transformVueStyle;
+  // compileStyleAsync and processStyle are gone. Searches every `.ts` file
   // under `src/` (excluding specs and test fixtures).
   function readPluginSourceFiles(): string[] {
     const srcDir = dirname(fileURLToPath(import.meta.url));
@@ -78,47 +77,32 @@ describe("unplugin factory", () => {
     return files;
   }
 
-  it("Vite style lane still calls compileStyleAsync", () => {
+  it("Vite style lane does not call compileStyleAsync", () => {
     let sawCompileStyleAsync = false;
-    let sawCompilerSfc = false;
     for (const file of readPluginSourceFiles()) {
       const src = readFileSync(file, "utf8");
       if (src.includes("compileStyleAsync")) sawCompileStyleAsync = true;
-      if (src.includes("vue/compiler-sfc")) sawCompilerSfc = true;
     }
-    expect(sawCompileStyleAsync).toBe(true);
-    expect(sawCompilerSfc).toBe(true);
+    expect(sawCompileStyleAsync).toBe(false);
   });
 
-  it("non-Vite style lane still calls processStyle", () => {
+  it("non-Vite style lane does not import or call processStyle", () => {
     let sawProcessStyle = false;
     for (const file of readPluginSourceFiles()) {
       const src = readFileSync(file, "utf8");
       if (/\bprocessStyle\b/.test(src)) sawProcessStyle = true;
     }
-    expect(sawProcessStyle).toBe(true);
+    expect(sawProcessStyle).toBe(false);
   });
 
-  it("compiler wrapper exports transformVueStyle beside the live processStyle call", () => {
-    let sawTransformVueStyle = false;
-    let sawProcessStyle = false;
-    for (const file of readPluginSourceFiles()) {
-      const src = readFileSync(file, "utf8");
-      if (src.includes("transformVueStyle")) sawTransformVueStyle = true;
-      if (/\bprocessStyle\b/.test(src)) sawProcessStyle = true;
-    }
-    expect(sawTransformVueStyle).toBe(true);
-    expect(sawProcessStyle).toBe(true);
-  });
-
-  it("live bundler routes do not call transformVueStyle", () => {
+  it("both bundler style lanes call transformVueStyle", () => {
     const indexSrc = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "index.ts"),
       "utf8",
     );
-    expect(/\btransformVueStyle\s*\(/.test(indexSrc)).toBe(false);
-    expect(indexSrc).toContain("compileStyleAsync");
-    expect(/\bprocessStyle\b/.test(indexSrc)).toBe(true);
+    expect(/\btransformVueStyle\s*\(/.test(indexSrc)).toBe(true);
+    expect(indexSrc).not.toContain("compileStyleAsync");
+    expect(/\bprocessStyle\b/.test(indexSrc)).toBe(false);
   });
 });
 
@@ -348,7 +332,7 @@ $border: #555;
     expect(style.code).not.toContain("[data-v-");
   });
 
-  it("transform() scopes CSS via compileStyleAsync for scoped blocks", async () => {
+  it("transform() scopes CSS via transformVueStyle for scoped blocks", async () => {
     const plugin = await createVitePlugin();
     const file = join(tempDir, "ScopedTransform.vue").replace(/\\/g, "/");
     const sfc = `<template><button class="scoped-transform">x</button></template>
@@ -415,7 +399,7 @@ $border: #555;
     expect(transformed).toBeDefined();
     expect(transformed.code).toContain("[data-v-");
     expect(transformed.code).toContain(".second");
-    expect(transformed.code).toContain("color: #00f;");
+    expect(transformed.code).toContain("color: blue;");
     expect(transformed.code).not.toContain(".first");
   });
 
@@ -471,7 +455,7 @@ const x = 1
 <style>
 .a { color: red; }
 </style>
-<style lang="scss" scoped>
+<style lang="scss">
 .b { color: blue; }
 </style>`;
 
@@ -566,7 +550,7 @@ describe("non-Vite style virtual modules", () => {
     } as any) as any;
   }
 
-  it("transform() scopes preprocessed CSS via processStyle", async () => {
+  it("transform() scopes preprocessed CSS via transformVueStyle", async () => {
     const plugin = createPlugin();
     const filename = "/test/ScopedRollup.vue";
     const sfc = `<script setup>
