@@ -42,6 +42,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 axum = "0.8.9"
 
 [dev-dependencies]
+verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_audit = { path = "../verter_audit" }
 verter_span = { path = "../verter_span" }
 verter_compiler = { path = "../verter_compiler" }

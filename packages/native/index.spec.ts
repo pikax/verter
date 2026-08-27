@@ -1175,3 +1175,22 @@ describe("VerterHost.compileMany", () => {
     ).toThrow();
   });
 });
+
+describe("CSS selector-structure boundary", () => {
+  it("an unstructurable selector is skipped, not re-parsed", () => {
+    const host = new VerterHost();
+    const source = `<template><div class="card">x</div></template>
+<style lang="scss">
+.card { color: red; }
+.foo#{$x} { color: blue; }
+</style>`;
+    const result = host.upsert({
+      inputId: "Skip.vue",
+      source,
+      fileKind: "vue",
+    });
+    const matches = host.matchCssSelectors(result.canonicalId);
+    expect(matches.some((row) => row.selectorText === ".card")).toBe(true);
+    expect(matches.some((row) => row.selectorText.includes("#{$x}"))).toBe(false);
+  });
+});

@@ -1434,7 +1434,7 @@ fn byte_offset_to_utf16_safe(source: &str, byte_offset: u32) -> u32 {
 }
 
 /// Build CSS selector match results for visualization.
-fn build_selector_match_results(
+pub fn build_selector_match_results(
     snapshot: &host::FileAnalysisSnapshot,
     source: &str,
 ) -> Vec<FfiSelectorMatchResult> {
@@ -1452,13 +1452,9 @@ fn build_selector_match_results(
         };
 
         for selector in &css.selectors {
-            // Use pre-parsed structure if available, otherwise parse
             let parsed = match &selector.structure {
                 Some(s) => s.clone(),
-                None => match verter_semantic::analysis::style::parse_selector(&selector.text) {
-                    Some(s) => s,
-                    None => continue,
-                },
+                None => continue,
             };
 
             let mut matches = Vec::new();

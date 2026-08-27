@@ -42,3 +42,6 @@ getrandom_legacy = { package = "getrandom", version = "0.3", features = ["wasm_j
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.72"
+verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
+verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
+verter_session = { path = "../verter_session", features = ["test-support"] }

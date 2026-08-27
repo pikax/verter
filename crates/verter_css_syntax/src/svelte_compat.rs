@@ -41,7 +41,8 @@ use crate::style_ir::{
 /// FIRST exact upstream CSS parse code on a body-parse FAILURE, or `None`
 /// when the body parses cleanly for Svelte's `read/style.js` race.
 #[must_use]
-pub fn style_body_reject_code(source: &str, content: Span) -> Option<&'static str> {
+#[allow(dead_code)]
+pub(crate) fn style_body_reject_code(source: &str, content: Span) -> Option<&'static str> {
     match parse_style_body(source, content) {
         Ok(ir) => svelte_reject_from_ir(&ir),
         Err(_) => Some("css_expected_identifier"),

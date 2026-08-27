@@ -6,4 +6,5 @@
 mod carrier_routing_no_vue_gate;
 mod http_readiness;
 mod mcp_tool_audit_integration;
+mod one_parse_per_style_block;
 mod rmcp_sdk_conformance;

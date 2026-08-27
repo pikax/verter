@@ -1,0 +1,11 @@
+error[E0603]: struct `Parser` is private
+ --> tests/compile-fail/parser_route_module_path.rs:4:13
+  |
+4 |     parser::Parser, CssDialect, CssEntryPoint, CssParseMode, CssSource, CssStructureTooLarge,
+  |             ^^^^^^ private struct
+  |
+note: the struct `Parser` is defined here
+ --> src/parser.rs
+  |
+  | pub(crate) struct Parser<'a> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

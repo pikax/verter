@@ -1126,6 +1126,8 @@ pub fn parse_selector_structure(
     source: &CssSource,
     dialect: CssDialect,
 ) -> Result<SelectorStructure, CssParseFailure> {
+    #[cfg(any(test, feature = "test-support"))]
+    SELECTOR_STRUCTURE_PARSE_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let mut sink = SelectorSink::new(source.clone());
     parse_with_sink(
         source,
@@ -1135,6 +1137,19 @@ pub fn parse_selector_structure(
         &mut sink,
     )?;
     Ok(sink.finish())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static SELECTOR_STRUCTURE_PARSE_INVOCATIONS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Per-thread count of [`parse_selector_structure`] executions. Test observability only.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn parse_selector_structure_thread_invocations() -> u64 {
+    SELECTOR_STRUCTURE_PARSE_INVOCATIONS.with(std::cell::Cell::get)
 }
 
 fn combinator_kind(tokens: &[SyntaxToken], source: &CssSource) -> CombinatorKind {

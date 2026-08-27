@@ -1,10 +1,7 @@
 mod carrier_blind_pseudo_classification;
 mod comment_spans;
-mod cst;
 mod dialects;
-mod lexer;
-mod recovery;
-mod selectors;
-mod svelte_compat_profile;
+mod parse_gateway_closure;
+mod special_pseudo_typed_list_totality;
 mod svelte_lenient_selector_spans;
 mod svelte_value_prelude_reconstruction;

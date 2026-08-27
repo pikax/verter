@@ -22,7 +22,7 @@ pub mod svelte_compat;
 pub mod token;
 pub mod version;
 
-pub use cst::{parse_lossless, LosslessCst, LosslessCstSink, SyntaxElement, SyntaxNode};
+pub use cst::{LosslessCst, LosslessCstSink, SyntaxElement, SyntaxNode};
 pub use diagnostic::{
     CssDiagnostic, CssDiagnosticKind, CssParseFailure, CssSeverity, CssSourceTooLarge,
     CssStructureTooLarge, RecoveryKind, StructureOverflowKind,
@@ -33,7 +33,13 @@ pub use event::{NodeFlags, ParseEvent, ParseEventSink, ParseSummary, SyntaxKind}
 pub use inline_style::parse_inline_style_declarations_thread_invocations;
 pub use inline_style::{parse_inline_style_declarations, InlineStyleDeclaration};
 pub use lexer::Lexer;
-pub use parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource, Parser, SourceSize};
+#[cfg(any(test, feature = "test-support"))]
+pub use parser::css_source_token_reconstructions;
+pub use parser::{
+    parse_with_sink, CssEntryPoint, CssParseMode, CssSource, SourceSize, SpecialSelectorListPseudo,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use selector::parse_selector_structure_thread_invocations;
 pub use selector::{
     parse_selector_structure, AttributeMatcher, CombinatorKind, ComplexSelector,
     ComplexSelectorPart, CompoundTail, NthExpression, PseudoFunctionKind, SelectorAttribute,
@@ -53,13 +59,25 @@ pub use style_ir::{
     UnknownStatementKind, ValueInterpolation,
 };
 pub use svelte_compat::{
-    parse_style_body, style_body_reject_code, svelte_first_significant_value_span,
-    svelte_nth_of_selector_span, svelte_percentage_selector_span, svelte_read_value_text,
-    svelte_reject_from_ir, svelte_trailing_type_selector_span, svelte_trim_js_whitespace,
-    CssBodyParseError,
+    parse_style_body, svelte_first_significant_value_span, svelte_nth_of_selector_span,
+    svelte_percentage_selector_span, svelte_read_value_text, svelte_reject_from_ir,
+    svelte_trailing_type_selector_span, svelte_trim_js_whitespace, CssBodyParseError,
 };
 pub use token::{
     css_identifier_eq_ignore_ascii_case, decode_css_identifier, DecodedName, SyntaxToken,
     TokenFlags, TokenKind,
 };
 pub use version::CssSyntaxGrammarVersion;
+
+#[cfg(test)]
+extern crate self as verter_css_syntax;
+
+#[cfg(test)]
+#[path = "test_allocator.rs"]
+mod test_allocator;
+#[cfg(test)]
+pub(crate) use test_allocator::measure_allocations;
+
+#[cfg(test)]
+#[path = "test_cases.rs"]
+mod cases;

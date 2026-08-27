@@ -1,0 +1,11 @@
+error[E0603]: function `style_body_reject_code` is private
+ --> tests/compile-fail/style_body_reject_code_module_path.rs:1:39
+  |
+1 | use verter_css_syntax::svelte_compat::style_body_reject_code;
+  |                                       ^^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `style_body_reject_code` is defined here
+ --> src/svelte_compat.rs
+  |
+  | pub(crate) fn style_body_reject_code(source: &str, content: Span) -> Option<&'static str> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

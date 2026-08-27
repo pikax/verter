@@ -670,14 +670,28 @@ mod tests {
 
     #[test]
     fn svelte_convergence_introduces_no_hidden_second_parse_or_reconstruct() {
-        // Same call-count proof as above, exercised over a MULTI-CONSTRUCT
-        // stylesheet (nested rules, an at-rule, a pseudo-class argument
-        // list, `:global`) that would touch every analyze/match/render
-        // recursion path this convergence introduced — if any of those
-        // paths hid an admission-time reparse of the css text (rather than
-        // reading typed facts off the one shared tree), this call count
-        // would exceed 1.
-        let before = verter_css_syntax::parse_style_ir_thread_invocations();
+        // TWO independent observations over a MULTI-CONSTRUCT stylesheet
+        // (nested rules, an at-rule, a pseudo-class argument list,
+        // `:global`) that touches every analyze/match/render recursion path
+        // this convergence introduced.
+        //
+        // (1) PARSE count: exactly one `parse_style_ir` per plan build.
+        //
+        // (2) RECONSTRUCTION count: ZERO `CssSource::slice_tokens` calls.
+        //     The parse counter alone cannot see the second half of the
+        //     claim — "no reconstruct-then-reparse". A pipeline that
+        //     materialises the css text back out of the token stream and
+        //     then RE-SCANS it (rather than re-feeding it to
+        //     `parse_style_ir`) leaves the parse count at exactly 1 while
+        //     doing precisely the duplicated work this criterion forbids.
+        //     `slice_tokens` is the sole allocating token-stream-to-`String`
+        //     materialisation `verter_css_syntax` offers (and the only thing
+        //     `LosslessCst::reconstruct` is built on), so requiring a delta
+        //     of zero observes the reconstruction directly — and, because
+        //     each call is one whole-source `String::with_capacity`, it is
+        //     also the allocation this claim is about.
+        let parses_before = verter_css_syntax::parse_style_ir_thread_invocations();
+        let reconstructions_before = verter_css_syntax::css_source_token_reconstructions();
         let source = "<div class=\"card\"><p class=\"title\">x</p></div>\n<style>\
             @media (min-width: 1px) { .card :is(.title, .other) { color: red; } }\n\
             .card { :global(.x) { color: blue; } }\n\
@@ -686,9 +700,61 @@ mod tests {
             </style>";
         plan_for(source, None).expect("a multi-construct body plans");
         assert_eq!(
-            verter_css_syntax::parse_style_ir_thread_invocations() - before,
+            verter_css_syntax::parse_style_ir_thread_invocations() - parses_before,
             1,
             "exactly one shared-grammar parse regardless of construct diversity"
+        );
+        assert_eq!(
+            verter_css_syntax::css_source_token_reconstructions() - reconstructions_before,
+            0,
+            "the converged pipeline must never rebuild the css text out of the token \
+             stream — a reconstruct-then-rescan hides behind a parse count of exactly 1"
+        );
+    }
+
+    /// Discrimination companion for the reconstruction half, mirroring
+    /// `parse_style_ir_thread_invocations_counts_every_call_site`: the
+    /// reconstruction counter lives inside `CssSource::slice_tokens` itself,
+    /// so an unrelated reconstruction anywhere on this thread moves it. A
+    /// zero-delta assertion is therefore evidence, not a counter that never
+    /// moves at all.
+    #[test]
+    fn css_source_token_reconstructions_counts_every_call_site() {
+        use std::sync::Arc;
+        use verter_css_syntax::{
+            parse_with_sink, CssDialect, CssEntryPoint, CssParseMode, CssSource, LosslessCstSink,
+        };
+
+        let before = verter_css_syntax::css_source_token_reconstructions();
+        let source = "<div class=\"card\">x</div>\n<style>.card { color: red; }</style>";
+        plan_for(source, None).expect("a clean body plans");
+        assert_eq!(
+            verter_css_syntax::css_source_token_reconstructions() - before,
+            0,
+            "the pipeline itself reconstructs nothing"
+        );
+
+        // A direct, unrelated reconstruction — nothing to do with the Svelte
+        // pipeline — must move the SAME counter, proving the zero-delta
+        // assertions above are capable of failing. Uses the public gateway
+        // plus `LosslessCstSink` rather than the crate-private `parse_lossless`
+        // convenience, so the witness stays valid after that route is sealed.
+        let css = CssSource::new(Arc::from(".x { color: red; }"), 0).unwrap();
+        let mut sink = LosslessCstSink::new(css.clone());
+        parse_with_sink(
+            &css,
+            CssDialect::Css,
+            CssEntryPoint::Stylesheet,
+            CssParseMode::Recover,
+            &mut sink,
+        )
+        .expect("a clean body parses");
+        let cst = sink.finish().expect("cst finishes");
+        assert_eq!(cst.reconstruct(), ".x { color: red; }");
+        assert_eq!(
+            verter_css_syntax::css_source_token_reconstructions() - before,
+            1,
+            "an unrelated token-stream reconstruction also moves the counter"
         );
     }
 

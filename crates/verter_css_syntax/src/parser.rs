@@ -116,13 +116,42 @@ impl CssSource {
         self.slice(Span::new(token.start, token.end))
     }
 
+    /// Materialises a fresh `String` from a token stream — the ONE allocating
+    /// source-text reconstruction primitive in this crate (`LosslessCst::reconstruct`
+    /// is its only in-crate caller). Every call is counted for
+    /// [`css_source_token_reconstructions`].
     pub fn slice_tokens(&self, tokens: impl IntoIterator<Item = SyntaxToken>) -> String {
+        #[cfg(any(test, feature = "test-support"))]
+        SOURCE_TOKEN_RECONSTRUCTIONS.with(|count| count.set(count.get() + 1));
         let mut output = String::with_capacity(self.text.len());
         for token in tokens {
             output.push_str(self.token_text(token));
         }
         output
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Per-thread count of [`CssSource::slice_tokens`] executions — the
+    /// RECONSTRUCTION half of the "one shared-grammar parse, and no
+    /// reconstruct-then-rescan" proof. `slice_tokens` is the sole allocating
+    /// token-stream-to-`String` materialisation this crate offers, so a
+    /// consumer that rebuilds CSS text (in order to re-scan or re-parse it)
+    /// moves this counter even though the parse counter stays put — which is
+    /// exactly the shape a parse-count-only probe cannot see. Compiled only
+    /// under `test-support`, so production builds carry neither the TLS nor
+    /// the increment.
+    static SOURCE_TOKEN_RECONSTRUCTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of [`CssSource::slice_tokens`] token-stream reconstructions
+/// performed on the CALLING thread. Test/guard observability only — see the
+/// thread-local's doc.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn css_source_token_reconstructions() -> u64 {
+    SOURCE_TOKEN_RECONSTRUCTIONS.with(std::cell::Cell::get)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,7 +177,7 @@ pub fn parse_with_sink(
     Parser::new(source, dialect, entry, mode).parse(sink)
 }
 
-pub struct Parser<'a> {
+pub(crate) struct Parser<'a> {
     source: &'a CssSource,
     dialect: CssDialect,
     mode: CssParseMode,
@@ -160,7 +189,7 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(
+    pub(crate) fn new(
         source: &'a CssSource,
         dialect: CssDialect,
         entry: CssEntryPoint,
@@ -178,7 +207,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn parse(
+    pub(crate) fn parse(
         mut self,
         sink: &mut impl ParseEventSink,
     ) -> Result<ParseSummary, CssParseFailure> {
@@ -1516,25 +1545,55 @@ pub(crate) fn classify_at_rule(name: &str) -> SyntaxKind {
     }
 }
 
+/// Carrier-neutral special selector-list pseudos (`:deep` / `:global` / `:slotted`).
+///
+/// One typed authority both the parser's selector-list classification and the
+/// semantic projector's special-pseudo recognition consume. Adding a variant
+/// forces every exhaustive match (including the semantic projector) to
+/// classify the new name before it compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SpecialSelectorListPseudo {
+    Deep,
+    Global,
+    Slotted,
+}
+
+impl SpecialSelectorListPseudo {
+    pub const ALL: [Self; 3] = [Self::Deep, Self::Global, Self::Slotted];
+
+    pub const fn ident(self) -> &'static str {
+        match self {
+            Self::Deep => "deep",
+            Self::Global => "global",
+            Self::Slotted => "slotted",
+        }
+    }
+
+    pub const fn vue_prefixed_ident(self) -> &'static str {
+        match self {
+            Self::Deep => "v-deep",
+            Self::Global => "v-global",
+            Self::Slotted => "v-slotted",
+        }
+    }
+
+    pub fn from_ident(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| css_identifier_eq_ignore_ascii_case(name, kind.ident()))
+    }
+}
+
 fn is_selector_list_pseudo(name: &str, pseudo_element: bool) -> bool {
+    if identifier_is_any(name, &["is", "where", "not", "has"]) {
+        return true;
+    }
     if pseudo_element {
-        identifier_is_any(
-            name,
-            &[
-                "is",
-                "where",
-                "not",
-                "has",
-                "v-deep",
-                "v-slotted",
-                "v-global",
-            ],
-        )
+        SpecialSelectorListPseudo::ALL
+            .iter()
+            .any(|kind| css_identifier_eq_ignore_ascii_case(name, kind.vue_prefixed_ident()))
     } else {
-        identifier_is_any(
-            name,
-            &["is", "where", "not", "has", "deep", "slotted", "global"],
-        )
+        SpecialSelectorListPseudo::from_ident(name).is_some()
     }
 }
 

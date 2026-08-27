@@ -5,11 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use verter_css_syntax::{
-    decode_css_identifier, parse_lossless, parse_selector_structure, parse_style_ir,
-    parse_with_sink, CssDialect, CssEntryPoint, CssParseMode, CssSource, Lexer, NodeFlags,
-    ParseEvent, ParseEventSink, SelectorComponentKind, StyleCompleteness, StyleStatement,
-    SyntaxKind, SyntaxToken, TokenFlags, TokenKind,
+    decode_css_identifier, parse_selector_structure, parse_style_ir, parse_with_sink, CssDialect,
+    CssEntryPoint, CssParseMode, CssSource, Lexer, NodeFlags, ParseEvent, ParseEventSink,
+    SelectorComponentKind, StyleCompleteness, StyleStatement, SyntaxKind, SyntaxToken, TokenFlags,
+    TokenKind,
 };
+
+use crate::cst::parse_lossless;
 
 fn tokens(source: &CssSource, dialect: CssDialect) -> Vec<(TokenKind, u16, u32, u32)> {
     Lexer::new(source, dialect)

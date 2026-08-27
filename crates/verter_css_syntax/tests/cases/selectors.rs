@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use verter_css_syntax::{
-    parse_lossless, parse_selector_structure, AttributeMatcher, CombinatorKind, CssDialect,
-    CssEntryPoint, CssParseMode, CssSource, NthExpression, PseudoFunctionKind,
-    SelectorComponentKind, SelectorTrust, TokenFlags, TokenKind,
+    parse_selector_structure, AttributeMatcher, CombinatorKind, CssDialect, CssEntryPoint,
+    CssParseMode, CssSource, NthExpression, PseudoFunctionKind, SelectorComponentKind,
+    SelectorTrust, TokenFlags, TokenKind,
 };
+
+use crate::cst::parse_lossless;
 
 #[test]
 fn wpt_selector_structure_and_spans() {
@@ -728,7 +730,7 @@ fn dialect_interpolations_balance_in_selector_grammar() {
         (CssDialect::Less, ".item-@{name}", "@{name}"),
     ] {
         let source = CssSource::new(Arc::from(input), 31).unwrap();
-        let cst = verter_css_syntax::parse_lossless(
+        let cst = parse_lossless(
             source.clone(),
             dialect,
             verter_css_syntax::CssEntryPoint::SelectorList,

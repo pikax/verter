@@ -3,11 +3,12 @@ use std::process::Command;
 use std::sync::Arc;
 
 use verter_css_syntax::{
-    parse_lossless, parse_with_sink, CssDiagnosticKind, CssDialect, CssEntryPoint, CssParseFailure,
-    CssParseMode, CssSource, CssSyntaxGrammarVersion, LosslessCst, LosslessCstSink, NodeFlags,
-    ParseEvent, ParseEventSink, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TokenKind,
+    parse_with_sink, CssDiagnosticKind, CssDialect, CssEntryPoint, CssParseFailure, CssParseMode,
+    CssSource, CssSyntaxGrammarVersion, LosslessCst, LosslessCstSink, NodeFlags, ParseEvent,
+    ParseEventSink, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TokenKind,
 };
 
+use crate::cst::parse_lossless;
 use crate::measure_allocations;
 
 #[derive(Default)]

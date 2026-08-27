@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use verter_css_syntax::{
-    parse_lossless, CssDiagnosticKind, CssDialect, CssEntryPoint, CssParseFailure, CssParseMode,
-    CssSource, CssSourceTooLarge, RecoveryKind, SourceSize, StructureOverflowKind, SyntaxKind,
+    CssDiagnosticKind, CssDialect, CssEntryPoint, CssParseFailure, CssParseMode, CssSource,
+    CssSourceTooLarge, RecoveryKind, SourceSize, StructureOverflowKind, SyntaxKind,
 };
+
+use crate::cst::parse_lossless;
 
 #[test]
 fn strict_fails_where_recover_emits_explicit_nodes() {

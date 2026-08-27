@@ -4,3 +4,5 @@
 //! do NOT centralise shared helpers here, and keep this list sorted.
 
 mod audit;
+mod one_parse_per_style_block;
+mod selector_structure_boundary;

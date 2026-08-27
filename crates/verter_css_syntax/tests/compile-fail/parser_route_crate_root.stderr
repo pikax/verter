@@ -1,0 +1,11 @@
+error[E0432]: unresolved import `verter_css_syntax::Parser`
+ --> tests/compile-fail/parser_route_crate_root.rs:5:21
+  |
+5 |     ParseEventSink, Parser,
+  |                     ^^^^^^ no `Parser` in the root
+  |
+help: a similar name exists in the module
+  |
+5 -     ParseEventSink, Parser,
+5 +     ParseEventSink, parser,
+  |

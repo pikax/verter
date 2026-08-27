@@ -1898,3 +1898,149 @@ fn test_color_candidates_exclude_comment_and_string_content() {
         color_decl.color_candidates
     );
 }
+
+// ── the per-declaration record's SCHEMA ──
+//
+// `AnalyzedDeclaration` is the contract two LSP readers (the color-picker's
+// candidate source and the completion classifier's value-position signal)
+// were converged onto. Behavioral fixtures over those readers observe the
+// values that flow through today; they do not observe the record's REQUIRED
+// SHAPE, so a field could be renamed, dropped, or silently repurposed while
+// every colour chip and completion stayed green. These pins close that: the
+// exhaustive destructurings below are compile-time closure over the field
+// set (adding a field is `E0027`, removing or renaming one is `E0026`/
+// `E0609`), and the value assertions pin what each field must mean.
+
+/// Every field of `AnalyzedDeclaration` is required, and each carries the
+/// meaning its consumers depend on: `name_span` delimits the property name
+/// exactly, `value_span` the trimmed value text, `selector_index` the
+/// ENCLOSING rule's entry in `selectors`.
+#[test]
+fn analyzed_declaration_schema_is_name_span_value_span_selector_index() {
+    let css = ".a { color:   #f00  ; }\n.b { --tone: blue; }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().expect("css analysis");
+    assert_eq!(
+        css_analysis.declarations.len(),
+        2,
+        "every Complete declaration is recorded, custom-property or not: {:?}",
+        css_analysis.declarations
+    );
+
+    for (index, expected_name, expected_value, expected_selector) in
+        [(0usize, "color", "#f00", ".a"), (1, "--tone", "blue", ".b")]
+    {
+        // Exhaustive destructuring: the required field set, closed by the
+        // compiler. A new field forces this pin to be revisited.
+        let AnalyzedDeclaration {
+            name_span,
+            value_span,
+            selector_index,
+            color_candidates: _,
+        } = &css_analysis.declarations[index];
+
+        assert_eq!(
+            &css[name_span.start as usize..name_span.end as usize],
+            expected_name,
+            "name_span must delimit the property name exactly"
+        );
+        assert_eq!(
+            &css[value_span.start as usize..value_span.end as usize],
+            expected_value,
+            "value_span must delimit the TRIMMED value text — the completion \
+             classifier treats `value_span.end` as the last offset still inside \
+             the value"
+        );
+        let selector_index = selector_index.expect("a rule-body declaration has an enclosing rule");
+        assert_eq!(
+            css_analysis.selectors[selector_index as usize].text, expected_selector,
+            "selector_index must index back into `selectors` at the ENCLOSING rule"
+        );
+        assert!(
+            css_analysis.selectors[selector_index as usize]
+                .rule_body_span
+                .is_some_and(|body| name_span.start >= body.start && value_span.end <= body.end),
+            "the declaration must lie inside its own selector's rule_body_span — \
+             the pair the completion classifier joins on"
+        );
+    }
+}
+
+/// Every field of `AnalyzedColorCandidate` is required, and color-function
+/// classification is CASE-INSENSITIVE with a lowercase-normalised
+/// `function_name` — the form `color_info.rs` matches on (`starts_with("rgb")`)
+/// and could not itself detect regressing to case-sensitive.
+#[test]
+fn analyzed_color_candidate_schema_and_case_insensitive_function_names() {
+    for (value, expected_name) in [
+        ("RGB(255, 0, 0)", "rgb"),
+        ("Rgb(255, 0, 0)", "rgb"),
+        ("rGbA(255, 0, 0, 1)", "rgba"),
+        ("HSL(0, 100%, 50%)", "hsl"),
+        ("HsLa(0, 100%, 50%, 1)", "hsla"),
+    ] {
+        let css = format!(".a {{ color: {value}; }}");
+        let analysis = analyze_css(&css);
+        let css_analysis = analysis.css.as_ref().expect("css analysis");
+        let candidates = &css_analysis.declarations[0].color_candidates;
+        assert_eq!(
+            candidates.len(),
+            1,
+            "`{value}` must classify as one color-function candidate whatever \
+             its casing: {candidates:?}"
+        );
+
+        // Exhaustive destructuring: the required field set, closed by the compiler.
+        let AnalyzedColorCandidate {
+            span,
+            kind,
+            function_name,
+            numeric_args,
+        } = &candidates[0];
+
+        assert_eq!(*kind, ColorCandidateKind::Function);
+        assert_eq!(
+            &css[span.start as usize..span.end as usize],
+            value,
+            "span must cover the whole call including its parentheses"
+        );
+        assert_eq!(
+            function_name.as_deref(),
+            Some(expected_name),
+            "function_name must be lowercase-normalised, whatever the source casing"
+        );
+        assert!(
+            numeric_args.len() >= 3,
+            "the channel arguments must be extracted: {numeric_args:?}"
+        );
+    }
+
+    // The hex arm's own field shape, and the closed kind taxonomy.
+    let css = ".a { color: #F00; }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().expect("css analysis");
+    let AnalyzedColorCandidate {
+        span,
+        kind,
+        function_name,
+        numeric_args,
+    } = &css_analysis.declarations[0].color_candidates[0];
+    match kind {
+        ColorCandidateKind::Hex => {
+            assert_eq!(&css[span.start as usize..span.end as usize], "#F00");
+            assert!(function_name.is_none(), "a hex token names no function");
+            assert!(numeric_args.is_empty(), "a hex token carries no arguments");
+        }
+        ColorCandidateKind::Function => panic!("`#F00` is a hex candidate, not a function"),
+    }
+
+    // Negative: a case-variant of a NON-color function is still not a color.
+    let css = ".a { color: URL(x.png); }";
+    let analysis = analyze_css(css);
+    let css_analysis = analysis.css.as_ref().expect("css analysis");
+    assert!(
+        css_analysis.declarations[0].color_candidates.is_empty(),
+        "case-insensitivity must not widen the closed color-function set: {:?}",
+        css_analysis.declarations[0].color_candidates
+    );
+}

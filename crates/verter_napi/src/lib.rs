@@ -3270,10 +3270,7 @@ fn build_selector_match_results(
         for selector in &css.selectors {
             let parsed = match &selector.structure {
                 Some(s) => s.clone(),
-                None => match verter_semantic::analysis::style::parse_selector(&selector.text) {
-                    Some(s) => s,
-                    None => continue,
-                },
+                None => continue,
             };
 
             let mut matches = Vec::new();

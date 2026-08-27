@@ -112,6 +112,8 @@ pub use routes::{
 };
 pub use scope::AnalysisScope;
 pub use selector_match::{match_selector, MatchResult};
+#[cfg(any(test, feature = "test-support"))]
+pub use style::parse_selector_thread_invocations;
 pub use style::{
     build_css_style_analysis, build_external_src_style_analysis, build_preprocessor_style_analysis,
     build_scanned_style_analysis, build_scanned_style_analysis_from_ir,

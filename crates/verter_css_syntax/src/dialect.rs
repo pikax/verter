@@ -19,6 +19,9 @@ pub enum CssDialect {
 }
 
 impl CssDialect {
+    /// Closed dialect universe this crate parses natively.
+    pub const ALL: [Self; 5] = [Self::Css, Self::Scss, Self::Sass, Self::Less, Self::Stylus];
+
     #[inline]
     pub(crate) const fn allows_line_comments(self) -> bool {
         matches!(self, Self::Scss | Self::Sass | Self::Less | Self::Stylus)
