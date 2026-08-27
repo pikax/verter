@@ -112,12 +112,10 @@ impl<'a> Lexer<'a> {
         self.absolute(self.cursor)
     }
 
+    #[inline]
     fn absolute(&self, local: usize) -> u32 {
-        let local = u32::try_from(local).expect("CssSource validates its local span domain");
-        self.source
-            .origin()
-            .checked_add(local)
-            .expect("CssSource validates origin plus source length")
+        // CssSource construction already proved origin+len fits u32.
+        self.source.origin() + local as u32
     }
 
     #[inline]
@@ -129,16 +127,28 @@ impl<'a> Lexer<'a> {
         self.consume_whitespace_profiled(WhitespaceProfile::Css)
     }
 
-    /// Consume a run of whitespace under `profile` — [`WhitespaceProfile::JsUnicode`]
-    /// additionally recognizes vertical tab and the Unicode space run, decoding codepoints where
-    /// the ASCII fast path doesn't apply. For [`WhitespaceProfile::Css`] this behaves identically
-    /// to the byte-stepping loop it replaces (the CSS ASCII whitespace set is single-byte only).
+    /// Consume a run of whitespace under `profile`. [`WhitespaceProfile::Css`]
+    /// uses a byte loop over the Syntax Module ASCII set; [`WhitespaceProfile::JsUnicode`]
+    /// additionally recognizes vertical tab and the Unicode space run.
     pub(crate) fn consume_whitespace_profiled(
         &mut self,
         profile: WhitespaceProfile,
     ) -> SyntaxToken {
         let start = self.cursor;
         let mut flags = TokenFlags::TRIVIA;
+        if profile == WhitespaceProfile::Css {
+            while self.cursor < self.bytes.len() {
+                let byte = self.bytes[self.cursor];
+                if !is_css_whitespace(byte) {
+                    break;
+                }
+                if matches!(byte, b'\n' | b'\r' | b'\x0c') {
+                    flags |= TokenFlags::CONTAINS_NEWLINE;
+                }
+                self.cursor += 1;
+            }
+            return self.make(TokenKind::Whitespace, flags, start, self.cursor);
+        }
         while let Some((cp, len)) = codepoint_at(self.bytes, self.cursor) {
             if !is_whitespace_codepoint(cp, profile) {
                 break;

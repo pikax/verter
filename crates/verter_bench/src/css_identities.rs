@@ -183,6 +183,7 @@ fn authored_input(css: &str) -> AuthoredStyleInput<'_> {
         "standalone:carrier",
         "standalone:carrier-bytes",
     )
+    .without_source_map()
 }
 
 fn plain_input(css: &str) -> PlainCssInput<'_> {
@@ -194,6 +195,7 @@ fn plain_input(css: &str) -> PlainCssInput<'_> {
         "standalone:carrier-bytes",
     )
     .expect("plain CSS input")
+    .without_source_map()
 }
 
 fn observe_rewrite(outcome: StyleRewriteOutcome) {

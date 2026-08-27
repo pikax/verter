@@ -71,7 +71,8 @@ fn compile_full(source: &str) -> String {
                 Some(StyleLang::Unknown) => continue,
             };
             if let Ok(stage_one) = transform_vue_v_bind(
-                AuthoredStyleInput::new(css_source, dialect, "bench.vue", "bench", "bench"),
+                AuthoredStyleInput::new(css_source, dialect, "bench.vue", "bench", "bench")
+                    .without_source_map(),
                 scope_id,
             ) {
                 let mut code = match stage_one {
@@ -86,7 +87,8 @@ fn compile_full(source: &str) -> String {
                         "bench",
                         "bench",
                     )
-                    .expect("CSS selected");
+                    .expect("CSS selected")
+                    .without_source_map();
                     if let Ok(StyleRewriteOutcome::Rewritten { code: scoped, .. }) =
                         transform_vue_scoped_css(input, scope_id)
                     {

@@ -38,7 +38,8 @@ pub fn extract_style_v_bind_usage_for_dialects<'a>(
 
     for (css, dialect) in style_contents {
         let input =
-            AuthoredStyleInput::new(css, dialect, "style-usage", "style-usage", "style-usage");
+            AuthoredStyleInput::new(css, dialect, "style-usage", "style-usage", "style-usage")
+                .without_source_map();
         match transform_vue_v_bind(input, "usage") {
             Ok(StyleRewriteOutcome::Unchanged { facts })
             | Ok(StyleRewriteOutcome::Rewritten { facts, .. }) => {

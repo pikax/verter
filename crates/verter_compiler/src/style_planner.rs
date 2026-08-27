@@ -23,15 +23,26 @@ use oxc_sourcemap::{SourceMap, Token};
 /// Generate a Vue CSS variable name from a scope ID and authored expression.
 #[must_use]
 pub fn generate_var_name(scope_id: &str, expression: &str) -> String {
-    let mut sanitized = String::with_capacity(expression.len());
+    let mut out = String::with_capacity(2 + scope_id.len() + 1 + expression.len());
+    out.push_str("--");
+    out.push_str(scope_id);
+    out.push('-');
     for character in expression.chars() {
         if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
-            sanitized.push(character);
+            out.push(character);
         } else {
-            sanitized.push('_');
+            out.push('_');
         }
     }
-    format!("--{scope_id}-{sanitized}")
+    out
+}
+
+fn css_var_reference(var_name: &str) -> String {
+    let mut out = String::with_capacity(5 + var_name.len());
+    out.push_str("var(");
+    out.push_str(var_name);
+    out.push(')');
+    out
 }
 
 /// A `v-bind()` expression replaced with a CSS variable.
@@ -53,11 +64,15 @@ fn hashed_class_name(component_id: &str, class_name: &str) -> String {
     hasher.update(component_id.as_bytes());
     hasher.update(class_name.as_bytes());
     let result = hasher.finalize();
-    let hash = format!(
-        "{:02x}{:02x}{:02x}{:02x}",
-        result[0], result[1], result[2], result[3]
-    );
-    format!("{class_name}_{hash}")
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(class_name.len() + 1 + 8);
+    out.push_str(class_name);
+    out.push('_');
+    for &byte in &result[..4] {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +140,7 @@ pub struct AuthoredStyleInput<'a> {
     dialect: CssDialect,
     source: StyleSourceIdentity<'a>,
     prepared: Option<&'a StyleSyntaxIr>,
+    want_source_map: bool,
 }
 
 impl<'a> AuthoredStyleInput<'a> {
@@ -145,12 +161,21 @@ impl<'a> AuthoredStyleInput<'a> {
                 content_artifact_token,
             },
             prepared: None,
+            want_source_map: true,
         }
     }
 
     #[must_use]
     pub const fn with_prepared(mut self, ir: &'a StyleSyntaxIr) -> Self {
         self.prepared = Some(ir);
+        self
+    }
+
+    /// Isolated rewrite stages skip `CodeTransform::generate_map` and descriptor
+    /// hashing when the caller does not need a source map.
+    #[must_use]
+    pub const fn without_source_map(mut self) -> Self {
+        self.want_source_map = false;
         self
     }
 
@@ -177,6 +202,7 @@ impl<'a> AuthoredStyleInput<'a> {
 pub struct PlainCssInput<'a> {
     code: &'a str,
     source: StyleSourceIdentity<'a>,
+    want_source_map: bool,
 }
 
 impl<'a> PlainCssInput<'a> {
@@ -202,12 +228,21 @@ impl<'a> PlainCssInput<'a> {
                 source_space_token,
                 content_artifact_token,
             },
+            want_source_map: true,
         })
     }
 
     #[must_use]
     pub const fn code(&self) -> &'a str {
         self.code
+    }
+
+    /// Isolated rewrite stages skip `CodeTransform::generate_map` and descriptor
+    /// hashing when the caller does not need a source map.
+    #[must_use]
+    pub const fn without_source_map(mut self) -> Self {
+        self.want_source_map = false;
+        self
     }
 }
 
@@ -327,6 +362,32 @@ pub enum StyleRewriteOutcome {
 enum StyleEdit {
     Overwrite { span: Span, content: String },
     Insert { at: u32, content: String },
+}
+
+enum PreparedEdit<'a> {
+    Overwrite {
+        start: u32,
+        end: u32,
+        content: &'a str,
+    },
+    Insert {
+        at: u32,
+        content: &'a str,
+    },
+}
+
+fn intern_edit_content<'a>(
+    allocator: &'a Allocator,
+    interned: &mut Vec<&'a str>,
+    content: &str,
+) -> &'a str {
+    if let Some(existing) = interned.iter().copied().find(|s| *s == content) {
+        existing
+    } else {
+        let interned_content = allocator.alloc_str(content);
+        interned.push(interned_content);
+        interned_content
+    }
 }
 
 impl StyleEdit {
@@ -613,15 +674,64 @@ fn build_transform_output(
 
     let allocator = Allocator::new();
     let mut transform = CodeTransform::new(code, &allocator);
+    let mut interned = Vec::new();
+    let mut prepared = Vec::with_capacity(edits.len());
+    let mut overwrite_count = 0usize;
+    let mut insert_count = 0usize;
     for edit in edits {
         match edit {
             StyleEdit::Overwrite { span, content } => {
-                let content = allocator.alloc_str(&content);
-                transform.overwrite(span.start, span.end, content);
+                overwrite_count += 1;
+                prepared.push(PreparedEdit::Overwrite {
+                    start: span.start,
+                    end: span.end,
+                    content: intern_edit_content(&allocator, &mut interned, &content),
+                });
             }
             StyleEdit::Insert { at, content } => {
-                let content = allocator.alloc_str(&content);
-                transform.prepend_left(at, content);
+                insert_count += 1;
+                prepared.push(PreparedEdit::Insert {
+                    at,
+                    content: intern_edit_content(&allocator, &mut interned, &content),
+                });
+            }
+        }
+    }
+    if overwrite_count == prepared.len() && overwrite_count >= 2 {
+        let ops: Vec<(u32, u32, &str)> = prepared
+            .iter()
+            .map(|edit| match *edit {
+                PreparedEdit::Overwrite {
+                    start,
+                    end,
+                    content,
+                } => (start, end, content),
+                PreparedEdit::Insert { .. } => unreachable!("overwrite-only partition"),
+            })
+            .collect();
+        transform.batch_overwrite(&ops);
+    } else if insert_count == prepared.len() && insert_count >= 2 {
+        let ops: Vec<(u32, &str)> = prepared
+            .iter()
+            .map(|edit| match *edit {
+                PreparedEdit::Insert { at, content } => (at, content),
+                PreparedEdit::Overwrite { .. } => unreachable!("insert-only partition"),
+            })
+            .collect();
+        transform.batch_prepend_left_static(&ops);
+    } else {
+        for edit in prepared {
+            match edit {
+                PreparedEdit::Overwrite {
+                    start,
+                    end,
+                    content,
+                } => {
+                    transform.overwrite(start, end, content);
+                }
+                PreparedEdit::Insert { at, content } => {
+                    transform.prepend_left(at, content);
+                }
             }
         }
     }
@@ -673,13 +783,20 @@ fn emit(
     let source_map = source_map
         .map(|map| map.to_json_string())
         .unwrap_or_default();
-    let raw_map = want_source_map.then_some(source_map.as_str());
-    let output_descriptor = RuntimeOutputDescriptor::generated(
-        &output,
-        raw_map,
-        &[(source.source_space_token, source.content_artifact_token)],
-        SourceMapFidelity::Exact,
-    );
+    let output_descriptor = if want_source_map {
+        RuntimeOutputDescriptor::generated(
+            &output,
+            Some(source_map.as_str()).filter(|map| !map.is_empty()),
+            &[(source.source_space_token, source.content_artifact_token)],
+            SourceMapFidelity::Exact,
+        )
+    } else {
+        RuntimeOutputDescriptor::generated_without_map(
+            output.len() as u64,
+            source.source_space_token,
+            source.content_artifact_token,
+        )
+    };
     Ok(StyleRewriteOutcome::Rewritten {
         code: output,
         source_map,
@@ -717,7 +834,7 @@ pub fn transform_vue_v_bind(
         StyleRewriteStage::AuthoredVBind,
         edits,
         facts,
-        true,
+        input.want_source_map,
     )
 }
 
@@ -909,7 +1026,7 @@ fn collect_v_bind_values(
                     let var_name = generate_var_name(scope_id, expression);
                     edits.push(StyleEdit::Overwrite {
                         span: function.full_span(),
-                        content: format!("var({var_name})"),
+                        content: css_var_reference(&var_name),
                     });
                     vars.push(VBindVar {
                         expression: expression.to_string(),
@@ -997,7 +1114,7 @@ fn collect_v_bind_value_slice(
                     let var_name = generate_var_name(scope_id, expression);
                     edits.push(StyleEdit::Overwrite {
                         span: function.full_span(),
-                        content: format!("var({var_name})"),
+                        content: css_var_reference(&var_name),
                     });
                     vars.push(VBindVar {
                         expression: expression.to_string(),
@@ -1199,7 +1316,7 @@ pub fn transform_vue_css_modules(
         StyleRewriteStage::PostPreprocessModules,
         edits,
         facts,
-        true,
+        input.want_source_map,
     )
 }
 
@@ -1394,7 +1511,7 @@ pub fn transform_vue_scoped_css(
         StyleRewriteStage::PostPreprocessScoping,
         edits,
         facts,
-        true,
+        input.want_source_map,
     )
 }
 
@@ -1639,30 +1756,28 @@ pub fn run_vue_style_cascade(
         }
     }
 
-    let current_code = owned
-        .as_ref()
-        .map_or(input.code, |(code, _)| code.as_str())
-        .to_string();
-    let composition = owned
-        .as_ref()
-        .map_or(MapComposition::NotStarted, |(_, composition)| {
-            composition.clone()
-        });
-    let post = run_post_v_bind_stages(
-        &current_code,
-        input.source,
-        input.dialect,
-        retained_ir,
-        scope_id,
-        module,
-        scoped,
-        &mut facts,
-        &mut stage_failures,
-        composition,
-        want_source_map,
-    );
-    if let Some(rewritten) = post {
-        owned = Some(rewritten);
+    if module || scoped {
+        let current_code = owned.as_ref().map_or(input.code, |(code, _)| code.as_str());
+        let composition = owned
+            .as_ref()
+            .map_or(MapComposition::NotStarted, |(_, composition)| {
+                composition.clone()
+            });
+        if let Some(rewritten) = run_post_v_bind_stages(
+            current_code,
+            input.source,
+            input.dialect,
+            retained_ir,
+            scope_id,
+            module,
+            scoped,
+            &mut facts,
+            &mut stage_failures,
+            composition,
+            want_source_map,
+        ) {
+            owned = Some(rewritten);
+        }
     }
 
     let (code, source_map) = match owned {
@@ -1742,30 +1857,28 @@ pub fn run_vue_style_cascade_verified(
         Err(failure) => stage_failures.push(failure),
     }
 
-    let current_code = owned
-        .as_ref()
-        .map_or(code, |(value, _)| value.as_str())
-        .to_string();
-    let composition = owned
-        .as_ref()
-        .map_or(MapComposition::NotStarted, |(_, composition)| {
-            composition.clone()
-        });
-    let post = run_post_v_bind_stages(
-        &current_code,
-        source,
-        CssDialect::Css,
-        retained_ir,
-        scope_id,
-        module,
-        scoped,
-        &mut facts,
-        &mut stage_failures,
-        composition,
-        want_source_map,
-    );
-    if let Some(rewritten) = post {
-        owned = Some(rewritten);
+    if module || scoped {
+        let current_code = owned.as_ref().map_or(code, |(value, _)| value.as_str());
+        let composition = owned
+            .as_ref()
+            .map_or(MapComposition::NotStarted, |(_, composition)| {
+                composition.clone()
+            });
+        if let Some(rewritten) = run_post_v_bind_stages(
+            current_code,
+            source,
+            CssDialect::Css,
+            retained_ir,
+            scope_id,
+            module,
+            scoped,
+            &mut facts,
+            &mut stage_failures,
+            composition,
+            want_source_map,
+        ) {
+            owned = Some(rewritten);
+        }
     }
 
     let (code, source_map) = match owned {
@@ -2029,6 +2142,19 @@ fn run_post_v_bind_stages(
     owned
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VueSpecialPseudo {
+    Global,
+    Deep,
+    Slotted,
+}
+
+fn component_ident_eq(source: &CssSource, component: &SelectorComponent, name: &str) -> bool {
+    component.name_span().is_some_and(|span| {
+        css_identifier_eq_ignore_ascii_case(source.slice(span).trim_end_matches('('), name)
+    })
+}
+
 struct VueScopePlanner<'a> {
     source: &'a CssSource,
     scope_attr: String,
@@ -2202,18 +2328,19 @@ impl VueScopePlanner<'_> {
         if !selector_is_trusted_for_scoping(selector) {
             return Err(self.untrusted(selector.span()));
         }
-        let mut special_edits = Vec::new();
-        let has_special = self.collect_special_selector_edits(selector, &mut special_edits)?;
+        let checkpoint = self.edits.len();
+        let mut edits = std::mem::take(&mut self.edits);
+        let has_special = self.collect_special_selector_edits(selector, &mut edits)?;
         if has_special {
-            self.edits.extend(special_edits);
+            self.edits = edits;
             self.facts.rewrites.scoped_selector = true;
             return Ok(());
         }
-
+        edits.truncate(checkpoint);
         let scope_attr = self.scope_attr.clone();
-        let mut scope_edits = Vec::new();
-        self.collect_selector_scope_edits(selector, &scope_attr, &mut scope_edits)?;
-        self.edits.extend(scope_edits);
+        let planned = self.collect_selector_scope_edits(selector, &scope_attr, &mut edits);
+        self.edits = edits;
+        planned?;
         self.facts.rewrites.scoped_selector = true;
         Ok(())
     }
@@ -2237,10 +2364,7 @@ impl VueScopePlanner<'_> {
                             continue;
                         };
                         let special_name = self.vue_special_pseudo_name(component);
-                        if special_name
-                            .as_deref()
-                            .is_some_and(|name| matches!(name, "global" | "v-global"))
-                        {
+                        if special_name == Some(VueSpecialPseudo::Global) {
                             let argument = self.render_special_argument(pseudo, false)?;
                             edits.truncate(edits_checkpoint);
                             edits.push(StyleEdit::Overwrite {
@@ -2250,10 +2374,7 @@ impl VueScopePlanner<'_> {
                             self.facts.rewrites.global = true;
                             return Ok(true);
                         }
-                        if special_name
-                            .as_deref()
-                            .is_some_and(|name| matches!(name, "deep" | "v-deep"))
-                        {
+                        if special_name == Some(VueSpecialPseudo::Deep) {
                             let argument = self.render_special_argument(pseudo, true)?;
                             let same_compound_anchor = component_index > 0;
                             let anchor = same_compound_anchor
@@ -2279,10 +2400,7 @@ impl VueScopePlanner<'_> {
                             self.facts.rewrites.deep = true;
                             return Ok(true);
                         }
-                        if special_name
-                            .as_deref()
-                            .is_some_and(|name| matches!(name, "slotted" | "v-slotted"))
-                        {
+                        if special_name == Some(VueSpecialPseudo::Slotted) {
                             self.collect_slotted_component_edits(component, pseudo, edits)?;
                             self.facts.rewrites.slotted = true;
                             return Ok(true);
@@ -2424,9 +2542,8 @@ impl VueScopePlanner<'_> {
         let components = compound.components();
         if components.len() == 1 {
             let component = &components[0];
-            if self
-                .pseudo_name(component)
-                .is_some_and(|name| matches!(name.as_str(), "is" | "where"))
+            if component_ident_eq(self.source, component, "is")
+                || component_ident_eq(self.source, component, "where")
             {
                 let nested = component
                     .pseudo()
@@ -2495,24 +2612,23 @@ impl VueScopePlanner<'_> {
             || css_identifier_eq_ignore_ascii_case(head, "@-webkit-keyframes")
     }
 
-    fn pseudo_name(&self, component: &SelectorComponent) -> Option<String> {
-        let span = component.name_span()?;
-        Some(
-            self.source
-                .slice(span)
-                .trim_end_matches('(')
-                .to_ascii_lowercase(),
-        )
-    }
-
-    fn vue_special_pseudo_name(&self, component: &SelectorComponent) -> Option<String> {
+    fn vue_special_pseudo_name(&self, component: &SelectorComponent) -> Option<VueSpecialPseudo> {
         component.pseudo()?.selector_list()?;
-        let name = self.pseudo_name(component)?;
-        matches!(
-            name.as_str(),
-            "deep" | "v-deep" | "slotted" | "v-slotted" | "global" | "v-global"
-        )
-        .then_some(name)
+        if component_ident_eq(self.source, component, "global")
+            || component_ident_eq(self.source, component, "v-global")
+        {
+            Some(VueSpecialPseudo::Global)
+        } else if component_ident_eq(self.source, component, "deep")
+            || component_ident_eq(self.source, component, "v-deep")
+        {
+            Some(VueSpecialPseudo::Deep)
+        } else if component_ident_eq(self.source, component, "slotted")
+            || component_ident_eq(self.source, component, "v-slotted")
+        {
+            Some(VueSpecialPseudo::Slotted)
+        } else {
+            None
+        }
     }
 
     fn trusted_first_selector_argument<'a>(

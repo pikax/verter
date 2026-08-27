@@ -1878,7 +1878,8 @@ fn build_style_analyses_from_inventory(
                     "vue-style-analysis",
                     "vue-style-analysis",
                     "vue-style-analysis",
-                );
+                )
+                .without_source_map();
                 verter_compiler::style_planner::transform_vue_v_bind(input, &scope_id).map(
                     |outcome| {
                         let vars = match outcome {

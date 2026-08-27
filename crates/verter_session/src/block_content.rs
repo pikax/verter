@@ -1269,7 +1269,8 @@ impl VerterHost {
                         "style-usage",
                         "style-usage",
                     )
-                    .with_prepared(prepared.ir());
+                    .with_prepared(prepared.ir())
+                    .without_source_map();
                     match verter_compiler::style_planner::transform_vue_v_bind(input, "usage") {
                         Ok(
                             verter_compiler::style_planner::StyleRewriteOutcome::Unchanged {

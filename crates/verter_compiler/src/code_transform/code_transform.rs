@@ -215,19 +215,25 @@ fn push_preserved_source_ranges(
 impl<'a> CodeTransform<'a> {
     /// Create a new CodeTransform from source text and an allocator
     pub fn new(source: &'a str, allocator: &'a Allocator) -> Self {
+        let len = source.len();
+        // Empirically, kitchen-sink.vue (27370 bytes) produces ~2098 final chunks.
+        // Using /13 avoids a Vec reallocation for typical large files.
+        let estimated_chunks = if len > 0 { (len / 13).max(64) } else { 0 };
+        Self::with_chunk_capacity(source, allocator, estimated_chunks)
+    }
+
+    /// Like [`new`](Self::new) but with an explicit chunk-buffer size. Style
+    /// rewrites know their edit count and would otherwise pay the template-sized
+    /// 64-slot floor on a one-insert rule.
+    pub(crate) fn with_chunk_capacity(
+        source: &'a str,
+        allocator: &'a Allocator,
+        estimated_chunks: usize,
+    ) -> Self {
         #[cfg(test)]
         CODE_TRANSFORM_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
 
         let len = source.len() as u32;
-
-        // Pre-allocate chunks capacity based on source size.
-        // Empirically, kitchen-sink.vue (27370 bytes) produces ~2098 final chunks.
-        // Using /13 avoids a Vec reallocation for typical large files.
-        let estimated_chunks = if len > 0 {
-            (len as usize / 13).max(64)
-        } else {
-            0
-        };
         let mut chunks = Vec::with_capacity(estimated_chunks);
         if len > 0 {
             chunks.push(Chunk::from_source(0, len));

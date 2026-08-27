@@ -187,7 +187,8 @@ pub fn prepare_style_for_preprocessor(
             filename,
             filename,
             filename,
-        );
+        )
+        .without_source_map();
         verter_compiler::style_planner::transform_vue_v_bind(input, &options.scopeId)
             .map_err(style_rewrite_failure_error)
     }))?

@@ -603,3 +603,68 @@ fn vue_style_cascade_source_map_toggle_is_a_genuine_ab_option() {
         "the returned map must carry real mappings"
     );
 }
+
+#[test]
+fn vue_isolated_style_source_map_toggle_is_a_genuine_ab_option() {
+    let source = ".x { color: v-bind(tone); }";
+    let on_input = AuthoredStyleInput::new(
+        source,
+        CssDialect::Css,
+        "isolated.css",
+        "space:isolated",
+        "artifact:isolated",
+    );
+    let off_input = on_input.without_source_map();
+    let on = rewritten(transform_vue_v_bind(on_input, "scope123").expect("v-bind rewrite"));
+    let off = rewritten(transform_vue_v_bind(off_input, "scope123").expect("v-bind rewrite"));
+    assert_eq!(
+        on.0, off.0,
+        "the source_map toggle must never change emitted code"
+    );
+    assert!(
+        !on.1.is_empty(),
+        "default isolated rewrite must hand back a map"
+    );
+    assert!(
+        off.1.is_empty(),
+        "without_source_map must not hand back a map: {:?}",
+        off.1
+    );
+    let map = decode(&on.1);
+    assert!(
+        map.get_tokens().next().is_some(),
+        "the returned map must carry real mappings"
+    );
+
+    let scoped_source = ".box { color: red; }";
+    let scoped_on = PlainCssInput::try_new(
+        scoped_source,
+        CssDialect::Css,
+        "isolated.css",
+        "space:isolated",
+        "artifact:isolated",
+    )
+    .expect("plain css");
+    let scoped_off = scoped_on.without_source_map();
+    let on = rewritten(transform_vue_scoped_css(scoped_on, "scope123").expect("scoped rewrite"));
+    let off = rewritten(transform_vue_scoped_css(scoped_off, "scope123").expect("scoped rewrite"));
+    assert_eq!(on.0, off.0);
+    assert!(!on.1.is_empty());
+    assert!(off.1.is_empty(), "scoped without_source_map leaked a map");
+
+    let modules_on = PlainCssInput::try_new(
+        scoped_source,
+        CssDialect::Css,
+        "isolated.css",
+        "space:isolated",
+        "artifact:isolated",
+    )
+    .expect("plain css");
+    let modules_off = modules_on.without_source_map();
+    let on = rewritten(transform_vue_css_modules(modules_on, "scope123").expect("modules rewrite"));
+    let off =
+        rewritten(transform_vue_css_modules(modules_off, "scope123").expect("modules rewrite"));
+    assert_eq!(on.0, off.0);
+    assert!(!on.1.is_empty());
+    assert!(off.1.is_empty(), "modules without_source_map leaked a map");
+}

@@ -791,7 +791,7 @@ impl<'b> SelectorSink<'b> {
             bump,
             source,
             open: SmallVec::new(),
-            tokens: bumpalo::collections::Vec::new_in(bump),
+            tokens: bumpalo::collections::Vec::with_capacity_in(16, bump),
             list: None,
         }
     }
