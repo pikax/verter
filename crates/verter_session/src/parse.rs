@@ -1647,13 +1647,17 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     }
 }
 
-/// Build preprocessor requests for blocks that use non-native languages.
+/// Build preprocessor requests for blocks that use non-native languages,
+/// plus optional CSS admission for inline native non-CSS style dialects.
 ///
 /// A non-native language is any `lang` that the Rust compiler cannot handle natively:
 /// - Template: anything other than HTML (or no `lang`)
 /// - Script: anything not in `[ts, tsx, js, jsx]`
 /// - Style: anything outside CSS/SCSS/Sass/Less/Stylus
 /// - Custom: any custom block with a `lang` attribute
+///
+/// Inline SCSS/Sass/Less/Stylus stay natively analyzable; the request is an
+/// optional CSS overlay, not a compile blocker.
 fn build_preprocessor_requests(
     inventory: &verter_language::CarrierBlockInventory,
     source: &str,
@@ -1668,7 +1672,11 @@ fn build_preprocessor_requests(
         };
         let content_class = crate::block_content::role_class(role);
         let lang = crate::block_content::role_lang(inventory, role, syntax);
-        if crate::block_content::block_content_is_native(inventory, role, syntax, &lang) {
+        if crate::block_content::block_content_is_native(inventory, role, syntax, &lang)
+            && !crate::block_content::optional_native_style_preprocessor(
+                inventory, role, syntax, &lang,
+            )
+        {
             continue;
         }
         let Some(block_ref) = inventory.block_ref(*id) else {
@@ -3555,13 +3563,15 @@ watch(count, (value, oldValue) => {
         );
     }
 
-    /// SCSS is a native block-content dialect; the bundler may still transform
-    /// it later, but analysis/selection does not require a caller result.
+    /// Inline SCSS is analyzed natively and still offers an optional CSS overlay.
     #[test]
-    fn no_preprocessor_request_for_native_scss_style() {
+    fn inline_native_scss_offers_optional_supplied_css_request() {
         let source = "<template><div>hello</div></template>\n<style lang=\"scss\">\n.a { .b { color: red } }\n</style>";
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
-        assert!(snap.preprocessor_requests.is_empty());
+        assert_eq!(snap.preprocessor_requests.len(), 1);
+        let req = &snap.preprocessor_requests[0];
+        assert_eq!(req.content_class, BlockContentClass::Style);
+        assert_eq!(req.lang, "scss");
     }
 
     /// SCSS style blocks scan to full CSS facts (classes with exact
@@ -3840,8 +3850,8 @@ watch(count, (value, oldValue) => {
         let (snap, _parsed) = parse_vue_snapshot("test.vue", source, AnalysisScope::NONE);
         assert_eq!(
             snap.preprocessor_requests.len(),
-            2,
-            "SCSS is native; only template and script need supplied output"
+            3,
+            "pug, coffee, and optional inline SCSS CSS overlay"
         );
 
         // Verify each type is present
@@ -3852,7 +3862,7 @@ watch(count, (value, oldValue) => {
             .collect();
         assert!(types.contains(&BlockContentClass::Template));
         assert!(types.contains(&BlockContentClass::Script));
-        assert!(!types.contains(&BlockContentClass::Style));
+        assert!(types.contains(&BlockContentClass::Style));
     }
 
     #[test]

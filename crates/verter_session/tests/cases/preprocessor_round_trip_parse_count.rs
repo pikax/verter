@@ -1,12 +1,13 @@
 //! A34: a byte-changing preprocessor result adds exactly one parse.
-//! Worst-case Vue path (non-CSS dialect, all three stages rewriting) totals five.
+//! Worst-case Vue path (native non-CSS dialect, all three stages rewriting)
+//! totals four.
 
 use std::sync::Arc;
 
 use verter_css_syntax::parse_style_ir_thread_invocations;
 use verter_session::{
-    hash_block_content, BlockOverrideEntry, BlockOverrideRequest, CompileProfile, FileLanguage,
-    HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
+    hash_block_content, AnalysisLevel, BlockOverrideEntry, BlockOverrideRequest, CompileProfile,
+    FileLanguage, HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
 
 fn parse_count() -> u64 {
@@ -165,10 +166,16 @@ fn preprocessed_result_adds_exactly_one_parse() {
         );
     }
 
-    // Worst-case Vue: non-CSS dialect, all three stages rewriting on the
-    // supplied CSS identity. Mutation that reddens: add a fourth parse.
+    // Worst-case Vue: native non-CSS dialect whose authored parse runs, plus a
+    // byte-changing supplied CSS result, with v-bind, CSS-modules, and scoped
+    // all rewriting. Mutation that reddens: add a fifth parse.
     {
-        let host = VerterHost::new_standalone(HostConfig::default());
+        // Upsert skips style analysis so the authored SCSS parse is charged
+        // on this thread by get_analysis, not a scheduler worker.
+        let host = VerterHost::new_standalone(HostConfig {
+            analysis_level: AnalysisLevel::None,
+            ..HostConfig::default()
+        });
         let before = parse_count();
         let update = host
             .upsert(UpsertRequest {
@@ -176,26 +183,33 @@ fn preprocessed_result_adds_exactly_one_parse() {
                 input_id: "/workspace/WorstCase.vue".to_string(),
                 source: Arc::from(
                     "<template><div class=\"card\">x</div></template>\
-                     <style lang=\"postcss\" scoped module>\
-                     .card { color: v-bind(theme); nested { display: block; } }\
+                     <style lang=\"scss\" scoped module>\
+                     $accent: hotpink;\
+                     .card { color: v-bind(theme); }\
                      </style>",
                 ),
                 file_language: FileLanguage::vue(),
                 aliases: Vec::new(),
             })
             .expect("worst-case upsert");
+        let analysis = host
+            .get_analysis(&update.canonical_id)
+            .expect("native SCSS analysis must run");
+        assert!(
+            !analysis.styles.is_empty() && analysis.styles[0].css.is_some(),
+            "authored SCSS must parse through parse_style_ir"
+        );
         let request = update
             .preprocessor_requests
             .first()
-            .expect("postcss needs external preprocessing")
+            .expect("inline SCSS offers an optional CSS overlay")
             .clone();
-        // Supplied result is CSS (preprocessor output). Nested syntax is
-        // flattened so the modules rewrite sees a class selector.
+        assert_eq!(request.lang, "scss");
         admit_and_compile(
             &host,
             &update.canonical_id,
             &request,
-            ".card { color: v-bind(theme); }\n.card nested { display: block; }",
+            ".card { color: v-bind(theme); }",
         );
         let style = compile_style(&host, &update.canonical_id);
         assert!(
@@ -219,18 +233,14 @@ fn preprocessed_result_adds_exactly_one_parse() {
             style.code
         );
         assert!(
-            !style.code.contains(".card {") && !style.code.contains(".card nested"),
+            !style.code.contains(".card {"),
             "unhashed class selectors must not survive modules: {}",
             style.code
         );
         let worst = parse_count() - before;
-        assert!(
-            worst <= 5,
-            "worst-case non-CSS + three Vue stages must not exceed five parses, got {worst}"
-        );
         assert_eq!(
-            worst, 5,
-            "worst-case non-CSS + three Vue stages totals five, got {worst}"
+            worst, 4,
+            "worst-case native SCSS + admitted CSS + two successor parses totals four, got {worst}"
         );
     }
 }

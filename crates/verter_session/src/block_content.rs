@@ -495,12 +495,13 @@ fn pre_capture_outcome(
     availability: BlockContentAvailability,
 ) -> Result<(), BlockContentPreCaptureTerminal> {
     match availability {
-        BlockContentAvailability::ProcessedContentRequired => Ok(()),
+        BlockContentAvailability::ProcessedContentRequired
+        | BlockContentAvailability::NativeAvailable => Ok(()),
         BlockContentAvailability::Stale => Err(BlockContentPreCaptureTerminal::Stale),
         BlockContentAvailability::Conflict => Err(BlockContentPreCaptureTerminal::Failed),
-        BlockContentAvailability::NativeAvailable
-        | BlockContentAvailability::SuppliedAvailable
-        | BlockContentAvailability::Missing => Err(BlockContentPreCaptureTerminal::Unavailable),
+        BlockContentAvailability::SuppliedAvailable | BlockContentAvailability::Missing => {
+            Err(BlockContentPreCaptureTerminal::Unavailable)
+        }
     }
 }
 
@@ -588,6 +589,19 @@ pub(crate) fn native_language(content_class: BlockContentClass, lang: &str) -> b
         BlockContentClass::Style => matches!(lang, "css" | "scss" | "sass" | "less" | "stylus"),
         BlockContentClass::Custom => false,
     }
+}
+
+/// Inline SCSS/Sass/Less/Stylus is analyzed natively, but a bundler may still
+/// admit a byte-changing CSS result over the sealed override channel.
+pub(crate) fn optional_native_style_preprocessor(
+    inventory: &verter_language::CarrierBlockInventory,
+    role: &SectionRole,
+    syntax: &TaggedSyntax,
+    lang: &str,
+) -> bool {
+    matches!(role, SectionRole::Style { .. })
+        && matches!(lang, "scss" | "sass" | "less" | "stylus")
+        && named_attr(inventory, syntax, "src").is_none()
 }
 
 /// Single authority for whether selected authored bytes can flow directly
@@ -1587,12 +1601,12 @@ impl VerterHost {
                 return Err(terminal_on_error(BlockContentRefusal::Stale));
             }
             match current.availability {
-                BlockContentAvailability::ProcessedContentRequired => {}
+                BlockContentAvailability::ProcessedContentRequired
+                | BlockContentAvailability::NativeAvailable => {}
                 BlockContentAvailability::Conflict => {
                     return Err(terminal_on_error(BlockContentRefusal::Conflict));
                 }
-                availability @ (BlockContentAvailability::NativeAvailable
-                | BlockContentAvailability::SuppliedAvailable
+                availability @ (BlockContentAvailability::SuppliedAvailable
                 | BlockContentAvailability::Missing
                 | BlockContentAvailability::Stale) => {
                     return Err(terminal_on_error(BlockContentRefusal::Unavailable {
