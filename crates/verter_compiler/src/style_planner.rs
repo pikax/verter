@@ -1815,7 +1815,7 @@ impl VueScopePlanner<'_> {
                             .as_deref()
                             .is_some_and(|name| matches!(name, "global" | "v-global"))
                         {
-                            let argument = self.render_special_argument(pseudo, false, false)?;
+                            let argument = self.render_special_argument(pseudo, false)?;
                             edits.truncate(edits_checkpoint);
                             edits.push(StyleEdit::Overwrite {
                                 span: selector_content_span(selector),
@@ -1828,7 +1828,7 @@ impl VueScopePlanner<'_> {
                             .as_deref()
                             .is_some_and(|name| matches!(name, "deep" | "v-deep"))
                         {
-                            let argument = self.render_special_argument(pseudo, false, true)?;
+                            let argument = self.render_special_argument(pseudo, true)?;
                             let same_compound_anchor = component_index > 0;
                             let anchor = same_compound_anchor
                                 .then_some(compound)
@@ -1857,11 +1857,7 @@ impl VueScopePlanner<'_> {
                             .as_deref()
                             .is_some_and(|name| matches!(name, "slotted" | "v-slotted"))
                         {
-                            let argument = self.render_special_argument(pseudo, true, false)?;
-                            edits.push(StyleEdit::Overwrite {
-                                span: component.span(),
-                                content: argument,
-                            });
+                            self.collect_slotted_component_edits(component, pseudo, edits)?;
                             self.facts.rewrites.slotted = true;
                             return Ok(true);
                         }
@@ -1927,52 +1923,58 @@ impl VueScopePlanner<'_> {
     }
 
     fn render_special_argument(
-        &mut self,
+        &self,
         pseudo: &SelectorPseudo,
-        slotted: bool,
         allow_empty: bool,
     ) -> Result<String, StyleRewriteFailure> {
         let Some(selector) = self.trusted_first_selector_argument(pseudo, allow_empty)? else {
             return Ok(String::new());
         };
-        let span = selector.span();
-        let mut edits = Vec::new();
-        if slotted {
-            let slotted_attr = self.slotted_attr.clone();
-            self.collect_selector_scope_edits(selector, &slotted_attr, &mut edits)?;
-        }
-        if edits.is_empty() {
-            return Ok(self.source.slice(span).to_string());
-        }
-        edits.sort_by_key(|edit| (edit.start(), edit.end()));
-        let allocator = Allocator::new();
-        let mut transform = CodeTransform::new(self.source.slice(span), &allocator);
-        let mut previous_end = span.start;
-        for edit in edits {
-            if edit.start() < previous_end || edit.end() > span.end {
-                return Err(self.untrusted(span));
-            }
-            previous_end = previous_end.max(edit.end());
-            match edit {
-                StyleEdit::Overwrite {
-                    span: edit_span,
-                    content,
-                } => {
-                    let content = allocator.alloc_str(&content);
-                    transform.overwrite(
-                        edit_span.start - span.start,
-                        edit_span.end - span.start,
-                        content,
-                    );
-                }
-                StyleEdit::Insert { at, content } => {
-                    let content = allocator.alloc_str(&content);
-                    transform.prepend_left(at - span.start, content);
-                }
-            }
-        }
-        let rendered = transform.build_string();
-        Ok(rendered)
+        Ok(self.source.slice(selector.span()).to_string())
+    }
+
+    /// Rewrites `:slotted(<arg>)` to `<arg>` with the slotted scope attribute
+    /// inserted, expressed entirely as edits against the outer source: the
+    /// `:slotted(` prefix and the `)` suffix are deleted in place, and the
+    /// argument's scope-attribute inserts (already carrying absolute source
+    /// offsets) go into the same outer edit vector verbatim. The argument is
+    /// never rendered to an intermediate string, so no occurrence-local
+    /// allocator, transform, or splice exists — the outer `emit` remains the
+    /// sole edit applier and source-map producer.
+    ///
+    /// The three edit groups cannot overlap: the prefix overwrite ends at
+    /// `argument_span.start`, every argument insert lands inside
+    /// `[argument_span.start, argument_span.end]`, and the suffix overwrite
+    /// starts at `argument_span.end`; inserts are zero-width, so `emit`'s
+    /// `start < previous_end` guard accepts the boundary-touching cases.
+    fn collect_slotted_component_edits(
+        &self,
+        component: &SelectorComponent,
+        pseudo: &SelectorPseudo,
+        edits: &mut Vec<StyleEdit>,
+    ) -> Result<(), StyleRewriteFailure> {
+        let Some(selector) = self.trusted_first_selector_argument(pseudo, false)? else {
+            // Unreachable with `allow_empty: false`; preserved as the exact
+            // outcome the string-rendering path produced for a missing
+            // argument: the whole `:slotted()` component is deleted.
+            edits.push(StyleEdit::Overwrite {
+                span: component.span(),
+                content: String::new(),
+            });
+            return Ok(());
+        };
+        let component_span = component.span();
+        let argument_span = selector.span();
+        edits.push(StyleEdit::Overwrite {
+            span: Span::new(component_span.start, argument_span.start),
+            content: String::new(),
+        });
+        self.collect_selector_scope_edits(selector, &self.slotted_attr, edits)?;
+        edits.push(StyleEdit::Overwrite {
+            span: Span::new(argument_span.end, component_span.end),
+            content: String::new(),
+        });
+        Ok(())
     }
 
     fn collect_selector_scope_edits(

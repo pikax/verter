@@ -886,3 +886,343 @@ mod intra_parser_attribution {
         }
     }
 }
+
+mod slotted_occurrence_arena_bytes {
+    //! Requested-byte / scaling regression for the per-`:slotted()` bump-arena
+    //! floor. Bytes are the measured quantity, not calls: one
+    //! `Allocator::new()` + first `alloc_str` is a handful of calls wrapping a
+    //! ~16KiB first chunk, so the call-count delta is a proxy whose size
+    //! depends on how many occurrences an input carries, while the byte
+    //! counter measures the imposed per-occurrence cost directly.
+    //!
+    //! Isolation: `:deep(...)` only renders its argument's raw source slice
+    //! and never collects argument edits, so subtracting `:deep` bytes from
+    //! `:slotted` bytes at the same N attributes the extra to the slotted
+    //! rewrite plus a small parser-side residual — the two generators differ
+    //! in source length and token content, so parsing does NOT subtract out
+    //! exactly (see `parser_only_residual_between_deep_and_slotted_generators`
+    //! for the quantified residual). The extra must scale far below one
+    //! bump-chunk per additional occurrence.
+
+    use verter_compiler::style_planner::{run_vue_style_cascade, AuthoredStyleInput};
+    use verter_css_syntax::CssDialect;
+
+    use super::style_planner_gen::{
+        generate_deep_rules, generate_mixed_vue, generate_slotted_rules,
+    };
+    use super::{alloc_bytes, alloc_count, reset_alloc_counter};
+
+    const SCOPE_ID: &str = "a4f2eed6";
+    const SMALL_N: usize = 8;
+    const LARGE_N: usize = 40;
+    /// One oxc bump first-chunk is 16KiB, so an occurrence-local arena costs
+    /// ~22.7KB of requested bytes per occurrence (chunk + two 64-entry chunk
+    /// Vecs). The measured per-occurrence extra of the outer-edit rewrite is
+    /// 628 bytes (single argument edit); 2KiB gives ~3x measurement headroom
+    /// while sitting ~11x below the arena floor, so a reintroduced
+    /// per-occurrence arena cannot pass.
+    const MAX_EXTRA_BYTES_PER_SLOTTED_OCCURRENCE: u64 = 2048;
+    /// Multi-edit cap: an `:is()` two-arm argument contributes two inserts
+    /// plus the prefix/suffix deletes per occurrence; measured extra is
+    /// 1,971 bytes per occurrence. 4KiB is ~2x headroom and ~5.5x below the
+    /// ~22.7KB occurrence-local arena floor.
+    const MAX_EXTRA_BYTES_PER_MULTI_EDIT_SLOTTED_OCCURRENCE: u64 = 4096;
+    /// Three-edit cap: an `:is()` three-arm argument contributes three
+    /// inserts plus the prefix/suffix deletes per occurrence; measured extra
+    /// is 2,589 bytes per occurrence. 6KiB is ~2.4x headroom and ~3.7x below
+    /// the ~22.7KB occurrence-local arena floor, so a regression gated on
+    /// more than two argument edits cannot pass.
+    const MAX_EXTRA_BYTES_PER_THREE_EDIT_SLOTTED_OCCURRENCE: u64 = 6144;
+    const ATTRIBUTION_N: usize = 50;
+
+    /// Multi-edit variant of the css_bench slotted generator: every
+    /// occurrence's argument is an `:is()` with two arms, so scoping fans out
+    /// to TWO absolute-offset inserts per occurrence. A regression that
+    /// minted an occurrence-local arena only when an argument carries more
+    /// than one edit is invisible to the single-edit generators above; this
+    /// shape catches it.
+    fn generate_multi_edit_slotted_rules(n: usize) -> String {
+        (0..n)
+            .map(|i| format!(":slotted(:is(.a-{i}, .b-{i})) {{ color: red; }}"))
+            .collect()
+    }
+
+    /// `:deep()` baseline with byte-for-byte the same argument shape as
+    /// [`generate_multi_edit_slotted_rules`]: `:deep(...)` only reads its
+    /// argument's raw slice and collects no argument edits, so subtracting it
+    /// isolates the slotted rewrite from parsing the `:is()` argument.
+    fn generate_multi_edit_deep_rules(n: usize) -> String {
+        (0..n)
+            .map(|i| format!(":deep(:is(.a-{i}, .b-{i})) {{ color: red; }}"))
+            .collect()
+    }
+
+    /// Three-edit variant: every occurrence's argument is an `:is()` with
+    /// THREE arms, so scoping fans out to three absolute-offset inserts per
+    /// occurrence. A regression gated on more than two argument edits is
+    /// invisible to both the single-edit and two-edit generators above; this
+    /// shape catches it. That the shape really produces three edits is pinned
+    /// by the output-shape controls in the planner's direct-result tests
+    /// (`three_edit_slotted_argument_scopes_each_is_arm` and the
+    /// `many_three_edit_*` build-count test, which use this exact rule text).
+    fn generate_three_edit_slotted_rules(n: usize) -> String {
+        (0..n)
+            .map(|i| format!(":slotted(:is(.a-{i}, .b-{i}, .c-{i})) {{ color: red; }}"))
+            .collect()
+    }
+
+    /// `:deep()` baseline with byte-for-byte the same argument shape as
+    /// [`generate_three_edit_slotted_rules`], for the same isolation reason
+    /// as [`generate_multi_edit_deep_rules`].
+    fn generate_three_edit_deep_rules(n: usize) -> String {
+        (0..n)
+            .map(|i| format!(":deep(:is(.a-{i}, .b-{i}, .c-{i})) {{ color: red; }}"))
+            .collect()
+    }
+
+    struct Measured {
+        count: u64,
+        bytes: u64,
+    }
+
+    fn measure_converged(css: &str) -> Measured {
+        let input = AuthoredStyleInput::new(
+            css,
+            CssDialect::Css,
+            "probe.css",
+            "space:probe",
+            "artifact:probe",
+        );
+        // Warm any one-time lazy initialisation before the measured call.
+        let _ = run_vue_style_cascade(input, SCOPE_ID, false, true, true);
+        reset_alloc_counter();
+        let outcome = run_vue_style_cascade(input, SCOPE_ID, false, true, true);
+        std::hint::black_box(&outcome);
+        Measured {
+            count: alloc_count(),
+            bytes: alloc_bytes(),
+        }
+    }
+
+    #[test]
+    fn slotted_occurrence_extra_bytes_scale_below_bump_chunk() {
+        let slotted_small = measure_converged(&generate_slotted_rules(SMALL_N));
+        let deep_small = measure_converged(&generate_deep_rules(SMALL_N));
+        let slotted_large = measure_converged(&generate_slotted_rules(LARGE_N));
+        let deep_large = measure_converged(&generate_deep_rules(LARGE_N));
+
+        let extra_small = slotted_small.bytes.saturating_sub(deep_small.bytes);
+        let extra_large = slotted_large.bytes.saturating_sub(deep_large.bytes);
+        let extra_delta = extra_large.saturating_sub(extra_small);
+        let extra_n = (LARGE_N - SMALL_N) as u64;
+        let extra_per = extra_delta / extra_n;
+
+        eprintln!(
+            "J1_SLOTTED_ARENA[small n={SMALL_N}] slotted_bytes={} deep_bytes={} extra={}",
+            slotted_small.bytes, deep_small.bytes, extra_small
+        );
+        eprintln!(
+            "J1_SLOTTED_ARENA[large n={LARGE_N}] slotted_bytes={} deep_bytes={} extra={}",
+            slotted_large.bytes, deep_large.bytes, extra_large
+        );
+        eprintln!(
+            "J1_SLOTTED_ARENA[per extra occurrence] bytes={extra_per} (cap {MAX_EXTRA_BYTES_PER_SLOTTED_OCCURRENCE})"
+        );
+
+        assert!(
+            extra_per < MAX_EXTRA_BYTES_PER_SLOTTED_OCCURRENCE,
+            "per-occurrence slotted-minus-deep requested bytes must stay below one \
+             oxc bump first-chunk ({MAX_EXTRA_BYTES_PER_SLOTTED_OCCURRENCE}); observed {extra_per} \
+             (({extra_large} - {extra_small}) / {extra_n}). A ~16KiB-scale floor means \
+             the slotted rewrite is minting a fresh occurrence-local Allocator again."
+        );
+    }
+
+    #[test]
+    fn slotted_occurrence_absolute_extra_bytes_below_cap() {
+        let slotted_large = measure_converged(&generate_slotted_rules(LARGE_N));
+        let deep_large = measure_converged(&generate_deep_rules(LARGE_N));
+        let extra_large = slotted_large.bytes.saturating_sub(deep_large.bytes);
+        eprintln!(
+            "J1_SLOTTED_ARENA[absolute n={LARGE_N}] extra={extra_large} cap={}",
+            LARGE_N as u64 * MAX_EXTRA_BYTES_PER_SLOTTED_OCCURRENCE
+        );
+        assert!(
+            extra_large < LARGE_N as u64 * MAX_EXTRA_BYTES_PER_SLOTTED_OCCURRENCE,
+            "absolute slotted-minus-deep extra at n={LARGE_N} is {extra_large}, \
+             which is still a per-occurrence arena floor"
+        );
+    }
+
+    #[test]
+    fn multi_edit_slotted_occurrence_extra_bytes_scale_below_bump_chunk() {
+        let slotted_small = measure_converged(&generate_multi_edit_slotted_rules(SMALL_N));
+        let deep_small = measure_converged(&generate_multi_edit_deep_rules(SMALL_N));
+        let slotted_large = measure_converged(&generate_multi_edit_slotted_rules(LARGE_N));
+        let deep_large = measure_converged(&generate_multi_edit_deep_rules(LARGE_N));
+
+        let extra_small = slotted_small.bytes.saturating_sub(deep_small.bytes);
+        let extra_large = slotted_large.bytes.saturating_sub(deep_large.bytes);
+        let extra_delta = extra_large.saturating_sub(extra_small);
+        let extra_n = (LARGE_N - SMALL_N) as u64;
+        let extra_per = extra_delta / extra_n;
+
+        eprintln!(
+            "J1_SLOTTED_ARENA_MULTI[small n={SMALL_N}] slotted_bytes={} deep_bytes={} extra={}",
+            slotted_small.bytes, deep_small.bytes, extra_small
+        );
+        eprintln!(
+            "J1_SLOTTED_ARENA_MULTI[large n={LARGE_N}] slotted_bytes={} deep_bytes={} extra={}",
+            slotted_large.bytes, deep_large.bytes, extra_large
+        );
+        eprintln!(
+            "J1_SLOTTED_ARENA_MULTI[per extra occurrence] bytes={extra_per} (cap {MAX_EXTRA_BYTES_PER_MULTI_EDIT_SLOTTED_OCCURRENCE})"
+        );
+
+        assert!(
+            extra_per < MAX_EXTRA_BYTES_PER_MULTI_EDIT_SLOTTED_OCCURRENCE,
+            "per-occurrence multi-edit slotted-minus-deep requested bytes must stay \
+             below the cap ({MAX_EXTRA_BYTES_PER_MULTI_EDIT_SLOTTED_OCCURRENCE}); observed \
+             {extra_per} (({extra_large} - {extra_small}) / {extra_n}). A ~16KiB-scale floor \
+             means a fresh occurrence-local Allocator is back — on the multi-argument-edit path"
+        );
+    }
+
+    #[test]
+    fn multi_edit_slotted_occurrence_absolute_extra_bytes_below_cap() {
+        let slotted_large = measure_converged(&generate_multi_edit_slotted_rules(LARGE_N));
+        let deep_large = measure_converged(&generate_multi_edit_deep_rules(LARGE_N));
+        let extra_large = slotted_large.bytes.saturating_sub(deep_large.bytes);
+        eprintln!(
+            "J1_SLOTTED_ARENA_MULTI[absolute n={LARGE_N}] extra={extra_large} cap={}",
+            LARGE_N as u64 * MAX_EXTRA_BYTES_PER_MULTI_EDIT_SLOTTED_OCCURRENCE
+        );
+        assert!(
+            extra_large < LARGE_N as u64 * MAX_EXTRA_BYTES_PER_MULTI_EDIT_SLOTTED_OCCURRENCE,
+            "absolute multi-edit slotted-minus-deep extra at n={LARGE_N} is \
+             {extra_large}, which is still a per-occurrence arena floor"
+        );
+    }
+
+    #[test]
+    fn three_edit_slotted_occurrence_extra_bytes_scale_below_bump_chunk() {
+        let slotted_small = measure_converged(&generate_three_edit_slotted_rules(SMALL_N));
+        let deep_small = measure_converged(&generate_three_edit_deep_rules(SMALL_N));
+        let slotted_large = measure_converged(&generate_three_edit_slotted_rules(LARGE_N));
+        let deep_large = measure_converged(&generate_three_edit_deep_rules(LARGE_N));
+
+        let extra_small = slotted_small.bytes.saturating_sub(deep_small.bytes);
+        let extra_large = slotted_large.bytes.saturating_sub(deep_large.bytes);
+        let extra_delta = extra_large.saturating_sub(extra_small);
+        let extra_n = (LARGE_N - SMALL_N) as u64;
+        let extra_per = extra_delta / extra_n;
+
+        eprintln!(
+            "J1_SLOTTED_ARENA_THREE[small n={SMALL_N}] slotted_bytes={} deep_bytes={} extra={}",
+            slotted_small.bytes, deep_small.bytes, extra_small
+        );
+        eprintln!(
+            "J1_SLOTTED_ARENA_THREE[large n={LARGE_N}] slotted_bytes={} deep_bytes={} extra={}",
+            slotted_large.bytes, deep_large.bytes, extra_large
+        );
+        eprintln!(
+            "J1_SLOTTED_ARENA_THREE[per extra occurrence] bytes={extra_per} (cap {MAX_EXTRA_BYTES_PER_THREE_EDIT_SLOTTED_OCCURRENCE})"
+        );
+
+        assert!(
+            extra_per < MAX_EXTRA_BYTES_PER_THREE_EDIT_SLOTTED_OCCURRENCE,
+            "per-occurrence three-edit slotted-minus-deep requested bytes must stay \
+             below the cap ({MAX_EXTRA_BYTES_PER_THREE_EDIT_SLOTTED_OCCURRENCE}); observed \
+             {extra_per} (({extra_large} - {extra_small}) / {extra_n}). A ~16KiB-scale floor \
+             means a fresh occurrence-local Allocator is back — on a path gated on more \
+             than two argument edits"
+        );
+    }
+
+    #[test]
+    fn three_edit_slotted_occurrence_absolute_extra_bytes_below_cap() {
+        let slotted_large = measure_converged(&generate_three_edit_slotted_rules(LARGE_N));
+        let deep_large = measure_converged(&generate_three_edit_deep_rules(LARGE_N));
+        let extra_large = slotted_large.bytes.saturating_sub(deep_large.bytes);
+        eprintln!(
+            "J1_SLOTTED_ARENA_THREE[absolute n={LARGE_N}] extra={extra_large} cap={}",
+            LARGE_N as u64 * MAX_EXTRA_BYTES_PER_THREE_EDIT_SLOTTED_OCCURRENCE
+        );
+        assert!(
+            extra_large < LARGE_N as u64 * MAX_EXTRA_BYTES_PER_THREE_EDIT_SLOTTED_OCCURRENCE,
+            "absolute three-edit slotted-minus-deep extra at n={LARGE_N} is \
+             {extra_large}, which is still a per-occurrence arena floor"
+        );
+    }
+
+    /// Declared measurement control, not coverage: quantifies the parser-side
+    /// residual between the `:deep` and `:slotted` generator arms. The two
+    /// generators differ in source length and token content, so CSS parsing
+    /// does NOT subtract out exactly in the isolation figures above — this
+    /// prints the residual by running the cascade with `scoped=false`
+    /// (parse + v-bind scan only, no selector rewriting in either arm).
+    #[test]
+    fn parser_only_residual_between_deep_and_slotted_generators() {
+        fn measure_parse_only(css: &str) -> u64 {
+            let input = AuthoredStyleInput::new(
+                css,
+                CssDialect::Css,
+                "probe.css",
+                "space:probe",
+                "artifact:probe",
+            );
+            let _ = run_vue_style_cascade(input, SCOPE_ID, false, false, false);
+            reset_alloc_counter();
+            let outcome = run_vue_style_cascade(input, SCOPE_ID, false, false, false);
+            std::hint::black_box(&outcome);
+            alloc_bytes()
+        }
+
+        let deep = measure_parse_only(&generate_deep_rules(ATTRIBUTION_N));
+        let slotted = measure_parse_only(&generate_slotted_rules(ATTRIBUTION_N));
+        eprintln!(
+            "J1_PARSER_RESIDUAL[n={ATTRIBUTION_N}] deep_bytes={deep} slotted_bytes={slotted} \
+             residual={}",
+            slotted.abs_diff(deep)
+        );
+        assert!(
+            deep > 0 && slotted > 0,
+            "control: the parse-only cascade must allocate at all"
+        );
+    }
+
+    #[test]
+    fn slotted_occurrence_byte_measurement_is_live() {
+        let slotted_small = measure_converged(&generate_slotted_rules(SMALL_N));
+        let slotted_large = measure_converged(&generate_slotted_rules(LARGE_N));
+        assert!(
+            slotted_large.bytes > slotted_small.bytes,
+            "control: larger slotted input must request more bytes than the smaller one \
+             (slotted_large={} slotted_small={})",
+            slotted_large.bytes,
+            slotted_small.bytes
+        );
+        assert!(
+            slotted_small.count > 0 && slotted_large.count > 0,
+            "control: the converged cascade must allocate at all"
+        );
+    }
+
+    #[test]
+    fn attribution_slotted_rules_and_mixed_vue_totals() {
+        let slotted = measure_converged(&generate_slotted_rules(ATTRIBUTION_N));
+        let mixed = measure_converged(&generate_mixed_vue(ATTRIBUTION_N));
+        eprintln!(
+            "J1_ATTRIBUTION[slotted_rules n={ATTRIBUTION_N}] calls={} bytes={}",
+            slotted.count, slotted.bytes
+        );
+        eprintln!(
+            "J1_ATTRIBUTION[mixed_vue n={ATTRIBUTION_N}] calls={} bytes={}",
+            mixed.count, mixed.bytes
+        );
+        assert!(
+            slotted.bytes > 0 && mixed.bytes > 0,
+            "control: attribution totals must observe a real cascade"
+        );
+    }
+}
