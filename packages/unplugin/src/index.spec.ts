@@ -2,8 +2,9 @@
  * @ai-generated - Integration tests for the unplugin factory.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "fs";
-import { join } from "path";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { tmpdir } from "os";
 import { defineConfig, resolveConfig } from "vite";
 import { transform as transformJs } from "esbuild";
@@ -53,6 +54,71 @@ describe("unplugin factory", () => {
 
     expect(plugin).toBeDefined();
     expect((plugin as any).name).toBe("unplugin-verter");
+  });
+
+  // Plugin-source discriminators: Vite still calls compileStyleAsync,
+  // non-Vite still calls processStyle, and the compiler wrapper exports
+  // transformVueStyle beside processStyle. Searches every `.ts` file
+  // under `src/` (excluding specs and test fixtures).
+  function readPluginSourceFiles(): string[] {
+    const srcDir = dirname(fileURLToPath(import.meta.url));
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "__fixtures__") continue;
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".spec.ts")) {
+          files.push(full);
+        }
+      }
+    };
+    walk(srcDir);
+    return files;
+  }
+
+  it("Vite style lane still calls compileStyleAsync", () => {
+    let sawCompileStyleAsync = false;
+    let sawCompilerSfc = false;
+    for (const file of readPluginSourceFiles()) {
+      const src = readFileSync(file, "utf8");
+      if (src.includes("compileStyleAsync")) sawCompileStyleAsync = true;
+      if (src.includes("vue/compiler-sfc")) sawCompilerSfc = true;
+    }
+    expect(sawCompileStyleAsync).toBe(true);
+    expect(sawCompilerSfc).toBe(true);
+  });
+
+  it("non-Vite style lane still calls processStyle", () => {
+    let sawProcessStyle = false;
+    for (const file of readPluginSourceFiles()) {
+      const src = readFileSync(file, "utf8");
+      if (/\bprocessStyle\b/.test(src)) sawProcessStyle = true;
+    }
+    expect(sawProcessStyle).toBe(true);
+  });
+
+  it("compiler wrapper exports transformVueStyle beside the live processStyle call", () => {
+    let sawTransformVueStyle = false;
+    let sawProcessStyle = false;
+    for (const file of readPluginSourceFiles()) {
+      const src = readFileSync(file, "utf8");
+      if (src.includes("transformVueStyle")) sawTransformVueStyle = true;
+      if (/\bprocessStyle\b/.test(src)) sawProcessStyle = true;
+    }
+    expect(sawTransformVueStyle).toBe(true);
+    expect(sawProcessStyle).toBe(true);
+  });
+
+  it("live bundler routes do not call transformVueStyle", () => {
+    const indexSrc = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "index.ts"),
+      "utf8",
+    );
+    expect(/\btransformVueStyle\s*\(/.test(indexSrc)).toBe(false);
+    expect(indexSrc).toContain("compileStyleAsync");
+    expect(/\bprocessStyle\b/.test(indexSrc)).toBe(true);
   });
 });
 
@@ -489,6 +555,42 @@ const count = ref(0)
     // Non-module block stays a side-effect import
     expect(result.code).toMatch(/import\s+"[^"]*type=style&index=1&lang\.css"/);
     expect(result.code).toContain(`__cssModules`);
+  });
+});
+
+describe("non-Vite style virtual modules", () => {
+  function createPlugin() {
+    return unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+  }
+
+  it("transform() scopes preprocessed CSS via processStyle", async () => {
+    const plugin = createPlugin();
+    const filename = "/test/ScopedRollup.vue";
+    const sfc = `<script setup>
+const primary = "red";
+</script>
+<template><button class="box">x</button></template>`;
+
+    await plugin.transform(sfc, filename);
+    const styleId = `${filename}?vue&type=style&index=0&scoped&lang.scss`;
+    expect(plugin.transformInclude(styleId)).toBe(true);
+
+    const transformed = await plugin.transform(".box { color: v-bind(primary); }\n", styleId);
+    expect(transformed).toBeDefined();
+    expect(transformed.code).toContain("[data-v-");
+    expect(transformed.code).toContain(".box");
+    expect(transformed.code).toMatch(/var\(--[a-z0-9]+-primary\)/);
+  });
+
+  it("transform() leaves unregistered style requests untouched", async () => {
+    const plugin = createPlugin();
+    const styleId = "/test/Unregistered.vue?vue&type=style&index=0&scoped&lang.scss";
+    const source = ".box { color: v-bind(primary); }\n";
+    const transformed = await plugin.transform(source, styleId);
+    expect(transformed.code).toBe(source);
   });
 });
 

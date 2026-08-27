@@ -467,6 +467,56 @@ function isClientComponent(filename: string): boolean {
   return filename.endsWith(".client.vue");
 }
 
+/**
+ * Vite style post-process. Live authority is `vue/compiler-sfc`
+ * `compileStyleAsync` (scoping + v-bind).
+ */
+async function applyViteStyleLane(
+  compiler: {
+    compileStyleAsync: (opts: {
+      source: string;
+      filename: string;
+      id: string;
+      scoped: boolean;
+      isProd: boolean;
+    }) => Promise<{
+      code: string;
+      map?: unknown;
+      errors: Array<string | { message: string }>;
+    }>;
+  },
+  code: string,
+  filename: string,
+  scopeId: string,
+  scoped: boolean,
+  isProd: boolean,
+  reportError: (message: string) => void,
+): Promise<{ code: string; map: unknown }> {
+  const result = await compiler.compileStyleAsync({
+    source: code,
+    filename,
+    id: `data-v-${scopeId}`,
+    scoped,
+    isProd,
+  });
+  if (result.errors.length) {
+    for (const err of result.errors) {
+      reportError(typeof err === "string" ? err : err.message);
+    }
+  }
+  return { code: result.code, map: result.map ?? null };
+}
+
+/**
+ * Non-Vite style post-process. Live authority is native `processStyle`
+ * (CSS scoping). `transformVueStyle` is exported beside it from
+ * `./core/compiler` and is not the live caller.
+ */
+function applyNonViteStyleLane(css: string, scopeId: string, scoped: boolean): string {
+  const processed = processStyle(css, { scopeId, scoped });
+  return processed.code;
+}
+
 interface StyleBlockEntry {
   blockToken: string;
   content: string;
@@ -824,9 +874,10 @@ function createFrameworkFactory(
         const carrierFramework = frameworkForFilename(filename, frameworkSelection);
 
         // Style virtual module transform:
-        // - Vite mode: run compileStyleAsync() for scoping + CSS v-bind() rewriting.
-        //   Vite's CSS pipeline has already preprocessed SCSS/SASS/Less before this.
-        // - Non-Vite: use Rust processStyle for CSS scoping only.
+        // - Vite mode: applyViteStyleLane → compileStyleAsync() for scoping
+        //   + CSS v-bind() rewriting. Vite's CSS pipeline has already
+        //   preprocessed SCSS/SASS/Less before this.
+        // - Non-Vite: applyNonViteStyleLane → processStyle for CSS scoping.
         if (query.vue && query.type === "style") {
           if (viteConfig && compiler) {
             const profile = profileCache.get(filename);
@@ -836,21 +887,17 @@ function createFrameworkFactory(
             const scopedFlags = styleScopedCache.get(filename);
             const isScoped = query.scoped || entry?.scoped || (scopedFlags?.[styleIndex] ?? false);
 
-            const result = await compiler.compileStyleAsync({
-              source: code,
+            return await applyViteStyleLane(
+              compiler,
+              code,
               filename,
-              id: `data-v-${profile?.componentId ?? ""}`,
-              scoped: isScoped,
-              isProd: profile?.isProduction ?? false,
-            });
-
-            if (result.errors.length) {
-              for (const err of result.errors) {
-                this.error(typeof err === "string" ? err : err.message);
-              }
-            }
-
-            return { code: result.code, map: result.map ?? null };
+              profile?.componentId ?? "",
+              isScoped,
+              profile?.isProduction ?? false,
+              (message) => {
+                this.error(message);
+              },
+            );
           }
 
           // Non-Vite: use Rust processStyle for CSS scoping only.
@@ -860,11 +907,7 @@ function createFrameworkFactory(
             const styleIndex = query.index ?? 0;
             const scopedFlags = styleScopedCache.get(filename);
             const isScoped = query.scoped || (scopedFlags?.[styleIndex] ?? false);
-            const processed = processStyle(css, {
-              scopeId: profile.componentId ?? "",
-              scoped: isScoped,
-            });
-            css = processed.code;
+            css = applyNonViteStyleLane(css, profile.componentId ?? "", isScoped);
           }
           return { code: css, map: null };
         }

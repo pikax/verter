@@ -5,6 +5,8 @@ import type {
   Workspace,
   ProcessStyleOptions,
   ProcessStyleResult,
+  TransformVueStyleOptions,
+  TransformVueStyleResult,
 } from "@verter/native";
 
 const require = createRequire(import.meta.url);
@@ -63,6 +65,13 @@ export function resetHost(): void {
 
 export function processStyle(css: string, options: ProcessStyleOptions): ProcessStyleResult {
   return loadNative().processStyle(css, options);
+}
+
+export function transformVueStyle(
+  css: string,
+  options: TransformVueStyleOptions,
+): TransformVueStyleResult {
+  return loadNative().transformVueStyle(css, options);
 }
 
 export function getHash(text: string): string {
