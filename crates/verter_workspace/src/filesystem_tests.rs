@@ -1,7 +1,8 @@
 use super::*;
 use crate::changes::WorkspaceChange;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::{ExactResolution, ResolutionContext, ResolvePhase, ResolveRequestKind};
+use crate::types::ExactResolution;
+use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 /// The temp directory's REAL path, for filesystem operations.
 ///
@@ -29,7 +30,7 @@ fn canonical_temp_root(dir: &tempfile::TempDir) -> std::path::PathBuf {
 /// and the drive case, and a bare `canonicalize_path` never resolves the
 /// symlink. Every temp-derived id in this file goes through here.
 fn temp_canonical_id(path: &std::path::Path) -> String {
-    crate::resolver::normalize_canonical_id(&path.to_string_lossy())
+    verter_semantic::resolver_core::normalize_canonical_id(&path.to_string_lossy())
 }
 
 /// Discrimination for [`temp_canonical_id`] on the platform whose spelling
@@ -136,11 +137,11 @@ fn frozen_resolution_revalidation_bypasses_probe_and_directory_caches() {
     let recorder = FilesystemResolutionRecorder::new(&workspace, published);
     assert_eq!(
         WorkspaceRead::probe_path(&recorder, &existing),
-        crate::resolution_currency::PathProbe::File
+        verter_semantic::resolver_core::PathProbe::File
     );
     assert_eq!(
         WorkspaceRead::probe_path(&recorder, &appearing),
-        crate::resolution_currency::PathProbe::Absent
+        verter_semantic::resolver_core::PathProbe::Absent
     );
     let frozen = recorder.freeze();
 
@@ -895,6 +896,53 @@ fn vfs_provenance_tracks_dir_index_hits_refreshes_and_dirty_rescans() {
     );
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn bounded_resolution_preflight_never_enumerates_or_retains_native_directory_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = canonical_temp_root(&dir);
+    for ordinal in 0..1_024 {
+        std::fs::write(root.join(format!("entry-{ordinal:04}.ts")), "x").unwrap();
+    }
+    let target = temp_canonical_id(&root.join("entry-0000.ts"));
+    let workspace = FilesystemWorkspace::new(FilesystemOptions::default());
+    workspace.reset_vfs_provenance();
+
+    let keys = vec![verter_semantic::resolver_core::InputKey::PathProbe {
+        path: target.clone().into(),
+    }];
+    let reservation = WorkspaceRead::preflight_resolution_inputs_bounded(
+        &workspace,
+        &keys,
+        verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder(),
+    )
+    .expect("metadata-only native preflight");
+
+    let provenance = workspace.vfs_provenance_snapshot();
+    assert_eq!(provenance.native_fs_read_dir_count, 0);
+    assert_eq!(provenance.dir_index_refresh_count, 0);
+    assert!(matches!(
+        reservation.entries(),
+        [crate::resolver::ResolutionInputReservation::PathProbe {
+            value: verter_semantic::resolver_core::PathProbe::File,
+            directories,
+            ..
+        }] if directories.is_empty()
+    ));
+
+    assert_eq!(
+        WorkspaceRead::probe_path(&workspace, &target),
+        verter_semantic::resolver_core::PathProbe::File
+    );
+    assert_eq!(
+        workspace
+            .vfs_provenance_snapshot()
+            .native_fs_read_dir_count,
+        1,
+        "the ordinary probe deliberately demonstrates that this fixture's native directory rail is observable"
+    );
+}
+
 #[test]
 fn vfs_provenance_tracks_native_read_file_misses_after_stale_positive_index_hits() {
     let dir = tempfile::tempdir().unwrap();
@@ -1153,9 +1201,10 @@ fn monorepo_package_tsconfig_paths_resolve_at_types() {
 
 #[test]
 fn package_tsconfig_membership_does_not_claim_sibling_package_files() {
-    use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
     use crate::snapshot_builder::configured_membership_from_raw;
     use crate::CanonicalPath;
+    use crate::ProjectMembership;
+    use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 
     let root = "/repo/packages/code-highlight";
     // MatchAll (no files/include) → defaults under THIS root only
@@ -1199,12 +1248,12 @@ fn alias_onto_file_directory_probe_is_stable_admissible_evidence() {
         roots: vec![root.clone()],
         eager_preload: false,
     });
-    let mut config = crate::resolver::IdeProjectConfig::new(
+    let mut config = crate::resolver::ide_project_config(
         root.clone(),
         root.clone(),
         Some(format!("{root}/tsconfig.json")),
     );
-    config.compiler_options = crate::resolver::IdeProjectCompilerOptions {
+    config.compiler_options = verter_semantic::resolver_core::IdeProjectCompilerOptions {
         base_url: Some(root.clone()),
         paths: vec![("@dep/child".to_string(), vec!["src/Child.vue".to_string()])],
         ..Default::default()
@@ -1236,6 +1285,220 @@ fn alias_onto_file_directory_probe_is_stable_admissible_evidence() {
         "a directory enumeration answered NotADirectory is stable evidence, not unstable I/O; got {:?}",
         outcome.non_admission_reason()
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn filesystem_package_fixture(
+    churn: u32,
+) -> (
+    tempfile::TempDir,
+    String,
+    String,
+    String,
+    FilesystemWorkspace,
+) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root_path = canonical_temp_root(&temp);
+    std::fs::create_dir_all(root_path.join("src")).expect("src dir");
+    std::fs::create_dir_all(root_path.join("node_modules/pkg")).expect("package dir");
+    std::fs::write(root_path.join("src/main.ts"), "import 'pkg';\n").expect("importer");
+    std::fs::write(
+        root_path.join("node_modules/pkg/package.json"),
+        r#"{"name":"pkg","types":"./a.d.ts"}"#,
+    )
+    .expect("manifest");
+    std::fs::write(
+        root_path.join("node_modules/pkg/a.d.ts"),
+        "export type A = 1;\n",
+    )
+    .expect("target a");
+    std::fs::write(
+        root_path.join("node_modules/pkg/b.d.ts"),
+        "export type B = 2;\n",
+    )
+    .expect("target b");
+    let root = temp_canonical_id(&root_path);
+    let importer = format!("{root}/src/main.ts");
+    let manifest = format!("{root}/node_modules/pkg/package.json");
+    let budgets = verter_semantic::resolver_core::InputResolutionBudgets::try_tightened(
+        32, 128, 32_768, 16, churn,
+    )
+    .expect("test policy");
+    let workspace = FilesystemWorkspace::new_with_input_resolution_budgets(
+        FilesystemOptions {
+            roots: vec![root.clone()],
+            eager_preload: false,
+        },
+        budgets,
+    );
+    WorkspaceAccess::configure_resolver(
+        &workspace,
+        vec![crate::resolver::ide_project_config(
+            root.clone(),
+            root.clone(),
+            Some(format!("{root}/tsconfig.json")),
+        )],
+    );
+    (temp, root, importer, manifest, workspace)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_filesystem_import_churn_limit_is_typed_and_cold(with_overlay: bool) {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_temp, root, importer, manifest, workspace) = filesystem_package_fixture(1);
+    let published = workspace.load_published().expect("published root");
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&hook_calls);
+    let manifest_path = std::path::PathBuf::from(&manifest);
+    let _ = crate::resolver::take_input_resolution_budget_events_for_test();
+    let outcome = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::RequestCompletion,
+        move || {
+            let ordinal = calls.fetch_add(1, Ordering::AcqRel);
+            if ordinal % 2 == 1 {
+                let target = if ordinal % 4 == 1 { "b" } else { "a" };
+                std::fs::write(
+                    &manifest_path,
+                    format!(r#"{{"name":"pkg","types":"./{target}.d.ts"}}"#),
+                )
+                .expect("rewrite manifest at terminal fence");
+            }
+        },
+        || {
+            let context = ResolutionContext {
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+            };
+            if with_overlay {
+                WorkspaceRead::resolve_import_outcome_with_overlay(
+                    &workspace,
+                    &crate::resolution_currency::ResolutionOverlaySnapshot::default(),
+                    &importer,
+                    "pkg",
+                    context,
+                )
+            } else {
+                WorkspaceRead::resolve_import_at_published(
+                    &workspace, &published, &importer, "pkg", context,
+                )
+            }
+        },
+    );
+
+    assert_eq!(hook_calls.load(Ordering::Acquire), 4);
+    assert_eq!(
+        outcome.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::BudgetExceeded)
+    );
+    assert_eq!(
+        workspace.engine.lazy_resolution_slot_len_for_test(
+            &importer,
+            "pkg",
+            ResolutionContext {
+                phase: ResolvePhase::ProviderGraph,
+                kind: ResolveRequestKind::EsmImport,
+            },
+            verter_semantic::resolver_core::ResolutionPopulation::Base,
+        ),
+        0
+    );
+    assert!(workspace.engine.snapshot.read().read(&manifest).is_none());
+    assert!(workspace.engine.package_index.read().is_empty());
+    assert!(WorkspaceRead::forward_deps_for(&workspace, &importer).is_empty());
+    assert!(WorkspaceRead::reverse_deps_for(
+        &workspace,
+        &format!("{root}/node_modules/pkg/a.d.ts")
+    )
+    .is_empty());
+    let events = crate::resolver::take_input_resolution_budget_events_for_test();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].meter,
+        verter_semantic::resolver_core::InputResolutionBudgetMeter::Churn
+    );
+    assert_eq!((events[0].consumed, events[0].prospective), (1, 2));
+
+    // Mutation controls: creating either Engine ledger inside the wrapper loop
+    // removes the churn event; rewriting the typed churn terminal as retry
+    // exhaustion changes the non-admission reason; moving final validation
+    // after Engine return makes every shared store non-empty.
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn filesystem_import_churn_limit_stays_typed_and_cold() {
+    assert_filesystem_import_churn_limit_is_typed_and_cold(false);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn filesystem_overlay_import_churn_limit_stays_typed_and_cold() {
+    assert_filesystem_import_churn_limit_is_typed_and_cold(true);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_filesystem_parsed_edge_terminal_failure_is_cold(with_exact: bool) {
+    use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
+
+    let (_temp, root, importer, manifest, workspace) = filesystem_package_fixture(1);
+    let manifest_path = std::path::PathBuf::from(&manifest);
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let write_count = Arc::clone(&writes);
+    let edges = [crate::types::ParsedEdge::Relative {
+        specifier: "pkg".to_string(),
+        kind: ResolveRequestKind::EsmImport,
+    }];
+    resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::ParsedEdgePreCommit,
+        move || {
+            let ordinal = write_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let target = if ordinal % 2 == 0 { "b" } else { "a" };
+            std::fs::write(
+                &manifest_path,
+                format!(r#"{{"name":"pkg","types":"./{target}.d.ts"}}"#),
+            )
+            .expect("rewrite manifest before conditional commit");
+        },
+        || {
+            if with_exact {
+                let result = WorkspaceAccess::record_parsed_edges_with_exact_resolutions(
+                    &workspace,
+                    &importer,
+                    &edges,
+                    vec![ExactResolution {
+                        specifier: "pkg".to_string(),
+                        phase: ResolvePhase::ProviderGraph,
+                        kind: ResolveRequestKind::EsmImport,
+                        resolved_canonical_id: Some(format!("{root}/node_modules/pkg/a.d.ts")),
+                        possible_canonical_ids: Vec::new(),
+                    }],
+                );
+                assert!(!result.changed);
+                assert!(result.newly_resolved.is_empty());
+            } else {
+                WorkspaceAccess::record_parsed_edges(&workspace, &importer, &edges);
+            }
+        },
+    );
+
+    assert_eq!(writes.load(std::sync::atomic::Ordering::Acquire), 2);
+    assert!(workspace.engine.snapshot.read().read(&manifest).is_none());
+    assert!(workspace.engine.package_index.read().is_empty());
+    assert!(WorkspaceRead::forward_deps_for(&workspace, &importer).is_empty());
+    assert!(WorkspaceRead::reverse_deps_for(
+        &workspace,
+        &format!("{root}/node_modules/pkg/a.d.ts")
+    )
+    .is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn filesystem_parsed_and_exact_edge_replays_publish_nothing_after_terminal_revalidation_failure() {
+    assert_filesystem_parsed_edge_terminal_failure_is_cold(false);
+    assert_filesystem_parsed_edge_terminal_failure_is_cold(true);
 }
 
 // ── The production backend's warm owner-edge reuse ──
@@ -1765,7 +2028,7 @@ fn assert_manifest_rewrite_retargets(entry: ResolveEntry) {
     });
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![crate::resolver::IdeProjectConfig::new(
+        vec![crate::resolver::ide_project_config(
             root_id.clone(),
             root_id.clone(),
             Some(format!("{root_id}/tsconfig.json")),
@@ -1941,7 +2204,7 @@ fn a_first_observation_advances_no_fact_and_republishes_no_world_root() {
         workspace
             .engine
             .capture_published_resolution_world(
-                crate::resolution_currency::ResolutionPopulation::Base,
+                verter_semantic::resolver_core::ResolutionPopulation::Base,
             )
             .expect("a settled resolution world")
     };
@@ -1960,27 +2223,27 @@ fn a_first_observation_advances_no_fact_and_republishes_no_world_root() {
             "PathProbe",
             crate::resolution_currency::ResolutionFactKey::PathProbe {
                 canonical: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
-                population: crate::resolution_currency::ResolutionPopulation::Base,
+                population: verter_semantic::resolver_core::ResolutionPopulation::Base,
             },
         ),
         (
             "Realpath",
             crate::resolution_currency::ResolutionFactKey::Realpath {
                 requested: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
-                population: crate::resolution_currency::ResolutionPopulation::Base,
+                population: verter_semantic::resolver_core::ResolutionPopulation::Base,
             },
         ),
         (
             "Manifest",
             crate::resolution_currency::ResolutionFactKey::Manifest {
                 canonical: crate::resolution_currency::CanonicalResolutionId::new(dep.clone()),
-                population: crate::resolution_currency::ResolutionPopulation::Base,
+                population: verter_semantic::resolver_core::ResolutionPopulation::Base,
             },
         ),
     ] {
         assert_eq!(
             workspace.engine.resolution_fact_version_for_test(
-                crate::resolution_currency::ResolutionPopulation::Base,
+                verter_semantic::resolver_core::ResolutionPopulation::Base,
                 &key
             ),
             crate::resolution_currency::ResolutionFactVersion::INITIAL,
@@ -2006,7 +2269,7 @@ fn a_first_observation_advances_no_fact_and_republishes_no_world_root() {
     );
     assert_eq!(
         base_world().base.path_probes.get(&dep),
-        Some(&crate::resolution_currency::PathProbe::File),
+        Some(&verter_semantic::resolver_core::PathProbe::File),
         "the filled baseline must still be RECORDED. A fill that is discarded \
          leaves the family permanently unrecorded, and an unrecorded family \
          can never detect a change: every observation of it is a first \
@@ -2489,7 +2752,7 @@ fn freeze_and_refresh_agree_on_the_realpath_family() {
         realpath: Some(
             recorded_realpath
                 .as_deref()
-                .map(crate::resolver::normalize_canonical_id),
+                .map(verter_semantic::resolver_core::normalize_canonical_id),
         ),
         manifest: None,
     }
@@ -2623,7 +2886,7 @@ fn filesystem_workspace_exposes_the_source_env_generation_through_the_access_tra
     // recomposes the per-project env-hash tables.
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![crate::resolver::IdeProjectConfig::new(
+        vec![crate::resolver::ide_project_config(
             root_id.clone(),
             root_id.clone(),
             Some(format!("{root_id}/tsconfig.json")),

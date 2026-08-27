@@ -1388,12 +1388,12 @@ withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
 fn define_props_extends_at_alias_primitive_props_resolves() {
     let host = strict_host();
     host.configure_projects(vec![{
-        let mut cfg = verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+        let mut cfg = verter_workspace::ide_project_config(
             "/project".to_string(),
             "/project".to_string(),
             Some("/project/tsconfig.json".to_string()),
         );
-        cfg.workspace_aliases = vec![verter_workspace::WorkspaceAlias {
+        cfg.workspace_aliases = vec![verter_semantic::resolver_core::WorkspaceAlias {
             find: "@/".to_string(),
             replacement: "/project/src/".to_string(),
         }];
@@ -2665,24 +2665,21 @@ fn candidate_list_resolves_to_first_loaded() {
     let host = strict_host();
     // Configure workspace with @/ alias via host wrapper
     // (`host.workspace()` is `pub(crate)`).
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig {
-            root: "/src".to_string(),
-            workspace_root: "/src".to_string(),
-            tsconfig_path: None,
-            provider_root: "/src".to_string(),
-            workspace_aliases: vec![verter_workspace::WorkspaceAlias {
-                find: "@/".to_string(),
-                replacement: "/src/".to_string(),
-            }],
-            compiler_options:
-                verter_semantic::analysis::project_resolver::IdeProjectCompilerOptions::default(),
-            references: vec![],
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
-                &verter_workspace::CanonicalPath::new("/src"),
-            ),
-        },
-    ]);
+    host.configure_projects(vec![verter_semantic::resolver_core::IdeProjectConfig {
+        root: "/src".to_string(),
+        workspace_root: "/src".to_string(),
+        tsconfig_path: None,
+        provider_root: "/src".to_string(),
+        workspace_aliases: vec![verter_semantic::resolver_core::WorkspaceAlias {
+            find: "@/".to_string(),
+            replacement: "/src/".to_string(),
+        }],
+        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        references: vec![],
+        membership: verter_workspace::configured_membership_match_all_under_root(
+            &verter_workspace::CanonicalPath::new("/src"),
+        ),
+    }]);
     let source = "<script setup lang=\"ts\">\nimport type { Props } from '@/types'\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.msg }}</div></template>";
     upsert_vue(&host, "/src/Comp.vue", source);
     // Only the second candidate is loaded
@@ -4447,9 +4444,9 @@ fn upsert_syncs_relative_import_edges_to_workspace() {
         extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
         workspace_root: "/src".to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("/src"),
         ),
     });
@@ -4544,12 +4541,12 @@ fn workspace_resolution_used_for_aliased_imports() {
         extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
         workspace_root: "/project".to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_workspace::IdeProjectCompilerOptions {
+        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions {
             paths: vec![("@/*".to_string(), vec!["/project/src/*".to_string()])],
             ..Default::default()
         },
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("/project"),
         ),
     });
@@ -4589,7 +4586,7 @@ fn workspace_resolution_used_for_aliased_imports() {
     let result = host.resolve_loaded_dependency_canonical(
         "/project/src/Comp.vue",
         "@/utils",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
 
     // This SHOULD resolve to /project/src/utils.ts via the workspace's project resolver.
@@ -4636,7 +4633,7 @@ fn workspace_resolution_does_not_override_exact_resolution() {
     let result = host.resolve_loaded_dependency_canonical(
         "/src/Comp.vue",
         "./dep",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
 
     // The `import_routes` exact-match fast path should take priority
@@ -4696,13 +4693,11 @@ fn macro_type_dep_resolves_types_only_package_exports() {
         },
         ws.clone(),
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let popup_source = "<script setup lang=\"ts\">\nimport type { MotionProps } from 'motion'\nconst props = defineProps<MotionProps>()\n</script>\n<template><div>{{ props.duration }}</div></template>";
     upsert_vue(&host, "/workspace/src/Popup.vue", popup_source);
 
@@ -4724,7 +4719,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
     let esm_resolve = host.resolve_loaded_dependency_canonical(
         "/workspace/src/Popup.vue",
         "motion",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
     assert!(
         esm_resolve.is_none(),
@@ -4734,7 +4729,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
     let type_resolve = host.resolve_loaded_dependency_canonical(
         "/workspace/src/Popup.vue",
         "motion",
-        verter_workspace::ResolveRequestKind::TypeImport,
+        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
     );
     assert!(
         type_resolve.is_some(),
@@ -4792,13 +4787,11 @@ fn type_import_route_prefers_package_declaration_entrypoint_over_cached_runtime_
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     upsert_vue(
         &host,
@@ -4859,13 +4852,11 @@ fn type_import_route_does_not_trust_imported_cache_miss_for_untracked_package_fi
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     upsert_vue(
         &host,
         "/workspace/src/App.vue",
@@ -4957,13 +4948,11 @@ fn type_import_package_with_node_condition_still_prefers_types_entry() {
     );
 
     let host = VerterHost::new(HostConfig::default(), ws);
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     upsert_vue(
         &host,
@@ -4974,7 +4963,7 @@ fn type_import_package_with_node_condition_still_prefers_types_entry() {
     let resolved = host.resolve_loaded_dependency_canonical(
         "/workspace/src/Consumer.vue",
         "vue-router",
-        verter_workspace::ResolveRequestKind::TypeImport,
+        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
     );
 
     assert_eq!(

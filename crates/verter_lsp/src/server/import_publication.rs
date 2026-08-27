@@ -430,7 +430,7 @@ impl VerterLanguageServer {
         // choose independently.
         let tsserver_uses_authored_specifiers =
             matches!(self.type_provider_kind, crate::TypeProviderKind::Tsserver)
-                && verter_workspace::path_is_carrier(&canonical_id)
+                && verter_semantic::resolver_core::path_is_carrier(&canonical_id)
                 && self
                     .vfs_workspace
                     .read()
@@ -476,7 +476,7 @@ impl VerterLanguageServer {
                     return ImportSyncOutcome::Retry;
                 }
             };
-            if verter_workspace::path_is_carrier(&resolved) {
+            if verter_semantic::resolver_core::path_is_carrier(&resolved) {
                 continue;
             }
             if seen_barrels.insert(resolved.clone()) {
@@ -526,7 +526,7 @@ impl VerterLanguageServer {
                                 return ImportSyncOutcome::Retry;
                             }
                         };
-                    if verter_workspace::path_is_carrier(&target) {
+                    if verter_semantic::resolver_core::path_is_carrier(&target) {
                         if seen_barrel_carrier.insert(target.clone()) {
                             barrel_carrier_deps.push(target);
                         }

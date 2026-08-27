@@ -48,10 +48,9 @@ mod mode;
 mod resolver;
 mod warm_cache;
 
-// Explicit re-exports only. We deliberately do NOT `pub use resolver::*`: that
-// would risk putting a bare `ProjectResolver` next to the re-exported
-// `verter_semantic::analysis::project_resolver::ProjectResolver`. The resolver
-// trait is exported under its non-colliding name `ExternalTsProjectResolver`.
+// Explicit re-exports only. The ownership-resolver trait is exported under its
+// precise name, `ExternalTsProjectResolver`, and remains distinct from semantic
+// module resolution.
 pub use carrier::{CarrierArtifact, CarrierRegistry, CarrierRole, InMemoryCarrierRegistry};
 pub use eligibility::{
     compose_eligibility, AttachFact, BindingFact, EditorBindingFact, EligibilityFacts, ProxyFact,

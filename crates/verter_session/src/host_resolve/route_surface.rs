@@ -223,6 +223,7 @@ impl VerterHost {
         requested_name: &str,
     ) -> Option<(String, String)> {
         let result = self.resolve_named_type_export_target_uncached_with_store_view(
+            self,
             view,
             dep_canonical,
             requested_name,

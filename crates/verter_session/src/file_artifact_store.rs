@@ -50,42 +50,9 @@ pub use verter_semantic::facts::registry::{
 
 // ── Project identity wrapper ──
 
-/// Thin newtype around the 16-byte `project_identity` value produced by
-/// `IdeProjectConfig::project_identity()`.
-///
-/// Used as a key dimension on [`AugmentationTargetKey`] to keep
-/// augmentation entries from one project from poisoning a sibling
-/// project under the same syntactic specifier.
-///
-/// Byte-ordered (`PartialOrd`/`Ord` over the 16 hash bytes) so ordered
-/// sets of project identities — e.g. the members of a
-/// [`ReferenceComponent`](crate::external_ts::ReferenceComponent) — have
-/// one canonical deterministic order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProjectIdentity(pub Hash16);
-
-impl ProjectIdentity {
-    /// Fold the 16-byte project-identity hash into the `u32`
-    /// project-isolation dimension carried by query-identity keys that
-    /// store `project_identity: u32` (the
-    /// [`ResolvedDeclSlotIdentity`](crate::semantic_query::ResolvedDeclSlotIdentity)
-    /// slot, `ApparentTypeContext`, `TemplateLiteralReduceContext`, …).
-    ///
-    /// The full 16-byte hash is the workspace + tsconfig + provider-root
-    /// discriminator; this is a deterministic, order-fixed fold of all 16
-    /// bytes (four little-endian `u32` lanes XOR-combined) so two distinct
-    /// project identities keep distinct folds with overwhelming
-    /// probability while keeping the key field a compact `u32`. The fold
-    /// is the SINGLE conversion point — callers building a
-    /// slot from `host_view_project_identity_for(..)` route through here
-    /// rather than re-deriving a fold inline.
-    #[must_use]
-    pub fn fold_u32(self) -> u32 {
-        let b = self.0;
-        let lane = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
-        lane(0) ^ lane(4) ^ lane(8) ^ lane(12)
-    }
-}
+// Dependency-neutral project identity shared with the semantic observation
+// boundary (a plain `Hash16` newtype with no session/host behavior).
+pub use verter_semantic::resolver_core::ProjectIdentity;
 
 // ── FileArtifactKey ──
 
@@ -440,71 +407,14 @@ pub struct ModuleAugmentationFact {
 /// resolved relative paths (`declare module "./local" {}` resolved
 /// against the augmenter), wildcard ambients (`declare module "*.css" {}`),
 /// and the global block (`declare global {}`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum AugmentationTargetKind {
-    /// `declare module "vue" {}` — bare specifier resolved through the
-    /// project's module resolver under the resolve env.
-    ExternalSpecifier(InternedSpecifier),
-    /// `declare module "./local" {}` — relative path resolved against
-    /// the augmenter's own canonical.
-    ResolvedRelativeCanonical(Arc<str>),
-    /// `declare module "*.css" {}` — wildcard ambient module pattern.
-    WildcardAmbient(InternedGlobPattern),
-    /// `declare global { ... }` — augments the global scope.
-    GlobalAugmentation,
-}
-
-/// Inverse-lookup key for the augmentation index.
-///
-/// Carries the resolve-domain dimensions (`project_identity`,
-/// `resolve_env_hash`, `lib_env_hash`) so the same syntactic specifier
-/// `"vue"` in two projects under different envs produces two distinct
-/// keys. Project isolation prevents cross-project poisoning.
-///
-/// R21 scoping rule: this key carries `lib_env_hash` because module
-/// augmentations live inside libs / ambient corpora — a lib update CAN
-/// change which augmenters are visible.
-///
-/// The `population` dimension keeps a session-overlay augmenter set isolated
-/// from the base set: a session that overlays a `declare module` block sees
-/// the overlay's augmenters unioned with base under [`AugmentationPopulation::Session`],
-/// while base reads stay on [`AugmentationPopulation::Base`] — overlay
-/// augmenters never poison the base index, and project + env isolation prevents
-/// cross-project poisoning.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AugmentationTargetKey {
-    pub project_identity: ProjectIdentity,
-    pub resolve_env_hash: Hash16,
-    pub lib_env_hash: Hash16,
-    pub population: AugmentationPopulation,
-    pub target: AugmentationTargetKind,
-}
-
-/// Population identity for an [`AugmentationTargetKey`]: which artifact set the
-/// CONTENT-ADDRESSED augmentation index was scanned over.
-///
-/// A `Base` index scans only base ([`FileArtifactKey::is_base`]) artifacts; a
-/// `Session` index scans the session's overlay (non-base) artifacts UNIONED
-/// with base. The `Session` discriminant carries the overlay-set CONTENT
-/// fingerprint ([`crate::session_view::SessionView::fingerprint`], derived once
-/// through [`crate::session_view::augmentation_population_for_view`]) — NOT a
-/// raw session id. This index is a content-addressed compute cache, so the
-/// fingerprint IS part of its content view identity: it keeps two sessions
-/// (and the base) on distinct augmenter sets AND makes the slot self-invalidate
-/// when overlay content/membership changes (a new fingerprint → a fresh scan).
-/// Overlay results are NEVER written into a `Base`-keyed entry.
-///
-/// This is the CONTENT-ADDRESSED population: the overlay-set fingerprint IS
-/// the index's content view identity, so a base entry can never satisfy a
-/// session lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AugmentationPopulation {
-    /// Base resolve-domain population — base artifacts only.
-    Base,
-    /// Session-overlay population, keyed by the overlay-set content
-    /// fingerprint ([`crate::session_view::SessionView::fingerprint`]).
-    Session(u64),
-}
+// Dependency-neutral augmentation key vocabulary shared with the semantic
+// observation boundary. `InternedSpecifier`/`InternedGlobPattern` are fact
+// registry values, and these key types contain no session/host behavior.
+// Their ordering supports `InputKey` load-set normalization; the store's
+// DashMap uses their `Hash`/`Eq` identity.
+pub use verter_semantic::resolver_core::{
+    AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
+};
 
 // ── AugmenterEntry / AugmenterSet ──
 
@@ -3825,7 +3735,7 @@ const GLOBAL_AUGMENTATION_TAG: &str = "$global";
 ///   specifier is NOT relative, NOT a wildcard, NOT the global tag.
 /// - `ResolvedRelativeCanonical(canon)` → match relative specifiers
 ///   (the full TS `pathIsRelative` class via
-///   [`verter_workspace::resolver::is_relative_specifier`]) whose
+///   [`verter_semantic::resolver_core::is_relative_specifier`]) whose
 ///   `resolve_relative_canonical` resolves equal to `canon`.
 /// - `WildcardAmbient(pattern)` → match `fact.specifier == pattern`
 ///   AND the specifier contains a wildcard `*`.
@@ -3845,7 +3755,7 @@ pub(crate) fn augmenter_matches_target<R>(
 where
     R: Fn(&str, &str) -> Option<Arc<str>>,
 {
-    use verter_workspace::resolver::is_relative_specifier;
+    use verter_semantic::resolver_core::is_relative_specifier;
     let specifier: &str = fact.specifier.as_ref();
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
@@ -3899,7 +3809,7 @@ fn augmenter_fact_could_contribute(
     // which facts are relative, or a `declare module '..'` fact would
     // be exact-matched as relative but never invalidate relative-target
     // entries.
-    let is_relative = verter_workspace::resolver::is_relative_specifier(specifier);
+    let is_relative = verter_semantic::resolver_core::is_relative_specifier(specifier);
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
             let is_wildcard = specifier.contains('*');

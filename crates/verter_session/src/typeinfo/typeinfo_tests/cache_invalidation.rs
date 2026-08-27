@@ -359,13 +359,11 @@ fn make_package_host_with_workspace(
         },
         workspace.clone() as Arc<dyn verter_workspace::WorkspaceAccess>,
     ));
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     (host, workspace)
 }
 

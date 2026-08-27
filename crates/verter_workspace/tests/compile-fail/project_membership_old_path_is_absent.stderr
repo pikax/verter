@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `verter_workspace::project_membership`
+ --> tests/compile-fail/project_membership_old_path_is_absent.rs:1:23
+  |
+1 | use verter_workspace::project_membership::ProjectMembership;
+  |                       ^^^^^^^^^^^^^^^^^^ could not find `project_membership` in `verter_workspace`

@@ -126,8 +126,7 @@ fn layer_map() -> HashMap<&'static str, u8> {
     m
 }
 
-/// Recorded upward exception: layer-3 `verter_semantic` /
-/// `verter_diagnostics` → `verter_workspace` (layer 5) →
+/// Recorded upward exception: layer-3 `verter_diagnostics` → `verter_workspace` (layer 5) →
 /// `verter_scheduler` (unconditional) and `verter_tsgo_api` (native-only).
 /// Equality-pinned, never subset-checked — shrinking or growing the set
 /// fails until this map is deliberately updated.
@@ -142,7 +141,6 @@ fn ratified_upward_exceptions() -> HashMap<&'static str, BTreeSet<&'static str>>
             .into_iter()
             .collect();
     let mut m = HashMap::new();
-    m.insert("verter_semantic", allowed.clone());
     m.insert("verter_diagnostics", allowed);
     m
 }
@@ -332,7 +330,7 @@ impl ResolveGraph {
 /// Exception roots. Closure-based (not direct-edge): the upward reach is
 /// two-hop, and every legitimate consumer of these crates inherits it.
 /// Inheritors are not separate violations.
-const RATIFIED_ROOT_CRATES: &[&str] = &["verter_semantic", "verter_diagnostics"];
+const RATIFIED_ROOT_CRATES: &[&str] = &["verter_diagnostics"];
 
 #[test]
 fn workspace_production_closures_never_cross_upward_except_the_recorded_exception() {
@@ -423,10 +421,32 @@ fn closure_walk_is_non_vacuous_for_known_deep_reaches() {
 
     let semantic_closure = graph.production_closure_names("verter_semantic");
     assert!(
-        semantic_closure.contains("verter_workspace"),
-        "walk canary: `verter_semantic` must reach `verter_workspace` on this resolve — if it \
-         does not, either the underlying dependency has genuinely been removed (update this \
-         test and the exception map together) or the walk is broken"
+        semantic_closure.contains("verter_parser"),
+        "walk canary: `verter_semantic`'s production closure must contain `verter_parser` \
+         (got {} names) — the closure walk has gone blind",
+        semantic_closure.len()
+    );
+}
+
+/// The resolver ownership edge points from the I/O-owning workspace into the
+/// dependency-neutral semantic kernel, never back upward. Both assertions are
+/// required: the negative half alone passes if the intended edge is deleted.
+#[test]
+fn workspace_to_semantic_is_present_and_semantic_to_workspace_is_absent() {
+    let metadata = workspace_metadata();
+    let graph = ResolveGraph::from_metadata(&metadata);
+
+    let workspace_closure = graph.production_closure_names("verter_workspace");
+    assert!(
+        workspace_closure.contains("verter_semantic"),
+        "resolver ownership requires `verter_workspace -> verter_semantic`; deleting the edge \
+         must fail this guard"
+    );
+
+    let semantic_closure = graph.production_closure_names("verter_semantic");
+    assert!(
+        !semantic_closure.contains("verter_workspace"),
+        "the dependency-neutral semantic kernel must never reach `verter_workspace`"
     );
 }
 

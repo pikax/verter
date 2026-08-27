@@ -1329,8 +1329,8 @@ fn host_virtual_file_to_napi(
 
 fn napi_project_config_to_ide(
     config: NapiIdeProjectConfig,
-) -> verter_semantic::analysis::project_resolver::IdeProjectConfig {
-    let mut ide = verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+) -> verter_semantic::resolver_core::IdeProjectConfig {
+    let mut ide = verter_workspace::ide_project_config(
         config.root.clone(),
         config.workspaceRoot,
         config.tsconfigPath,
@@ -1341,12 +1341,10 @@ fn napi_project_config_to_ide(
     if let Some(aliases) = config.workspaceAliases {
         ide.workspace_aliases = aliases
             .into_iter()
-            .map(
-                |a| verter_semantic::analysis::project_resolver::WorkspaceAlias {
-                    find: a.find,
-                    replacement: a.replacement,
-                },
-            )
+            .map(|a| verter_semantic::resolver_core::WorkspaceAlias {
+                find: a.find,
+                replacement: a.replacement,
+            })
             .collect();
     }
     if let Some(opts) = config.compilerOptions {
@@ -1572,16 +1570,16 @@ impl NapiWorkspace {
     ) -> Result<Option<String>> {
         use verter_workspace::WorkspaceRead;
         let phase = match phase.as_deref() {
-            Some("provider") => verter_workspace::ResolvePhase::ProviderGraph,
-            _ => verter_workspace::ResolvePhase::CodegenBlocker,
+            Some("provider") => verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
+            _ => verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
         };
         let kind = match kind.as_deref() {
-            Some("type") => verter_workspace::ResolveRequestKind::TypeImport,
-            Some("require") => verter_workspace::ResolveRequestKind::RequireCall,
-            Some("src") => verter_workspace::ResolveRequestKind::SfcSrcAttr,
-            _ => verter_workspace::ResolveRequestKind::EsmImport,
+            Some("type") => verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            Some("require") => verter_semantic::resolver_core::ResolveRequestKind::RequireCall,
+            Some("src") => verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+            _ => verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         };
-        let ctx = verter_workspace::ResolutionContext { phase, kind };
+        let ctx = verter_semantic::resolver_core::ResolutionContext { phase, kind };
         Ok(self
             .inner
             .resolve_import(&importer, &specifier, ctx)
@@ -1593,11 +1591,10 @@ impl NapiWorkspace {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig> =
-                projects
-                    .into_iter()
-                    .map(napi_project_config_to_ide)
-                    .collect();
+            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+                .into_iter()
+                .map(napi_project_config_to_ide)
+                .collect();
             use verter_workspace::WorkspaceAccess;
             self.inner.configure_resolver(configs);
         }))
@@ -2099,7 +2096,7 @@ impl NapiVerterHost {
             .map(napi_module_reference_to_analysis)
             .collect::<Result<Vec<_>>>()?;
         Ok(
-            verter_semantic::analysis::project_resolver::collect_resolvable_module_reference_specifiers(
+            verter_semantic::resolver_core::collect_resolvable_module_reference_specifiers(
                 &module_references,
             ),
         )
@@ -2121,7 +2118,7 @@ impl NapiVerterHost {
             .collect::<Result<Vec<_>>>()?;
         let extensions = extensions.unwrap_or_else(default_known_dependency_extensions);
         Ok(
-            verter_semantic::analysis::project_resolver::resolve_known_module_reference_dependencies(
+            verter_semantic::resolver_core::resolve_known_module_reference_dependencies(
                 &owner_id,
                 &module_references,
                 &known_ids,
@@ -2168,11 +2165,10 @@ impl NapiVerterHost {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig> =
-                projects
-                    .into_iter()
-                    .map(napi_project_config_to_ide)
-                    .collect();
+            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+                .into_iter()
+                .map(napi_project_config_to_ide)
+                .collect();
             self.inner.configure_projects(configs);
         }))
     }

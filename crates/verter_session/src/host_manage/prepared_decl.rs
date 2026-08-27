@@ -819,7 +819,9 @@ impl VerterHost {
         canonical_id: &str,
         state: &crate::resolver_core::ShallowFileState,
     ) -> Option<rustc_hash::FxHashMap<String, String>> {
-        self.prepared_decl_bundle_route_dep_edges_with_context(self, canonical_id, state)
+        self.with_base_resolver_context(|ctx| {
+            self.prepared_decl_bundle_route_dep_edges_with_context(ctx, canonical_id, state)
+        })
     }
 
     /// Resolve the owner's authored import specifiers into the bundle's
@@ -1591,8 +1593,9 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
-        let ctx: &dyn crate::resolver_core::ResolverContext = self;
-        self.shallow_file_state_with_context(ctx, canonical_id)
+        self.with_base_resolver_context(|ctx| {
+            self.shallow_file_state_with_context(ctx, canonical_id)
+        })
     }
 
     /// Context-threaded core of [`Self::shallow_file_state`].
@@ -3006,7 +3009,7 @@ impl VerterHost {
         let ctx =
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
         use crate::resolver_core::resolver_context::ResolverContext;
-        self.owner_import_surface_with_store_view(ctx.store_view(), owner_canonical)
+        self.owner_import_surface_with_store_view(&ctx, ctx.store_view(), owner_canonical)
     }
 
     /// View-bound variant of [`Self::owner_import_surface`].
@@ -3019,6 +3022,7 @@ impl VerterHost {
     /// preserved.
     pub(crate) fn owner_import_surface_with_store_view(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         view: &dyn crate::resolver_core::StoreView,
         owner_canonical: &str,
     ) -> Option<Arc<crate::owner_import_surface::OwnerImportSurface>> {
@@ -3118,6 +3122,7 @@ impl VerterHost {
                 // `imported_type_root.rs:49`).
                 let (final_identity, route_facts) = self
                     .resolve_imported_type_root_with_facts_with_store_view(
+                        ctx,
                         view,
                         resolved_canonical_id.as_str(),
                         target.imported_name.as_str(),
@@ -3270,9 +3275,8 @@ impl VerterHost {
     ///
     /// Test-only bare wrapper. Production callers go through
     /// `ctx.resolve_owner_direct_import` (which routes through the
-    /// request-bound `_with_store_view`); the test-only arm on
-    /// `impl ResolverContext for VerterHost` reaches this wrapper on
-    /// test fixtures that call `host.<method>` directly.
+    /// request-bound `_with_store_view`); direct-host test fixtures reach this
+    /// wrapper through the compile-fenced seam.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn resolve_owner_direct_import(
@@ -3290,6 +3294,7 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
         use crate::resolver_core::resolver_context::ResolverContext;
         self.resolve_owner_direct_import_with_store_view(
+            &ctx,
             ctx.store_view(),
             owner_canonical,
             local_name,
@@ -3302,11 +3307,12 @@ impl VerterHost {
     /// [`Self::owner_import_surface_with_store_view`].
     pub(crate) fn resolve_owner_direct_import_with_store_view(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         view: &dyn crate::resolver_core::StoreView,
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        let surface = self.owner_import_surface_with_store_view(view, owner_canonical)?;
+        let surface = self.owner_import_surface_with_store_view(ctx, view, owner_canonical)?;
         // `Arc<str>` borrows as `&str`, so the surface lookup uses the
         // caller-supplied slice directly without allocating a fresh Arc.
         let binding = surface.bindings.get(local_name)?;

@@ -57,13 +57,11 @@ fn make_host_with_files(files: &[(&str, &str)]) -> Arc<VerterHost> {
         workspace.inject_file((*path).to_string(), Arc::from(*source));
     }
     let host = Arc::new(VerterHost::new(HostConfig::default(), workspace));
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/w".to_string(),
-            "/w".to_string(),
-            Some("/w/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/w".to_string(),
+        "/w".to_string(),
+        Some("/w/tsconfig.json".to_string()),
+    )]);
     // Upsert each file with its REAL content so the synthesized `default`
     // symbol + import routes are populated (the workspace injection above lets
     // cross-file import resolution find the targets).

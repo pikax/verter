@@ -40,7 +40,7 @@ impl VerterHost {
         let dep_canonical = match self.resolve_loaded_dependency_canonical(
             owner_canonical,
             import_source,
-            verter_workspace::ResolveRequestKind::TypeImport,
+            verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 admitted.into_result()?

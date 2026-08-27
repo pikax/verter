@@ -534,7 +534,7 @@ impl VerterLanguageServer {
         // provider-state COMMIT is the caller's responsibility here, so an OWNED decision's
         // `committed_state` / `transition` is intentionally dropped — only the store
         // membership is refreshed. But a NON-OWNED outcome is NOT discardable: it must be
-        // settled through the coordinator so a transient defer requeues (the F3/F4
+        // settled through the coordinator so a transient defer requeues (the
         // dropped-outcome class) and a terminal owner-loss advances the barrier.
         match self
             .reconcile_carrier_via_gateway(canonical_id, is_jsx, ide.as_ref(), open_pin)
@@ -735,7 +735,7 @@ impl VerterLanguageServer {
             .iter()
             .filter(|dependency| {
                 dependency.provider_target
-                    == crate::project_resolver::ProviderTarget::CarrierPublicApi
+                    == verter_semantic::resolver_core::ProviderTarget::CarrierPublicApi
             })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
@@ -749,9 +749,9 @@ impl VerterLanguageServer {
             .iter()
             .filter(|dependency| {
                 dependency.provider_target
-                    == crate::project_resolver::ProviderTarget::ShadowSourceFile
+                    == verter_semantic::resolver_core::ProviderTarget::ShadowSourceFile
                     || (dependency.provider_target
-                        == crate::project_resolver::ProviderTarget::SourceFile
+                        == verter_semantic::resolver_core::ProviderTarget::SourceFile
                         && dependency.source_id.contains("node_modules"))
             })
             .map(|dependency| dependency.source_id.clone())
@@ -856,16 +856,16 @@ impl VerterLanguageServer {
 
             for dependency in resolved_dependencies {
                 if dependency.provider_target
-                    == crate::project_resolver::ProviderTarget::CarrierPublicApi
+                    == verter_semantic::resolver_core::ProviderTarget::CarrierPublicApi
                 {
                     self.sync_carrier_public_api_by_canonical_id(&dependency.source_id)
                         .await;
                 } else if dependency.provider_target
-                    == crate::project_resolver::ProviderTarget::ShadowSourceFile
+                    == verter_semantic::resolver_core::ProviderTarget::ShadowSourceFile
                 {
                     pending.push(dependency.source_id.clone());
                 } else if dependency.provider_target
-                    == crate::project_resolver::ProviderTarget::SourceFile
+                    == verter_semantic::resolver_core::ProviderTarget::SourceFile
                     && dependency.source_id.contains("node_modules")
                 {
                     // Follow node_modules dependencies transitively
@@ -1266,7 +1266,10 @@ impl VerterLanguageServer {
                     return;
                 }
                 (
-                    verter_workspace::carrier_ide_provider_path(&canonical_id, is_jsx),
+                    verter_semantic::resolver_core::carrier_ide_provider_path(
+                        &canonical_id,
+                        is_jsx,
+                    ),
                     true,
                 )
             }
@@ -2081,7 +2084,7 @@ impl VerterLanguageServer {
     ) -> Option<String> {
         carrier_language_for(canonical_id)
             .is_some()
-            .then(|| verter_workspace::carrier_api_provider_path(canonical_id))
+            .then(|| verter_semantic::resolver_core::carrier_api_provider_path(canonical_id))
     }
 
     pub(super) async fn sync_carrier_ide_unresolved(
@@ -2100,7 +2103,8 @@ impl VerterLanguageServer {
         // Carrier-generic IDE virtual-file derivation (`Foo.svelte` →
         // `Foo.svelte.tsx`), never a hardcoded `.vue` suffix. This bootstrap
         // unresolved path already knows it holds a carrier.
-        let ide_path = verter_workspace::carrier_ide_provider_path(canonical_id, is_jsx);
+        let ide_path =
+            verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, is_jsx);
 
         let mut state = self
             .provider_sync_state_for_source(canonical_id)
@@ -2252,9 +2256,9 @@ impl VerterLanguageServer {
                 provider_ide_path_for_source(&snapshot.resolver, &canonical, is_jsx)
             })
             .or_else(|| {
-                carrier_language_for(&canonical)
-                    .is_some()
-                    .then(|| verter_workspace::carrier_ide_provider_path(&canonical, is_jsx))
+                carrier_language_for(&canonical).is_some().then(|| {
+                    verter_semantic::resolver_core::carrier_ide_provider_path(&canonical, is_jsx)
+                })
             })
     }
 

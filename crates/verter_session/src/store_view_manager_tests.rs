@@ -218,7 +218,7 @@ fn token_carries_project_identity_dimension() {
     let (host, _canonical) = host_with_one_file();
     let base = host.current_validation_token();
     let mut other = base;
-    other.project_identity = crate::file_artifact_store::ProjectIdentity([0x5Au8; 16]);
+    other.project_identity = crate::resolver_store::StoreViewProjectIdentity([0x5Au8; 16]);
     assert_ne!(
         base.project_identity, other.project_identity,
         "the two tokens must differ in the project_identity dimension"
@@ -2296,7 +2296,7 @@ fn manager_cached_view_misses_after_edge_stale_wildcard_file_set_change() {
     assert!(
         token1.externally_superseded_by(&token2),
         "an edge-staleness transition is an EXTERNAL mutation: a result \
-         computed under the pre-transition snapshot MUST NOT be promoted"
+         computed under the superseded snapshot MUST NOT be promoted"
     );
 }
 

@@ -12,7 +12,7 @@
 
 use super::*;
 
-use crate::project_resolver::{IdeProjectConfig, NativeProjectResolver};
+use verter_semantic::resolver_core::ModuleResolverCore;
 
 /// The owner's root, or `None` for the terminal `NoProject` answer.
 fn owned_root(ownership: &ProjectOwnership) -> Option<&str> {
@@ -33,13 +33,13 @@ fn owned_config(ownership: &ProjectOwnership) -> Option<&str> {
 /// A single-folder pnpm monorepo: the workspace root is a configured project,
 /// and `packages/app` is its own configured project with its own install.
 fn monorepo_authority() -> SnapshotOwnerAuthority {
-    let resolver = NativeProjectResolver::new(vec![
-        IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![
+        verter_workspace::ide_project_config(
             "/ws".to_string(),
             "/ws".to_string(),
             Some("/ws/tsconfig.json".to_string()),
         ),
-        IdeProjectConfig::new(
+        verter_workspace::ide_project_config(
             "/ws/packages/app".to_string(),
             "/ws".to_string(),
             Some("/ws/packages/app/tsconfig.json".to_string()),
@@ -114,7 +114,7 @@ fn a_project_configured_by_jsconfig_is_identified_by_that_file() {
     // `jsconfig.json` configures a project exactly like `tsconfig.json`. An
     // authority that reported the root and let the consumer look for a literal
     // `tsconfig.json` would leave this project with invented default options.
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         "/ws/packages/legacy".to_string(),
         "/ws".to_string(),
         Some("/ws/packages/legacy/jsconfig.json".to_string()),
@@ -154,7 +154,7 @@ fn sibling_prefix_directory_is_not_treated_as_a_nested_package() {
     // `/ws/packages/app-extra` shares a string prefix with `/ws/packages/app`
     // but is NOT under it. A prefix-only containment test would bind it to the
     // wrong package's TypeScript.
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         "/ws/packages/app".to_string(),
         "/ws".to_string(),
         Some("/ws/packages/app/tsconfig.json".to_string()),
@@ -176,7 +176,7 @@ fn sibling_prefix_directory_is_not_treated_as_a_nested_package() {
 
 #[test]
 fn a_fallback_only_workspace_yields_no_project_rather_than_an_invented_root() {
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         "/ws".to_string(),
         "/ws".to_string(),
         None,

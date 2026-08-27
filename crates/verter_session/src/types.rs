@@ -3754,8 +3754,7 @@ pub struct MetaProvenance {
     /// `view.content_hash_for(canonical)` rather than the base host's
     /// `shallow_file_state(canonical).whole_hash`. Used by
     /// `tests/cases/g_session/session_view_warm_reuse.rs` to assert R17/R18 (the
-    /// consumer path is wired through `SessionView`, not through the
-    /// bare host).
+    /// consumer path is wired through `SessionView`).
     pub view_aware_cache_key_lookups: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_hits: std::sync::atomic::AtomicU64,
     pub resolved_external_type_cache_misses: std::sync::atomic::AtomicU64,
@@ -4693,6 +4692,36 @@ pub(crate) struct HostMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_config_shape_has_no_module_resolution_budget_ingress() {
+        let HostConfig {
+            dev_mode: _,
+            compile_error_policy: _,
+            lsp_scheme: _,
+            max_profiles_per_file: _,
+            resolve_extensions: _,
+            analysis_level: _,
+            analysis_scope: _,
+            generic_root_propagation: _,
+            metrics_enabled: _,
+            audit_enabled: _,
+            footprint_capture: _,
+            audit_timing_capture: _,
+            max_derivation_edges: _,
+            audit_caps: _,
+            depth_budget: _,
+            projection_op_budget: _,
+            eviction_policy: _,
+            lsp_method_timeouts: _,
+            external_resolution_step_budget: _,
+            recursion_budget_overrides: _,
+            typeinfo_scratch_cache_capacity: _,
+            host_cpu_threads: _,
+            query_profile: _,
+            resource_policy: _,
+        } = HostConfig::default();
+    }
 
     // -----------------------------------------------------------------------
     // AnalysisSourceRevision

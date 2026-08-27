@@ -1,7 +1,7 @@
 #![doc = include_str!("../../../docs/arch/path-precise-resolution-currency.md")]
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -14,13 +14,14 @@ use super::{
     Engine,
 };
 use crate::canonical_path::CanonicalPath;
-use crate::membership::ConfiguredMembership;
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-use crate::resolver::{normalize_canonical_id, IdeProjectCompilerOptions, WorkspaceAlias};
+use crate::resolver::take_input_resolution_budget_events_for_test;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::{
-    ExactResolution, ExactResolutionResult, ParsedEdge, ResolutionContext, ResolvePhase,
-    ResolveRequestKind, ResolveResult,
+use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
+use verter_semantic::resolver_core::{
+    normalize_canonical_id, AttemptFailure, IdeProjectCompilerOptions, InputResolutionBudgetMeter,
+    InputResolutionBudgets, ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind,
+    ResolveResult, WorkspaceAlias,
 };
 
 const CONTEXT: ResolutionContext = ResolutionContext {
@@ -70,6 +71,21 @@ impl ConcurrentReader {
 }
 
 impl WorkspaceRead for ConcurrentReader {
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
+        crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<crate::resolver::LoadedResolutionInputBatch, AttemptFailure> {
+        crate::resolver::load_workspace_inputs_for_test(self, reservation)
+    }
+
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.files
             .read()
@@ -78,10 +94,10 @@ impl WorkspaceRead for ConcurrentReader {
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
-        self.probe_path(canonical_id) == crate::resolution_currency::PathProbe::File
+        self.probe_path(canonical_id) == verter_semantic::resolver_core::PathProbe::File
     }
 
-    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
         let normalized = normalize_canonical_id(canonical_id);
         let exists = self.files.read().contains_key(&normalized);
         let should_fire = self
@@ -94,9 +110,9 @@ impl WorkspaceRead for ConcurrentReader {
             resolution_test_hooks::fire(ResolutionPhase::FilesystemProbing);
         }
         if exists {
-            crate::resolution_currency::PathProbe::File
+            verter_semantic::resolver_core::PathProbe::File
         } else {
-            crate::resolution_currency::PathProbe::Absent
+            verter_semantic::resolver_core::PathProbe::Absent
         }
     }
 
@@ -255,7 +271,9 @@ fn assert_single_world_outcome(
 }
 
 fn publish_alias(engine: &Engine, project_root: &str, alias_target: &str) {
-    let membership = ConfiguredMembership::match_all_under_root(&CanonicalPath::new(project_root));
+    let membership = crate::membership::configured_membership_match_all_under_root(
+        &CanonicalPath::new(project_root),
+    );
     *engine.project_graph.write() = ProjectGraph::from_configs(vec![VfsProjectConfig {
         root: project_root.to_string(),
         rank: ProjectRank::Explicit,
@@ -537,4 +555,291 @@ fn resolution_concurrency_mutation_during_request_completion_never_admits_mixed_
         },
     );
     let _outcome = assert_single_world_outcome(&result, &old_oracle, &new_oracle, &observation);
+}
+
+#[test]
+fn conditional_commit_restarts_share_one_churn_ledger_and_a_new_request_resets_it() {
+    const IMPORTER: &str = "/p/main.ts";
+    const SPECIFIER: &str = "./ordinary";
+    let budgets =
+        InputResolutionBudgets::try_tightened(32, 128, 32_768, 16, 1).expect("test policy");
+    let engine = Arc::new(Engine::new_with_input_resolution_budgets(budgets));
+    let reader = ConcurrentReader::new(&["/p/ordinary.ts"]);
+    let mutations = Arc::new(AtomicUsize::new(0));
+    let mutate_engine = Arc::clone(&engine);
+    let mutate_count = Arc::clone(&mutations);
+
+    let refused = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            let ordinal = mutate_count.fetch_add(1, Ordering::AcqRel);
+            let target = if ordinal % 2 == 0 {
+                "/p/exact-a.ts"
+            } else {
+                "/p/exact-b.ts"
+            };
+            mutate_engine.set_exact_resolutions(IMPORTER, vec![exact(SPECIFIER, target)]);
+        },
+        || engine.resolve_import_outcome(&reader, IMPORTER, SPECIFIER, CONTEXT),
+    );
+
+    assert_eq!(mutations.load(Ordering::Acquire), 2);
+    assert_eq!(
+        refused.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::BudgetExceeded),
+        "the second conditional-commit restart must breach the same operation ledger"
+    );
+    assert!(
+        refused.result().is_none(),
+        "a churn rejection must discard the answer computed from the superseded world"
+    );
+    assert!(engine
+        .cached_resolution_query_for_test(
+            IMPORTER,
+            SPECIFIER,
+            CONTEXT,
+            reader.resolution_population(),
+        )
+        .is_none());
+    assert!(
+        engine.reverse_deps_for("/p/exact-a.ts").is_empty(),
+        "the superseded answer must not enter the reverse index"
+    );
+
+    let fresh = engine.resolve_import_outcome(&reader, IMPORTER, SPECIFIER, CONTEXT);
+    assert_eq!(
+        fresh.result().map(|result| result.source_id.as_str()),
+        Some("/p/exact-b.ts")
+    );
+    assert!(
+        fresh.is_cacheable(),
+        "a new operation must receive a fresh ledger"
+    );
+
+    // Mutation controls: recreating the ledger inside the outer retry loop,
+    // or moving the churn charge after `continue`, makes the first assertion
+    // run to the provider retry cap instead of producing BudgetExceeded.
+}
+
+#[test]
+fn ratified_outer_churn_boundary_runs_the_ninth_attempt_and_rejects_only_its_restart() {
+    const IMPORTER: &str = "/p/main.ts";
+    const SPECIFIER: &str = "./ordinary";
+    let reader = ConcurrentReader::new(&["/p/ordinary.ts"]);
+
+    let accepted_engine = Arc::new(Engine::new());
+    let accepted_hook_calls = Arc::new(AtomicUsize::new(0));
+    let mutate_engine = Arc::clone(&accepted_engine);
+    let hook_calls = Arc::clone(&accepted_hook_calls);
+    let accepted = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            let ordinal = hook_calls.fetch_add(1, Ordering::AcqRel);
+            if ordinal < InputResolutionBudgets::RATIFIED.churn() as usize {
+                let target = if ordinal % 2 == 0 {
+                    "/p/exact-a.ts"
+                } else {
+                    "/p/exact-b.ts"
+                };
+                mutate_engine.set_exact_resolutions(IMPORTER, vec![exact(SPECIFIER, target)]);
+            }
+        },
+        || accepted_engine.resolve_import_outcome(&reader, IMPORTER, SPECIFIER, CONTEXT),
+    );
+    assert_eq!(accepted_hook_calls.load(Ordering::Acquire), 9);
+    assert_eq!(
+        accepted.result().map(|result| result.source_id.as_str()),
+        Some("/p/exact-b.ts"),
+        "eight inclusive restarts must still run and admit the ninth attempt"
+    );
+    assert!(accepted.is_cacheable());
+
+    let _ = take_input_resolution_budget_events_for_test();
+    let refused_engine = Arc::new(Engine::new());
+    let refused_hook_calls = Arc::new(AtomicUsize::new(0));
+    let mutate_engine = Arc::clone(&refused_engine);
+    let hook_calls = Arc::clone(&refused_hook_calls);
+    let refused = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            let ordinal = hook_calls.fetch_add(1, Ordering::AcqRel);
+            let target = if ordinal % 2 == 0 {
+                "/p/exact-a.ts"
+            } else {
+                "/p/exact-b.ts"
+            };
+            mutate_engine.set_exact_resolutions(IMPORTER, vec![exact(SPECIFIER, target)]);
+        },
+        || refused_engine.resolve_import_outcome(&reader, IMPORTER, SPECIFIER, CONTEXT),
+    );
+    assert_eq!(
+        refused_hook_calls.load(Ordering::Acquire),
+        9,
+        "the ninth attempt must run before its prospective ninth restart is rejected"
+    );
+    assert_eq!(
+        refused.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::BudgetExceeded)
+    );
+    assert!(refused.result().is_none());
+    assert!(refused_engine
+        .cached_resolution_query_for_test(
+            IMPORTER,
+            SPECIFIER,
+            CONTEXT,
+            reader.resolution_population(),
+        )
+        .is_none());
+    assert!(
+        refused_engine.reverse_deps_for("/p/exact-b.ts").is_empty(),
+        "the answer computed before the final exact-A publication must not enter the reverse index"
+    );
+
+    let events = take_input_resolution_budget_events_for_test();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].meter, InputResolutionBudgetMeter::Churn);
+    assert_eq!(events[0].consumed, 8);
+    assert_eq!(events[0].prospective, 9);
+    assert_eq!(events[0].maximum, 8);
+
+    // Mutation control: restoring an independent `for _ in 0..8` world loop
+    // stops after eight hook calls and reports retry exhaustion before this
+    // exact semantic churn event can exist.
+}
+
+#[test]
+fn parsed_edge_commit_restarts_share_one_churn_ledger_and_discard_stale_edges() {
+    const IMPORTER: &str = "/p/main.ts";
+    let budgets =
+        InputResolutionBudgets::try_tightened(32, 128, 32_768, 16, 1).expect("test policy");
+    let engine = Arc::new(Engine::new_with_input_resolution_budgets(budgets));
+    let reader = ConcurrentReader::new(&["/p/ordinary.ts"]);
+    let mutations = Arc::new(AtomicUsize::new(0));
+    let mutate_engine = Arc::clone(&engine);
+    let mutate_count = Arc::clone(&mutations);
+    let edges = [ParsedEdge::Relative {
+        specifier: "./ordinary".to_string(),
+        kind: ResolveRequestKind::EsmImport,
+    }];
+
+    let _ = take_input_resolution_budget_events_for_test();
+    resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::ParsedEdgePreCommit,
+        move || {
+            let ordinal = mutate_count.fetch_add(1, Ordering::AcqRel);
+            let target = if ordinal % 2 == 0 {
+                "/p/exact-a.ts"
+            } else {
+                "/p/exact-b.ts"
+            };
+            mutate_engine.set_exact_resolutions(IMPORTER, vec![exact("./forced", target)]);
+        },
+        || engine.record_parsed_edges(&reader, IMPORTER, &edges),
+    );
+
+    assert_eq!(mutations.load(Ordering::Acquire), 2);
+    assert!(
+        !engine
+            .forward_deps_for(IMPORTER)
+            .iter()
+            .any(|dependency| dependency == "/p/ordinary.ts"),
+        "the superseded parsed-edge result must not enter the forward index"
+    );
+    let events = take_input_resolution_budget_events_for_test();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].meter, InputResolutionBudgetMeter::Churn);
+    assert_eq!((events[0].consumed, events[0].prospective), (1, 2));
+
+    engine.record_parsed_edges(&reader, IMPORTER, &edges);
+    assert_eq!(engine.forward_deps_for(IMPORTER), vec!["/p/ordinary.ts"]);
+}
+
+#[test]
+fn parsed_edge_exact_companion_rejects_the_ninth_restart_after_running_nine_attempts() {
+    const IMPORTER: &str = "/p/main.ts";
+    let engine = Arc::new(Engine::new());
+    let reader = ConcurrentReader::new(&["/p/ordinary.ts"]);
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let mutate_engine = Arc::clone(&engine);
+    let calls = Arc::clone(&hook_calls);
+    let edges = [ParsedEdge::Relative {
+        specifier: "./ordinary".to_string(),
+        kind: ResolveRequestKind::EsmImport,
+    }];
+
+    let _ = take_input_resolution_budget_events_for_test();
+    let result = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::ParsedEdgePreCommit,
+        move || {
+            let ordinal = calls.fetch_add(1, Ordering::AcqRel);
+            let target = if ordinal % 2 == 0 {
+                "/p/exact-a.ts"
+            } else {
+                "/p/exact-b.ts"
+            };
+            mutate_engine.set_exact_resolutions(IMPORTER, vec![exact("./forced", target)]);
+        },
+        || {
+            engine.record_parsed_edges_with_exact_resolutions(
+                &reader,
+                IMPORTER,
+                &edges,
+                vec![exact("./ordinary", "/p/ordinary.ts")],
+            )
+        },
+    );
+
+    assert_eq!(hook_calls.load(Ordering::Acquire), 9);
+    assert!(!result.changed);
+    assert!(result.newly_resolved.is_empty());
+    assert!(
+        !engine
+            .forward_deps_for(IMPORTER)
+            .iter()
+            .any(|dependency| dependency == "/p/ordinary.ts"),
+        "the parsed-edge result preceding the rejected ninth restart must not be admitted"
+    );
+    let events = take_input_resolution_budget_events_for_test();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].meter, InputResolutionBudgetMeter::Churn);
+    assert_eq!((events[0].consumed, events[0].prospective), (8, 9));
+}
+
+#[test]
+fn explicit_project_churn_rejection_discards_the_superseded_result() {
+    let budgets =
+        InputResolutionBudgets::try_tightened(32, 128, 32_768, 16, 1).expect("test policy");
+    let engine = Arc::new(Engine::new_with_input_resolution_budgets(budgets));
+    publish_alias(&engine, "/p", "/p/old");
+    let reader = ConcurrentReader::new(&["/p/old.ts", "/p/new.ts"]);
+    let owner = ProjectOwnership {
+        project_root: "/p".to_string(),
+        tsconfig_path: Some("/p/tsconfig.json".to_string()),
+    };
+    let mutations = Arc::new(AtomicUsize::new(0));
+    let mutate_engine = Arc::clone(&engine);
+    let mutate_count = Arc::clone(&mutations);
+
+    let refused = resolution_test_hooks::with_repeating_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            let ordinal = mutate_count.fetch_add(1, Ordering::AcqRel);
+            let target = if ordinal % 2 == 0 { "/p/new" } else { "/p/old" };
+            publish_alias(&mutate_engine, "/p", target);
+        },
+        || engine.resolve_import_for_project_outcome(&reader, &owner, "@dep", CONTEXT),
+    );
+
+    assert_eq!(mutations.load(Ordering::Acquire), 2);
+    assert_eq!(
+        refused.non_admission_reason(),
+        Some(verter_audit::NonAdmissionReason::BudgetExceeded)
+    );
+    assert!(
+        refused.result().is_none(),
+        "the explicit-project facade must not expose its superseded attempt output"
+    );
+
+    // Mutation control: passing `result` through either explicit-path churn
+    // rejection makes the final assertion expose the old alias target.
 }

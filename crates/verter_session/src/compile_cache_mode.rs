@@ -60,7 +60,7 @@
 //!   and ignores every reason (stateless already bypasses host caches).
 
 use smallvec::SmallVec;
-use verter_workspace::WorkspaceAlias;
+use verter_semantic::resolver_core::WorkspaceAlias;
 
 use crate::types::{
     CompileCacheMode, CompileErrorPolicy, CompileInput, CompileProfile, DowngradeReason, HostConfig,

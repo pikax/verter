@@ -179,6 +179,96 @@ fn rig(fixtures: Vec<(FlowSliceFunctionKey, &'static str)>, budget: FlowSliceBud
     }
 }
 
+/// `FunctionFlowGraphStore::peek`/`FlowSliceStores::peek_skeleton_for` —
+/// the `ResolverObservation::function_body_skeleton` backing
+/// primitive: a non-blocking read that must NEVER drive a build.
+#[test]
+fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
+    let key = function_key("/peek.ts", "myType", 1);
+    let rig = rig(
+        vec![(key.clone(), MYTYPE_FIXTURE)],
+        FlowSliceBudget::default(),
+    );
+
+    // Discriminates: a `peek` that fell through to `source.build_skeleton`
+    // on a miss would silently become `get_or_build` under a different
+    // name, defeating the whole point of a non-blocking observation
+    // backing primitive.
+    assert!(
+        rig.graphs.peek(&key).is_none(),
+        "peek must never trigger a build"
+    );
+    assert_eq!(rig.source.build_calls(), 0);
+
+    let built = rig
+        .graphs
+        .get_or_build(&key, rig.source.as_ref(), &rig.host as &dyn ResolverContext)
+        .expect("fixture key must build");
+    assert_eq!(rig.source.build_calls(), 1);
+
+    let peeked = rig.graphs.peek(&key).expect("peek must see the warm entry");
+    assert!(
+        Arc::ptr_eq(&peeked, &built),
+        "peek must return the SAME memoized bundle, not a fresh build"
+    );
+    // A second peek does not build again.
+    assert_eq!(rig.source.build_calls(), 1);
+}
+
+/// `FlowSliceStores::peek_skeleton_for` — the store-level wrapper's
+/// equivalence to `FunctionFlowGraphStore::peek`, built directly (not
+/// through `FlowSliceStores::new`'s production `RetainedSnapshotSkeletonSource`)
+/// so a `FixtureSkeletonSource` can drive the warm-build half without a
+/// real host/indexed artifact.
+#[test]
+fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
+    let key = function_key("/peek-store.ts", "myType", 2);
+    let graphs = Arc::new(FunctionFlowGraphStore::new());
+    let source = Arc::new(FixtureSkeletonSource::new(vec![(
+        key.clone(),
+        MYTYPE_FIXTURE,
+    )]));
+    let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::clone(&source) as _;
+    let budget: FlowSliceBudgetCell =
+        Arc::new(parking_lot::RwLock::new(FlowSliceBudget::default()));
+    let hash_node = FlowSliceHashNode::new(
+        Arc::clone(&graphs),
+        Arc::clone(&skeletons),
+        Arc::clone(&budget),
+    );
+    let lowered_node = FlowSliceLoweredBodyNode::new(
+        Arc::clone(&graphs),
+        Arc::clone(&skeletons),
+        Arc::clone(&budget),
+    );
+    let stores = FlowSliceStores {
+        graphs: Arc::clone(&graphs),
+        skeletons: Arc::clone(&skeletons),
+        hash_node,
+        lowered_node,
+        #[cfg(test)]
+        budget,
+    };
+
+    // Discriminates: a `peek_skeleton_for` that fell through to
+    // `skeleton_for`'s blocking build would defeat the whole point of a
+    // non-blocking observation backing primitive.
+    assert!(stores.peek_skeleton_for(&key).is_none());
+    assert_eq!(source.build_calls(), 0);
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let built = stores
+        .skeleton_for(&key, &host as &dyn ResolverContext)
+        .expect("fixture key must build");
+    assert_eq!(source.build_calls(), 1);
+
+    let peeked = stores
+        .peek_skeleton_for(&key)
+        .expect("peek_skeleton_for must see the warm entry");
+    assert!(Arc::ptr_eq(&peeked, &built));
+    assert_eq!(source.build_calls(), 1);
+}
+
 fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
     match outcome {
         FlowSliceHashOutcome::Planned(slice_hash) => slice_hash,

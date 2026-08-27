@@ -495,8 +495,8 @@ pub struct PerRequestCacheCounters {
     /// Rule-compliance diagnostic counters. Empirical instrumentation
     /// that quantifies the bypass surfaces identified as the
     /// residual perf-gap suspects: per-request
-    /// `HostStoreView::from_host` builds, bare-host
-    /// `ComponentMetaQueryEngine::new(...)` constructions, and
+    /// `HostStoreView::from_host` builds, non-request-bound test-engine
+    /// constructions, and
     /// `ResolverContext::resolver_store_view()` warm-hit validator
     /// rebuilds. These counters are production-on (atomic, ~ns of
     /// cost vs. the µs–ms work they observe) and snapshot into
@@ -574,9 +574,8 @@ pub fn bump_resolver_store_view_call() {
 
 /// Bump the per-request `bare_engine_constructions` diagnostic
 /// counter when a request context is installed. Called from
-/// `ComponentMetaQueryEngine::new` whenever the ctx fails the
-/// `is_request_bound()` predicate (i.e. the engine is being bound
-/// to the bare `impl ResolverContext for VerterHost` rail).
+/// `ComponentMetaQueryEngine::new` whenever a test context fails the
+/// `is_request_bound()` predicate. Production contexts are sealed and bound.
 #[inline]
 pub fn bump_bare_engine_construction() {
     if let Some(ctx) = current_request_context() {
@@ -2320,8 +2319,8 @@ mod tests {
 
     #[test]
     fn bump_bare_engine_construction_increments_on_installed_context() {
-        // Discriminating: a bare-host `ResolverContext::is_request_bound()`
-        // returns false → calling `bump_bare_engine_construction()`
+        // Discriminating: a non-request-bound test context requires calling
+        // `bump_bare_engine_construction()`
         // under an installed RequestContext must increment the counter.
         // Without an installed context the bump is a noop.
         let ctx = make_ctx(101, false);

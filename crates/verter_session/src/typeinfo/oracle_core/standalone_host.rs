@@ -15,9 +15,10 @@
 
 use std::sync::Arc;
 
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_workspace::{
-    AmbientLibSpec, CanonicalPath, ConfiguredMembership, IdeProjectCompilerOptions, MemoryOptions,
-    MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    AmbientLibSpec, CanonicalPath, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
+    VfsProjectConfig, WorkspaceAccess,
 };
 
 use crate::types::HostConfig;
@@ -61,9 +62,9 @@ pub(crate) fn standalone_footprint_host() -> Arc<VerterHost> {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(
-            FIXTURE_PROJECT_ROOT,
-        )),
+        membership: verter_workspace::configured_membership_match_all_under_root(
+            &CanonicalPath::new(FIXTURE_PROJECT_ROOT),
+        ),
     }]));
     workspace
         .register_ambient_lib(AmbientLibSpec {

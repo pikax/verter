@@ -936,7 +936,7 @@ mod tests {
             workspace_aliases: Vec::new(),
             compiler_options: Default::default(),
             references: Vec::new(),
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new(&root),
             ),
         });

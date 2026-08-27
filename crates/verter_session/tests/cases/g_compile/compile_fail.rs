@@ -47,9 +47,7 @@ fn type_publication_capability_boundary() {
     t.compile_fail("tests/cases/compile-fail/symbolic_equivalence_direct_mint.rs");
 }
 
-/// Raw module-resolution entry points are private to the resolver's own unit
-/// tests. Production callers must cross the Engine-owned transaction boundary,
-/// whose tracked wrapper requires an unforgeable Engine capability.
+/// The legacy workspace-owned resolver cannot be restored as a wrapper or alias.
 #[test]
 #[cfg_attr(
     not(feature = "compile-fail"),

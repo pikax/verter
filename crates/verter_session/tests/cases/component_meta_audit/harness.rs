@@ -32,13 +32,14 @@
 
 use std::sync::Arc;
 
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_session::audited_request::AuditedRequest;
 pub use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
 use verter_session::component_meta_audit::{RequestAuditRecord, RequestFootprintAudit};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{
-    AmbientLibSpec, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph,
-    ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    AmbientLibSpec, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
+    WorkspaceAccess,
 };
 
 // Shared test-fixture source files injected into hermetic
@@ -171,7 +172,7 @@ pub fn build_hermetic_host_with_lib(
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("/ws"),
         ),
     }]));

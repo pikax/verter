@@ -176,7 +176,10 @@ impl VerterHost {
         canonical_id: &str,
         specifiers: &[String],
     ) -> Option<Vec<FactVersionRef>> {
-        let lanes: Vec<(String, Option<verter_workspace::ResolveRequestKind>)> = specifiers
+        let lanes: Vec<(
+            String,
+            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        )> = specifiers
             .iter()
             .map(|specifier| (specifier.clone(), None))
             .collect();
@@ -193,7 +196,10 @@ impl VerterHost {
     fn import_route_witness_for_lanes(
         &self,
         canonical_id: &str,
-        specifiers: &[(String, Option<verter_workspace::ResolveRequestKind>)],
+        specifiers: &[(
+            String,
+            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        )],
     ) -> Option<Vec<FactVersionRef>> {
         #[cfg(test)]
         if self
@@ -224,7 +230,10 @@ impl VerterHost {
     fn observed_import_route_witness(
         &self,
         canonical_id: &str,
-        specifiers: &[(String, Option<verter_workspace::ResolveRequestKind>)],
+        specifiers: &[(
+            String,
+            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        )],
     ) -> Option<Vec<FactVersionRef>> {
         let (refused, observed) = {
             let scope = ResolutionWitnessScope::enter();
@@ -352,9 +361,16 @@ impl VerterHost {
     fn authored_import_specifiers(
         &self,
         canonical_id: &str,
-    ) -> Option<Vec<(String, Option<verter_workspace::ResolveRequestKind>)>> {
-        let mut specifiers: Vec<(String, Option<verter_workspace::ResolveRequestKind>)> =
-            Vec::new();
+    ) -> Option<
+        Vec<(
+            String,
+            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        )>,
+    > {
+        let mut specifiers: Vec<(
+            String,
+            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        )> = Vec::new();
         let mut readable = false;
 
         if let Some(source) = self.scheduler.try_get_source(canonical_id) {
@@ -369,7 +385,7 @@ impl VerterHost {
                 specifiers.extend(data.parse.external_requests.iter().map(|request| {
                     (
                         request.specifier.clone(),
-                        Some(verter_workspace::ResolveRequestKind::SfcSrcAttr),
+                        Some(verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr),
                     )
                 }));
                 let analysis = &data.parse.script_analysis;

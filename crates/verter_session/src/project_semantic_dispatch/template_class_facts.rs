@@ -115,9 +115,8 @@ enum RequestedSubject {
 /// subject that resolves to a script binding, and a prepared declaration can
 /// only be served against a per-request store view. Taking
 /// [`RequestBoundResolverContext`] — the sealed marker implemented for
-/// `HostResolverContext` and `SessionResolverContext` but never for
-/// `VerterHost` — makes a bare-host binding a compile error instead of a
-/// cache-presence-dependent runtime abort at the caller's chosen branch.
+/// `HostResolverContext` and `SessionResolverContext` — makes a non-request
+/// binding a compile error.
 pub(crate) fn build_template_class_semantic_facts(
     ctx: &dyn RequestBoundResolverContext,
     canonical: &str,

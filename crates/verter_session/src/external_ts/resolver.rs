@@ -1,10 +1,10 @@
 //! The project-resolution layer of the project-bound external-TS contract.
 //!
 //! `ExternalTsProjectResolver` maps a source URI to one of the explicit
-//! carrier-ownership resolution states. The name is deliberately NOT a bare
-//! `ProjectResolver` — `verter_semantic::analysis::project_resolver::ProjectResolver`
-//! is re-exported elsewhere and the two must not collide; consumers reach this
-//! one as `external_ts::ExternalTsProjectResolver`.
+//! carrier-ownership resolution states. This is distinct from module resolution,
+//! which is owned by `verter_semantic::resolver_core::ModuleResolverCore`;
+//! consumers reach this ownership resolver as
+//! `external_ts::ExternalTsProjectResolver`.
 //!
 //! The implementation ([`WorkspaceProjectResolver`]) runs the §2.2 / §2.6-step-4
 //! carrier-path conflict pass FIRST — UNCONDITIONALLY, before ownership is even
@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use verter_workspace::resolver::{
+use verter_semantic::resolver_core::{
     normalize_canonical_id, path_is_carrier, strip_carrier_extension,
 };
 use verter_workspace::traits::WorkspaceRead;

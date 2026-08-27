@@ -16,6 +16,101 @@ use serde::{Deserialize, Serialize};
 use verter_span::Span;
 
 // =============================================================================
+// Route Analysis Inputs
+// =============================================================================
+
+/// The complete, immutable filesystem snapshot route analysis consumes.
+/// A host-backed caller captures it once before analysis begins, and every
+/// route entry consumes `RouteAnalysisInputs` without touching a live handle.
+///
+/// Four categories correspond to `read_file` (package.json,
+/// router config file contents), `file_exists` (router config candidate
+/// probes), `is_dir`/`read_dir` (recursive `pages/`/`layouts/` directory
+/// walks — folded into one map: a directory absent from `directories`
+/// is "does not exist". `Result::Err` from `read_dir` also folds into
+/// "treat as empty/absent"; route
+/// analysis has no error-vs-absent distinction to preserve, unlike
+/// module resolution's witnessed `PathProbe::Inaccessible`/`Unknown`).
+///
+/// No public constructor with pre-filled fields — callers build one via
+/// `new()` + the `insert_*` methods so every recorded fact is explicit,
+/// matching this codebase's established DTO-building convention
+/// (`AttemptOutput`, `ResolverAttemptView`).
+#[derive(Debug, Clone, Default)]
+pub struct RouteAnalysisInputs {
+    files: std::collections::HashMap<String, std::sync::Arc<str>>,
+    existing_files: std::collections::HashSet<String>,
+    directories: std::collections::HashMap<String, Vec<RouteDirEntry>>,
+}
+
+/// A directory entry captured into a [`RouteAnalysisInputs`] snapshot.
+///
+/// Dependency-neutral route-analysis input IR, distinct from any VFS
+/// result row: the caller-side walker that populates
+/// [`RouteAnalysisInputs`] performs the one-way projection from whatever
+/// live directory-listing type its host handle returns onto this type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteDirEntry {
+    pub path: String,
+    pub is_dir: bool,
+}
+
+impl RouteAnalysisInputs {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records `path`'s content — backs `read_file`. Also marks the path
+    /// as existing (a file with readable content necessarily exists).
+    pub fn insert_file(
+        &mut self,
+        path: impl Into<String>,
+        content: impl Into<std::sync::Arc<str>>,
+    ) {
+        let path = path.into();
+        self.existing_files.insert(path.clone());
+        self.files.insert(path, content.into());
+    }
+
+    /// Records that `path` exists on disk without necessarily capturing
+    /// its content — backs `file_exists` alone (a router-config candidate
+    /// probe that turns out absent needs no entry at all: absence from
+    /// the set already answers `false`, so only positive existence is
+    /// ever recorded here).
+    pub fn insert_existing_file(&mut self, path: impl Into<String>) {
+        self.existing_files.insert(path.into());
+    }
+
+    /// Records `path`'s directory listing — backs both `is_dir` (a
+    /// directory with a recorded listing necessarily exists) and
+    /// `read_dir`.
+    pub fn insert_directory(&mut self, path: impl Into<String>, entries: Vec<RouteDirEntry>) {
+        self.directories.insert(path.into(), entries);
+    }
+
+    #[must_use]
+    pub fn read_file(&self, path: &str) -> Option<std::sync::Arc<str>> {
+        self.files.get(path).cloned()
+    }
+
+    #[must_use]
+    pub fn file_exists(&self, path: &str) -> bool {
+        self.existing_files.contains(path)
+    }
+
+    #[must_use]
+    pub fn is_dir(&self, path: &str) -> bool {
+        self.directories.contains_key(path)
+    }
+
+    #[must_use]
+    pub fn read_dir(&self, path: &str) -> Option<&[RouteDirEntry]> {
+        self.directories.get(path).map(Vec::as_slice)
+    }
+}
+
+// =============================================================================
 // Core Types
 // =============================================================================
 
@@ -193,11 +288,11 @@ pub struct RouteHealthIssue {
 
 /// Detect the routing framework from `package.json` dependencies.
 pub fn detect_routing_framework(
-    workspace: &dyn verter_workspace::WorkspaceRead,
+    inputs: &RouteAnalysisInputs,
     project_root: &str,
 ) -> RoutingFramework {
     let pkg_path = format!("{}/package.json", project_root.trim_end_matches('/'));
-    let content = match workspace.read_file(&pkg_path) {
+    let content = match inputs.read_file(&pkg_path) {
         Some(c) => c,
         None => return RoutingFramework::Unknown,
     };
@@ -237,7 +332,14 @@ pub fn detect_routing_framework_from_json(content: &str) -> RoutingFramework {
 // =============================================================================
 
 /// Common router config file locations to search.
-const ROUTER_CONFIG_CANDIDATES: &[&str] = &[
+///
+/// `pub` (not just crate-private) so a `RouteAnalysisInputs`-building
+/// caller (`verter_session`'s `build_route_analysis_inputs`)
+/// knows exactly which paths it needs to probe/read before calling
+/// `discover_router_configs`/`build_route_analysis` — the candidate list
+/// IS part of this module's public contract with its snapshot-builder,
+/// not an internal implementation detail.
+pub const ROUTER_CONFIG_CANDIDATES: &[&str] = &[
     "src/router/index.ts",
     "src/router/index.js",
     "src/router.ts",
@@ -247,15 +349,12 @@ const ROUTER_CONFIG_CANDIDATES: &[&str] = &[
 ];
 
 /// Discover router config files in a project.
-pub fn discover_router_configs(
-    workspace: &dyn verter_workspace::WorkspaceRead,
-    project_root: &str,
-) -> Vec<String> {
+pub fn discover_router_configs(inputs: &RouteAnalysisInputs, project_root: &str) -> Vec<String> {
     let trimmed = project_root.trim_end_matches('/');
     ROUTER_CONFIG_CANDIDATES
         .iter()
         .map(|candidate| format!("{}/{}", trimmed, candidate))
-        .filter(|p| workspace.file_exists(p))
+        .filter(|p| inputs.file_exists(p))
         .collect()
 }
 
@@ -658,28 +757,28 @@ fn resolve_component_path(import_source: &str) -> String {
 /// - `[...slug].vue` → `/:slug(.*)*`
 /// - Directory nesting → nested route paths
 pub fn extract_file_based_routes(
-    workspace: &dyn verter_workspace::WorkspaceRead,
+    inputs: &RouteAnalysisInputs,
     pages_dir: &str,
 ) -> Vec<RouteDefinition> {
-    if !workspace.is_dir(pages_dir) {
+    if !inputs.is_dir(pages_dir) {
         return Vec::new();
     }
 
-    extract_file_routes_recursive(workspace, pages_dir, "")
+    extract_file_routes_recursive(inputs, pages_dir, "")
 }
 
 fn extract_file_routes_recursive(
-    workspace: &dyn verter_workspace::WorkspaceRead,
+    inputs: &RouteAnalysisInputs,
     current_dir: &str,
     parent_path: &str,
 ) -> Vec<RouteDefinition> {
     let mut routes = Vec::new();
 
-    let Ok(entries) = workspace.read_dir(current_dir) else {
+    let Some(entries) = inputs.read_dir(current_dir) else {
         return routes;
     };
 
-    let mut entries = entries;
+    let mut entries = entries.to_vec();
     entries.sort_by(|a, b| a.path.cmp(&b.path));
 
     for entry in entries {
@@ -694,7 +793,7 @@ fn extract_file_routes_recursive(
             } else {
                 format!("{}/{}", parent_path.trim_end_matches('/'), segment)
             };
-            let children = extract_file_routes_recursive(workspace, &entry.path, &dir_path);
+            let children = extract_file_routes_recursive(inputs, &entry.path, &dir_path);
             routes.extend(children);
         } else {
             let path = std::path::Path::new(name_str);
@@ -865,17 +964,14 @@ pub fn extract_router_views(
 // =============================================================================
 
 /// Discover layout definitions from the `layouts/` directory.
-pub fn discover_layouts(
-    workspace: &dyn verter_workspace::WorkspaceRead,
-    project_root: &str,
-) -> Vec<LayoutDefinition> {
+pub fn discover_layouts(inputs: &RouteAnalysisInputs, project_root: &str) -> Vec<LayoutDefinition> {
     let layouts_dir = format!("{}/layouts", project_root.trim_end_matches('/'));
-    if !workspace.is_dir(&layouts_dir) {
+    if !inputs.is_dir(&layouts_dir) {
         return Vec::new();
     }
 
     let mut layouts = Vec::new();
-    let Ok(entries) = workspace.read_dir(&layouts_dir) else {
+    let Some(entries) = inputs.read_dir(&layouts_dir) else {
         return layouts;
     };
 
@@ -1117,37 +1213,37 @@ pub fn flatten_routes(routes: &[RouteDefinition]) -> Vec<&RouteDefinition> {
 
 /// Build a complete route analysis snapshot for a project.
 pub fn build_route_analysis(
-    workspace: &dyn verter_workspace::WorkspaceRead,
+    inputs: &RouteAnalysisInputs,
     project_root: &str,
     template_components: &[(
         String,
         Vec<crate::analysis::template::TemplateComponentUsage>,
     )],
 ) -> RouteAnalysisSnapshot {
-    let framework = detect_routing_framework(workspace, project_root);
+    let framework = detect_routing_framework(inputs, project_root);
     let trimmed_root = project_root.trim_end_matches('/');
 
     // Extract routes based on framework type
     let routes = match framework {
         RoutingFramework::NuxtPages => {
             let pages_dir = format!("{trimmed_root}/pages");
-            extract_file_based_routes(workspace, &pages_dir)
+            extract_file_based_routes(inputs, &pages_dir)
         }
         RoutingFramework::UnpluginVueRouter => {
             // unplugin-vue-router uses file-based routing from src/pages/
             let pages_dir = format!("{trimmed_root}/src/pages");
-            if workspace.is_dir(&pages_dir) {
-                extract_file_based_routes(workspace, &pages_dir)
+            if inputs.is_dir(&pages_dir) {
+                extract_file_based_routes(inputs, &pages_dir)
             } else {
-                extract_file_based_routes(workspace, &format!("{trimmed_root}/pages"))
+                extract_file_based_routes(inputs, &format!("{trimmed_root}/pages"))
             }
         }
         RoutingFramework::VueRouter | RoutingFramework::Unknown => {
             // Try programmatic route extraction
-            let configs = discover_router_configs(workspace, project_root);
+            let configs = discover_router_configs(inputs, project_root);
             let mut all_routes = Vec::new();
             for config_path in configs {
-                if let Some(content) = workspace.read_file(&config_path) {
+                if let Some(content) = inputs.read_file(&config_path) {
                     all_routes.extend(extract_programmatic_routes(
                         &content,
                         &config_path,
@@ -1168,12 +1264,12 @@ pub fn build_route_analysis(
     }
 
     // Discover layouts
-    let layouts = discover_layouts(workspace, project_root);
+    let layouts = discover_layouts(inputs, project_root);
 
     // Extract global guards from router config files
     let mut global_guards = Vec::new();
-    for config_path in discover_router_configs(workspace, project_root) {
-        if let Some(content) = workspace.read_file(&config_path) {
+    for config_path in discover_router_configs(inputs, project_root) {
+        if let Some(content) = inputs.read_file(&config_path) {
             global_guards.extend(extract_route_guards(&content, &config_path));
         }
     }

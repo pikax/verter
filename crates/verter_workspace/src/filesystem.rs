@@ -80,7 +80,7 @@ fn record_resolution_directory_observation(canonical_id: &str, value: Resolution
         observations
             .borrow_mut()
             .push(ResolutionDirectoryObservation {
-                canonical: crate::resolver::normalize_canonical_id(canonical_id),
+                canonical: verter_semantic::resolver_core::normalize_canonical_id(canonical_id),
                 value,
             });
     });
@@ -199,9 +199,20 @@ impl std::fmt::Debug for FilesystemWorkspace {
 
 impl FilesystemWorkspace {
     pub fn new(options: FilesystemOptions) -> Self {
+        Self::new_with_input_resolution_budgets(
+            options,
+            verter_semantic::resolver_core::InputResolutionBudgets::default(),
+        )
+    }
+
+    /// Construct with a complete tightening-only semantic budget policy.
+    pub fn new_with_input_resolution_budgets(
+        options: FilesystemOptions,
+        budgets: verter_semantic::resolver_core::InputResolutionBudgets,
+    ) -> Self {
         Self {
             options,
-            engine: Engine::new(),
+            engine: Engine::new_with_input_resolution_budgets(budgets),
             #[cfg(not(target_arch = "wasm32"))]
             native_fs: crate::native_fs::NativeFs::new(),
             sinks: parking_lot::RwLock::new(Vec::new()),
@@ -320,7 +331,7 @@ impl FilesystemWorkspace {
         self.engine.mutate_content_for(
             &canonical_id,
             false,
-            Some(crate::resolution_currency::PathProbe::File),
+            Some(verter_semantic::resolver_core::PathProbe::File),
             crate::engine::BaseRealpathTransition::Unknown,
             || {
                 self.engine.invalidate_package_manifest(&canonical_id);
@@ -429,47 +440,73 @@ impl FilesystemWorkspace {
         published: &Arc<crate::published_state::PublishedRoot>,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
-        const MAX_SNAPSHOT_ATTEMPTS: usize = 4;
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
 
-        for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
+        loop {
             let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(published));
-            let discovery = self.engine.resolve_import_outcome_for_published(
-                &recorder,
-                self.resolution_evidence_source(),
-                published,
-                importer_id,
-                specifier,
-                ctx,
-            );
-            if discovery.non_admission_reason()
-                == Some(verter_audit::NonAdmissionReason::ResolutionViewSuperseded)
-            {
+            let discovery = self
+                .engine
+                .resolve_import_outcome_for_published_in_operation(
+                    &recorder,
+                    self.resolution_evidence_source(),
+                    published,
+                    importer_id,
+                    specifier,
+                    ctx,
+                    &mut input_ledger,
+                    &|| true,
+                );
+            if matches!(
+                discovery.non_admission_reason(),
+                Some(
+                    verter_audit::NonAdmissionReason::ResolutionViewSuperseded
+                        | verter_audit::NonAdmissionReason::BudgetExceeded
+                )
+            ) {
                 return discovery;
             }
+            input_ledger.discard_staged_loaded_inputs();
 
             let frozen = recorder.freeze();
             if !frozen.revalidate() {
+                if input_ledger.charge_outer_restart(self).is_err() {
+                    return crate::resolution_currency::ResolutionOutcome::refused(
+                        None,
+                        verter_audit::NonAdmissionReason::BudgetExceeded,
+                    );
+                }
                 continue;
             }
-            let outcome = self.engine.resolve_import_outcome_for_published(
-                &frozen,
-                self.resolution_evidence_source(),
-                published,
-                importer_id,
-                specifier,
-                ctx,
-            );
-            if frozen.complete() && frozen.revalidate() {
+            let final_valid = std::cell::Cell::new(true);
+            let outcome = self
+                .engine
+                .resolve_import_outcome_for_published_in_operation(
+                    &frozen,
+                    self.resolution_evidence_source(),
+                    published,
+                    importer_id,
+                    specifier,
+                    ctx,
+                    &mut input_ledger,
+                    &|| {
+                        let valid = frozen.complete() && frozen.revalidate();
+                        final_valid.set(valid);
+                        valid
+                    },
+                );
+            if final_valid.get() {
                 return outcome;
             }
+            if input_ledger.charge_outer_restart(self).is_err() {
+                return crate::resolution_currency::ResolutionOutcome::refused(
+                    None,
+                    verter_audit::NonAdmissionReason::BudgetExceeded,
+                );
+            }
         }
-
-        crate::resolution_currency::ResolutionOutcome::refused(
-            None,
-            verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
-        )
     }
 
     fn resolve_import_with_overlay_snapshot(
@@ -477,61 +514,85 @@ impl FilesystemWorkspace {
         overlay: &crate::resolution_currency::ResolutionOverlaySnapshot,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
-        const MAX_SNAPSHOT_ATTEMPTS: usize = 4;
         let Some(published) = self.load_published() else {
             return crate::resolution_currency::ResolutionOutcome::refused(
                 None,
                 verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance,
             );
         };
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
 
-        for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
+        loop {
             let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(&published));
             let discovery = {
                 let reader =
                     crate::resolution_currency::OverlaySnapshotReader::new(&recorder, overlay);
-                self.engine.resolve_import_outcome_for_published(
-                    &reader,
-                    self.resolution_evidence_source(),
-                    &published,
-                    importer_id,
-                    specifier,
-                    ctx,
-                )
+                self.engine
+                    .resolve_import_outcome_for_published_in_operation(
+                        &reader,
+                        self.resolution_evidence_source(),
+                        &published,
+                        importer_id,
+                        specifier,
+                        ctx,
+                        &mut input_ledger,
+                        &|| true,
+                    )
             };
-            if discovery.non_admission_reason()
-                == Some(verter_audit::NonAdmissionReason::ResolutionViewSuperseded)
-            {
+            if matches!(
+                discovery.non_admission_reason(),
+                Some(
+                    verter_audit::NonAdmissionReason::ResolutionViewSuperseded
+                        | verter_audit::NonAdmissionReason::BudgetExceeded
+                )
+            ) {
                 return discovery;
             }
+            input_ledger.discard_staged_loaded_inputs();
 
             let frozen = recorder.freeze();
             if !frozen.revalidate() {
+                if input_ledger.charge_outer_restart(self).is_err() {
+                    return crate::resolution_currency::ResolutionOutcome::refused(
+                        None,
+                        verter_audit::NonAdmissionReason::BudgetExceeded,
+                    );
+                }
                 continue;
             }
+            let final_valid = std::cell::Cell::new(true);
             let outcome = {
                 let reader =
                     crate::resolution_currency::OverlaySnapshotReader::new(&frozen, overlay);
-                self.engine.resolve_import_outcome_for_published(
-                    &reader,
-                    self.resolution_evidence_source(),
-                    &published,
-                    importer_id,
-                    specifier,
-                    ctx,
-                )
+                self.engine
+                    .resolve_import_outcome_for_published_in_operation(
+                        &reader,
+                        self.resolution_evidence_source(),
+                        &published,
+                        importer_id,
+                        specifier,
+                        ctx,
+                        &mut input_ledger,
+                        &|| {
+                            let valid = frozen.complete() && frozen.revalidate();
+                            final_valid.set(valid);
+                            valid
+                        },
+                    )
             };
-            if frozen.complete() && frozen.revalidate() {
+            if final_valid.get() {
                 return outcome;
             }
+            if input_ledger.charge_outer_restart(self).is_err() {
+                return crate::resolution_currency::ResolutionOutcome::refused(
+                    None,
+                    verter_audit::NonAdmissionReason::BudgetExceeded,
+                );
+            }
         }
-
-        crate::resolution_currency::ResolutionOutcome::refused(
-            None,
-            verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
-        )
     }
 
     /// Record a resolution-derived parsed-edge batch against an immutable,
@@ -552,24 +613,44 @@ impl FilesystemWorkspace {
         &self,
         canonical_id: &str,
         edges: &[crate::types::ParsedEdge],
-        publish: impl Fn(&dyn crate::traits::WorkspaceRead) -> T,
+        publish: impl Fn(
+            &dyn crate::traits::WorkspaceRead,
+            &mut crate::resolver::InputResolutionLedger,
+            &dyn Fn() -> bool,
+        ) -> Option<T>,
     ) -> Option<T> {
         crate::probe_scope!(RECORD_EDGES_FROZEN);
-        const MAX_SNAPSHOT_ATTEMPTS: usize = 4;
         let published = self.load_published()?;
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
 
-        for _ in 0..MAX_SNAPSHOT_ATTEMPTS {
+        loop {
             let recorder = FilesystemResolutionRecorder::new(self, Arc::clone(&published));
-            self.engine
-                .observe_parsed_edge_evidence(&recorder, canonical_id, edges);
+            self.engine.observe_parsed_edge_evidence_in_operation(
+                &recorder,
+                canonical_id,
+                edges,
+                &mut input_ledger,
+            );
+            input_ledger.discard_staged_loaded_inputs();
 
             let frozen = recorder.freeze();
             if !frozen.revalidate() {
+                if input_ledger.charge_outer_restart(self).is_err() {
+                    break;
+                }
                 continue;
             }
-            let product = publish(&frozen);
-            if frozen.complete() && frozen.revalidate() {
+            let final_valid = std::cell::Cell::new(true);
+            if let Some(product) = publish(&frozen, &mut input_ledger, &|| {
+                let valid = frozen.complete() && frozen.revalidate();
+                final_valid.set(valid);
+                valid
+            }) {
                 return Some(product);
+            }
+            if final_valid.get() || input_ledger.charge_outer_restart(self).is_err() {
+                break;
             }
         }
         None
@@ -578,7 +659,7 @@ impl FilesystemWorkspace {
 
 struct FilesystemResolutionObservations {
     files: parking_lot::Mutex<HashMap<String, Option<Arc<str>>>>,
-    probes: parking_lot::Mutex<HashMap<String, crate::resolution_currency::PathProbe>>,
+    probes: parking_lot::Mutex<HashMap<String, verter_semantic::resolver_core::PathProbe>>,
     realpaths: parking_lot::Mutex<HashMap<String, Option<String>>>,
     manifests: parking_lot::Mutex<HashMap<String, Option<crate::types::PackageManifest>>>,
     directories: parking_lot::Mutex<HashMap<String, ResolutionDirectoryValue>>,
@@ -778,7 +859,7 @@ impl<'a> FilesystemResolutionRecorder<'a> {
 }
 
 fn observation_key(canonical_id: &str) -> String {
-    crate::resolver::normalize_canonical_id(canonical_id)
+    verter_semantic::resolver_core::normalize_canonical_id(canonical_id)
 }
 
 impl FilesystemWorkspace {
@@ -811,9 +892,12 @@ impl FilesystemWorkspace {
         }
     }
 
-    fn independent_probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+    fn independent_probe_path(
+        &self,
+        canonical_id: &str,
+    ) -> verter_semantic::resolver_core::PathProbe {
         if self.engine.overlay.read().has_overlay(canonical_id) {
-            return crate::resolution_currency::PathProbe::File;
+            return verter_semantic::resolver_core::PathProbe::File;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -823,7 +907,7 @@ impl FilesystemWorkspace {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = canonical_id;
-            crate::resolution_currency::PathProbe::Unknown
+            verter_semantic::resolver_core::PathProbe::Unknown
         }
     }
 
@@ -894,8 +978,9 @@ impl FilesystemWorkspace {
         canonical_id: &str,
     ) -> Option<crate::resolution_currency::LiveResolutionObservation> {
         use crate::resolution_currency::{
-            is_package_manifest_path, manifest_fingerprint_of, LiveResolutionObservation, PathProbe,
+            is_package_manifest_path, manifest_fingerprint_of, LiveResolutionObservation,
         };
+        use verter_semantic::resolver_core::PathProbe;
 
         let key = observation_key(canonical_id);
         let is_manifest = is_package_manifest_path(&key);
@@ -913,7 +998,7 @@ impl FilesystemWorkspace {
         let realpath = self
             .independent_realpath(canonical_id)
             .ok()?
-            .map(|path| crate::resolver::normalize_canonical_id(&path));
+            .map(|path| verter_semantic::resolver_core::normalize_canonical_id(&path));
         let manifest = if is_manifest {
             Some(
                 self.independent_manifest(canonical_id)
@@ -1078,12 +1163,12 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
     fn file_exists(&self, canonical_id: &str) -> bool {
         matches!(
             self.probe_path(canonical_id),
-            crate::resolution_currency::PathProbe::File
-                | crate::resolution_currency::PathProbe::Directory
+            verter_semantic::resolver_core::PathProbe::File
+                | verter_semantic::resolver_core::PathProbe::Directory
         )
     }
 
-    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
         let result = crate::traits::WorkspaceRead::probe_path(self.workspace, canonical_id);
         self.observations
             .record(&self.observations.probes, canonical_id, result);
@@ -1110,7 +1195,7 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
         canonicals
     }
 
-    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
+    fn resolution_population(&self) -> verter_semantic::resolver_core::ResolutionPopulation {
         crate::traits::WorkspaceRead::resolution_population(self.workspace)
     }
 
@@ -1133,6 +1218,66 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
         self.observations
             .record_manifest(canonical_id, result.clone());
         result
+    }
+
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<
+        crate::resolver::ResolutionInputReservationBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        let reservation = crate::traits::WorkspaceRead::preflight_resolution_inputs_bounded(
+            self.workspace,
+            keys,
+            basis,
+        )?;
+        for entry in reservation.entries() {
+            match entry {
+                crate::resolver::ResolutionInputReservation::PathProbe {
+                    key: verter_semantic::resolver_core::InputKey::PathProbe { path },
+                    value,
+                    ..
+                } => self
+                    .observations
+                    .record(&self.observations.probes, path, *value),
+                crate::resolver::ResolutionInputReservation::RealPath {
+                    key: verter_semantic::resolver_core::InputKey::RealPath { path },
+                    value,
+                    ..
+                } => self
+                    .observations
+                    .record(&self.observations.realpaths, path, value.clone()),
+                _ => {}
+            }
+        }
+        Ok(reservation)
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<
+        crate::resolver::LoadedResolutionInputBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        let loaded = crate::traits::WorkspaceRead::load_preflighted_resolution_inputs(
+            self.workspace,
+            reservation,
+        )?;
+        for entry in loaded.entries() {
+            if let crate::resolver::LoadedResolutionInput::PackageManifest {
+                manifest_path,
+                value,
+                ..
+            } = entry
+            {
+                self.observations
+                    .record_manifest(manifest_path, value.clone());
+            }
+        }
+        Ok(loaded)
     }
 
     fn classify_file(&self, canonical_id: &str) -> verter_language::FileLanguage {
@@ -1207,7 +1352,7 @@ struct FrozenFilesystemResolutionReader<'a> {
     published: Arc<crate::published_state::PublishedRoot>,
     content_generation: u64,
     files: HashMap<String, Option<Arc<str>>>,
-    probes: HashMap<String, crate::resolution_currency::PathProbe>,
+    probes: HashMap<String, verter_semantic::resolver_core::PathProbe>,
     realpaths: HashMap<String, Option<String>>,
     manifests: HashMap<String, Option<crate::types::PackageManifest>>,
     directories: HashMap<String, ResolutionDirectoryValue>,
@@ -1291,18 +1436,18 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
     fn file_exists(&self, canonical_id: &str) -> bool {
         matches!(
             self.probe_path(canonical_id),
-            crate::resolution_currency::PathProbe::File
-                | crate::resolution_currency::PathProbe::Directory
+            verter_semantic::resolver_core::PathProbe::File
+                | verter_semantic::resolver_core::PathProbe::Directory
         )
     }
 
-    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
         self.probes
             .get(&observation_key(canonical_id))
             .copied()
             .unwrap_or_else(|| {
                 self.mark_incomplete();
-                crate::resolution_currency::PathProbe::Unknown
+                verter_semantic::resolver_core::PathProbe::Unknown
             })
     }
 
@@ -1310,7 +1455,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
         self.complete() && self.revalidate()
     }
 
-    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
+    fn resolution_population(&self) -> verter_semantic::resolver_core::ResolutionPopulation {
         crate::traits::WorkspaceRead::resolution_population(self.workspace)
     }
 
@@ -1338,6 +1483,75 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
                 None
             }
         }
+    }
+
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<
+        crate::resolver::ResolutionInputReservationBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        crate::resolver::preflight_supported_resolution_inputs(
+            keys,
+            basis,
+            |path| Ok((self.probe_path(path), Vec::new())),
+            |path| Ok((self.realpath(path), Vec::new())),
+            |manifest_path, key| match self.manifests.get(&observation_key(manifest_path)) {
+                Some(value) => Ok((
+                    value.is_some(),
+                    value
+                        .as_ref()
+                        .and_then(|manifest| manifest.raw.as_ref())
+                        .map_or(0, |raw| raw.len() as u64),
+                    Vec::new(),
+                )),
+                None => {
+                    self.mark_incomplete();
+                    Err(
+                        verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
+                            key: key.clone(),
+                        },
+                    )
+                }
+            },
+        )
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<
+        crate::resolver::LoadedResolutionInputBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        crate::resolver::load_supported_resolution_inputs(
+            reservation,
+            |manifest_path, expected_present, _reserved_raw_bytes, key| {
+                match self.manifests.get(&observation_key(manifest_path)) {
+                    Some(value) if value.is_some() == expected_present => Ok(value.clone()),
+                    Some(_) => Err(
+                        verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            unresolved: vec![key.clone()],
+                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                        },
+                    ),
+                    None => {
+                        self.mark_incomplete();
+                        Err(
+                            verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
+                                key: key.clone(),
+                            },
+                        )
+                    }
+                }
+            },
+        )
+    }
+
+    fn commit_loaded_resolution_inputs(&self, entries: &[crate::resolver::LoadedResolutionInput]) {
+        crate::traits::WorkspaceRead::commit_loaded_resolution_inputs(self.workspace, entries);
     }
 
     fn classify_file(&self, canonical_id: &str) -> verter_language::FileLanguage {
@@ -1424,7 +1638,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
     fn is_dir(&self, path: &str) -> bool {
         matches!(
             self.probe_path(path),
-            crate::resolution_currency::PathProbe::Directory
+            verter_semantic::resolver_core::PathProbe::Directory
         )
     }
 }
@@ -1547,11 +1761,11 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         false
     }
 
-    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
         if self.engine.overlay.read().has_overlay(canonical_id)
             || self.engine.snapshot.read().contains(canonical_id)
         {
-            return crate::resolution_currency::PathProbe::File;
+            return verter_semantic::resolver_core::PathProbe::File;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1559,13 +1773,13 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
             // without a syscall. A positive still goes through metadata so a
             // directory is not laundered into File.
             if self.ensure_parent_dir_indexed(canonical_id) == Some(false) {
-                return crate::resolution_currency::PathProbe::Absent;
+                return verter_semantic::resolver_core::PathProbe::Absent;
             }
             self.native_fs.probe_path(canonical_id)
         }
         #[cfg(target_arch = "wasm32")]
         {
-            crate::resolution_currency::PathProbe::Absent
+            verter_semantic::resolver_core::PathProbe::Absent
         }
     }
 
@@ -1577,7 +1791,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         take_resolution_directory_observations()
     }
 
-    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
+    fn resolution_population(&self) -> verter_semantic::resolver_core::ResolutionPopulation {
         self.engine.default_resolution_population()
     }
 
@@ -1608,13 +1822,205 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.read_package_manifest(self, canonical_id)
     }
 
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<
+        crate::resolver::ResolutionInputReservationBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        crate::resolver::preflight_supported_resolution_inputs(
+            keys,
+            basis,
+            |path| {
+                let value = if self.engine.overlay.read().has_overlay(path)
+                    || self.engine.snapshot.read().contains(path)
+                {
+                    verter_semantic::resolver_core::PathProbe::File
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.native_fs.probe_path_live(path).map_err(|_| {
+                            verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
+                                key: verter_semantic::resolver_core::InputKey::PathProbe {
+                                    path: path.into(),
+                                },
+                            }
+                        })?
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        verter_semantic::resolver_core::PathProbe::Absent
+                    }
+                };
+                Ok((value, Vec::new()))
+            },
+            |path| {
+                let value = if self.engine.overlay.read().has_overlay(path)
+                    || self.engine.snapshot.read().contains(path)
+                {
+                    Some(path.to_string())
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.native_fs.realpath_live(path).map_err(|_| {
+                            verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
+                                key: verter_semantic::resolver_core::InputKey::RealPath {
+                                    path: path.into(),
+                                },
+                            }
+                        })?
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        None
+                    }
+                };
+                Ok((value, Vec::new()))
+            },
+            |manifest_path, key| {
+                let _ = take_resolution_directory_observations();
+                let in_memory = self
+                    .engine
+                    .overlay
+                    .read()
+                    .get(manifest_path)
+                    .or_else(|| self.engine.snapshot.read().read(manifest_path));
+                let length = if let Some(source) = in_memory {
+                    Some(source.len() as u64)
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.native_fs.file_len_live(manifest_path).map_err(|_| {
+                            verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
+                                key: key.clone(),
+                            }
+                        })?
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        None
+                    }
+                };
+                Ok((length.is_some(), length.unwrap_or(0), Vec::new()))
+            },
+        )
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<
+        crate::resolver::LoadedResolutionInputBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        crate::resolver::load_supported_resolution_inputs(
+            reservation,
+            |manifest_path, expected_present, reserved_raw_bytes, key| {
+                let in_memory = self
+                    .engine
+                    .overlay
+                    .read()
+                    .get(manifest_path)
+                    .or_else(|| self.engine.snapshot.read().read(manifest_path));
+                let source = if let Some(source) = in_memory {
+                    if source.len() as u64 > reserved_raw_bytes {
+                        return Err(
+                            verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                                unresolved: vec![key.clone()],
+                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                            },
+                        );
+                    }
+                    Some(source)
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        match self
+                            .native_fs
+                            .read_file_bounded_live(manifest_path, reserved_raw_bytes)
+                            .map_err(|_| {
+                                verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
+                                    key: key.clone(),
+                                }
+                            })? {
+                            crate::native_fs::BoundedFileRead::Missing => None,
+                            crate::native_fs::BoundedFileRead::Exceeded => {
+                                return Err(
+                                    verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                                        unresolved: vec![key.clone()],
+                                        reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                                    },
+                                );
+                            }
+                            crate::native_fs::BoundedFileRead::Complete(source) => Some(source),
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        None
+                    }
+                };
+                if source.is_some() != expected_present {
+                    return Err(
+                        verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            unresolved: vec![key.clone()],
+                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                        },
+                    );
+                }
+                Ok(source.map(|source| crate::package_index::parse_package_json(&source)))
+            },
+        )
+    }
+
+    fn commit_loaded_resolution_inputs(&self, entries: &[crate::resolver::LoadedResolutionInput]) {
+        for entry in entries {
+            let crate::resolver::LoadedResolutionInput::PackageManifest {
+                value,
+                manifest_path,
+                ..
+            } = entry
+            else {
+                continue;
+            };
+            if let Some(raw) = value.as_ref().and_then(|manifest| manifest.raw.as_deref()) {
+                if !self.engine.overlay.read().has_overlay(manifest_path)
+                    && !self.engine.snapshot.read().contains(manifest_path)
+                {
+                    self.engine
+                        .snapshot
+                        .write()
+                        .inject(manifest_path.clone(), Arc::from(raw));
+                }
+            }
+        }
+        let mut cache = self.engine.package_index.write();
+        for entry in entries {
+            if let crate::resolver::LoadedResolutionInput::PackageManifest {
+                value,
+                manifest_path,
+                ..
+            } = entry
+            {
+                match value.as_ref().and_then(|manifest| manifest.raw.as_deref()) {
+                    Some(raw) => {
+                        let _ = cache.get_or_parse(manifest_path, raw);
+                    }
+                    None => cache.insert_not_found(manifest_path),
+                }
+            }
+        }
+    }
+
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn resolve_import(
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
-    ) -> Option<crate::types::ResolveResult> {
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
         self.engine.resolve_import_with_evidence(
             self,
             self.resolution_evidence_source(),
@@ -1628,7 +2034,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         let Some(published) = self.load_published() else {
             return crate::resolution_currency::ResolutionOutcome::refused(
@@ -1644,7 +2050,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         overlay: &crate::resolution_currency::ResolutionOverlaySnapshot,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         self.resolve_import_with_overlay_snapshot(overlay, importer_id, specifier, ctx)
     }
@@ -1654,26 +2060,26 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         published: &Arc<crate::published_state::PublishedRoot>,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         self.resolve_import_at_published_snapshot(published, importer_id, specifier, ctx)
     }
 
     fn resolve_import_for_project(
         &self,
-        owner: &crate::types::ProjectOwnership,
+        owner: &verter_semantic::resolver_core::ProjectOwnership,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
-    ) -> Option<crate::types::ResolveResult> {
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
         self.engine
             .resolve_import_for_project(self, owner, specifier, ctx)
     }
 
     fn resolve_import_for_project_outcome(
         &self,
-        owner: &crate::types::ProjectOwnership,
+        owner: &verter_semantic::resolver_core::ProjectOwnership,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         self.engine
             .resolve_import_for_project_outcome(self, owner, specifier, ctx)
@@ -1784,7 +2190,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     #[cfg(not(target_arch = "wasm32"))]
     fn read_ambient_lib(
         &self,
-        stable_key: crate::project_key::ProjectStableKey,
+        stable_key: verter_semantic::resolver_core::ProjectStableKey,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
         self.engine.read_ambient_lib(self, stable_key, canonical_id)
@@ -1793,15 +2199,15 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     fn project_stable_key(
         &self,
         project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<crate::project_key::ProjectStableKey> {
+    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
         self.engine.project_stable_key(project_id)
     }
 
     fn lookup_ambient_symbol(
         &self,
-        consumer_project: crate::project_key::ProjectStableKey,
+        consumer_project: verter_semantic::resolver_core::ProjectStableKey,
         symbol: &str,
-    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
+    ) -> Option<verter_semantic::resolver_core::AmbientSymbolHit> {
         self.engine.lookup_ambient_symbol(consumer_project, symbol)
     }
 
@@ -1842,9 +2248,15 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     }
 
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[crate::types::ParsedEdge]) {
-        self.record_parsed_edges_with_frozen_evidence(canonical_id, edges, |reader| {
-            self.engine.record_parsed_edges(reader, canonical_id, edges);
-        });
+        self.record_parsed_edges_with_frozen_evidence(
+            canonical_id,
+            edges,
+            |reader, ledger, valid| {
+                self.engine
+                    .record_parsed_edges_in_operation(reader, canonical_id, edges, ledger, valid)
+                    .then_some(())
+            },
+        );
     }
 
     fn set_exact_resolutions(
@@ -1861,14 +2273,21 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         edges: &[crate::types::ParsedEdge],
         resolutions: Vec<crate::types::ExactResolution>,
     ) -> crate::types::ExactResolutionResult {
-        self.record_parsed_edges_with_frozen_evidence(canonical_id, edges, |reader| {
-            self.engine.record_parsed_edges_with_exact_resolutions(
-                reader,
-                canonical_id,
-                edges,
-                resolutions.clone(),
-            )
-        })
+        self.record_parsed_edges_with_frozen_evidence(
+            canonical_id,
+            edges,
+            |reader, ledger, valid| {
+                self.engine
+                    .record_parsed_edges_with_exact_resolutions_in_operation(
+                        reader,
+                        canonical_id,
+                        edges,
+                        resolutions.clone(),
+                        ledger,
+                        valid,
+                    )
+            },
+        )
         .unwrap_or_default()
     }
 
@@ -1923,7 +2342,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             canonical_id,
             true,
-            Some(crate::resolution_currency::PathProbe::Absent),
+            Some(verter_semantic::resolver_core::PathProbe::Absent),
             crate::engine::BaseRealpathTransition::Known(None),
             || {
                 self.engine.invalidate_package_manifest(canonical_id);
@@ -1938,7 +2357,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         );
     }
 
-    fn configure_resolver(&self, projects: Vec<crate::resolver::IdeProjectConfig>) {
+    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
         self.engine
             .set_configured_resolver_projects(Some(projects.clone()));
         let vfs_configs: Vec<crate::project_graph::VfsProjectConfig> = projects
@@ -1968,7 +2387,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             path,
             true,
-            Some(crate::resolution_currency::PathProbe::File),
+            Some(verter_semantic::resolver_core::PathProbe::File),
             crate::engine::BaseRealpathTransition::Unknown,
             || {
                 if let Err(error) = self.native_fs.write_file(path, content) {
@@ -1991,7 +2410,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             path,
             false,
-            Some(crate::resolution_currency::PathProbe::Directory),
+            Some(verter_semantic::resolver_core::PathProbe::Directory),
             crate::engine::BaseRealpathTransition::Unknown,
             || {
                 if let Err(error) = self.native_fs.create_dir_all(path) {
@@ -2012,7 +2431,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             path,
             true,
-            Some(crate::resolution_currency::PathProbe::Absent),
+            Some(verter_semantic::resolver_core::PathProbe::Absent),
             crate::engine::BaseRealpathTransition::Known(None),
             || {
                 if let Err(error) = self.native_fs.delete_file(path) {
@@ -2050,7 +2469,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             dst,
             true,
-            Some(crate::resolution_currency::PathProbe::File),
+            Some(verter_semantic::resolver_core::PathProbe::File),
             crate::engine::BaseRealpathTransition::Unknown,
             || {
                 if let Err(error) = self.native_fs.copy_file(src, dst) {
@@ -2100,14 +2519,14 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     #[cfg(not(target_arch = "wasm32"))]
     fn unregister_ambient_lib(
         &self,
-        stable_key: crate::project_key::ProjectStableKey,
+        stable_key: verter_semantic::resolver_core::ProjectStableKey,
         canonical_id: &str,
     ) -> Result<(), crate::ambient_lib::AmbientLibError> {
         self.engine.unregister_ambient_lib(stable_key, canonical_id)
     }
 
     fn record_ambient_dependency(&self, consumer: &str, virtual_id: &str) {
-        // F1.5 fix: route ambient deps through the dedicated
+        // Route ambient deps through the dedicated
         // `ambient_resolved` class so they survive `record_parsed_edges`
         // re-records.
         self.engine.add_ambient_resolved_dep(consumer, virtual_id);

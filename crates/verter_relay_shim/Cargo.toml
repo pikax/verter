@@ -101,6 +101,7 @@ serde_json = { workspace = true }
 # Live shared-provider tests live here so `CARGO_BIN_EXE_verter-relay-shim` /
 # `NEXTEST_BIN_EXE_verter-relay-shim` is native (tests must not spawn cargo).
 verter_lsp = { path = "../verter_lsp", features = ["test-support"] }
+verter_semantic = { path = "../verter_semantic" }
 verter_session = { path = "../verter_session", features = ["test-support", "test-util"] }
 verter_span = { path = "../verter_span" }
 verter_test_support = { path = "../verter_test_support" }

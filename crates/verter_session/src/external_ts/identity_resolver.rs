@@ -21,7 +21,7 @@
 //!    `C:/…` drive path is a path, not a scheme.
 //! 2. Resolve a relative reference against the REFERENCING tsconfig's directory.
 //! 3. Normalize `.` / `..` and separators via the shared
-//!    [`verter_workspace::resolver::collapse_path`] (drive-lowercased,
+//!    [`verter_semantic::resolver_core::collapse_path`] (drive-lowercased,
 //!    slash-normalized, UNC-aware — never a hand-rolled path joiner).
 //! 4. Resolve a directory reference to its `tsconfig.json` target (a reference
 //!    that does not already end in `.json` denotes a directory).
@@ -38,9 +38,9 @@
 
 use std::sync::Arc;
 
+use verter_semantic::resolver_core::collapse_path;
 use verter_span::path::canonicalize_path;
 use verter_span::uri::file_uri_to_path;
-use verter_workspace::resolver::collapse_path;
 
 use crate::file_artifact_store::ProjectIdentity;
 

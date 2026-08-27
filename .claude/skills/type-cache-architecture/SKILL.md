@@ -994,7 +994,7 @@ key only when the cached value depends on lib data:
 
 A single bundled `project_config_hash` is forbidden.
 
-The five hash functions live on `verter_workspace::resolver::IdeProjectConfig`
+The five hash functions live on `verter_semantic::resolver_core::IdeProjectConfig` (the `verter_workspace::env_hash` trait impls)
 + per-call inputs surfaced through `EnvHashInputs<'_>`:
 
 ```rust
@@ -1122,8 +1122,8 @@ Fields:
 `pub(crate)`; it is exercised internally by `#[cfg(test)] mod tests` in the
 owning module — there is no `for_tests` re-export and no parallel
 `for_tests_from_raw` constructor on the production type. Construction-discriminator
-tests drive `from_request` through the bare-host
-`impl ResolverContext for VerterHost` rail directly.
+tests drive `from_request` through the explicit compile-fenced direct-host test
+context; production construction is request-bound by the sealed trait.
 
 Architecture guard: `tests/cases/g_misc3/world_snapshot_is_not_a_cache_key.rs` parses every
 production `.rs` file under `crates/verter_session/src/` with
@@ -1653,12 +1653,12 @@ The discrimination matrix:
 
 - `crates/verter_workspace/src/env_hash.rs` — five env-hash functions on
   `IdeProjectConfig` + `EnvHashInputs<'_>`.
-- `crates/verter_workspace/src/fact_registry.rs` — `FactKey`, `Fact`,
-  `FactDomain`, `FactRegistry`, `SymbolSpace`, `MemberKind`, `FactLane`,
-  `ObservedFact`, `MacroKind`, `MacroTargetKey`, `InternedSpecifier`,
-  `InternedName`, `InternedGlobPattern`, `AugmentationTargetKindTag`.
-  `crates/verter_semantic/src/facts/registry.rs` is the semantic compatibility
-  re-export plus the semantic `MacroKind` conversion.
+- `crates/verter_semantic/src/facts/registry.rs` — the fact-schema owner:
+  `FactKey`, `Fact`, `FactDomain`, `FactRegistry`, `SymbolSpace`, `MemberKind`,
+  `FactLane`, `ObservedFact`, `MacroKind`, `MacroTargetKey`, `InternedSpecifier`,
+  `InternedName`, `InternedGlobPattern`, `AugmentationTargetKindTag`, plus the
+  semantic `MacroKind` conversion. `verter_workspace` consumes it; there is no
+  workspace-side registry module.
 - `crates/verter_semantic/src/facts/hashing.rs` — `compute_semantic_hash`,
   `compute_member_presence_hash`, `compute_member_shape_hash`, `CrossDeclLens`,
   `CrossDeclRef`, `HashOutcome`, `MAX_HASH_DEPTH = 64`.
@@ -1681,10 +1681,20 @@ The discrimination matrix:
   `compute_parse_stable_hash(&IndexedReady) -> Hash16`. `parse_stable_hash` is
   a structural hash over the post-shallow-analysis decl skeleton, invariant
   under cosmetic edits.
+- `crates/verter_semantic/src/facts/version.rs` — the immutable fact-version
+  value graph: `FactVersionRef`, `ParseFactRef`, `ResolveImportsFactRef`,
+  `RouteSurfaceFactRef`, `ProgramAnalysisFactRef`, their hashes/stamps,
+  populations, attribution, and compaction-domain values.
+- `crates/verter_semantic/src/facts/resolution.rs` — the immutable resolution
+  identity/value graph: canonical/specifier/context/query identities plus
+  `ResolutionFactVersion`, `ResolutionFactKey`, and `ResolutionFactRef`.
+- `crates/verter_workspace/src/{fact_cache,resolution_currency}.rs` — cache
+  policy, validation authority, published resolution worlds, transactions,
+  ledgers, and lawful re-exports of the semantic-owned immutable values. These
+  modules define no second nominal fact or resolution-identity vocabulary.
 - `crates/verter_session/src/resolver_core/mod.rs` — `ValidatedFactCache`,
-  `FactVersionRef` (legacy + `Parse`/`ResolveImports`/`RouteSurface` per-domain
-  variants), `ParseFactRef`, `ResolveImportsFactRef`, `RouteSurfaceFactRef`,
-  `StoreView` (per-domain validator methods), `StoreViewCompatToken`.
+  re-exported semantic fact values, `StoreView` (per-domain validator methods),
+  and `StoreViewCompatToken`.
 - `crates/verter_session/src/semantic_query.rs` — `DeclIdentity` (the live
   value-side versioned identity) and `ResolvedDeclSlotIdentity` (the env-bearing
   content-free query-identity slot used as `Instantiate.base` /
@@ -1720,7 +1730,7 @@ The discrimination matrix:
   provenance, `binder_scope_id` query identity, negative lookup `ReturnOnly`).
 - `crates/verter_session/tests/cases/g_file/file_artifact_store_smoke.rs` — consumer-side
   smoke tests.
-- `crates/verter_workspace/src/fact_registry.rs` (`registry_tests` inline
+- `crates/verter_semantic/src/facts/registry.rs` (`registry_tests` inline
   module) — `FactKey::domain()` routing per R12 / R26, `SymbolSpace` tag
   stability per R11.
 - `crates/verter_semantic/src/facts/hashing.rs` (inline `tests` module) —

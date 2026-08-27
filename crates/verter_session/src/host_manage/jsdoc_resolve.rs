@@ -582,7 +582,7 @@ impl crate::resolver_core::ComponentMetaResolverHost for HostComponentMetaResolv
     }
 
     fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
-        crate::resolver_core::ResolverContext::workspace_is_package_backed(self.host, canonical_id)
+        self.ctx.workspace_is_package_backed(canonical_id)
     }
 
     fn sync_transitive_macro_type_dependencies(
@@ -725,8 +725,7 @@ fn node_has_direct_macro_reference(
 /// Test-only bare wrapper. Production callers go through
 /// [`resolve_type_declaration_with_context`] with a request-bound
 /// `HostResolverContext` / `SessionResolverContext` so the
-/// `HostComponentMetaResolver`'s route reads use the overlay-aware view rather
-/// than the panic-shimmed bare-host trait impl.
+/// `HostComponentMetaResolver`'s route reads use the overlay-aware view.
 #[cfg(any(test, feature = "test-support"))]
 #[allow(dead_code)]
 pub(crate) fn resolve_type_declaration(
@@ -1008,12 +1007,8 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // annotation when projection misses so the caller still receives
     // the unresolved payload rather than `None`.
     //
-    // Route the dispatch helper through the
-    // request-bound `ctx` rather than `host: &VerterHost`. Passing
-    // `host` here coerced into the bare-host
-    // `<&VerterHost as ResolverContext>` impl, which panics under
-    // `cfg(not(any(test, feature = "test-support")))` (release) once
-    // `project_expr_class_a_via_dispatch` reaches
+    // Route the dispatch helper through the request-bound `ctx`; the
+    // `project_expr_class_a_via_dispatch` walk reaches
     // `ctx.prepared_decl_bundle(...)` deeper in the call graph.
     let resolved =
         project_expr_class_a_via_dispatch(ctx, canonical_source, &parsed).unwrap_or(parsed);

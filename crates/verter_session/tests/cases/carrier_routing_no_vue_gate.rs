@@ -368,7 +368,7 @@ fn session_resolution_routing_has_no_hardcoded_vue_gate() {
            - `file_language.is_framework_carrier()` when you hold a `FileLanguage`,\n\
            - `verter_language::LanguageRegistry::global().classify_static(path)\n\
                 .static_resolution().is_framework_carrier()` for a path string,\n\
-           - `verter_workspace::path_is_carrier(path)` for a bare path helper.\n\
+           - `verter_semantic::resolver_core::path_is_carrier(path)` for a bare path helper.\n\
          Allowlisted ONLY: the Vue-MACRO resolution helper `direct_macro.rs`\n\
          (Vue-runtime/Vue-macro intrinsic) and the HARD-BOUNDARY\n\
          `virtual_file_pipeline.rs` (legacy Vue public-API renderer), plus test\n\
@@ -405,7 +405,7 @@ const PRE_CHANGE_VIOLATING_LINES: &[(&str, &str)] = &[
 const POST_CHANGE_CLEAN_LINES: &[&str] = &[
     "if !verter_language::LanguageRegistry::global().classify_static(&child_id).static_resolution().is_framework_carrier() {",
     "if !kind.is_framework_carrier() {",
-    "if verter_workspace::path_is_carrier(&canonical_id) {",
+    "if verter_semantic::resolver_core::path_is_carrier(&canonical_id) {",
     "if file_language.is_svelte() {",
 ];
 

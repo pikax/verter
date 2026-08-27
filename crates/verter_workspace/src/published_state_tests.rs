@@ -1,12 +1,12 @@
 use super::*;
-use crate::resolver::ProjectResolver;
 use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
+use verter_semantic::resolver_core::ModuleResolverCore;
 
 fn empty_snapshot(gen: u64) -> Arc<WorkspaceSnapshot> {
     Arc::new(WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects: vec![],
-        resolver: ProjectResolver::default(),
+        resolver: ModuleResolverCore::default(),
         generation: SnapshotGeneration(gen),
     })
 }

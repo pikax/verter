@@ -5,10 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::resolver::{
-    join_paths, normalize_canonical_id, parent_dir, IdeProjectCompilerOptions, ProjectMembership,
-};
 use crate::traits::WorkspaceRead;
+use crate::ProjectMembership;
+use verter_semantic::resolver_core::{
+    join_paths, normalize_canonical_id, parent_dir, IdeProjectCompilerOptions,
+};
 
 /// Maximum depth for tsconfig `extends` chain resolution.
 const MAX_TSCONFIG_EXTENDS_DEPTH: u8 = 8;
@@ -872,7 +873,7 @@ pub(crate) fn resolve_membership_path(
     value: &str,
     allow_directory_glob: bool,
 ) -> String {
-    let normalized = if crate::resolver::is_absolute_specifier(value) {
+    let normalized = if verter_semantic::resolver_core::is_absolute_specifier(value) {
         normalize_canonical_id(value)
     } else {
         join_paths(tsconfig_dir, value)
@@ -896,7 +897,7 @@ pub(crate) fn resolve_membership_path(
 }
 
 fn resolve_path_value(tsconfig_dir: &str, value: &str) -> String {
-    if crate::resolver::is_absolute_specifier(value) {
+    if verter_semantic::resolver_core::is_absolute_specifier(value) {
         normalize_canonical_id(value)
     } else {
         join_paths(tsconfig_dir, value)
@@ -904,7 +905,7 @@ fn resolve_path_value(tsconfig_dir: &str, value: &str) -> String {
 }
 
 fn resolve_path_target(base_url: &str, value: &str) -> String {
-    if crate::resolver::is_absolute_specifier(value) {
+    if verter_semantic::resolver_core::is_absolute_specifier(value) {
         normalize_canonical_id(value)
     } else {
         join_paths(base_url, value)

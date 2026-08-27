@@ -165,10 +165,9 @@ impl<'h> FactTracerBasisSource<'h> {
     ///
     /// It reads the seed through
     /// [`ResolverContext::aggregate_basis_seed`](crate::resolver_core::ResolverContext::aggregate_basis_seed)
-    /// rather than through `ctx.store_view()`, because a context reached
-    /// with a bare host has no view to borrow and answering `store_view()`
-    /// there is an architectural panic. A bare-host context seeds nothing
-    /// and its scopes behave exactly as an unbound one.
+    /// rather than re-deriving it from the view. This keeps the context
+    /// projection as the one compaction-basis authority and lets test doubles
+    /// explicitly represent an unbound basis.
     #[must_use]
     pub fn from_ctx(ctx: &'h dyn crate::resolver_core::ResolverContext) -> Self {
         Self {
@@ -179,11 +178,9 @@ impl<'h> FactTracerBasisSource<'h> {
 
     /// Seed from a context the producer may or may not have been given.
     ///
-    /// The shape for a producer reachable BOTH from a request-bound
-    /// resolver path and from a bare host entry: bound when a context
-    /// came with the call, unbound when it did not. Never a fabricated
-    /// context — the bare-host `store_view()` is an architectural panic,
-    /// not a fallback.
+    /// Producers with a request context are bound to its exact basis;
+    /// context-free utility callers remain explicitly unbound. No context is
+    /// fabricated as a fallback.
     #[must_use]
     pub fn from_optional_ctx(
         host: &'h crate::VerterHost,
@@ -754,18 +751,12 @@ pub(crate) fn validate_fact_signature(
     }
     // Context-aware dispatch.
     //
-    // Request-bound contexts (`HostResolverContext`,
-    // `SessionResolverContext`) expose the request-entry-snapshotted
-    // overlay-aware view through `store_view()` (borrowed; layered
-    // overlay+base). Bare-host contexts (`impl ResolverContext for
-    // VerterHost`) cannot return a borrowed view (the host owns no
-    // long-lived snapshot) so they must rebuild an owned
-    // `HostStoreView` through `resolver_store_view()`.
+    // Request-bound contexts expose the request-entry-snapshotted,
+    // overlay-aware view through `store_view()`. The else arm serves only
+    // explicit test doubles and the compile-fenced direct-host test seam.
     //
-    // Two branches that perform validation INSIDE the matched arm —
-    // returning a `&dyn StoreView` from a single `let view = ...`
-    // call would borrow a temporary in the bare-host arm and drop
-    // before validation runs.
+    // Validation stays inside each branch so the owned test view outlives the
+    // validation call.
     if ctx.is_request_bound() {
         let view = ctx.store_view();
         view.validates_fact_signature(signature)
@@ -817,9 +808,9 @@ pub(crate) fn validate_fact_signature_with_self_roots(
     }
     // Context-aware dispatch.
     //
-    // Same dispatch rationale as [`validate_fact_signature`] above —
-    // request-bound contexts validate against the borrowed
-    // overlay-aware view; bare-host contexts rebuild an owned view.
+    // Same dispatch rationale as [`validate_fact_signature`] above:
+    // production contexts validate against the borrowed overlay-aware view;
+    // the test-only unbound form owns its fixture view.
     // Both arms apply the strict `validates_self_root_whole_hash`
     // rule for canonicals listed in `self_root_canonicals` (a keyed
     // canonical that became untracked fails the warm-read validation
@@ -1307,8 +1298,8 @@ pub(crate) fn bound_completed_structural_carrier(
     Ok((Arc::from(facts), Arc::from(self_root_canonicals)))
 }
 
-/// Run `f` against the exact effective store view of `ctx` without returning a
-/// borrow to a temporary bare-host view.
+/// Run `f` against the exact effective store view of `ctx` while keeping any
+/// owned test fixture view alive for the call.
 pub(crate) fn with_effective_store_view<R>(
     ctx: &dyn ResolverContext,
     f: impl FnOnce(&dyn StoreView) -> R,
@@ -1563,9 +1554,9 @@ pub(crate) fn resolution_witness_fact_for_tests() -> FactVersionRef {
     let publication = host.resolve_for_persistent_state(
         "/witness_fixture/main.ts",
         "./absent",
-        verter_workspace::ResolutionContext {
-            phase: verter_workspace::ResolvePhase::ProviderGraph,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolutionContext {
+            phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         },
     );
     let verter_workspace::ResolutionPublication::Admitted(admitted) = publication else {

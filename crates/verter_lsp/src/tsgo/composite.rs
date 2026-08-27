@@ -32,12 +32,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use verter_semantic::resolver_core::normalize_canonical_id;
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, ProjectBinding, ServeMode,
 };
 use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_session::VerterHost;
-use verter_workspace::resolver::normalize_canonical_id;
 use verter_workspace::traits::WorkspaceRead;
 
 use verter_tsgo_api::control::Advertisement;

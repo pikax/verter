@@ -163,7 +163,7 @@ pub fn collect_carrier_paths(
             &|file: &str| {
                 // Any framework CARRIER file (`.vue` / `.svelte`), from the
                 // registry carrier-extension set — not a `.vue`-literal.
-                verter_workspace::path_is_carrier(file)
+                verter_semantic::resolver_core::path_is_carrier(file)
             },
         )
         .unwrap_or_default()
@@ -248,7 +248,7 @@ pub fn classify_tiers(paths: &[String], tsconfig_patterns: &[String]) -> Vec<(St
 /// claims it. Otherwise it's `Tier::Other`.
 ///
 /// This is a scan-PRIORITIZATION hint, NOT the authoritative ownership decision.
-/// It shares the SAME F2 authority the serve path uses — the snapshot's
+/// It shares the SAME ownership authority the serve path uses — the snapshot's
 /// [`configured_owner_resolution_for_file`](verter_workspace::WorkspaceSnapshot::configured_owner_resolution_for_file)
 /// (solution-graph-pruned) — so a `ProjectSource`/`Other` tier can never disagree
 /// with the serve path on whether a file is configured at all
@@ -697,7 +697,7 @@ async fn sync_non_carrier_file_to_provider(
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     sync_states: &DashMap<String, ProviderSyncState>,
-) -> Vec<crate::project_resolver::ResolveResult> {
+) -> Vec<verter_semantic::resolver_core::ResolveResult> {
     let snapshot = {
         let ws = vfs_workspace.read();
         ws.as_ref().and_then(|ws| {
@@ -840,7 +840,7 @@ async fn sync_non_carrier_file_to_provider(
     reason = "node_modules follow-through threads the provider-surface store alongside its sync inputs"
 )]
 async fn follow_node_modules_deps(
-    initial_deps: Vec<crate::project_resolver::ResolveResult>,
+    initial_deps: Vec<verter_semantic::resolver_core::ResolveResult>,
     host: &Arc<VerterHost>,
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
@@ -848,17 +848,17 @@ async fn follow_node_modules_deps(
     sync_states: &DashMap<String, ProviderSyncState>,
     node_modules_synced: &mut HashSet<String>,
 ) {
-    let mut pending: Vec<crate::project_resolver::ResolveResult> = initial_deps;
+    let mut pending: Vec<verter_semantic::resolver_core::ResolveResult> = initial_deps;
 
     while let Some(dep) = pending.pop() {
         // Handle Vue public API dependencies (sync .vue.verter.ts files)
-        if dep.provider_target == crate::project_resolver::ProviderTarget::CarrierPublicApi {
+        if dep.provider_target == verter_semantic::resolver_core::ProviderTarget::CarrierPublicApi {
             // Vue public API files are handled in by sync_file_to_provider
             continue;
         }
 
         // Handle shadow source files (non-carrier workspace files — already in queue)
-        if dep.provider_target == crate::project_resolver::ProviderTarget::ShadowSourceFile {
+        if dep.provider_target == verter_semantic::resolver_core::ProviderTarget::ShadowSourceFile {
             // These are workspace files already queued in source_classified
             continue;
         }
@@ -1655,13 +1655,13 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
+        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+            verter_workspace::ide_project_config(
                 "/workspace/pkg-a".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/pkg-a/tsconfig.json".to_string()),
             ),
-            crate::project_resolver::IdeProjectConfig::new(
+            verter_workspace::ide_project_config(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
                 None,
@@ -1741,8 +1741,8 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
+        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+            verter_workspace::ide_project_config(
                 "/workspace/pkg-a".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/pkg-a/tsconfig.json".to_string()),
@@ -1842,13 +1842,13 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
+        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+            verter_workspace::ide_project_config(
                 "/workspace/src".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/tsconfig.app.json".to_string()),
             ),
-            crate::project_resolver::IdeProjectConfig::new(
+            verter_workspace::ide_project_config(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
                 None,
@@ -1941,8 +1941,8 @@ defineProps<{ msg: string }>()
             .ensure_compiled("/workspace/src/Child.vue", &profile)
             .is_ok());
 
-        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
+        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+            verter_workspace::ide_project_config(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/tsconfig.json".to_string()),
@@ -2173,14 +2173,14 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_configured_is_project_source() {
-        use verter_workspace::workspace_snapshot::*;
-        use verter_workspace::{
-            CanonicalPath, CompiledGlob, ConfiguredMembership, FallbackMembership, NormalizedGlob,
-            ProjectResolver, StaticMembershipSpec,
+        use verter_semantic::resolver_core::{
+            CompiledGlob, ConfiguredMembership, ModuleResolverCore, NormalizedGlob,
         };
+        use verter_workspace::workspace_snapshot::*;
+        use verter_workspace::{CanonicalPath, FallbackMembership};
 
         let root = CanonicalPath::new("d:/project");
-        let spec = StaticMembershipSpec::with_typescript_defaults(&root);
+        let spec = verter_workspace::static_membership_with_typescript_defaults(&root);
 
         let snap = WorkspaceSnapshot {
             owners_memo: Default::default(),
@@ -2215,7 +2215,7 @@ defineProps<{ msg: string }>()
                     },
                 },
             ],
-            resolver: ProjectResolver::default(),
+            resolver: ModuleResolverCore::default(),
             generation: SnapshotGeneration(1),
         };
 
@@ -2234,13 +2234,13 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_outside_all_projects_is_other() {
+        use verter_semantic::resolver_core::ModuleResolverCore;
         use verter_workspace::workspace_snapshot::*;
-        use verter_workspace::ProjectResolver;
 
         let snap = WorkspaceSnapshot {
             owners_memo: Default::default(),
             projects: vec![],
-            resolver: ProjectResolver::default(),
+            resolver: ModuleResolverCore::default(),
             generation: SnapshotGeneration(1),
         };
 
@@ -2251,10 +2251,9 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_node_modules_is_other() {
+        use verter_semantic::resolver_core::{ConfiguredMembership, ModuleResolverCore};
         use verter_workspace::workspace_snapshot::*;
-        use verter_workspace::{
-            CanonicalPath, ConfiguredMembership, ProjectResolver, StaticMembershipSpec,
-        };
+        use verter_workspace::CanonicalPath;
 
         let root = CanonicalPath::new("d:/project");
 
@@ -2267,7 +2266,7 @@ defineProps<{ msg: string }>()
                 payload: ProjectPayload::Configured {
                     tsconfig_path: CanonicalPath::new("d:/project/tsconfig.json"),
                     membership: ConfiguredMembership {
-                        spec: StaticMembershipSpec::with_typescript_defaults(&root),
+                        spec: verter_workspace::static_membership_with_typescript_defaults(&root),
                         materialized_files: Default::default(),
                     },
                     compiler_options: Default::default(),
@@ -2275,7 +2274,7 @@ defineProps<{ msg: string }>()
                     workspace_aliases: vec![],
                 },
             }],
-            resolver: ProjectResolver::default(),
+            resolver: ModuleResolverCore::default(),
             generation: SnapshotGeneration(1),
         };
 
@@ -2316,8 +2315,8 @@ defineProps<{ msg: string }>()
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
+        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+            verter_workspace::ide_project_config(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/tsconfig.json".to_string()),
@@ -2451,13 +2450,15 @@ defineProps<{ msg: string }>()
             verter_workspace::FilesystemOptions::default(),
         ));
         let root_cp = verter_workspace::CanonicalPath::new(root);
-        let spec = verter_workspace::StaticMembershipSpec {
+        let spec = verter_semantic::resolver_core::StaticMembershipSpec {
             files: Vec::new(),
-            include: vec![verter_workspace::CompiledGlob::new(
-                verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
+            include: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+                    &root_cp, "**/*",
+                ),
             )],
-            exclude: vec![verter_workspace::CompiledGlob::new(
-                verter_workspace::NormalizedGlob::from_root_and_pattern(
+            exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
                     &root_cp,
                     "node_modules/**",
                 ),
@@ -2470,17 +2471,18 @@ defineProps<{ msg: string }>()
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-                membership: verter_workspace::ConfiguredMembership {
+                membership: verter_semantic::resolver_core::ConfiguredMembership {
                     spec,
                     materialized_files: Default::default(),
                 },
-                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 workspace_aliases: Vec::new(),
             },
         }];
-        let resolver = verter_workspace::ProjectResolver::new(vec![
-            crate::project_resolver::IdeProjectConfig::new(
+        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+            verter_workspace::ide_project_config(
                 root.to_string(),
                 root.to_string(),
                 Some(tsconfig.to_string()),

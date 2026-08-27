@@ -457,7 +457,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                         }
                         verter_workspace::ResolutionPublication::Refused(_) => return false,
                     };
-                if verter_workspace::path_is_carrier(&resolved) {
+                if verter_semantic::resolver_core::path_is_carrier(&resolved) {
                     continue; // a directly-resolved carrier is already handled by the carrier pass
                 }
                 if !seen_barrels.insert(resolved.clone()) {
@@ -473,7 +473,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                 if let Some(barrel_analysis) = host.get_analysis(&resolved) {
                     for module_ref in barrel_analysis.module_references.iter() {
                         if let Some(specifier) = &module_ref.literal_specifier {
-                            if verter_workspace::path_is_carrier(specifier) {
+                            if verter_semantic::resolver_core::path_is_carrier(specifier) {
                                 let carrier_id = match resolve_import_specifier_standalone(
                                     host, &resolved, specifier,
                                 ) {
@@ -487,7 +487,7 @@ pub(super) async fn resync_aliased_imports_for_open_files(
                                         return false;
                                     }
                                 };
-                                if verter_workspace::path_is_carrier(&carrier_id)
+                                if verter_semantic::resolver_core::path_is_carrier(&carrier_id)
                                     && seen_barrel_carrier.insert(carrier_id.clone())
                                 {
                                     barrel_carrier_deps.push(carrier_id);

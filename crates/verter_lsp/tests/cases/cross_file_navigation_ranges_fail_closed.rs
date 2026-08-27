@@ -90,7 +90,7 @@ fn external_ts_reference_keeps_the_real_line_not_zero() {
     let (ts_path, read_source) = ext_source(".ts", ts);
     assert!(
         ts_path.ends_with(".ts")
-            && !verter_workspace::path_is_carrier(&ts_path[..ts_path.len() - 3]),
+            && !verter_semantic::resolver_core::path_is_carrier(&ts_path[..ts_path.len() - 3]),
         "fixture must be a plain external .ts (not a generated carrier file): {ts_path}"
     );
 

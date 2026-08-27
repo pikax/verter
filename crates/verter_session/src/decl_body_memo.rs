@@ -44,8 +44,8 @@ use verter_semantic::analysis::framework_facts::svelte::{
     PropsAnnotationLowering, SvelteTypeArgumentLowering,
 };
 use verter_semantic::analysis::type_eval::{
-    AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclBody, TypeDeclInfo,
-    TypeDeclKind, ValueDeclGroup, ValueDeclKind,
+    AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclKind,
+    ValueDeclGroup, ValueDeclKind,
 };
 use verter_semantic::analysis::type_eval_build::{
     lower_jsdoc_typedef_at_comment, lower_statement_parts, lower_svelte_runes_statement_parts,
@@ -62,10 +62,8 @@ use verter_semantic::facts::{
     ValueBodyFingerprintInput,
 };
 use verter_type_expr::facts::{
-    EnumMemberFact, EnumMemberNamesFact, EnumScalar, HeritageBaseFact, KeyDomainClosednessFact,
-    NarrowTypeParam, ObjectShapeFact, PreparedMemberFact, PreparedProjectionClassFact,
-    PreparedWrapperShapeFact, ShallowRouteFacts, TypeDependencyPathFact, ValueAnnotationClass,
-    ValueTypeAnnotationFact, VueIgnoredHeritageFact,
+    EnumScalar, HeritageBaseFact, KeyDomainClosednessFact, NarrowTypeParam, PreparedMemberFact,
+    TypeDependencyPathFact, ValueAnnotationClass, VueIgnoredHeritageFact,
 };
 use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
 use verter_type_expr::span_origins::DeclContributorAnchor;
@@ -79,217 +77,10 @@ use crate::types::MetaProvenance;
 pub(crate) mod locator_deref;
 pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 
-/// The lazily lowered body of one TYPE declaration group (all same-name
-/// contributors folded, exactly as the whole-env walk would fold them). No
-/// `TypeExpr` is stored (compile-witnessed by the `NoTypeExpr` derive):
-/// authored contributor bodies and header-parameter BOUNDS are re-borrowed
-/// lease-only from the retained snapshot on demand; the memo stores the
-/// content-free mirror facts only.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
-pub struct LoweredTypeDecl {
-    pub kind: TypeDeclKind,
-    /// Content-free facts retained per exact source contributor. Member return
-    /// inference is addressed through its producer-emitted origin only.
-    pub contributor_facts: Arc<[TypeDeclInfo]>,
-    /// `TypeDeclBody::Single` or the `Merged` carrier — the same
-    /// merge-aware body `TypeDeclGroup::merged_body` produces.
-    pub body: TypeDeclBody,
-    /// The decl-body content fingerprint — a memo-owned body FACT computed
-    /// ONCE at lazy lowering time from the TRANSIENT lowered contributor
-    /// bodies (enum groups: the value-derived projected scalar-union arms)
-    /// through the shared [`type_body_fingerprint`] producer and the shared
-    /// [`ShallowLens`]. Stored as the full [`HashOutcome`] so admission
-    /// checks keep `budget_exceeded` / `visited_nodes`; readers
-    /// ([`DeclBodyMemo::compat_type_body_hash_input`]) return this stored
-    /// fact — no locator deref, no query-time re-lowering.
-    pub body_hash: HashOutcome,
-    /// Semantic declaration-dependency segment identities. The root local
-    /// binding and member path remain separate through classification.
-    pub dependency_paths: FxHashSet<TypeDependencyPathFact>,
-    pub structural_dependency_paths: FxHashSet<TypeDependencyPathFact>,
-    /// Complete declaration carrier, including positions intentionally omitted
-    /// from legacy component-meta closure breadth.
-    pub declaration_carrier_paths: FxHashSet<TypeDependencyPathFact>,
-    pub value_query_paths: FxHashSet<TypeDependencyPathFact>,
-    pub value_position_paths: FxHashSet<TypeDependencyPathFact>,
-    pub has_unroutable_value_position: bool,
-    /// The per-decl DIRECT route facts (whole-route edges / member edges /
-    /// member-path seed edges / member names), produced graph-free at this
-    /// lazy lowering from the same transient contributor bodies. The session
-    /// route closures read these through the shared fact-closure core.
-    pub route_facts: ShallowRouteFacts,
-    /// `typeof` roots referenced by the merged lookup surface (sorted).
-    pub typeof_root_names: Vec<String>,
-    /// The NARROW type-parameter facts (name + ordinal + content-free bound
-    /// locators), unioned first-seen-by-name across contributors in source
-    /// order — the content-free mirror of the transient typed-IR parameter
-    /// union (the lease-only re-borrow serves bound CONTENT on demand). The
-    /// prepared-decl builder copies this mirror
-    /// (`PreparedTypeDecl.type_parameters`).
-    pub narrow_type_parameters: Vec<NarrowTypeParam>,
-    /// Exact typed `@vue-ignore` heritage identities copied from the shallow
-    /// declaration header. Consumers apply them only under an explicit Vue
-    /// runtime projection policy; ordinary inheritance remains unchanged.
-    pub vue_ignored_heritage: Arc<[VueIgnoredHeritageFact]>,
-    /// The prepared MEMBER-INDEX facts (name → header flags + content-free
-    /// member-value locator + span-recovery origin), classified ONCE at this
-    /// lazy lowering from the same transient contributor bodies through the
-    /// shared `verter_semantic` prepared classifiers
-    /// ([`PreparedTypeDecl::build_member_index`]) — a merged group's member
-    /// locators carry their `MergedContributor` path step. The session
-    /// prepared-decl builder COPIES these facts; it never re-classifies or
-    /// derefs a locator at prepare time.
-    pub member_index: FxHashMap<verter_type_expr::facts::FactPropertyKey, PreparedMemberFact>,
-    /// The prepared structural-wrapper classification FACT, classified at
-    /// this lazy lowering from the primary transient body
-    /// ([`PreparedTypeDecl::classify_wrapper_shape`]).
-    pub wrapper_shape: PreparedWrapperShapeFact,
-    /// The prepared projection classification FACT, classified at this lazy
-    /// lowering ([`PreparedTypeDecl::classify_projection`]).
-    pub projection_class: PreparedProjectionClassFact,
-    /// The producer-minted content-free heritage-base FACTS of a CLASS
-    /// body's Intersection fold, extracted ONCE at this lazy lowering from
-    /// the same transient contributor bodies through the shared
-    /// `verter_semantic` extractor ([`collect_heritage_base_facts`]) — the
-    /// authored base name + `name_resolution` routing key + per-argument
-    /// [`verter_type_expr::locators::TypeArgLocator`]s. The session
-    /// prepared-decl builder COPIES these facts
-    /// (`PreparedTypeDecl.heritage_bases`); the dispatch resolves each head
-    /// and lowers demanded arguments on demand — no query-time body re-walk.
-    /// Empty for non-class declarations and heritage-free classes.
-    pub heritage_bases: Arc<[HeritageBaseFact]>,
-    /// The producer-minted per-declaration KEY-DOMAIN closedness fact
-    /// (closed-object SHAPE verdict + one recipe per contributor body),
-    /// extracted ONCE at this lazy lowering from the same transient
-    /// contributor bodies through the shared `verter_semantic` extractor
-    /// ([`collect_key_domain_closedness_fact`]). The session prepared-decl
-    /// builder COPIES it (`PreparedTypeDecl.key_domain_closedness`); the
-    /// dispatch closedness evaluator reads it in place of a query-time
-    /// authored-body walk. `None` for enum groups (their type surface is the
-    /// value-derived scalar union — no authored type body to classify).
-    pub key_domain_closedness: Option<Arc<KeyDomainClosednessFact>>,
-}
-
-/// The memo-owned VALUE-body fingerprint FACT — the [`HashOutcome`] fields
-/// carried NoTypeExpr-witnessed. ([`HashOutcome`] now derives the witness
-/// itself; this memo-local record stays the VALUE-side storage so the
-/// record shape and its budget-bit doc convention do not move.) Lossless
-/// bijection with [`HashOutcome`] via
-/// [`from_outcome`](Self::from_outcome) / [`to_outcome`](Self::to_outcome).
-#[derive(Debug, Clone, PartialEq, Eq, verter_no_typeexpr::NoTypeExpr)]
-pub struct ValueBodyHashFact {
-    /// The structural fingerprint.
-    pub hash: verter_semantic::facts::FactHash,
-    /// `true` when the producing fold could not fully observe the body — set
-    /// by TWO DISTINCT mechanisms. (1) Depth-cap: the shared hash encoder
-    /// (`enter_frame`, `verter_semantic` `facts/hashing.rs`) sets it at
-    /// `MAX_HASH_DEPTH` exceedance for type AND value bodies alike (both
-    /// walks share that encoder), including a real deep annotation on the
-    /// demand-lowered file memo. (2) Transient-less fold: the shared session
-    /// fold (`fold_lowered_value_decl` — reached via
-    /// `lowered_value_decl_from_group` for a seeded/ambient VALUE fold, and
-    /// via [`lowered_value_decl_for_synthesised_default`] for a synthesized
-    /// component default) forces it on a record built without its
-    /// fingerprint-relevant transients — VALUE-only; the type-side
-    /// transient-less non-enum fold fails loudly in
-    /// `lowered_type_decl_from_group` instead of setting the bit. The bit is
-    /// stored honestly on the memo fact. At the PRE-EXISTING parse-domain
-    /// body-fact admission ([`crate::fact_emission::LazyBodyFactSource`])
-    /// the bit is dropped at `Fact` construction — that admission line is
-    /// unchanged by this storage flip (for the depth-cap case the flow is
-    /// byte-identical to the type side). TODO(follow-up): enforce
-    /// `NonCacheable` on a `budget_exceeded` body fact at that shared
-    /// admission.
-    pub budget_exceeded: bool,
-    /// Stable count of visited unique nodes (visit-order stability probes).
-    pub visited_nodes: usize,
-}
-
-impl ValueBodyHashFact {
-    fn from_outcome(outcome: HashOutcome) -> Self {
-        Self {
-            hash: outcome.hash,
-            budget_exceeded: outcome.budget_exceeded,
-            visited_nodes: outcome.visited_nodes,
-        }
-    }
-
-    /// The [`HashOutcome`] view compat readers hand out.
-    pub(crate) fn to_outcome(&self) -> HashOutcome {
-        HashOutcome {
-            hash: self.hash,
-            budget_exceeded: self.budget_exceeded,
-            visited_nodes: self.visited_nodes,
-        }
-    }
-}
-
-/// The lazily lowered body of one VALUE declaration group — narrowed FACTS
-/// only, mirroring the fact vocabulary the inventory's
-/// [`verter_semantic::analysis::type_eval::ValueDeclInfo`] carries, plus the
-/// memo-owned value-body fingerprint. No `TypeExpr` is stored (compile-
-/// witnessed by the `NoTypeExpr` derive): authored value positions are
-/// content-free locators inside the facts, lowered on demand through the
-/// shared dispatch.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
-pub struct LoweredValueDecl {
-    pub kind: ValueDeclKind,
-    /// The narrowed annotation FACT: classification
-    /// ([`Absent`/`Direct`/`TypeOfAlias`](ValueAnnotationClass)), the
-    /// precomputed single-hop `typeof x` peel target, and (when derivable)
-    /// the annotation source.
-    pub type_annotation: ValueTypeAnnotationFact,
-    /// The merged overload signature-FACT set, in source order
-    /// (`FunctionSignature` is the [`verter_type_expr::facts::FunctionSignatureFact`]
-    /// alias; parameter/return positions are content-free body locators).
-    pub signatures: Vec<FunctionSignature>,
-    /// Narrowed object-shape fact, if this is a const initialized with an
-    /// object (member value positions are content-free locators).
-    pub object_shape: Option<ObjectShapeFact>,
-    /// The full ordered narrowed member inventory of an `enum` declaration,
-    /// in source declaration order, UNIONED across every same-name merged
-    /// contributor ([`ValueDeclGroup::merged_enum_unified`]). `Some` exactly
-    /// when the lowered value decl is an enum. Drives `typeof Enum` (an
-    /// object keyed by the member NAMES) and the `Enum.Member` projection —
-    /// EVERY member, foldable (literal scalar) or deferred-and-degraded
-    /// (sound primitive domain). The value-body fingerprint reads the folded
-    /// subset only.
-    pub enum_members: Option<EnumMemberFact>,
-    /// The enum's member-NAME inventory fact (the presence rail), mirrored
-    /// from the inventory's producer-emitted
-    /// [`ValueDeclInfo::enum_member_names`](verter_semantic::analysis::type_eval::ValueDeclInfo::enum_member_names)
-    /// via [`ValueDeclGroup::merged_enum_member_names_fact`]. `Some` exactly
-    /// when the lowered value decl is an enum.
-    pub enum_member_names: Option<EnumMemberNamesFact>,
-    /// The value-body content fingerprint — a memo-owned body FACT computed
-    /// ONCE at lazy lowering time from the TRANSIENT lowered annotation /
-    /// object shape (plus the merged signature facts and the folded enum
-    /// members) through the shared [`value_body_fingerprint`] producer and
-    /// the shared [`ShallowLens`] — the value-space sibling of
-    /// [`LoweredTypeDecl::body_hash`]. Readers
-    /// ([`crate::fact_emission::compat_value_body_hash_input`]) return this
-    /// stored fact — no locator deref, no query-time re-lowering. A record
-    /// built WITHOUT its lowering transients (a seeded env prefill or the
-    /// ambient rune inventory) whose fingerprint would need them (a
-    /// classified annotation or an object shape on a non-enum) carries a
-    /// DEGRADED outcome (`budget_exceeded = true`) — an honest bit, never a
-    /// fabricated fingerprint. Two distinct producer mechanisms set that
-    /// bit (see [`ValueBodyHashFact::budget_exceeded`]): the transient-less
-    /// DEGRADED bit is forced by the shared session fold
-    /// (`fold_lowered_value_decl`, reached via
-    /// `lowered_value_decl_from_group` and via the synthesized
-    /// component-default constructor
-    /// [`lowered_value_decl_for_synthesised_default`]), VALUE-only — the
-    /// type-side transient-less non-enum fold fails loudly instead — while
-    /// the shared hash encoder separately sets the same bit at
-    /// `MAX_HASH_DEPTH` exceedance for real deep bodies, type and value
-    /// alike. The
-    /// parse-domain admission's bit-drop at `Fact` construction is
-    /// pre-existing and unchanged here — the tracked NonCacheable-forcing
-    /// follow-up at the shared admission owns it (see
-    /// [`ValueBodyHashFact::budget_exceeded`]).
-    pub body_hash: ValueBodyHashFact,
-}
+/// Dependency-neutral lowered declaration values are owned by
+/// `verter_semantic::resolver_core::lowered_decl`. This module re-exports
+/// them for the session-owned lazy-lowering machinery and its consumers.
+pub use verter_semantic::resolver_core::{LoweredTypeDecl, LoweredValueDecl, ValueBodyHashFact};
 
 /// The committed value of one per-symbol demand cell.
 ///
@@ -914,6 +705,114 @@ impl DeclBodyMemo {
             self.backfill(batch, &contributors, Some((SymbolSpace::Value, &key)), None);
         }
         outcome
+    }
+
+    /// Non-blocking peek at a TYPE declaration's lowered body — NEVER
+    /// triggers `acquire_lease`'s worker-thread rendezvous
+    /// (`DeclLoweringService::acquire_lease`, a genuine cross-thread
+    /// blocking wait), unlike [`Self::type_decl_outcome_in`]. The
+    /// Data-only `ResolverObservation` accessor.
+    ///
+    /// `AttemptOutcome::Complete(None)` covers BOTH "genuinely not
+    /// inventoried" (the header index — always eagerly, synchronously
+    /// available — has no entry) AND "already demanded, committed empty"
+    /// (`DemandCell::Ready(None)`): both are stable, cacheable facts.
+    /// `AttemptOutcome::NeedInputs` covers "inventoried but not yet
+    /// demanded," "a demand is currently in-flight on another thread," and
+    /// "a `DemandCell::LeaseMiss` observed in the narrow window before the
+    /// committing thread evicts it" — all three collapse to the SAME
+    /// externally-observable state (the cell entry not being a settled
+    /// `Ready`) by `DemandCell`'s own eviction invariant, and all three
+    /// mean the same thing: the caller must trigger the blocking lowering
+    /// path (`type_decl_outcome_in`) and retry, never treat this as a
+    /// stable fact.
+    ///
+    /// Provides data for immutable attempt snapshots without blocking the
+    /// semantic kernel.
+    #[allow(dead_code)]
+    pub(crate) fn peek_type_decl(
+        &self,
+        canonical: &str,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> verter_semantic::resolver_core::AttemptOutcome<Option<Arc<LoweredTypeDecl>>> {
+        use verter_semantic::resolver_core::AttemptOutcome;
+
+        if self.header_index.type_header_in(owner, name).is_none() {
+            return AttemptOutcome::Complete(None);
+        }
+        let key = DeclBindingKey::new(owner, name);
+        let entry = self.type_entries.get(&key);
+        match entry.as_deref().and_then(|cell| cell.get()) {
+            Some(DemandCell::Ready(value)) => AttemptOutcome::Complete(value.clone()),
+            Some(DemandCell::LeaseMiss) | None => {
+                AttemptOutcome::NeedInputs(self.decl_body_need_inputs(
+                    canonical,
+                    owner,
+                    name,
+                    verter_semantic::resolver_core::DeclarationSpace::Type,
+                ))
+            }
+        }
+    }
+
+    /// Non-blocking peek at a VALUE declaration's lowered body — the value-
+    /// space mirror of [`Self::peek_type_decl`]; see its doc comment for
+    /// the full `AttemptOutcome` mapping rationale.
+    #[allow(dead_code)]
+    pub(crate) fn peek_value_decl(
+        &self,
+        canonical: &str,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> verter_semantic::resolver_core::AttemptOutcome<Option<Arc<LoweredValueDecl>>> {
+        use verter_semantic::resolver_core::AttemptOutcome;
+
+        if self.header_index.value_header_in(owner, name).is_none() {
+            return AttemptOutcome::Complete(None);
+        }
+        let key = DeclBindingKey::new(owner, name);
+        let entry = self.value_entries.get(&key);
+        match entry.as_deref().and_then(|cell| cell.get()) {
+            Some(DemandCell::Ready(value)) => AttemptOutcome::Complete(value.clone()),
+            Some(DemandCell::LeaseMiss) | None => {
+                AttemptOutcome::NeedInputs(self.decl_body_need_inputs(
+                    canonical,
+                    owner,
+                    name,
+                    verter_semantic::resolver_core::DeclarationSpace::Value,
+                ))
+            }
+        }
+    }
+
+    /// Shared `LoadSet` construction for [`Self::peek_type_decl`]/
+    /// [`Self::peek_value_decl`]'s `NeedInputs` arm. `space` disambiguates
+    /// which lowering space demanded the key (see
+    /// [`verter_semantic::resolver_core::DeclarationSpace`]'s docs): the
+    /// same `(canonical, owner, name)` triple can independently miss in
+    /// both spaces for the same declaration name.
+    ///
+    /// The `ResolutionBasis` is [`ResolutionBasis::unbound_placeholder`]
+    /// because this memo does not own the request basis. The request driver
+    /// replaces it when incorporating the demand into an attempt.
+    fn decl_body_need_inputs(
+        &self,
+        canonical: &str,
+        owner: TopLevelOwnerId,
+        name: &str,
+        space: verter_semantic::resolver_core::DeclarationSpace,
+    ) -> verter_semantic::resolver_core::LoadSet {
+        use verter_semantic::resolver_core::{InputKey, LoadSet, ResolutionBasis};
+        LoadSet::new(
+            vec![InputKey::DeclBody {
+                canonical: std::sync::Arc::from(canonical),
+                owner,
+                name: std::sync::Arc::from(name),
+                space,
+            }],
+            ResolutionBasis::unbound_placeholder(),
+        )
     }
 
     /// The body fingerprint for a file-scope TYPE symbol — the single

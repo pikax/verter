@@ -62,8 +62,6 @@ pub mod audited_request;
 mod audited_request_tests;
 mod authored_evidence_producer;
 pub mod binder_identity_facts;
-#[cfg(test)]
-mod block_6c_view_hoist_tests;
 mod block_content;
 pub mod build_toolchain_fingerprint;
 mod cache;
@@ -77,6 +75,8 @@ mod carrier_publication_store_tests;
 #[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;
+#[cfg(test)]
+mod request_view_reuse_tests;
 pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
@@ -346,6 +346,7 @@ pub mod resolver_core;
 mod resolver_store;
 #[cfg(test)]
 mod resolver_store_tests;
+pub mod route_analysis_inputs;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
 pub(crate) mod session_runtime;
@@ -474,8 +475,8 @@ pub struct VerterHost {
     /// [`UpsertRequest`](crate::types::UpsertRequest)`.aliases`. Maps
     /// non-canonical paths (e.g. synthetic IDs from the unplugin or LSP layer)
     /// to canonical IDs for symbol-resolution stability across surfaces.
-    /// Disjoint from VFS overlay storage (which keys by canonical) and from
-    /// `verter_vfs::ProjectResolver` (which resolves import strings).
+    /// Disjoint from workspace overlay storage (which keys by canonical) and
+    /// from semantic module resolution (which resolves import strings).
     /// Host-scoped authority with no equivalent in `ProjectTypeStore`.
     pub(crate) alias_to_canonical: Shared<FxHashMap<String, String>>,
     pub(crate) tick: std::sync::atomic::AtomicU64,

@@ -774,13 +774,13 @@ async fn monorepo_provider_with_config(
         .await
         .expect("workspace folders sync");
 
-    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-        crate::project_resolver::IdeProjectConfig::new(
+    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        verter_workspace::ide_project_config(
             "/ws".to_string(),
             "/ws".to_string(),
             Some("/ws/tsconfig.json".to_string()),
         ),
-        crate::project_resolver::IdeProjectConfig::new(
+        verter_workspace::ide_project_config(
             "/ws/packages/app".to_string(),
             "/ws".to_string(),
             Some(nested_config.to_string()),
@@ -1134,13 +1134,13 @@ async fn without_an_ownership_authority_no_config_is_invented() {
 /// single-folder monorepo fixture (one folder `/ws`, nested configured package
 /// `/ws/packages/app`).
 fn monorepo_authority() -> Arc<dyn crate::type_provider::traits::ConfiguredOwnerAuthority> {
-    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-        crate::project_resolver::IdeProjectConfig::new(
+    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        verter_workspace::ide_project_config(
             "/ws".to_string(),
             "/ws".to_string(),
             Some("/ws/tsconfig.json".to_string()),
         ),
-        crate::project_resolver::IdeProjectConfig::new(
+        verter_workspace::ide_project_config(
             "/ws/packages/app".to_string(),
             "/ws".to_string(),
             Some("/ws/packages/app/tsconfig.json".to_string()),

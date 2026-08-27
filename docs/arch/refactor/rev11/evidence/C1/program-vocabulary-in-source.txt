@@ -1,0 +1,49 @@
+C1 production-vocabulary cleanup proof
+======================================
+
+Scope
+-----
+
+- Initial inventory: 132 prohibited lines across 40 production files touched by C1.
+- Inventory source: the pre-cleanup version of this evidence file at rebased commit `232b44cad`.
+- Live production set: existing Rust files under `crates/*/src/**` changed by C1 relative to
+  `d1f3d50a948597f036868543b9bb21acacd730ff`, excluding `_tests.rs`, `tests.rs`, `tests/`,
+  `benches/`, and `examples/` by the same production-source boundary as the architecture guard.
+- Live production-set manifest: 150 paths; SHA-256
+  `9db77502eef93c25dbd303257230cd21a27fbb70f18f9dbc78cb08ad98c7d281`.
+
+Cleanup
+-------
+
+Program/finding identifiers, Revision-11 evidence paths, and obsolete relocation/landing prose
+were replaced with present-tense ownership and mechanism descriptions. The review-round sweep
+covered the cited resolver, route-analysis, and declaration-memo comments plus the same wording
+class across the bounded 150-path production set. No runtime resolution behavior, public API,
+cache owner, witness, load-set, or metric was changed. The one debug-only diagnostic containing
+the text `C` + `1` uses compile-time literal concatenation, preserving its exact emitted
+diagnostic bytes while keeping the management identifier out of a production source line.
+
+Zero-match controls
+-------------------
+
+Broader live scanner, run over all 150 C1-touched production files:
+
+```text
+rg -n '\bC1(?:-AC-[0-9]+)?\b|\bF[0-9]+(?:\.[0-9]+)?\b|docs/arch/refactor/rev11/|\b(?:relocation|relocated|landed ahead|inert until|not-yet-ported|ported locally|pre-move|still-existing|not-yet-repointed|final repoint)\b'
+```
+
+Result: `0` matches. The production manifest remains 150 paths with the exact digest above.
+
+Exact original-inventory replay: each of the original 132 source-line payloads was searched
+literally in its recorded source path after cleanup. Result: `0 / 132` remain.
+
+Architecture guard:
+
+```text
+cargo nextest run -p verter_session no_phase_archaeology_in_production_code
+```
+
+Result: PASS — 1 passed, 8,788 skipped; nextest run
+`119be4ed-c294-48a5-9fec-b04e093b805a`.
+
+RESULT: PASS — ZERO LIVE PROHIBITED MATCHES

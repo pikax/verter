@@ -115,7 +115,7 @@ pub(crate) struct FlowSliceFunctionKey {
 }
 
 /// The demand identity of one slice: the demanded return-projection
-/// path (empty = whole return). Further demand axes (the C1
+/// path (empty = whole return). Further demand axes (the
 /// `ReturnProjectionDemand` lattice point with its `EvalPolicy`) land
 /// with the `FlowReturn` key axes and map onto this identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -257,6 +257,20 @@ impl FunctionFlowGraphStore {
                 Some(bundle)
             }
         }
+    }
+
+    /// Non-blocking peek at the already-memoized bundle for `key` — the
+    /// `ResolverObservation::function_body_skeleton` backing
+    /// primitive. NEVER calls `source.build_skeleton`/
+    /// `resolver.ensure_indexed_ready_serve` (the blocking cold path
+    /// `get_or_build` falls through to on a miss): a plain `DashMap::get`,
+    /// same shape as `FileArtifactStore::get_augmenter_set`. `None` means
+    /// "not yet built for this content version" — the caller drives
+    /// `get_or_build`'s blocking build to resolve it, not a proven
+    /// skeleton-producer typed miss (which lives inside `Some(bundle)`'s
+    /// own content, never as this method's own `None`).
+    pub(crate) fn peek(&self, key: &FlowSliceFunctionKey) -> Option<Arc<FlowGraphBundle>> {
+        self.entries.get(key).map(|hit| Arc::clone(hit.value()))
     }
 
     /// Number of graph builds performed (observability; the
@@ -577,6 +591,25 @@ impl FlowSliceStores {
     ) -> Option<Arc<FunctionBodySkeleton>> {
         self.graphs
             .get_or_build(key, self.skeletons.as_ref(), resolver)
+            .map(|bundle| Arc::clone(&bundle.skeleton))
+    }
+
+    /// Non-blocking peek at the memoized [`FunctionBodySkeleton`] of one
+    /// function content version — the backing primitive of
+    /// `ResolverObservation::function_body_skeleton`. Unlike
+    /// [`Self::skeleton_for`], NEVER drives the blocking
+    /// `RetainedSnapshotSkeletonSource` cold build (`ensure_indexed_ready_serve`
+    /// and `DeclLoweringService::acquire_lease`'s worker-thread rendezvous):
+    /// `None` means "not yet built for this content version," not a
+    /// resolved absence — a caller that needs the resolved value falls
+    /// back to `skeleton_for`'s blocking path.
+    #[allow(dead_code)]
+    pub(crate) fn peek_skeleton_for(
+        &self,
+        key: &FlowSliceFunctionKey,
+    ) -> Option<Arc<FunctionBodySkeleton>> {
+        self.graphs
+            .peek(key)
             .map(|bundle| Arc::clone(&bundle.skeleton))
     }
 

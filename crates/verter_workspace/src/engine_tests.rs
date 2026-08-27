@@ -7,7 +7,7 @@
 //! constant. The engine caches both so per-store-view reads
 //! (`host_view_project_identity` / `host_view_env_hashes_for` no-owner
 //! fallback on the session side) stop re-running the full
-//! `IdeProjectConfig::new` → membership-glob-compile → 4×hash pipeline.
+//! `crate::resolver::ide_project_config` → membership-glob-compile → 4×hash pipeline.
 //!
 //! These tests pin: cached values are byte-equal to an uncached fresh
 //! computation; an extension-list republish invalidates the cached array;
@@ -20,9 +20,9 @@ use super::{
     compute_workspace_default_env_hash_array, workspace_default_env_hash_array_for_engine,
     workspace_default_project_identity_hash_for_engine, Engine,
 };
+use crate::env_hash::IdeProjectConfigEnvHash;
 use crate::published_state::ProjectEnvHashArray;
 use crate::published_state::PublishedRoot;
-use crate::resolver::IdeProjectConfig;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 
 /// Uncached reference computation from the engine's LIVE extension list —
@@ -53,7 +53,8 @@ fn cached_default_env_hash_array_equals_fresh_computation() {
 #[test]
 fn cached_default_project_identity_equals_fresh_computation() {
     let engine = Engine::new();
-    let fresh = IdeProjectConfig::new(String::new(), String::new(), None).project_identity();
+    let fresh =
+        crate::resolver::ide_project_config(String::new(), String::new(), None).project_identity();
 
     assert_eq!(
         workspace_default_project_identity_hash_for_engine(&engine),
@@ -131,7 +132,7 @@ fn memory_workspace_trait_surface_tracks_extension_republish() {
     // Identity is extension-independent and stable across the republish.
     assert_eq!(
         ws.workspace_default_project_identity_hash(),
-        IdeProjectConfig::new(String::new(), String::new(), None).project_identity()
+        crate::resolver::ide_project_config(String::new(), String::new(), None).project_identity()
     );
 }
 
@@ -197,10 +198,10 @@ use crate::fact_cache::{
     ReadSetSignature, ResolveImportsFactRef,
 };
 use crate::memory::{MemoryOptions, MemoryWorkspace};
-use crate::resolution_currency::{
-    ResolutionEvidenceSource, ResolutionPopulation, ResolutionWorldId,
+use crate::resolution_currency::ResolutionEvidenceSource;
+use verter_semantic::resolver_core::{
+    ResolutionContext, ResolutionPopulation, ResolutionWorldId, ResolvePhase, ResolveRequestKind,
 };
-use crate::types::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 /// A witness whose `Resolution` bucket compacted: it carries the terminal
 /// aggregate and nothing else, so it names zero canonicals.
@@ -210,7 +211,7 @@ fn compacted_resolution_witness() -> ReadSetSignature {
             domain: CompactionDomain::Resolution,
             population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
             stamp: AggregateStamp::ResolutionRoots {
-                base: ResolutionWorldId::fresh(1),
+                base: ResolutionWorldId::from_raw(1),
                 session: None,
             },
         },

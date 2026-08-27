@@ -1241,7 +1241,7 @@ structural:
   edges — never by the project set and never by the whole fact ledger —
   and it runs only at publication.
 - **The memo does not cover the direct membership callers.** It sits at
-  `selected_context_for_path`. `ProjectResolver::nearest_config_for_path`
+  `selected_context_for_path`. `ModuleResolverCore::nearest_config_for_path`
   and `effective_configs_for_path` are also called directly, and those
   walks stay unmemoized: seven call sites inside `resolver.rs` itself
   (`:289`, `:298`, `:304`, `:326`, `:420`, `:471`, `:735`) and five in

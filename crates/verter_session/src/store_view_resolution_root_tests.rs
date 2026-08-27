@@ -12,9 +12,8 @@
 
 use std::sync::Arc;
 
-use verter_workspace::{
-    ReadSetSignature, ResolutionContext, ResolutionPublication, ResolvePhase, ResolveRequestKind,
-};
+use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_workspace::{ReadSetSignature, ResolutionPublication};
 
 use crate::resolver_store::HostStoreView;
 use crate::types::FileLanguage;

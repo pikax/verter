@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 use verter_session::{HostConfig, VerterHost};
 use verter_type_runtime::protocol::{
@@ -17,7 +18,6 @@ use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
 };
-use verter_workspace::membership::ConfiguredMembership;
 use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
 use verter_workspace::published_state::PublishedRoot;
 use verter_workspace::snapshot_builder::{

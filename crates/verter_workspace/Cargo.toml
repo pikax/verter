@@ -22,6 +22,13 @@ external-corpus = []
 # Test-only observation seams (currently the snapshot-publication receipt).
 # Off by default; requested by dependent crates' dev-dependencies so a
 # cross-crate test can see a seam `cfg(test)` on THIS crate would hide.
+# Exposes test-only constructors for otherwise crate-private identity
+# newtypes (`ResolutionWorldId`, `SessionFingerprint`, `WorkspaceAuthorityId`)
+# so a downstream crate's own unit tests can build a concrete
+# `ResolutionBasis`-shaped value without minting through `Engine`/
+# `WorkspaceRead::capture_resolution_world` — production code never uses
+# these constructors. Matches the repo-wide `test-support` feature
+# convention (e.g. `verter_css_syntax`).
 test-support = []
 
 [dependencies]
@@ -40,6 +47,7 @@ thiserror = "2.0"
 verter_audit = { path = "../verter_audit" }
 verter_language = { path = "../verter_language" }
 verter_scheduler = { path = "../verter_scheduler" }
+verter_semantic = { path = "../verter_semantic" }
 verter_span = { path = "../verter_span" }
 verter_type_expr = { workspace = true }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
@@ -55,3 +63,4 @@ verter_tsgo_api = { path = "../verter_tsgo_api" }
 
 [dev-dependencies]
 tempfile = "3.27"
+trybuild = "1.0"

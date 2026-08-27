@@ -33,13 +33,10 @@
 //!
 //! The trait extends `sealed::Sealed`, whose marker is defined in a
 //! private inner module — external crates cannot name it, so they cannot
-//! implement `ResolverContext`. Three in-crate types register `Sealed`
-//! (the `impl sealed::Sealed` block at the bottom of this file): the base
-//! `VerterHost` implementer plus the two request-bound wrappers
-//! `HostResolverContext` and `SessionResolverContext`. The request-bound
-//! refinement layers a SECOND, narrower seal on top — see
-//! [`RequestBoundResolverContext`], which admits only the two request-bound
-//! wrappers and never the bare host.
+//! implement `ResolverContext`. Production implementations are the two
+//! request-bound wrappers, `HostResolverContext` and
+//! `SessionResolverContext`. The direct-host implementation is compiled only
+//! by the explicit test-support configuration.
 //!
 //! ## Architectural guarantees (cross-referenced from CLAUDE.md)
 //!
@@ -63,7 +60,7 @@ use std::sync::Arc;
 
 use verter_semantic::analysis::type_eval::DeclarationId;
 use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
-use verter_workspace::{AmbientSymbolHit, ProjectStableKey};
+use verter_semantic::resolver_core::{AmbientSymbolHit, ProjectStableKey};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::project_type_store::{IndexedReady, ProjectTypeStore};
@@ -82,19 +79,15 @@ use crate::HostConfig;
 mod sealed {
     /// Marker trait `ResolverContext` is sealed against. Only types
     /// inside `verter_session` that implement this marker can implement
-    /// `ResolverContext`. Today the implementers are `VerterHost` and the
-    /// two request-bound contexts.
+    /// `ResolverContext`.
     pub trait Sealed {}
 
     /// Narrower marker sealing [`super::RequestBoundResolverContext`].
     ///
-    /// Implemented ONLY for the two genuinely request-bound contexts
-    /// (`HostResolverContext`, `SessionResolverContext`) — NEVER for the
-    /// bare-host `VerterHost`. Because the marker trait carries this as a
-    /// supertrait bound, a non-request-bound context cannot be laundered
-    /// into `RequestBoundResolverContext` even from inside this crate
-    /// without adding a visible, reviewable `impl RequestBoundSealed`
-    /// here, and no external crate can add one at all.
+    /// Production implementations are the two genuinely request-bound
+    /// contexts. The test-support direct-host seam receives the marker only
+    /// in configurations where its entire `ResolverContext` implementation
+    /// is compile-visible. No external crate can add an implementation.
     pub trait RequestBoundSealed {}
 }
 
@@ -152,24 +145,22 @@ impl MaterializeScopeObservation {
 /// `component_meta_materialize.rs`, `project_semantic_dispatch/*`).
 ///
 /// `ResolverContext` is the only way for seal-scope code to reach host
-/// state at runtime. It is a **flat trait** with no super-traits — see
-/// the module-level rationale.
+/// state at runtime. Its only super-traits are private structural seals; it
+/// composes no non-dyn-compatible domain traits.
 ///
 /// Visibility is `pub(crate)` because this is purely an internal seal — no
 /// external integrators construct
 /// `&dyn ResolverContext`.
-pub(crate) trait ResolverContext: sealed::Sealed {
+pub(crate) trait ResolverContext: sealed::Sealed + sealed::RequestBoundSealed {
     // -------- Identity --------------------------------------------
 
     /// `true` when this context is request-bound — i.e. a
     /// [`crate::resolver_core::HostResolverContext`] or
     /// [`crate::resolver_core::SessionResolverContext`] backed by a
     /// per-request [`HostStoreView`] (and overlay) constructed at the
-    /// request entry boundary. `false` for the bare-host
-    /// `impl ResolverContext for VerterHost` rail, which rebuilds an
-    /// owned view on every `resolver_store_view()` / `store_view()`
-    /// call (retired from production resolver-tier code — only the
-    /// request-bound rails remain as live entry points).
+    /// request entry boundary. Production contexts always return `true`;
+    /// the default exists for test doubles and the explicit direct-host
+    /// test-support seam.
     ///
     /// Used by `ComponentMetaQueryEngine::new` to bump the
     /// `bare_engine_constructions` diagnostic counter whenever the
@@ -436,11 +427,9 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// Resolver-tier consumers consult the borrow on every cache validation;
     /// no consumer rebuilds or enumerates the host.
     ///
-    /// The bare `impl ResolverContext for VerterHost::store_view` panics —
-    /// a bare `&VerterHost` owns no view to borrow. Production code MUST
-    /// construct a `HostResolverContext::new(host, &view)` at the request
-    /// entry point. Tests / mocks that want the convenience of a bare host
-    /// MUST build a view first and wrap it.
+    /// Production code constructs a `HostResolverContext` at the request
+    /// entry point. The compile-fenced direct-host test seam supplies an
+    /// owned fixture view.
     ///
     /// Returns `&dyn StoreView` (not the concrete [`HostStoreView`]) so
     /// the trait stays dyn-compatible AND so a request-bound implementer
@@ -585,11 +574,11 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     // clippy cleanup — these two trait methods are part of
     // the resolver-context surface contract for component-meta-tier
     // adapters but have no caller in the landed tree. The trait is
-    // sealed (only `VerterHost` implements it) and the methods are
+    // sealed and the methods are
     // retained for symmetry with the dependency-fact and analysis-snap
     // bridges defined in the impl block below. `#[allow(dead_code)]` is
     // applied at the trait definition so the corresponding
-    // `impl ResolverContext for VerterHost` definitions do not need
+    // implementations do not need
     // their own `#[allow]` annotations.
 
     #[allow(dead_code)]
@@ -694,10 +683,8 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// (`CanonicalCompletionOverlay::bundle_memo`) — the R17-compliant
     /// home for values that must never enter host/shared caches.
     ///
-    /// The default impl returns `None`: a context with no request scope
-    /// (the bare host) owns no request world, so it can reuse nothing
-    /// beyond what the shared cache already holds. Both request-bound
-    /// contexts override it to expose their request overlay.
+    /// The default impl returns `None`; request-bound contexts override it to
+    /// expose their request overlay.
     fn request_completion_overlay(
         &self,
     ) -> Option<&crate::resolver_core::CanonicalCompletionOverlay> {
@@ -719,9 +706,8 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// recovery in particular) MUST normalise the canonical before
     /// keying the store — a raw-keyed lookup misses the artifact
     /// whenever `normalize(raw) != raw`. The default impl delegates to
-    /// [`crate::VerterHost::normalized_analysis_canonical`]; both
-    /// implementers ([`crate::VerterHost`] and the overlay-aware
-    /// `SessionResolverContext`) resolve through the same host method.
+    /// [`crate::VerterHost::normalized_analysis_canonical`]; every context
+    /// resolves through the same host method.
     fn normalized_analysis_canonical<'a>(
         &self,
         raw_canonical: &'a str,
@@ -743,25 +729,15 @@ pub(crate) trait ResolverContext: sealed::Sealed {
     /// `fact_signature_helpers::install_fact_tracer(host, ...)`
     /// surface without bypassing the seal.
     ///
-    /// Both production implementers ([`crate::VerterHost`] and
-    /// [`crate::resolver_core::session_resolver_context::SessionResolverContext`])
-    /// return their inner `&crate::VerterHost`. There is no other
-    /// implementer; the seal guarantees the trait contract.
+    /// Both production request-bound adapters return their inner
+    /// `&crate::VerterHost`; the seal guarantees the trait contract.
     fn host_for_fact_tracer_install(&self) -> &crate::VerterHost;
 
     /// This context's contribution to a fact tracer's compaction basis.
     ///
-    /// Deliberately NOT `self.store_view().aggregate_basis_seed()` at the
-    /// call site. [`Self::store_view`] is a BORROW contract that the bare
-    /// `impl ResolverContext for VerterHost` cannot satisfy — it owns no
-    /// view, so its implementation is an architectural panic in
-    /// production. The tracer chokepoint runs on EVERY cold compute,
-    /// including the ones still reached through a bare host, so reaching
-    /// `store_view()` from there would turn that guard into a live crash.
-    ///
-    /// So the projection is a context-level question with a fail-safe
-    /// default: a context that is not request-bound vouches for nothing,
-    /// its scopes compact nothing and detect no movement. The two
+    /// The projection is a context-level question with a fail-safe default:
+    /// a test context that is not request-bound vouches for nothing, its
+    /// scopes compact nothing and detect no movement. The two
     /// request-bound implementers override it by forwarding the view they
     /// already hold — a borrow, never a `StoreViewManager` read.
     #[inline]
@@ -775,6 +751,7 @@ pub(crate) trait ResolverContext: sealed::Sealed {
 // borrowed `HostStoreView`, and `SessionResolverContext` is the
 // overlay-aware wrapper that delegates every method to a borrowed host
 // alongside an overlay-rooted view.
+#[cfg(any(test, feature = "test-support"))]
 impl sealed::Sealed for crate::VerterHost {}
 impl<'a> sealed::Sealed for crate::resolver_core::host_resolver_context::HostResolverContext<'a> {}
 impl<'a> sealed::Sealed
@@ -788,21 +765,16 @@ impl<'a> sealed::Sealed
 /// so [`ResolverContext::is_request_bound`] is `true` and every artifact
 /// serve is view-correct for the requesting caller.
 ///
-/// This is the STRUCTURAL rail behind
-/// [`crate::query_host_port::SessionQueryHostPort::new`]: the port binds a
-/// `&dyn RequestBoundResolverContext`, so the retired bare-host rail
-/// (`impl ResolverContext for VerterHost`) is UNCONSTRUCTIBLE at the type
-/// level — `VerterHost` implements [`ResolverContext`] but NOT this
-/// marker, and therefore cannot coerce to `&dyn RequestBoundResolverContext`.
-/// The runtime `is_request_bound` check the port formerly asserted is now
-/// redundant defense-in-depth.
+/// This is the STRUCTURAL rail behind every [`ResolverContext`] use: the
+/// base trait itself requires the private request-bound seal, and the query
+/// host port retains this narrower marker to state its request-bound API
+/// contract directly.
 ///
-/// Sealed via [`sealed::RequestBoundSealed`], implemented ONLY for
-/// [`crate::resolver_core::HostResolverContext`] and
-/// [`crate::resolver_core::SessionResolverContext`]. It is NEVER
-/// implemented for [`crate::VerterHost`]; the seal makes an external or
-/// in-crate-laundered non-request-bound implementer impossible without a
-/// visible `impl RequestBoundSealed`.
+/// Sealed via [`sealed::RequestBoundSealed`]. The direct
+/// [`crate::VerterHost`] implementation exists only behind the
+/// compile-absent production test-support fence. The private seal makes an
+/// external or in-crate-laundered production implementation impossible
+/// without a visible coherence change here.
 ///
 /// The marker deliberately does NOT distinguish a base
 /// [`crate::resolver_core::HostResolverContext`] from an overlay
@@ -815,13 +787,14 @@ pub(crate) trait RequestBoundResolverContext:
 {
 }
 
-// The request-bound seal: `RequestBoundSealed` (and hence
-// `RequestBoundResolverContext`) is implemented for the two genuinely
-// request-bound contexts ONLY, and NEVER for the bare-host `VerterHost`.
+// Production request contexts carry the seal. The direct host receives it
+// only in the explicitly test-only configuration below.
 impl<'a> sealed::RequestBoundSealed
     for crate::resolver_core::host_resolver_context::HostResolverContext<'a>
 {
 }
+#[cfg(any(test, feature = "test-support"))]
+impl sealed::RequestBoundSealed for crate::VerterHost {}
 impl<'a> sealed::RequestBoundSealed
     for crate::resolver_core::session_resolver_context::SessionResolverContext<'a>
 {
@@ -846,31 +819,21 @@ static_assertions::assert_obj_safe!(ResolverContext);
 // subtrait of a dyn-compatible trait adding no new methods is dyn-safe;
 // this pins it against a future edit.
 static_assertions::assert_obj_safe!(RequestBoundResolverContext);
+#[cfg(not(any(test, feature = "test-support")))]
+static_assertions::assert_not_impl_any!(crate::VerterHost: ResolverContext);
+#[cfg(any(test, feature = "test-support"))]
+static_assertions::assert_impl_all!(crate::VerterHost: ResolverContext);
 
+/// Test-only direct-host seam. Production builds compile this implementation
+/// out, so every production `ResolverContext` is structurally request-bound.
+#[cfg(any(test, feature = "test-support"))]
 impl ResolverContext for crate::VerterHost {
     // Cache accessors -------------------------------------------------
 
     #[inline]
     fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
-        // Bare-host arm — same pattern as the resolver methods below.
-        // In production, reaching this means a request-bound caller
-        // missed plumbing. Tests route through the `#[cfg(test)]` arm
-        // via a one-shot owned-view rebuild.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            // A bare host is NOT request-bound: it owns no request
-            // world, so it supplies no bundle memo.
-            crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, None, canonical_id)
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = canonical_id;
-            panic!(
-                "Architectural violation: bare-host prepared_decl_bundle called from \
-                 production; construct HostResolverContext at the request entry"
-            );
-        }
+        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+        crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, None, canonical_id)
     }
 
     #[inline]
@@ -883,26 +846,15 @@ impl ResolverContext for crate::VerterHost {
         Option<Arc<PreparedTypeDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::prepared_type_decl_in_with_store_view(
-                self,
-                &view,
-                None,
-                canonical_id,
-                owner,
-                symbol_name,
-            )
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = (canonical_id, owner, symbol_name);
-            panic!(
-                "Architectural violation: bare-host prepared_type_decl called from \
-                 production; construct HostResolverContext at the request entry"
-            );
-        }
+        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+        crate::VerterHost::prepared_type_decl_in_with_store_view(
+            self,
+            &view,
+            None,
+            canonical_id,
+            owner,
+            symbol_name,
+        )
     }
 
     #[inline]
@@ -915,26 +867,15 @@ impl ResolverContext for crate::VerterHost {
         Option<Arc<PreparedValueDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::prepared_value_decl_in_with_store_view(
-                self,
-                &view,
-                None,
-                canonical_id,
-                owner,
-                symbol_name,
-            )
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = (canonical_id, owner, symbol_name);
-            panic!(
-                "Architectural violation: bare-host prepared_value_decl called from \
-                 production; construct HostResolverContext at the request entry"
-            );
-        }
+        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+        crate::VerterHost::prepared_value_decl_in_with_store_view(
+            self,
+            &view,
+            None,
+            canonical_id,
+            owner,
+            symbol_name,
+        )
     }
 
     #[inline]
@@ -973,62 +914,19 @@ impl ResolverContext for crate::VerterHost {
     #[track_caller]
     fn resolver_store_view(&self) -> HostStoreView {
         crate::request_context::bump_resolver_store_view_call();
-        // Bare-host validation rail (the `!is_request_bound()` arm of the
-        // fact-signature helpers, reachable only when no request-bound
-        // context was installed — production reaches the `store_view()`
-        // panic instead). Hand back the proven-current base view for the
-        // fact validation; under churn it falls to the cold-seed's inner.
+        // The test-only direct-host seam hands fact validation a proven-current
+        // base view; under churn it falls to the cold-seed's inner view.
         crate::VerterHost::resolver_store_view(self).into_owned_view()
     }
 
     #[inline]
     fn store_view(&self) -> &dyn crate::resolver_core::StoreView {
-        // The bare `impl ResolverContext for VerterHost` cannot satisfy
-        // a borrow contract — `&VerterHost` owns no `HostStoreView`.
-        // Production resolver-tier code MUST construct a
-        // `HostResolverContext::new(host, &view, overlay)` at the request
-        // boundary and pass `&host_ctx` (or
-        // `&host_ctx as &dyn ResolverContext`) into the pipeline.
-        //
-        // In production (non-test) builds this is an architectural guard
-        // — reaching it means the request-binding boundary was
-        // bypassed.
-        //
-        // The audit's claim that "every production cold-compute path
-        // now constructs a HostResolverContext" was incomplete: the
-        // iter3 bench surfaced bare-host
-        // `ComponentMetaQueryEngine::new(self)` constructions in
-        // `host_manage/fallthrough.rs`, `host_manage/intrinsic_projection.rs`,
-        // `host_manage/eval_env.rs`, and `host_manage/jsdoc_resolve.rs`.
-        // Until those construction sites migrate to
-        // `HostResolverContext`, callers reachable from those code
-        // paths that need a `StoreView` must route through
-        // `ctx.resolver_store_view()` (the owned-view rail) rather
-        // than `ctx.store_view()`.
-        //
-        // In test builds the bare-host fallback is supported via a
-        // `Box::leak`'d owned view per call: many test fixtures hand a
-        // bare `&VerterHost` to `validate_*` helpers that route through
-        // `ctx.store_view()`. Leaking gives the borrow a `'static`
-        // lifetime — no `unsafe`, no thread-local lifetime hack, no
-        // sequential-borrow assumption to maintain. The leak is bounded
-        // by the number of test calls to this fallback (a few thousand
-        // at most across the entire test suite, ~1KB per view), which
-        // is fully acceptable for `cfg(test)`-only paths. Production
-        // builds reach the `cfg(not(test))` panic arm below.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            let leaked: &'static HostStoreView = Box::leak(Box::new(view));
-            leaked as &dyn crate::resolver_core::StoreView
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            panic!(
-                "ResolverContext::store_view() called on bare &VerterHost — \
-                 construct HostResolverContext::new(host, &view, overlay) at the request entry"
-            );
-        }
+        // Direct-host test fixtures own no request view. The explicit
+        // test-support seam leaks one owned view per call so a borrowed trait
+        // object remains valid without unsafe lifetime fabrication.
+        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+        let leaked: &'static HostStoreView = Box::leak(Box::new(view));
+        leaked as &dyn crate::resolver_core::StoreView
     }
 
     #[inline]
@@ -1049,30 +947,13 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
-        // Bare-host arm: in production, reaching this means a
-        // request-bound caller missed plumbing. Tests still route
-        // through the `#[cfg(test)]` arm via the one-shot owned-view
-        // rebuild — exactly the same dispatch the bare wrapper used
-        // to perform inline.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::resolve_imported_type_root_with_store_view(
-                self,
-                &view,
-                dep_canonical,
-                imported_name,
-            )
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = (dep_canonical, imported_name);
-            panic!(
-                "Architectural violation: bare-host resolve_imported_type_root called from \
-                 production; construct HostResolverContext::new(host, &view, overlay) at the \
-                 request entry and route through `ctx.resolve_imported_type_root`"
-            );
-        }
+        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+        crate::VerterHost::resolve_imported_type_root_with_store_view(
+            self,
+            &view,
+            dep_canonical,
+            imported_name,
+        )
     }
 
     #[inline]
@@ -1084,28 +965,14 @@ impl ResolverContext for crate::VerterHost {
         Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
-        // Bare-host arm: mirrors `resolve_imported_type_root` above — a
-        // test/debug convenience over a one-shot owned view; reaching it
-        // from production means a request-bound caller missed plumbing.
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::resolve_imported_type_root_with_facts_with_store_view(
-                self,
-                &view,
-                dep_canonical,
-                imported_name,
-            )
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = (dep_canonical, imported_name);
-            panic!(
-                "Architectural violation: bare-host resolve_imported_type_root_with_facts called \
-                 from production; construct HostResolverContext::new(host, &view, overlay) at the \
-                 request entry and route through `ctx.resolve_imported_type_root_with_facts`"
-            );
-        }
+        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+        crate::VerterHost::resolve_imported_type_root_with_facts_with_store_view(
+            self,
+            self,
+            &view,
+            dep_canonical,
+            imported_name,
+        )
     }
 
     #[inline]
@@ -1114,24 +981,14 @@ impl ResolverContext for crate::VerterHost {
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::resolve_named_type_export_target_shallow_with_store_view(
-                self,
-                &view,
-                dep_canonical,
-                requested_name,
-            )
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = (dep_canonical, requested_name);
-            panic!(
-                "Architectural violation: bare-host resolve_named_type_export_target_shallow \
-                 called from production; construct HostResolverContext at the request entry"
-            );
-        }
+        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+        crate::VerterHost::resolve_named_type_export_target_shallow_with_store_view(
+            self,
+            self,
+            &view,
+            dep_canonical,
+            requested_name,
+        )
     }
 
     #[inline]
@@ -1140,24 +997,14 @@ impl ResolverContext for crate::VerterHost {
         owner_canonical: &str,
         local_name: &str,
     ) -> Option<(String, String)> {
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
-            crate::VerterHost::resolve_owner_direct_import_with_store_view(
-                self,
-                &view,
-                owner_canonical,
-                local_name,
-            )
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = (owner_canonical, local_name);
-            panic!(
-                "Architectural violation: bare-host resolve_owner_direct_import called from \
-                 production; construct HostResolverContext at the request entry"
-            );
-        }
+        let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
+        crate::VerterHost::resolve_owner_direct_import_with_store_view(
+            self,
+            self,
+            &view,
+            owner_canonical,
+            local_name,
+        )
     }
 
     #[inline]
@@ -1194,34 +1041,13 @@ impl ResolverContext for crate::VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
     ) -> crate::resolver_core::ResolvedTypeDeclaration {
-        // Bare-host arm. The internal walker constructs a
-        // `HostComponentMetaResolver` over a `ctx` reference; passing
-        // `self` (bare host) would route the walker's request-bound methods
-        // through the
-        // panic-shimmed bare-host trait impl. Tests perform the
-        // one-shot owned-view rebuild via `_with_context(host, self)`;
-        // production callers go through
-        // `HostResolverContext::resolve_type_declaration_for_dep` or
-        // `SessionResolverContext::resolve_type_declaration_for_dep`
-        // (both route through `_with_context(host, ctx)`).
-        #[cfg(any(test, feature = "test-support"))]
-        {
-            crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
-                self,
-                self,
-                dep_canonical,
-                owner,
-                requested_name,
-            )
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let _ = (dep_canonical, owner, requested_name);
-            panic!(
-                "Architectural violation: bare-host resolve_type_declaration_for_dep called \
-                 from production; construct HostResolverContext at the request entry"
-            );
-        }
+        crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
+            self,
+            self,
+            dep_canonical,
+            owner,
+            requested_name,
+        )
     }
 
     #[inline]
@@ -1313,8 +1139,497 @@ pub(crate) fn observe_fan_out(fact: crate::resolver_core::FactVersionRef) {
     fact_tracer_tls::observe_fan_out(fact);
 }
 
-/// Fan `sig` into every active tracer on the current thread's stack.
+// ---------------------------------------------------------------------------
+// Request-bound lifecycle adapters — the ONE shared `ResolverContext`
+// implementation behind `HostResolverContext` and `SessionResolverContext`.
+// ---------------------------------------------------------------------------
+
+/// What distinguishes one request-bound lifecycle from another.
 ///
+/// Both request-bound contexts hold a `&VerterHost` plus a per-request
+/// [`RequestStoreView`](crate::resolver_core::RequestStoreView); every
+/// `ResolverContext` method that only threads those two is implemented
+/// ONCE on [`RequestBoundAdapter`]. The methods below are the residue
+/// that genuinely differs between a base request and a session-overlay
+/// request. Every hook has a base-host default; the session lifecycle
+/// overrides the overlay-aware ones.
+///
+/// Hooks that must re-enter the resolver tier receive the enclosing
+/// adapter as `ctx: &dyn ResolverContext` so the re-entry binds to the
+/// same request-bound context.
+pub(crate) trait RequestBoundLifecycle {
+    /// The host this request runs against.
+    fn host(&self) -> &crate::VerterHost;
+
+    /// The request-bound view (base view chained behind the request's
+    /// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)).
+    fn request_view(&self) -> &crate::resolver_core::RequestStoreView<'_>;
+
+    /// The active session view, if this lifecycle carries one.
+    fn session_view(&self) -> Option<&dyn crate::session_view::SessionView>;
+
+    /// Idempotently promote a newly-loaded canonical into the request
+    /// overlay (epoch-guarded); the session lifecycle threads its view.
+    fn complete_canonical(&self, canonical: &str);
+
+    /// Build the owned per-call [`HostStoreView`] (the cold-path rail).
+    #[track_caller]
+    fn owned_store_view(&self) -> HostStoreView;
+
+    fn prepared_decl_bundle(
+        &self,
+        ctx: &dyn ResolverContext,
+        canonical_id: &str,
+    ) -> Option<Arc<PreparedDeclBundle>>;
+
+    fn prepared_type_decl(
+        &self,
+        ctx: &dyn ResolverContext,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Result<
+        Option<Arc<PreparedTypeDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    >;
+
+    fn prepared_value_decl(
+        &self,
+        ctx: &dyn ResolverContext,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Result<
+        Option<Arc<PreparedValueDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    >;
+
+    /// Materialise (or warm-read) the canonical artifact. The adapter
+    /// performs the canonical completion on success.
+    fn materialize_indexed_ready_serve(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+        crate::VerterHost::ensure_indexed_ready_serve(self.host(), canonical_id)
+    }
+
+    /// Load the canonical. The adapter performs the canonical completion
+    /// on success.
+    fn load(&self, canonical_id: &str) -> bool {
+        crate::VerterHost::ensure_loaded(self.host(), canonical_id)
+    }
+
+    fn shallow_file_state(
+        &self,
+        ctx: &dyn ResolverContext,
+        canonical_id: &str,
+    ) -> Option<Arc<ShallowFileState>> {
+        self.host()
+            .shallow_file_state_with_context(ctx, canonical_id)
+    }
+
+    fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
+        self.host().authoritative_current_content_hash(canonical)
+    }
+
+    fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
+        self.host().current_content_pinned_indexed(canonical)
+    }
+
+    fn artifact_key_for_current_content(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        self.host().authoritative_current_artifact_key(canonical)
+    }
+
+    fn observe_materialize_scope(
+        &self,
+        ctx: &dyn ResolverContext,
+        canonical: &str,
+    ) -> Option<MaterializeScopeObservation> {
+        self.host()
+            .observe_materialize_scope_with_context(ctx, canonical)
+    }
+
+    fn resolve_type_dependency_canonical(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        match crate::VerterHost::resolve_type_dependency_canonical(
+            self.host(),
+            owner_canonical,
+            import_source,
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Refused(_) => {
+                note_non_cacheable_read_fan_out(NonCacheableReadReason::UnrootableRoute);
+                None
+            }
+        }
+    }
+}
+
+/// The request-bound [`ResolverContext`] carrier.
+///
+/// `HostResolverContext<'a>` and `SessionResolverContext<'a>` are this
+/// struct over their respective lifecycles; the `ResolverContext`
+/// implementation below is written once and threads
+/// [`RequestBoundLifecycle::request_view`] (the request-bound view) into
+/// every view-aware host entry, so both lifecycles validate warm caches
+/// against the view built at their request boundary.
+pub(crate) struct RequestBoundAdapter<L>(pub(crate) L);
+
+impl<L: RequestBoundLifecycle> RequestBoundAdapter<L> {
+    /// Borrow the inner host.
+    #[allow(dead_code)]
+    pub(crate) fn host(&self) -> &crate::VerterHost {
+        self.0.host()
+    }
+
+    /// Borrow the request-scoped overlay. Cooperative-admission lanes
+    /// that inherit the context clone the `Arc` to seed a sibling
+    /// wrapper sharing the same per-request completion state.
+    #[allow(dead_code)]
+    pub(crate) fn overlay(&self) -> &Arc<crate::resolver_core::CanonicalCompletionOverlay> {
+        self.0.request_view().overlay()
+    }
+
+    /// Explicitly complete a canonical in the request overlay.
+    /// Production completion is driven by the shared load/materialise
+    /// methods; tests also exercise the overlay transition directly.
+    #[allow(dead_code)]
+    pub(crate) fn complete_canonical(&self, canonical: &str) {
+        self.0.complete_canonical(canonical);
+    }
+}
+
+impl<L: RequestBoundLifecycle> ResolverContext for RequestBoundAdapter<L>
+where
+    Self: sealed::Sealed + sealed::RequestBoundSealed,
+{
+    #[inline]
+    fn is_request_bound(&self) -> bool {
+        true
+    }
+
+    #[inline]
+    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedDeclBundle>> {
+        self.0.prepared_decl_bundle(self, canonical_id)
+    }
+
+    /// Request-bound contexts own the request's completion overlay, and
+    /// therefore the request-world bundle memo — the only reuse tier that
+    /// can hold a value the shared cache is not allowed to hold.
+    #[inline]
+    fn request_completion_overlay(
+        &self,
+    ) -> Option<&crate::resolver_core::CanonicalCompletionOverlay> {
+        Some(self.0.request_view().overlay())
+    }
+
+    #[inline]
+    fn prepared_type_decl(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Result<
+        Option<Arc<PreparedTypeDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
+        self.0
+            .prepared_type_decl(self, canonical_id, owner, symbol_name)
+    }
+
+    #[inline]
+    fn prepared_value_decl(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol_name: &str,
+    ) -> Result<
+        Option<Arc<PreparedValueDecl>>,
+        crate::resolver_core::prepared_decl::PreparationFailure,
+    > {
+        self.0
+            .prepared_value_decl(self, canonical_id, owner, symbol_name)
+    }
+
+    #[inline]
+    fn ensure_indexed_ready_serve(
+        &self,
+        canonical_id: &str,
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+        let result = self.0.materialize_indexed_ready_serve(canonical_id);
+        if result.is_some() {
+            // Eager canonical completion, idempotent + epoch-guarded.
+            self.0.complete_canonical(canonical_id);
+        }
+        result
+    }
+
+    #[inline]
+    fn ensure_loaded(&self, canonical_id: &str) -> bool {
+        let loaded = self.0.load(canonical_id);
+        if loaded {
+            self.0.complete_canonical(canonical_id);
+        }
+        loaded
+    }
+
+    #[inline]
+    fn shallow_file_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
+        self.0.shallow_file_state(self, canonical_id)
+    }
+
+    #[inline]
+    fn local_type_declaration_id(
+        &self,
+        canonical_source: &str,
+        resolved_name: &str,
+    ) -> Option<DeclarationId> {
+        crate::VerterHost::local_type_declaration_id(self.0.host(), canonical_source, resolved_name)
+    }
+
+    #[inline]
+    fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
+        crate::VerterHost::get_whole_hash(self.0.host(), canonical)
+    }
+
+    #[inline]
+    fn authoritative_current_content_hash(&self, canonical: &str) -> Option<Hash16> {
+        self.0.authoritative_current_content_hash(canonical)
+    }
+
+    #[inline]
+    fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
+        self.0.indexed_for_current_content(canonical)
+    }
+
+    #[inline]
+    fn artifact_key_for_current_content(
+        &self,
+        canonical: &str,
+    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+        self.0.artifact_key_for_current_content(canonical)
+    }
+
+    #[inline]
+    fn observe_materialize_scope(&self, canonical: &str) -> Option<MaterializeScopeObservation> {
+        self.0.observe_materialize_scope(self, canonical)
+    }
+
+    /// Owned-view variant — clones the request-bound fixed snapshot.
+    /// Hot-path callers use [`Self::store_view`] (the borrow into the same
+    /// fixed view) for zero-allocation cache-validity reads.
+    #[inline]
+    #[track_caller]
+    fn resolver_store_view(&self) -> HostStoreView {
+        crate::request_context::bump_resolver_store_view_call();
+        self.0.owned_store_view()
+    }
+
+    #[inline]
+    fn store_view(&self) -> &dyn crate::resolver_core::StoreView {
+        self.0.request_view()
+    }
+
+    #[inline]
+    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+        crate::resolver_core::StoreView::aggregate_basis_seed(self.0.request_view())
+    }
+
+    #[inline]
+    fn project_type_store(&self) -> &Arc<ProjectTypeStore> {
+        crate::VerterHost::project_type_store(self.0.host())
+    }
+
+    #[inline]
+    fn config(&self) -> &HostConfig {
+        crate::VerterHost::config(self.0.host())
+    }
+
+    #[inline]
+    fn resolve_imported_type_root(
+        &self,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+        // The context-bound shim validates the cached imported-root entry
+        // against this request's view instead of rebuilding a snapshot.
+        self.0
+            .host()
+            .resolve_imported_type_root_with_context(self, dep_canonical, imported_name)
+    }
+
+    #[inline]
+    fn resolve_imported_type_root_with_facts(
+        &self,
+        dep_canonical: &str,
+        imported_name: &str,
+    ) -> (
+        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Arc<[crate::resolver_core::FactVersionRef]>,
+    ) {
+        self.0
+            .host()
+            .resolve_imported_type_root_with_facts_with_context(self, dep_canonical, imported_name)
+    }
+
+    #[inline]
+    fn resolve_named_type_export_target_shallow(
+        &self,
+        dep_canonical: &str,
+        requested_name: &str,
+    ) -> Option<(String, String)> {
+        self.0
+            .host()
+            .resolve_named_type_export_target_shallow_with_store_view(
+                self,
+                self.0.request_view(),
+                dep_canonical,
+                requested_name,
+            )
+    }
+
+    #[inline]
+    fn resolve_owner_direct_import(
+        &self,
+        owner_canonical: &str,
+        local_name: &str,
+    ) -> Option<(String, String)> {
+        self.0.host().resolve_owner_direct_import_with_store_view(
+            self,
+            self.0.request_view(),
+            owner_canonical,
+            local_name,
+        )
+    }
+
+    #[inline]
+    fn resolve_type_dependency_canonical(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        self.0
+            .resolve_type_dependency_canonical(owner_canonical, import_source)
+    }
+
+    #[inline]
+    fn routed_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowFileState>> {
+        crate::VerterHost::routed_shallow_state(self.0.host(), canonical_id)
+    }
+
+    #[inline]
+    fn resolve_type_declaration_for_dep(
+        &self,
+        dep_canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        requested_name: &str,
+    ) -> crate::resolver_core::ResolvedTypeDeclaration {
+        // The walker constructed inside binds to this request-bound context.
+        crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
+            self.0.host(),
+            self,
+            dep_canonical,
+            owner,
+            requested_name,
+        )
+    }
+
+    #[inline]
+    fn resolve_value_export_target(
+        &self,
+        dep_canonical_id: &str,
+        imported_name: &str,
+    ) -> Option<ValueDeclIdentity> {
+        crate::VerterHost::resolve_value_export_target(
+            self.0.host(),
+            dep_canonical_id,
+            imported_name,
+        )
+    }
+
+    #[inline]
+    fn lookup_ambient_symbol(
+        &self,
+        consumer_project: ProjectStableKey,
+        symbol: &str,
+    ) -> Option<AmbientSymbolHit> {
+        self.0
+            .host()
+            .workspace()
+            .lookup_ambient_symbol(consumer_project, symbol)
+    }
+
+    #[inline]
+    fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str) {
+        self.0
+            .host()
+            .workspace()
+            .record_ambient_dependency(consumer_canonical, virtual_id);
+    }
+
+    #[inline]
+    #[cfg(test)]
+    fn workspace_is_workspace_owned(&self, canonical_id: &str) -> bool {
+        self.0.host().workspace().is_workspace_owned(canonical_id)
+    }
+
+    #[inline]
+    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
+        self.0.host().workspace().is_package_backed(canonical_id)
+    }
+
+    #[inline]
+    fn dispatch(&self) -> ProjectSemanticDispatch<'_> {
+        // Anchoring at `self` threads the request-bound view (and any
+        // session view) through every dispatch-tier call.
+        ProjectSemanticDispatch::new(self)
+    }
+
+    #[inline]
+    fn dispatch_node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+        self.0
+            .host()
+            .project_type_store()
+            .semantic_graph()
+            .node_data(node)
+    }
+
+    #[inline]
+    fn current_dependency_fact_versions(
+        &self,
+        canonical: &str,
+        tracked_deps: &BTreeSet<String>,
+    ) -> Vec<FactVersionRef> {
+        crate::VerterHost::current_dependency_fact_versions(self.0.host(), canonical, tracked_deps)
+    }
+
+    #[inline]
+    fn get_raw_analysis_snapshot(&self, canonical: &str) -> Option<FileAnalysisSnapshot> {
+        crate::VerterHost::get_raw_analysis_snapshot(self.0.host(), canonical)
+    }
+
+    #[inline]
+    fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
+        fact_tracer_tls::current_tracer()
+    }
+
+    #[inline]
+    fn active_session_view(&self) -> Option<&dyn crate::session_view::SessionView> {
+        self.0.session_view()
+    }
+
+    #[inline]
+    fn host_for_fact_tracer_install(&self) -> &crate::VerterHost {
+        self.0.host()
+    }
+}
+
 /// Borrowed-slice variant of [`observe_fan_out`]. Used by
 /// `bubble_fact_signature_via_tls` and other warm-hit bubble-up paths.
 /// No-op when the stack is empty or `sig` is empty.
@@ -1596,5 +1911,18 @@ impl crate::VerterHost {
     #[must_use]
     pub fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
         fact_tracer_tls::current_tracer()
+    }
+}
+
+#[cfg(test)]
+mod request_bound_adapter_structure_tests {
+    use super::ResolverContext;
+
+    fn assert_resolver_context<T: ResolverContext>() {}
+
+    #[test]
+    fn request_bound_lifecycles_share_one_resolver_context_implementation() {
+        assert_resolver_context::<crate::resolver_core::HostResolverContext<'static>>();
+        assert_resolver_context::<crate::resolver_core::SessionResolverContext<'static>>();
     }
 }

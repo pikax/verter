@@ -1,0 +1,64 @@
+verter_workspace resolution_conversion_registration_tests::converted_resolution_module_is_declared_and_therefore_selected
+verter_workspace resolution_conversion_tests::every_historical_delta_is_exactly_the_registered_carrier_probe_set
+verter_workspace resolution_conversion_tests::full_driver_a_dangling_project_reference_falls_through_without_panicking
+verter_workspace resolution_conversion_tests::full_driver_a_full_chain_miss_agrees_on_both_engines
+verter_workspace resolution_conversion_tests::full_driver_a_project_reference_cycle_terminates_on_both_engines
+verter_workspace resolution_conversion_tests::full_driver_carrier_import_provider_projection_matches_legacy_end_to_end
+verter_workspace resolution_conversion_tests::full_driver_owner_overlap_selects_the_nearest_root
+verter_workspace resolution_conversion_tests::full_driver_preferred_specifier_candidates_agrees_with_legacy
+verter_workspace resolution_conversion_tests::full_driver_project_exact_result_agrees_with_legacy
+verter_workspace resolution_conversion_tests::full_driver_resolves_a_relative_specifier_for_an_owned_importer
+verter_workspace resolution_conversion_tests::full_driver_resolves_a_scoped_package_via_legacy_main_field
+verter_workspace resolution_conversion_tests::full_driver_resolves_an_absolute_specifier_for_an_owned_importer
+verter_workspace resolution_conversion_tests::full_driver_resolves_via_a_project_reference
+verter_workspace resolution_conversion_tests::full_driver_resolves_via_a_workspace_alias
+verter_workspace resolution_conversion_tests::full_driver_resolves_via_explicit_project_ownership
+verter_workspace resolution_conversion_tests::full_driver_resolves_via_hash_imports
+verter_workspace resolution_conversion_tests::full_driver_resolves_via_node_modules_exports_array_form
+verter_workspace resolution_conversion_tests::full_driver_resolves_via_node_modules_exports_with_conditions
+verter_workspace resolution_conversion_tests::full_driver_resolves_via_the_base_url_fallback
+verter_workspace resolution_conversion_tests::full_driver_resolves_via_tsconfig_paths
+verter_workspace resolution_conversion_tests::full_driver_workspace_alias_wins_over_tsconfig_paths_and_base_url
+verter_workspace resolution_conversion_tests::historical_outcome_ledger_is_total_and_unique
+verter_workspace resolution_conversion_tests::kernel_runner_miss_case_matches_the_witness_contract_result
+verter_workspace resolution_conversion_tests::kernel_runner_positive_case_matches_the_witness_contract_result
+verter_workspace resolution_conversion_tests::kernel_runner_restarts_cleanly_on_a_basis_change
+verter_workspace resolution_conversion_tests::resolution_witness_miss_case_kernel_matches_legacy
+verter_workspace resolution_conversion_tests::resolution_witness_positive_case_kernel_matches_legacy
+
+# execution (final tree): cargo nextest run -p verter_workspace -E 'test(resolution_conversion) | test(resolution_driver_tests)'
+PASS [   0.191s] (2538/2805) verter_workspace resolution_conversion_tests::full_driver_a_dangling_project_reference_falls_through_without_panicking
+PASS [   0.372s] (2539/2805) verter_workspace resolution_conversion_registration_tests::converted_resolution_module_is_declared_and_therefore_selected
+PASS [   0.254s] (2540/2805) verter_workspace resolution_conversion_tests::full_driver_a_full_chain_miss_agrees_on_both_engines
+PASS [   0.326s] (2542/2805) verter_workspace resolution_conversion_tests::full_driver_a_project_reference_cycle_terminates_on_both_engines
+PASS [   0.324s] (2543/2805) verter_workspace resolution_conversion_tests::full_driver_carrier_import_provider_projection_matches_legacy_end_to_end
+PASS [   0.263s] (2544/2805) verter_workspace resolution_conversion_tests::full_driver_preferred_specifier_candidates_agrees_with_legacy
+PASS [   0.266s] (2545/2805) verter_workspace resolution_conversion_tests::full_driver_project_exact_result_agrees_with_legacy
+PASS [   0.199s] (2546/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_a_scoped_package_via_legacy_main_field
+PASS [   0.525s] (2547/2805) verter_workspace resolution_conversion_tests::full_driver_owner_overlap_selects_the_nearest_root
+PASS [   0.122s] (2549/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_via_explicit_project_ownership
+PASS [   0.510s] (2550/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_a_relative_specifier_for_an_owned_importer
+PASS [   0.380s] (2551/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_via_a_project_reference
+PASS [   0.371s] (2552/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_via_a_workspace_alias
+PASS [   0.125s] (2553/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_via_the_base_url_fallback
+PASS [   0.383s] (2554/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_via_hash_imports
+PASS [   0.197s] (2555/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_via_tsconfig_paths
+PASS [   0.769s] (2556/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_an_absolute_specifier_for_an_owned_importer
+PASS [   0.196s] (2557/2805) verter_workspace resolution_conversion_tests::historical_outcome_ledger_is_total_and_unique
+PASS [   0.199s] (2558/2805) verter_workspace resolution_conversion_tests::kernel_runner_miss_case_matches_the_witness_contract_result
+PASS [   1.605s] (2559/2805) verter_workspace resolution_conversion_tests::every_historical_delta_is_exactly_the_registered_carrier_probe_set
+PASS [   0.122s] (2560/2805) verter_workspace resolution_conversion_tests::resolution_witness_miss_case_kernel_matches_legacy
+PASS [   0.770s] (2561/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_via_node_modules_exports_array_form
+PASS [   0.312s] (2562/2805) verter_workspace resolution_conversion_tests::kernel_runner_restarts_cleanly_on_a_basis_change
+PASS [   0.560s] (2565/2805) verter_workspace resolution_conversion_tests::kernel_runner_positive_case_matches_the_witness_contract_result
+PASS [   1.074s] (2567/2805) verter_workspace resolution_conversion_tests::full_driver_resolves_via_node_modules_exports_with_conditions
+PASS [   1.195s] (2578/2805) verter_workspace resolution_conversion_tests::resolution_witness_positive_case_kernel_matches_legacy
+PASS [   1.646s] (2579/2805) verter_workspace resolution_conversion_tests::full_driver_workspace_alias_wins_over_tsconfig_paths_and_base_url
+PASS [   0.182s] (2583/2805) verter_workspace resolution_driver_tests::every_consumed_selector_replays_once_in_wave_order
+PASS [   0.179s] (2584/2805) verter_workspace resolution_driver_tests::limit_breach_surfaces_terminal_with_the_breached_limit
+PASS [   0.122s] (2585/2805) verter_workspace resolution_driver_tests::transient_load_failure_retries_and_completes
+PASS [   0.260s] (2588/2805) verter_workspace resolution_driver_tests::unsatisfiable_input_surfaces_terminal_no_progress_with_unresolved_keys
+PASS [   0.630s] (2589/2805) verter_workspace resolution_driver_tests::directory_members_signature_records_only_consumed_members
+PASS [   0.764s] (2594/2805) verter_workspace resolution_driver_tests::manifest_name_only_edit_changes_the_replayed_fingerprint
+PASS [   1.753s] (2606/2805) verter_workspace resolution_driver_tests::basis_change_mid_flight_restarts_cleanly_on_the_new_basis
+Summary [ 177.902s] 2805 tests run: 2805 passed, 3 skipped

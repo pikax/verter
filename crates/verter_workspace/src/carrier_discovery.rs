@@ -36,8 +36,9 @@
 //! its companion suffix come from the language registry, never hardcoded).
 
 use crate::canonical_path::CanonicalPath;
-use crate::resolver::{carrier_ide_provider_path, IdeProjectCompilerOptions, ProjectMembership};
 use crate::snapshot_builder::{membership_to_spec, supported_extensions_for};
+use crate::ProjectMembership;
+use verter_semantic::resolver_core::{carrier_ide_provider_path, IdeProjectCompilerOptions};
 
 /// How a carrier's companion TypeScript surface becomes a member of a
 /// configured Program.

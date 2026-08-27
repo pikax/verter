@@ -53,7 +53,6 @@ pub use macros::{
 pub mod macro_usage;
 mod options;
 pub mod project_index;
-pub mod project_resolver;
 pub mod root_binding_index;
 pub mod routes;
 pub mod runtime_survival_erasure;
@@ -107,8 +106,9 @@ pub use routes::{
     detect_routing_framework_from_json, discover_layouts, discover_router_configs,
     extract_file_based_routes, extract_navigation_links, extract_programmatic_routes,
     extract_route_guards, extract_router_views, flatten_routes, LayoutDefinition, NavigationLink,
-    NavigationTarget, RouteAnalysisSnapshot, RouteDefinition, RouteGuard, RouteGuardKind,
-    RouteHealthIssue, RouteHealthReport, RouterViewLocation, RoutingFramework,
+    NavigationTarget, RouteAnalysisInputs, RouteAnalysisSnapshot, RouteDefinition, RouteDirEntry,
+    RouteGuard, RouteGuardKind, RouteHealthIssue, RouteHealthReport, RouterViewLocation,
+    RoutingFramework, ROUTER_CONFIG_CANDIDATES,
 };
 pub use scope::AnalysisScope;
 pub use selector_match::{match_selector, MatchResult};

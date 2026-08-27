@@ -246,14 +246,12 @@ pub fn set_conditional_root_narrowing(views: &mut LspViews, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_semantic::resolver_core::{CompiledGlob, ModuleResolverCore, NormalizedGlob};
     use verter_workspace::workspace_snapshot::{
         OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
     use verter_workspace::ViteConfigTrustInfo;
-    use verter_workspace::{
-        CanonicalPath, CompiledGlob, FallbackMembership, MemoryOptions, MemoryWorkspace,
-        NormalizedGlob, ProjectResolver,
-    };
+    use verter_workspace::{CanonicalPath, FallbackMembership, MemoryOptions, MemoryWorkspace};
 
     fn empty_workspace() -> MemoryWorkspace {
         MemoryWorkspace::new(MemoryOptions::default())
@@ -282,7 +280,7 @@ mod tests {
         WorkspaceSnapshot {
             owners_memo: Default::default(),
             projects,
-            resolver: ProjectResolver::default(),
+            resolver: ModuleResolverCore::default(),
             generation: SnapshotGeneration(1),
         }
     }
@@ -295,8 +293,8 @@ mod tests {
             workspace_root: root_cp.clone(),
             payload: ProjectPayload::Configured {
                 tsconfig_path: CanonicalPath::new(tsconfig),
-                membership: verter_workspace::ConfiguredMembership {
-                    spec: verter_workspace::StaticMembershipSpec {
+                membership: verter_semantic::resolver_core::ConfiguredMembership {
+                    spec: verter_semantic::resolver_core::StaticMembershipSpec {
                         files: files.iter().map(|f| CanonicalPath::new(f)).collect(),
                         include: Vec::new(),
                         exclude: Vec::new().into(),

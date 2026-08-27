@@ -276,9 +276,8 @@ impl ComponentMetaRequestHost for VerterHost {
             format!("owner={} mode={mode:?}", canonical),
         );
         // Thread the request-bound view through the warm-hit accessor
-        // so the per-warm-hit `HostStoreView` rebuild is eliminated on
-        // the bare-host hot path (bypass audit
-        // top-leverage fix).
+        // so the per-warm-hit `HostStoreView` rebuild is eliminated on the
+        // base request path.
         let result = self.try_get_cached_resolved_meta_with_store_view_and_admission(
             store_view, canonical, mode,
         );
@@ -483,8 +482,8 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
                 // promotion fence (`is_stable`) gates on — re-bound through
                 // `StoreViewRead::from_executor_snapshot` so currentness stays
                 // intrinsic to the seed. This makes the compute seed and the
-                // promotion-gating seed ONE read, matching the bare-host and
-                // session-host paths (which already rebind through
+                // promotion-gating seed ONE read, matching the base and
+                // session paths (which already rebind through
                 // `from_executor_snapshot`). Taking a SECOND fresh base read here
                 // would diverge from the fence: under additive store-view churn —
                 // which advances the artifact / load generations the

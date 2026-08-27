@@ -1,2157 +1,1485 @@
-//! Project-aware import resolver.
-//!
-//! Resolves import specifiers against tsconfig paths, project references,
-//! workspace aliases, node_modules (package.json exports/imports), and
-//! relative/absolute paths. Produces [`ResolveResult`] containing both the
-//! source path and the provider-graph path used by the type provider.
+//! Workspace-owned resolver driving and configuration ingress.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::sync::Arc;
+
+#[cfg(test)]
+use std::cell::Cell;
 
 use crate::canonical_path::CanonicalPath;
-use crate::membership::ConfiguredMembership;
-use crate::types::PackageManifest;
-use crate::types::{
-    ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
-    ResolveRequestKind, ResolveResult,
+use crate::membership::configured_membership_match_all_under_root;
+#[cfg(test)]
+use crate::membership::ProjectMembership;
+use verter_semantic::resolver_core::{
+    AttemptFailure, AttemptOutcome, AttemptOutput, ConsumedResolutionObservationKey,
+    IdeProjectCompilerOptions, IdeProjectConfig, InputKey, InputLoadIntegrityReason,
+    InputResolutionBudgetExhaustion, InputResolutionBudgetMeter, InputResolutionBudgets,
+    InputResolutionRetention, KernelAttempt, LoadSet, ModuleResolverCore, ResolutionBasis,
+    ResolutionContext, ResolutionObservationSnapshot, ResolutionPackageManifest, ResolveRequest,
+    ResolveResult, ResolverAttemptView, ResolverObservationKind,
 };
 
-// ── Types ──
-
-/// A workspace alias maps a prefix (e.g. `@/`) to a filesystem replacement.
+/// One exact bounded preflight entry. Payload-bearing package content is not
+/// present here; only its authoritative reservation is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceAlias {
-    pub find: String,
-    pub replacement: String,
-}
-
-/// Compiler options extracted from a tsconfig for resolution.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct IdeProjectCompilerOptions {
-    pub base_url: Option<String>,
-    pub paths: Vec<(String, Vec<String>)>,
-    /// `compilerOptions.allowJs` — when set (or `checkJs`), `.js`/`.jsx`/
-    /// `.cjs`/`.mjs` join the project's supported-extension set.
-    pub allow_js: bool,
-    /// `compilerOptions.checkJs` — implies `allowJs` for membership purposes
-    /// (TypeScript treats `checkJs` as turning on JS type-checking, which
-    /// requires the JS files to be project members).
-    pub check_js: bool,
-    /// `compilerOptions.allowImportingTsExtensions` — when explicitly true,
-    /// tsserver barrel publication preserves authored `.vue`/`.svelte`
-    /// specifiers. Missing/false projects receive the `.verter.ts`
-    /// compatibility rewrite.
-    pub allow_importing_ts_extensions: bool,
-    /// `compilerOptions.disableSolutionSearching` — when a solution config sets
-    /// it, default-project selection does NOT climb from that solution to its
-    /// ancestor solution (mirrors tsgo `DisableSolutionSearching`). Default
-    /// `false`. Consumed by
-    /// [`WorkspaceSnapshot::default_configured_owner_for_file`](crate::workspace_snapshot::WorkspaceSnapshot::default_configured_owner_for_file).
-    pub disable_solution_searching: bool,
-}
-
-impl IdeProjectCompilerOptions {
-    /// Whether JavaScript files are project members (either `allowJs` or
-    /// `checkJs` is set).
-    #[must_use]
-    pub fn js_is_member(&self) -> bool {
-        self.allow_js || self.check_js
-    }
-}
-
-/// Membership filter for a tsconfig project.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum ProjectMembership {
-    #[default]
-    MatchAll,
-    IncludeExclude {
-        files: Vec<String>,
-        include: Vec<String>,
-        exclude: Vec<String>,
+pub enum ResolutionInputReservation {
+    PathProbe {
+        key: InputKey,
+        value: verter_semantic::resolver_core::PathProbe,
+        directories: Vec<String>,
+    },
+    RealPath {
+        key: InputKey,
+        value: Option<String>,
+        directories: Vec<String>,
+    },
+    PackageManifest {
+        key: InputKey,
+        manifest_path: String,
+        present: bool,
+        raw_bytes: u64,
+        directories: Vec<String>,
     },
 }
 
-/// Configuration for a single IDE project (tsconfig-backed).
+impl ResolutionInputReservation {
+    #[must_use]
+    pub fn key(&self) -> &InputKey {
+        match self {
+            Self::PathProbe { key, .. }
+            | Self::RealPath { key, .. }
+            | Self::PackageManifest { key, .. } => key,
+        }
+    }
+
+    fn matches_key_variant(&self) -> bool {
+        matches!(
+            (self, self.key()),
+            (Self::PathProbe { .. }, InputKey::PathProbe { .. })
+                | (Self::RealPath { .. }, InputKey::RealPath { .. })
+                | (
+                    Self::PackageManifest { .. },
+                    InputKey::PackageManifest { .. }
+                )
+        )
+    }
+
+    fn reserved_bytes(&self) -> Option<u64> {
+        let metadata = match self {
+            Self::PathProbe { directories, .. } | Self::RealPath { directories, .. } => {
+                spelling_bytes(directories.iter().map(String::as_str))?
+            }
+            Self::PackageManifest {
+                manifest_path,
+                directories,
+                ..
+            } => spelling_bytes(
+                directories
+                    .iter()
+                    .map(String::as_str)
+                    .chain(std::iter::once(manifest_path.as_str())),
+            )?,
+        };
+        let payload = match self {
+            Self::PathProbe { .. } => 1,
+            Self::RealPath { value, .. } => value.as_ref().map_or(0, |value| value.len() as u64),
+            Self::PackageManifest { raw_bytes, .. } => *raw_bytes,
+        };
+        metadata.checked_add(payload)
+    }
+}
+
+/// Exact normalized keys and basis reserved by bounded preflight.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IdeProjectConfig {
-    pub root: String,
-    pub workspace_root: String,
-    pub tsconfig_path: Option<String>,
-    pub provider_root: String,
-    pub workspace_aliases: Vec<WorkspaceAlias>,
-    pub compiler_options: IdeProjectCompilerOptions,
-    pub references: Vec<String>,
-    /// Exact configured membership — the SAME [`ConfiguredMembership`] the
-    /// snapshot's `configured_owner_resolution_for_file` consults, so the
-    /// resolver and the ownership authority never diverge on a glob-vs-exact
-    /// membership answer. A fallback (tsconfig-less) config carries a
-    /// [`ConfiguredMembership::match_all_under_root`] membership.
-    pub membership: ConfiguredMembership,
+pub struct ResolutionInputReservationBatch {
+    keys: Vec<InputKey>,
+    basis: ResolutionBasis,
+    entries: Vec<ResolutionInputReservation>,
+    reserved_bytes: u64,
 }
 
-impl IdeProjectConfig {
-    pub fn new(root: String, workspace_root: String, tsconfig_path: Option<String>) -> Self {
-        let provider_root = root.clone();
-        let membership = ConfiguredMembership::match_all_under_root(&CanonicalPath::new(&root));
-        Self {
-            root,
-            workspace_root,
-            tsconfig_path,
-            provider_root,
-            workspace_aliases: Vec::new(),
-            compiler_options: IdeProjectCompilerOptions::default(),
-            references: Vec::new(),
-            membership,
-        }
-    }
-
-    /// Whether `file_id` is a member of this project, per the exact
-    /// [`ConfiguredMembership`] (its materialized file set, or the compiled
-    /// spec globs for a match-all / filesystem-less membership). One
-    /// membership engine — no second glob evaluator.
-    pub fn matches_file(&self, file_id: &str) -> bool {
-        self.membership.contains(&CanonicalPath::new(file_id))
-    }
-}
-
-// ── ProjectResolver ──
-
-/// The main project resolver. Holds a sorted list of IDE project configs
-/// and resolves import specifiers against them.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ProjectResolver {
-    projects: Vec<IdeProjectConfig>,
-}
-
-/// Backward-compatible type alias for [`ProjectResolver`].
-///
-/// Kept for downstream crates that reference the original name from
-/// the verter_semantic::analysis era.
-pub type NativeProjectResolver = ProjectResolver;
-
-impl ProjectResolver {
-    pub fn new(projects: Vec<IdeProjectConfig>) -> Self {
-        let mut projects = projects;
-        projects.sort_by(compare_projects);
-        Self { projects }
-    }
-
-    /// Every project config that EFFECTIVELY claims `file_id`, most-specific
-    /// (nearest-root) first, with genuine overlap PRESERVED (non-collapsing).
-    ///
-    /// Configured owners take precedence: when any configured project claims the
-    /// file, only the configured candidates survive (after nearest-root pruning — a
-    /// strict-ancestor root loses to a deeper co-claiming root, so `extends`/breadth
-    /// at an ancestor root does not make a descendant package file ambiguous when a
-    /// descendant configured project also claims it) and fallbacks are suppressed;
-    /// otherwise the matching fallback configs are returned.
-    ///
-    /// This is the resolver's path→config lookup for import resolution and
-    /// provider-path derivation — NOT the carrier-ownership authority (that is
-    /// `verter_session`'s `CarrierOwnershipResolution`, which wraps the snapshot's
-    /// exact `configured_owner_resolution_for_file` and fails closed on a genuine
-    /// overlap). This lookup therefore never collapses an overlap into a no-owner
-    /// answer; callers choose nearest / any via [`Self::nearest_config_for_path`].
-    /// Candidates come out in the resolver's pre-sorted project precedence order
-    /// (deepest root first), so the first element is the nearest.
-    pub fn effective_configs_for_path(&self, file_id: &str) -> Vec<&IdeProjectConfig> {
-        // Collect every configured project whose membership claims the file.
-        let configured: Vec<&IdeProjectConfig> = self
-            .projects
-            .iter()
-            .filter(|project| project.tsconfig_path.is_some() && project.matches_file(file_id))
-            .collect();
-
-        if !configured.is_empty() {
-            // Nearest-root pruning: drop a configured candidate whose root is a
-            // STRICT ANCESTOR of another matching candidate's root. The length
-            // check makes containment STRICT (equal roots are not ancestors).
-            return configured
+impl ResolutionInputReservationBatch {
+    pub fn new(
+        keys: Vec<InputKey>,
+        basis: ResolutionBasis,
+        entries: Vec<ResolutionInputReservation>,
+    ) -> Option<Self> {
+        let reserved_bytes = checked_reservation_byte_total(
+            entries
                 .iter()
-                .copied()
-                .filter(|candidate| {
-                    let candidate_root = normalize_canonical_id(&candidate.root);
-                    !configured.iter().any(|other| {
-                        if std::ptr::eq(*other, *candidate) {
-                            return false;
-                        }
-                        let other_root = normalize_canonical_id(&other.root);
-                        other_root.len() > candidate_root.len()
-                            && normalized_starts_with(&other_root, &candidate_root)
-                    })
-                })
-                .collect();
+                .map(ResolutionInputReservation::reserved_bytes),
+        )?;
+        Some(Self {
+            keys,
+            basis,
+            entries,
+            reserved_bytes,
+        })
+    }
+
+    #[must_use]
+    pub fn keys(&self) -> &[InputKey] {
+        &self.keys
+    }
+
+    #[must_use]
+    pub const fn basis(&self) -> ResolutionBasis {
+        self.basis
+    }
+
+    #[must_use]
+    pub const fn reserved_bytes(&self) -> u64 {
+        self.reserved_bytes
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[ResolutionInputReservation] {
+        &self.entries
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_reserved_bytes_for_test(mut self, reserved_bytes: u64) -> Self {
+        self.reserved_bytes = reserved_bytes;
+        self
+    }
+}
+
+/// One value returned by the bounded load phase.
+#[derive(Debug, Clone)]
+pub enum LoadedResolutionInput {
+    PathProbe {
+        key: InputKey,
+        value: verter_semantic::resolver_core::PathProbe,
+        directories: Vec<String>,
+    },
+    RealPath {
+        key: InputKey,
+        value: Option<String>,
+        directories: Vec<String>,
+    },
+    PackageManifest {
+        key: InputKey,
+        value: Option<crate::types::PackageManifest>,
+        manifest_path: String,
+        directories: Vec<String>,
+    },
+}
+
+impl LoadedResolutionInput {
+    #[must_use]
+    pub fn key(&self) -> &InputKey {
+        match self {
+            Self::PathProbe { key, .. }
+            | Self::RealPath { key, .. }
+            | Self::PackageManifest { key, .. } => key,
         }
-
-        // No configured owner: the matching fallback (tsconfig-less) configs.
-        self.projects
-            .iter()
-            .filter(|project| project.tsconfig_path.is_none() && project.matches_file(file_id))
-            .collect()
     }
 
-    /// The nearest (most-specific-root) effective config for `file_id`, or `None`.
-    ///
-    /// The resolver-internal alias/target/provider-path lookups take the nearest; a
-    /// genuine overlap yields the deterministically-first candidate (projects are
-    /// pre-sorted nearest-root-first) rather than collapsing to `None`. Import
-    /// resolution is not the fail-closed ownership authority — that role belongs to
-    /// `verter_session`'s `CarrierOwnershipResolution`.
-    pub fn nearest_config_for_path(&self, file_id: &str) -> Option<&IdeProjectConfig> {
-        self.effective_configs_for_path(file_id).into_iter().next()
+    fn matches_key_variant(&self) -> bool {
+        matches!(
+            (self, self.key()),
+            (Self::PathProbe { .. }, InputKey::PathProbe { .. })
+                | (Self::RealPath { .. }, InputKey::RealPath { .. })
+                | (
+                    Self::PackageManifest { .. },
+                    InputKey::PackageManifest { .. }
+                )
+        )
     }
 
-    fn project_for_ownership(
-        &self,
-        owner: &crate::types::ProjectOwnership,
-    ) -> Option<&IdeProjectConfig> {
-        let normalized_root = normalize_canonical_id(&owner.project_root);
-        let normalized_tsconfig = owner
-            .tsconfig_path
-            .as_ref()
-            .map(|path| normalize_canonical_id(path));
-        let mut matched: Option<&IdeProjectConfig> = None;
-
-        for project in &self.projects {
-            if normalize_canonical_id(&project.root) != normalized_root {
-                continue;
+    fn actual_bytes(&self) -> Option<u64> {
+        let metadata = match self {
+            Self::PathProbe { directories, .. } | Self::RealPath { directories, .. } => {
+                spelling_bytes(directories.iter().map(String::as_str))?
             }
-            let project_tsconfig = project
-                .tsconfig_path
+            Self::PackageManifest {
+                manifest_path,
+                directories,
+                ..
+            } => spelling_bytes(
+                directories
+                    .iter()
+                    .map(String::as_str)
+                    .chain(std::iter::once(manifest_path.as_str())),
+            )?,
+        };
+        let payload = match self {
+            Self::PathProbe { .. } => 1,
+            Self::RealPath { value, .. } => value.as_ref().map_or(0, |value| value.len() as u64),
+            Self::PackageManifest { value, .. } => value
                 .as_ref()
-                .map(|path| normalize_canonical_id(path));
-            if project_tsconfig != normalized_tsconfig {
-                continue;
+                .and_then(|manifest| manifest.raw.as_ref())
+                .map_or(0, |raw| raw.len() as u64),
+        };
+        metadata.checked_add(payload)
+    }
+}
+
+/// Complete output of one bounded load flight.
+#[derive(Debug, Clone)]
+pub struct LoadedResolutionInputBatch {
+    keys: Vec<InputKey>,
+    basis: ResolutionBasis,
+    entries: Vec<LoadedResolutionInput>,
+    actual_bytes: u64,
+    complete: bool,
+}
+
+impl LoadedResolutionInputBatch {
+    pub fn new(
+        keys: Vec<InputKey>,
+        basis: ResolutionBasis,
+        entries: Vec<LoadedResolutionInput>,
+        complete: bool,
+    ) -> Option<Self> {
+        let actual_bytes =
+            checked_actual_byte_total(entries.iter().map(LoadedResolutionInput::actual_bytes))?;
+        Some(Self {
+            keys,
+            basis,
+            entries,
+            actual_bytes,
+            complete,
+        })
+    }
+
+    #[must_use]
+    pub fn keys(&self) -> &[InputKey] {
+        &self.keys
+    }
+
+    #[must_use]
+    pub const fn basis(&self) -> ResolutionBasis {
+        self.basis
+    }
+
+    #[must_use]
+    pub const fn actual_bytes(&self) -> u64 {
+        self.actual_bytes
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[LoadedResolutionInput] {
+        &self.entries
+    }
+}
+
+pub(crate) fn checked_reservation_byte_total(
+    charges: impl IntoIterator<Item = Option<u64>>,
+) -> Option<u64> {
+    charges
+        .into_iter()
+        .try_fold(0_u64, |total, charge| total.checked_add(charge?))
+}
+
+pub(crate) fn checked_actual_byte_total(
+    charges: impl IntoIterator<Item = Option<u64>>,
+) -> Option<u64> {
+    charges
+        .into_iter()
+        .try_fold(0_u64, |total, charge| total.checked_add(charge?))
+}
+
+fn spelling_bytes<'a>(mut spellings: impl Iterator<Item = &'a str>) -> Option<u64> {
+    spellings.try_fold(0_u64, |sum, spelling| {
+        sum.checked_add(spelling.len() as u64)
+    })
+}
+
+pub(crate) fn unsupported_input_failure(key: &InputKey) -> Option<AttemptFailure> {
+    let observation = match key {
+        InputKey::FileContent { .. } => ResolverObservationKind::WholeHash,
+        InputKey::DeclBody { space, .. } => match space {
+            verter_semantic::resolver_core::DeclarationSpace::Type => {
+                ResolverObservationKind::TypeDecl
             }
-            if matched.is_some() {
-                return None;
+            verter_semantic::resolver_core::DeclarationSpace::Value => {
+                ResolverObservationKind::ValueDecl
             }
-            matched = Some(project);
+        },
+        InputKey::ModuleAugmentationIndex { .. } => {
+            ResolverObservationKind::ModuleAugmentationIndex
         }
+        InputKey::FlowFunctionSkeleton { .. } => ResolverObservationKind::FunctionBodySkeleton,
+        InputKey::PathProbe { .. }
+        | InputKey::RealPath { .. }
+        | InputKey::PackageManifest { .. } => return None,
+    };
+    Some(AttemptFailure::ObservationUnavailable { observation })
+}
 
-        matched
+pub(crate) fn preflight_supported_resolution_inputs(
+    keys: &[InputKey],
+    basis: ResolutionBasis,
+    mut path_probe: impl FnMut(
+        &str,
+    ) -> Result<
+        (verter_semantic::resolver_core::PathProbe, Vec<String>),
+        AttemptFailure,
+    >,
+    mut realpath: impl FnMut(&str) -> Result<(Option<String>, Vec<String>), AttemptFailure>,
+    mut package_manifest: impl FnMut(
+        &str,
+        &InputKey,
+    ) -> Result<(bool, u64, Vec<String>), AttemptFailure>,
+) -> Result<ResolutionInputReservationBatch, AttemptFailure> {
+    let mut entries = Vec::with_capacity(keys.len());
+    for key in keys {
+        let entry = match key {
+            InputKey::PathProbe { path } => {
+                let (value, directories) = path_probe(path)?;
+                ResolutionInputReservation::PathProbe {
+                    key: key.clone(),
+                    value,
+                    directories,
+                }
+            }
+            InputKey::RealPath { path } => {
+                let (value, directories) = realpath(path)?;
+                ResolutionInputReservation::RealPath {
+                    key: key.clone(),
+                    value,
+                    directories,
+                }
+            }
+            InputKey::PackageManifest { directory } => {
+                let manifest_path =
+                    verter_semantic::resolver_core::join_paths(directory, "package.json");
+                let (present, raw_bytes, directories) = package_manifest(&manifest_path, key)?;
+                ResolutionInputReservation::PackageManifest {
+                    key: key.clone(),
+                    manifest_path,
+                    present,
+                    raw_bytes,
+                    directories,
+                }
+            }
+            _ => {
+                return Err(unsupported_input_failure(key)
+                    .expect("the supported variants were matched exhaustively"));
+            }
+        };
+        entries.push(entry);
+    }
+    ResolutionInputReservationBatch::new(keys.to_vec(), basis, entries).ok_or_else(|| {
+        AttemptFailure::InputResolutionByteLimit {
+            unresolved: keys.to_vec(),
+            bytes: u64::MAX,
+        }
+    })
+}
+
+pub(crate) fn load_supported_resolution_inputs(
+    reservation: &ResolutionInputReservationBatch,
+    mut package_manifest: impl FnMut(
+        &str,
+        bool,
+        u64,
+        &InputKey,
+    )
+        -> Result<Option<crate::types::PackageManifest>, AttemptFailure>,
+) -> Result<LoadedResolutionInputBatch, AttemptFailure> {
+    let mut entries = Vec::with_capacity(reservation.entries().len());
+    for entry in reservation.entries() {
+        entries.push(match entry {
+            ResolutionInputReservation::PathProbe {
+                key,
+                value,
+                directories,
+            } => LoadedResolutionInput::PathProbe {
+                key: key.clone(),
+                value: *value,
+                directories: directories.clone(),
+            },
+            ResolutionInputReservation::RealPath {
+                key,
+                value,
+                directories,
+            } => LoadedResolutionInput::RealPath {
+                key: key.clone(),
+                value: value.clone(),
+                directories: directories.clone(),
+            },
+            ResolutionInputReservation::PackageManifest {
+                key,
+                manifest_path,
+                present,
+                raw_bytes,
+                directories,
+            } => LoadedResolutionInput::PackageManifest {
+                key: key.clone(),
+                value: package_manifest(manifest_path, *present, *raw_bytes, key)?,
+                manifest_path: manifest_path.clone(),
+                directories: directories.clone(),
+            },
+        });
+    }
+    LoadedResolutionInputBatch::new(
+        reservation.keys().to_vec(),
+        reservation.basis(),
+        entries,
+        true,
+    )
+    .ok_or_else(|| AttemptFailure::InputLoadIntegrity {
+        unresolved: reservation.keys().to_vec(),
+        reason: InputLoadIntegrityReason::ActualOverReservation,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static DRIVER_TERMINAL_KEY_COPIES: Cell<usize> = const { Cell::new(0) };
+    static DRIVER_DELTA_MATERIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+    static INPUT_RESOLUTION_BUDGET_EVENTS: std::cell::RefCell<Vec<InputResolutionBudgetExhaustion>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_resolution_driver_churn_for_test() {
+    DRIVER_TERMINAL_KEY_COPIES.set(0);
+    DRIVER_DELTA_MATERIALIZATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn take_input_resolution_budget_events_for_test() -> Vec<InputResolutionBudgetExhaustion>
+{
+    INPUT_RESOLUTION_BUDGET_EVENTS.take()
+}
+
+#[cfg(test)]
+pub(crate) fn resolution_driver_churn_for_test() -> (usize, usize) {
+    (
+        DRIVER_TERMINAL_KEY_COPIES.get(),
+        DRIVER_DELTA_MATERIALIZATIONS.get(),
+    )
+}
+
+/// Config-ingress constructor for the semantic-owned project DTO.
+#[must_use]
+pub fn ide_project_config(
+    root: String,
+    workspace_root: String,
+    tsconfig_path: Option<String>,
+) -> IdeProjectConfig {
+    let provider_root = root.clone();
+    let membership = configured_membership_match_all_under_root(&CanonicalPath::new(&root));
+    IdeProjectConfig {
+        root,
+        workspace_root,
+        tsconfig_path,
+        provider_root,
+        workspace_aliases: Vec::new(),
+        compiler_options: IdeProjectCompilerOptions::default(),
+        references: Vec::new(),
+        membership,
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ResolutionInputs {
+    snapshot: Arc<ResolutionObservationSnapshot>,
+    observation_inputs: HashMap<InputKey, SnapshotInput>,
+}
+
+#[cfg(test)]
+impl ResolutionInputs {
+    pub(crate) fn metadata_key_shares_input_arc_for_test(&self, key: &InputKey) -> bool {
+        self.observation_inputs
+            .keys()
+            .find(|stored| *stored == key)
+            .is_some_and(|stored| input_key_arc_ptr_eq(stored, key))
+    }
+}
+
+#[cfg(test)]
+fn input_key_arc_ptr_eq(left: &InputKey, right: &InputKey) -> bool {
+    match (left, right) {
+        (InputKey::PathProbe { path: left }, InputKey::PathProbe { path: right })
+        | (InputKey::RealPath { path: left }, InputKey::RealPath { path: right }) => {
+            Arc::ptr_eq(left, right)
+        }
+        (
+            InputKey::PackageManifest { directory: left },
+            InputKey::PackageManifest { directory: right },
+        ) => Arc::ptr_eq(left, right),
+        _ => false,
+    }
+}
+
+enum SnapshotInput {
+    PathProbe {
+        directories: Vec<String>,
+    },
+    RealPath {
+        directories: Vec<String>,
+    },
+    PackageManifest {
+        fingerprint: Option<[u8; 16]>,
+        directories: Vec<String>,
+        manifest_path: String,
+    },
+}
+
+fn attempt_view(
+    inputs: &ResolutionInputs,
+    basis: ResolutionBasis,
+    budgets: InputResolutionBudgets,
+    retention: &InputResolutionRetention,
+) -> ResolverAttemptView {
+    ResolverAttemptView::from_resolution_snapshot_with_operation_retention(
+        Arc::clone(&inputs.snapshot),
+        basis,
+        budgets,
+        retention.clone(),
+    )
+}
+
+#[cfg(test)]
+fn load_requested_inputs(
+    inputs: &mut ResolutionInputs,
+    keys: &[InputKey],
+    mut snapshot_path_probe: impl FnMut(
+        &str,
+    ) -> (verter_semantic::resolver_core::PathProbe, Vec<String>),
+    mut snapshot_realpath: impl FnMut(&str) -> (Option<String>, Vec<String>),
+    mut snapshot_package_manifest: impl FnMut(
+        &str,
+    )
+        -> (Option<crate::types::PackageManifest>, Vec<String>),
+) -> Result<bool, Box<InputKey>> {
+    let mut progressed = false;
+    for key in keys {
+        match key {
+            InputKey::PathProbe { path } => {
+                let (value, directories) = snapshot_path_probe(path);
+                progressed |= !inputs.snapshot.contains_path_probe(path);
+                Arc::make_mut(&mut inputs.snapshot).insert_path_probe(path.to_string(), value);
+                inputs
+                    .observation_inputs
+                    .insert(key.clone(), SnapshotInput::PathProbe { directories });
+            }
+            InputKey::RealPath { path } => {
+                let (value, directories) = snapshot_realpath(path);
+                progressed |= !inputs.snapshot.contains_real_path(path);
+                Arc::make_mut(&mut inputs.snapshot)
+                    .insert_real_path(path.to_string(), value.map(Arc::from));
+                inputs
+                    .observation_inputs
+                    .insert(key.clone(), SnapshotInput::RealPath { directories });
+            }
+            InputKey::PackageManifest { directory } => {
+                let manifest_path =
+                    verter_semantic::resolver_core::join_paths(directory, "package.json");
+                let (manifest, directories) = snapshot_package_manifest(&manifest_path);
+                let fingerprint = manifest
+                    .as_ref()
+                    .map(crate::resolution_currency::manifest_fingerprint_of);
+                let value = manifest.map(|manifest| {
+                    Arc::new(ResolutionPackageManifest {
+                        main: manifest.main,
+                        module: manifest.module,
+                        types: manifest.types,
+                        typings: manifest.typings,
+                        exports: manifest.exports,
+                        imports: manifest.imports,
+                    })
+                });
+                progressed |= !inputs.snapshot.contains_package_manifest(directory);
+                Arc::make_mut(&mut inputs.snapshot)
+                    .insert_package_manifest(directory.to_string(), value);
+                inputs.observation_inputs.insert(
+                    key.clone(),
+                    SnapshotInput::PackageManifest {
+                        fingerprint,
+                        directories,
+                        manifest_path,
+                    },
+                );
+            }
+            _ => return Err(Box::new(key.clone())),
+        }
+    }
+    Ok(progressed)
+}
+
+#[cfg(test)]
+pub(crate) fn load_requested_workspace_inputs(
+    reader: &dyn crate::traits::WorkspaceRead,
+    inputs: &mut ResolutionInputs,
+    keys: &[InputKey],
+) -> Result<bool, Box<InputKey>> {
+    load_requested_inputs(
+        inputs,
+        keys,
+        |path| (reader.probe_path(path), Vec::new()),
+        |path| (reader.realpath(path), Vec::new()),
+        |path| (reader.read_package_manifest(path), Vec::new()),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn preflight_workspace_inputs_for_test(
+    reader: &dyn crate::traits::WorkspaceRead,
+    keys: &[InputKey],
+    basis: ResolutionBasis,
+) -> Result<ResolutionInputReservationBatch, AttemptFailure> {
+    preflight_supported_resolution_inputs(
+        keys,
+        basis,
+        |path| {
+            let _ = reader.take_resolution_directory_observations();
+            let value = reader.probe_path(path);
+            Ok((value, reader.take_resolution_directory_observations()))
+        },
+        |path| {
+            let _ = reader.take_resolution_directory_observations();
+            let value = reader.realpath(path);
+            Ok((value, reader.take_resolution_directory_observations()))
+        },
+        |manifest_path, _| {
+            let _ = reader.take_resolution_directory_observations();
+            let manifest = reader.read_package_manifest(manifest_path);
+            Ok((
+                manifest.is_some(),
+                manifest
+                    .as_ref()
+                    .and_then(|manifest| manifest.raw.as_ref())
+                    .map_or(0, |raw| raw.len() as u64),
+                reader.take_resolution_directory_observations(),
+            ))
+        },
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn load_workspace_inputs_for_test(
+    reader: &dyn crate::traits::WorkspaceRead,
+    reservation: &ResolutionInputReservationBatch,
+) -> Result<LoadedResolutionInputBatch, AttemptFailure> {
+    load_supported_resolution_inputs(
+        reservation,
+        |manifest_path, expected_present, reserved_raw_bytes, key| {
+            let manifest = reader.read_package_manifest(manifest_path);
+            if manifest.is_some() != expected_present {
+                return Err(AttemptFailure::InputLoadIntegrity {
+                    unresolved: vec![key.clone()],
+                    reason: InputLoadIntegrityReason::IncompleteBoundedCapture,
+                });
+            }
+            if manifest
+                .as_ref()
+                .and_then(|manifest| manifest.raw.as_ref())
+                .is_some_and(|raw| raw.len() as u64 > reserved_raw_bytes)
+            {
+                return Err(AttemptFailure::InputLoadIntegrity {
+                    unresolved: vec![key.clone()],
+                    reason: InputLoadIntegrityReason::ActualOverReservation,
+                });
+            }
+            Ok(manifest)
+        },
+    )
+}
+
+fn apply_attempt_output(
+    reader: &crate::resolution_currency::TransactionReader<'_>,
+    inputs: &ResolutionInputs,
+    output: &AttemptOutput,
+) -> bool {
+    verter_debug_assert::verter_debug_assert!(output.observed_facts().is_empty());
+    verter_debug_assert::verter_debug_assert!(output.ambient_dependencies().is_empty());
+
+    for observation in output.consumed_resolution_observations() {
+        match observation {
+            ConsumedResolutionObservationKey::PathProbe { path } => {
+                let key = InputKey::PathProbe {
+                    path: Arc::clone(path),
+                };
+                let Some(SnapshotInput::PathProbe { directories }) =
+                    inputs.observation_inputs.get(&key)
+                else {
+                    return false;
+                };
+                let Some(value) = inputs.snapshot.path_probe(path) else {
+                    return false;
+                };
+                reader.record_snapshot_directories(directories);
+                reader.record_snapshot_canonical_path(path, value);
+            }
+            ConsumedResolutionObservationKey::RealPath { path } => {
+                let key = InputKey::RealPath {
+                    path: Arc::clone(path),
+                };
+                let Some(SnapshotInput::RealPath { directories }) =
+                    inputs.observation_inputs.get(&key)
+                else {
+                    return false;
+                };
+                let Some(value) = inputs.snapshot.real_path(path) else {
+                    return false;
+                };
+                reader.record_snapshot_directories(directories);
+                reader.record_snapshot_canonical_realpath(path, value.as_deref());
+            }
+            ConsumedResolutionObservationKey::PackageManifest { directory } => {
+                let key = InputKey::PackageManifest {
+                    directory: Arc::clone(directory),
+                };
+                let Some(SnapshotInput::PackageManifest {
+                    fingerprint,
+                    directories,
+                    manifest_path,
+                }) = inputs.observation_inputs.get(&key)
+                else {
+                    return false;
+                };
+                reader.record_snapshot_directories(directories);
+                reader.record_snapshot_canonical_manifest(manifest_path, *fingerprint);
+            }
+            ConsumedResolutionObservationKey::RecoveryScope { canonical_prefix } => {
+                reader.record_snapshot_canonical_recovery_scope(canonical_prefix);
+            }
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+fn canonical_manifest_path(directory: &str) -> String {
+    if directory.is_empty() {
+        "/package.json".to_string()
+    } else if directory.ends_with('/') {
+        format!("{directory}package.json")
+    } else {
+        format!("{directory}/package.json")
+    }
+}
+
+pub(crate) fn drive_attempt<T>(
+    reader: &dyn crate::traits::WorkspaceRead,
+    ledger: &mut InputResolutionLedger,
+    mut apply_attempt_output: impl FnMut(&ResolutionInputs, &AttemptOutput) -> bool,
+    mut run: impl FnMut(&ResolverAttemptView, ResolutionBasis) -> KernelAttempt<T>,
+) -> Result<T, Box<AttemptFailure>> {
+    let result = drive_attempt_with_bounded_io(
+        reader,
+        ledger,
+        |keys, basis| reader.preflight_resolution_inputs_bounded(keys, basis),
+        |reservation| reader.load_preflighted_resolution_inputs(reservation),
+        &mut apply_attempt_output,
+        &mut run,
+    );
+    if result.is_err() {
+        ledger.release_applied_outputs();
+    }
+    result
+}
+
+pub(crate) struct InputResolutionLedger {
+    budgets: InputResolutionBudgets,
+    attempts: u32,
+    unique_keys: HashSet<InputKey>,
+    bytes: u64,
+    depth: u32,
+    churn: u32,
+    last_load_set: Option<LoadSet>,
+    staged_loaded_inputs: Vec<LoadedResolutionInput>,
+    applied_outputs: Vec<AttemptOutput>,
+    retention: InputResolutionRetention,
+}
+
+impl InputResolutionLedger {
+    pub(crate) fn new(budgets: InputResolutionBudgets) -> Self {
+        Self {
+            budgets,
+            attempts: 0,
+            unique_keys: HashSet::new(),
+            bytes: 0,
+            depth: 0,
+            churn: 0,
+            last_load_set: None,
+            staged_loaded_inputs: Vec::new(),
+            applied_outputs: Vec::new(),
+            retention: InputResolutionRetention::new(budgets),
+        }
     }
 
-    /// Map a source file path to the provider-graph path used by the type provider.
-    ///
-    /// For a framework CARRIER file (`.vue` / `.svelte`) this appends the
-    /// reserved API virtual-file suffix [`CARRIER_API_VIRTUAL_SUFFIX`]
-    /// (`.verter.ts` — the redirect-reached public API shim, the uniform api
-    /// suffix from the `VirtualFileNaming` column); for non-carrier files the
-    /// source path is returned as-is. The carrier-extension set is derived from
-    /// the language registry (the registry is the single classification
-    /// authority), so a new carrier needs no edit here. This is a pure path
-    /// transform that does not require project ownership — callers that need
-    /// ownership must check it separately via `nearest_config_for_path()`.
-    pub fn provider_id_for_source(&self, source_id: &str) -> Option<String> {
-        let normalized_source = normalize_canonical_id(source_id);
-        if path_is_carrier(&normalized_source) {
-            Some(format!("{normalized_source}{CARRIER_API_VIRTUAL_SUFFIX}"))
-        } else {
-            Some(normalized_source)
+    pub(crate) fn charge_churn(
+        &mut self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        unresolved: &[InputKey],
+    ) -> Result<(), Box<AttemptFailure>> {
+        self.staged_loaded_inputs.clear();
+        let prospective = self.churn.checked_add(1).unwrap_or(u32::MAX);
+        if prospective > self.budgets.churn() {
+            return Err(limit_failure(
+                reader,
+                InputResolutionBudgetMeter::Churn,
+                u64::from(self.churn),
+                u64::from(self.churn) + 1,
+                u64::from(self.budgets.churn()),
+                AttemptFailure::InputResolutionChurnLimit {
+                    unresolved: copy_terminal_keys(unresolved),
+                    churn: self.churn,
+                },
+            ));
         }
+        self.churn = prospective;
+        Ok(())
     }
 
-    /// Map a framework CARRIER source path to the IDE artifact path
-    /// (`{src}.tsx` or `{src}.jsx`).
-    ///
-    /// Returns `None` for non-carrier files. The carrier-extension set is
-    /// derived from the language registry. `is_jsx` selects between `.tsx`
-    /// (TypeScript) and `.jsx` (JavaScript) output for both Vue and Svelte
-    /// component carriers. This is a pure path transform that does not require
-    /// project ownership.
-    pub fn provider_ide_id_for_source(&self, source_id: &str, is_jsx: bool) -> Option<String> {
-        let normalized_source = normalize_canonical_id(source_id);
-        if !path_is_carrier(&normalized_source) {
-            return None;
-        }
-
-        Some(carrier_ide_provider_path(&normalized_source, is_jsx))
+    pub(crate) fn charge_outer_restart(
+        &mut self,
+        reader: &dyn crate::traits::WorkspaceRead,
+    ) -> Result<(), Box<AttemptFailure>> {
+        self.applied_outputs.clear();
+        let unresolved = self
+            .last_load_set
+            .as_ref()
+            .map_or_else(Vec::new, |load_set| load_set.keys().to_vec());
+        self.charge_churn(reader, &unresolved)
     }
 
-    /// Reverse-map a provider-graph path back to its source file path.
-    ///
-    /// Strips the carrier virtual suffixes from a carrier virtual path: the IDE
-    /// `.tsx`/`.jsx` companion (e.g. `foo.vue.tsx` -> `foo.vue`) or the
-    /// reserved API suffix [`CARRIER_API_VIRTUAL_SUFFIX`] (`.verter.ts` — e.g.
-    /// `Bar.svelte.verter.ts` -> `Bar.svelte`). The carrier-extension set is
-    /// derived from the language registry. For non-carrier paths, returns the
-    /// path as-is if owned by a project.
-    pub fn source_id_from_provider_id(&self, provider_id: &str) -> Option<String> {
-        let normalized = normalize_canonical_id(provider_id);
+    pub(crate) fn commit_loaded_inputs(&mut self, reader: &dyn crate::traits::WorkspaceRead) {
+        reader.commit_loaded_resolution_inputs(&self.staged_loaded_inputs);
+        self.staged_loaded_inputs.clear();
+    }
 
-        // Carrier IDE virtual paths: strip the trailing `.tsx`/`.jsx` to get
-        // the carrier source (`foo.vue.tsx` -> `foo.vue`).
-        if (normalized.ends_with(".tsx") || normalized.ends_with(".jsx"))
-            && path_is_carrier(&normalized[..normalized.len() - 4])
+    pub(crate) fn release_applied_outputs(&mut self) {
+        self.applied_outputs.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn applied_output_count_for_test(&self) -> usize {
+        self.applied_outputs.len()
+    }
+
+    /// Drop pass-local payloads and the actual completed outputs applied by a
+    /// ReturnOnly discovery pass. The validated replay owns fresh outputs;
+    /// retaining discovery output after discard would retain witnesses with no
+    /// live transaction.
+    pub(crate) fn discard_staged_loaded_inputs(&mut self) {
+        self.staged_loaded_inputs.clear();
+        self.release_applied_outputs();
+    }
+
+    fn ensure_transient_retry_fits(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        unresolved: &[InputKey],
+        reservation_bytes: u64,
+    ) -> Result<(), Box<AttemptFailure>> {
+        let prospective_attempts = self.attempts.checked_add(1).map(u64::from);
+        if prospective_attempts.is_none_or(|attempts| attempts > u64::from(self.budgets.attempts()))
         {
-            let candidate = &normalized[..normalized.len() - 4];
-            if self.nearest_config_for_path(candidate).is_some() {
-                return Some(candidate.to_string());
-            }
-        }
-        // Carrier API virtual paths: strip the reserved `.verter.ts` API suffix
-        // (`foo.vue.verter.ts` -> `foo.vue`). The reserved infix is why this is
-        // unambiguous against a real `.svelte.ts` rune module — a rune path
-        // never carries the `.verter.` infix.
-        if let Some(candidate) = normalized.strip_suffix(CARRIER_API_VIRTUAL_SUFFIX) {
-            if path_is_carrier(candidate) && self.nearest_config_for_path(candidate).is_some() {
-                return Some(candidate.to_string());
-            }
+            return Err(limit_failure(
+                reader,
+                InputResolutionBudgetMeter::Attempts,
+                u64::from(self.attempts),
+                prospective_attempts.unwrap_or(u64::MAX),
+                u64::from(self.budgets.attempts()),
+                AttemptFailure::InputResolutionAttemptLimit {
+                    unresolved: copy_terminal_keys(unresolved),
+                    attempts: self.attempts,
+                },
+            ));
         }
 
-        // Non-carrier: provider path == source path (if owned by a project)
-        if self.nearest_config_for_path(&normalized).is_some() {
-            return Some(normalized);
+        let prospective_bytes = self.bytes.checked_add(reservation_bytes);
+        if prospective_bytes.is_none_or(|bytes| bytes > self.budgets.input_bytes()) {
+            return Err(limit_failure(
+                reader,
+                InputResolutionBudgetMeter::InputBytes,
+                self.bytes,
+                prospective_bytes.unwrap_or(u64::MAX),
+                self.budgets.input_bytes(),
+                AttemptFailure::InputResolutionByteLimit {
+                    unresolved: copy_terminal_keys(unresolved),
+                    bytes: self.bytes,
+                },
+            ));
         }
-
-        None
+        Ok(())
     }
 
-    /// Resolve an import specifier against all configured projects.
-    ///
-    /// Tries workspace aliases, tsconfig paths, baseUrl, project references,
-    /// `package.json` `#imports`, and `node_modules` in order. Returns both
-    /// the source path and the provider-graph path for the type provider.
-    ///
-    /// When the importer has no owning project, owner-independent branches
-    /// (relative/absolute, `#imports`, `node_modules`) are still attempted.
-    /// Only alias-based resolution (workspace aliases, tsconfig paths, baseUrl,
-    /// project references) requires an owning project.
+    #[cfg(test)]
+    pub(crate) fn consumed_for_test(&self) -> (u32, usize, u64, u32, u32) {
+        (
+            self.attempts,
+            self.unique_keys.len(),
+            self.bytes,
+            self.depth,
+            self.churn,
+        )
+    }
+}
+
+impl Default for InputResolutionLedger {
+    fn default() -> Self {
+        Self::new(InputResolutionBudgets::default())
+    }
+}
+
+pub(crate) fn drive_attempt_with_bounded_io<T>(
+    reader: &dyn crate::traits::WorkspaceRead,
+    ledger: &mut InputResolutionLedger,
+    mut preflight: impl FnMut(
+        &[InputKey],
+        ResolutionBasis,
+    ) -> Result<ResolutionInputReservationBatch, AttemptFailure>,
+    mut load: impl FnMut(
+        &ResolutionInputReservationBatch,
+    ) -> Result<LoadedResolutionInputBatch, AttemptFailure>,
+    mut apply_attempt_output: impl FnMut(&ResolutionInputs, &AttemptOutput) -> bool,
+    mut run: impl FnMut(&ResolverAttemptView, ResolutionBasis) -> KernelAttempt<T>,
+) -> Result<T, Box<AttemptFailure>> {
+    let mut active_basis = None;
+    let mut inputs = ResolutionInputs::default();
+    let mut requested = Vec::new();
+    let mut delta = Vec::new();
+    let mut last_load_set: Option<LoadSet> = None;
+
+    loop {
+        let basis = crate::resolution_currency::resolution_basis_for_reader(reader)
+            .unwrap_or_else(ResolutionBasis::unbound_placeholder);
+        if active_basis != Some(basis) {
+            if active_basis.is_some() {
+                ledger.charge_churn(reader, last_load_set.as_ref().map_or(&[], LoadSet::keys))?;
+            }
+            active_basis = Some(basis);
+            inputs = ResolutionInputs::default();
+            requested.clear();
+            last_load_set = None;
+        }
+        let prospective_attempts = ledger.attempts.checked_add(1).unwrap_or(u32::MAX);
+        if prospective_attempts > ledger.budgets.attempts() {
+            return Err(limit_failure(
+                reader,
+                InputResolutionBudgetMeter::Attempts,
+                u64::from(ledger.attempts),
+                u64::from(ledger.attempts) + 1,
+                u64::from(ledger.budgets.attempts()),
+                AttemptFailure::InputResolutionAttemptLimit {
+                    unresolved: last_load_set
+                        .as_ref()
+                        .map_or_else(Vec::new, |load_set| copy_terminal_keys(load_set.keys())),
+                    attempts: ledger.attempts,
+                },
+            ));
+        }
+        ledger.attempts = prospective_attempts;
+        let view = attempt_view(&inputs, basis, ledger.budgets, &ledger.retention);
+        let outcome = run(&view, basis);
+        drop(view);
+        match outcome {
+            AttemptOutcome::Complete(completed) => {
+                #[cfg(test)]
+                crate::engine::resolution_test_hooks::fire(
+                    crate::engine::resolution_test_hooks::ResolutionPhase::ProviderProjection,
+                );
+                if !apply_attempt_output(&inputs, &completed.output) {
+                    return Err(Box::new(AttemptFailure::InputResolutionNoProgress {
+                        unresolved: last_load_set
+                            .as_ref()
+                            .map_or_else(Vec::new, |load_set| copy_terminal_keys(load_set.keys())),
+                    }));
+                }
+                let verter_semantic::resolver_core::CompletedAttempt { value, output } = completed;
+                ledger.applied_outputs.push(output);
+                ledger.last_load_set = last_load_set;
+                return Ok(value);
+            }
+            AttemptOutcome::NeedInputs(load_set) => {
+                if load_set.basis() != basis {
+                    ledger.charge_churn(reader, load_set.keys())?;
+                    last_load_set = Some(load_set);
+                    active_basis = None;
+                    continue;
+                }
+                delta.clear();
+                #[cfg(test)]
+                let had_delta_capacity = delta.capacity() != 0;
+                delta.extend(
+                    load_set
+                        .keys()
+                        .iter()
+                        .filter(|key| !requested.contains(*key))
+                        .cloned(),
+                );
+                #[cfg(test)]
+                if !had_delta_capacity && !delta.is_empty() {
+                    DRIVER_DELTA_MATERIALIZATIONS.set(DRIVER_DELTA_MATERIALIZATIONS.get() + 1);
+                }
+                if delta.is_empty() {
+                    return Err(Box::new(AttemptFailure::InputResolutionNoProgress {
+                        unresolved: copy_terminal_keys(load_set.keys()),
+                    }));
+                }
+
+                if let Some(failure) = delta.iter().find_map(unsupported_input_failure) {
+                    reader.note_input_resolution_terminal_failure();
+                    return Err(Box::new(failure));
+                }
+
+                let prospective_depth = ledger.depth.checked_add(1).unwrap_or(u32::MAX);
+                if prospective_depth > ledger.budgets.driver_depth() {
+                    return Err(limit_failure(
+                        reader,
+                        InputResolutionBudgetMeter::DriverDepth,
+                        u64::from(ledger.depth),
+                        u64::from(ledger.depth) + 1,
+                        u64::from(ledger.budgets.driver_depth()),
+                        AttemptFailure::InputResolutionDepthLimit {
+                            unresolved: copy_terminal_keys(&delta),
+                            depth: ledger.depth,
+                        },
+                    ));
+                }
+
+                let mut new_keys = Vec::new();
+                let mut new_key_bytes = 0_u64;
+                for key in &delta {
+                    if !ledger.unique_keys.contains(key) {
+                        new_keys.push(key.clone());
+                        new_key_bytes = new_key_bytes
+                            .checked_add(input_key_spelling_bytes(key))
+                            .unwrap_or(u64::MAX);
+                    }
+                }
+                let prospective_unique = ledger
+                    .unique_keys
+                    .len()
+                    .checked_add(new_keys.len())
+                    .and_then(|value| u32::try_from(value).ok())
+                    .unwrap_or(u32::MAX);
+                if prospective_unique > ledger.budgets.unique_keys() {
+                    return Err(limit_failure(
+                        reader,
+                        InputResolutionBudgetMeter::UniqueKeys,
+                        ledger.unique_keys.len() as u64,
+                        ledger.unique_keys.len() as u64 + new_keys.len() as u64,
+                        u64::from(ledger.budgets.unique_keys()),
+                        AttemptFailure::InputResolutionUniqueKeyLimit {
+                            unresolved: copy_terminal_keys(&delta),
+                            unique_keys: u32::try_from(ledger.unique_keys.len())
+                                .unwrap_or(u32::MAX),
+                        },
+                    ));
+                }
+                let prospective_key_bytes = ledger.bytes.checked_add(new_key_bytes);
+                if prospective_key_bytes.is_none_or(|bytes| bytes > ledger.budgets.input_bytes()) {
+                    return Err(limit_failure(
+                        reader,
+                        InputResolutionBudgetMeter::InputBytes,
+                        ledger.bytes,
+                        prospective_key_bytes.unwrap_or(u64::MAX),
+                        ledger.budgets.input_bytes(),
+                        AttemptFailure::InputResolutionByteLimit {
+                            unresolved: copy_terminal_keys(&delta),
+                            bytes: ledger.bytes,
+                        },
+                    ));
+                }
+                ledger.unique_keys.extend(new_keys);
+                ledger.bytes = prospective_key_bytes.expect("checked above");
+
+                let reservation = match preflight(&delta, basis) {
+                    Ok(reservation) => reservation,
+                    Err(AttemptFailure::TransientInputLoadFailure { .. }) => {
+                        // Preflight has not produced a payload/metadata
+                        // reservation yet, so only the next kernel attempt
+                        // needs proving here. The repeated preflight must
+                        // still produce a bounded reservation, which is
+                        // charged before its load below.
+                        ledger.ensure_transient_retry_fits(reader, &delta, 0)?;
+                        last_load_set = Some(load_set);
+                        continue;
+                    }
+                    Err(failure) => {
+                        reader.note_input_resolution_terminal_failure();
+                        return Err(Box::new(failure));
+                    }
+                };
+                if reservation.keys() != delta.as_slice()
+                    || reservation.basis() != basis
+                    || reservation.entries().len() != delta.len()
+                    || !reservation
+                        .entries()
+                        .iter()
+                        .zip(delta.iter())
+                        .all(|(entry, key)| entry.matches_key_variant() && entry.key() == key)
+                {
+                    reader.note_input_load_integrity_failure();
+                    return Err(Box::new(AttemptFailure::InputLoadIntegrity {
+                        unresolved: copy_terminal_keys(&delta),
+                        reason: if reservation.basis() != basis {
+                            InputLoadIntegrityReason::BasisMismatch
+                        } else {
+                            InputLoadIntegrityReason::KeySetMismatch
+                        },
+                    }));
+                }
+                let prospective_bytes = ledger.bytes.checked_add(reservation.reserved_bytes());
+                if prospective_bytes.is_none_or(|bytes| bytes > ledger.budgets.input_bytes()) {
+                    return Err(limit_failure(
+                        reader,
+                        InputResolutionBudgetMeter::InputBytes,
+                        ledger.bytes,
+                        prospective_bytes.unwrap_or(u64::MAX),
+                        ledger.budgets.input_bytes(),
+                        AttemptFailure::InputResolutionByteLimit {
+                            unresolved: copy_terminal_keys(&delta),
+                            bytes: ledger.bytes,
+                        },
+                    ));
+                }
+                ledger.bytes = prospective_bytes.expect("checked above");
+
+                let loaded = match load(&reservation) {
+                    Ok(loaded) => loaded,
+                    Err(AttemptFailure::TransientInputLoadFailure { .. }) => {
+                        ledger.ensure_transient_retry_fits(
+                            reader,
+                            &delta,
+                            reservation.reserved_bytes(),
+                        )?;
+                        last_load_set = Some(load_set);
+                        continue;
+                    }
+                    Err(failure @ AttemptFailure::InputLoadIntegrity { .. }) => {
+                        reader.note_input_load_integrity_failure();
+                        return Err(Box::new(failure));
+                    }
+                    Err(failure) => {
+                        reader.note_input_resolution_terminal_failure();
+                        return Err(Box::new(failure));
+                    }
+                };
+                let integrity_reason = if loaded.basis() != basis {
+                    Some(InputLoadIntegrityReason::BasisMismatch)
+                } else if loaded.keys() != delta.as_slice()
+                    || loaded.entries().len() != delta.len()
+                    || !loaded
+                        .entries()
+                        .iter()
+                        .zip(delta.iter())
+                        .all(|(entry, key)| entry.matches_key_variant() && entry.key() == key)
+                {
+                    Some(InputLoadIntegrityReason::KeySetMismatch)
+                } else if !loaded.is_complete() {
+                    Some(InputLoadIntegrityReason::IncompleteBoundedCapture)
+                } else if loaded.actual_bytes() > reservation.reserved_bytes() {
+                    Some(InputLoadIntegrityReason::ActualOverReservation)
+                } else {
+                    None
+                };
+                if let Some(reason) = integrity_reason {
+                    reader.note_input_load_integrity_failure();
+                    return Err(Box::new(AttemptFailure::InputLoadIntegrity {
+                        unresolved: copy_terminal_keys(&delta),
+                        reason,
+                    }));
+                }
+                ledger
+                    .staged_loaded_inputs
+                    .extend(loaded.entries().iter().cloned());
+                let progressed = apply_loaded_resolution_inputs(&mut inputs, loaded);
+                if progressed {
+                    requested.append(&mut delta);
+                    ledger.depth = prospective_depth;
+                }
+                last_load_set = Some(load_set);
+            }
+            AttemptOutcome::Terminal(failure) => match failure {
+                AttemptFailure::InputResolutionAliasGeometryRetentionLimit {
+                    retained,
+                    prospective,
+                    maximum,
+                } => {
+                    return Err(limit_failure(
+                        reader,
+                        InputResolutionBudgetMeter::AliasGeometryRetention,
+                        u64::from(retained),
+                        u64::from(prospective),
+                        u64::from(maximum),
+                        AttemptFailure::InputResolutionAliasGeometryRetentionLimit {
+                            retained,
+                            prospective,
+                            maximum,
+                        },
+                    ));
+                }
+                AttemptFailure::InputResolutionCompletedWitnessRetentionLimit {
+                    retained,
+                    prospective,
+                    maximum,
+                } => {
+                    return Err(limit_failure(
+                        reader,
+                        InputResolutionBudgetMeter::CompletedWitnessRetention,
+                        u64::from(retained),
+                        u64::from(prospective),
+                        u64::from(maximum),
+                        AttemptFailure::InputResolutionCompletedWitnessRetentionLimit {
+                            retained,
+                            prospective,
+                            maximum,
+                        },
+                    ));
+                }
+                failure if failure.is_input_resolution_limit() => {
+                    reader.note_resolution_budget_exhausted();
+                    return Err(Box::new(failure));
+                }
+                failure => return Err(Box::new(failure)),
+            },
+        }
+    }
+}
+
+fn limit_failure(
+    reader: &dyn crate::traits::WorkspaceRead,
+    meter: InputResolutionBudgetMeter,
+    consumed: u64,
+    prospective: u64,
+    maximum: u64,
+    failure: AttemptFailure,
+) -> Box<AttemptFailure> {
+    let event = InputResolutionBudgetExhaustion {
+        meter,
+        consumed,
+        prospective,
+        maximum,
+    };
+    #[cfg(test)]
+    INPUT_RESOLUTION_BUDGET_EVENTS.with_borrow_mut(|events| events.push(event));
+    reader.note_input_resolution_budget_exhausted(event);
+    Box::new(failure)
+}
+
+fn input_key_spelling_bytes(key: &InputKey) -> u64 {
+    match key {
+        InputKey::PathProbe { path } | InputKey::RealPath { path } => path.len() as u64,
+        InputKey::PackageManifest { directory } => directory.len() as u64,
+        _ => 0,
+    }
+}
+
+fn apply_loaded_resolution_inputs(
+    inputs: &mut ResolutionInputs,
+    loaded: LoadedResolutionInputBatch,
+) -> bool {
+    let mut progressed = false;
+    for entry in loaded.entries {
+        match entry {
+            LoadedResolutionInput::PathProbe {
+                key,
+                value,
+                directories,
+            } => {
+                let InputKey::PathProbe { path } = &key else {
+                    return false;
+                };
+                progressed |= !inputs.snapshot.contains_path_probe(path);
+                Arc::make_mut(&mut inputs.snapshot).insert_path_probe(path.to_string(), value);
+                inputs
+                    .observation_inputs
+                    .insert(key, SnapshotInput::PathProbe { directories });
+            }
+            LoadedResolutionInput::RealPath {
+                key,
+                value,
+                directories,
+            } => {
+                let InputKey::RealPath { path } = &key else {
+                    return false;
+                };
+                progressed |= !inputs.snapshot.contains_real_path(path);
+                Arc::make_mut(&mut inputs.snapshot)
+                    .insert_real_path(path.to_string(), value.map(Arc::from));
+                inputs
+                    .observation_inputs
+                    .insert(key, SnapshotInput::RealPath { directories });
+            }
+            LoadedResolutionInput::PackageManifest {
+                key,
+                value,
+                manifest_path,
+                directories,
+            } => {
+                let InputKey::PackageManifest { directory } = &key else {
+                    return false;
+                };
+                let fingerprint = value
+                    .as_ref()
+                    .map(crate::resolution_currency::manifest_fingerprint_of);
+                let value = value.map(|manifest| {
+                    Arc::new(ResolutionPackageManifest {
+                        main: manifest.main,
+                        module: manifest.module,
+                        types: manifest.types,
+                        typings: manifest.typings,
+                        exports: manifest.exports,
+                        imports: manifest.imports,
+                    })
+                });
+                progressed |= !inputs.snapshot.contains_package_manifest(directory);
+                Arc::make_mut(&mut inputs.snapshot)
+                    .insert_package_manifest(directory.to_string(), value);
+                inputs.observation_inputs.insert(
+                    key,
+                    SnapshotInput::PackageManifest {
+                        fingerprint,
+                        directories,
+                        manifest_path,
+                    },
+                );
+            }
+        }
+    }
+    progressed
+}
+
+fn copy_terminal_keys(keys: &[InputKey]) -> Vec<InputKey> {
+    #[cfg(test)]
+    DRIVER_TERMINAL_KEY_COPIES.set(DRIVER_TERMINAL_KEY_COPIES.get() + keys.len());
+    keys.to_vec()
+}
+
+pub(crate) fn resolve_tracked(
+    resolver: &ModuleResolverCore,
+    _capability: &crate::engine::TrackedResolutionCapability,
+    reader: &crate::resolution_currency::TransactionReader<'_>,
+    ledger: &mut InputResolutionLedger,
+    request: &ResolveRequest,
+) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
+    let frame = resolver.resolve_frame(request);
+    let result = drive_attempt(
+        reader,
+        ledger,
+        |inputs, output| apply_attempt_output(reader, inputs, output),
+        |view, basis| frame.attempt(view, basis),
+    );
+    match result {
+        Err(failure)
+            if failure.is_input_resolution_limit()
+                || matches!(
+                    failure.as_ref(),
+                    AttemptFailure::InputLoadIntegrity { .. }
+                        | AttemptFailure::ObservationUnavailable { .. }
+                ) =>
+        {
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
+pub(crate) fn resolve_for_project_tracked(
+    resolver: &ModuleResolverCore,
+    _capability: &crate::engine::TrackedResolutionCapability,
+    reader: &crate::resolution_currency::TransactionReader<'_>,
+    ledger: &mut InputResolutionLedger,
+    owner: &verter_semantic::resolver_core::ProjectOwnership,
+    specifier: &str,
+    context: ResolutionContext,
+) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
+    let frame = resolver.resolve_for_project_frame(owner, specifier, context);
+    let result = drive_attempt(
+        reader,
+        ledger,
+        |inputs, output| apply_attempt_output(reader, inputs, output),
+        |view, basis| frame.attempt(view, basis),
+    );
+    match result {
+        Err(failure)
+            if failure.is_input_resolution_limit()
+                || matches!(
+                    failure.as_ref(),
+                    AttemptFailure::InputLoadIntegrity { .. }
+                        | AttemptFailure::ObservationUnavailable { .. }
+                ) =>
+        {
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
+#[cfg(test)]
+trait ModuleResolverCoreTestExt {
+    fn resolve_with_reader(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        request: &ResolveRequest,
+    ) -> Option<ResolveResult>;
+
+    fn resolve_for_project_with_reader(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        specifier: &str,
+        context: ResolutionContext,
+    ) -> Option<ResolveResult>;
+}
+
+#[cfg(test)]
+impl ModuleResolverCoreTestExt for ModuleResolverCore {
     fn resolve_with_reader(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         request: &ResolveRequest,
     ) -> Option<ResolveResult> {
-        let importer_owner = self.nearest_config_for_path(&request.importer_id);
-        let ctx = ResolutionContext {
-            phase: request.phase,
-            kind: request.kind,
-        };
-
-        let (source_id, resolution_kind) = match importer_owner {
-            Some(owner) => self.resolve_source_id(
-                reader,
-                owner,
-                &request.importer_id,
-                &request.specifier,
-                ctx,
-            )?,
-            None => {
-                // No owning project — try owner-independent branches only
-                self.resolve_source_id_unowned(
-                    reader,
-                    &request.importer_id,
-                    &request.specifier,
-                    ctx,
-                )?
+        let frame = self.resolve_frame(request);
+        let mut ledger = InputResolutionLedger::default();
+        drive_attempt_with_bounded_io(
+            reader,
+            &mut ledger,
+            |keys, basis| preflight_workspace_inputs_for_test(reader, keys, basis),
+            |reservation| load_workspace_inputs_for_test(reader, reservation),
+            |_, _| true,
+            |view, basis| frame.attempt(view, basis),
+        )
+        .unwrap_or_else(|failure| {
+            if failure.is_input_resolution_limit() {
+                None
+            } else {
+                panic!("resolution driver failed unexpectedly: {failure:?}")
             }
-        };
-
-        Some(self.build_resolve_result(request, source_id, resolution_kind))
-    }
-
-    pub(crate) fn resolve_tracked(
-        &self,
-        _capability: &crate::engine::TrackedResolutionCapability,
-        reader: &crate::resolution_currency::TransactionReader<'_>,
-        request: &ResolveRequest,
-    ) -> Option<ResolveResult> {
-        self.resolve_with_reader(reader, request)
+        })
     }
 
     fn resolve_for_project_with_reader(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &crate::types::ProjectOwnership,
+        owner: &verter_semantic::resolver_core::ProjectOwnership,
         specifier: &str,
-        ctx: ResolutionContext,
-    ) -> Option<ResolveResult> {
-        let project = self.project_for_ownership(owner)?;
-        let (source_id, resolution_kind) =
-            self.resolve_source_id_for_project(reader, project, specifier, ctx)?;
-        Some(self.build_project_resolve_result(specifier, source_id, resolution_kind))
-    }
-
-    pub(crate) fn resolve_for_project_tracked(
-        &self,
-        _capability: &crate::engine::TrackedResolutionCapability,
-        reader: &crate::resolution_currency::TransactionReader<'_>,
-        owner: &crate::types::ProjectOwnership,
-        specifier: &str,
-        ctx: ResolutionContext,
-    ) -> Option<ResolveResult> {
-        self.resolve_for_project_with_reader(reader, owner, specifier, ctx)
-    }
-
-    pub(crate) fn project_exact_result(
-        &self,
-        importer_id: &str,
-        specifier: &str,
-        source_id: String,
         context: ResolutionContext,
-    ) -> ResolveResult {
-        self.build_resolve_result(
-            &ResolveRequest {
-                importer_id: importer_id.to_owned(),
-                specifier: specifier.to_owned(),
-                kind: context.kind,
-                phase: context.phase,
-            },
-            source_id,
-            ResolutionKind::Bundler,
+    ) -> Option<ResolveResult> {
+        let frame = self.resolve_for_project_frame(owner, specifier, context);
+        let mut ledger = InputResolutionLedger::default();
+        drive_attempt_with_bounded_io(
+            reader,
+            &mut ledger,
+            |keys, basis| preflight_workspace_inputs_for_test(reader, keys, basis),
+            |reservation| load_workspace_inputs_for_test(reader, reservation),
+            |_, _| true,
+            |view, basis| frame.attempt(view, basis),
         )
-    }
-
-    /// Build a [`ResolveResult`] from a resolved source path.
-    ///
-    /// Looks up `nearest_config_for_path()` on the **target** (not importer) for correct
-    /// `provider_id`/`provider_specifier`/`provider_target`/`owner_tsconfig_path`.
-    fn build_resolve_result(
-        &self,
-        request: &ResolveRequest,
-        source_id: String,
-        resolution_kind: ResolutionKind,
-    ) -> ResolveResult {
-        #[cfg(test)]
-        crate::engine::resolution_test_hooks::fire(
-            crate::engine::resolution_test_hooks::ResolutionPhase::ProviderProjection,
-        );
-        let target_owner = self.nearest_config_for_path(&source_id);
-        let provider_id = target_owner
-            .and_then(|_| self.provider_id_for_source(&source_id))
-            .unwrap_or_else(|| source_id.clone());
-        let provider_target = match target_owner {
-            // Any framework CARRIER (`.vue` / `.svelte`) targets the public API
-            // virtual file (`{src}.verter.ts`) for cross-file component typing —
-            // the carrier-extension set is the registry's, not a `.vue` literal.
-            Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
-                ProviderTarget::CarrierPublicApi
-            }
-            Some(_) => ProviderTarget::ShadowSourceFile,
-            None => ProviderTarget::SourceFile,
-        };
-        let provider_specifier = if target_owner.is_some() {
-            match provider_target {
-                // Vue imports must target the synthetic public API file for cross-file
-                // component typing inside the provider project.
-                ProviderTarget::CarrierPublicApi => {
-                    let importer_provider_id = self
-                        .provider_id_for_source(&request.importer_id)
-                        .unwrap_or_else(|| normalize_canonical_id(&request.importer_id));
-                    relative_specifier(&importer_provider_id, &provider_id)
-                }
-                // Non-Vue workspace files stay on the original source specifier so the
-                // provider project obeys the workspace tsconfig and does not introduce
-                // explicit `.ts` imports that trigger TS5097 under bundler resolution.
-                ProviderTarget::ShadowSourceFile | ProviderTarget::SourceFile => {
-                    request.specifier.clone()
-                }
-            }
-        } else {
-            request.specifier.clone()
-        };
-
-        ResolveResult {
-            owner_tsconfig_path: target_owner.and_then(|project| project.tsconfig_path.clone()),
-            source_id,
-            provider_id,
-            provider_specifier,
-            provider_target,
-            resolution_kind,
-        }
-    }
-
-    fn build_project_resolve_result(
-        &self,
-        specifier: &str,
-        source_id: String,
-        resolution_kind: ResolutionKind,
-    ) -> ResolveResult {
-        let target_owner = self.nearest_config_for_path(&source_id);
-        let provider_id = target_owner
-            .and_then(|_| self.provider_id_for_source(&source_id))
-            .unwrap_or_else(|| source_id.clone());
-        let provider_target = match target_owner {
-            // Any framework CARRIER (`.vue` / `.svelte`) targets the public API
-            // virtual file (`{src}.verter.ts`) for cross-file component typing —
-            // the carrier-extension set is the registry's, not a `.vue` literal.
-            Some(_) if path_is_carrier(&normalize_canonical_id(&source_id)) => {
-                ProviderTarget::CarrierPublicApi
-            }
-            Some(_) => ProviderTarget::ShadowSourceFile,
-            None => ProviderTarget::SourceFile,
-        };
-
-        ResolveResult {
-            owner_tsconfig_path: target_owner.and_then(|project| project.tsconfig_path.clone()),
-            source_id,
-            provider_id,
-            provider_specifier: specifier.to_string(),
-            provider_target,
-            resolution_kind,
-        }
-    }
-
-    /// Resolve owner-independent branches only (no tsconfig paths, aliases, etc.).
-    ///
-    /// Used when the importer has no owning project. Only attempts:
-    /// - Relative/absolute path resolution
-    /// - `#imports` (package.json imports field)
-    /// - `node_modules` resolution
-    fn resolve_source_id_unowned(
-        &self,
-        reader: &dyn crate::traits::WorkspaceRead,
-        importer_id: &str,
-        specifier: &str,
-        ctx: ResolutionContext,
-    ) -> Option<(String, ResolutionKind)> {
-        // Relative / absolute
-        if is_relative_specifier(specifier) || is_absolute_specifier(specifier) {
-            let importer_dir = parent_dir(importer_id);
-            let base = if is_absolute_specifier(specifier) {
-                normalize_canonical_id(specifier)
-            } else {
-                join_paths(&importer_dir, specifier)
-            };
-            let resolved = probe_path_for_context(reader, &base, ctx)?;
-            if !package_follow_is_confirmed(reader, importer_id, &resolved) {
-                return None;
-            }
-            return Some((resolved, ResolutionKind::Relative));
-        }
-
-        // #imports (unowned — unbounded walk)
-        if specifier.starts_with('#') {
-            if let Some(resolved) =
-                resolve_package_imports(reader, importer_id, specifier, ctx, None)
-            {
-                return Some((resolved, ResolutionKind::PackageImports));
-            }
-            return None;
-        }
-
-        // node_modules (unowned — unbounded walk)
-        if let Some((resolved, resolution_kind)) =
-            resolve_node_modules_package(reader, importer_id, specifier, ctx, None)
-        {
-            return Some((resolved, resolution_kind));
-        }
-
-        None
-    }
-
-    fn resolve_source_id(
-        &self,
-        reader: &dyn crate::traits::WorkspaceRead,
-        importer_owner: &IdeProjectConfig,
-        importer_id: &str,
-        specifier: &str,
-        ctx: ResolutionContext,
-    ) -> Option<(String, ResolutionKind)> {
-        if is_relative_specifier(specifier) || is_absolute_specifier(specifier) {
-            let importer_dir = parent_dir(importer_id);
-            let base = if is_absolute_specifier(specifier) {
-                normalize_canonical_id(specifier)
-            } else {
-                join_paths(&importer_dir, specifier)
-            };
-            let resolved = probe_path_for_context(reader, &base, ctx)?;
-            if !package_follow_is_confirmed(reader, importer_id, &resolved) {
-                return None;
-            }
-            return Some((resolved, ResolutionKind::Relative));
-        }
-
-        for alias in sorted_workspace_aliases(&importer_owner.workspace_aliases) {
-            if !specifier.starts_with(&alias.find) {
-                continue;
-            }
-            let remainder = &specifier[alias.find.len()..];
-            let base = join_paths(&alias.replacement, remainder);
-            if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
-                return Some((resolved, ResolutionKind::WorkspaceAlias));
-            }
-        }
-
-        if let Some(resolved) = resolve_tsconfig_paths(reader, importer_owner, specifier, ctx) {
-            return Some((resolved, ResolutionKind::TsConfigPath));
-        }
-
-        if let Some(base_url) = importer_owner.compiler_options.base_url.as_deref() {
-            let base = join_paths(base_url, specifier);
-            if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
-                return Some((resolved, ResolutionKind::TsConfigPath));
-            }
-        }
-
-        if let Some(resolved) =
-            self.resolve_project_references(reader, importer_owner, specifier, ctx)
-        {
-            return Some((resolved, ResolutionKind::ProjectReference));
-        }
-
-        // #imports (owned — bounded by workspace_root)
-        if specifier.starts_with('#') {
-            if let Some(resolved) = resolve_package_imports(
-                reader,
-                importer_id,
-                specifier,
-                ctx,
-                Some(&importer_owner.workspace_root),
-            ) {
-                return Some((resolved, ResolutionKind::PackageImports));
-            }
-            return None;
-        }
-
-        // node_modules (owned — bounded by workspace_root)
-        if let Some((resolved, resolution_kind)) = resolve_node_modules_package(
-            reader,
-            importer_id,
-            specifier,
-            ctx,
-            Some(&importer_owner.workspace_root),
-        ) {
-            return Some((resolved, resolution_kind));
-        }
-
-        None
-    }
-
-    fn resolve_source_id_for_project(
-        &self,
-        reader: &dyn crate::traits::WorkspaceRead,
-        project: &IdeProjectConfig,
-        specifier: &str,
-        ctx: ResolutionContext,
-    ) -> Option<(String, ResolutionKind)> {
-        if is_relative_specifier(specifier) || is_absolute_specifier(specifier) {
-            let base = if is_absolute_specifier(specifier) {
-                normalize_canonical_id(specifier)
-            } else {
-                join_paths(&project.root, specifier)
-            };
-            let resolved = probe_path_for_context(reader, &base, ctx)?;
-            return Some((resolved, ResolutionKind::Relative));
-        }
-
-        for alias in sorted_workspace_aliases(&project.workspace_aliases) {
-            if !specifier.starts_with(&alias.find) {
-                continue;
-            }
-            let remainder = &specifier[alias.find.len()..];
-            let base = join_paths(&alias.replacement, remainder);
-            if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
-                return Some((resolved, ResolutionKind::WorkspaceAlias));
-            }
-        }
-
-        if let Some(resolved) = resolve_tsconfig_paths(reader, project, specifier, ctx) {
-            return Some((resolved, ResolutionKind::TsConfigPath));
-        }
-
-        if let Some(base_url) = project.compiler_options.base_url.as_deref() {
-            let base = join_paths(base_url, specifier);
-            if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
-                return Some((resolved, ResolutionKind::TsConfigPath));
-            }
-        }
-
-        if let Some(resolved) = self.resolve_project_references(reader, project, specifier, ctx) {
-            return Some((resolved, ResolutionKind::ProjectReference));
-        }
-
-        // #imports (project-scoped — bounded by workspace_root)
-        if specifier.starts_with('#') {
-            if let Some(resolved) = resolve_package_imports_from_dir(
-                reader,
-                &project.root,
-                specifier,
-                ctx,
-                Some(&project.workspace_root),
-            ) {
-                return Some((resolved, ResolutionKind::PackageImports));
-            }
-            return None;
-        }
-
-        // node_modules (project-scoped — bounded by workspace_root)
-        if let Some((resolved, resolution_kind)) = resolve_node_modules_package_from_dir(
-            reader,
-            &project.root,
-            specifier,
-            ctx,
-            Some(&project.workspace_root),
-        ) {
-            return Some((resolved, resolution_kind));
-        }
-
-        None
-    }
-
-    /// Compute the preferred import specifier for a target file relative to an importer.
-    ///
-    /// Returns the shortest alias-based specifier (tsconfig paths or workspace aliases)
-    /// that round-trips back to the original target via `resolve_with_reader()`.
-    /// Returns `None` if no alias matches or the importer has no owning project.
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn preferred_specifier(
-        &self,
-        reader: &dyn crate::traits::WorkspaceRead,
-        importer_id: &str,
-        target_id: &str,
-    ) -> Option<String> {
-        let normalized_target = normalize_canonical_id(target_id);
-        let candidates = self.preferred_specifier_candidates(importer_id, target_id)?;
-
-        // Round-trip verify and pick shortest.
-        let mut best: Option<String> = None;
-        for candidate in candidates {
-            let request = crate::types::ResolveRequest {
-                importer_id: importer_id.to_string(),
-                specifier: candidate.clone(),
-                kind: crate::types::ResolveRequestKind::EsmImport,
-                phase: crate::types::ResolvePhase::CodegenBlocker,
-            };
-            if let Some(result) = self.resolve_with_reader(reader, &request) {
-                if normalize_canonical_id(&result.source_id) == normalized_target {
-                    match &best {
-                        Some(current) if current.len() <= candidate.len() => {}
-                        _ => best = Some(candidate),
-                    }
-                }
-            }
-        }
-
-        best
-    }
-
-    pub(crate) fn preferred_specifier_candidates(
-        &self,
-        importer_id: &str,
-        target_id: &str,
-    ) -> Option<Vec<String>> {
-        let owner = self.nearest_config_for_path(importer_id)?;
-        let normalized_target = normalize_canonical_id(target_id);
-        let mut candidates: Vec<String> = Vec::new();
-
-        // 1. Collect candidates from tsconfig paths
-        let base_url = owner
-            .compiler_options
-            .base_url
-            .as_deref()
-            .unwrap_or(owner.root.as_str());
-
-        for (pattern, targets) in &owner.compiler_options.paths {
-            for target_template in targets {
-                if let Some(specifier) =
-                    reverse_tsconfig_path(base_url, pattern, target_template, &normalized_target)
-                {
-                    candidates.push(specifier);
-                }
-            }
-        }
-
-        // 2. Collect candidates from workspace aliases
-        for alias in &owner.workspace_aliases {
-            let mut replacement = normalize_canonical_id(&alias.replacement);
-            // Ensure replacement ends with '/' for consistent prefix matching.
-            // Vite normalization stores replacement without trailing slash but
-            // find with trailing slash (e.g., find="@/", replacement="/workspace/src").
-            if !replacement.ends_with('/') {
-                replacement.push('/');
-            }
-            if let Some(remainder) = normalized_target.strip_prefix(replacement.as_str()) {
-                // find already has trailing slash from Vite normalization —
-                // remainder has no leading slash, so concatenation is clean.
-                let specifier = format!("{}{}", alias.find, remainder);
-                candidates.push(specifier);
-            }
-        }
-
-        Some(candidates)
-    }
-
-    /// Non-recursive entry for project-reference resolution: seeds the
-    /// traversal state with the importing project's own tsconfig so a
-    /// reference back-edge to the importer terminates instead of reprocessing
-    /// it, then delegates to the bounded recursive walk.
-    fn resolve_project_references(
-        &self,
-        reader: &dyn crate::traits::WorkspaceRead,
-        importer_owner: &IdeProjectConfig,
-        specifier: &str,
-        ctx: ResolutionContext,
-    ) -> Option<String> {
-        let mut state =
-            ProjectReferenceTraversalState::seeded_with(importer_owner.tsconfig_path.as_deref());
-        self.resolve_project_references_inner(reader, importer_owner, specifier, ctx, &mut state)
-    }
-
-    /// Walks the importer's declared `references` in order (first match wins):
-    /// each referenced project's workspace aliases, tsconfig `paths`, and
-    /// `baseUrl` are checked before descending into its own references.
-    ///
-    /// The descent is bounded by [`ProjectReferenceTraversalState`]: an edge
-    /// to a tsconfig already on the active path (a `references` cycle) or past
-    /// the depth fuse terminates only that branch — later sibling references
-    /// still run. Active-set discipline is push-on-descend / pop-on-return, so
-    /// a diamond (A refs B and C, both ref D) resolves through both arms.
-    fn resolve_project_references_inner(
-        &self,
-        reader: &dyn crate::traits::WorkspaceRead,
-        importer_owner: &IdeProjectConfig,
-        specifier: &str,
-        ctx: ResolutionContext,
-        state: &mut ProjectReferenceTraversalState,
-    ) -> Option<String> {
-        for reference in &importer_owner.references {
-            // Back-edge to a project already on the active descent path: its
-            // aliases/paths/baseUrl were checked when it was entered (or by
-            // the entry point, for the seed), so skip only this branch.
-            if state.active.contains(reference.as_str()) {
-                continue;
-            }
-
-            let Some(project) = self
-                .projects
-                .iter()
-                .find(|candidate| candidate.tsconfig_path.as_deref() == Some(reference.as_str()))
-            else {
-                continue;
-            };
-
-            for alias in sorted_workspace_aliases(&project.workspace_aliases) {
-                if !specifier.starts_with(&alias.find) {
-                    continue;
-                }
-                let remainder = &specifier[alias.find.len()..];
-                let base = join_paths(&alias.replacement, remainder);
-                if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
-                    return Some(resolved);
-                }
-            }
-
-            if let Some(resolved) = resolve_tsconfig_paths(reader, project, specifier, ctx) {
-                return Some(resolved);
-            }
-
-            if let Some(base_url) = project.compiler_options.base_url.as_deref() {
-                let base = join_paths(base_url, specifier);
-                if let Some(resolved) = resolve_path_mapping_target(reader, &base, ctx) {
-                    return Some(resolved);
-                }
-            }
-
-            // Transitive descent, gated by the stack-safety fuse. Exhaustion
-            // terminates only this branch; siblings still run.
-            //
-            // Reaching the fuse is NOT by itself a loss of information. This
-            // project's own aliases, `paths` and `baseUrl` were already
-            // checked above in this same iteration; the only thing the fuse
-            // suppresses is the descent into `project.references`. So report
-            // exhaustion only when that descent would have walked something:
-            // a reference that names a known project and is not already on
-            // the active path. A reference already on the active path would
-            // have been skipped as a back-edge anyway, and one naming no
-            // known project contributes nothing — in neither case is any
-            // observation missing, and the negative remains fully proven.
-            //
-            // The active set to reason against is the one the descent WOULD
-            // have had, which is the current set plus `reference` itself
-            // (inserted just below, before recursing). Without that, a project
-            // whose references name itself looks like an onward edge here
-            // while the real descent would skip it as a back-edge.
-            //
-            // When something IS dropped, the branch is UNWALKED rather than
-            // proven empty, so the attempt's observations no longer cover
-            // everything its answer depends on. A transaction-carrying reader
-            // then refuses cache admission for the whole attempt, because a
-            // negative published here would be wrong and its signature —
-            // which never witnessed the skipped projects — could not be
-            // invalidated by editing them.
-            if state.remaining_depth == 0 {
-                let descent_would_walk_something = project.references.iter().any(|onward| {
-                    onward.as_str() != reference.as_str()
-                        && !state.active.contains(onward.as_str())
-                        && self.projects.iter().any(|candidate| {
-                            candidate.tsconfig_path.as_deref() == Some(onward.as_str())
-                        })
-                });
-                if descent_would_walk_something {
-                    reader.note_resolution_budget_exhausted();
-                }
-                continue;
-            }
-            state.remaining_depth -= 1;
-            state.active.insert(reference.clone());
-            let resolved =
-                self.resolve_project_references_inner(reader, project, specifier, ctx, state);
-            state.active.remove(reference.as_str());
-            state.remaining_depth += 1;
-            if resolved.is_some() {
-                return resolved;
-            }
-        }
-
-        None
-    }
-}
-
-/// Traversal state for one project-reference resolution walk.
-///
-/// Two guards with distinct roles: `active` is the semantic cycle guard —
-/// the set of tsconfig paths currently on the descent path, matched by exact
-/// string equality against the same `tsconfig_path` values stored on the
-/// resolver's projects (production paths arrive canonicalized through the
-/// snapshot/VFS path; `ProjectResolver::new` does not normalize them itself)
-/// — and `remaining_depth` is the stack-safety fuse that unconditionally
-/// bounds the walk regardless of key normalization.
-struct ProjectReferenceTraversalState {
-    active: HashSet<String>,
-    remaining_depth: u32,
-}
-
-/// Stack-safety fuse for transitive project-reference descent. Generous
-/// enough for any real acyclic reference chain (monorepo chains are at most
-/// tens of projects deep) while staying far below the recursion depth that
-/// exhausts a thread stack — the unbounded walk overflowed at tens of
-/// thousands of frames.
-const PROJECT_REFERENCE_DEPTH_LIMIT: u32 = 256;
-
-impl ProjectReferenceTraversalState {
-    /// Fresh state whose active set is seeded with the starting project's own
-    /// tsconfig path (when it has one), so a reference cycle back to the
-    /// importer terminates at the back-edge.
-    fn seeded_with(importer_tsconfig: Option<&str>) -> Self {
-        let mut active = HashSet::new();
-        if let Some(tsconfig) = importer_tsconfig {
-            active.insert(tsconfig.to_string());
-        }
-        Self {
-            active,
-            remaining_depth: PROJECT_REFERENCE_DEPTH_LIMIT,
-        }
-    }
-}
-
-// ── Private helpers ──
-
-/// The IDE virtual-file suffix for a carrier source — the SINGLE naming
-/// derivation every consumer routes through. `is_jsx` selects `.jsx`
-/// (JavaScript carriers) vs `.tsx` (TypeScript carriers); a `.svelte` carrier
-/// always reports `is_jsx = false`, so it always projects `.tsx`. Appends to
-/// the FULL carrier canonical (`Foo.svelte` + `.tsx` → `Foo.svelte.tsx`).
-///
-/// This is the owner-independent transform; `provider_ide_id_for_source`
-/// additionally gates on carrier classification, and the LSP
-/// `open_unresolved_*` path (which already knows it holds an open carrier)
-/// routes through it rather than re-deriving the formula locally.
-#[must_use]
-pub fn carrier_ide_provider_path(source_id: &str, is_jsx: bool) -> String {
-    let ext = if is_jsx { ".jsx" } else { ".tsx" };
-    format!("{source_id}{ext}")
-}
-
-/// The reserved carrier API virtual-file suffix: the `.verter.` infix marks a
-/// REDIRECT-reached public-API carrier surface (never a bare-import probe
-/// target), uniformly across adapters. A bare `.svelte.ts` API carrier would
-/// collide with a Svelte rune-module extension (tsgo probes `.svelte.ts` before
-/// `.svelte.tsx`), so the API carrier carries this reserved infix; no real
-/// adapter source or rune-module extension carries `.verter.`.
-///
-/// This MIRRORS the `VirtualFileNaming` column's `import_surface`
-/// `Suffix(".verter.ts")` in `verter_session`'s framework descriptor (the
-/// single naming authority). The two derivations cannot import each other
-/// (`verter_session` depends on `verter_workspace`, not the reverse), so they
-/// are kept byte-for-byte in sync by the `virtual_file_naming_characterization`
-/// guard rather than a shared import.
-pub const CARRIER_API_VIRTUAL_SUFFIX: &str = ".verter.ts";
-
-/// The module-specifier spelling used by generated IDE carriers when importing
-/// the TypeScript API carrier. TypeScript's standard `.js`-to-`.ts` extension
-/// substitution resolves this to [`CARRIER_API_VIRTUAL_SUFFIX`] without
-/// requiring a consumer project to enable `allowImportingTsExtensions`.
-pub const CARRIER_API_MODULE_SPECIFIER_SUFFIX: &str = ".verter.js";
-
-/// The carrier-independent API virtual-file derivation: append the reserved
-/// [`CARRIER_API_VIRTUAL_SUFFIX`] (`.verter.ts`) to the FULL carrier canonical
-/// (`Foo.vue` → `Foo.vue.verter.ts`, `Foo.svelte` → `Foo.svelte.verter.ts`).
-/// Mirrors `carrier_ide_provider_path` for the API (`.d.ts`-style) provider
-/// surface. `provider_id_for_source` additionally gates on carrier
-/// classification; the LSP cold-start fallback (which already knows it holds a
-/// carrier) routes through this rather than hardcoding `{src}.vue.verter.ts`.
-#[must_use]
-pub fn carrier_api_provider_path(source_id: &str) -> String {
-    format!("{source_id}{CARRIER_API_VIRTUAL_SUFFIX}")
-}
-
-/// The registry-classified framework CARRIER source extensions (`vue`, `svelte`,
-/// …), WITHOUT a leading dot — the single classification authority the
-/// inserted-import specifier rewrite probes a bare `./Comp` against (one
-/// `Comp.{ext}` candidate per extension). Owned `String`s so callers are free of
-/// the global registry's borrow. A new carrier extends the registry, not callers.
-#[must_use]
-pub fn carrier_source_extensions() -> Vec<String> {
-    verter_language::LanguageRegistry::global()
-        .carrier_extensions()
-        .iter()
-        .map(|ext| (*ext).to_string())
-        .collect()
-}
-
-/// Whether `path` is a framework CARRIER file (`.vue` / `.svelte`), by the
-/// language registry's carrier-extension set (the single classification
-/// authority — a new carrier extends the registry, not this predicate).
-pub fn path_is_carrier(path: &str) -> bool {
-    verter_language::LanguageRegistry::global()
-        .carrier_extensions()
-        .iter()
-        .any(|ext| {
-            // Append-to-full-canonical semantics: a carrier file ends with
-            // `.{ext}` and the dot is preceded by at least one stem char.
-            let needle = format!(".{ext}");
-            path.len() > needle.len() && path.ends_with(&needle)
-        })
-}
-
-/// Strip the registry-classified CARRIER extension from a path or filename,
-/// returning the bare stem. `Foo.vue` → `Foo`, `Foo.svelte` → `Foo`. The
-/// carrier-extension set (the single classification authority) is consulted
-/// in longest-suffix-first order so an adapter whose carrier extension is a
-/// suffix of another resolves the longest match first. A path with no
-/// carrier extension is returned unchanged.
-///
-/// This is the registry-backed replacement for the hardcoded
-/// `strip_suffix(".vue")` carrier-stem derivations across the LSP feature
-/// layer (component auto-import, drop-edit). A new carrier extends the
-/// registry, not this helper.
-pub fn strip_carrier_extension(path: &str) -> &str {
-    // Longest-suffix-first so `.svelte.ts`-style nested suffixes (were they
-    // ever carriers) and any future carrier that is a suffix of another match
-    // their longest form first. `carrier_extensions()` yields the registry's
-    // row order; we sort by descending length here to make the contract
-    // explicit and order-independent.
-    let registry = verter_language::LanguageRegistry::global();
-    let mut extensions = registry.carrier_extensions();
-    extensions.sort_unstable_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
-    for ext in extensions {
-        let needle = format!(".{ext}");
-        if path.len() > needle.len() {
-            if let Some(stem) = path.strip_suffix(&needle) {
-                return stem;
-            }
-        }
-    }
-    path
-}
-
-fn normalized_starts_with(path: &str, prefix: &str) -> bool {
-    let normalized = normalize_canonical_id(path);
-    let prefix = normalize_canonical_id(prefix);
-    normalized.starts_with(&prefix)
-        && (normalized.len() == prefix.len()
-            || prefix.ends_with('/')
-            || normalized.as_bytes().get(prefix.len()) == Some(&b'/'))
-}
-
-fn resolve_tsconfig_paths(
-    reader: &dyn crate::traits::WorkspaceRead,
-    project: &IdeProjectConfig,
-    specifier: &str,
-    ctx: ResolutionContext,
-) -> Option<String> {
-    let base_url = project
-        .compiler_options
-        .base_url
-        .as_deref()
-        .unwrap_or(project.root.as_str());
-
-    for (pattern, targets) in &project.compiler_options.paths {
-        let Some(captured) = capture_tsconfig_pattern(pattern, specifier) else {
-            continue;
-        };
-
-        for target in targets {
-            let candidate = apply_tsconfig_target(base_url, target, captured);
-            if let Some(resolved) = resolve_path_mapping_target(reader, &candidate, ctx) {
-                return Some(resolved);
-            }
-        }
-    }
-
-    None
-}
-
-fn resolve_path_mapping_target(
-    reader: &dyn crate::traits::WorkspaceRead,
-    candidate: &str,
-    ctx: ResolutionContext,
-) -> Option<String> {
-    let normalized = normalize_canonical_id(candidate);
-    let package_json_path = join_paths(&normalized, "package.json");
-    if let Some(package_json) = read_package_manifest_if_present(reader, &package_json_path) {
-        if let Some(exports) = package_json.exports.as_ref() {
-            if let Some(resolved) = resolve_package_exports(reader, &normalized, exports, ".", ctx)
-            {
-                return Some(resolved);
-            }
-            if prefers_declaration_files(ctx) {
-                if let Some(types_entry) =
-                    resolve_manifest_types_entry(reader, &normalized, &package_json)
-                {
-                    return Some(types_entry);
-                }
-            }
-        }
-
-        if let Some(resolved) = resolve_legacy_package(reader, &normalized, &package_json, "", ctx)
-        {
-            return Some(resolved);
-        }
-    }
-
-    probe_path_for_context(reader, &normalized, ctx)
-}
-
-fn capture_tsconfig_pattern<'a>(pattern: &'a str, specifier: &'a str) -> Option<&'a str> {
-    if let Some(star) = pattern.find('*') {
-        let prefix = &pattern[..star];
-        let suffix = &pattern[star + 1..];
-        if !specifier.starts_with(prefix) || !specifier.ends_with(suffix) {
-            return None;
-        }
-        let captured_end = specifier.len().saturating_sub(suffix.len());
-        if prefix.len() > captured_end {
-            return None;
-        }
-        Some(&specifier[prefix.len()..captured_end])
-    } else if pattern == specifier {
-        Some("")
-    } else {
-        None
-    }
-}
-
-fn apply_tsconfig_target(base_url: &str, target: &str, captured: &str) -> String {
-    let replaced = if let Some(star) = target.find('*') {
-        format!("{}{}{}", &target[..star], captured, &target[star + 1..])
-    } else {
-        target.to_string()
-    };
-    if is_absolute_specifier(&replaced) {
-        normalize_canonical_id(&replaced)
-    } else {
-        join_paths(base_url, &replaced)
-    }
-}
-
-/// Reverse a tsconfig path mapping: given a target file path, reconstruct the
-/// import specifier that would match the given pattern → target template.
-fn reverse_tsconfig_path(
-    base_url: &str,
-    pattern: &str,
-    target_template: &str,
-    target_id: &str,
-) -> Option<String> {
-    // Compute the absolute target prefix and suffix from the template
-    let (target_prefix, target_suffix) = if let Some(star) = target_template.find('*') {
-        let prefix_part = &target_template[..star];
-        let suffix_part = &target_template[star + 1..];
-        let mut prefix = if is_absolute_specifier(prefix_part) {
-            normalize_canonical_id(prefix_part)
-        } else {
-            join_paths(base_url, prefix_part)
-        };
-        // The template's trailing slash (`/workspace/src/*`) is a directory
-        // boundary marker; the canonical-id normalizer strips trailing slashes,
-        // so restore the boundary the template carried — otherwise the captured
-        // remainder would keep a leading `/`.
-        if prefix_part.ends_with('/') && !prefix.ends_with('/') {
-            prefix.push('/');
-        }
-        (prefix, suffix_part.to_string())
-    } else {
-        // No wildcard — exact match only
-        let abs = if is_absolute_specifier(target_template) {
-            normalize_canonical_id(target_template)
-        } else {
-            join_paths(base_url, target_template)
-        };
-        return if normalize_canonical_id(target_id) == abs {
-            // Pattern without wildcard: return the pattern itself
-            Some(pattern.to_string())
-        } else {
-            None
-        };
-    };
-
-    // Check if target_id matches the prefix + ... + suffix shape
-    let normalized_target = normalize_canonical_id(target_id);
-    if !normalized_target.starts_with(&target_prefix) {
-        return None;
-    }
-    if !target_suffix.is_empty() && !normalized_target.ends_with(&target_suffix) {
-        return None;
-    }
-    let captured_end = normalized_target.len().saturating_sub(target_suffix.len());
-    if target_prefix.len() > captured_end {
-        return None;
-    }
-    let captured = &normalized_target[target_prefix.len()..captured_end];
-
-    // Reconstruct specifier from pattern
-    if let Some(star) = pattern.find('*') {
-        Some(format!(
-            "{}{}{}",
-            &pattern[..star],
-            captured,
-            &pattern[star + 1..]
-        ))
-    } else {
-        Some(pattern.to_string())
-    }
-}
-
-fn sorted_workspace_aliases(aliases: &[WorkspaceAlias]) -> Vec<&WorkspaceAlias> {
-    let mut aliases = aliases.iter().collect::<Vec<_>>();
-    aliases.sort_by(|a, b| {
-        b.find
-            .len()
-            .cmp(&a.find.len())
-            .then_with(|| a.find.cmp(&b.find))
-    });
-    aliases
-}
-
-fn probe_path(reader: &dyn crate::traits::WorkspaceRead, base: &str) -> Option<String> {
-    let base = normalize_canonical_id(base);
-    let has_extension = Path::new(&base).extension().is_some();
-
-    if has_extension {
-        if let Some(resolved) = resolve_existing_path(reader, &base) {
-            return Some(resolved);
-        }
-        // NOTE: the `nodenext` `.js`->`.ts` extension rewrite is NOT applied
-        // here. It is a TYPESCRIPT-IMPORT-resolution rule and is applied only in
-        // `probe_path_for_context` for import-like request kinds — never for an
-        // SFC `src=` attribute (which reads the literal file bytes) and never
-        // for a `types`/`typings` manifest probe (already declaration paths).
-    } else {
-        for extension in probe_extensions() {
-            let candidate = format!("{base}{extension}");
-            if let Some(resolved) = resolve_existing_path(reader, &candidate) {
-                return Some(resolved);
-            }
-        }
-    }
-
-    for index_name in probe_index_files() {
-        let candidate = format!("{}/{}", base.trim_end_matches('/'), index_name);
-        if let Some(resolved) = resolve_existing_path(reader, &candidate) {
-            return Some(resolved);
-        }
-    }
-
-    None
-}
-
-fn probe_path_for_context(
-    reader: &dyn crate::traits::WorkspaceRead,
-    base: &str,
-    ctx: ResolutionContext,
-) -> Option<String> {
-    let normalized = normalize_canonical_id(base);
-    // TS file-extension-substitution for an explicit JS-family IMPORT specifier
-    // prefers the SOURCE sibling (`./x.js` -> `./x.ts`) over a co-located
-    // declaration file, so the source-`.ts`/`.tsx` sibling is tried BEFORE the
-    // `.d.ts` companion. This is a TYPESCRIPT-IMPORT rule, so it applies ONLY to
-    // import-like kinds — NEVER to an SFC `src=` attribute (`<script
-    // src="./setup.js">` reads the literal file bytes; substituting `.ts` would
-    // change which external file is consumed).
-    if ctx.kind != ResolveRequestKind::SfcSrcAttr {
-        if let Some(resolved) = resolve_ts_source_sibling(reader, &normalized) {
-            return Some(resolved);
-        }
-    }
-    if prefers_declaration_files(ctx) {
-        if let Some(resolved) = resolve_declaration_companion(reader, &normalized) {
-            return Some(resolved);
-        }
-    }
-    probe_path(reader, &normalized)
-}
-
-fn resolve_existing_path(
-    reader: &dyn crate::traits::WorkspaceRead,
-    candidate: &str,
-) -> Option<String> {
-    let normalized = normalize_canonical_id(candidate);
-    if !matches!(
-        reader.probe_path(&normalized),
-        crate::resolution_currency::PathProbe::File
-            | crate::resolution_currency::PathProbe::Directory
-    ) {
-        return None;
-    }
-    Some(
-        reader
-            .realpath(&normalized)
-            .map(|path| normalize_canonical_id(&path))
-            .unwrap_or(normalized),
-    )
-}
-
-pub(crate) fn probe_extensions() -> &'static [&'static str] {
-    &[
-        ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", ".vue", ".d.ts", ".d.mts",
-        ".d.cts",
-    ]
-}
-
-fn probe_index_files() -> &'static [&'static str] {
-    &[
-        "index.ts",
-        "index.tsx",
-        "index.js",
-        "index.jsx",
-        "index.mts",
-        "index.mjs",
-        "index.cts",
-        "index.cjs",
-        "index.vue",
-        "index.d.ts",
-        "index.d.mts",
-        "index.d.cts",
-    ]
-}
-
-fn prefers_declaration_files(ctx: ResolutionContext) -> bool {
-    matches!(
-        (ctx.phase, ctx.kind),
-        (ResolvePhase::CodegenBlocker, ResolveRequestKind::TypeImport)
-            | (ResolvePhase::ProviderGraph, _)
-    )
-}
-
-fn is_declaration_file(path: &str) -> bool {
-    let normalized = normalize_canonical_id(path);
-    normalized.ends_with(".d.ts")
-        || normalized.ends_with(".d.mts")
-        || normalized.ends_with(".d.cts")
-}
-
-fn resolve_manifest_types_entry(
-    reader: &dyn crate::traits::WorkspaceRead,
-    package_dir: &str,
-    package_json: &PackageManifest,
-) -> Option<String> {
-    for target in [
-        package_json.types.as_deref(),
-        package_json.typings.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Some(resolved) = probe_path(reader, &resolve_package_path(package_dir, target, None))
-        {
-            return Some(resolved);
-        }
-    }
-    None
-}
-
-fn resolve_declaration_companion(
-    reader: &dyn crate::traits::WorkspaceRead,
-    candidate: &str,
-) -> Option<String> {
-    let normalized = normalize_canonical_id(candidate);
-    let (runtime_ext, companion_exts): (&str, &[&str]) = if normalized.ends_with(".mjs") {
-        (".mjs", &[".d.mts", ".d.ts"])
-    } else if normalized.ends_with(".cjs") {
-        (".cjs", &[".d.cts", ".d.ts"])
-    } else if normalized.ends_with(".jsx") {
-        (".jsx", &[".d.ts"])
-    } else if normalized.ends_with(".js") {
-        (".js", &[".d.ts"])
-    } else {
-        return None;
-    };
-
-    let stem = normalized.strip_suffix(runtime_ext)?;
-
-    for companion_ext in companion_exts {
-        let companion = format!("{stem}{companion_ext}");
-        if let Some(resolved) = resolve_existing_path(reader, &companion) {
-            return Some(resolved);
-        }
-    }
-
-    None
-}
-
-/// TypeScript's `nodenext` extension rewrite: a JS-family runtime specifier
-/// resolves to its TypeScript SOURCE sibling (`./x.js` -> `./x.ts`). Maps the
-/// runtime extension to its source siblings only (`.ts`/`.tsx`/`.mts`/`.cts`;
-/// `.jsx` -> `.tsx`); the `.d.*` declaration companion is a SEPARATE, lower
-/// fallback handled by `resolve_declaration_companion`, so the source sibling
-/// always wins when both exist (matching TS file-extension-substitution).
-/// Returns the first existing source sibling, or `None`.
-fn resolve_ts_source_sibling(
-    reader: &dyn crate::traits::WorkspaceRead,
-    candidate: &str,
-) -> Option<String> {
-    let normalized = normalize_canonical_id(candidate);
-    let (runtime_ext, source_exts): (&str, &[&str]) = if normalized.ends_with(".mjs") {
-        (".mjs", &[".mts"])
-    } else if normalized.ends_with(".cjs") {
-        (".cjs", &[".cts"])
-    } else if normalized.ends_with(".jsx") {
-        (".jsx", &[".tsx"])
-    } else if normalized.ends_with(".js") {
-        (".js", &[".ts", ".tsx"])
-    } else {
-        return None;
-    };
-
-    let stem = normalized.strip_suffix(runtime_ext)?;
-
-    for source_ext in source_exts {
-        let sibling = format!("{stem}{source_ext}");
-        if let Some(resolved) = resolve_existing_path(reader, &sibling) {
-            return Some(resolved);
-        }
-    }
-
-    None
-}
-
-fn package_follow_is_confirmed(
-    reader: &dyn crate::traits::WorkspaceRead,
-    importer_id: &str,
-    resolved: &str,
-) -> bool {
-    let Some(package_dir) = candidate_package_dir_for_importer(importer_id) else {
-        return true;
-    };
-    let package_json_path = join_paths(&package_dir, "package.json");
-    if read_package_manifest_if_present(reader, &package_json_path).is_none() {
-        return false;
-    }
-    normalized_starts_with(resolved, &package_dir)
-}
-
-fn candidate_package_dir_for_importer(importer_id: &str) -> Option<String> {
-    let normalized = normalize_canonical_id(importer_id);
-    let node_modules_marker = "/node_modules/";
-    let marker_index = normalized.rfind(node_modules_marker)?;
-    let package_start = marker_index + node_modules_marker.len();
-    let package_path = &normalized[package_start..];
-
-    let mut parts = package_path.split('/');
-    let first = parts.next()?;
-    let package_rel = if first.starts_with('@') {
-        let second = parts.next()?;
-        format!("{first}/{second}")
-    } else {
-        first.to_string()
-    };
-
-    Some(format!(
-        "{}{node_modules_marker}{package_rel}",
-        &normalized[..marker_index]
-    ))
-}
-
-fn relative_specifier(from_file: &str, to_file: &str) -> String {
-    let from_dir = parent_dir(from_file);
-    let from_dir = normalize_canonical_id(&from_dir);
-    let to_file = normalize_canonical_id(to_file);
-    let from_parts = split_path_parts(&from_dir);
-    let to_parts = split_path_parts(&to_file);
-
-    let common = from_parts
-        .iter()
-        .zip(to_parts.iter())
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut segments = Vec::new();
-    for _ in common..from_parts.len() {
-        segments.push("..".to_string());
-    }
-    for part in &to_parts[common..] {
-        segments.push(part.clone());
-    }
-
-    match segments.as_slice() {
-        [] => "./".to_string(),
-        _ => {
-            let joined = segments.join("/");
-            if joined.starts_with("../") || joined == ".." {
-                joined
-            } else {
-                format!("./{joined}")
-            }
-        }
-    }
-}
-
-fn split_path_parts(path: &str) -> Vec<String> {
-    normalize_canonical_id(path)
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn compare_projects(a: &IdeProjectConfig, b: &IdeProjectConfig) -> std::cmp::Ordering {
-    normalize_canonical_id(&b.root)
-        .len()
-        .cmp(&normalize_canonical_id(&a.root).len())
-        .then_with(|| project_rank(a).cmp(&project_rank(b)))
-        .then_with(|| a.tsconfig_path.cmp(&b.tsconfig_path))
-        .then_with(|| a.root.cmp(&b.root))
-}
-
-fn project_rank(project: &IdeProjectConfig) -> u8 {
-    match project.tsconfig_path.as_deref() {
-        Some(path) if normalize_canonical_id(path).ends_with("/tsconfig.json") => 0,
-        Some(_) => 1,
-        None => 2,
-    }
-}
-
-fn resolve_package_imports(
-    reader: &dyn crate::traits::WorkspaceRead,
-    importer_id: &str,
-    specifier: &str,
-    ctx: ResolutionContext,
-    boundary: Option<&str>,
-) -> Option<String> {
-    for directory in ancestor_dirs(importer_id, boundary) {
-        let Some(package_json) =
-            read_package_manifest_if_present(reader, &join_paths(&directory, "package.json"))
-        else {
-            continue;
-        };
-        let Some(imports) = package_json
-            .imports
-            .as_ref()
-            .and_then(|value| value.as_object())
-        else {
-            continue;
-        };
-        let Some((entry, captured)) = match_package_mapping(imports, specifier) else {
-            continue;
-        };
-        if let Some(resolved) =
-            resolve_package_target(reader, &directory, entry, captured.as_deref(), ctx)
-        {
-            return Some(resolved);
-        }
-    }
-
-    None
-}
-
-fn resolve_package_imports_from_dir(
-    reader: &dyn crate::traits::WorkspaceRead,
-    start_dir: &str,
-    specifier: &str,
-    ctx: ResolutionContext,
-    boundary: Option<&str>,
-) -> Option<String> {
-    for directory in ancestor_dirs_from_dir(start_dir, boundary) {
-        let Some(package_json) =
-            read_package_manifest_if_present(reader, &join_paths(&directory, "package.json"))
-        else {
-            continue;
-        };
-        let Some(imports) = package_json
-            .imports
-            .as_ref()
-            .and_then(|value| value.as_object())
-        else {
-            continue;
-        };
-        let Some((entry, captured)) = match_package_mapping(imports, specifier) else {
-            continue;
-        };
-        if let Some(resolved) =
-            resolve_package_target(reader, &directory, entry, captured.as_deref(), ctx)
-        {
-            return Some(resolved);
-        }
-    }
-
-    None
-}
-
-fn resolve_node_modules_package(
-    reader: &dyn crate::traits::WorkspaceRead,
-    importer_id: &str,
-    specifier: &str,
-    ctx: ResolutionContext,
-    boundary: Option<&str>,
-) -> Option<(String, ResolutionKind)> {
-    resolve_node_modules_package_from_dirs(
-        reader,
-        ancestor_dirs(importer_id, boundary),
-        specifier,
-        ctx,
-    )
-}
-
-fn resolve_node_modules_package_from_dir(
-    reader: &dyn crate::traits::WorkspaceRead,
-    start_dir: &str,
-    specifier: &str,
-    ctx: ResolutionContext,
-    boundary: Option<&str>,
-) -> Option<(String, ResolutionKind)> {
-    resolve_node_modules_package_from_dirs(
-        reader,
-        ancestor_dirs_from_dir(start_dir, boundary),
-        specifier,
-        ctx,
-    )
-}
-
-fn resolve_node_modules_package_from_dirs<I>(
-    reader: &dyn crate::traits::WorkspaceRead,
-    directories: I,
-    specifier: &str,
-    ctx: ResolutionContext,
-) -> Option<(String, ResolutionKind)>
-where
-    I: IntoIterator<Item = String>,
-{
-    let (package_name, subpath) = split_package_specifier(specifier)?;
-    for directory in directories {
-        let package_dir = join_paths(&join_paths(&directory, "node_modules"), &package_name);
-        let package_json_path = join_paths(&package_dir, "package.json");
-
-        if let Some(package_json) = read_package_manifest_if_present(reader, &package_json_path) {
-            if let Some(exports) = package_json.exports.as_ref() {
-                let export_key = if subpath.is_empty() {
-                    ".".to_string()
-                } else {
-                    format!("./{subpath}")
-                };
-                if let Some(resolved) =
-                    resolve_package_exports(reader, &package_dir, exports, &export_key, ctx)
-                {
-                    if subpath.is_empty()
-                        && prefers_declaration_files(ctx)
-                        && !is_declaration_file(&resolved)
-                    {
-                        if let Some(types_entry) =
-                            resolve_manifest_types_entry(reader, &package_dir, &package_json)
-                        {
-                            return Some((types_entry, ResolutionKind::NodeModules));
-                        }
-                    }
-                    return Some((resolved, ResolutionKind::PackageExports));
-                }
-
-                if subpath.is_empty() && prefers_declaration_files(ctx) {
-                    if let Some(types_entry) =
-                        resolve_manifest_types_entry(reader, &package_dir, &package_json)
-                    {
-                        return Some((types_entry, ResolutionKind::NodeModules));
-                    }
-                }
-
-                continue;
-            }
-
-            if let Some(resolved) =
-                resolve_legacy_package(reader, &package_dir, &package_json, subpath, ctx)
-            {
-                return Some((resolved, ResolutionKind::NodeModules));
-            }
-        } else {
-            let base = if subpath.is_empty() {
-                package_dir.clone()
-            } else {
-                join_paths(&package_dir, subpath)
-            };
-            if let Some(resolved) = probe_path_for_context(reader, &base, ctx) {
-                return Some((resolved, ResolutionKind::NodeModules));
-            }
-        }
-    }
-
-    None
-}
-
-fn read_package_manifest_if_present(
-    reader: &dyn crate::traits::WorkspaceRead,
-    canonical_id: &str,
-) -> Option<PackageManifest> {
-    let normalized = normalize_canonical_id(canonical_id);
-    if reader.probe_path(&normalized) != crate::resolution_currency::PathProbe::File {
-        return None;
-    }
-    reader.read_package_manifest(&normalized)
-}
-
-fn resolve_package_exports(
-    reader: &dyn crate::traits::WorkspaceRead,
-    package_dir: &str,
-    exports: &serde_json::Value,
-    export_key: &str,
-    ctx: ResolutionContext,
-) -> Option<String> {
-    match exports {
-        serde_json::Value::String(_) | serde_json::Value::Array(_) => {
-            if export_key == "." {
-                resolve_package_target(reader, package_dir, exports, None, ctx)
-            } else {
+        .unwrap_or_else(|failure| {
+            if failure.is_input_resolution_limit() {
                 None
+            } else {
+                panic!("resolution driver failed unexpectedly: {failure:?}")
             }
-        }
-        serde_json::Value::Object(map) => {
-            if !map.keys().any(|key| key.starts_with('.')) {
-                if export_key == "." {
-                    return resolve_package_target(reader, package_dir, exports, None, ctx);
-                }
-                return None;
-            }
-
-            let (entry, captured) = match_package_mapping(map, export_key)?;
-            resolve_package_target(reader, package_dir, entry, captured.as_deref(), ctx)
-        }
-        _ => None,
+        })
     }
 }
 
-fn resolve_legacy_package(
-    reader: &dyn crate::traits::WorkspaceRead,
-    package_dir: &str,
-    package_json: &PackageManifest,
-    subpath: &str,
-    ctx: ResolutionContext,
-) -> Option<String> {
-    if !subpath.is_empty() {
-        return probe_path_for_context(reader, &join_paths(package_dir, subpath), ctx);
-    }
-
-    let keys: &[&str] = match (ctx.phase, ctx.kind) {
-        (_, ResolveRequestKind::RequireCall) => &["main"],
-        (
-            ResolvePhase::CodegenBlocker,
-            ResolveRequestKind::EsmImport | ResolveRequestKind::SfcSrcAttr,
-        ) => &["module", "main"],
-        _ => &["types", "typings", "main"],
-    };
-    for key in keys {
-        let target = match *key {
-            "main" => package_json.main.as_deref(),
-            "module" => package_json.module.as_deref(),
-            "types" => package_json.types.as_deref(),
-            "typings" => package_json.typings.as_deref(),
-            _ => None,
-        };
-        let Some(target) = target else {
-            continue;
-        };
-        if let Some(resolved) = probe_path_for_context(
-            reader,
-            &resolve_package_path(package_dir, target, None),
-            ctx,
-        ) {
-            return Some(resolved);
-        }
-    }
-
-    probe_path_for_context(reader, &join_paths(package_dir, "index"), ctx)
-}
-
-fn resolve_package_target(
-    reader: &dyn crate::traits::WorkspaceRead,
-    package_dir: &str,
-    value: &serde_json::Value,
-    captured: Option<&str>,
-    ctx: ResolutionContext,
-) -> Option<String> {
-    match value {
-        serde_json::Value::String(target) => probe_path_for_context(
-            reader,
-            &resolve_package_path(package_dir, target, captured),
-            ctx,
-        ),
-        serde_json::Value::Array(items) => items
-            .iter()
-            .find_map(|item| resolve_package_target(reader, package_dir, item, captured, ctx)),
-        serde_json::Value::Object(map) => {
-            for condition in package_conditions(ctx) {
-                let Some(entry) = map.get(*condition) else {
-                    continue;
-                };
-                if let Some(resolved) =
-                    resolve_package_target(reader, package_dir, entry, captured, ctx)
-                {
-                    return Some(resolved);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn package_conditions(ctx: ResolutionContext) -> &'static [&'static str] {
-    match (ctx.phase, ctx.kind) {
-        (_, ResolveRequestKind::RequireCall) => &["require", "default"],
-        (
-            ResolvePhase::CodegenBlocker,
-            ResolveRequestKind::EsmImport | ResolveRequestKind::SfcSrcAttr,
-        ) => &["import", "default"],
-        (ResolvePhase::CodegenBlocker, ResolveRequestKind::TypeImport) => {
-            &["types", "import", "default"]
-        }
-        (ResolvePhase::ProviderGraph, _) => &["types", "import", "default"],
-    }
-}
-
-fn resolve_package_path(package_dir: &str, target: &str, captured: Option<&str>) -> String {
-    let replaced = match captured {
-        Some(captured) if target.contains('*') => {
-            let star = target.find('*').unwrap_or(0);
-            format!("{}{}{}", &target[..star], captured, &target[star + 1..])
-        }
-        _ => target.to_string(),
-    };
-
-    if is_absolute_specifier(&replaced) {
-        normalize_canonical_id(&replaced)
-    } else {
-        join_paths(package_dir, &replaced)
-    }
-}
-
-fn split_package_specifier(specifier: &str) -> Option<(String, &str)> {
-    if specifier.is_empty() || is_relative_specifier(specifier) || is_absolute_specifier(specifier)
-    {
-        return None;
-    }
-
-    if let Some(rest) = specifier.strip_prefix('@') {
-        let mut parts = rest.splitn(3, '/');
-        let scope = parts.next()?;
-        let name = parts.next()?;
-        let subpath = parts.next().unwrap_or("");
-        return Some((format!("@{scope}/{name}"), subpath));
-    }
-
-    let mut parts = specifier.splitn(2, '/');
-    let package_name = parts.next()?.to_string();
-    let subpath = parts.next().unwrap_or("");
-    Some((package_name, subpath))
-}
-
-fn ancestor_dirs(path: &str, boundary: Option<&str>) -> Vec<String> {
-    let boundary_norm = boundary.map(normalize_canonical_id);
-    let mut result = Vec::new();
-    let mut current = parent_dir(path);
-    while !current.is_empty() {
-        result.push(current.clone());
-        if let Some(ref b) = boundary_norm {
-            if current == *b {
-                break;
-            }
-        }
-        let next = parent_dir(&current);
-        if next == current {
-            break;
-        }
-        current = next;
-    }
-    result
-}
-
-fn ancestor_dirs_from_dir(path: &str, boundary: Option<&str>) -> Vec<String> {
-    let boundary_norm = boundary.map(normalize_canonical_id);
-    let mut result = Vec::new();
-    let mut current = normalize_canonical_id(path);
-    while !current.is_empty() {
-        result.push(current.clone());
-        if let Some(ref b) = boundary_norm {
-            if current == *b {
-                break;
-            }
-        }
-        let next = parent_dir(&current);
-        if next == current {
-            break;
-        }
-        current = next;
-    }
-    result
-}
-
-fn match_package_mapping<'a>(
-    mappings: &'a serde_json::Map<String, serde_json::Value>,
-    specifier: &str,
-) -> Option<(&'a serde_json::Value, Option<String>)> {
-    let mut best: Option<(&serde_json::Value, Option<String>, usize, bool)> = None;
-    for (pattern, value) in mappings {
-        let Some(captured) = capture_tsconfig_pattern(pattern, specifier) else {
-            continue;
-        };
-        let exact = !pattern.contains('*');
-        let score = pattern.replace('*', "").len();
-        match &best {
-            Some((_, _, best_score, best_exact))
-                if *best_score > score || (*best_score == score && *best_exact && !exact) =>
-            {
-                continue;
-            }
-            _ => {
-                best = Some((
-                    value,
-                    (!captured.is_empty()).then(|| captured.to_string()),
-                    score,
-                    exact,
-                ));
-            }
-        }
-    }
-
-    best.map(|(value, captured, _, _)| (value, captured))
-}
-
-// ── Public path helpers (used by downstream crates) ──
-
-/// Normalize a canonical ID.
-///
-/// Delegates to the single canonical-path owner (`verter_span::path` via the
-/// crate's `canonical_path` re-export): backslash→slash, `//?/UNC/`/`//?/`
-/// extended-prefix stripping, lowercase Windows drive letter, and trailing-slash
-/// stripping (except the roots `/` and `x:/`) — no divergent second normalizer.
-///
-/// The `\\?\` / `//?/` extended-length prefixes the owner strips are the ones
-/// `std::fs::canonicalize()` produces on Windows; this normalizer never touches
-/// disk itself (the `NativeFs` boundary owns all `std::fs::` access).
-pub fn normalize_canonical_id(value: &str) -> String {
-    verter_audit::attribute_n!(NormalizeCanonicalId, value.len());
-    crate::canonical_path::canonicalize_path(value)
-}
-
-/// Collapse `.` and `..` segments from a path.
-pub fn collapse_path(value: &str) -> String {
-    verter_audit::attribute_n!(CollapsePath, value.len());
-    let normalized = normalize_canonical_id(value);
-
-    // UNC paths (`//host/share/...`): the `//host/share` portion is the immutable
-    // root — preserved verbatim, and `..` can NEVER escape above the share (just
-    // as `..` can't escape `/` or a drive root). Splitting `//` as ordinary
-    // segments would either flatten it to `/host/...` or let `..` pop the host /
-    // share, both of which split UNC file identity. Handle it as a dedicated
-    // branch: peel off host + share as the root, collapse only the tail below it.
-    if let Some(after) = normalized.strip_prefix("//") {
-        let mut segs = after.split('/').filter(|s| !s.is_empty());
-        let mut root = String::from("//");
-        if let Some(host) = segs.next() {
-            root.push_str(host);
-        }
-        if let Some(share) = segs.next() {
-            root.push('/');
-            root.push_str(share);
-        }
-        let mut parts: Vec<&str> = Vec::new();
-        for part in segs {
-            match part {
-                "." => {}
-                // Bounded at the share root: popping an empty stack is a no-op,
-                // so `..` never escapes `//host/share`.
-                ".." => {
-                    parts.pop();
-                }
-                p => parts.push(p),
-            }
-        }
-        return if parts.is_empty() {
-            root
-        } else {
-            format!("{root}/{}", parts.join("/"))
-        };
-    }
-
-    let (prefix, rest) = if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-        (normalized[..2].to_string(), normalized[2..].to_string())
-    } else {
-        (String::new(), normalized.clone())
-    };
-
-    let absolute = rest.starts_with('/');
-    let mut parts = Vec::new();
-    for part in rest.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                if let Some(last) = parts.last() {
-                    if *last != ".." {
-                        parts.pop();
-                    } else if !absolute {
-                        parts.push("..");
-                    }
-                } else if !absolute {
-                    parts.push("..");
-                }
-            }
-            part => parts.push(part),
-        }
-    }
-
-    let mut result = String::new();
-    if !prefix.is_empty() {
-        result.push_str(&prefix);
-    }
-    if absolute {
-        result.push('/');
-    }
-    result.push_str(&parts.join("/"));
-
-    if result.is_empty() {
-        if absolute {
-            "/".to_string()
-        } else {
-            ".".to_string()
-        }
-    } else if result.len() == 2 && result.as_bytes()[1] == b':' {
-        format!("{result}/")
-    } else {
-        result
-    }
-}
-
-/// Join two path segments, collapsing `.`/`..`.
-pub fn join_paths(base: &str, path: &str) -> String {
-    if path.is_empty() {
-        return normalize_canonical_id(base);
-    }
-    if is_absolute_specifier(path) {
-        return collapse_path(path);
-    }
-
-    let normalized_base = normalize_canonical_id(base)
-        .trim_end_matches('/')
-        .to_string();
-    let normalized_path = normalize_canonical_id(path);
-    collapse_path(&format!(
-        "{}/{}",
-        normalized_base,
-        normalized_path
-            .trim_start_matches("./")
-            .trim_start_matches('/')
-    ))
-}
-
-/// Return the parent directory of a path.
-pub fn parent_dir(path: &str) -> String {
-    let normalized = normalize_canonical_id(path);
-    normalized
-        .rsplit_once('/')
-        .map(|(dir, _)| dir.to_string())
-        .unwrap_or_default()
-}
-
-/// Check if a specifier is relative. Matches TypeScript's `pathIsRelative`
-/// (`/^\.\.?($|[\\/])/`) exactly: the bare `.` / `..` directory specifiers
-/// plus the `./`, `../`, `.\`, `..\` prefixes (the regex's `[\\/]` class
-/// covers both separators) — `import ... from '..'` resolves to the parent
-/// directory's index module, never as a bare package name.
-///
-/// Classification runs on the raw specifier text (like TS), and this
-/// predicate does NOT normalize anything: separator normalization for a
-/// specifier classified relative happens in the relative resolution
-/// branches' [`join_paths`] call, whose `normalize_canonical_id` pass
-/// rewrites `\` → `/` (TS `combinePaths`/`normalizeSlashes` semantics), so
-/// `'..\index'` resolves byte-identically to `'../index'`. Non-relative
-/// specifiers (package names, `#imports`) keep their bytes — `pkg\sub`
-/// stays a package name.
-pub fn is_relative_specifier(specifier: &str) -> bool {
-    matches!(specifier, "." | "..")
-        || specifier.starts_with("./")
-        || specifier.starts_with("../")
-        || specifier.starts_with(".\\")
-        || specifier.starts_with("..\\")
-}
-
-/// Check if a specifier is an absolute path.
-pub fn is_absolute_specifier(specifier: &str) -> bool {
-    specifier.starts_with('/')
-        || Path::new(specifier).is_absolute()
-        || specifier.as_bytes().get(1) == Some(&b':')
-}
-
-// ── Known-file helpers (used by verter_semantic::analysis for module reference resolution) ──
-
-pub fn build_known_file_index(known_ids: &[String]) -> HashMap<String, String> {
-    let mut index = HashMap::new();
-    for known_id in known_ids {
-        index
-            .entry(normalize_known_file_id(known_id))
-            .or_insert_with(|| known_id.clone());
-    }
-    index
-}
-
-pub fn resolve_known_dependency_id(
-    owner_id: &str,
-    specifier: &str,
-    known_index: &HashMap<String, String>,
-    extensions: &[String],
-) -> Option<String> {
-    let resolved_base = resolve_known_dependency_base(owner_id, specifier)?;
-    if let Some(match_id) = known_index.get(&normalize_known_file_id(&resolved_base)) {
-        return Some(match_id.clone());
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    for extension in extensions {
-        if extension.is_empty() {
-            continue;
-        }
-
-        let with_extension = format!("{resolved_base}{extension}");
-        if seen.insert(with_extension.clone()) {
-            if let Some(match_id) = known_index.get(&normalize_known_file_id(&with_extension)) {
-                return Some(match_id.clone());
-            }
-        }
-
-        let with_index = format!("{}/index{extension}", resolved_base.trim_end_matches('/'));
-        if seen.insert(with_index.clone()) {
-            if let Some(match_id) = known_index.get(&normalize_known_file_id(&with_index)) {
-                return Some(match_id.clone());
-            }
-        }
-    }
-
-    None
-}
-
-pub fn resolve_known_dependency_base(owner_id: &str, specifier: &str) -> Option<String> {
-    if is_relative_specifier(specifier) {
-        return Some(join_paths(&parent_dir(owner_id), specifier));
-    }
-    if is_absolute_specifier(specifier) {
-        return Some(collapse_path(specifier));
-    }
-    None
-}
-
-pub fn normalize_known_file_id(file_id: &str) -> String {
-    collapse_path(file_id)
-}
-
-#[cfg(test)]
-#[path = "resolution_witness_contract_tests.rs"]
-mod resolution_witness_contract_tests;
 #[cfg(test)]
 #[path = "resolver_tests.rs"]
 mod resolver_tests;

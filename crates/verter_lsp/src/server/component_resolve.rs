@@ -229,9 +229,9 @@ impl VerterLanguageServer {
             .resolve_for_persistent_state(
                 parent_canonical_id,
                 specifier,
-                verter_workspace::ResolutionContext {
-                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                    kind: verter_workspace::ResolveRequestKind::EsmImport,
+                verter_semantic::resolver_core::ResolutionContext {
+                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
                 },
             )
             .map_result(|resolved| resolved.source_id)

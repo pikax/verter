@@ -7,8 +7,9 @@
 //! two-axis reverse graph (`reverse_deps_for_target`).
 
 use super::*;
-use crate::types::{ExactResolution, ResolutionContext, ResolvePhase, ResolveRequestKind};
+use crate::types::ExactResolution;
 use std::collections::BTreeSet;
+use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 fn default_ctx() -> ResolutionContext {
     ResolutionContext {

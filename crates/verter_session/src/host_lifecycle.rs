@@ -193,9 +193,9 @@ impl VerterHost {
         let outcome = self.ws().resolve_import_outcome(
             parent_canonical_id,
             import_source,
-            verter_workspace::ResolutionContext {
-                phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                kind: verter_workspace::ResolveRequestKind::EsmImport,
+            verter_semantic::resolver_core::ResolutionContext {
+                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             },
         );
         #[cfg(test)]
@@ -256,7 +256,7 @@ impl VerterHost {
         &self,
         parent_canonical_id: &str,
         import_source: &str,
-        ctx: verter_workspace::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication<String> {
         self.resolve_for_persistent_state(parent_canonical_id, import_source, ctx)
             .map_result(|result| result.source_id)
@@ -271,7 +271,7 @@ impl VerterHost {
         &self,
         parent_canonical_id: &str,
         import_source: &str,
-        ctx: verter_workspace::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
         // Typeinfo scratch files inline the active request scope and therefore
         // resolve their synthetic imports in that real scope's project
@@ -323,7 +323,7 @@ impl VerterHost {
         overlay: &verter_workspace::ResolutionOverlaySnapshot,
         parent_canonical_id: &str,
         import_source: &str,
-        ctx: verter_workspace::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
         let importer =
             if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(parent_canonical_id) {
@@ -360,9 +360,9 @@ impl VerterHost {
             overlay,
             owner_canonical,
             import_source,
-            verter_workspace::ResolutionContext {
-                phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                kind: verter_workspace::ResolveRequestKind::TypeImport,
+            verter_semantic::resolver_core::ResolutionContext {
+                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
             },
         );
         let type_lane = match type_lane {
@@ -378,9 +378,9 @@ impl VerterHost {
             overlay,
             owner_canonical,
             import_source,
-            verter_workspace::ResolutionContext {
-                phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                kind: verter_workspace::ResolveRequestKind::EsmImport,
+            verter_semantic::resolver_core::ResolutionContext {
+                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             },
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
@@ -651,7 +651,7 @@ impl VerterHost {
     /// atomically. Pass an empty slice to clear the resolver.
     pub fn configure_projects(
         &self,
-        projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
+        projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
         // Project-config change drops resolution-derived state:

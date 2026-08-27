@@ -459,9 +459,9 @@ less than full parity. Route through the shared substrate instead:
 - `crate::server::is_default_export_component_carrier(path)` for the
   default-export / component-target navigation gates (every carrier shares
   default-export component semantics — none is Vue-intrinsic),
-- `verter_workspace::path_is_carrier` / `strip_carrier_extension` for pure
+- `verter_semantic::resolver_core::path_is_carrier` / `strip_carrier_extension` for pure
   path / stem helpers (registry-owned, longest-suffix-first),
-- `verter_workspace::carrier_ide_provider_path` / `carrier_api_provider_path`
+- `verter_semantic::resolver_core::carrier_ide_provider_path` / `carrier_api_provider_path`
   (or the resolver `provider_*_for_source` / `source_id_from_provider_id`
   helpers) for the provider virtual-file path — the IDE / API suffix is
   carrier-owned, so `Foo.svelte` projects `Foo.svelte.tsx` / `Foo.svelte.ts`,

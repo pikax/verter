@@ -33,9 +33,10 @@
 
 use std::sync::Arc;
 
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectId,
-    ProjectRank, VfsProjectConfig, WorkspaceAccess,
+    MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectId, ProjectRank, VfsProjectConfig,
+    WorkspaceAccess,
 };
 
 fn build_multi_project_workspace() -> Arc<MemoryWorkspace> {
@@ -59,7 +60,7 @@ fn build_multi_project_workspace() -> Arc<MemoryWorkspace> {
                 ..Default::default()
             },
             references: vec![],
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/shared"),
             ),
         },
@@ -77,7 +78,7 @@ fn build_multi_project_workspace() -> Arc<MemoryWorkspace> {
                 ..Default::default()
             },
             references: vec![],
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/shared"),
             ),
         },

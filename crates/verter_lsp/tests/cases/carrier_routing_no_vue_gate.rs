@@ -448,8 +448,8 @@ fn carrier_lsp_routing_has_no_hardcoded_vue_gate() {
          Route through the carrier-generic substrate instead:\n\
            - `file_language.is_framework_carrier()` when you hold a `FileLanguage`,\n\
            - `crate::server::carrier_language_for(path).is_some()` for URI/canonical routing,\n\
-           - `verter_workspace::path_is_carrier` / `strip_carrier_extension` for path helpers,\n\
-           - `verter_workspace::carrier_ide_provider_path` / `carrier_api_provider_path`\n\
+           - `verter_semantic::resolver_core::path_is_carrier` / `strip_carrier_extension` for path helpers,\n\
+           - `verter_semantic::resolver_core::carrier_ide_provider_path` / `carrier_api_provider_path`\n\
              (or the resolver `provider_*_for_source` helpers) for provider paths.\n\
          Allowlisted ONLY: `.server.vue`/`.client.vue` SSR conventions (masked,\n\
          not whole-line whitelisted), test code, comments, explicit\n\
@@ -511,13 +511,13 @@ const PRE_CHANGE_VIOLATING_LINES: &[(&str, &str)] = &[
 const POST_CHANGE_CLEAN_LINES: &[&str] = &[
     "if !file_language.is_framework_carrier() {",
     "if !kind.is_framework_carrier() {",
-    "let stem = verter_workspace::strip_carrier_extension(filename);",
+    "let stem = verter_semantic::resolver_core::strip_carrier_extension(filename);",
     "if crate::server::carrier_language_for(dropped_uri).is_none() {",
     "if carrier_language_for(&canonical_id).is_some() {",
     "if is_default_export_component_carrier(&resolved_target) {",
-    "if verter_workspace::path_is_carrier(specifier) {",
-    "verter_workspace::carrier_ide_provider_path(&canonical_id, is_jsx),",
-    "verter_workspace::carrier_api_provider_path(canonical_id)",
+    "if verter_semantic::resolver_core::path_is_carrier(specifier) {",
+    "verter_semantic::resolver_core::carrier_ide_provider_path(&canonical_id, is_jsx),",
+    "verter_semantic::resolver_core::carrier_api_provider_path(canonical_id)",
     "if file_language.is_svelte() {",
     // The carrier-neutral editor-INGRESS classifier replacing a hardcoded
     // `language_id == \"vue\"` branch: the registry maps the editor id.

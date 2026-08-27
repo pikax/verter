@@ -35,11 +35,11 @@
 use std::sync::Arc;
 
 use verter_audit::{RequestKind, RequestKindPayload, WorkspaceOp};
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
-    VfsProjectConfig, WorkspaceAccess,
+    MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
 fn build_host_with_workspace(audit_enabled: bool) -> Arc<VerterHost> {
@@ -63,7 +63,7 @@ fn build_host_with_workspace(audit_enabled: bool) -> Arc<VerterHost> {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("d:/project"),
         ),
     }]);

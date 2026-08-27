@@ -760,6 +760,12 @@ path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-27-C1-KERNEL-R
 sha256 = "65d00fa9e5de74981adf1e77052bb98fdd942eb661506c98a811071eca20bf24"
 
 [[document]]
+id = "RULING-2026-08-27-C1-FINAL-ROUND6-PERFORMANCE-DISPOSITION"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-27-C1-FINAL-ROUND6-PERFORMANCE-DISPOSITION.md"
+sha256 = "6ed5a27d148cd6320b10848777b126b46e3920cf3cfe363d1197b8d6ada4585b"
+
+[[document]]
 id = "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-SOURCE-POLICY-EVIDENCE.md"
@@ -799,7 +805,7 @@ sha256 = "1e44da3d4104cb2866f75d267cf3cdf6cebc719c099ba890760f6b6c1c64a834"
 
 [[authorization]]
 block = "C1"
-documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION", "RULING-C1-THREE-GAPS-ADDENDUM", "RULING-2026-08-25-C1-STAGE2-CUTOVER", "RULING-2026-08-26-C1-LANDING-PATH", "RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY", "RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY", "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE", "RULING-2026-08-26-C1-INPUT-RESOLUTION-BUDGET-AUTHORITY", "RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION", "RULING-2026-08-27-C1-FINAL-ROUND2-PERFORMANCE-DISPOSITION", "RULING-2026-08-27-C1-KERNEL-RETENTION-AUTHORITY"]
+documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION", "RULING-C1-THREE-GAPS-ADDENDUM", "RULING-2026-08-25-C1-STAGE2-CUTOVER", "RULING-2026-08-26-C1-LANDING-PATH", "RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY", "RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY", "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE", "RULING-2026-08-26-C1-INPUT-RESOLUTION-BUDGET-AUTHORITY", "RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION", "RULING-2026-08-27-C1-FINAL-ROUND2-PERFORMANCE-DISPOSITION", "RULING-2026-08-27-C1-KERNEL-RETENTION-AUTHORITY", "RULING-2026-08-27-C1-FINAL-ROUND6-PERFORMANCE-DISPOSITION"]
 ratified_by = "architecture ruling seat under explicit maintainer delegation"
 ratified_at = "2026-08-24"
 scope = "Ratifies the C1 charter text — converging ModuleResolverCore and the non-flow TypeInfoCore — as digest-bound authority, with ARCH-ADDENDUM-C1-THREE-GAPS.md governing wherever it conflicts: sealing over semantic-owned snapshots with no foreign implementations, enumerated per-module move/stay/split dispositions in place of a literal relocation, and one closed non-overridable inherent gateway in place of the exhaustive-coverage proof C1-AC-5 specifies. It is charter authority ONLY and dispatches nothing: C1 stays LOCKED, its predecessor set is unsatisfied (CM1 was REVIEW when this was written and is now ACCEPTED with all three mandates PASS; the predecessor condition is met), and RULING-2026-08-24-C1-CHARTER-RATIFIABILITY leaves two findings open against it — Stage 2 requires a separately ratified, digest-bound execution plan binding an exact rebased baseline, caller/deletion inventory, Cargo-edge and guard transition and atomic abort conditions, and no block-branch registry delta may substitute for authorization authored here. Execution authority requires a further record."
@@ -871,6 +877,34 @@ kernel_retention_meter_ids = ["C1-ALIAS-GEOMETRY-RETENTION-001", "C1-COMPLETED-W
 kernel_retention_reviewed_subject_sha = "d4bed980bea382a7d42dae4b932f16ba247065dc"
 kernel_retention_reviewed_subject_tree = "b2f56be5201560710df45bca7f2dde3f106cedf3"
 kernel_retention_disposition = "NARROW_AMENDMENT_REQUIRED; unique_keys remains first-seen complete InputKey only; one seven-field semantic-owned carrier and the existing workspace operation ledger; lazy priority-preserving alias geometry; exact composed witnesses; typed BudgetExceeded and no publication; no C2/C4 or performance scope"
+final_round6_performance_waiver_defer_ids = ["C1-A6-CONTROL-STABILITY-003", "C1-A6-WALL-REL-004", "C1-A6-WALL-ABS-001", "C1-APM002-ALLOC-REL-003", "C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001"]
+final_round6_performance_base_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
+final_round6_performance_base_tree = "2e7cf8637ec5c52b0fa04572d99672b052f1f85f"
+final_round6_performance_production_subject_sha = "2820cf2eb790caffdb69f59bc20402d7d0a6647b"
+final_round6_performance_production_subject_tree = "ef8efbec06c8e87d1d6d72d9ea8e69fa624f515b"
+final_round6_performance_evidence_child_sha = "713651edd3c9ab629ea5c68380238fb4bafa6711"
+final_round6_performance_evidence_child_tree = "1e112ba5218803e6166c2f4065732179fa339ebe"
+final_round6_performance_evidence_sha256 = "a6083c355239afa6216352f5f78bc36b8c3df9ad2fc3845a32b79e76283b0136"
+final_round6_performance_raw_manifest_entries = 149
+final_round6_performance_raw_manifest_sha256 = "11c016f9a80ea8c8ffc16d564e69a4eb52b8cc426deb4e60b9b18cd9eff86892"
+final_round6_performance_harness_git_blob = "efa9ea54a14772ecd87511d6bb07017aa33940ba"
+final_round6_performance_harness_sha256 = "5e06d35dda284a8ef049bf0dd3dc39974b904729f740da58c650ec59e806f632"
+final_round6_performance_enabled_base_binary_sha256 = "ebf6c2f0762228ae2a4ac01c3fdca5c436750b312c9d093187db99e0d0d832f3"
+final_round6_performance_enabled_subject_binary_sha256 = "16c08912af5255a641001d1b132034198ede0019144977be76a51a75425a7321"
+final_round6_performance_disabled_base_binary_sha256 = "4936acffe4e563d04c37cd7144fbda74c2ececba14e3fcfa5b0620b0a9d65ffd"
+final_round6_performance_disabled_subject_binary_sha256 = "8a53c2cb7fc2220df2830d626995e4bcb009fba493fd72d9413b08e64d1b4b1c"
+final_round6_performance_enabled_base_result_sha256 = "76afc8c3b747c92cb2af0fb47f1dad14d40344cfa4392bac481a9b1319fd04ff"
+final_round6_performance_enabled_subject_result_sha256 = "d193ac0d04f516ae0517a668518ccb3a2504d6d2d958644c2016c71c9d5ad341"
+final_round6_performance_control_stability_result = "FAIL: final session +3.096636412% > 3%; exact-session user waiver applies below 10%"
+final_round6_performance_relative_wall_result = "FAIL: 95.710 -> 111.895 ms; +16.910458677% > 3%"
+final_round6_performance_absolute_wall_result = "FAIL: 111.895 ms > 100 ms"
+final_round6_performance_allocation_count_result = "FAIL: 477365 -> 604706; +26.675814105%"
+final_round6_performance_allocation_bytes_result = "FAIL: 104030662 -> 137711352; +32.375733608%"
+final_round6_performance_absolute_rss_result = "PASS: 76709888 B <= 268435456 B"
+final_round6_performance_relative_rss_result = "PASS: +2.484404071% <= +4.952%"
+final_round6_performance_work_output_result = "PASS: all configured work counters, zero counters, admissions, and component digest 7161214711717846280"
+final_round6_performance_inheritance_rule = "The evidence-only child 713651edd3c9ab629ea5c68380238fb4bafa6711 and later authority-only descendants may inherit only while production, harness, corpus, toolchain, configuration, raw evidence and measured results remain unchanged; none is the measured production subject."
+final_round6_performance_successor_obligation = "C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001"
 
 # Three-question architecture ruling taken on 7dac2b614, the tip of the unowned
 # branch block/lsp-durable-fence (lane architecture-lspfence-ownership,

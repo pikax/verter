@@ -18,7 +18,7 @@ use std::sync::Arc;
 use crate::canonical_path::CanonicalPath;
 use crate::config::{load_compiler_options, load_project_membership};
 use crate::memory::{MemoryOptions, MemoryWorkspace};
-use crate::resolver::carrier_ide_provider_path;
+use verter_semantic::resolver_core::carrier_ide_provider_path;
 
 use super::{decide_carrier_discovery, CarrierDiscoveryMode};
 

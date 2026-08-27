@@ -29,5 +29,6 @@ pub mod input;
 pub mod profile;
 pub mod query;
 pub mod refs;
+pub mod resolver_core;
 pub mod revision;
 pub mod snapshot;

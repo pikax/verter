@@ -430,13 +430,13 @@ async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
     // DISCRIMINATING: a regression that re-terminals a multi-claimant carrier as
     // `Ambiguous(MultipleOwners)` while still serving `Bound` would surface a
     // `verter(project)` warning here and fail this assertion.
-    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-        crate::project_resolver::IdeProjectConfig::new(
+    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
         ),
-        crate::project_resolver::IdeProjectConfig::new(
+        verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
@@ -1449,7 +1449,7 @@ async fn coordinator_direct_ide_sync_must_not_pair_stale_content_with_a_mid_flig
         ),
     };
 
-    let ide_path = verter_workspace::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
     // Pause the coordinator's `open_file` call — `ide.code` is already
     // compiled from revision A by this point, and the record has not run yet.
     let (arrived, release) = provider.block_open_file(&ide_path);
@@ -1574,7 +1574,7 @@ async fn coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_afte
         ),
     };
 
-    let ide_path = verter_workspace::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
     // Pause the tick right after the compile — the pre-fix pin-capture spot.
     let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
 
@@ -4864,7 +4864,7 @@ async fn an_open_plain_ts_importer_is_fenced_after_an_evict_and_reopen() {
     let parent_id = format!("{workspace_id}/src/parent.ts");
 
     let host = crate::test_utils::make_filesystem_test_host(ws);
-    host.configure_projects(vec![crate::project_resolver::IdeProjectConfig::new(
+    host.configure_projects(vec![verter_workspace::ide_project_config(
         workspace_id.clone(),
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.json")),

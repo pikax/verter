@@ -208,9 +208,10 @@ const AMBIENT_LIB_ID: &str = "lib.function.d.ts";
 /// Build a host over one configured project at `/ws`, optionally registering
 /// the callable ambient corpus, with `/ws/owner.ts` loaded.
 fn callable_host(register_ambient: bool) -> Arc<VerterHost> {
+    use verter_semantic::resolver_core::IdeProjectCompilerOptions;
     use verter_workspace::{
-        CanonicalPath, ConfiguredMembership, IdeProjectCompilerOptions, MemoryOptions,
-        MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
+        CanonicalPath, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
+        WorkspaceAccess,
     };
 
     let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
@@ -224,7 +225,9 @@ fn callable_host(register_ambient: bool) -> Arc<VerterHost> {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/ws")),
+        membership: verter_workspace::configured_membership_match_all_under_root(
+            &CanonicalPath::new("/ws"),
+        ),
     }]));
     workspace.inject_file("/ws/owner.ts".to_string(), Arc::from(CALLABLE_OWNER));
     if register_ambient {

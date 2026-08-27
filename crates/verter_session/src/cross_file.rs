@@ -105,9 +105,9 @@ impl VerterHost {
                     Some(source) => match self.resolve_via_vfs(
                         parent_id,
                         source,
-                        verter_workspace::ResolutionContext {
-                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                            kind: verter_workspace::ResolveRequestKind::EsmImport,
+                        verter_semantic::resolver_core::ResolutionContext {
+                            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
                         },
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -631,7 +631,7 @@ import Child from '@/components/Child.vue'
         // bumps `project_generation` (evicting the project-shape
         // cluster), and advances the store-view epoch.
         {
-            use verter_semantic::analysis::project_resolver::*;
+            use verter_semantic::resolver_core::*;
             host.configure_projects(vec![IdeProjectConfig {
                 root: "/project".to_string(),
                 workspace_root: "/project".to_string(),
@@ -643,7 +643,7 @@ import Child from '@/components/Child.vue'
                 }],
                 compiler_options: IdeProjectCompilerOptions::default(),
                 references: vec![],
-                membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                membership: verter_workspace::configured_membership_match_all_under_root(
                     &verter_workspace::CanonicalPath::new("/project"),
                 ),
             }]);

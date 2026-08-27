@@ -20,10 +20,12 @@
 use std::sync::Arc;
 
 use verter_audit::{RequestKind, RequestKindPayload, RequestTargetIdentity, WorkspaceOp};
+use verter_semantic::resolver_core::{
+    IdeProjectCompilerOptions, ResolutionContext, ResolvePhase, ResolveRequestKind,
+};
 use verter_workspace::{
-    CanonicalPath, ConfiguredMembership, IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace,
-    ParsedEdge, ProjectGraph, ProjectRank, ResolutionContext, ResolvePhase, ResolveRequestKind,
-    VfsProjectConfig, WorkspaceAccess, WorkspaceRead,
+    configured_membership_match_all_under_root, CanonicalPath, MemoryOptions, MemoryWorkspace,
+    ParsedEdge, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess, WorkspaceRead,
 };
 
 #[test]
@@ -57,7 +59,7 @@ fn audit_op_resolve_records_exactly_the_resolved_target_in_files() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: configured_membership_match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 
@@ -188,7 +190,7 @@ fn audit_op_resolve_unresolved_specifier_yields_zero_touched_files() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: configured_membership_match_all_under_root(&CanonicalPath::new("d:/project")),
     }]);
     ws.set_project_graph(graph);
 

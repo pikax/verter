@@ -12,7 +12,7 @@ use verter_scheduler::invalidation::Hash16;
 use crate::ambient_lib::AmbientLibsByProject;
 use crate::changes::{ChangeResult, WorkspaceChange};
 use crate::dir_index::DirIndex;
-use crate::env_hash::EnvHashInputs;
+use crate::env_hash::{EnvHashInputs, IdeProjectConfigEnvHash};
 use crate::exact_resolution::{DependencySnapshotView, EdgeStore};
 use crate::memory::MemorySnapshot;
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
@@ -23,20 +23,20 @@ use crate::published_state::{ProjectEnvHashArray, PublishedRoot};
 use crate::resolution_currency::{
     explicit_context, manifest_resolution_fingerprint, selected_context_for_path,
     CanonicalResolutionId, CapturedResolutionWorld, ObservedResolutionValues, ResolutionEpoch,
-    ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionPopulation,
-    ResolutionQueryKey, ResolutionSessionRoot, ResolutionTransaction, ResolutionWorldId,
-    ResolutionWorldRoot, ResolveContextId, SessionFingerprint, TransactionReader,
+    ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionQueryKey,
+    ResolutionSessionRoot, ResolutionTransaction, ResolutionWorldRoot, ResolveContextId,
+    TransactionReader,
 };
-use crate::resolver::IdeProjectConfig;
 use crate::traits::WorkspaceResourceSnapshot;
-use crate::types::{
-    ExactResolution, ExactResolutionResult, ResolvePhase, ResolveRequestKind, ResolveResult,
-    VfsProvenance,
-};
+use crate::types::{ExactResolution, ExactResolutionResult, VfsProvenance};
 use crate::workspace_snapshot::{
     OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 use crate::{SignatureAdmission, CANDIDATE_CAP};
+use verter_semantic::resolver_core::{
+    IdeProjectConfig, ResolutionPopulation, ResolutionWorldId, ResolvePhase, ResolveRequestKind,
+    ResolveResult, SessionFingerprint,
+};
 
 static NEXT_STRICT_SELF_ROOT_AUTHORITY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -167,7 +167,7 @@ struct ParsedEdgeInputs {
 /// Unforgeable crate-internal proof that a resolver call is owned by Engine's
 /// sealed resolution transaction.
 ///
-/// `ProjectResolver` accepts this only alongside a `TransactionReader`.
+/// `ModuleResolverCore` accepts this only alongside a `TransactionReader`.
 /// Keeping construction private to this module prevents sibling production
 /// code from bypassing fact capture while preserving direct resolver unit
 /// tests inside the resolver module.
@@ -178,6 +178,11 @@ pub(crate) struct TrackedResolutionCapability {
 impl TrackedResolutionCapability {
     fn new() -> Self {
         Self { _private: () }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_conversion_test() -> Self {
+        Self::new()
     }
 }
 
@@ -229,7 +234,7 @@ struct ObservedBaselineValue<'a> {
 /// fold, and the live observation triple at once.
 #[derive(Debug, Clone, Copy)]
 enum ObservedFamilyValue<'a> {
-    Probe(crate::resolution_currency::PathProbe),
+    Probe(verter_semantic::resolver_core::PathProbe),
     Realpath(Option<&'a str>),
     Manifest(Option<[u8; 16]>),
 }
@@ -323,6 +328,7 @@ impl BaselineFold {
 /// ordering constraints. `resolution_epoch` is an atomic, sequenced by
 /// `resolution_world_write` rather than by a lock order of its own.
 pub(crate) struct Engine {
+    pub(crate) input_resolution_budgets: verter_semantic::resolver_core::InputResolutionBudgets,
     pub(crate) overlay: RwLock<OverlayStore>,
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
@@ -390,7 +396,7 @@ pub(crate) struct Engine {
     /// Project graph — the write-side store. Callers update this via
     /// `set_project_graph()` / `configure_resolver()`, then
     /// `rebuild_and_publish()` atomically derives and publishes a
-    /// `WorkspaceSnapshot` + `ProjectResolver` to `published_state`.
+    /// `WorkspaceSnapshot` + `ModuleResolverCore` to `published_state`.
     pub(crate) project_graph: RwLock<ProjectGraph>,
     configured_resolver_projects: RwLock<Option<Vec<IdeProjectConfig>>>,
     #[allow(dead_code)]
@@ -450,7 +456,7 @@ pub(crate) struct Engine {
     /// workspace mutation chokepoints, so mutators that bypass any
     /// host-level wrapper (direct embedder `notify_upsert`, `write_file`,
     /// `copy_file`) are covered by construction. Keys are normalized
-    /// through [`crate::resolver::normalize_canonical_id`] at the
+    /// through [`verter_semantic::resolver_core::normalize_canonical_id`] at the
     /// recording chokepoints AND the query, so a direct embedder passing
     /// a non-canonical key form (backslashes, Windows drive casing)
     /// records under the same key the gate reads.
@@ -484,19 +490,30 @@ impl Drop for StrictSelfRootTransition<'_> {
 }
 
 impl Engine {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::new_with_input_resolution_budgets(
+            verter_semantic::resolver_core::InputResolutionBudgets::default(),
+        )
+    }
+
+    pub(crate) fn new_with_input_resolution_budgets(
+        input_resolution_budgets: verter_semantic::resolver_core::InputResolutionBudgets,
+    ) -> Self {
         static NEXT_SESSION_FINGERPRINT: AtomicU64 = AtomicU64::new(1);
         let initial_extensions: Vec<String> = Self::merge_extensions(&[]);
-        let initial_resolution_world =
-            Arc::new(ResolutionWorldRoot::bootstrap(ResolutionWorldId::fresh(1)));
+        let initial_resolution_world = Arc::new(ResolutionWorldRoot::bootstrap(
+            ResolutionWorldId::from_raw(1),
+        ));
         let default_resolution_session =
-            SessionFingerprint::fresh(NEXT_SESSION_FINGERPRINT.fetch_add(1, Ordering::Relaxed));
+            SessionFingerprint::from_raw(NEXT_SESSION_FINGERPRINT.fetch_add(1, Ordering::Relaxed));
         let default_session_domain = Arc::new(SessionResolutionDomain::new(
-            ResolutionSessionRoot::bootstrap(ResolutionWorldId::fresh(2)),
+            ResolutionSessionRoot::bootstrap(ResolutionWorldId::from_raw(2)),
         ));
         let mut resolution_sessions = FxHashMap::default();
         resolution_sessions.insert(default_resolution_session, default_session_domain);
         let engine = Self {
+            input_resolution_budgets,
             overlay: RwLock::new(OverlayStore::new()),
             snapshot: RwLock::new(MemorySnapshot::new()),
             edges: RwLock::new(EdgeStore::new()),
@@ -543,7 +560,7 @@ impl Engine {
     /// then ascending lex. Used by [`Engine::new`] and
     /// [`Engine::set_default_resolve_extensions`] (single source of truth).
     fn merge_extensions(host_resolve_extensions: &[String]) -> Vec<String> {
-        let mut merged: BTreeSet<String> = crate::resolver::probe_extensions()
+        let mut merged: BTreeSet<String> = verter_semantic::resolver_core::probe_extensions()
             .iter()
             .map(|s| (*s).to_string())
             .collect();
@@ -556,7 +573,7 @@ impl Engine {
     }
 
     /// Replace the workspace's reverse-dep extension list (additive: merges
-    /// with `probe_extensions()` and sorts longest-first at set-time per F4).
+    /// with `probe_extensions()` and sorts longest-first at set-time).
     /// Lock-free swap; does not stall reverse queries.
     ///
     /// An extension-priority change is a resolve-config mutation: the merged
@@ -722,13 +739,13 @@ impl Engine {
 
     fn record_content_transition_at(&self, canonical_id: &str, generation: u64) {
         self.content_transitions.write().insert(
-            crate::resolver::normalize_canonical_id(canonical_id),
+            verter_semantic::resolver_core::normalize_canonical_id(canonical_id),
             generation,
         );
     }
 
     fn record_subtree_content_transition_at(&self, prefix: &str, generation: u64) {
-        let mut normalized = crate::resolver::normalize_canonical_id(prefix);
+        let mut normalized = verter_semantic::resolver_core::normalize_canonical_id(prefix);
         while normalized.len() > 1 && normalized.ends_with('/') {
             normalized.pop();
         }
@@ -762,7 +779,7 @@ impl Engine {
     /// registration pair, which does not exist on `wasm32`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn bump_content_generation_for(&self, canonical_id: &str) -> u64 {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         self.mutate_resolution_world(|_world| {
             self.pending_resolution_refresh
                 .write()
@@ -799,7 +816,7 @@ impl Engine {
     /// containing the canonical (a `delete_dir_all` / watcher recovery
     /// transitions every member of the subtree).
     pub(crate) fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         let exact = self
             .content_transitions
             .read()
@@ -945,7 +962,7 @@ impl Engine {
                 self.resolution_world.store(Arc::new(replacement));
             }
             WorldWrite::Publish => {
-                replacement.id = ResolutionWorldId::fresh(
+                replacement.id = ResolutionWorldId::from_raw(
                     self.next_resolution_world_id
                         .fetch_add(1, Ordering::Relaxed),
                 );
@@ -1097,7 +1114,7 @@ impl Engine {
         let mut domains = self.resolution_sessions.write();
         Arc::clone(domains.entry(fingerprint).or_insert_with(|| {
             Arc::new(SessionResolutionDomain::new(
-                ResolutionSessionRoot::bootstrap(ResolutionWorldId::fresh(
+                ResolutionSessionRoot::bootstrap(ResolutionWorldId::from_raw(
                     self.next_resolution_world_id
                         .fetch_add(1, Ordering::Relaxed),
                 )),
@@ -1193,7 +1210,7 @@ impl Engine {
                 domain.root.store(Arc::new(replacement));
             }
             WorldWrite::Publish => {
-                replacement.id = ResolutionWorldId::fresh(
+                replacement.id = ResolutionWorldId::from_raw(
                     self.next_resolution_world_id
                         .fetch_add(1, Ordering::Relaxed),
                 );
@@ -1313,7 +1330,12 @@ impl Engine {
         owner_canonical: &str,
         population: ResolutionPopulation,
     ) -> Option<crate::FactVersionRef> {
-        let node = ResolutionFactKey::owner_resolution_set(owner_canonical, population);
+        let node = ResolutionFactKey::owner_resolution_set(
+            CanonicalResolutionId::new(verter_semantic::resolver_core::normalize_canonical_id(
+                owner_canonical,
+            )),
+            population,
+        );
         let publish = |facts: &mut crate::resolution_currency::ResolutionFactRoot| -> bool {
             let mut children = facts.owner_child_decisions(owner_canonical, population);
             if children.is_empty() {
@@ -1401,7 +1423,7 @@ impl Engine {
             ResolutionFactKey::exact_importer(
                 canonical_id,
                 &resolution.specifier,
-                crate::types::ResolutionContext {
+                verter_semantic::resolver_core::ResolutionContext {
                     phase: resolution.phase,
                     kind: resolution.kind,
                 },
@@ -1438,7 +1460,7 @@ impl Engine {
         canonical_id: &str,
         population: ResolutionPopulation,
     ) -> Vec<ResolutionFactKey> {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         let mut keys = vec![
             ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(canonical.clone()),
@@ -1463,9 +1485,9 @@ impl Engine {
         &self,
         world: &mut ResolutionWorldRoot,
         canonical_id: &str,
-        outcome: crate::resolution_currency::PathProbe,
+        outcome: verter_semantic::resolver_core::PathProbe,
     ) -> bool {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         if world.path_probes.get(&canonical).copied() == Some(outcome) {
             return false;
         }
@@ -1475,8 +1497,8 @@ impl Engine {
         }
         if matches!(
             outcome,
-            crate::resolution_currency::PathProbe::File
-                | crate::resolution_currency::PathProbe::Directory
+            verter_semantic::resolver_core::PathProbe::File
+                | verter_semantic::resolver_core::PathProbe::Directory
         ) {
             self.advance_absent_realpath_ancestors(world, &canonical);
         }
@@ -1517,7 +1539,7 @@ impl Engine {
     /// recorded evidence baselines and advance the exact path facts so
     /// stale witnesses fail. Never touches recovery scopes.
     fn advance_base_path_facts_unknown(&self, world: &mut ResolutionWorldRoot, canonical_id: &str) {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         world.path_probes.remove(&canonical);
         world.realpaths.remove(&canonical);
         for key in Self::path_fact_keys(&canonical, ResolutionPopulation::Base) {
@@ -1549,8 +1571,9 @@ impl Engine {
         canonical_id: &str,
         resolved: Option<String>,
     ) -> bool {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
-        let resolved = resolved.map(|path| crate::resolver::normalize_canonical_id(&path));
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let resolved =
+            resolved.map(|path| verter_semantic::resolver_core::normalize_canonical_id(&path));
         if world.realpaths.get(&canonical) == Some(&resolved) {
             return false;
         }
@@ -1574,7 +1597,7 @@ impl Engine {
         canonical_id: &str,
         fingerprint: Option<[u8; 16]>,
     ) -> bool {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         if !crate::resolution_currency::is_package_manifest_path(&canonical) {
             return false;
         }
@@ -1697,15 +1720,16 @@ impl Engine {
         canonical_id: &str,
         manifest_fingerprint: Option<[u8; 16]>,
     ) {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         let population = ResolutionPopulation::Session(fingerprint);
         let was_overlay = session.overlay_paths.contains(&canonical);
         let effective_before = if was_overlay {
-            Some(crate::resolution_currency::PathProbe::File)
+            Some(verter_semantic::resolver_core::PathProbe::File)
         } else {
             base.path_probes.get(&canonical).copied()
         };
-        let path_changed = effective_before != Some(crate::resolution_currency::PathProbe::File);
+        let path_changed =
+            effective_before != Some(verter_semantic::resolver_core::PathProbe::File);
         // An overlay's effective realpath is its canonical overlay path.
         // Compare against the recorded base realpath value: only a base
         // value known to already equal the canonical leaves the effective
@@ -1780,7 +1804,7 @@ impl Engine {
         fingerprint: SessionFingerprint,
         canonical_id: &str,
     ) -> bool {
-        let canonical = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         if session.overlay_paths.remove(&canonical).is_none() {
             return false;
         }
@@ -1822,7 +1846,7 @@ impl Engine {
         &self,
         canonical_id: &str,
         remove_edges: bool,
-        path_after: Option<crate::resolution_currency::PathProbe>,
+        path_after: Option<verter_semantic::resolver_core::PathProbe>,
         realpath_after: BaseRealpathTransition,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
@@ -1840,9 +1864,9 @@ impl Engine {
             }
             match realpath_after {
                 BaseRealpathTransition::Unknown => {
-                    world
-                        .realpaths
-                        .remove(&crate::resolver::normalize_canonical_id(canonical_id));
+                    world.realpaths.remove(
+                        &verter_semantic::resolver_core::normalize_canonical_id(canonical_id),
+                    );
                 }
                 BaseRealpathTransition::Known(resolved) => {
                     self.update_base_realpath_fact(world, canonical_id, resolved);
@@ -1922,7 +1946,7 @@ impl Engine {
                 self.update_base_path_facts(
                     world,
                     &canonical_id,
-                    crate::resolution_currency::PathProbe::Absent,
+                    verter_semantic::resolver_core::PathProbe::Absent,
                 );
                 self.update_base_realpath_fact(world, &canonical_id, None);
                 self.update_base_manifest_fact(world, &canonical_id, None);
@@ -1954,7 +1978,7 @@ impl Engine {
             if remove_edges {
                 self.remove_edges_under_in_world(world, prefix);
             }
-            let normalized = crate::resolver::normalize_canonical_id(prefix);
+            let normalized = verter_semantic::resolver_core::normalize_canonical_id(prefix);
             self.advance_resolution_fact(
                 &mut world.facts,
                 ResolutionFactKey::RecoveryScope {
@@ -2215,7 +2239,7 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: crate::types::ResolutionContext,
+        context: verter_semantic::resolver_core::ResolutionContext,
         population: ResolutionPopulation,
     ) -> Option<ResolutionQueryKey> {
         self.lazy_resolution_cache
@@ -2238,7 +2262,7 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: crate::types::ResolutionContext,
+        context: verter_semantic::resolver_core::ResolutionContext,
         population: ResolutionPopulation,
     ) -> usize {
         self.lazy_resolution_cache
@@ -2285,7 +2309,7 @@ impl Engine {
 
     /// Build and publish a snapshot from the current project graph.
     ///
-    /// Derives a `WorkspaceSnapshot` + `ProjectResolver` from the current
+    /// Derives a `WorkspaceSnapshot` + `ModuleResolverCore` from the current
     /// `project_graph` and atomically publishes them to `published_state`.
     /// Called by `set_project_graph()` and `configure_resolver()`.
     ///
@@ -2309,8 +2333,8 @@ impl Engine {
             let graph = self.project_graph.read();
             let resolver = configured_projects
                 .clone()
-                .map(crate::resolver::ProjectResolver::new)
-                .unwrap_or_else(|| graph.to_project_resolver());
+                .map(verter_semantic::resolver_core::ModuleResolverCore::new)
+                .unwrap_or_else(|| graph.to_module_resolver_core());
 
             // Build a WorkspaceSnapshot from the graph's projects
             let projects: Vec<_> = graph
@@ -2370,7 +2394,7 @@ impl Engine {
     ) -> Option<crate::types::PackageManifest> {
         use crate::package_index::ManifestEntry;
 
-        let canonical_id = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical_id = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         {
             let cache = self.package_index.read();
             match cache.get_cached(&canonical_id) {
@@ -2395,7 +2419,7 @@ impl Engine {
     }
 
     pub(crate) fn invalidate_package_manifest(&self, canonical_id: &str) {
-        let canonical_id = crate::resolver::normalize_canonical_id(canonical_id);
+        let canonical_id = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
         if canonical_id.ends_with("/package.json") {
             self.package_index.write().invalidate(&canonical_id);
         }
@@ -2496,16 +2520,16 @@ impl Engine {
                                 self.update_base_path_facts(
                                     world,
                                     &canonical_id,
-                                    crate::resolution_currency::PathProbe::File,
+                                    verter_semantic::resolver_core::PathProbe::File,
                                 );
                                 // A disk-backed change cannot cheaply prove
                                 // the post-change realpath; comparisons stay
                                 // conservative until re-observed.
-                                world
-                                    .realpaths
-                                    .remove(&crate::resolver::normalize_canonical_id(
+                                world.realpaths.remove(
+                                    &verter_semantic::resolver_core::normalize_canonical_id(
                                         &canonical_id,
-                                    ));
+                                    ),
+                                );
                                 let manifest_fingerprint =
                                     self.base_manifest_fingerprint(&canonical_id);
                                 self.update_base_manifest_fact(
@@ -2518,7 +2542,9 @@ impl Engine {
                                 self.advance_base_path_facts_unknown(world, &canonical_id);
                                 if canonical_id.ends_with("/package.json") {
                                     let canonical =
-                                        crate::resolver::normalize_canonical_id(&canonical_id);
+                                        verter_semantic::resolver_core::normalize_canonical_id(
+                                            &canonical_id,
+                                        );
                                     world.manifest_fingerprints.remove(&canonical);
                                     self.advance_resolution_fact(
                                         &mut world.facts,
@@ -2542,7 +2568,7 @@ impl Engine {
                         self.update_base_path_facts(
                             world,
                             &canonical_id,
-                            crate::resolution_currency::PathProbe::Absent,
+                            verter_semantic::resolver_core::PathProbe::Absent,
                         );
                         self.update_base_realpath_fact(world, &canonical_id, None);
                         self.update_base_manifest_fact(world, &canonical_id, None);
@@ -2556,7 +2582,8 @@ impl Engine {
                         // The member set is unknown (an out-of-band disk
                         // change), so record the narrowest subtree scope at
                         // the batch's post-mutation generation.
-                        let normalized = crate::resolver::normalize_canonical_id(&prefix);
+                        let normalized =
+                            verter_semantic::resolver_core::normalize_canonical_id(&prefix);
                         self.advance_resolution_fact(
                             &mut world.facts,
                             ResolutionFactKey::RecoveryScope {
@@ -2619,7 +2646,7 @@ impl Engine {
         })
     }
 
-    /// Replace owner's transitive-semantic dep set. Always fires; closes F15.
+    /// Replace owner's transitive-semantic dep set. Always fires.
     pub(crate) fn replace_semantic_transitive(&self, canonical_id: &str, deps: BTreeSet<String>) {
         self.edges
             .write()
@@ -2634,7 +2661,7 @@ impl Engine {
 
     /// Add a single ambient-resolved dep (incremental). Routes ambient
     /// dependencies into the dedicated `ambient_resolved` class so they
-    /// survive `record_parsed_edges` re-records (closes F1.5).
+    /// survive `record_parsed_edges` re-records.
     pub(crate) fn add_ambient_resolved_dep(&self, canonical_id: &str, virtual_id: &str) -> bool {
         self.edges
             .write()
@@ -2653,8 +2680,8 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
-    ) -> Option<crate::types::ResolveResult> {
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
         self.resolve_import_outcome(reader, importer_id, specifier, ctx)
             .into_transient_result()
     }
@@ -2671,8 +2698,10 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> ResolutionOutcome {
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
         self.resolve_import_outcome_in_published(
             reader,
             crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
@@ -2680,6 +2709,8 @@ impl Engine {
             importer_id,
             specifier,
             ctx,
+            &mut input_ledger,
+            &|| true,
         )
     }
 
@@ -2690,8 +2721,8 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
-    ) -> Option<crate::types::ResolveResult> {
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
         self.resolve_import_outcome_with_evidence(reader, evidence, importer_id, specifier, ctx)
             .into_transient_result()
     }
@@ -2710,8 +2741,10 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> ResolutionOutcome {
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
         self.resolve_import_outcome_in_published(
             reader,
             evidence,
@@ -2719,6 +2752,8 @@ impl Engine {
             importer_id,
             specifier,
             ctx,
+            &mut input_ledger,
+            &|| true,
         )
     }
 
@@ -2733,7 +2768,32 @@ impl Engine {
         expected_published: &Arc<crate::published_state::PublishedRoot>,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> ResolutionOutcome {
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
+        self.resolve_import_outcome_for_published_in_operation(
+            reader,
+            evidence,
+            expected_published,
+            importer_id,
+            specifier,
+            ctx,
+            &mut input_ledger,
+            &|| true,
+        )
+    }
+
+    pub(crate) fn resolve_import_outcome_for_published_in_operation(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
+        expected_published: &Arc<crate::published_state::PublishedRoot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
+        final_validate: &dyn Fn() -> bool,
     ) -> ResolutionOutcome {
         self.resolve_import_outcome_in_published(
             reader,
@@ -2742,6 +2802,8 @@ impl Engine {
             importer_id,
             specifier,
             ctx,
+            input_ledger,
+            final_validate,
         )
     }
 
@@ -2882,7 +2944,7 @@ impl Engine {
             if self.overlay.read().has_overlay(canonical) {
                 continue;
             }
-            let key = crate::resolver::normalize_canonical_id(canonical);
+            let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
             let recorded = Self::recorded_baseline(&recorded_before, &key);
             // A source that could not produce a trustworthy live observation
             // gets no stamp and no fold. The stamp certifies an actual live
@@ -2970,14 +3032,14 @@ impl Engine {
     /// was last read LIVE, or `None` when it never has been.
     #[cfg(test)]
     pub(crate) fn evidence_verified_generation_for_test(&self, canonical: &str) -> Option<u64> {
-        let key = crate::resolver::normalize_canonical_id(canonical);
+        let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
         self.evidence_verified_generation.read().get(&key).copied()
     }
 
     /// Whether `canonical` is still awaiting evidence re-observation.
     #[cfg(test)]
     pub(crate) fn pending_resolution_refresh_for_test(&self, canonical: &str) -> bool {
-        let key = crate::resolver::normalize_canonical_id(canonical);
+        let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
         self.pending_resolution_refresh.read().contains(&key)
     }
 
@@ -2996,7 +3058,7 @@ impl Engine {
             probe: reader.probe_path(canonical_id),
             realpath: reader
                 .realpath(canonical_id)
-                .map(|path| crate::resolver::normalize_canonical_id(&path)),
+                .map(|path| verter_semantic::resolver_core::normalize_canonical_id(&path)),
             manifest: crate::resolution_currency::is_package_manifest_path(canonical_id).then(
                 || {
                     reader.read_file(canonical_id).map(|source| {
@@ -3129,10 +3191,11 @@ impl Engine {
         expected_published: Option<&Arc<crate::published_state::PublishedRoot>>,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
+        final_validate: &dyn Fn() -> bool,
     ) -> ResolutionOutcome {
         crate::probe_scope!(RESOLVE_IN_PUBLISHED);
-        const MAX_WORLD_ATTEMPTS: usize = 8;
         let population = reader.resolution_population();
         let cache_key = LazyResolutionCacheKey {
             importer_id: importer_id.to_string(),
@@ -3141,18 +3204,20 @@ impl Engine {
             kind: ctx.kind,
             population,
         };
-        let mut last_result = None;
-        let mut last_rejected = Vec::new();
         let request_local_snapshot = reader.resolution_snapshot_is_request_local();
-
-        for _ in 0..MAX_WORLD_ATTEMPTS {
+        loop {
             crate::probe_scope!(RESOLVE_ATTEMPT);
             let captured = {
                 crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)
             };
             let Some(captured) = captured else {
-                continue;
+                #[cfg(test)]
+                resolution_test_hooks::record_return_only();
+                return ResolutionOutcome::refused(
+                    None,
+                    verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
+                );
             };
             if expected_published.is_some_and(|expected| {
                 !captured
@@ -3263,6 +3328,17 @@ impl Engine {
                 }
             }
             if refreshed {
+                let tracked = TransactionReader::new(reader, &transaction);
+                if input_ledger.charge_outer_restart(&tracked).is_err() {
+                    return ResolutionOutcome::new(
+                        None,
+                        transaction.into_inner().finish(),
+                        rejected_exact_targets,
+                        true,
+                        false,
+                        false,
+                    );
+                }
                 continue;
             }
             // One owner-edge authority for every resolution producer, the
@@ -3345,8 +3421,10 @@ impl Engine {
                                     source_id: id.clone(),
                                     provider_id: id.clone(),
                                     provider_specifier: specifier.to_string(),
-                                    provider_target: crate::types::ProviderTarget::SourceFile,
-                                    resolution_kind: crate::types::ResolutionKind::Bundler,
+                                    provider_target:
+                                        verter_semantic::resolver_core::ProviderTarget::SourceFile,
+                                    resolution_kind:
+                                        verter_semantic::resolver_core::ResolutionKind::Bundler,
                                     owner_tsconfig_path: None,
                                 }
                             })
@@ -3355,19 +3433,58 @@ impl Engine {
                     crate::probe_scope!(RESOLVE_TRACKED);
                     let tracked = TransactionReader::new(reader, &transaction);
                     let capability = TrackedResolutionCapability::new();
-                    captured.world.base.published.as_ref().and_then(|root| {
-                        let request = crate::types::ResolveRequest {
-                            importer_id: importer_id.to_string(),
-                            specifier: specifier.to_string(),
-                            kind: ctx.kind,
-                            phase: ctx.phase,
-                        };
-                        root.snapshot
-                            .resolver
-                            .resolve_tracked(&capability, &tracked, &request)
-                    })
+                    let driven = captured
+                        .world
+                        .base
+                        .published
+                        .as_ref()
+                        .map_or(Ok(None), |root| {
+                            let request = verter_semantic::resolver_core::ResolveRequest {
+                                importer_id: importer_id.to_string(),
+                                specifier: specifier.to_string(),
+                                kind: ctx.kind,
+                                phase: ctx.phase,
+                            };
+                            crate::resolver::resolve_tracked(
+                                &root.snapshot.resolver,
+                                &capability,
+                                &tracked,
+                                input_ledger,
+                                &request,
+                            )
+                        });
+                    match driven {
+                        Ok(result) => result,
+                        Err(_) => {
+                            transaction.lock().mark_incomplete_provenance();
+                            #[cfg(test)]
+                            resolution_test_hooks::record_return_only();
+                            return ResolutionOutcome::new(
+                                None,
+                                transaction.into_inner().finish(),
+                                rejected_exact_targets,
+                                true,
+                                false,
+                                false,
+                            );
+                        }
+                    }
                 }
             };
+            let terminal_admission = transaction.lock().input_resolution_terminal_admission();
+            if let Some(admission) = terminal_admission {
+                #[cfg(test)]
+                resolution_test_hooks::record_return_only();
+                input_ledger.release_applied_outputs();
+                return ResolutionOutcome::new(
+                    result,
+                    admission,
+                    rejected_exact_targets,
+                    true,
+                    false,
+                    false,
+                );
+            }
             if !reused {
                 let complete_context = Self::complete_provider_context(
                     captured.world.base.as_ref(),
@@ -3386,14 +3503,22 @@ impl Engine {
                     ));
                 }
             }
-            last_result = result.clone();
-            last_rejected = rejected_exact_targets.clone();
-
             #[cfg(test)]
             resolution_test_hooks::fire(
                 resolution_test_hooks::ResolutionPhase::PreAdmissionValidation,
             );
             if !self.resolution_world_still_current(&captured) {
+                let tracked = TransactionReader::new(reader, &transaction);
+                if input_ledger.charge_outer_restart(&tracked).is_err() {
+                    return ResolutionOutcome::new(
+                        None,
+                        transaction.into_inner().finish(),
+                        rejected_exact_targets,
+                        true,
+                        false,
+                        false,
+                    );
+                }
                 continue;
             }
 
@@ -3413,11 +3538,39 @@ impl Engine {
                 )
             };
             if !self.resolution_world_still_current(&captured) {
+                let tracked = TransactionReader::new(reader, &transaction);
+                if input_ledger.charge_outer_restart(&tracked).is_err() {
+                    return ResolutionOutcome::new(
+                        None,
+                        transaction.into_inner().finish(),
+                        rejected_exact_targets,
+                        true,
+                        false,
+                        false,
+                    );
+                }
                 continue;
+            }
+            if !final_validate() {
+                input_ledger.release_applied_outputs();
+                return ResolutionOutcome::new(
+                    None,
+                    SignatureAdmission::NonCacheable(
+                        verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
+                    ),
+                    rejected_exact_targets,
+                    true,
+                    false,
+                    false,
+                );
             }
             if !reader.resolution_event_bridge_complete() {
                 transaction.lock().mark_untracked_backend();
             }
+            #[cfg(test)]
+            resolution_test_hooks::record_completed_outputs_at_final_fence(
+                input_ledger.applied_output_count_for_test(),
+            );
             let query = transaction.lock().query().cloned();
             let mut transaction = transaction.into_inner();
             // The decision's COMPLETE direct edge set, taken before
@@ -3453,6 +3606,18 @@ impl Engine {
                 // An observed value conflicted with the recorded baseline:
                 // state newer than the captured root entered through the
                 // mutation protocol. Retry against the new world.
+                if input_ledger.charge_outer_restart(reader).is_err() {
+                    return ResolutionOutcome::new(
+                        None,
+                        SignatureAdmission::NonCacheable(
+                            verter_audit::NonAdmissionReason::BudgetExceeded,
+                        ),
+                        rejected_exact_targets,
+                        true,
+                        false,
+                        false,
+                    );
+                }
                 continue;
             }
             let cacheable_signature = match &admission {
@@ -3538,6 +3703,7 @@ impl Engine {
                 }
             }
             if !request_local_snapshot && matches!(&admission, SignatureAdmission::Cacheable(_)) {
+                input_ledger.commit_loaded_inputs(reader);
                 if let Some(ref result) = result {
                     self.edges
                         .write()
@@ -3553,6 +3719,12 @@ impl Engine {
                 SignatureAdmission::NonCacheable(_) => resolution_test_hooks::record_return_only(),
             }
 
+            #[cfg(test)]
+            resolution_test_hooks::record_completed_outputs_at_publication(
+                input_ledger.applied_output_count_for_test(),
+            );
+            input_ledger.release_applied_outputs();
+
             return ResolutionOutcome::new(
                 result,
                 admission,
@@ -3562,19 +3734,6 @@ impl Engine {
                 reused,
             );
         }
-
-        #[cfg(test)]
-        resolution_test_hooks::record_return_only();
-        ResolutionOutcome::new(
-            last_result,
-            SignatureAdmission::NonCacheable(
-                verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
-            ),
-            last_rejected,
-            true,
-            false,
-            false,
-        )
     }
 
     fn complete_provider_context(
@@ -3598,7 +3757,8 @@ impl Engine {
             Ok(target)
                 if target == ResolveContextId::unowned()
                     && result.owner_tsconfig_path.is_none()
-                    && result.provider_target == crate::types::ProviderTarget::SourceFile =>
+                    && result.provider_target
+                        == verter_semantic::resolver_core::ProviderTarget::SourceFile =>
             {
                 Some(selected.with_external_provider_projection(result))
             }
@@ -3613,10 +3773,10 @@ impl Engine {
     pub(crate) fn resolve_import_for_project(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &crate::types::ProjectOwnership,
+        owner: &verter_semantic::resolver_core::ProjectOwnership,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
-    ) -> Option<crate::types::ResolveResult> {
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
         self.resolve_import_for_project_outcome(reader, owner, specifier, ctx)
             .into_transient_result()
     }
@@ -3624,16 +3784,21 @@ impl Engine {
     pub(crate) fn resolve_import_for_project_outcome(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &crate::types::ProjectOwnership,
+        owner: &verter_semantic::resolver_core::ProjectOwnership,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> ResolutionOutcome {
-        const MAX_WORLD_ATTEMPTS: usize = 8;
         let population = reader.resolution_population();
-        let mut last_result = None;
-        for _ in 0..MAX_WORLD_ATTEMPTS {
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
+        loop {
             let Some(captured) = self.capture_stable_resolution_world(population) else {
-                continue;
+                #[cfg(test)]
+                resolution_test_hooks::record_return_only();
+                return ResolutionOutcome::refused(
+                    None,
+                    verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
+                );
             };
             #[cfg(test)]
             resolution_test_hooks::capture_attempt_world();
@@ -3666,15 +3831,45 @@ impl Engine {
 
             let tracked = TransactionReader::new(reader, &transaction);
             let capability = TrackedResolutionCapability::new();
-            let result = captured.world.base.published.as_ref().and_then(|root| {
-                root.snapshot.resolver.resolve_for_project_tracked(
-                    &capability,
-                    &tracked,
-                    owner,
-                    specifier,
-                    ctx,
-                )
-            });
+            let driven = captured
+                .world
+                .base
+                .published
+                .as_ref()
+                .map_or(Ok(None), |root| {
+                    crate::resolver::resolve_for_project_tracked(
+                        &root.snapshot.resolver,
+                        &capability,
+                        &tracked,
+                        &mut input_ledger,
+                        owner,
+                        specifier,
+                        ctx,
+                    )
+                });
+            let result = match driven {
+                Ok(result) => result,
+                Err(_) => {
+                    transaction.lock().mark_incomplete_provenance();
+                    #[cfg(test)]
+                    resolution_test_hooks::record_return_only();
+                    return ResolutionOutcome::new(
+                        None,
+                        transaction.into_inner().finish(),
+                        Vec::new(),
+                        true,
+                        false,
+                        false,
+                    );
+                }
+            };
+            let terminal_admission = transaction.lock().input_resolution_terminal_admission();
+            if let Some(admission) = terminal_admission {
+                #[cfg(test)]
+                resolution_test_hooks::record_return_only();
+                input_ledger.release_applied_outputs();
+                return ResolutionOutcome::new(result, admission, Vec::new(), true, false, false);
+            }
             let complete_context = Self::complete_provider_context(
                 captured.world.base.as_ref(),
                 selected.as_ref().map(|(_, context)| context.clone()),
@@ -3685,23 +3880,30 @@ impl Engine {
             if let (Some((project_identity, _)), Some(complete_context)) =
                 (selected, complete_context)
             {
-                transaction
-                    .lock()
-                    .set_query(ResolutionQueryKey::explicit_project(
-                        project_identity,
-                        specifier,
-                        ctx,
-                        complete_context,
-                        population,
-                    ));
+                transaction.lock().set_query(ResolutionQueryKey::explicit(
+                    project_identity,
+                    specifier,
+                    ctx,
+                    complete_context,
+                    population,
+                ));
             }
-            last_result = result.clone();
-
             #[cfg(test)]
             resolution_test_hooks::fire(
                 resolution_test_hooks::ResolutionPhase::PreAdmissionValidation,
             );
             if !self.resolution_world_still_current(&captured) {
+                let tracked = TransactionReader::new(reader, &transaction);
+                if input_ledger.charge_outer_restart(&tracked).is_err() {
+                    return ResolutionOutcome::new(
+                        None,
+                        transaction.into_inner().finish(),
+                        Vec::new(),
+                        true,
+                        false,
+                        false,
+                    );
+                }
                 continue;
             }
             #[cfg(test)]
@@ -3713,11 +3915,26 @@ impl Engine {
                 .as_ref()
                 .map(|domain| domain.write.lock());
             if !self.resolution_world_still_current(&captured) {
+                let tracked = TransactionReader::new(reader, &transaction);
+                if input_ledger.charge_outer_restart(&tracked).is_err() {
+                    return ResolutionOutcome::new(
+                        None,
+                        transaction.into_inner().finish(),
+                        Vec::new(),
+                        true,
+                        false,
+                        false,
+                    );
+                }
                 continue;
             }
             if !reader.resolution_event_bridge_complete() {
                 transaction.lock().mark_untracked_backend();
             }
+            #[cfg(test)]
+            resolution_test_hooks::record_completed_outputs_at_final_fence(
+                input_ledger.applied_output_count_for_test(),
+            );
             let mut admission = transaction.into_inner().finish();
             if matches!(
                 &admission,
@@ -3735,21 +3952,12 @@ impl Engine {
                 }
                 SignatureAdmission::NonCacheable(_) => resolution_test_hooks::record_return_only(),
             }
+            if matches!(&admission, SignatureAdmission::Cacheable(_)) {
+                input_ledger.commit_loaded_inputs(reader);
+            }
+            input_ledger.release_applied_outputs();
             return ResolutionOutcome::new(result, admission, Vec::new(), true, false, false);
         }
-
-        #[cfg(test)]
-        resolution_test_hooks::record_return_only();
-        ResolutionOutcome::new(
-            last_result,
-            SignatureAdmission::NonCacheable(
-                verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
-            ),
-            Vec::new(),
-            true,
-            false,
-            false,
-        )
     }
 
     /// Whether `canonical_id` (or its realpath) is claimed by any
@@ -3825,10 +4033,10 @@ impl Engine {
             .snapshot
             .resolver
             .preferred_specifier_candidates(importer_id, target_id)?;
-        let normalized_target = crate::resolver::normalize_canonical_id(target_id);
-        let context = crate::types::ResolutionContext {
-            phase: crate::types::ResolvePhase::CodegenBlocker,
-            kind: crate::types::ResolveRequestKind::EsmImport,
+        let normalized_target = verter_semantic::resolver_core::normalize_canonical_id(target_id);
+        let context = verter_semantic::resolver_core::ResolutionContext {
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         };
         let mut best: Option<String> = None;
         for candidate in candidates {
@@ -3840,7 +4048,8 @@ impl Engine {
                 context,
             );
             if outcome.into_transient_result().is_some_and(|result| {
-                crate::resolver::normalize_canonical_id(&result.source_id) == normalized_target
+                verter_semantic::resolver_core::normalize_canonical_id(&result.source_id)
+                    == normalized_target
             }) {
                 match &best {
                     Some(current) if current.len() <= candidate.len() => {}
@@ -3863,8 +4072,9 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
         captured_world: &Arc<CapturedResolutionWorld>,
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
     ) -> ResolutionOutcome {
         let population = captured_world.population;
         let transaction = Mutex::new(ResolutionTransaction::new(Arc::clone(captured_world)));
@@ -3882,17 +4092,46 @@ impl Engine {
         }
         let tracked = TransactionReader::new(reader, &transaction);
         let capability = TrackedResolutionCapability::new();
-        let result = captured_world.base.published.as_ref().and_then(|root| {
-            let request = crate::types::ResolveRequest {
-                importer_id: importer_id.to_string(),
-                specifier: specifier.to_string(),
-                kind: ctx.kind,
-                phase: ctx.phase,
-            };
-            root.snapshot
-                .resolver
-                .resolve_tracked(&capability, &tracked, &request)
-        });
+        let driven = captured_world
+            .base
+            .published
+            .as_ref()
+            .map_or(Ok(None), |root| {
+                let request = verter_semantic::resolver_core::ResolveRequest {
+                    importer_id: importer_id.to_string(),
+                    specifier: specifier.to_string(),
+                    kind: ctx.kind,
+                    phase: ctx.phase,
+                };
+                crate::resolver::resolve_tracked(
+                    &root.snapshot.resolver,
+                    &capability,
+                    &tracked,
+                    input_ledger,
+                    &request,
+                )
+            });
+        let result = match driven {
+            Ok(result) => result,
+            Err(_) => {
+                transaction.lock().mark_incomplete_provenance();
+                if !reader.resolution_event_bridge_complete() {
+                    transaction.lock().mark_untracked_backend();
+                }
+                return ResolutionOutcome::new(
+                    None,
+                    transaction.into_inner().finish(),
+                    Vec::new(),
+                    true,
+                    false,
+                    false,
+                );
+            }
+        };
+        let terminal_admission = transaction.lock().input_resolution_terminal_admission();
+        if let Some(admission) = terminal_admission {
+            return ResolutionOutcome::new(result, admission, Vec::new(), true, false, false);
+        }
         let complete_context = Self::complete_provider_context(
             captured_world.base.as_ref(),
             selected_context,
@@ -3931,7 +4170,7 @@ impl Engine {
         importer_id: &str,
         specifier: &str,
         target_id: &str,
-        ctx: crate::types::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
         captured_world: &Arc<CapturedResolutionWorld>,
     ) -> ResolutionOutcome {
         let population = captured_world.population;
@@ -3968,8 +4207,8 @@ impl Engine {
                     source_id: target_id.to_owned(),
                     provider_id: target_id.to_owned(),
                     provider_specifier: specifier.to_owned(),
-                    provider_target: crate::types::ProviderTarget::SourceFile,
-                    resolution_kind: crate::types::ResolutionKind::Bundler,
+                    provider_target: verter_semantic::resolver_core::ProviderTarget::SourceFile,
+                    resolution_kind: verter_semantic::resolver_core::ResolutionKind::Bundler,
                     owner_tsconfig_path: None,
                 })
             });
@@ -4014,11 +4253,12 @@ impl Engine {
     /// that. This is the discovery half of that protocol: it resolves the
     /// batch once so the caller's recorder observes every filesystem read the
     /// admitted replay will need, and deliberately discards the product.
-    pub(crate) fn observe_parsed_edge_evidence(
+    pub(crate) fn observe_parsed_edge_evidence_in_operation(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         canonical_id: &str,
         edges: &[crate::types::ParsedEdge],
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
     ) {
         let population = reader.resolution_population();
         if let Some(captured) = self.capture_resolution_world(population) {
@@ -4027,6 +4267,7 @@ impl Engine {
                 canonical_id,
                 edges,
                 &captured.world,
+                input_ledger,
             );
         }
     }
@@ -4041,10 +4282,32 @@ impl Engine {
         canonical_id: &str,
         edges: &[crate::types::ParsedEdge],
     ) {
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
+        let _ = self.record_parsed_edges_in_operation(
+            reader,
+            canonical_id,
+            edges,
+            &mut input_ledger,
+            &|| true,
+        );
+    }
+
+    pub(crate) fn record_parsed_edges_in_operation(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
+        final_validate: &dyn Fn() -> bool,
+    ) -> bool {
         crate::probe_scope!(RECORD_PARSED_EDGES);
-        for _ in 0..8 {
+        loop {
             let population = reader.resolution_population();
             let Some(captured) = self.capture_stable_resolution_world(population) else {
+                if input_ledger.charge_outer_restart(reader).is_err() {
+                    return false;
+                }
                 continue;
             };
             let Ok(inputs) = self.resolve_parsed_edge_inputs_in_world(
@@ -4052,16 +4315,24 @@ impl Engine {
                 canonical_id,
                 edges,
                 &captured.world,
+                input_ledger,
             ) else {
-                std::thread::yield_now();
-                continue;
+                return false;
             };
+
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::ParsedEdgePreCommit,
+            );
 
             // Per R4 lifecycle: replace_parsed_edges CLEARS exact_resolved +
             // exact_resolutions + lazy_resolved + semantic_transitive.
             // ambient_resolved survives. Bundler must re-call
             // set_import_dependencies after every upsert.
             let committed = self.mutate_resolution_world_if_current(&captured, |world| {
+                if !final_validate() {
+                    return (false, false);
+                }
                 let retained = {
                     let mut edges = self.edges.write();
                     edges.replace_parsed_edges(
@@ -4073,10 +4344,14 @@ impl Engine {
                     edges.exact_resolutions_for_owner(canonical_id)
                 };
                 let changed = self.replace_world_exact_resolutions(world, canonical_id, &retained);
-                ((), changed)
+                input_ledger.commit_loaded_inputs(reader);
+                (true, changed)
             });
-            if committed.is_ok() {
-                return;
+            if let Ok(committed) = committed {
+                return committed;
+            }
+            if input_ledger.charge_outer_restart(reader).is_err() {
+                return false;
             }
         }
     }
@@ -4094,9 +4369,34 @@ impl Engine {
         edges: &[crate::types::ParsedEdge],
         resolutions: Vec<crate::types::ExactResolution>,
     ) -> crate::types::ExactResolutionResult {
-        for _ in 0..8 {
+        let mut input_ledger =
+            crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
+        self.record_parsed_edges_with_exact_resolutions_in_operation(
+            reader,
+            canonical_id,
+            edges,
+            resolutions,
+            &mut input_ledger,
+            &|| true,
+        )
+        .unwrap_or_default()
+    }
+
+    pub(crate) fn record_parsed_edges_with_exact_resolutions_in_operation(
+        &self,
+        reader: &dyn crate::traits::WorkspaceRead,
+        canonical_id: &str,
+        edges: &[crate::types::ParsedEdge],
+        resolutions: Vec<crate::types::ExactResolution>,
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
+        final_validate: &dyn Fn() -> bool,
+    ) -> Option<crate::types::ExactResolutionResult> {
+        loop {
             let population = reader.resolution_population();
             let Some(captured) = self.capture_stable_resolution_world(population) else {
+                if input_ledger.charge_outer_restart(reader).is_err() {
+                    return None;
+                }
                 continue;
             };
             let Ok(inputs) = self.resolve_parsed_edge_inputs_in_world(
@@ -4104,12 +4404,20 @@ impl Engine {
                 canonical_id,
                 edges,
                 &captured.world,
+                input_ledger,
             ) else {
-                std::thread::yield_now();
-                continue;
+                return None;
             };
+
+            #[cfg(test)]
+            resolution_test_hooks::fire(
+                resolution_test_hooks::ResolutionPhase::ParsedEdgePreCommit,
+            );
             let attempt_resolutions = resolutions.clone();
             let committed = self.mutate_resolution_world_if_current(&captured, |world| {
+                if !final_validate() {
+                    return (None, false);
+                }
                 let mut edge_store = self.edges.write();
                 edge_store.replace_parsed_edges(
                     canonical_id,
@@ -4121,13 +4429,17 @@ impl Engine {
                     edge_store.replace_exact_resolutions(canonical_id, attempt_resolutions);
                 let retained = edge_store.exact_resolutions_for_owner(canonical_id);
                 let changed = self.replace_world_exact_resolutions(world, canonical_id, &retained);
-                (result, changed)
+                drop(edge_store);
+                input_ledger.commit_loaded_inputs(reader);
+                (Some(result), changed)
             });
             if let Ok(result) = committed {
                 return result;
             }
+            if input_ledger.charge_outer_restart(reader).is_err() {
+                return None;
+            }
         }
-        crate::types::ExactResolutionResult::default()
     }
 
     /// Shared pre-lock resolution work for the parsed-edge recorders:
@@ -4140,6 +4452,7 @@ impl Engine {
         canonical_id: &str,
         edges: &[crate::types::ParsedEdge],
         captured_world: &Arc<CapturedResolutionWorld>,
+        input_ledger: &mut crate::resolver::InputResolutionLedger,
     ) -> Result<ParsedEdgeInputs, crate::resolution_currency::ResolutionPublicationRefusal> {
         let mut parsed_resolved: BTreeSet<String> = BTreeSet::new();
         let mut bare_specifiers: Vec<(String, ResolveRequestKind)> = Vec::new();
@@ -4148,8 +4461,8 @@ impl Engine {
         for edge in edges {
             match edge {
                 crate::types::ParsedEdge::Relative { specifier, kind } => {
-                    let ctx = crate::types::ResolutionContext {
-                        phase: crate::types::ResolvePhase::CodegenBlocker,
+                    let ctx = verter_semantic::resolver_core::ResolutionContext {
+                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
                         kind: *kind,
                     };
                     let outcome = self.resolve_parsed_edge_in_world(
@@ -4158,6 +4471,7 @@ impl Engine {
                         specifier,
                         ctx,
                         captured_world,
+                        input_ledger,
                     );
                     match outcome.into_publication() {
                         crate::ResolutionPublication::Admitted(admitted)
@@ -4188,9 +4502,10 @@ impl Engine {
                             canonical_id,
                             specifier,
                             path,
-                            crate::types::ResolutionContext {
-                                phase: crate::types::ResolvePhase::CodegenBlocker,
-                                kind: crate::types::ResolveRequestKind::SfcSrcAttr,
+                            verter_semantic::resolver_core::ResolutionContext {
+                                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                                kind:
+                                    verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
                             },
                             captured_world,
                         );
@@ -4206,9 +4521,9 @@ impl Engine {
                             }
                         }
                     } else {
-                        let ctx = crate::types::ResolutionContext {
-                            phase: crate::types::ResolvePhase::CodegenBlocker,
-                            kind: crate::types::ResolveRequestKind::SfcSrcAttr,
+                        let ctx = verter_semantic::resolver_core::ResolutionContext {
+                            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                            kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
                         };
                         let outcome = self.resolve_parsed_edge_in_world(
                             reader,
@@ -4216,6 +4531,7 @@ impl Engine {
                             specifier,
                             ctx,
                             captured_world,
+                            input_ledger,
                         );
                         match outcome.into_publication() {
                             crate::ResolutionPublication::Admitted(admitted) => {
@@ -4303,11 +4619,11 @@ impl Engine {
                 .projects
                 .iter()
                 .find(|p| p.id == pid)
-                .map(|p| crate::project_key::ProjectStableKey::from_project(p, &p.workspace_root))
+                .map(|p| crate::project_key::project_stable_key_from_project(p, &p.workspace_root))
                 .ok_or(AmbientLibError::UnknownOrAmbiguousProject)?,
             None if published.snapshot.projects.len() == 1 => {
                 let p = &published.snapshot.projects[0];
-                crate::project_key::ProjectStableKey::from_project(p, &p.workspace_root)
+                crate::project_key::project_stable_key_from_project(p, &p.workspace_root)
             }
             None => return Err(AmbientLibError::UnknownOrAmbiguousProject),
         };
@@ -4352,7 +4668,7 @@ impl Engine {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn unregister_ambient_lib(
         &self,
-        stable_key: crate::project_key::ProjectStableKey,
+        stable_key: verter_semantic::resolver_core::ProjectStableKey,
         canonical_id: &str,
     ) -> Result<(), crate::ambient_lib::AmbientLibError> {
         use crate::ambient_lib::{cas_unregister, normalize_canonical_id};
@@ -4374,7 +4690,7 @@ impl Engine {
     pub(crate) fn read_ambient_lib(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        stable_key: crate::project_key::ProjectStableKey,
+        stable_key: verter_semantic::resolver_core::ProjectStableKey,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
         let canonical = crate::ambient_lib::normalize_canonical_id(canonical_id);
@@ -4395,9 +4711,9 @@ impl Engine {
     /// `lib_order`) that exposes the symbol.
     pub(crate) fn lookup_ambient_symbol(
         &self,
-        consumer_project: crate::project_key::ProjectStableKey,
+        consumer_project: verter_semantic::resolver_core::ProjectStableKey,
         symbol: &str,
-    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
+    ) -> Option<verter_semantic::resolver_core::AmbientSymbolHit> {
         let ambient = self.ambient_libs.load_full();
         let p = ambient.by_project.get(&consumer_project)?;
         let candidates = p.symbol_index.get(symbol)?;
@@ -4406,7 +4722,7 @@ impl Engine {
             consumer_project,
             canonical_id.as_ref(),
         );
-        Some(crate::ambient_lib::AmbientSymbolHit {
+        Some(verter_semantic::resolver_core::AmbientSymbolHit {
             project: consumer_project,
             canonical_id,
             virtual_id,
@@ -4418,14 +4734,14 @@ impl Engine {
     pub(crate) fn project_stable_key(
         &self,
         project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<crate::project_key::ProjectStableKey> {
+    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
         let published = self.load_published()?;
         published
             .snapshot
             .projects
             .iter()
             .find(|p| p.id == project_id)
-            .map(|p| crate::project_key::ProjectStableKey::from_project(p, &p.workspace_root))
+            .map(|p| crate::project_key::project_stable_key_from_project(p, &p.workspace_root))
     }
 
     /// Lock-free read of the ambient lib registry — used by validators.
@@ -4487,7 +4803,7 @@ fn workspace_default_export_conditions() -> ConditionSet {
 ///
 /// Producer-side composition: reads `compiler_options` directly from each
 /// `Configured` project payload; for `Fallback` projects, uses
-/// `IdeProjectConfig::new(root, workspace_root, None)` so the resulting
+/// `crate::resolver::ide_project_config(root, workspace_root, None)` so the resulting
 /// `project_identity` distinguishes fallback identities (a fallback
 /// project at root `/A` is not the same identity as a configured project
 /// at root `/A`).
@@ -4566,13 +4882,14 @@ fn compose_env_hash_tables_from_configs(
             ProjectPayload::Fallback { .. } => None,
         };
         let selected = configs.iter().find(|config| {
-            crate::resolver::normalize_canonical_id(&config.root) == project.root.as_str()
-                && crate::resolver::normalize_canonical_id(&config.workspace_root)
+            verter_semantic::resolver_core::normalize_canonical_id(&config.root)
+                == project.root.as_str()
+                && verter_semantic::resolver_core::normalize_canonical_id(&config.workspace_root)
                     == project.workspace_root.as_str()
                 && config
                     .tsconfig_path
                     .as_deref()
-                    .map(crate::resolver::normalize_canonical_id)
+                    .map(verter_semantic::resolver_core::normalize_canonical_id)
                     .as_deref()
                     == expected_tsconfig
         });
@@ -4611,7 +4928,7 @@ fn ide_project_config_from_ownership(project: &OwnershipProject) -> IdeProjectCo
             workspace_aliases,
             membership,
         } => {
-            let mut config = IdeProjectConfig::new(
+            let mut config = crate::resolver::ide_project_config(
                 project.root.as_str().to_string(),
                 project.workspace_root.as_str().to_string(),
                 Some(tsconfig_path.as_str().to_string()),
@@ -4622,7 +4939,7 @@ fn ide_project_config_from_ownership(project: &OwnershipProject) -> IdeProjectCo
             config.membership = membership.clone();
             config
         }
-        ProjectPayload::Fallback { .. } => IdeProjectConfig::new(
+        ProjectPayload::Fallback { .. } => crate::resolver::ide_project_config(
             project.root.as_str().to_string(),
             project.workspace_root.as_str().to_string(),
             None,
@@ -4690,7 +5007,7 @@ fn compute_workspace_default_env_hash_array(extensions: &[String]) -> ProjectEnv
         export_conditions: &export_conditions,
         ambient_corpus_fingerprint: WORKSPACE_AMBIENT_FINGERPRINT,
     };
-    let config = IdeProjectConfig::new(String::new(), String::new(), None);
+    let config = crate::resolver::ide_project_config(String::new(), String::new(), None);
     [
         config.parse_env_hash(&inputs),
         config.resolve_env_hash(&inputs),
@@ -4714,7 +5031,7 @@ pub(crate) fn workspace_default_project_identity_hash_for_engine(_engine: &Engin
     // root) without colliding across workspaces.
     static DEFAULT_PROJECT_IDENTITY: OnceLock<Hash16> = OnceLock::new();
     *DEFAULT_PROJECT_IDENTITY.get_or_init(|| {
-        IdeProjectConfig::new(String::new(), String::new(), None).project_identity()
+        crate::resolver::ide_project_config(String::new(), String::new(), None).project_identity()
     })
 }
 

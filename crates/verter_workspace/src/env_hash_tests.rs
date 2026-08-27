@@ -15,13 +15,11 @@
 
 use std::sync::OnceLock;
 
-use super::EnvHashInputs;
+use super::{EnvHashInputs, IdeProjectConfigEnvHash};
 use crate::canonical_path::CanonicalPath;
-use crate::membership::ConfiguredMembership;
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
-use crate::resolver::{
-    IdeProjectCompilerOptions, IdeProjectConfig, ProjectMembership, WorkspaceAlias,
-};
+use crate::ProjectMembership;
+use verter_semantic::resolver_core::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
 
 /// Baseline `exports`/`imports` condition set, materialised as a `'static`
 /// borrow so the baseline `EnvHashInputs` can carry `&'static ConditionSet`.
@@ -32,7 +30,7 @@ fn baseline_conditions() -> &'static ConditionSet {
 
 /// Helper to construct a baseline `(IdeProjectConfig, EnvHashInputs)` pair.
 fn baseline() -> (IdeProjectConfig, EnvHashInputs<'static>) {
-    let mut cfg = IdeProjectConfig::new(
+    let mut cfg = crate::resolver::ide_project_config(
         "/ws/proj".to_string(),
         "/ws".to_string(),
         Some("/ws/proj/tsconfig.json".to_string()),
@@ -416,7 +414,9 @@ fn project_identity_changes_when_membership_changes() {
     let (cfg, _) = baseline();
     let h0 = cfg.project_identity();
     let mut cfg2 = cfg.clone();
-    cfg2.membership = ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/ws/proj"));
+    cfg2.membership = crate::membership::configured_membership_match_all_under_root(
+        &CanonicalPath::new("/ws/proj"),
+    );
     let h1 = cfg2.project_identity();
     assert_ne!(h0, h1, "membership change MUST change project_identity");
 }

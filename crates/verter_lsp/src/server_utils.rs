@@ -160,7 +160,7 @@ pub(super) fn build_workspace_components(
         // strip: `src/components/MyButton.vue` → `MyButton`,
         // `src/components/MyButton.svelte` → `MyButton`.
         let filename = file_id.rsplit('/').next().unwrap_or(file_id);
-        let stem = verter_workspace::strip_carrier_extension(filename);
+        let stem = verter_semantic::resolver_core::strip_carrier_extension(filename);
         if stem.is_empty() {
             continue;
         }
@@ -273,7 +273,7 @@ pub(crate) fn quote_wrapped_specifier(raw_text: &str, specifier: &str) -> String
 }
 
 pub(super) fn provider_ide_path_for_source(
-    resolver: &crate::project_resolver::NativeProjectResolver,
+    resolver: &verter_semantic::resolver_core::ModuleResolverCore,
     canonical_id: &str,
     is_jsx: bool,
 ) -> Option<String> {
@@ -282,14 +282,14 @@ pub(super) fn provider_ide_path_for_source(
 
 #[cfg(test)]
 pub(super) fn provider_api_path_for_source(
-    resolver: &crate::project_resolver::NativeProjectResolver,
+    resolver: &verter_semantic::resolver_core::ModuleResolverCore,
     canonical_id: &str,
 ) -> Option<String> {
     resolver.provider_id_for_source(canonical_id)
 }
 
 pub(super) fn source_id_from_provider_carrier_path(
-    resolver: &crate::project_resolver::NativeProjectResolver,
+    resolver: &verter_semantic::resolver_core::ModuleResolverCore,
     host: &verter_session::VerterHost,
     provider_path: &str,
 ) -> Option<String> {
@@ -302,7 +302,9 @@ pub(super) fn source_id_from_provider_carrier_path(
     // `store.svelte.ts` → `store.svelte` even when no `store.svelte` component
     // was ever compiled. Without this guard a real `store.svelte.ts` rune module
     // (or a real `weird.vue.tsx` on disk) reverse-maps to a phantom carrier.
-    if verter_workspace::path_is_carrier(&candidate) && host.get_source(&candidate).is_none() {
+    if verter_semantic::resolver_core::path_is_carrier(&candidate)
+        && host.get_source(&candidate).is_none()
+    {
         // The stripped carrier candidate is a phantom. If the ORIGINAL provider
         // path is itself a real owned source (the `.svelte.ts`/`.svelte.js` rune
         // module case, or any owned `{name}.{carrier-ext}.{x}` file with no
@@ -310,7 +312,7 @@ pub(super) fn source_id_from_provider_carrier_path(
         // We consult ownership + host directly here rather than re-stripping
         // through `source_id_from_provider_id` (which would re-derive the same
         // phantom carrier).
-        let normalized = verter_workspace::resolver::normalize_canonical_id(provider_path);
+        let normalized = verter_semantic::resolver_core::normalize_canonical_id(provider_path);
         if host.get_source(&normalized).is_some()
             && resolver.nearest_config_for_path(&normalized).is_some()
         {
@@ -404,8 +406,8 @@ impl verter_workspace::WorkspaceRead for LspProjectResolverReader<'_> {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_workspace::ResolutionContext,
-    ) -> Option<verter_workspace::ResolveResult> {
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
         self.documents
             .host()
             .workspace_read()
@@ -416,7 +418,7 @@ impl verter_workspace::WorkspaceRead for LspProjectResolverReader<'_> {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_workspace::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         self.documents
             .host()
@@ -429,7 +431,7 @@ impl verter_workspace::WorkspaceRead for LspProjectResolverReader<'_> {
         published: &Arc<verter_workspace::PublishedRoot>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_workspace::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         self.documents
             .host()
@@ -502,7 +504,7 @@ fn resolve_import_from_published_snapshot(
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     specifier: &str,
-    context: verter_workspace::ResolutionContext,
+    context: verter_semantic::resolver_core::ResolutionContext,
 ) -> verter_workspace::ResolutionPublication {
     let outcome = match resolution_view {
         Some(view) => verter_workspace::WorkspaceRead::resolve_import_at_published(
@@ -518,7 +520,7 @@ fn resolve_import_from_published_snapshot(
 }
 
 pub(crate) fn compute_specifier_replacements(
-    _resolver: &crate::project_resolver::NativeProjectResolver,
+    _resolver: &verter_semantic::resolver_core::ModuleResolverCore,
     resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
@@ -540,9 +542,9 @@ pub(crate) fn compute_specifier_replacements(
             reader,
             importer_id,
             specifier,
-            verter_workspace::ResolutionContext {
+            verter_semantic::resolver_core::ResolutionContext {
                 kind: module_reference_request_kind(reference),
-                phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
             },
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
@@ -856,7 +858,7 @@ pub(crate) async fn sync_self_file_shadow_state(
 }
 
 pub(crate) fn rewrite_non_carrier_source_with_resolver(
-    resolver: &crate::project_resolver::NativeProjectResolver,
+    resolver: &verter_semantic::resolver_core::ModuleResolverCore,
     resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
@@ -921,12 +923,12 @@ pub(crate) fn prepare_non_carrier_provider_sync(
 }
 
 pub(crate) fn collect_resolved_provider_dependencies(
-    _resolver: &crate::project_resolver::NativeProjectResolver,
+    _resolver: &verter_semantic::resolver_core::ModuleResolverCore,
     resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_session::ScriptModuleReference],
-) -> Option<Vec<crate::project_resolver::ResolveResult>> {
+) -> Option<Vec<verter_semantic::resolver_core::ResolveResult>> {
     let mut seen = HashSet::new();
     let mut resolved = Vec::new();
 
@@ -940,9 +942,9 @@ pub(crate) fn collect_resolved_provider_dependencies(
                         reader,
                         importer_id,
                         specifier,
-                        verter_workspace::ResolutionContext {
+                        verter_semantic::resolver_core::ResolutionContext {
                             kind,
-                            phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                            phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
                         },
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -965,9 +967,9 @@ pub(crate) fn collect_resolved_provider_dependencies(
                         reader,
                         importer_id,
                         specifier,
-                        verter_workspace::ResolutionContext {
+                        verter_semantic::resolver_core::ResolutionContext {
                             kind,
-                            phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                            phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
                         },
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -991,12 +993,12 @@ pub(crate) fn collect_resolved_provider_dependencies(
 }
 
 pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
-    _resolver: &crate::project_resolver::NativeProjectResolver,
+    _resolver: &verter_semantic::resolver_core::ModuleResolverCore,
     resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
-) -> Option<Vec<crate::project_resolver::ResolveResult>> {
+) -> Option<Vec<verter_semantic::resolver_core::ResolveResult>> {
     let mut seen = HashSet::new();
     let mut resolved = Vec::new();
 
@@ -1018,9 +1020,9 @@ pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
                 reader,
                 importer_id,
                 specifier,
-                verter_workspace::ResolutionContext {
+                verter_semantic::resolver_core::ResolutionContext {
                     kind: analyzed_module_reference_request_kind(reference),
-                    phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                    phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
                 },
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -1042,25 +1044,25 @@ pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
 
 pub(crate) fn module_reference_request_kind(
     reference: &verter_session::ScriptModuleReference,
-) -> crate::project_resolver::ResolveRequestKind {
+) -> verter_semantic::resolver_core::ResolveRequestKind {
     if reference.is_type_only {
-        crate::project_resolver::ResolveRequestKind::TypeImport
+        verter_semantic::resolver_core::ResolveRequestKind::TypeImport
     } else if reference.semantics == verter_semantic::analysis::ModuleReferenceSemantics::Require {
-        crate::project_resolver::ResolveRequestKind::RequireCall
+        verter_semantic::resolver_core::ResolveRequestKind::RequireCall
     } else {
-        crate::project_resolver::ResolveRequestKind::EsmImport
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport
     }
 }
 
 pub(super) fn analyzed_module_reference_request_kind(
     reference: &verter_semantic::analysis::AnalyzedModuleReference,
-) -> crate::project_resolver::ResolveRequestKind {
+) -> verter_semantic::resolver_core::ResolveRequestKind {
     if reference.is_type_only {
-        crate::project_resolver::ResolveRequestKind::TypeImport
+        verter_semantic::resolver_core::ResolveRequestKind::TypeImport
     } else if reference.semantics == verter_semantic::analysis::ModuleReferenceSemantics::Require {
-        crate::project_resolver::ResolveRequestKind::RequireCall
+        verter_semantic::resolver_core::ResolveRequestKind::RequireCall
     } else {
-        crate::project_resolver::ResolveRequestKind::EsmImport
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport
     }
 }
 
@@ -1076,7 +1078,7 @@ pub(super) fn import_resolved_matches_target(resolved: &str, target: &str) -> bo
     }
     // Skip if resolved already has a carrier extension — no fuzzy matching
     // needed.
-    if verter_workspace::path_is_carrier(resolved) {
+    if verter_semantic::resolver_core::path_is_carrier(resolved) {
         return false;
     }
     let last_segment = resolved.rsplit('/').next().filter(|s| !s.is_empty());
@@ -1486,9 +1488,9 @@ pub(super) fn resolve_import_specifier_standalone(
     host.resolve_for_persistent_state(
         parent_canonical_id,
         specifier,
-        verter_workspace::ResolutionContext {
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolutionContext {
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         },
     )
     .map_result(|resolved| resolved.source_id)
@@ -1638,9 +1640,9 @@ pub(super) fn collect_priority_carrier_public_api_targets_from_module_references
                 reader,
                 importer_id,
                 &specifier,
-                verter_workspace::ResolutionContext {
+                verter_semantic::resolver_core::ResolutionContext {
                     kind: analyzed_module_reference_request_kind(reference),
-                    phase: crate::project_resolver::ResolvePhase::ProviderGraph,
+                    phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
                 },
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -1651,7 +1653,8 @@ pub(super) fn collect_priority_carrier_public_api_targets_from_module_references
             let Some(resolved) = resolved else {
                 continue;
             };
-            if resolved.provider_target == crate::project_resolver::ProviderTarget::CarrierPublicApi
+            if resolved.provider_target
+                == verter_semantic::resolver_core::ProviderTarget::CarrierPublicApi
                 && seen.insert(resolved.source_id.clone())
             {
                 ids.push(resolved.source_id);

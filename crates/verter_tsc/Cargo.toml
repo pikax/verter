@@ -28,6 +28,7 @@ test-fake-engine = ["verter_tsgo_api/test-fake-engine"]
 verter_debug_assert = { workspace = true }
 verter_compiler = { path = "../verter_compiler" }
 verter_session = { path = "../verter_session" }
+verter_semantic = { path = "../verter_semantic" }
 verter_workspace = { path = "../verter_workspace" }
 # In-memory tsgo `--api` typecheck backend (the `--noEmit` path).
 verter_tsgo_api = { path = "../verter_tsgo_api" }

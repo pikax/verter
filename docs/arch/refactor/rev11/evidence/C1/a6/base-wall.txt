@@ -1,0 +1,121 @@
+## base disabled arm: 1b43954cea45cbbec13735f0004bdb6e505104fb8a57f9eb8f2aaac81fadc56c  /tmp/c1-a6/base/attribution_baseline
+### invocation 1
+corpus: 41 files (40 components + 1 shared module), runs: 30, attribution: OFF
+warmup resolved 40/40 components
+wall_median_ms	91.48
+wall_min_ms	87.65
+files	40
+runs	30
+attribution	0
+
+attribution feature is OFF — no counter table exists in this build.
+This arm measures the disabled-instrumentation cost; rebuild with
+`--features attribution` for the dataset.
+        3.59 real         4.63 user         0.69 sys
+            77299712  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                9368  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              192972  involuntary context switches
+         50475713889  instructions retired
+         18234098505  cycles elapsed
+            66109968  peak memory footprint
+### invocation 2
+corpus: 41 files (40 components + 1 shared module), runs: 30, attribution: OFF
+warmup resolved 40/40 components
+wall_median_ms	91.59
+wall_min_ms	88.06
+files	40
+runs	30
+attribution	0
+
+attribution feature is OFF — no counter table exists in this build.
+This arm measures the disabled-instrumentation cost; rebuild with
+`--features attribution` for the dataset.
+        2.96 real         4.73 user         0.70 sys
+            75939840  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                9292  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              190263  involuntary context switches
+         50660891982  instructions retired
+         18536294612  cycles elapsed
+            64733688  peak memory footprint
+### invocation 3
+corpus: 41 files (40 components + 1 shared module), runs: 30, attribution: OFF
+warmup resolved 40/40 components
+wall_median_ms	90.81
+wall_min_ms	87.82
+files	40
+runs	30
+attribution	0
+
+attribution feature is OFF — no counter table exists in this build.
+This arm measures the disabled-instrumentation cost; rebuild with
+`--features attribution` for the dataset.
+        2.88 real         4.66 user         0.69 sys
+            75890688  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                9299  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              199217  involuntary context switches
+         50714277447  instructions retired
+         18277606350  cycles elapsed
+            64700944  peak memory footprint
+### invocation 4
+corpus: 41 files (40 components + 1 shared module), runs: 30, attribution: OFF
+warmup resolved 40/40 components
+wall_median_ms	90.93
+wall_min_ms	86.87
+files	40
+runs	30
+attribution	0
+
+attribution feature is OFF — no counter table exists in this build.
+This arm measures the disabled-instrumentation cost; rebuild with
+`--features attribution` for the dataset.
+        2.91 real         4.72 user         0.72 sys
+            76234752  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                9278  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              190953  involuntary context switches
+         50622969145  instructions retired
+         18420776236  cycles elapsed
+            65028600  peak memory footprint

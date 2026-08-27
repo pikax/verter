@@ -301,7 +301,7 @@ impl MetaProject {
     /// Configure project-scoped path alias resolution.
     pub fn configure_projects(
         &self,
-        projects: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
+        projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
         // No overlay gate — base operations go directly to host.
@@ -1258,3 +1258,7 @@ mod prepared_surface_intersection_tests;
 #[cfg(test)]
 #[path = "meta_batch_fixed_view_tests.rs"]
 mod meta_batch_fixed_view_tests;
+
+#[cfg(test)]
+#[path = "lifecycle_answer_equivalence_tests.rs"]
+mod lifecycle_answer_equivalence_tests;

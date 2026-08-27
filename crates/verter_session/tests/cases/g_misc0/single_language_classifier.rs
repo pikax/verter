@@ -60,7 +60,6 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
     // Workspace resolver `.vue`-aware routing (resolution data, not
     // classification).
-    "crates/verter_workspace/src/resolver.rs",
     // LSP / MCP / tooling feature files (frozen here so no NEW file grows
     // a literal). The LSP feature / server routing files and the MCP tool
     // surface were de-Vue-gated (carrier routing is carrier-generic, pinned

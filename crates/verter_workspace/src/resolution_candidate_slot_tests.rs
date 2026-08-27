@@ -18,13 +18,12 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use super::Engine;
-use crate::resolution_currency::{PathProbe, ResolutionPopulation};
-use crate::resolver::normalize_canonical_id;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::{
-    ExactResolution, ExactResolutionResult, ParsedEdge, ResolutionContext, ResolvePhase,
-    ResolveRequestKind,
+use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
+use verter_semantic::resolver_core::{
+    normalize_canonical_id, AttemptFailure, PathProbe, ResolutionPopulation,
 };
+use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 const CONTEXT: ResolutionContext = ResolutionContext {
     phase: ResolvePhase::ProviderGraph,
@@ -65,6 +64,21 @@ impl SlotReader {
 }
 
 impl WorkspaceRead for SlotReader {
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
+        crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<crate::resolver::LoadedResolutionInputBatch, AttemptFailure> {
+        crate::resolver::load_workspace_inputs_for_test(self, reservation)
+    }
+
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.files
             .read()
@@ -154,9 +168,9 @@ fn engine_for(root: &str) -> Engine {
             extensions: vec![".ts".to_string()],
             workspace_root: root.to_string(),
             workspace_aliases: Vec::new(),
-            compiler_options: crate::resolver::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
             references: Vec::new(),
-            membership: crate::ConfiguredMembership::match_all_under_root(
+            membership: crate::membership::configured_membership_match_all_under_root(
                 &crate::CanonicalPath::new(root),
             ),
         },

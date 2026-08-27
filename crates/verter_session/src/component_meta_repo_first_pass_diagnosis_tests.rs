@@ -43,9 +43,9 @@ fn build_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
             extensions: vec![],
             workspace_root: "/workspace".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace"),
             ),
         },
@@ -57,13 +57,11 @@ fn build_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
     }
     let ws_access: Arc<dyn WorkspaceAccess> = workspace;
     let host = VerterHost::new(HostConfig::default(), ws_access);
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     Arc::new(host)
 }
 

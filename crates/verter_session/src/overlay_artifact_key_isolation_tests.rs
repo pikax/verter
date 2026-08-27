@@ -63,13 +63,11 @@ const HELPER_SOURCE: &str = "export const helper = 1;\n";
 
 fn host_with_owner() -> (Arc<VerterHost>, [u8; 16]) {
     let host = VerterHost::new_standalone(HostConfig::default());
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let _ = host
         .upsert(UpsertRequest {
             canonical_id: Some("/workspace/owner.ts".to_string()),
@@ -85,9 +83,9 @@ fn host_with_owner() -> (Arc<VerterHost>, [u8; 16]) {
         .resolve_for_persistent_state(
             "/workspace/owner.ts",
             "./helper",
-            verter_workspace::ResolutionContext {
-                phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                kind: verter_workspace::ResolveRequestKind::EsmImport,
+            verter_semantic::resolver_core::ResolutionContext {
+                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             },
         )
     {

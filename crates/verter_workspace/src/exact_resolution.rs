@@ -10,7 +10,7 @@
 //! pattern). Tests MUST cover the new class symmetrically: write/replace,
 //! query (canonical + stem if applicable), `remove_file`, and
 //! `replace_exact_resolutions` interaction. Adding new dep types into
-//! `lazy_resolved` or any other catch-all class is forbidden — the F1.5
+//! `lazy_resolved` or any other catch-all class is forbidden — the
 //! latent defect (ambient deps silently dropped on parse re-record) was
 //! caused by exactly this kind of routing.
 
@@ -18,9 +18,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 
 use crate::path_matches_prefix;
-use crate::types::{
-    ExactResolution, ExactResolutionResult, ResolutionContext, ResolvePhase, ResolveRequestKind,
-};
+use crate::types::{ExactResolution, ExactResolutionResult};
+use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 /// Coherent per-owner dependency state. Each class is owned by exactly one
 /// kind of writer event; the canonical reverse axis is maintained via
@@ -39,17 +38,17 @@ use crate::types::{
 /// - `parsed_resolved`: replaced wholesale by every `record_parsed_edges`.
 /// - `parsed_unresolved_relatives`: PERMANENT parser source-of-truth.
 ///   Replaced wholesale by every `record_parsed_edges`. **Never destroyed by
-///   exact-resolution writers** (F18). The set of "active" unresolved stems
+///   exact-resolution writers**. The set of "active" unresolved stems
 ///   feeding `reverse_deps_by_stem` is computed as `parsed_unresolved_relatives
 ///   \ entries dampened by an exact_resolutions row with phase=CodegenBlocker
 ///   AND matching kind AND resolved_canonical_id.is_some()`.
 /// - `exact_resolved`: replaced wholesale by `replace_exact_resolutions`.
 ///   **CLEARED by `record_parsed_edges`** (matches host_upsert.rs:170 which
-///   clears `cc.import_routes` on every upsert — closes F11).
+///   clears `cc.import_routes` on every upsert).
 /// - `lazy_resolved`: cleared by `record_parsed_edges` and re-accumulated
 ///   on subsequent bare-import resolution.
 /// - `ambient_resolved`: **NOT cleared by `record_parsed_edges`** (closes
-///   F1.5 latent defect — ambient resolution is bare-name-driven, not parsed
+///   ambient-dependency defect — ambient resolution is bare-name-driven, not parsed
 ///   from imports). Cleared only on `remove_file` and explicit
 ///   `replace_ambient_resolved`.
 /// - `semantic_transitive`: **CLEARED by `record_parsed_edges`** (matches
@@ -228,7 +227,7 @@ impl EdgeStore {
     /// set is recomputed AFTER the exact mutation; `reverse_deps_by_stem`
     /// is updated against the active-stem diff. Parsed-unresolved entries
     /// are NOT destroyed — when bundler later removes/Nones a resolution,
-    /// the stem becomes active again automatically (F18 active-stem model).
+    /// the stem becomes active again automatically (active-stem model).
     pub fn replace_exact_resolutions(
         &mut self,
         canonical_id: &str,
@@ -316,10 +315,10 @@ impl EdgeStore {
     /// caches on identical re-record.
     ///
     /// On input-differing re-record, secondary classes are cleared per
-    /// the F11 lifecycle (parsed re-record is a structural event when
+    /// the parsed-edge lifecycle (parsed re-record is a structural event when
     /// the inputs actually changed).
     ///
-    /// **NOT clear `ambient_resolved` (F1.5).**
+    /// **NOT clear `ambient_resolved`.**
     pub fn replace_parsed_edges(
         &mut self,
         canonical_id: &str,
@@ -345,7 +344,7 @@ impl EdgeStore {
         }
 
         self.write_pattern(canonical_id, |snap| {
-            // Per F11 lifecycle: clear classes that are bundler/parser-driven.
+            // Parsed-edge lifecycle: clear classes that are bundler/parser-driven.
             snap.parsed_resolved = parsed_resolved;
             snap.parsed_unresolved_relatives.clear();
             for (key, stem) in unresolved_pairs {
@@ -356,7 +355,7 @@ impl EdgeStore {
             snap.exact_resolved.clear();
             snap.exact_resolutions.clear();
             snap.semantic_transitive.clear();
-            // ambient_resolved survives parse re-record (F1.5).
+            // ambient_resolved survives parse re-record.
         });
     }
 
@@ -396,7 +395,7 @@ impl EdgeStore {
     }
 
     /// Replace `semantic_transitive` set wholesale. Always fires regardless
-    /// of `canonical_dep_union` equality (closes F15).
+    /// of `canonical_dep_union` equality.
     pub fn replace_semantic_transitive(&mut self, canonical_id: &str, deps: BTreeSet<String>) {
         self.write_pattern(canonical_id, |snap| {
             snap.semantic_transitive = deps;
@@ -420,7 +419,7 @@ impl EdgeStore {
             .unwrap_or_default()
     }
 
-    /// Single union query (R4 hot-path optimised — F19): when only one
+    /// Single union query (R4 hot-path optimised): when only one
     /// bucket hits, return its contents directly without allocating a
     /// `BTreeSet` for dedup.
     pub fn reverse_deps_for_target(

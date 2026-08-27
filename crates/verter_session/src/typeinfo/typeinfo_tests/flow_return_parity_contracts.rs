@@ -177,28 +177,28 @@ fn flow_return_mp_fixture_routes_are_hermetic_and_resolvable() {
     let barrel = host.resolve_loaded_dependency_canonical(
         PARITY_OWNER,
         "./flow_return_parity_aug_barrel",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
     assert_eq!(barrel.as_deref(), Some(PARITY_BARREL));
 
     let base = host.resolve_loaded_dependency_canonical(
         PARITY_BARREL,
         "./flow_return_parity_aug_base",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
     assert_eq!(base.as_deref(), Some(PARITY_BASE));
 
     let patch = host.resolve_loaded_dependency_canonical(
         PARITY_BARREL,
         "./flow_return_parity_aug_patch",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
     assert_eq!(patch.as_deref(), Some(PARITY_PATCH));
 
     let unused = host.resolve_loaded_dependency_canonical(
         PARITY_BARREL,
         "./flow_return_parity_aug_unused",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
     assert_eq!(unused.as_deref(), Some(PARITY_UNUSED));
 }

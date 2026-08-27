@@ -7,14 +7,15 @@
 use rustc_hash::FxHashSet;
 
 use crate::canonical_path::CanonicalPath;
-use crate::membership::{
-    typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,
-    SupportedExtensions,
-};
-use crate::resolver::{IdeProjectConfig, ProjectMembership, ProjectResolver};
+use crate::membership::{FallbackMembership, SupportedExtensions};
 use crate::workspace_snapshot::{
     compare_project_precedence, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
     WorkspaceSnapshot,
+};
+use crate::ProjectMembership;
+use verter_semantic::resolver_core::{
+    typescript_default_excludes, ConfiguredMembership, IdeProjectConfig, ModuleResolverCore,
+    StaticMembershipSpec,
 };
 
 /// Result of building a workspace snapshot from workspace roots.
@@ -61,7 +62,7 @@ pub fn build_workspace_snapshot(
         let reference_targets: FxHashSet<String> = tsconfig_entries
             .iter()
             .flat_map(|entry| load_project_references(ws, &entry.path))
-            .map(|target| crate::resolver::normalize_canonical_id(&target))
+            .map(|target| verter_semantic::resolver_core::normalize_canonical_id(&target))
             .collect();
 
         for entry in &tsconfig_entries {
@@ -296,7 +297,7 @@ pub fn registry_carrier_extensions() -> Vec<String> {
 /// compiler options (for the `allowJs`/`checkJs` JS-family gate) and the
 /// registered carrier extensions.
 pub fn supported_extensions_for(
-    compiler_options: &crate::resolver::IdeProjectCompilerOptions,
+    compiler_options: &verter_semantic::resolver_core::IdeProjectCompilerOptions,
 ) -> SupportedExtensions {
     SupportedExtensions::new(
         compiler_options.js_is_member(),
@@ -318,7 +319,10 @@ pub fn membership_to_spec(
 ) -> StaticMembershipSpec {
     match membership {
         ProjectMembership::MatchAll => {
-            StaticMembershipSpec::with_supported_extension_defaults(project_root, supported)
+            crate::membership::static_membership_with_supported_extension_defaults(
+                project_root,
+                supported,
+            )
         }
         ProjectMembership::IncludeExclude {
             files,
@@ -329,7 +333,7 @@ pub fn membership_to_spec(
             let include_refs: Vec<&str> = include.iter().map(String::as_str).collect();
             if exclude.is_empty() {
                 // No explicit exclude → TS defaults (node_modules etc.).
-                let mut spec = StaticMembershipSpec::from_includes(
+                let mut spec = crate::membership::static_membership_from_includes(
                     project_root,
                     &files_refs,
                     &include_refs,
@@ -340,7 +344,7 @@ pub fn membership_to_spec(
                 spec
             } else {
                 let exclude_refs: Vec<&str> = exclude.iter().map(String::as_str).collect();
-                StaticMembershipSpec::from_includes(
+                crate::membership::static_membership_from_includes(
                     project_root,
                     &files_refs,
                     &include_refs,
@@ -361,7 +365,7 @@ pub fn membership_to_spec(
 pub fn configured_membership_from_raw(
     root: &str,
     membership: &ProjectMembership,
-    compiler_options: &crate::resolver::IdeProjectCompilerOptions,
+    compiler_options: &verter_semantic::resolver_core::IdeProjectCompilerOptions,
 ) -> ConfiguredMembership {
     let supported = supported_extensions_for(compiler_options);
     let spec = membership_to_spec(&CanonicalPath::new(root), membership, &supported);
@@ -426,8 +430,8 @@ fn materialize_from_spec(
     result
 }
 
-/// Build a `ProjectResolver` from ownership projects.
-fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolver {
+/// Build a `ModuleResolverCore` from ownership projects.
+fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ModuleResolverCore {
     let ide_configs: Vec<IdeProjectConfig> = projects
         .iter()
         .map(|p| match &p.payload {
@@ -438,7 +442,7 @@ fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolve
                 workspace_aliases,
                 membership,
             } => {
-                let mut config = IdeProjectConfig::new(
+                let mut config = crate::resolver::ide_project_config(
                     p.root.as_str().to_string(),
                     p.workspace_root.as_str().to_string(),
                     Some(tsconfig_path.as_str().to_string()),
@@ -453,7 +457,7 @@ fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolve
                 config.membership = membership.clone();
                 config
             }
-            ProjectPayload::Fallback { .. } => IdeProjectConfig::new(
+            ProjectPayload::Fallback { .. } => crate::resolver::ide_project_config(
                 p.root.as_str().to_string(),
                 p.workspace_root.as_str().to_string(),
                 None,
@@ -461,7 +465,7 @@ fn build_resolver_from_projects(projects: &[OwnershipProject]) -> ProjectResolve
         })
         .collect();
 
-    ProjectResolver::new(ide_configs)
+    ModuleResolverCore::new(ide_configs)
 }
 
 /// Bridge: Convert a legacy `VfsProjectConfig` to an `OwnershipProject`.

@@ -20,10 +20,10 @@
 use std::sync::Arc;
 
 use verter_audit::{RequestKind, WorkspaceOp};
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_session::{HostConfig, VerterHost};
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
-    VfsProjectConfig,
+    MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
 };
 
 #[test]
@@ -56,7 +56,7 @@ fn audit_workspace_op_finalizes_registration_and_publishes_record() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("d:/project"),
         ),
     }]);

@@ -37,7 +37,11 @@ pub(crate) trait FallthroughRequestHost {
 
     /// Host whose fact-tracer stack owns this request. The request driver opens
     /// the outermost cacheability scope itself; callers never supply a probe.
-    fn cacheability_context(&self) -> &dyn ResolverContext;
+    fn with_cacheability_context<R>(
+        &self,
+        fixed_store_view: Option<(&Self::View, u64, bool)>,
+        operation: impl FnOnce(&dyn ResolverContext) -> R,
+    ) -> R;
 
     fn generic_root_propagation(&self) -> bool;
     /// Snapshot a base store view together with the manager's currentness
@@ -436,24 +440,24 @@ pub(crate) fn run_fallthrough_request<H>(
 where
     H: FallthroughRequestHost,
 {
-    crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(
-            host.cacheability_context(),
-        ),
-        |probe| {
-            run_fallthrough_request_in_scope(
-                host,
-                singleflight,
-                canonical_id,
-                prop_type_overrides,
-                visiting,
-                fixed_store_view,
-                probe,
-                max_attempts,
-            )
-        },
-    )
-    .0
+    host.with_cacheability_context(fixed_store_view, |ctx| {
+        crate::fact_signature_helpers::with_cacheability_scope(
+            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            |probe| {
+                run_fallthrough_request_in_scope(
+                    host,
+                    singleflight,
+                    canonical_id,
+                    prop_type_overrides,
+                    visiting,
+                    fixed_store_view,
+                    probe,
+                    max_attempts,
+                )
+            },
+        )
+        .0
+    })
 }
 
 fn run_fallthrough_request_in_scope<H>(
@@ -577,8 +581,12 @@ mod tests {
         type View = StubView;
         type Resolution = usize;
 
-        fn cacheability_context(&self) -> &dyn ResolverContext {
-            test_cacheability_host()
+        fn with_cacheability_context<R>(
+            &self,
+            _fixed_store_view: Option<(&Self::View, u64, bool)>,
+            operation: impl FnOnce(&dyn ResolverContext) -> R,
+        ) -> R {
+            operation(test_cacheability_host())
         }
 
         fn generic_root_propagation(&self) -> bool {
@@ -1009,8 +1017,12 @@ mod tests {
             type View = StubView;
             type Resolution = usize;
 
-            fn cacheability_context(&self) -> &dyn ResolverContext {
-                test_cacheability_host()
+            fn with_cacheability_context<R>(
+                &self,
+                _fixed_store_view: Option<(&Self::View, u64, bool)>,
+                operation: impl FnOnce(&dyn ResolverContext) -> R,
+            ) -> R {
+                operation(test_cacheability_host())
             }
 
             fn generic_root_propagation(&self) -> bool {
@@ -1252,8 +1264,12 @@ mod tests {
             type View = StubView;
             type Resolution = usize;
 
-            fn cacheability_context(&self) -> &dyn ResolverContext {
-                test_cacheability_host()
+            fn with_cacheability_context<R>(
+                &self,
+                _fixed_store_view: Option<(&Self::View, u64, bool)>,
+                operation: impl FnOnce(&dyn ResolverContext) -> R,
+            ) -> R {
+                operation(test_cacheability_host())
             }
 
             fn generic_root_propagation(&self) -> bool {

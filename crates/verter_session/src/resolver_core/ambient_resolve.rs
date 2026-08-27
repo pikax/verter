@@ -14,7 +14,7 @@
 //! internally.
 
 use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-use verter_workspace::ProjectStableKey;
+use verter_semantic::resolver_core::ProjectStableKey;
 
 use crate::resolver_core::ResolverContext;
 
@@ -73,9 +73,10 @@ mod tests {
                 extensions: vec![".ts".into(), ".vue".into()],
                 workspace_root: "/ws".to_string(),
                 workspace_aliases: vec![],
-                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: vec![],
-                membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                membership: verter_workspace::configured_membership_match_all_under_root(
                     &verter_workspace::CanonicalPath::new("/ws"),
                 ),
             },

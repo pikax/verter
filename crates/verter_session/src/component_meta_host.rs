@@ -241,7 +241,7 @@ impl ComponentMetaHost {
     /// Configure project-scoped path aliases.
     pub fn configure_projects(
         &self,
-        configs: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig>,
+        configs: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
     ) -> Result<(), ComponentMetaHostError> {
         self.check_alive()?;
         self.inner
@@ -717,9 +717,8 @@ fn extract_component_meta_from_resolved_with_evaluated(
     evaluated_types: Option<&ExpandedComponentTypes>,
     include_fallthrough: bool,
 ) -> ComponentMetaAnalysis {
-    // Macro-DTO surface read runs under the request-bound `ctx` (not the
-    // bare host) — mirrors the production
-    // `extract_component_meta_from_resolved` path.
+    // Macro-DTO surface reads through the same request-bound `ctx` as
+    // `extract_component_meta_from_resolved`.
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
         canonical_id,

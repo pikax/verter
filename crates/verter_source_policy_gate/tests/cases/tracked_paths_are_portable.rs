@@ -373,7 +373,7 @@ fn carrier_descriptors_with_extension() -> Vec<(FrameworkAdapterDescriptor, Stri
 /// `descriptors`) of the descriptor whose carrier extension it matches. A tracked
 /// path is a carrier when its basename ends with a descriptor's carrier extension
 /// preceded by ≥1 stem char (the same append-to-full rule
-/// `verter_workspace::path_is_carrier` applies). This derives the source set from the
+/// `verter_semantic::resolver_core::path_is_carrier` applies). This derives the source set from the
 /// REAL `git ls-files` enumeration the tracked-path guard already uses — not a
 /// representative literal list — so a path-specific generated collision/nonportable
 /// name on any real tracked carrier is exercised.

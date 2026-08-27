@@ -428,13 +428,11 @@ fn make_host(project_root: &Path) -> io::Result<VerterHost> {
         },
         Arc::new(ws),
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            project_root_id.clone(),
-            project_root_id,
-            Some(tsconfig_id),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        project_root_id.clone(),
+        project_root_id,
+        Some(tsconfig_id),
+    )]);
     Ok(host)
 }
 

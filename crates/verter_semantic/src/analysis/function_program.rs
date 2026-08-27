@@ -46,7 +46,7 @@ mod function_program_tests;
 /// the owner discriminates script-block owners, the name is the registered
 /// merged-symbol name — namespaces qualify `Ns.Name` exactly like the eval
 /// env registration).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FunctionDeclarationRef {
     /// Lexical top-level owner of the contributing statement.
     pub owner: verter_type_expr::TopLevelOwnerId,
@@ -100,7 +100,7 @@ pub struct FunctionBodyLocator {
 }
 
 /// The full program identity of one served function position.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FunctionProgramKey {
     /// The owning declaration.
     pub declaration: FunctionDeclarationRef,

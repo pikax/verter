@@ -4,16 +4,13 @@
 //! resolver context from CACHE PRESENCE: when the owner's `IndexedReady` is
 //! already published at the requested whole hash and the publication scope is
 //! base-publishable it takes one branch, otherwise it composes a cold-seed
-//! session view. Both branches return facts, so a context defect in either one
-//! is invisible from the outside — which is exactly how a lane that handed the
-//! resolver-tier builder a NON-request-bound context survived a call-site
-//! census.
+//! session view. Both branches must bind a request-bound context.
 //!
 //! It is not survivable at runtime: the builder's `classify_binding` demands
 //! `ResolverContext::prepared_value_decl` for every template `:class` subject
 //! that is a script binding, and only a request-bound context can serve a
-//! prepared declaration. A non-request-bound context aborts the whole request
-//! in every profile that compiles the bare-host guard.
+//! prepared declaration. The sealed builder signature rejects a
+//! non-request-bound context.
 //!
 //! The fixture is the minimal shape of that demand — a locally-vendored SFC
 //! whose template binds `:class` to a `computed` script binding — driven so the
@@ -82,10 +79,8 @@ fn template_class_facts_for(host: &VerterHost, canonical: &str) {
 
 /// The indexed-present branch must bind a REQUEST-BOUND resolver context.
 ///
-/// This is the hermetic form of the corpus `Avatar.vue` crash: with the
-/// owner's `IndexedReady` already published, the lane took the base branch and
-/// passed the bare `&VerterHost` — which is not request-bound and cannot serve
-/// `prepared_value_decl`.
+/// With the owner's `IndexedReady` already published, the base branch must
+/// preserve the request-bound prepared-declaration authority.
 #[test]
 fn indexed_present_template_class_lane_binds_a_request_bound_context() {
     let host = VerterHost::new_standalone(HostConfig::default());
@@ -119,17 +114,12 @@ fn indexed_present_template_class_lane_binds_a_request_bound_context() {
         bindings[0].request_bound,
         "the indexed-present template-class lane bound a NON-request-bound resolver context. \
          The resolver-tier builder demands prepared declarations (classify_binding -> \
-         ResolverContext::prepared_value_decl), which only a request-bound context can serve; a \
-         bare host aborts the request in every profile that compiles the bare-host guard. \
-         Construct a HostResolverContext for this branch, as the cold-seed branch already does \
-         for its session context."
+         ResolverContext::prepared_value_decl), which only a request-bound context can serve."
     );
 }
 
-/// Control: the cold-seed branch — the one that already constructs a session
-/// context — must stay request-bound too. This is what proves the assertion
-/// above discriminates a BRANCH rather than the whole lane: it passed against
-/// the pre-change tree while the indexed-present assertion failed.
+/// Control: the cold-seed branch must stay request-bound too. This proves the
+/// assertion discriminates a branch rather than accepting any lane binding.
 #[test]
 fn cold_seed_template_class_lane_binds_a_request_bound_context() {
     let host = VerterHost::new_standalone(HostConfig::default());

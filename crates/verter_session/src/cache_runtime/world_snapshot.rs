@@ -10,7 +10,7 @@
 //! The four env-hash dimensions and `project_identity` enter through
 //! [`WorldSnapshotDims`], which the host populates at the request
 //! entry boundary by calling the existing
-//! [`verter_workspace::resolver::IdeProjectConfig`] accessors
+//! [`verter_semantic::resolver_core::IdeProjectConfig`] accessors
 //! (`parse_env_hash`, `resolve_env_hash`, `type_env_hash`,
 //! `lib_env_hash`, `project_identity`). The trio
 //! `compiler_version` / `plugin_versions` / `world_generation` does
@@ -45,9 +45,8 @@ use crate::types::Hash16;
 /// Newtype wrapper around the session id used to scope an overlay.
 ///
 /// `None` on a [`WorldSnapshot`] represents a base view; `Some(_)`
-/// represents the active overlay's identity. The session rail
-/// constructs `Some(OverlayIdentity(session_id))`; the bare-host rail
-/// constructs `None`.
+/// represents the active overlay's identity. A base request constructs
+/// `None`; an overlay session constructs `Some(OverlayIdentity(session_id))`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OverlayIdentity(pub u64);
 
@@ -56,7 +55,7 @@ pub struct OverlayIdentity(pub u64);
 ///
 /// Carrying the dims as a struct keeps [`WorldSnapshot::from_request`]
 /// substrate-friendly: the four env-hash accessors on
-/// [`verter_workspace::resolver::IdeProjectConfig`] take an
+/// [`verter_semantic::resolver_core::IdeProjectConfig`] take an
 /// `&EnvHashInputs<'_>` argument; the caller computes the four
 /// `Hash16`s once and packs them here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -149,8 +148,7 @@ impl WorldSnapshot {
     /// `compat_token` is read through [`StoreView::compat_token`] on
     /// the context's active store view. `overlay_identity` is the
     /// session identity the caller already has at the request entry
-    /// boundary (the bare-host rail passes `None`; the session rail
-    /// passes `Some(OverlayIdentity(session_id))`).
+    /// boundary (`None` for a base request, `Some` for a session overlay).
     pub(crate) fn from_request(
         ctx: &dyn ResolverContext,
         dims: WorldSnapshotDims,
@@ -235,8 +233,8 @@ mod tests {
     //!
     //! 2. **`from_request` wiring** — the production constructor takes
     //!    `&dyn ResolverContext`, a `pub(crate)` trait sealed to the
-    //!    crate. The inline module exercises it directly through the
-    //!    bare-host `impl ResolverContext for VerterHost` rail.
+    //!    crate. The inline module exercises it through the explicit
+    //!    direct-host test-support implementation.
     //!
     //! Living inside `verter_session::cache_runtime` keeps
     //! [`WorldSnapshot`] truly `pub(crate)` — there is no parallel
@@ -512,8 +510,7 @@ mod tests {
     fn from_request_threads_dims_and_reads_compat_token_through_store_view() {
         // `from_request` takes `&dyn ResolverContext` and reads
         // `compat_token` through `ctx.store_view().compat_token()`.
-        // Driving it from inside `cache_runtime` uses the bare-host
-        // `impl ResolverContext for VerterHost` rail directly.
+        // The inline test uses the compile-fenced direct-host fixture context.
         let host = VerterHost::new_standalone(HostConfig::default());
         let ctx: &dyn crate::resolver_core::ResolverContext = &host;
 

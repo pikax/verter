@@ -100,7 +100,7 @@ fn extract_component_name(path: &str) -> Option<String> {
         .or_else(|| path.rsplit('\\').next())?;
     // Registry-backed carrier strip: `Foo.vue` / `Foo.svelte` → `Foo`. A
     // non-carrier filename yields itself unchanged, so reject it.
-    let name = verter_workspace::strip_carrier_extension(filename);
+    let name = verter_semantic::resolver_core::strip_carrier_extension(filename);
     if name.is_empty() || name == filename {
         return None;
     }

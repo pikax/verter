@@ -3622,17 +3622,14 @@ mod resolver_context_seal {
         )
     }
 
-    /// `resolver_context.rs` is the bridging trait file: it must
-    /// reference `VerterHost` to register the trait impl
-    /// (`impl ResolverContext for crate::VerterHost`). Whitelisting it
-    /// is structural — without it the seal scope would be
-    /// self-violating.
+    /// `resolver_context.rs` is the bridging trait file: it references
+    /// `VerterHost` for the request-bound adapter and compile-fenced test seam.
     fn is_seal_bridge_file(path: &Path) -> bool {
         path.file_name()
             .and_then(|n| n.to_str())
             .map(|n| {
-                // `resolver_context.rs` carries the `impl ResolverContext
-                // for VerterHost` bridge — the trait surface itself.
+                // `resolver_context.rs` carries the trait surface and its
+                // request-bound host adapter.
                 // `session_resolver_context.rs` is the session-bound
                 // wrapper that owns the `&VerterHost` borrow needed to
                 // reach view-aware host internals
@@ -5185,7 +5182,6 @@ pub(crate) mod foundations_guards {
             "crates/verter_workspace/src/filesystem.rs",
             "crates/verter_workspace/src/ambient_parse.rs",
             "crates/verter_workspace/src/intrinsic_library.rs",
-            "crates/verter_workspace/src/resolver.rs",
             "crates/verter_scheduler/src/source_loader.rs",
             "crates/verter_tsc/src/checker.rs",
             "crates/verter_tsc/src/tsconfig.rs",
@@ -5849,6 +5845,10 @@ pub(crate) mod foundations_guards {
         // verter_type_runtime, verter_napi (TypeExpander API);
         // tests/cases/g_misc0/host_tests.rs
         "pub mod resolver_core",
+        // verter_semantic route extraction consumes the owned snapshot this
+        // module builds: the extractors take `&RouteAnalysisInputs`
+        // instead of a live `&dyn WorkspaceRead`.
+        "pub mod route_analysis_inputs",
         // tests/cases/g_misc0/host_tests.rs (semantic_query::* in integration tests)
         "pub mod semantic_query",
         // tests/cases/g_misc0/invalidation_coverage.rs, tests/cases/g_misc0/invalidation_perf.rs
@@ -9325,10 +9325,6 @@ pub(crate) mod foundations_guards {
         (
             "crates/verter_workspace/src/intrinsic_library.rs",
             "ambient TypeScript SDK reader (`lib*.d.ts`) — companion to NativeFs for SDK declaration files. The verter_session intrinsic_registry consumes this single reader.",
-        ),
-        (
-            "crates/verter_workspace/src/resolver.rs",
-            "doc comment only references `std::fs::canonicalize()` behaviour on Windows for documentation; no actual `std::fs::` callsite. Path-string normalization stays local to the resolver.",
         ),
         (
             "crates/verter_compiler/src/svelte_oracle.rs",
@@ -16370,7 +16366,7 @@ fn artifact_removal_routes_through_single_chokepoint() {
 // view (`&CurrentHostStoreView`); cold builders take a
 // `ColdSeedHostStoreView`, which exposes NO `validates*` surface. The raw
 // `HostStoreView` escape hatch (`StoreViewRead::into_owned_view`) is
-// confined to an allowlist of bare-host / driver-snapshot / test-fixture
+// confined to an allowlist of request-driver / cold-seed / test-fixture
 // producers that do not warm-validate against the value.
 //
 // These four parts are mechanically discriminating: each FAILS if the
@@ -16381,16 +16377,18 @@ fn artifact_removal_routes_through_single_chokepoint() {
 /// The single allowlist of production files permitted to unwrap a
 /// `StoreViewRead` to a raw `HostStoreView` via `into_owned_view()`.
 ///
-/// Every entry is a bare-host owned-view rail (`ResolverContext::
-/// resolver_store_view`, reachable only when no request-bound context was
-/// installed), a request-driver owned-view snapshot accessor (currentness
+/// Every entry is a compile-fenced test fixture, a request-driver owned-view
+/// snapshot accessor (currentness
 /// gated separately by `snapshot_view_is_current`), a fenced cold-builder
 /// seed (`.into_cold_seed_view().into_inner()`), or a `#[cfg(...)]`
 /// test/debug fixture. NONE of them warm-validate a cache entry against
 /// the unwrapped value. Adding a new production warm validator that grabs
 /// a raw view fails [`resolver_store_view_into_owned_view_is_allowlisted`].
 const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
-    // The capability-split producer + the bare-host owned-view rail.
+    // The capability-split producer and direct-host test fixtures. The host
+    // context occurrence is confined to `with_bare_host_ctx_for_test` by its
+    // `#[cfg(any(test, feature = "test-support"))]` fence; its production
+    // lifecycle clones the already request-bound base view.
     "crates/verter_session/src/resolver_store.rs",
     "crates/verter_session/src/resolver_core/resolver_context.rs",
     "crates/verter_session/src/resolver_core/host_resolver_context.rs",
@@ -16422,7 +16420,7 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     // cfg(test) boundary.
     "crates/verter_session/src/typeinfo/oracle_core/relation_driver.rs",
     // Inline `#[cfg(test)]` proof only (the input-side no-poison gate test
-    // builds a quiescent bare-host owned view over a standalone host); no
+    // builds a quiescent owned view over a standalone host); no
     // production code path in this file touches the raw view — the raw-text
     // scan cannot see the cfg(test) boundary.
     "crates/verter_session/src/meta_resolve/projectors/output_sink.rs",
@@ -16549,7 +16547,7 @@ fn warm_validation_entry_points_require_current_store_view() {
 fn resolver_store_view_into_owned_view_is_allowlisted() {
     // Part D — the raw-`HostStoreView` escape hatch
     // (`StoreViewRead::into_owned_view`) appears in production ONLY in the
-    // allowlisted bare-host / driver-snapshot / fenced-cold-seed
+    // allowlisted test-fixture / driver-snapshot / fenced-cold-seed
     // producers. A new production file that grabs a raw view (the seam a
     // future warm-validation regression would slip through) fails here and
     // must instead choose `.current()` (warm) or
@@ -16570,7 +16568,7 @@ fn resolver_store_view_into_owned_view_is_allowlisted() {
     assert!(
         offenders.is_empty(),
         "`StoreViewRead::into_owned_view()` (the raw-`HostStoreView` escape hatch) \
-         is confined to the bare-host / driver-snapshot / fenced-cold-seed \
+         is confined to the test-fixture / driver-snapshot / fenced-cold-seed \
          allowlist. A new production caller must choose `.current()` (warm \
          validation) or `.into_cold_seed_view()` (fenced cold builder), not the \
          raw owned view. Offending files:\n  {}",

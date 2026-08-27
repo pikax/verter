@@ -118,8 +118,8 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_workspace::ResolutionContext,
-    ) -> Option<verter_workspace::ResolveResult> {
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
         self.inner.resolve_import(importer_id, specifier, ctx)
     }
 
@@ -127,7 +127,7 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_workspace::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         self.inner
             .resolve_import_outcome(importer_id, specifier, ctx)
@@ -227,7 +227,7 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.notify_delete(canonical_id);
     }
 
-    fn configure_resolver(&self, projects: Vec<verter_workspace::resolver::IdeProjectConfig>) {
+    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
         self.inner.configure_resolver(projects);
     }
 }
@@ -240,13 +240,11 @@ fn make_host_with_workspace(ws: Arc<CountingWorkspace>) -> VerterHost {
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     host
 }
 

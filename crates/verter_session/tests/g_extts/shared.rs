@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
+use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{
     CarrierOwnershipResolution, EnvDims, ExternalTsProjectResolver, WorkspaceProjectResolver,
 };
@@ -20,7 +21,6 @@ use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
 };
-use verter_workspace::membership::ConfiguredMembership;
 use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
 use verter_workspace::snapshot_builder::{
     build_workspace_snapshot_simple, membership_to_spec, supported_extensions_for,

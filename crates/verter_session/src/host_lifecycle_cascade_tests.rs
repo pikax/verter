@@ -123,8 +123,8 @@ fn alias_keyed_set_exact_resolutions_behaves_like_canonical_keyed() {
         alias,
         vec![verter_workspace::ExactResolution {
             specifier: "exact-pkg".to_string(),
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/node_modules/exact-pkg/index.d.ts".to_string()),
             possible_canonical_ids: vec!["/node_modules/exact-pkg/index.d.ts".to_string()],
         }],
@@ -165,8 +165,8 @@ fn set_exact_resolutions_canonicalizes_resolution_target_ids() {
         canonical,
         vec![verter_workspace::ExactResolution {
             specifier: "win-pkg".to_string(),
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("C:\\proj\\node_modules\\win-pkg\\index.d.ts".to_string()),
             possible_canonical_ids: vec!["C:\\proj\\node_modules\\win-pkg\\index.d.ts".to_string()],
         }],

@@ -503,7 +503,6 @@ const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
   "crates/verter_tsc/src/checker.rs",
   "crates/verter_type_runtime/src/tsgo/ipc.rs",
   "crates/verter_type_runtime/src/tsserver/ipc.rs",
-  "crates/verter_workspace/src/resolver.rs",
   "crates/verter_session/src/project_semantic_dispatch/walk.rs",
   "crates/verter_wasm/src/lib.rs",
 ]);

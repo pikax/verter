@@ -181,7 +181,7 @@ fn build_corpus_host(corpus_root: &Path) -> Arc<VerterHost> {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(&ws_root_str),
         ),
     }]);
@@ -192,13 +192,11 @@ fn build_corpus_host(corpus_root: &Path) -> Arc<VerterHost> {
     workspace.set_project_graph(project_graph);
     let ws_access: Arc<dyn WorkspaceAccess> = workspace;
     let host = VerterHost::new(HostConfig::default(), ws_access);
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            ws_root_str.clone(),
-            ws_root_str,
-            Some(tsconfig_path),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        ws_root_str.clone(),
+        ws_root_str,
+        Some(tsconfig_path),
+    )]);
     Arc::new(host)
 }
 

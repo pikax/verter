@@ -586,8 +586,19 @@ impl FallthroughRequestHost for VerterHost {
     type View = crate::resolver_store::HostStoreView;
     type Resolution = crate::types::FallthroughResolution;
 
-    fn cacheability_context(&self) -> &dyn crate::resolver_core::ResolverContext {
-        self
+    fn with_cacheability_context<R>(
+        &self,
+        fixed_store_view: Option<(&Self::View, u64, bool)>,
+        operation: impl FnOnce(&dyn crate::resolver_core::ResolverContext) -> R,
+    ) -> R {
+        let Some((view, _captured_fingerprint, is_current)) = fixed_store_view else {
+            return self.with_base_resolver_context(operation);
+        };
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::from_fixed_view(
+            self, view, overlay, is_current,
+        );
+        operation(&ctx)
     }
 
     fn generic_root_propagation(&self) -> bool {
@@ -683,13 +694,10 @@ impl FallthroughRequestHost for VerterHost {
         store_view: &Self::View,
         base_is_current: bool,
     ) -> Option<Self::Resolution> {
-        // The trait-method signature is tightened to
-        // require a request-bound `store_view` (no `Option`) — the
+        // The trait method requires a request-bound `store_view`; the
         // singleflight executor in `resolver_core::fallthrough_request`
         // always passes the view it built in `snapshot_view`. The
-        // defensive `None` arm that previously rebuilt an owned view
-        // + synthesised overlay (a bare-host fallback) is eliminated:
-        // production callers always arrive via `run_fallthrough_request`
+        // production callers arrive via `run_fallthrough_request`
         // → executor → `compute(view)` with a request-bound view. There
         // is no production caller that arrives without a view; any
         // future caller must thread one through.
@@ -812,7 +820,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         self.host
             .resolver_runtime()
             .fallthrough
-            .compute_and_maybe_admit(self.host, || {
+            .compute_and_maybe_admit(self.ctx, || {
                 let members = self
                     .host
                     .project_intrinsic_members_for_tag(canonical_id, tag, self.ctx)
@@ -834,7 +842,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         let dep_canonical = match self.host.resolve_loaded_dependency_canonical(
             parent_canonical,
             import_source,
-            verter_workspace::ResolveRequestKind::EsmImport,
+            verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 admitted.into_result()?
@@ -937,7 +945,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         self.host
             .resolver_runtime()
             .fallthrough
-            .compute_and_maybe_admit(self.host, || {
+            .compute_and_maybe_admit(self.ctx, || {
                 let resolution = self
                     .host
                     .resolve_fallthrough_surface_internal_with_overrides(
@@ -1009,7 +1017,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             .host
             .resolver_runtime()
             .fallthrough
-            .compute_and_maybe_admit(self.host, || {
+            .compute_and_maybe_admit(self.ctx, || {
                 let resolved = self.host.resolve_root_consumption(
                     canonical_id,
                     snapshot,
@@ -1167,7 +1175,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         match self.host.resolve_loaded_dependency_canonical(
             canonical_id,
             source,
-            verter_workspace::ResolveRequestKind::EsmImport,
+            verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 if let Some(resolved) = admitted.into_result() {
@@ -1229,15 +1237,18 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
 }
 
 pub(in crate::host_manage) fn exact_resolution_uses_type_preferred_target(
-    phase: verter_workspace::ResolvePhase,
-    kind: verter_workspace::ResolveRequestKind,
+    phase: verter_semantic::resolver_core::ResolvePhase,
+    kind: verter_semantic::resolver_core::ResolveRequestKind,
 ) -> bool {
     matches!(
         (phase, kind),
         (
-            verter_workspace::ResolvePhase::CodegenBlocker,
-            verter_workspace::ResolveRequestKind::TypeImport,
-        ) | (verter_workspace::ResolvePhase::ProviderGraph, _)
+            verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        ) | (
+            verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
+            _
+        )
     )
 }
 
@@ -1253,13 +1264,13 @@ fn is_type_preferred_target(canonical_id: &str) -> bool {
         // type-bearing virtual surface, so it is type-preferred exactly like a
         // `.vue` SFC. Sourced from the registry carrier-extension set, never a
         // hardcoded `.vue` arm that would strand other carriers.
-        || verter_workspace::path_is_carrier(canonical_id)
+        || verter_semantic::resolver_core::path_is_carrier(canonical_id)
 }
 
 fn has_file_like_extension(canonical_id: &str) -> bool {
     // Carrier-GENERIC: any registered framework carrier (`.vue`, `.svelte`, …)
     // is a real file-like path, not a bare module specifier.
-    verter_workspace::path_is_carrier(canonical_id)
+    verter_semantic::resolver_core::path_is_carrier(canonical_id)
         || canonical_id.ends_with(".ts")
         || canonical_id.ends_with(".tsx")
         || canonical_id.ends_with(".mts")

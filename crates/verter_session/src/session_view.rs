@@ -50,22 +50,14 @@ use crate::file_artifact_store::ProjectIdentity;
 use crate::types::Hash16;
 use crate::VerterHost;
 
-/// Five-way environment-hash carrier (R21).
-///
-/// Carries `[parse, resolve, type_, lib]` env-hash dimensions plus the
-/// implicit project-identity context (held alongside on the view). The
-/// `Default` impl returns an all-zero bundle and is reserved for test
-/// fixtures + arch guards; production view constructors compose the
-/// bundle from the workspace's published env-hash tables (see
-/// [`crate::VerterHost::host_view_env_hashes`] and
-/// [`crate::VerterHost::host_view_env_hashes_for`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct EnvHashes {
-    pub parse_env_hash: Hash16,
-    pub resolve_env_hash: Hash16,
-    pub type_env_hash: Hash16,
-    pub lib_env_hash: Hash16,
-}
+/// Five-way environment-hash carrier (R21), dependency-neutral because it
+/// contains only four plain `Hash16` fields. Production view constructors
+/// compose the semantic-owned bundle from the workspace's published
+/// env-hash tables (see [`crate::VerterHost::host_view_env_hashes`] and
+/// [`crate::VerterHost::host_view_env_hashes_for`]); the implicit
+/// project-identity context is held alongside on the view, not part of
+/// this bundle.
+pub use verter_semantic::resolver_core::EnvHashes;
 
 /// Read-only view over the base host's source / artifact state.
 ///
@@ -541,8 +533,7 @@ impl OverlaidView {
         }
     }
 
-    /// Variant that takes pre-computed overlay hashes (used by
-    /// future caller pathways where the hash is already known).
+    /// Variant for callers that already hold precomputed overlay hashes.
     #[allow(dead_code)]
     pub fn with_overlay_hashes(
         base: Arc<VerterHost>,

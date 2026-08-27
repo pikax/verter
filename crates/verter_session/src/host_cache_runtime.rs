@@ -41,7 +41,7 @@ impl VerterHost {
     pub(crate) fn workspace_aliases_for_canonical(
         &self,
         canonical: &str,
-    ) -> Vec<verter_workspace::WorkspaceAlias> {
+    ) -> Vec<verter_semantic::resolver_core::WorkspaceAlias> {
         use verter_workspace::workspace_snapshot::ProjectPayload;
         let Some(root) = self.workspace().published_root() else {
             return Vec::new();
@@ -245,7 +245,7 @@ impl VerterHost {
                 // probe reports "no augmenters", and a Content request
                 // admits a content-addressed entry with NO augmenter
                 // fingerprint — stale serves after the augmenter edits.
-                let is_relative = verter_workspace::resolver::is_relative_specifier(specifier);
+                let is_relative = verter_semantic::resolver_core::is_relative_specifier(specifier);
                 // Resolve a relative specifier's canonical through the live
                 // type-dependency resolver — the ONE resolution authority,
                 // and the SAME `pathIsRelative` authority the fact-side
@@ -421,8 +421,9 @@ impl VerterHost {
                             per_import_targets.push(AugmentationTargetKind::WildcardAmbient(
                                 InternedGlobPattern::from(fact_specifier),
                             ));
-                        } else if verter_workspace::resolver::is_relative_specifier(fact_specifier)
-                        {
+                        } else if verter_semantic::resolver_core::is_relative_specifier(
+                            fact_specifier,
+                        ) {
                             // Resolve the augmenter's relative
                             // `declare module "./X"` against the
                             // augmenter's own canonical — same authority

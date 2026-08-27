@@ -473,13 +473,11 @@ export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAu
         },
         Arc::new(ws),
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/project".to_string(),
-            "/project".to_string(),
-            Some("/project/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/project".to_string(),
+        "/project".to_string(),
+        Some("/project/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
 
     project
@@ -568,13 +566,11 @@ export type MenuContentEmits = Omit<MenuContentImplEmits, 'entryFocus' | 'openAu
         },
         Arc::new(ws),
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/project".to_string(),
-            "/project".to_string(),
-            Some("/project/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/project".to_string(),
+        "/project".to_string(),
+        Some("/project/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
 
     project
@@ -4531,13 +4527,11 @@ fn package_declaration_entrypoints_materialize_imported_props() {
         },
         Arc::new(ws),
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/project".to_string(),
-            "/project".to_string(),
-            Some("/project/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/project".to_string(),
+        "/project".to_string(),
+        Some("/project/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
 
     project
@@ -4593,13 +4587,11 @@ fn package_declaration_entrypoints_materialize_alias_reexports() {
         },
         Arc::new(ws),
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/project".to_string(),
-            "/project".to_string(),
-            Some("/project/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/project".to_string(),
+        "/project".to_string(),
+        Some("/project/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
 
     project

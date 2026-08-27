@@ -162,11 +162,10 @@ impl NapiMetaProject {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::analysis::project_resolver::IdeProjectConfig> =
-                projects
-                    .into_iter()
-                    .map(crate::napi_project_config_to_ide)
-                    .collect();
+            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+                .into_iter()
+                .map(crate::napi_project_config_to_ide)
+                .collect();
             self.inner.configure_projects(configs).map_err(meta_err)
         }))?
     }
@@ -556,7 +555,7 @@ mod tests {
 
     #[test]
     fn audit_bundle_for_walker_tolerates_full_bundle_with_analysis_and_resolution() {
-        // Review F14: pin the serde "tolerate unknown fields" posture
+        // Pin the serde "tolerate unknown fields" posture
         // for `AuditBundleForWalker`. The walker bindings
         // (`whyLoadedFromAuditJson`, `whyInstantiatedFromAuditJson`)
         // receive a full `AuditBundle` JSON — `{ analysis, resolution,

@@ -400,7 +400,8 @@ async fn parent_did_open_prewarms_imported_child_carrier_api() {
     // `{canonical}.ts` virtual path the prewarm syncs/records under.
     let child_canonical =
         crate::documents::uri_to_canonical_id(&session.workspace_uri("src/MyComp.vue"));
-    let child_provider_path = verter_workspace::carrier_api_provider_path(&child_canonical);
+    let child_provider_path =
+        verter_semantic::resolver_core::carrier_api_provider_path(&child_canonical);
 
     // The lightweight imported-carrier sync is async (a no-response provider
     // notification), so give it a BOUNDED settle — a short retry reading the store,
