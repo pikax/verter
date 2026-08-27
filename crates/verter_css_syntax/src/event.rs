@@ -145,6 +145,17 @@ impl ParseEvent {
 
 pub trait ParseEventSink {
     fn event(&mut self, event: ParseEvent) -> Result<(), CssStructureTooLarge>;
+
+    /// Whether whitespace trivia must appear as [`ParseEvent::Token`] events.
+    ///
+    /// Lossless CST reconstruction and Sass indent keep every whitespace token.
+    /// The stylesheet IR sink returns `false`: the parser still sees trivia via
+    /// the lexer for combinators and layout, but does not emit whitespace tokens
+    /// the IR ignores. Comment tokens stay on the stream so [`crate::StyleSyntaxIr`]
+    /// can retain comment spans.
+    fn retain_whitespace_trivia(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

@@ -591,6 +591,72 @@ fn less_variable_declaration_comments_have_exact_tokens_events_and_cst() {
     assert_eq!(controls_cst.reconstruct(), controls);
 }
 
+#[test]
+fn first_byte_dispatch_keeps_cdo_cdc_ident_and_left_angle_boundaries() {
+    let source = CssSource::new(Arc::from("<!-- --> --foo < !"), 0).unwrap();
+    let kinds: Vec<_> = tokens(&source, CssDialect::Css)
+        .into_iter()
+        .map(|token| token.0)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            TokenKind::Cdo,
+            TokenKind::Whitespace,
+            TokenKind::Cdc,
+            TokenKind::Whitespace,
+            TokenKind::Ident,
+            TokenKind::Whitespace,
+            TokenKind::Delim,
+            TokenKind::Whitespace,
+            TokenKind::Delim,
+        ]
+    );
+    assert_eq!(
+        source.slice_tokens(Lexer::new(&source, CssDialect::Css)),
+        source.text()
+    );
+}
+
+#[test]
+fn unescaped_cr_or_form_feed_in_a_string_is_a_bad_string() {
+    for input in ["\"x\ry\"", "\"x\u{c}y\""] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let kinds: Vec<_> = tokens(&source, CssDialect::Css)
+            .into_iter()
+            .map(|token| token.0)
+            .collect();
+        assert_eq!(
+            kinds.first().copied(),
+            Some(TokenKind::BadString),
+            "{input:?}"
+        );
+        assert_ne!(
+            kinds,
+            vec![TokenKind::String],
+            "an unescaped CSS newline must not stay inside a string: {input:?}"
+        );
+    }
+}
+
+#[test]
+fn comment_form_feed_sets_contains_newline_and_keeps_the_closer() {
+    let input = "/*a\x0cb*/";
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let actual = tokens(&source, CssDialect::Css);
+    assert_eq!(actual.len(), 1, "{actual:?}");
+    assert_eq!(actual[0].0, TokenKind::Comment);
+    assert_ne!(
+        actual[0].1 & TokenFlags::CONTAINS_NEWLINE,
+        0,
+        "form feed is a CSS newline"
+    );
+    assert_eq!(
+        source.slice_tokens(Lexer::new(&source, CssDialect::Css)),
+        source.text()
+    );
+}
+
 fn discover_css_files(root: &Path, current: &Path, out: &mut BTreeSet<String>) {
     for entry in fs::read_dir(current).unwrap() {
         let entry = entry.unwrap();

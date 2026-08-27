@@ -186,6 +186,7 @@ pub(crate) struct Parser<'a> {
     lookahead: Option<SyntaxToken>,
     nesting: SmallVec<[TokenKind; 16]>,
     summary: ParseSummary,
+    emit_whitespace_trivia: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -204,6 +205,7 @@ impl<'a> Parser<'a> {
             lookahead: None,
             nesting: SmallVec::new(),
             summary: ParseSummary::default(),
+            emit_whitespace_trivia: true,
         }
     }
 
@@ -211,6 +213,7 @@ impl<'a> Parser<'a> {
         mut self,
         sink: &mut impl ParseEventSink,
     ) -> Result<ParseSummary, CssParseFailure> {
+        self.emit_whitespace_trivia = sink.retain_whitespace_trivia();
         if self.entry == CssEntryPoint::Stylesheet
             && crate::layout::should_use_layout(self.source, self.dialect)
         {
@@ -369,6 +372,9 @@ impl<'a> Parser<'a> {
             self.lexer.next()
         };
         if let Some(token) = token {
+            if !self.emit_whitespace_trivia && token.kind == TokenKind::Whitespace as u16 {
+                return Ok(Some(token));
+            }
             if let Some(kind) = lexical_diagnostic(token) {
                 let diagnostic = CssDiagnostic {
                     kind,

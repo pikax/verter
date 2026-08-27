@@ -973,6 +973,10 @@ fn trim_delimiters<'b>(
 }
 
 impl ParseEventSink for StyleSyntaxIrSink<'_> {
+    fn retain_whitespace_trivia(&self) -> bool {
+        false
+    }
+
     fn event(&mut self, event: ParseEvent) -> Result<(), CssStructureTooLarge> {
         if let ParseEvent::Diagnostic(diagnostic) = event {
             self.diagnostics.push(diagnostic);
@@ -1053,6 +1057,9 @@ impl ParseEventSink for StyleSyntaxIrSink<'_> {
                 recovered: false,
             }),
             ParseEvent::Token(token) => {
+                if token.kind == TokenKind::Whitespace as u16 {
+                    return Ok(());
+                }
                 self.tokens.push(token);
                 if self
                     .open
