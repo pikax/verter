@@ -54,6 +54,7 @@ mod preprocessor_boundary_contract;
 mod preprocessor_round_trip_parse_count;
 mod runtime_constructor_matrix;
 mod shared_process_contract;
+mod style_native_analysis_preprocessor_boundary;
 mod svelte_compiler_block1;
 mod svelte_compiler_block1_guards;
 mod svelte_jsx_shim_freshness;
