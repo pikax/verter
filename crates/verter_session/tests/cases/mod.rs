@@ -10,6 +10,7 @@
 //! from this manifest.
 
 mod architecture_guards;
+mod capability_matrix_css_family_rows_ratified;
 mod carrier_byte_parity;
 mod carrier_coordinator_route_guard;
 mod carrier_encapsulation_guards;
