@@ -72,6 +72,10 @@ verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 smallvec = "1.15"
 
+[[bin]]
+name = "css_latency_gate"
+path = "src/bin/css_latency_gate.rs"
+
 [[bench]]
 name = "bindings_bench"
 harness = false
