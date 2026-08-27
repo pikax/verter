@@ -983,6 +983,16 @@ fn every_exported_napi_spelling_is_executed_or_classified_out_of_scope() {
         module_exports.contains(&"processStyle".to_string()),
         "the standalone CSS spelling is absent from the built artifact: {module_exports:?}"
     );
+    for spelling in [
+        "analyzeStyle",
+        "prepareStyleForPreprocessor",
+        "transformVueStyle",
+    ] {
+        assert!(
+            !module_exports.iter().any(|export| export == spelling),
+            "private style helper `{spelling}` leaked as a NAPI module export: {module_exports:?}"
+        );
+    }
     assert!(
         module_exports.contains(&"VerterHost".to_string()),
         "the host class is absent from the built artifact: {module_exports:?}"

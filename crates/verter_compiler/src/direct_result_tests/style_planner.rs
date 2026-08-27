@@ -5,9 +5,10 @@ use crate::code_transform::{
  * @ai-generated - Exercises the typed two-stage framework style planner boundary.
  */
 use crate::style_planner::{
-    analyze_css_module_classes, build_string_invocation_count, cascade_output_is_publishable,
-    cascade_requested_source_map, parse_ir_invocation_count, reset_build_string_invocation_count,
-    reset_parse_ir_invocation_count, reset_style_ir_stage_observations, run_vue_style_cascade,
+    analyze_css_module_classes, analyze_style, build_string_invocation_count,
+    cascade_output_is_publishable, cascade_requested_source_map, parse_ir_invocation_count,
+    reset_build_string_invocation_count, reset_parse_ir_invocation_count,
+    reset_style_ir_stage_observations, run_vue_style_cascade,
     run_vue_style_cascade_post_preprocess, style_ir_stage_observations, transform_vue_css_modules,
     transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
     StyleRewriteFailure, StyleRewriteFailureClass, StyleRewriteOutcome, StyleRewriteStage,
@@ -817,6 +818,32 @@ fn css_modules_class_analysis_native_for_all_five_dialects() {
     assert_ne!(
         hashed_names[0], "active",
         "must actually hash, not pass through"
+    );
+}
+
+#[test]
+fn read_only_analysis_keeps_valid_classes_beside_an_untrusted_selector() {
+    let source = ".good { color: red; } .bad-#{$name} { color: blue; }";
+    let input =
+        || AuthoredStyleInput::new(source, CssDialect::Scss, "Probe.scss", "probe", "probe");
+
+    assert!(
+        analyze_css_module_classes(input(), "probe1234").is_err(),
+        "the fixture must exercise the stricter rewrite-oriented refusal"
+    );
+
+    let analysis = analyze_style(input(), "probe1234")
+        .expect("read-only analysis must not inherit rewrite refusal");
+    assert!(analysis.static_classes.contains(&"good".to_string()));
+    assert_eq!(analysis.module_classes.len(), 1);
+    assert_eq!(analysis.module_classes[0].0, "good");
+    assert_ne!(analysis.module_classes[0].1, "good");
+    assert!(
+        analysis
+            .module_classes
+            .iter()
+            .all(|(name, _)| !name.starts_with("bad")),
+        "a dynamic selector must not invent a static module-class fact"
     );
 }
 

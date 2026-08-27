@@ -1106,6 +1106,31 @@ pub fn analyze_css_module_classes(
     Ok(classes.into_iter().collect())
 }
 
+/// Read-only style facts: complete static class names plus the hashed
+/// CSS-Modules names those classes would receive. Never rewrites bytes and
+/// never inherits rewrite-oriented refusal for an untrusted sibling selector.
+#[derive(Debug, Clone, Default)]
+pub struct StyleAnalysis {
+    pub static_classes: Vec<String>,
+    pub module_classes: Vec<(String, String)>,
+}
+
+pub fn analyze_style(
+    input: AuthoredStyleInput<'_>,
+    scope_id: &str,
+) -> Result<StyleAnalysis, StyleRewriteFailure> {
+    let ir = authored_or_parsed_ir(input, StyleRewriteStage::PostPreprocessModules)?;
+    let static_classes = dedup_static_class_names(&ir);
+    let module_classes = static_classes
+        .iter()
+        .map(|name| (name.clone(), hashed_class_name(scope_id, name)))
+        .collect();
+    Ok(StyleAnalysis {
+        static_classes,
+        module_classes,
+    })
+}
+
 pub fn transform_vue_css_modules(
     input: PlainCssInput<'_>,
     scope_id: &str,

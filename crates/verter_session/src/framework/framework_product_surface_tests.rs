@@ -307,6 +307,39 @@ fn the_inventory_is_internally_well_formed() {
         "the inventory names no `{TSC_PRODUCT_ID}` product, but the TSC target bit publishes one"
     );
 
+    for (id, spelling) in [
+        (
+            "css.prepare-style-for-preprocessor",
+            "prepare_style_for_preprocessor (private helper, not a module export)",
+        ),
+        (
+            "css.transform-vue-style",
+            "transform_vue_style (private helper, not a module export)",
+        ),
+        (
+            "css.analyze-style",
+            "analyze_style (private helper, not a module export)",
+        ),
+    ] {
+        let case = cases
+            .iter()
+            .find(|case| case["id"] == id)
+            .unwrap_or_else(|| panic!("the inventory does not classify `{id}`"));
+        assert!(case["hostEntryPoint"].is_null(), "{id} gained a host route");
+        let aliases = case["routeAliases"]
+            .as_array()
+            .expect("style cases carry route aliases");
+        assert_eq!(aliases.len(), 1, "{id} must classify one private helper");
+        assert_eq!(aliases[0]["transport"], "napi");
+        assert_eq!(aliases[0]["spelling"], spelling);
+        assert!(
+            aliases[0]["spelling"]
+                .as_str()
+                .is_some_and(|value| value.contains("private helper, not a module export")),
+            "{id} must stay a private helper, not a live NAPI export"
+        );
+    }
+
     let css = cases
         .iter()
         .find(|case| case["id"] == "css.process-style")
@@ -315,6 +348,22 @@ fn the_inventory_is_internally_well_formed() {
         css["hostEntryPoint"].is_null(),
         "the standalone CSS spelling gained a host route; the inventory's claim that it \
          bypasses the host is stale"
+    );
+    let live_aliases = css["routeAliases"]
+        .as_array()
+        .expect("the live style route carries aliases");
+    assert!(
+        live_aliases.iter().any(|alias| {
+            alias["transport"] == "napi"
+                && alias["spelling"] == "processStyle (free function, not a host method)"
+        }),
+        "the live processStyle NAPI export must remain classified as reachable"
+    );
+    assert!(
+        live_aliases
+            .iter()
+            .any(|alias| alias["transport"] == "bundler"),
+        "the retained bundler route must remain represented"
     );
 }
 
