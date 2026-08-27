@@ -84,12 +84,14 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 const USAGE: &str = "usage:
   css_latency_gate capture --out <path> [--pipeline <discriminant>] [--allow-unoptimized]
   css_latency_gate compare --baseline <path> --candidate <path> [--expect-transition <from>:<to>]
+  css_latency_gate gate --baseline <path> --out <path> [--pipeline <discriminant>] [--expect-transition <from>:<to>] [--allow-unoptimized]
 
 capture measures the shared benchmark-identity universe against the style
 pipeline compiled into this binary and writes a provenance-stamped record;
-compare gates a fresh candidate record against a committed baseline record.
-A produce-then-gate run is `capture --out cand.json` followed by
-`compare --baseline <committed> --candidate cand.json`.";
+compare gates a candidate record against a committed baseline record.
+gate is the produce-then-gate entry: it captures a fresh candidate to --out
+and then compares that written record against --baseline. A comparator over
+a candidate someone else produced is not this command.";
 
 fn arg_value(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -103,6 +105,7 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("capture") => capture(&args[1..]),
         Some("compare") => compare(&args[1..]),
+        Some("gate") => gate(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
@@ -110,10 +113,20 @@ fn main() -> ExitCode {
     }
 }
 
-fn capture(args: &[String]) -> ExitCode {
+fn write_record(path: &str, record: &CssBaselineRecord) -> Result<(), ExitCode> {
+    let json = serde_json::to_string_pretty(record).expect("record serializes");
+    verter_workspace::native_fs::NativeFs::new()
+        .write_file(path, &(json + "\n"))
+        .map_err(|err| {
+            eprintln!("failed to write {path}: {err:?}");
+            ExitCode::from(1)
+        })
+}
+
+fn capture_record(args: &[String]) -> Result<(String, CssBaselineRecord), ExitCode> {
     let Some(out) = arg_value(args, "--out") else {
         eprintln!("capture requires --out <path>\n{USAGE}");
-        return ExitCode::from(2);
+        return Err(ExitCode::from(2));
     };
     let pipeline =
         arg_value(args, "--pipeline").unwrap_or_else(|| "legacy-lightningcss".to_string());
@@ -124,26 +137,31 @@ fn capture(args: &[String]) -> ExitCode {
              optimized measurement. Build with --release, or pass --allow-unoptimized for a \
              throwaway local run."
         );
-        return ExitCode::from(3);
+        return Err(ExitCode::from(3));
     }
 
     let hooks = AllocHooks {
         reset: reset_alloc_counter,
         read: read_alloc_counter,
     };
-    let record = run_capture(&pipeline, &hooks);
-    let json = serde_json::to_string_pretty(&record).expect("record serializes");
-    if let Err(err) = verter_workspace::native_fs::NativeFs::new().write_file(&out, &(json + "\n"))
-    {
-        eprintln!("failed to write {out}: {err:?}");
-        return ExitCode::from(1);
+    Ok((out, run_capture(&pipeline, &hooks)))
+}
+
+fn capture(args: &[String]) -> ExitCode {
+    match capture_record(args) {
+        Err(code) => code,
+        Ok((out, record)) => match write_record(&out, &record) {
+            Err(code) => code,
+            Ok(()) => {
+                eprintln!(
+                    "captured {} identities and {} allocation categories to {out}",
+                    record.identities.len(),
+                    record.allocation_by_category.len()
+                );
+                ExitCode::SUCCESS
+            }
+        },
     }
-    eprintln!(
-        "captured {} identities and {} allocation categories to {out}",
-        record.identities.len(),
-        record.allocation_by_category.len()
-    );
-    ExitCode::SUCCESS
 }
 
 fn read_record(path: &str) -> Result<CssBaselineRecord, String> {
@@ -212,4 +230,40 @@ fn compare(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn gate(args: &[String]) -> ExitCode {
+    let Some(baseline_path) = arg_value(args, "--baseline") else {
+        eprintln!("gate requires --baseline <path> and --out <path>\n{USAGE}");
+        return ExitCode::from(2);
+    };
+    if arg_value(args, "--out").is_none() {
+        eprintln!("gate requires --baseline <path> and --out <path>\n{USAGE}");
+        return ExitCode::from(2);
+    }
+
+    let (out, record) = match capture_record(args) {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
+    if let Err(code) = write_record(&out, &record) {
+        return code;
+    }
+    eprintln!(
+        "captured {} identities and {} allocation categories to {out}",
+        record.identities.len(),
+        record.allocation_by_category.len()
+    );
+
+    let mut compare_args = vec![
+        "--baseline".to_string(),
+        baseline_path,
+        "--candidate".to_string(),
+        out,
+    ];
+    if let Some(spec) = arg_value(args, "--expect-transition") {
+        compare_args.push("--expect-transition".to_string());
+        compare_args.push(spec);
+    }
+    compare(&compare_args)
 }

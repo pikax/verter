@@ -579,7 +579,12 @@ pub fn run_capture(pipeline: &str, hooks: &AllocHooks) -> CssBaselineRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::css_identities::{identity_universe, universe, GROUPS};
+    use crate::css_identities::{
+        generate_class_rules, generate_deep_rules, generate_descendant_selectors,
+        generate_global_rules, generate_mixed_vue, generate_pseudo_selectors,
+        generate_repeated_classes, generate_selector_lists, generate_slotted_rules,
+        generate_v_bind_dotted, generate_v_bind_rules, identity_universe, universe, GROUPS,
+    };
 
     fn synthetic_provenance(pipeline: &str) -> Provenance {
         Provenance {
@@ -914,5 +919,216 @@ mod tests {
         let err = compare_records(&identity_universe(), &candidate, &baseline, &policy)
             .expect_err("reversed transition must refuse");
         assert!(err.iter().any(|e| e.contains("pipeline")));
+    }
+
+    // -------------------------------------------------------------------------
+    // Generator-mirror byte identity (Copy B = css_identities)
+    // -------------------------------------------------------------------------
+
+    const MIRROR_TABLE_JSON: &str =
+        include_str!("../../../docs/arch/refactor/rev11/evidence/J1/generator-mirror-digests.json");
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    fn copy_b_digest_table() -> std::collections::BTreeMap<String, String> {
+        let mut table = std::collections::BTreeMap::new();
+        const SIZES: [usize; 7] = [1, 5, 8, 20, 40, 50, 100];
+        const AXES: [usize; 6] = [1, 5, 10, 20, 50, 100];
+        type OneArgGenerator = fn(usize) -> String;
+        let ones: [(&str, OneArgGenerator); 10] = [
+            ("generate_class_rules", generate_class_rules),
+            (
+                "generate_descendant_selectors",
+                generate_descendant_selectors,
+            ),
+            ("generate_pseudo_selectors", generate_pseudo_selectors),
+            ("generate_selector_lists", generate_selector_lists),
+            ("generate_v_bind_rules", generate_v_bind_rules),
+            ("generate_v_bind_dotted", generate_v_bind_dotted),
+            ("generate_deep_rules", generate_deep_rules),
+            ("generate_slotted_rules", generate_slotted_rules),
+            ("generate_mixed_vue", generate_mixed_vue),
+            ("generate_global_rules", generate_global_rules),
+        ];
+        for (name, gen) in ones {
+            for n in SIZES {
+                table.insert(format!("{name}:{n}"), sha256_hex(gen(n).as_bytes()));
+            }
+        }
+        for unique in AXES {
+            for repeats in AXES {
+                table.insert(
+                    format!("generate_repeated_classes:{unique}x{repeats}"),
+                    sha256_hex(generate_repeated_classes(unique, repeats).as_bytes()),
+                );
+            }
+        }
+        table
+    }
+
+    #[test]
+    fn css_identities_generators_match_pinned_mirror_digests() {
+        let pinned: serde_json::Value =
+            serde_json::from_str(MIRROR_TABLE_JSON).expect("mirror table parses");
+        let expected = pinned["digests"]
+            .as_object()
+            .expect("digests object")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().expect("hex digest").to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let actual = copy_b_digest_table();
+        let expected_keys: BTreeSet<&str> = expected.keys().map(String::as_str).collect();
+        let actual_keys: BTreeSet<&str> = actual.keys().map(String::as_str).collect();
+        assert_eq!(
+            actual_keys, expected_keys,
+            "Copy B generator digest keys must be exactly the pinned set"
+        );
+        for (key, digest) in &expected {
+            assert_eq!(
+                actual.get(key).map(String::as_str),
+                Some(digest.as_str()),
+                "Copy B digest mismatch at {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn generator_mirror_control_class_rules_differs_from_deep_rules() {
+        let left = generate_class_rules(1);
+        let right = generate_deep_rules(1);
+        assert_ne!(left.as_bytes(), right.as_bytes());
+        let offset = left
+            .as_bytes()
+            .iter()
+            .zip(right.as_bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or(left.len().min(right.len()));
+        assert_eq!(offset, 0, "control must differ at byte 0, got {offset}");
+        assert!(left.starts_with(".class-0 { color: red; padding: 0px; }"));
+        assert!(right.starts_with(":deep(.inner-0) { color: red; }"));
+    }
+
+    const COMMITTED_BASELINE_JSON: &str =
+        include_str!("../../../docs/arch/refactor/rev11/evidence/J1/css-baseline-legacy.json");
+
+    fn committed_baseline() -> CssBaselineRecord {
+        serde_json::from_str(COMMITTED_BASELINE_JSON).expect("committed baseline parses")
+    }
+
+    #[test]
+    fn committed_baseline_integrity_and_universe_match() {
+        let record = committed_baseline();
+        assert_eq!(
+            integrity_digest(&record),
+            record.integrity,
+            "committed baseline must verify its self-integrity digest"
+        );
+        assert_eq!(record.provenance.pipeline, "legacy-lightningcss");
+        assert_eq!(record.provenance.cargo_profile, "release");
+        assert_eq!(record.provenance.sampling_mode, SAMPLING_MODE);
+        let ids: BTreeSet<String> = record
+            .identities
+            .iter()
+            .map(|m| m.identity.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            identity_universe(),
+            "committed baseline identity set must equal the compiled-in universe"
+        );
+        assert_eq!(record.identities.len(), 42);
+        assert_eq!(record.allocation_by_category.len(), 11);
+    }
+
+    #[test]
+    fn committed_baseline_compared_to_itself_is_under_ceiling() {
+        let record = committed_baseline();
+        let report = compare_records(
+            &identity_universe(),
+            &record,
+            &record,
+            &ComparePolicy::default(),
+        )
+        .expect("a record compared to itself is 1.0x");
+        assert_eq!(report.per_identity.len(), 42);
+        assert!(report.per_identity.iter().all(|r| r.ratio == 1.0));
+    }
+
+    #[test]
+    fn committed_baseline_refuses_missing_identity() {
+        let baseline = committed_baseline();
+        let mut candidate = baseline.clone();
+        let dropped = candidate
+            .identities
+            .pop()
+            .expect("baseline has identities")
+            .identity;
+        seal(&mut candidate);
+        let err = compare_records(
+            &identity_universe(),
+            &baseline,
+            &candidate,
+            &ComparePolicy::default(),
+        )
+        .expect_err("missing identity must refuse");
+        assert!(
+            err.iter()
+                .any(|e| e.contains("missing") && e.contains(&dropped)),
+            "refusal names the dropped identity {dropped}: {err:?}"
+        );
+    }
+
+    #[test]
+    fn committed_baseline_refuses_one_identity_over_ceiling() {
+        let baseline = committed_baseline();
+        let mut candidate = baseline.clone();
+        set_median(&mut candidate, "scoped/single_class", {
+            let base = baseline
+                .identities
+                .iter()
+                .find(|m| m.identity == "scoped/single_class")
+                .expect("identity present")
+                .wall_ns_median;
+            (base * 12) / 10 + 1
+        });
+        let err = compare_records(
+            &identity_universe(),
+            &baseline,
+            &candidate,
+            &ComparePolicy::default(),
+        )
+        .expect_err("one identity over the ceiling must fail");
+        let ceiling: Vec<&String> = err.iter().filter(|e| e.contains("ceiling")).collect();
+        assert_eq!(ceiling.len(), 1, "exactly one identity reddens: {err:?}");
+        assert!(
+            ceiling[0].contains("scoped/single_class"),
+            "the exceeding identity is named: {err:?}"
+        );
+    }
+
+    #[test]
+    fn committed_baseline_refuses_forged_integrity() {
+        let baseline = committed_baseline();
+        let mut candidate = baseline.clone();
+        candidate.provenance.tree_object_id = "tree-forged".to_string();
+        let err = compare_records(
+            &identity_universe(),
+            &baseline,
+            &candidate,
+            &ComparePolicy::default(),
+        )
+        .expect_err("forged tree object id must refuse");
+        assert!(
+            err.iter().any(|e| e.contains("integrity")),
+            "refusal cites the integrity digest: {err:?}"
+        );
     }
 }

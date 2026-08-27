@@ -19,8 +19,10 @@
 //! one count per `crates/verter_bench/benches/css_bench.rs` generator category
 //! (the same input generators `verter_bench::css_identities` registers). The
 //! numbers this binary prints (`eprintln!` markers, `cargo test -- --nocapture`)
-//! are instruments, not a pinned 1.2x ratio. A later recapture owns the
-//! ceiling against a committed baseline.
+//! are the live instruments. The 1.2x ceiling lives in
+//! `converged_style_pipeline_allocation_within_ratified_ceiling`, which
+//! compares each category against the recaptured legacy counts committed in
+//! this file.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -288,9 +290,8 @@ mod style_planner_allocation_baseline {
     //! whether v-bind touched anything. `module: false, scoped: true` mirrors
     //! the lightningcss canary's fixed `is_module: false, scoped: true`.
     //!
-    //! These canaries assert non-zero allocation only. They do not pin a
-    //! 1.2x ratio; that gate is a later recapture against a committed
-    //! baseline.
+    //! Per-category non-zero sanity. The 1.2x ratio is
+    //! `converged_style_pipeline_allocation_within_ratified_ceiling`.
 
     use verter_compiler::style_planner::{run_vue_style_cascade, AuthoredStyleInput};
     use verter_css_syntax::CssDialect;
@@ -313,7 +314,7 @@ mod style_planner_allocation_baseline {
     }
 
     pub(super) fn measure(css: &str) -> u64 {
-        let _ = run_pipeline(css);
+        run_pipeline(css);
         reset_alloc_counter();
         run_pipeline(css);
         alloc_count()
@@ -380,8 +381,8 @@ mod style_planner_allocation_baseline {
 }
 
 /// Dual-pipeline instrument: both pipelines measured in one process against
-/// the same generated CSS. Asserts each half is non-zero. Does not pin a
-/// 1.2x ratio — recapture owns that gate.
+/// the same generated CSS. Asserts each half is non-zero. The 1.2x ratio is
+/// `converged_style_pipeline_allocation_within_ratified_ceiling`.
 mod dual_pipeline_allocation_instrument {
     use super::legacy_process_style_allocation_baseline as lightningcss;
     use super::style_planner_allocation_baseline as planner;
@@ -418,6 +419,329 @@ mod dual_pipeline_allocation_instrument {
             "a caller that does not want a source map must not pay \
              generate_map/to_json_string (off={off}, on={on})"
         );
+    }
+}
+
+/// 1.2x allocation ceiling: converged `style_planner` counts versus the
+/// recaptured legacy `css::process_style` counts for the same generator
+/// category. Category universe is `style_planner_gen::all_categories` (the
+/// same 11 generators `css_identities::allocation_category_universe`
+/// registers). Comparison runs only after the retained set, the measured
+/// set, and that universe are the same set.
+mod allocation_ceiling {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::legacy_process_style_allocation_baseline as legacy;
+    use super::style_planner_allocation_baseline as converged;
+    use super::style_planner_gen::all_categories;
+
+    /// Wall-clock / allocation ceiling: candidate <= 1.2x baseline.
+    const CEILING_NUM: u128 = 12;
+    const CEILING_DEN: u128 = 10;
+
+    /// Legacy `css::process_style` allocation counts recaptured on tree
+    /// `1548e5b23d199fd9c761d952f50b4ecb4d5888bb` with `--test-threads=1`
+    /// through `dual_pipeline_allocation_instrument::each_category_observes_both_pipelines`.
+    /// Live counts from that tree, not a copied historical table.
+    const RETAINED_LEGACY_ALLOC: &[(&str, u64)] = &[
+        ("class_rules", 422),
+        ("descendant_selectors", 371),
+        ("pseudo_selectors", 371),
+        ("selector_lists", 822),
+        ("v_bind_rules", 929),
+        ("v_bind_dotted", 929),
+        ("deep_rules", 522),
+        ("slotted_rules", 472),
+        ("mixed_vue", 648),
+        ("global_rules", 370),
+        ("repeated_classes", 371),
+    ];
+
+    fn check_allocation_ceiling(
+        universe: &[&str],
+        retained_legacy: &BTreeMap<&str, u64>,
+        measured_converged: &BTreeMap<&str, u64>,
+    ) -> Result<(), Vec<String>> {
+        let mut failures = Vec::new();
+        let universe_set: BTreeSet<&str> = universe.iter().copied().collect();
+        let retained_set: BTreeSet<&str> = retained_legacy.keys().copied().collect();
+        let measured_set: BTreeSet<&str> = measured_converged.keys().copied().collect();
+
+        if universe_set.len() != universe.len() {
+            failures.push("universe contains duplicate categories".to_string());
+        }
+        if retained_set.len() != retained_legacy.len() {
+            failures.push("retained legacy table contains duplicate categories".to_string());
+        }
+        if measured_set.len() != measured_converged.len() {
+            failures.push("measured set contains duplicate categories".to_string());
+        }
+
+        for missing in universe_set.difference(&retained_set) {
+            failures.push(format!(
+                "retained legacy table is missing category {missing:?} from the universe"
+            ));
+        }
+        for extra in retained_set.difference(&universe_set) {
+            failures.push(format!(
+                "retained legacy table has extra category {extra:?} not in the universe"
+            ));
+        }
+        for missing in universe_set.difference(&measured_set) {
+            failures.push(format!(
+                "measured set is missing category {missing:?} from the universe"
+            ));
+        }
+        for extra in measured_set.difference(&universe_set) {
+            failures.push(format!(
+                "measured set has extra category {extra:?} not in the universe"
+            ));
+        }
+        if !failures.is_empty() {
+            return Err(failures);
+        }
+
+        for name in universe {
+            let base = u128::from(*retained_legacy.get(name).expect("set-equal"));
+            let cand = u128::from(*measured_converged.get(name).expect("set-equal"));
+            if cand * CEILING_DEN > base * CEILING_NUM {
+                failures.push(format!(
+                    "category {name:?} exceeds the 1.2x allocation ceiling: converged \
+                     {cand} vs legacy {base} ({:.3}x)",
+                    cand as f64 / base.max(1) as f64,
+                ));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures)
+        }
+    }
+
+    fn universe_names() -> Vec<&'static str> {
+        all_categories().into_iter().map(|(name, _)| name).collect()
+    }
+
+    fn retained_map() -> BTreeMap<&'static str, u64> {
+        RETAINED_LEGACY_ALLOC.iter().copied().collect()
+    }
+
+    #[test]
+    fn allocation_ceiling_passes_when_sets_match_and_ratios_under_bound() {
+        let universe = universe_names();
+        let retained = retained_map();
+        let measured: BTreeMap<&str, u64> = retained
+            .iter()
+            .map(|(k, v)| (*k, v.saturating_add(v / 10))) // 1.1x
+            .collect();
+        check_allocation_ceiling(&universe, &retained, &measured)
+            .expect("1.1x of retained counts is under the ceiling");
+    }
+
+    #[test]
+    fn allocation_ceiling_fails_on_missing_category() {
+        let universe = universe_names();
+        let retained = retained_map();
+        let mut measured = retained.clone();
+        measured.remove("class_rules");
+        let err = check_allocation_ceiling(&universe, &retained, &measured)
+            .expect_err("missing category must refuse");
+        assert!(
+            err.iter()
+                .any(|e| e.contains("missing") && e.contains("class_rules")),
+            "refusal names the missing category: {err:?}"
+        );
+    }
+
+    #[test]
+    fn allocation_ceiling_fails_on_extra_category() {
+        let universe = universe_names();
+        let retained = retained_map();
+        let mut measured = retained.clone();
+        measured.insert("fabricated", 1);
+        let err = check_allocation_ceiling(&universe, &retained, &measured)
+            .expect_err("extra category must refuse");
+        assert!(
+            err.iter()
+                .any(|e| e.contains("extra") && e.contains("fabricated")),
+            "refusal names the extra category: {err:?}"
+        );
+    }
+
+    #[test]
+    fn allocation_ceiling_fails_when_exactly_one_category_exceeds_naming_only_it() {
+        let universe = universe_names();
+        let retained = retained_map();
+        let mut measured = retained.clone();
+        let base = retained["class_rules"];
+        measured.insert("class_rules", (base * 12) / 10 + 1); // just over 1.2x
+        let err = check_allocation_ceiling(&universe, &retained, &measured)
+            .expect_err("one category over the ceiling must fail");
+        let ceiling: Vec<&String> = err.iter().filter(|e| e.contains("ceiling")).collect();
+        assert_eq!(
+            ceiling.len(),
+            1,
+            "exactly the one exceeding category reddens: {err:?}"
+        );
+        assert!(
+            ceiling[0].contains("class_rules"),
+            "the exceeding category is named: {err:?}"
+        );
+    }
+
+    #[test]
+    fn allocation_ceiling_passes_at_exactly_the_ceiling() {
+        let universe = universe_names();
+        let retained = retained_map();
+        let mut measured = retained.clone();
+        let base = retained["class_rules"];
+        measured.insert("class_rules", (base * 12) / 10); // exactly 1.2x
+        check_allocation_ceiling(&universe, &retained, &measured)
+            .expect("exactly 1.2x is within the ceiling");
+    }
+
+    #[test]
+    fn retained_legacy_allocation_matches_live_legacy_pipeline() {
+        let retained = retained_map();
+        let mut live = BTreeMap::new();
+        for (name, css) in all_categories() {
+            live.insert(name, legacy::measure(&css));
+        }
+        assert_eq!(
+            live, retained,
+            "live legacy counts must equal the recapture committed in this file \
+             — a copied donor table that drifted from this tree fails here"
+        );
+    }
+
+    #[test]
+    fn converged_style_pipeline_allocation_within_ratified_ceiling() {
+        let universe = universe_names();
+        let retained = retained_map();
+        let mut measured = BTreeMap::new();
+        for (name, css) in all_categories() {
+            let count = converged::measure(&css);
+            eprintln!(
+                "J1_ALLOC_RATIO[{name}] = converged {count} / legacy {} = {:.3}x",
+                retained[name],
+                count as f64 / retained[name].max(1) as f64
+            );
+            measured.insert(name, count);
+        }
+        check_allocation_ceiling(&universe, &retained, &measured).unwrap_or_else(|failures| {
+            panic!(
+                "converged style pipeline exceeds the recaptured 1.2x allocation ceiling:\n  {}",
+                failures.join("\n  ")
+            );
+        });
+    }
+}
+
+/// Copy A of the CSS generator mirror: `style_planner_gen` must produce
+/// byte-identical output to the pinned digest table (Copy B is
+/// `verter_bench::css_identities`).
+mod generator_mirror {
+    use std::collections::BTreeSet;
+
+    use sha2::{Digest, Sha256};
+
+    use super::style_planner_gen::{
+        generate_class_rules, generate_deep_rules, generate_descendant_selectors,
+        generate_global_rules, generate_mixed_vue, generate_pseudo_selectors,
+        generate_repeated_classes, generate_selector_lists, generate_slotted_rules,
+        generate_v_bind_dotted, generate_v_bind_rules,
+    };
+
+    const MIRROR_TABLE_JSON: &str =
+        include_str!("../../../docs/arch/refactor/rev11/evidence/J1/generator-mirror-digests.json");
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    fn copy_a_digest_table() -> std::collections::BTreeMap<String, String> {
+        let mut table = std::collections::BTreeMap::new();
+        const SIZES: [usize; 7] = [1, 5, 8, 20, 40, 50, 100];
+        const AXES: [usize; 6] = [1, 5, 10, 20, 50, 100];
+        type OneArgGenerator = fn(usize) -> String;
+        let ones: [(&str, OneArgGenerator); 10] = [
+            ("generate_class_rules", generate_class_rules),
+            (
+                "generate_descendant_selectors",
+                generate_descendant_selectors,
+            ),
+            ("generate_pseudo_selectors", generate_pseudo_selectors),
+            ("generate_selector_lists", generate_selector_lists),
+            ("generate_v_bind_rules", generate_v_bind_rules),
+            ("generate_v_bind_dotted", generate_v_bind_dotted),
+            ("generate_deep_rules", generate_deep_rules),
+            ("generate_slotted_rules", generate_slotted_rules),
+            ("generate_mixed_vue", generate_mixed_vue),
+            ("generate_global_rules", generate_global_rules),
+        ];
+        for (name, gen) in ones {
+            for n in SIZES {
+                table.insert(format!("{name}:{n}"), sha256_hex(gen(n).as_bytes()));
+            }
+        }
+        for unique in AXES {
+            for repeats in AXES {
+                table.insert(
+                    format!("generate_repeated_classes:{unique}x{repeats}"),
+                    sha256_hex(generate_repeated_classes(unique, repeats).as_bytes()),
+                );
+            }
+        }
+        table
+    }
+
+    #[test]
+    fn allocator_canary_generators_match_pinned_mirror_digests() {
+        let pinned: serde_json::Value =
+            serde_json::from_str(MIRROR_TABLE_JSON).expect("mirror table parses");
+        let expected = pinned["digests"]
+            .as_object()
+            .expect("digests object")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().expect("hex digest").to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let actual = copy_a_digest_table();
+        let expected_keys: BTreeSet<&str> = expected.keys().map(String::as_str).collect();
+        let actual_keys: BTreeSet<&str> = actual.keys().map(String::as_str).collect();
+        assert_eq!(
+            actual_keys, expected_keys,
+            "Copy A generator digest keys must be exactly the pinned set"
+        );
+        for (key, digest) in &expected {
+            assert_eq!(
+                actual.get(key).map(String::as_str),
+                Some(digest.as_str()),
+                "Copy A digest mismatch at {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn generator_mirror_control_class_rules_differs_from_deep_rules() {
+        let left = generate_class_rules(1);
+        let right = generate_deep_rules(1);
+        assert_ne!(left.as_bytes(), right.as_bytes());
+        let offset = left
+            .as_bytes()
+            .iter()
+            .zip(right.as_bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or(left.len().min(right.len()));
+        assert_eq!(offset, 0, "control must differ at byte 0, got {offset}");
+        assert!(left.starts_with(".class-0 { color: red; padding: 0px; }"));
+        assert!(right.starts_with(":deep(.inner-0) { color: red; }"));
     }
 }
 
