@@ -12,17 +12,15 @@
 //! This binary is allocator-ONLY: it carries no non-allocation tests. The
 //! rest of the integration suite lives in the `main` binary.
 //!
-//! # Legacy-path allocation baseline
+//! # Style-pipeline allocation instruments
 //!
-//! This module records the ALLOCATION half of the ratified Latency/Allocation
-//! bound: live allocations through the current legacy `css::process_style`
-//! entry point, one count per `crates/verter_bench/benches/css_bench.rs`
-//! generator category (the same input generators the wall-clock baseline in
-//! `docs/arch/refactor/rev11/evidence/J1/perf-baseline.md` measures). The
+//! This binary records live allocations through both the lightningcss
+//! `css::process_style` entry point and `style_planner::run_vue_style_cascade`,
+//! one count per `crates/verter_bench/benches/css_bench.rs` generator category
+//! (the same input generators `verter_bench::css_identities` registers). The
 //! numbers this binary prints (`eprintln!` markers, `cargo test -- --nocapture`)
-//! are the allocation baseline recorded in that same document; the converged
-//! style pipeline that replaces this entry point is required to stay within
-//! the same 1.2x (20%) ceiling per category.
+//! are instruments, not a pinned 1.2x ratio. A later recapture owns the
+//! ceiling against a committed baseline.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -79,40 +77,26 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
-mod legacy_process_style_allocation_baseline {
-    //! One canary per `css_bench.rs` generator category, each driving the
-    //! generated CSS through the legacy `css::process_style` entry point
-    //! with a fixed representative option set (`scoped: true`,
-    //! `is_module: false`) so counts are comparable across categories and,
-    //! later, against the converged style pipeline this legacy path is
-    //! replaced by. `scoped: true` is used uniformly (rather than mirroring
-    //! each generator's own bench group's options) because the ratified
-    //! bound compares ALLOCATION COUNT PER CATEGORY across the two
-    //! pipelines, not per exact option permutation — a fixed option set
-    //! removes that as a confound.
-
-    use verter_compiler::css::{process_style, ProcessStyleOptions};
-
-    use super::{alloc_count, reset_alloc_counter};
-
-    // ---- Generators mirrored 1:1 from css_bench.rs (kept in lock-step; the
-    // benchmark file and this canary must measure the same inputs). ----
-
-    fn generate_class_rules(n: usize) -> String {
+/// Input generators mirrored 1:1 from `verter_bench::css_identities`.
+/// `verter_compiler` tests cannot depend on `verter_bench`; byte-identity of
+/// the generated CSS is the contract recorded in
+/// `docs/arch/refactor/rev11/evidence/J1/generator-mirror-equivalence.md`.
+mod style_planner_gen {
+    pub fn generate_class_rules(n: usize) -> String {
         (0..n)
             .map(|i| format!(".class-{i} {{ color: red; padding: {i}px; }}"))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn generate_descendant_selectors(n: usize) -> String {
+    pub fn generate_descendant_selectors(n: usize) -> String {
         (0..n)
             .map(|i| format!(".parent-{i} .child-{i} {{ color: blue; }}"))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn generate_pseudo_selectors(n: usize) -> String {
+    pub fn generate_pseudo_selectors(n: usize) -> String {
         let pseudos = [":hover", ":focus", ":active", ":first-child", ":last-child"];
         (0..n)
             .map(|i| {
@@ -123,7 +107,7 @@ mod legacy_process_style_allocation_baseline {
             .join("\n")
     }
 
-    fn generate_selector_lists(n: usize) -> String {
+    pub fn generate_selector_lists(n: usize) -> String {
         (0..n)
             .map(|i| {
                 let selectors = (0..3)
@@ -136,35 +120,35 @@ mod legacy_process_style_allocation_baseline {
             .join("\n")
     }
 
-    fn generate_v_bind_rules(n: usize) -> String {
+    pub fn generate_v_bind_rules(n: usize) -> String {
         (0..n)
             .map(|i| format!(".item-{i} {{ color: v-bind(color{i}); }}"))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn generate_v_bind_dotted(n: usize) -> String {
+    pub fn generate_v_bind_dotted(n: usize) -> String {
         (0..n)
             .map(|i| format!(".item-{i} {{ color: v-bind('theme.colors.primary{i}'); }}"))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn generate_deep_rules(n: usize) -> String {
+    pub fn generate_deep_rules(n: usize) -> String {
         (0..n)
             .map(|i| format!(":deep(.inner-{i}) {{ color: red; }}"))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn generate_slotted_rules(n: usize) -> String {
+    pub fn generate_slotted_rules(n: usize) -> String {
         (0..n)
             .map(|i| format!(":slotted(.slot-{i}) {{ color: red; }}"))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn generate_mixed_vue(n: usize) -> String {
+    pub fn generate_mixed_vue(n: usize) -> String {
         (0..n)
             .map(|i| match i % 3 {
                 0 => format!(".item-{i} {{ color: v-bind(color{i}); }}"),
@@ -175,14 +159,14 @@ mod legacy_process_style_allocation_baseline {
             .join("\n")
     }
 
-    fn generate_global_rules(n: usize) -> String {
+    pub fn generate_global_rules(n: usize) -> String {
         (0..n)
             .map(|i| format!(":global(.reset-{i}) {{ margin: 0; }}"))
             .collect::<Vec<_>>()
             .join("\n")
     }
 
-    fn generate_repeated_classes(unique: usize, repeats: usize) -> String {
+    pub fn generate_repeated_classes(unique: usize, repeats: usize) -> String {
         let mut rules = Vec::new();
         for r in 0..repeats {
             for i in 0..unique {
@@ -192,9 +176,42 @@ mod legacy_process_style_allocation_baseline {
         rules.join("\n")
     }
 
-    const N: usize = 50;
+    pub const N: usize = 50;
 
-    fn measure(css: &str) -> u64 {
+    pub fn all_categories() -> [(&'static str, String); 11] {
+        [
+            ("class_rules", generate_class_rules(N)),
+            ("descendant_selectors", generate_descendant_selectors(N)),
+            ("pseudo_selectors", generate_pseudo_selectors(N)),
+            ("selector_lists", generate_selector_lists(N)),
+            ("v_bind_rules", generate_v_bind_rules(N)),
+            ("v_bind_dotted", generate_v_bind_dotted(N)),
+            ("deep_rules", generate_deep_rules(N)),
+            ("slotted_rules", generate_slotted_rules(N)),
+            ("mixed_vue", generate_mixed_vue(N)),
+            ("global_rules", generate_global_rules(N)),
+            ("repeated_classes", generate_repeated_classes(5, 10)),
+        ]
+    }
+}
+
+mod legacy_process_style_allocation_baseline {
+    //! One canary per `css_bench.rs` generator category, each driving the
+    //! generated CSS through the `css::process_style` entry point with a
+    //! fixed representative option set (`scoped: true`, `is_module: false`)
+    //! so counts are comparable across categories and, later, against the
+    //! `style_planner` pipeline. `scoped: true` is used uniformly (rather
+    //! than mirroring each generator's own bench group's options) because
+    //! the ratified bound compares ALLOCATION COUNT PER CATEGORY across the
+    //! two pipelines, not per exact option permutation — a fixed option set
+    //! removes that as a confound.
+
+    use verter_compiler::css::{process_style, ProcessStyleOptions};
+
+    use super::style_planner_gen::*;
+    use super::{alloc_count, reset_alloc_counter};
+
+    pub(super) fn measure(css: &str) -> u64 {
         let options = ProcessStyleOptions {
             scope_id: "a4f2eed6",
             scoped: true,
@@ -223,6 +240,96 @@ mod legacy_process_style_allocation_baseline {
                     count > 0,
                     "baseline sanity: `{}` must observe non-zero allocations \
                      through legacy css::process_style",
+                    $marker
+                );
+            }
+        };
+    }
+
+    canary!(class_rules, "class_rules", generate_class_rules(N));
+    canary!(
+        descendant_selectors,
+        "descendant_selectors",
+        generate_descendant_selectors(N)
+    );
+    canary!(
+        pseudo_selectors,
+        "pseudo_selectors",
+        generate_pseudo_selectors(N)
+    );
+    canary!(selector_lists, "selector_lists", generate_selector_lists(N));
+    canary!(v_bind_rules, "v_bind_rules", generate_v_bind_rules(N));
+    canary!(v_bind_dotted, "v_bind_dotted", generate_v_bind_dotted(N));
+    canary!(deep_rules, "deep_rules", generate_deep_rules(N));
+    canary!(slotted_rules, "slotted_rules", generate_slotted_rules(N));
+    canary!(mixed_vue, "mixed_vue", generate_mixed_vue(N));
+    canary!(global_rules, "global_rules", generate_global_rules(N));
+    canary!(
+        repeated_classes,
+        "repeated_classes",
+        generate_repeated_classes(5, 10)
+    );
+}
+
+mod style_planner_allocation_baseline {
+    //! Counterpart to `legacy_process_style_allocation_baseline`.
+    //!
+    //! Same generated CSS inputs (the shared `super::style_planner_gen`
+    //! module), driven through `style_planner::run_vue_style_cascade` — the
+    //! same cascade entry `compile/mod.rs` and `vue_bridge.rs` call — instead
+    //! of chaining the per-stage transform functions by hand.
+    //!
+    //! Calling the cascade entry (rather than `transform_vue_v_bind` then
+    //! `transform_vue_scoped_css` as two independent calls) matters for
+    //! allocation-count fidelity: `run_vue_style_cascade` hands the same
+    //! already-parsed `StyleSyntaxIr` forward when a stage returns
+    //! `Unchanged`, so a real invocation pays `1 + K` `parse_style_ir` calls
+    //! (K = stages that actually change bytes), never a flat 2 regardless of
+    //! whether v-bind touched anything. `module: false, scoped: true` mirrors
+    //! the lightningcss canary's fixed `is_module: false, scoped: true`.
+    //!
+    //! These canaries assert non-zero allocation only. They do not pin a
+    //! 1.2x ratio; that gate is a later recapture against a committed
+    //! baseline.
+
+    use verter_compiler::style_planner::{run_vue_style_cascade, AuthoredStyleInput};
+    use verter_css_syntax::CssDialect;
+
+    use super::style_planner_gen::*;
+    use super::{alloc_count, reset_alloc_counter};
+
+    const SCOPE_ID: &str = "a4f2eed6";
+
+    fn run_pipeline(css: &str) {
+        let input = AuthoredStyleInput::new(
+            css,
+            CssDialect::Css,
+            "<style>",
+            "standalone:carrier",
+            "standalone:carrier-bytes",
+        );
+        let outcome = run_vue_style_cascade(input, SCOPE_ID, false, true);
+        std::hint::black_box(&outcome.code);
+    }
+
+    pub(super) fn measure(css: &str) -> u64 {
+        let _ = run_pipeline(css);
+        reset_alloc_counter();
+        run_pipeline(css);
+        alloc_count()
+    }
+
+    macro_rules! canary {
+        ($name:ident, $marker:literal, $css:expr) => {
+            #[test]
+            fn $name() {
+                let css = $css;
+                let count = measure(&css);
+                eprintln!("J1_STYLE_PLANNER_ALLOC[{}] = {count}", $marker);
+                assert!(
+                    count > 0,
+                    "baseline sanity: `{}` must observe non-zero allocations \
+                     through style_planner::run_vue_style_cascade",
                     $marker
                 );
             }
@@ -363,8 +470,6 @@ mod intra_parser_attribution {
     }
 
     use super::{alloc_bytes, alloc_count, reset_alloc_counter};
-
-    const N: usize = 50;
     // One record per probe marker. Both selector-list ownership transfers (a rule's own list
     // and every functional pseudo's argument list) mark, so a 200-rule generator marks ~400
     // times. Overflow only truncates `parse_emit` attribution — the clone bucket is a Cell —
@@ -550,108 +655,9 @@ mod intra_parser_attribution {
         )
     }
 
-    // The generators live in the sibling module and are private. Mirror the
-    // 11-category set here so this module can name them without widening the
-    // legacy canary's visibility.
-    fn generate_class_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(".class-{i} {{ color: red; padding: {i}px; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_descendant_selectors(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(".parent-{i} .child-{i} {{ color: blue; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_pseudo_selectors(n: usize) -> String {
-        let pseudos = [":hover", ":focus", ":active", ":first-child", ":last-child"];
-        (0..n)
-            .map(|i| {
-                let pseudo = pseudos[i % pseudos.len()];
-                format!(".btn-{i}{pseudo} {{ color: red; }}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_selector_lists(n: usize) -> String {
-        (0..n)
-            .map(|i| {
-                let selectors = (0..3)
-                    .map(|j| format!(".sel-{i}-{j}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{selectors} {{ margin: {i}px; }}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_v_bind_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(".item-{i} {{ color: v-bind(color{i}); }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_v_bind_dotted(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(".item-{i} {{ color: v-bind('theme.colors.primary{i}'); }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_deep_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(":deep(.inner-{i}) {{ color: red; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_slotted_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(":slotted(.slot-{i}) {{ color: red; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_mixed_vue(n: usize) -> String {
-        (0..n)
-            .map(|i| match i % 3 {
-                0 => format!(".item-{i} {{ color: v-bind(color{i}); }}"),
-                1 => format!(":deep(.inner-{i}) {{ padding: {i}px; }}"),
-                _ => format!(":slotted(.slot-{i}) {{ margin: {i}px; }}"),
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_global_rules(n: usize) -> String {
-        (0..n)
-            .map(|i| format!(":global(.reset-{i}) {{ margin: 0; }}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    fn generate_repeated_classes(unique: usize, repeats: usize) -> String {
-        let mut rules = Vec::new();
-        for r in 0..repeats {
-            for i in 0..unique {
-                rules.push(format!(".btn-{i} {{ padding: {r}px; }}"));
-            }
-        }
-        rules.join("\n")
-    }
-
-    fn all_categories() -> [(&'static str, String); 11] {
-        [
-            ("class_rules", generate_class_rules(N)),
-            ("descendant_selectors", generate_descendant_selectors(N)),
-            ("pseudo_selectors", generate_pseudo_selectors(N)),
-            ("selector_lists", generate_selector_lists(N)),
-            ("v_bind_rules", generate_v_bind_rules(N)),
-            ("v_bind_dotted", generate_v_bind_dotted(N)),
-            ("deep_rules", generate_deep_rules(N)),
-            ("slotted_rules", generate_slotted_rules(N)),
-            ("mixed_vue", generate_mixed_vue(N)),
-            ("global_rules", generate_global_rules(N)),
-            ("repeated_classes", generate_repeated_classes(5, 10)),
-        ]
-    }
+    use super::style_planner_gen::{
+        all_categories, generate_class_rules, generate_deep_rules, generate_selector_lists, N,
+    };
 
     #[test]
     fn admission_copy_cannot_explain_parse_initial() {
