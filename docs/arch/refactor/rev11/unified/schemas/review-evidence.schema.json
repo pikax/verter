@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Independent candidate-bound review evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "type", "execution_custody", "custody_binding", "reviewer_executable_sha256", "evidence_id", "node_id", "review_profile", "candidate_sha", "candidate_tree", "reviewer", "lens", "model", "reasoning_effort", "verdict", "report_path", "report_sha256", "findings", "started_at", "completed_at", "payload_sha256"],
+  "properties": {
+    "schema": { "const": 2 }, "type": { "const": "review-evidence" },
+    "execution_custody": { "const": "programctl-review-run/v1" },
+    "custody_binding": { "type": "string", "pattern": "^review-capability:[0-9a-f]{64}$" },
+    "reviewer_executable_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "evidence_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+    "node_id": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" },
+    "review_profile": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidate_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "reviewer": { "type": "string", "minLength": 1 }, "lens": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 }, "reasoning_effort": { "type": "string", "minLength": 1 },
+    "verdict": { "const": "PASS" },
+    "report_path": { "type": "string", "pattern": "^review-reports/[A-Za-z0-9._/-]+$" },
+    "report_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "findings": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "fingerprint", "owner", "status"],
+        "allOf": [
+          {
+            "if": { "properties": { "severity": { "const": "P2" } }, "required": ["severity"] },
+            "then": { "required": ["class_wide_sweep", "next_cycle_obligation", "next_cycle_receipt", "authorization_binding"], "properties": { "status": { "const": "AUTHORIZED_DEFERRED" } } },
+            "else": { "properties": { "status": { "const": "CLOSED" } } }
+          }
+        ],
+        "properties": {
+          "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "owner": { "type": "string", "minLength": 1 },
+          "class_wide_sweep": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "next_cycle_obligation": { "type": "string", "minLength": 1 },
+          "next_cycle_receipt": { "type": "string", "pattern": "^NEXT-[A-Z0-9-]+:[0-9a-f]{64}$" },
+          "authorization_binding": { "type": "string", "pattern": "^finding-disposition:[0-9a-f]{64}$" },
+          "status": { "type": "string", "enum": ["CLOSED", "AUTHORIZED_DEFERRED"] }
+        }
+      }
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "payload_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

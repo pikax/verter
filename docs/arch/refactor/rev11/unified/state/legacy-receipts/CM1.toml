@@ -1,0 +1,16 @@
+schema = 2
+type = "legacy-accepted"
+node_id = "CM1"
+verdict = "ACCEPTED"
+accepted_sha = "f07ba1e99b14fc928bd7395241ee326b9e90b93e"
+accepted_tree = "612d1c633c68f23b868b7fd4cc61e0accbafb8da"
+candidate_sha = "f07ba1e99b14fc928bd7395241ee326b9e90b93e"
+candidate_tree = "612d1c633c68f23b868b7fd4cc61e0accbafb8da"
+integration_sha = "f07ba1e99b14fc928bd7395241ee326b9e90b93e"
+integration_tree = "612d1c633c68f23b868b7fd4cc61e0accbafb8da"
+charter_sha256 = "9b5b6f12a14a063e34cde6ff4da3b69cea91557db4d7b34278a97128a711a21a"
+source_ledger_sha256 = "2b176c4c15730ff9698c73f677eb239800c1adff3891e4e77493a768ea630dee"
+predecessors = ["BV1", "BS1"]
+gate_evidence = "pre-v2:CM1:grandfathered"
+review_evidence = "pre-v2:CM1:grandfathered"
+payload_sha256 = "84bcb600f44cba4460ce4f12ca3e3e1cd11da6edab2667bf8fcc311be10dfa91"

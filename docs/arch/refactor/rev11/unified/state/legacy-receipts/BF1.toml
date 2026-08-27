@@ -1,0 +1,16 @@
+schema = 2
+type = "legacy-accepted"
+node_id = "BF1"
+verdict = "ACCEPTED"
+accepted_sha = "6305950725abc2265135694f353b8fb75ef9c9c5"
+accepted_tree = "dfea0c71b2795ff10210fb2485fe1d70f0464f6a"
+candidate_sha = "6305950725abc2265135694f353b8fb75ef9c9c5"
+candidate_tree = "dfea0c71b2795ff10210fb2485fe1d70f0464f6a"
+integration_sha = "6305950725abc2265135694f353b8fb75ef9c9c5"
+integration_tree = "dfea0c71b2795ff10210fb2485fe1d70f0464f6a"
+charter_sha256 = "ef45ad3e19f74273ded8e41b43b31b239fda84b6eb13924ed887a5a5a8e6b98c"
+source_ledger_sha256 = "2b176c4c15730ff9698c73f677eb239800c1adff3891e4e77493a768ea630dee"
+predecessors = ["B1"]
+gate_evidence = "pre-v2:BF1:grandfathered"
+review_evidence = "pre-v2:BF1:grandfathered"
+payload_sha256 = "71c44caceadb94519fc235ed9a0c433aaa1291681be4a051885ca0985964a631"

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review profile catalog",
+  "type": "object", "additionalProperties": false, "required": ["schema", "profile"],
+  "properties": { "schema": { "const": 2 }, "profile": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["id", "reviewers", "independent", "lenses", "model", "effort"], "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" }, "reviewers": { "type": "integer", "minimum": 0 }, "independent": { "type": "boolean" },
+    "lenses": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "model": { "type": "string", "minLength": 1 }, "effort": { "type": "string", "minLength": 1 }
+  } } } }
+}

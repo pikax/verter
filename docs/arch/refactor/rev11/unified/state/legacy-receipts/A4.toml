@@ -1,0 +1,16 @@
+schema = 2
+type = "legacy-accepted"
+node_id = "A4"
+verdict = "ACCEPTED"
+accepted_sha = "1ab403c0107801b080438fab30b887c0c8164ecb"
+accepted_tree = "4ccdd9e72e21aa3bbf16615ee59d23339768ef1b"
+candidate_sha = "1ab403c0107801b080438fab30b887c0c8164ecb"
+candidate_tree = "4ccdd9e72e21aa3bbf16615ee59d23339768ef1b"
+integration_sha = "1ab403c0107801b080438fab30b887c0c8164ecb"
+integration_tree = "4ccdd9e72e21aa3bbf16615ee59d23339768ef1b"
+charter_sha256 = "207259a9cf46e1a2a6ed51a5e7ebe1552596834f51ae944e0256e96707fa7f3c"
+source_ledger_sha256 = "2b176c4c15730ff9698c73f677eb239800c1adff3891e4e77493a768ea630dee"
+predecessors = ["A3"]
+gate_evidence = "pre-v2:A4:grandfathered"
+review_evidence = "pre-v2:A4:grandfathered"
+payload_sha256 = "01871daac1ef35d8b0d09a0bc61e1ccc1221bada68859bd9b877a49d80f1f4e0"

@@ -1,0 +1,15 @@
+schema = 2
+type = "authority-amendment"
+amendment_id = "AMD-REQUIRED"
+ratified_by = "maintainer"
+ratification_receipt_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+previous_amendment_sha256 = ""
+before_authority_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+after_authority_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+before_generation = 0
+after_generation = 1
+changed_paths = ["authority/dag/REQUIRED.toml"]
+changed_nodes = []
+impact_closure = []
+invalidated_receipts = []
+payload_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"

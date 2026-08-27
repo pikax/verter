@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Activation transition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "package_state", "basis_commit", "basis_tree", "activation_node", "required_predecessors", "required_external_authorization", "c1_state", "c1_accepted_sha", "c1_accepted_tree", "c1_reviewed_sha", "c1_reviewed_tree", "j1_state", "j1_receipt", "orc0_receipt", "activation_authorization", "active_authority_sha256", "activation_transition", "premature_activation"],
+  "properties": {
+    "schema": { "const": 2 },
+    "package_state": { "type": "string", "enum": ["DORMANT", "ACTIVE"] },
+    "basis_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "basis_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "activation_node": { "const": "ORC0" },
+    "required_predecessors": { "type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" } },
+    "required_external_authorization": { "const": "maintainer_unified_v2_activation" },
+    "c1_state": { "const": "ACCEPTED" },
+    "c1_accepted_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "c1_accepted_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "c1_reviewed_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "c1_reviewed_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "j1_state": { "type": "string", "enum": ["IN_FLIGHT", "LANDED_GRANDFATHERED"] },
+    "j1_receipt": { "type": "string", "pattern": "^(?:|J1-LANDED-GRANDFATHERED:[0-9a-f]{64})$" },
+    "orc0_receipt": { "type": "string", "pattern": "^(?:|ORC0:[0-9a-f]{64})$" },
+    "activation_authorization": { "type": "string", "pattern": "^(?:|maintainer_unified_v2_activation:[0-9a-f]{64})$" },
+    "active_authority_sha256": { "type": "string", "pattern": "^(?:|[0-9a-f]{64})$" },
+    "activation_transition": { "type": "string", "pattern": "^(?:|ACT-[A-Z0-9-]+:[0-9a-f]{64})$" },
+    "premature_activation": { "const": "REFUSE" }
+  }
+}

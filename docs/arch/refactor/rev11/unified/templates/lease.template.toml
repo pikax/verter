@@ -1,0 +1,25 @@
+schema = 2
+type = "admission-lease"
+lease_id = "LEASE-REQUIRED"
+node_id = "REQUIRED"
+holder = "REQUIRED"
+base_sha = "0000000000000000000000000000000000000000"
+base_tree = "0000000000000000000000000000000000000000"
+candidate_ref = "refs/heads/REQUIRED"
+candidate_sha = "0000000000000000000000000000000000000000"
+candidate_tree = "0000000000000000000000000000000000000000"
+candidate_worktree = "/absolute/path/to/worktree"
+authority_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+conflict_domains = ["required_domain"]
+scope_path_roots = ["docs/arch/refactor/rev11/unified"]
+scope_symbols = ["unified authority"]
+resource_class = "docs-light"
+gate_runner = "REQUIRED"
+gate_result_path = "gate-results/REQUIRED.txt"
+integration_gate_result_path = "gate-results/REQUIRED-integration.txt"
+reviewer_assignments = ["correctness=REQUIRED"]
+review_report_paths = ["correctness=review-reports/REQUIRED.md"]
+renewed_from = ""
+acquired_at = "2026-01-01T00:00:00.000Z"
+expires_at = "2026-01-01T01:00:00.000Z"
+payload_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"

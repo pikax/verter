@@ -1,0 +1,35 @@
+schema = 4
+module = "compiler-vue-style-query"
+pinned_commit = "5a8ca4a391ea6d748f2891f1e39de6aaeec7987e"
+pinned_tree = "7ab8e3317fb8c8a15b7d63c6114a76f79f79f46d"
+
+[[node]]
+id = "VST1"
+name = "Vue selector-to-template query engine"
+predecessors = ["VCP2","VST0"]
+conditional_predecessors = []
+phase = "compiler"
+train = "compiler.vue-style-query"
+product = "vue_style_query"
+kind = "implementation"
+semantic_role = "delivery"
+class = "compiler"
+owner = "compiler.vue-style-query:indexed selector-to-template query service"
+conflict_domains = ["style_semantics", "vue_product"]
+resource_class = "rust-mixed"
+gate_profile = "targeted-domain"
+review_profile = "semantic-3"
+dispatchable = true
+optional = false
+release_gating = "non_release"
+source_refs = ["source:compiler-proposal.md:L1257"]
+external_requirements = []
+activation_gate = "ORC0"
+charter = "charters/compiler-vue-style-query/VST1.md"
+size = "M"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+rescope_loc = 1500
+rescope_files = 12
+rescope_unrelated_packages = 3

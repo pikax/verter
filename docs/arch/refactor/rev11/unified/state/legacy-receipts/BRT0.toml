@@ -1,0 +1,16 @@
+schema = 2
+type = "legacy-accepted"
+node_id = "BRT0"
+verdict = "ACCEPTED"
+accepted_sha = "724a1decdeeca266677d9812583e56928d5ac1cb"
+accepted_tree = "fba02ba6b822814692f7463dee11ff29d7982362"
+candidate_sha = "724a1decdeeca266677d9812583e56928d5ac1cb"
+candidate_tree = "fba02ba6b822814692f7463dee11ff29d7982362"
+integration_sha = "724a1decdeeca266677d9812583e56928d5ac1cb"
+integration_tree = "fba02ba6b822814692f7463dee11ff29d7982362"
+charter_sha256 = "53e1d2a1aa97e41c7040f0b2662eaedda63424809a3789177d9db07b0e7cfd7f"
+source_ledger_sha256 = "2b176c4c15730ff9698c73f677eb239800c1adff3891e4e77493a768ea630dee"
+predecessors = ["BF3"]
+gate_evidence = "pre-v2:BRT0:grandfathered"
+review_evidence = "pre-v2:BRT0:grandfathered"
+payload_sha256 = "9d0f5c848aa3ace8c9eb48b89109f5eb6f39cff2006cdb93f50ef29842300c18"

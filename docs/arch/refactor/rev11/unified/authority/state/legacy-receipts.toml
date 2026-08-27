@@ -1,0 +1,105 @@
+schema = 2
+[[receipt]]
+node_id = "A0"
+file_sha256 = "5a3b293252505194ef2d8b456f66b9ca6177f53c3f135b9826138cff5cfb0b71"
+payload_sha256 = "e2ec589c149f0a44b9ec618cd8a7dea9dc733868f7aad21f3e35f84ef397cb21"
+[[receipt]]
+node_id = "A1"
+file_sha256 = "017a6c4c768db65d4159fcb2f593da4412410a4983f9ac57ed321c30ec1a08e1"
+payload_sha256 = "20be0da8a6a6fbd284a991c69a970aad98532637b32f7a7c4053968e242a3ea0"
+[[receipt]]
+node_id = "A2"
+file_sha256 = "09cf71e0c23ac06d20824ea6c1b1189a81d7b4c171fc9f218bf98ee0db3b00fb"
+payload_sha256 = "2719ee337d7a8e265a6888ee53dadfe1c61088d9956d2043cc34e82a89b3da91"
+[[receipt]]
+node_id = "A3"
+file_sha256 = "7cf4a755503c156975d4c25028957a322d8840cc1f21918baceb4c0422b94fd0"
+payload_sha256 = "3ff93ebb52ee20f294ca611a64233f7fb2e9a40b4b4b8aed01200c0bbc6ac103"
+[[receipt]]
+node_id = "A4"
+file_sha256 = "defdf05d8a0d459975f8d964e2bdf35063ca9809ad1fe8a4bebb1d14c94a01f7"
+payload_sha256 = "01871daac1ef35d8b0d09a0bc61e1ccc1221bada68859bd9b877a49d80f1f4e0"
+[[receipt]]
+node_id = "A5"
+file_sha256 = "259c3d49f68a096d825fc56bcef24b8ab8e8e2e2c0c6f34476c3a453c016f679"
+payload_sha256 = "c2fbcdb4bf14ec0dc83cbe2057d954d302457d7ac05df53096ca9cbf2f6ae6db"
+[[receipt]]
+node_id = "A6"
+file_sha256 = "c4f590304de3a83b46188e6caffddc81f8857ca36ce261689585e8ac7614b5d3"
+payload_sha256 = "81cf920be1b0b337e726b5dfbdf3a0ec08b2a31d05057602ec4600c057efed51"
+[[receipt]]
+node_id = "B1"
+file_sha256 = "eeb175e3ae730b52307b2240768e02a05f2198dfa94f507f04cef92d528e665f"
+payload_sha256 = "bce53b139b2ba0cba97ed2a2d99b50fc736aa7bcccca3682f1808b6610045936"
+[[receipt]]
+node_id = "B2"
+file_sha256 = "a616d839638654c1b08149c438a08077d3d2257f0df944188b838b9f2d04a678"
+payload_sha256 = "78628786ea75ba7ce41aa8e5b6cbb4927eaf653833922658c9f9bf2b73380c6b"
+[[receipt]]
+node_id = "B3"
+file_sha256 = "d3ec228628d073ff965dd3e1011eac4d539dd460dfc409318ece28abb2a97016"
+payload_sha256 = "a9f17e5fdf79d9100c90118d1621855830c3bb54b7257cc26f70d4066c720389"
+[[receipt]]
+node_id = "B4"
+file_sha256 = "ce34a4875f01afbfc44961de1772806096f00496713f4ec4649fcba18f64e45a"
+payload_sha256 = "3d2e7b4689d3e9ee3e536dcb00ca6bf642a3285641a7e9eca93030c12f4d3824"
+[[receipt]]
+node_id = "B5"
+file_sha256 = "ae0162372df90c32f5ca8d64ab9e7b64762bff4abf6962fbfbcfcfbc39fe3322"
+payload_sha256 = "1aea95f87cfae1b5a763f574ba08f34283181f48b1fdf4a95d305b7c2b2ba0f5"
+[[receipt]]
+node_id = "B6"
+file_sha256 = "b98415e9bd7bfb0cc50bfe6dac029bb06c6a28a81318b4eef0950dec8e965d81"
+payload_sha256 = "17f5d682b957b44f4939b25e759123db49867979ab1f71c61c45a7dd92326b80"
+[[receipt]]
+node_id = "BA0"
+file_sha256 = "9f4f32ad8d0f91c39cb7d3493d8275e50c8c6e6233a4cff5f0e75e3400a7d2fc"
+payload_sha256 = "09c0c15d532abac96d0e2a9f6577fb02b28c6547bfbad8a25e3160bb9b39d17d"
+[[receipt]]
+node_id = "BF1"
+file_sha256 = "f40b5033f45a46799e860c2ff53557c0d38180e0d8e3f05f85ba82be473f3356"
+payload_sha256 = "71c44caceadb94519fc235ed9a0c433aaa1291681be4a051885ca0985964a631"
+[[receipt]]
+node_id = "BF2"
+file_sha256 = "4e90a76519655ac1191de7b88aadcaaf3d79c9a6bd3ba39c3a494853488a702f"
+payload_sha256 = "3f41504fb6adbd1390e4c92e7f97e2129fbd75767780384b0df68980d3983af8"
+[[receipt]]
+node_id = "BF3"
+file_sha256 = "28cf3a5e6fa7e6f48a2e7c10c1e4d7230502041c9a48ed771eb1236af396bbe0"
+payload_sha256 = "47299292ee14d5bfcfe60c77ae791083876c92d709dc125b4863d0c01dcd2422"
+[[receipt]]
+node_id = "BRT0"
+file_sha256 = "60876d77e1949ef0bf07feb2c5e2d5c0fe47af602c885840133b019775a159b9"
+payload_sha256 = "9d0f5c848aa3ace8c9eb48b89109f5eb6f39cff2006cdb93f50ef29842300c18"
+[[receipt]]
+node_id = "BS0"
+file_sha256 = "28008f3348a5f3fd663f50101ba80b18bccc3457ea8d459e7eabad666a119eb6"
+payload_sha256 = "edaa1d8af392afffacaae0ad67de68f4f67595d9a2ccd706d7c5fa6dfc82d303"
+[[receipt]]
+node_id = "BS1"
+file_sha256 = "b80d828d9e637cc3a6660fe92e24610cc1cd976358da9aa2e5b70ebe64768d37"
+payload_sha256 = "616052ec9d0fbc61a55b68bb2e5663f9828c9877d415024cabd5190b5e9e80d9"
+[[receipt]]
+node_id = "BV0"
+file_sha256 = "f80884bc9876ee5a0e88b4c229841eda6380956ee75b1cd8efce2502c1de8804"
+payload_sha256 = "e9682cf5eb25d00fd8543a4d18f2daf1e129fff405f77a71fd2ac0575e11a57c"
+[[receipt]]
+node_id = "BV0A"
+file_sha256 = "9a7797b90e27c727ff13734b0f45998c3e86db6badd5971e140ec206373c84f7"
+payload_sha256 = "128b9b6b5c7dcd50ae70cbd9517ecd73bff5def0c7a94efbc7228736fb3579e4"
+[[receipt]]
+node_id = "BV1"
+file_sha256 = "f0325524c9a0622d1f9e1cdbfb567d90141dfa352b3fbccfa44882690724fde2"
+payload_sha256 = "36e4e746f9cd14b16506b0487b4a893e7f541a5fa50dbb926432b43e6ef682a5"
+[[receipt]]
+node_id = "BV2"
+file_sha256 = "ab6a0c219cc68ee80500a4459489f789c3c7c85fa154f83f7f091ad2ce5e3f6b"
+payload_sha256 = "acba9c57d895c97ecf3201ddc7f0fa8fd01af0a2265cc05966167199b7405044"
+[[receipt]]
+node_id = "C1"
+file_sha256 = "a0bc52fa23fa95241d2156362a7ef9773f2c504cd8ad9eb8ac28fb7e5e3d8d55"
+payload_sha256 = "e0ed88e1e720f7f4fe48d41724ef696dbaf8f210521e7dd47ee3464553274a73"
+[[receipt]]
+node_id = "CM1"
+file_sha256 = "a6cd2706d73c6d02fa370e77fce84d4b73966ec773fbedaffc053b702e5562e4"
+payload_sha256 = "84bcb600f44cba4460ce4f12ca3e3e1cd11da6edab2667bf8fcc311be10dfa91"

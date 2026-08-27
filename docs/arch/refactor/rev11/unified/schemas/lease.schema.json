@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "title": "Ephemeral lease",
+  "required": ["schema", "type", "lease_id", "node_id", "holder", "base_sha", "base_tree", "candidate_ref", "candidate_sha", "candidate_tree", "candidate_worktree", "authority_sha256", "conflict_domains", "scope_path_roots", "scope_symbols", "resource_class", "gate_runner", "gate_result_path", "integration_gate_result_path", "reviewer_assignments", "review_report_paths", "renewed_from", "acquired_at", "expires_at", "payload_sha256"],
+  "properties": {
+    "schema": { "const": 2 },
+    "type": { "const": "admission-lease" },
+    "lease_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+    "node_id": {
+      "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$"
+    },
+    "holder": {
+      "type": "string", "minLength": 1
+    },
+    "base_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "base_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidate_ref": {
+      "type": "string", "pattern": "^refs/[A-Za-z0-9._/-]+$"
+    },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidate_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidate_worktree": { "type": "string", "minLength": 1 },
+    "authority_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "conflict_domains": {
+      "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+    },
+    "scope_path_roots": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "scope_symbols": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "resource_class": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "gate_runner": { "type": "string", "minLength": 1 },
+    "gate_result_path": { "type": "string", "pattern": "^gate-results/[A-Za-z0-9._/-]+$" },
+    "integration_gate_result_path": { "type": "string", "pattern": "^gate-results/[A-Za-z0-9._/-]+$" },
+    "reviewer_assignments": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*=.+$" } },
+    "review_report_paths": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9-]*=review-reports/[A-Za-z0-9._/-]+$" } },
+    "renewed_from": { "type": "string", "pattern": "^(?:|[A-Za-z0-9._-]+:[0-9a-f]{64})$" },
+    "acquired_at": {
+      "type": "string", "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string", "format": "date-time"
+    },
+    "payload_sha256": {
+      "type": "string", "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
