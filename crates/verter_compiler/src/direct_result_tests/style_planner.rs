@@ -57,6 +57,31 @@ fn normalize_selector(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn animation_value_identifiers(source: &str) -> Vec<&str> {
+    let mut identifiers = Vec::new();
+    for property in [
+        "animation:",
+        "animation-name:",
+        "-webkit-animation:",
+        "-webkit-animation-name:",
+    ] {
+        let mut remaining = source;
+        while let Some(start) = remaining.find(property) {
+            let value = &remaining[start + property.len()..];
+            let end = value.find([';', '}']).unwrap_or(value.len());
+            identifiers.extend(
+                value[..end]
+                    .split(|character: char| {
+                        !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+                    })
+                    .filter(|identifier| !identifier.is_empty()),
+            );
+            remaining = &value[end..];
+        }
+    }
+    identifiers
+}
+
 fn compile_style(source: &str) -> crate::compile::VerterCompileResult {
     // Style-planner tests need a valid carrier around the authored style. A style-only SFC is
     // intentionally diagnosed as missing its template/script entry, which is unrelated to the
@@ -587,7 +612,7 @@ fn vue_compile_routes_authored_styles_through_the_ir_planner() {
 // ─── J1 §3.1 vue-benchmarks probe findings (A10d-h) ────────────────────────
 //
 // Oracle: literal, exact byte capture from the workspace's pinned
-// `@vue/compiler-sfc@3.5.34` (J1.md §3.1). These assert the SEMANTIC content
+// `@vue/compiler-sfc@3.6.0-rc.5` (J1.md §3.1). These assert the SEMANTIC content
 // the oracle proves — attribute-injection point/presence, renamed
 // identifiers, reference-rewrite targets — token-normalized via `scoped()`'s
 // `selector_head()`/`normalize_selector()` helpers, never raw string
@@ -647,13 +672,47 @@ fn is_where_bare_selector_scopes_each_argument() {
 #[test]
 fn scoped_keyframes_rename_and_rewrite_references() {
     let source = "@keyframes fade { from { opacity: 0; } to { opacity: 1; } } \
-                  .x { animation: fade 1s; animation-name: fade, none; }";
+                  @keyframes spin { to { transform: rotate(1turn); } } \
+                  .x { animation: fade 1s, 2s linear spin; \
+                  animation-name: fade, none, spin; \
+                  -webkit-animation: spin 3s; \
+                  -webkit-animation-name: fade, spin; }";
     let actual = scoped(source, "x");
     assert!(actual.contains("@keyframes fade-x"), "{actual}");
+    assert!(actual.contains("@keyframes spin-x"), "{actual}");
     assert!(!actual.contains("@keyframes fade {"), "{actual}");
-    assert!(actual.contains("animation: fade-x 1s"), "{actual}");
-    assert!(actual.contains("animation-name: fade-x, none"), "{actual}");
-    assert!(!actual.contains("animation-name: fade,"), "{actual}");
+    assert!(!actual.contains("@keyframes spin {"), "{actual}");
+    let animation_identifiers = animation_value_identifiers(&actual);
+    assert!(
+        !animation_identifiers.contains(&"fade") && !animation_identifiers.contains(&"spin"),
+        "stale keyframe identifier in animation declarations: {animation_identifiers:?}; {actual}"
+    );
+    for stale in [
+        "animation: fade 1s",
+        "2s linear spin;",
+        "animation-name: fade,",
+        "none, spin;",
+        "-webkit-animation: spin 3s",
+        "-webkit-animation-name: fade, spin",
+    ] {
+        assert!(
+            !actual.contains(stale),
+            "stale keyframe reference {stale:?}: {actual}"
+        );
+    }
+    assert!(
+        actual.contains("animation: fade-x 1s, 2s linear spin-x"),
+        "{actual}"
+    );
+    assert!(
+        actual.contains("animation-name: fade-x, none, spin-x"),
+        "{actual}"
+    );
+    assert!(actual.contains("-webkit-animation: spin-x 3s"), "{actual}");
+    assert!(
+        actual.contains("-webkit-animation-name: fade-x, spin-x"),
+        "{actual}"
+    );
 }
 
 // @ai-generated - A10h (highest severity): the client `_useCssVars` runtime
@@ -1025,12 +1084,12 @@ fn zero_edit_routes_construct_no_code_transform() {
     }
 }
 
-// @ai-generated - Edit topology bound: `build_string()` runs exactly M times,
-// the edit-composition depth the construct requires. M=1 for a flat edit set
-// (plain scope-attribute insertion, `:deep()`'s argument render, which never
-// scopes its own contents). M=2 for a construct needing one nested sub-span
-// build (`:slotted()`'s argument IS scoped, so `render_special_argument`
-// builds its own `CodeTransform` in addition to the outer emit).
+// @ai-generated - Edit topology bound: `build_string()` runs exactly once per
+// rewrite that produces output. `:slotted()` argument scoping contributes
+// absolute-span edits directly to the outer emit's edit vector, so N
+// `:slotted()` occurrences still cost one outer emit build — whether an
+// occurrence contributes one argument edit (`.a`) or several
+// (`:is(.a, .b)` fans out to one insert per arm).
 #[test]
 fn build_string_call_count_matches_edit_composition_depth() {
     reset_build_string_invocation_count();
@@ -1092,10 +1151,284 @@ fn build_string_call_count_matches_edit_composition_depth() {
     let _ = scoped(":slotted(.a) { color: red }", "sc1");
     assert_eq!(
         build_string_invocation_count(),
-        2,
-        ":slotted()'s argument IS scoped, requiring one nested sub-span build \
-         plus the outer emit build"
+        1,
+        ":slotted() argument scoping rides the outer transform, not a nested one"
     );
+
+    reset_build_string_invocation_count();
+    let _ = scoped(":slotted(:is(.a, .b)) { color: red }", "sc1");
+    assert_eq!(
+        build_string_invocation_count(),
+        1,
+        "a multi-edit :slotted() argument (one insert per :is() arm) still \
+         rides the one outer transform"
+    );
+
+    reset_build_string_invocation_count();
+    let code = scoped(":slotted(:is(.a, .b, .c)) { color: red }", "sc1");
+    assert!(
+        code.contains(":is(.a[data-v-sc1-s], .b[data-v-sc1-s], .c[data-v-sc1-s])"),
+        "control: the three-arm argument must really fan out to three edits: {code}"
+    );
+    assert_eq!(
+        build_string_invocation_count(),
+        1,
+        "a three-edit :slotted() argument still rides the one outer transform — \
+         a regression gated on more than two argument edits is caught here while \
+         the one- and two-edit cases above stay green"
+    );
+}
+
+// @ai-generated - The multi-edit `:slotted()` shape really is multi-edit: an
+// `:is()` argument fans out to one scope-attribute insert per arm, applied at
+// absolute source offsets by the one outer transform, with the `:slotted(`
+// prefix and `)` suffix deleted around them.
+#[test]
+fn multi_edit_slotted_argument_scopes_each_is_arm() {
+    let code = scoped(":slotted(:is(.a, .b)) { color: red }", "sc1");
+    assert!(
+        code.contains(":is(.a[data-v-sc1-s], .b[data-v-sc1-s])"),
+        "each :is() arm must carry its own slotted attribute: {code}"
+    );
+    assert!(!code.contains(":slotted("), "{code}");
+}
+
+// @ai-generated - Three-arm variant of the shape control above: a three-arm
+// `:is()` argument fans out to THREE scope-attribute inserts. This pins that
+// the three-edit fixtures used by the build-count and allocation canaries
+// really do produce three argument edits — reachable from ordinary CSS
+// (`:slotted(:is(.a, .b, .c))`), not an assumed shape.
+#[test]
+fn three_edit_slotted_argument_scopes_each_is_arm() {
+    let code = scoped(":slotted(:is(.a, .b, .c)) { color: red }", "sc1");
+    assert!(
+        code.contains(":is(.a[data-v-sc1-s], .b[data-v-sc1-s], .c[data-v-sc1-s])"),
+        "each of the three :is() arms must carry its own slotted attribute: {code}"
+    );
+    assert!(!code.contains(":slotted("), "{code}");
+}
+
+// @ai-generated - Map-anchor guard: the emitted source map must carry
+// mappings whose SOURCE offsets are the `:slotted()` argument bytes' own
+// authored offsets, each sitting at a GENERATED position holding those very
+// bytes. What this establishes is that the argument's authored offsets
+// survive into the emitted map — which the known whole-component-overwrite
+// splice provably does not produce: its only mapping for the component
+// points at the component START, and no mapping's source position lands
+// inside the argument, so that implementation fails this test. What it does
+// NOT establish is that the argument bytes remained Original chunks of the
+// one outer transform, nor the sole-edit-mechanism architecture itself: a
+// re-rendering implementation that deliberately re-anchored its inserted
+// content to the authored offsets would reproduce these anchors and pass.
+// That residual is accepted; the sole-edit-mechanism property is held by the
+// production structure, with this guard as evidence against the concrete
+// splice regression, not as a proof of the architecture.
+//
+// Map decoding: the stage map is a standard JSON source map whose `mappings`
+// field is Base64-VLQ; `oxc_sourcemap::SourceMap::from_json_string` decodes
+// it into tokens exposing (dst_line, dst_col, src_line, src_col). The fixture
+// is single-line, so authored byte offsets equal source columns on line 0.
+#[test]
+fn slotted_argument_bytes_map_to_their_own_authored_offsets() {
+    let source = ":slotted(:is(.a, .b)) { color: red }";
+    let input = PlainCssInput::try_new(
+        source,
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    )
+    .unwrap();
+    let (code, map) =
+        rewritten(transform_vue_scoped_css(input, "sc1").expect("trusted CSS scopes"));
+    assert!(
+        code.contains(":is(.a[data-v-sc1-s], .b[data-v-sc1-s])"),
+        "control: the rewrite itself must be unchanged: {code}"
+    );
+
+    // Authored offsets derived from the fixture, never read off a run:
+    // the argument starts at `:is(`, and the argument's second original run
+    // (`, .b`) starts right after `.a`, where the first arm's attribute
+    // insert splits the argument bytes.
+    let argument_start = source.find(":is(").expect("fixture has the argument") as u32;
+    let after_first_arm = (source.find(".a").expect("fixture has .a") + ".a".len()) as u32;
+
+    let sm = oxc_sourcemap::SourceMap::from_json_string(&map).expect("valid stage map");
+    let tokens: Vec<(u32, u32, u32, u32)> = sm
+        .get_tokens()
+        .map(|token| {
+            (
+                token.get_dst_line(),
+                token.get_dst_col(),
+                token.get_src_line(),
+                token.get_src_col(),
+            )
+        })
+        .collect();
+
+    // Both authored positions must appear as mapping SOURCE positions, and
+    // each mapping's GENERATED position must sit on the very bytes it claims
+    // to preserve. This pins the anchors, not the chunk kind: it rules out
+    // the whole-component-overwrite splice (which maps neither position),
+    // while a re-rendering that deliberately re-anchored its inserted
+    // content would still satisfy it.
+    let generated_text_at = |dst_line: u32, dst_col: u32| -> &str {
+        assert_eq!(dst_line, 0, "single-line fixture stays single-line");
+        &code[dst_col as usize..]
+    };
+    let argument_token = tokens
+        .iter()
+        .find(|(_, _, src_line, src_col)| *src_line == 0 && *src_col == argument_start)
+        .unwrap_or_else(|| {
+            panic!(
+                "no mapping points at the argument's own authored offset \
+                 {argument_start}; the argument's authored offsets did not \
+                 survive into the emitted map: {tokens:?}"
+            )
+        });
+    assert!(
+        generated_text_at(argument_token.0, argument_token.1).starts_with(":is(.a"),
+        "the argument-start mapping must sit on the preserved argument bytes: {tokens:?}"
+    );
+    let second_run_token = tokens
+        .iter()
+        .find(|(_, _, src_line, src_col)| *src_line == 0 && *src_col == after_first_arm)
+        .unwrap_or_else(|| {
+            panic!(
+                "no mapping points at the argument's post-`.a` authored offset \
+                 {after_first_arm}; the per-arm insert did not split preserved \
+                 argument bytes: {tokens:?}"
+            )
+        });
+    assert!(
+        generated_text_at(second_run_token.0, second_run_token.1).starts_with(", .b"),
+        "the second-run mapping must sit on the preserved `, .b` bytes: {tokens:?}"
+    );
+}
+
+#[test]
+fn many_slotted_occurrences_share_one_emit_build_string() {
+    reset_build_string_invocation_count();
+    let many = (0..20)
+        .map(|i| format!(":slotted(.slot-{i}) {{ color: red; }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let code = scoped(&many, "sc1");
+    // Every occurrence must be rewritten, not just the first: the build-count
+    // assertion alone passes an implementation that scopes one occurrence and
+    // drops the rest.
+    assert_eq!(
+        code.matches("[data-v-sc1-s]").count(),
+        20,
+        "every one of the 20 occurrences must carry its scope attribute: {code}"
+    );
+    assert_eq!(
+        build_string_invocation_count(),
+        1,
+        "N :slotted() occurrences must not each mint a nested CodeTransform build"
+    );
+}
+
+// @ai-generated - The multi-edit variant of the occurrence-count bound: every
+// occurrence's argument produces TWO scope inserts (`:is()` with two arms), so
+// a regression that minted a per-occurrence transform only when an argument
+// carries more than one edit is caught here while the single-edit fixtures
+// above stay green.
+#[test]
+fn many_multi_edit_slotted_occurrences_share_one_emit_build_string() {
+    reset_build_string_invocation_count();
+    let many = (0..20)
+        .map(|i| format!(":slotted(:is(.a-{i}, .b-{i})) {{ color: red; }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let code = scoped(&many, "sc1");
+    assert!(
+        code.contains(":is(.a-0[data-v-sc1-s], .b-0[data-v-sc1-s])"),
+        "control: the fixture's arguments must really fan out to two edits: {code}"
+    );
+    // Every occurrence, not just the first: 20 occurrences x 2 arms.
+    assert_eq!(
+        code.matches("[data-v-sc1-s]").count(),
+        40,
+        "every arm of every one of the 20 occurrences must be scoped: {code}"
+    );
+    assert_eq!(
+        build_string_invocation_count(),
+        1,
+        "N multi-edit :slotted() occurrences must not each mint a nested \
+         CodeTransform build"
+    );
+}
+
+// @ai-generated - Three-edit variant of the occurrence-count bound: every
+// occurrence's argument produces THREE scope inserts (`:is()` with three
+// arms — the exact rule shape the three-edit allocation canaries generate),
+// so a regression gated on more than two argument edits is caught here while
+// both the single-edit and two-edit fixtures above stay green.
+#[test]
+fn many_three_edit_slotted_occurrences_share_one_emit_build_string() {
+    reset_build_string_invocation_count();
+    let many = (0..20)
+        .map(|i| format!(":slotted(:is(.a-{i}, .b-{i}, .c-{i})) {{ color: red; }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let code = scoped(&many, "sc1");
+    assert!(
+        code.contains(":is(.a-0[data-v-sc1-s], .b-0[data-v-sc1-s], .c-0[data-v-sc1-s])"),
+        "control: the fixture's arguments must really fan out to three edits: {code}"
+    );
+    // Every occurrence, not just the first: 20 occurrences x 3 arms.
+    assert_eq!(
+        code.matches("[data-v-sc1-s]").count(),
+        60,
+        "every arm of every one of the 20 occurrences must be scoped: {code}"
+    );
+    assert_eq!(
+        build_string_invocation_count(),
+        1,
+        "N three-edit :slotted() occurrences must not each mint a nested \
+         CodeTransform build"
+    );
+}
+
+// @ai-generated - The edit-count family is UNBOUNDED: `:is()` takes any number
+// of arms, so each fixture at N arms leaves a regression gated on `> N` free.
+// Fixtures at 1, 2 and 3 arms closed three rungs of that ladder one at a time;
+// this sweep closes the SWEPT RANGE in one assertion instead — it bounds the
+// ladder at ARM_SWEEP_MAX rather than closing an unbounded family. `build_string`
+// is the sensitive signal — a per-occurrence nested transform raises the count
+// above 1 for the shape that trips it — so sweeping the arm count is what
+// discriminates, and the byte canaries at 1/2/3 arms supply the magnitude.
+// Residual, stated rather than left to be rediscovered: a regression gated
+// above ARM_SWEEP_MAX arms is not caught here. That is inherent to
+// example-based testing over an unbounded family, not an oversight.
+#[test]
+fn slotted_argument_edit_count_sweep_never_mints_a_nested_build() {
+    const ARM_SWEEP_MAX: usize = 8;
+    for arms in 1..=ARM_SWEEP_MAX {
+        let selector = if arms == 1 {
+            ".a0".to_string()
+        } else {
+            let list = (0..arms)
+                .map(|i| format!(".a{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(":is({list})")
+        };
+        let source = format!(":slotted({selector}) {{ color: red; }}");
+        reset_build_string_invocation_count();
+        let code = scoped(&source, "sc1");
+        assert_eq!(
+            code.matches("[data-v-sc1-s]").count(),
+            arms,
+            "every one of the {arms} arm(s) must be scoped: {code}"
+        );
+        assert_eq!(
+            build_string_invocation_count(),
+            1,
+            "a {arms}-arm :slotted() argument must not mint a nested build: {code}"
+        );
+    }
 }
 
 // ─── A10i: the Vue-owned cascade parses each content identity once ─────────
