@@ -310,15 +310,15 @@ fn the_inventory_is_internally_well_formed() {
     for (id, spelling) in [
         (
             "css.prepare-style-for-preprocessor",
-            "prepare_style_for_preprocessor (private helper, not a module export)",
+            "prepareStyleForPreprocessor (free function, not a host method)",
         ),
         (
             "css.transform-vue-style",
-            "transform_vue_style (private helper, not a module export)",
+            "transformVueStyle (free function, not a host method)",
         ),
         (
             "css.analyze-style",
-            "analyze_style (private helper, not a module export)",
+            "analyzeStyle (free function, not a host method)",
         ),
     ] {
         let case = cases
@@ -329,14 +329,18 @@ fn the_inventory_is_internally_well_formed() {
         let aliases = case["routeAliases"]
             .as_array()
             .expect("style cases carry route aliases");
-        assert_eq!(aliases.len(), 1, "{id} must classify one private helper");
+        assert_eq!(
+            aliases.len(),
+            1,
+            "{id} must classify one NAPI free function and no bundler alias"
+        );
         assert_eq!(aliases[0]["transport"], "napi");
         assert_eq!(aliases[0]["spelling"], spelling);
         assert!(
             aliases[0]["spelling"]
                 .as_str()
-                .is_some_and(|value| value.contains("private helper, not a module export")),
-            "{id} must stay a private helper, not a live NAPI export"
+                .is_some_and(|value| value.contains("free function, not a host method")),
+            "{id} must be a NAPI module export unused by bundlers"
         );
     }
 

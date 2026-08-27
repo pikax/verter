@@ -4,15 +4,22 @@
 //! # verter_napi — Node.js bindings for Verter
 //!
 //! NAPI-RS binding layer that exposes [`verter_session::VerterHost`] and
-//! `processStyle` to Node.js.
+//! the standalone CSS style-processing entry points to Node.js.
 //!
 //! ## API parity
 //!
 //! This crate exposes the same `VerterHost` API as [`verter_wasm`] with
-//! one addition that requires a Node.js runtime:
+//! CSS entry points that require a Node.js runtime:
 //!
-//! - **`processStyle`** — applies scoped CSS, CSS Modules, and `v-bind()`
-//!   replacement to preprocessed CSS (SCSS/Less/Stylus output).
+//! - **`processStyle`** — live conflated CSS processor (scoped CSS, CSS
+//!   Modules, `v-bind()` replacement). Remains exported.
+//! - **`prepareStyleForPreprocessor`** — rewrites `v-bind()` in AUTHORED
+//!   style content before it is handed to an external SCSS/Less/Stylus
+//!   preprocessor.
+//! - **`transformVueStyle`** — applies the v-bind + CSS-Modules +
+//!   scoped-selector cascade to CSS the caller already treats as plain.
+//! - **`analyzeStyle`** — read-only style fact extraction (static + CSS
+//!   Modules class names), no rewrite.
 //!
 //! ## Performance
 //!
@@ -104,6 +111,13 @@ fn host_error(err: host::HostError) -> Error {
 //
 // Available in NAPI but not WASM because CSS preprocessing (LESS/SCSS/Stylus)
 // requires Node.js. The WASM host processes styles inline during compilation.
+//
+// Live export: `processStyle` (conflated processor). Dual-exported beside it:
+// - `prepareStyleForPreprocessor` — AUTHORED-dialect v-bind rewrite, before
+//   an external SCSS/Less/Stylus preprocessor.
+// - `transformVueStyle` — v-bind + CSS-Modules + scoped-selector cascade
+//   over CSS the caller already treats as plain.
+// - `analyzeStyle` — read-only fact extraction, no rewrite.
 // =============================================================================
 
 #[napi(object)]
@@ -199,191 +213,243 @@ fn css_dialect(value: Option<&str>) -> verter_css_syntax::CssDialect {
     }
 }
 
-fn rust_v_bind_vars(vars: Vec<verter_compiler::style_planner::VBindVar>) -> Vec<VueStyleVBind> {
+fn style_rewrite_failure_error(
+    failure: verter_compiler::style_planner::StyleRewriteFailure,
+) -> Error {
+    Error::new(Status::GenericFailure, failure.to_string())
+}
+
+#[napi(object)]
+pub struct VueStyleVBind {
+    /// The original expression text (e.g., "color" or "theme.color")
+    pub expression: String,
+    /// The generated CSS variable name (e.g., "--a4f2eed6-color")
+    pub varName: String,
+}
+
+fn to_napi_v_bind_vars(vars: Vec<verter_compiler::style_planner::VBindVar>) -> Vec<VueStyleVBind> {
     vars.into_iter()
         .map(|var| VueStyleVBind {
             expression: var.expression,
-            var_name: var.var_name,
+            varName: var.var_name,
         })
         .collect()
 }
 
-#[derive(Debug)]
-pub struct StyleOpError {
-    message: String,
-}
-
-impl StyleOpError {
-    fn from_failures(failures: &[verter_compiler::style_planner::StyleRewriteFailure]) -> Self {
-        Self {
-            message: failures
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; "),
-        }
-    }
-}
-
-impl From<verter_compiler::style_planner::StyleRewriteFailure> for StyleOpError {
-    fn from(error: verter_compiler::style_planner::StyleRewriteFailure) -> Self {
-        Self {
-            message: error.to_string(),
-        }
-    }
-}
-
-impl std::fmt::Display for StyleOpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for StyleOpError {}
-
-#[derive(Debug, Clone)]
-pub struct VueStyleVBind {
-    pub expression: String,
-    pub var_name: String,
-}
-
-#[derive(Debug, Clone, Default)]
+#[napi(object)]
+#[derive(Default)]
 pub struct PrepareStyleForPreprocessorOptions {
-    pub scope_id: String,
+    /// Scope ID string (e.g., "a4f2eed6")
+    pub scopeId: String,
+    /// Authored dialect: "css" (default) | "scss" | "sass" | "less" | "stylus".
     pub dialect: Option<String>,
     pub filename: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[napi(object)]
 pub struct PrepareStyleForPreprocessorResult {
+    /// Authored code with `v-bind()` rewritten to `var(--scope-hash)`.
     pub code: String,
-    pub v_bind_vars: Vec<VueStyleVBind>,
+    /// v-bind() expressions found and replaced.
+    pub vBindVars: Vec<VueStyleVBind>,
 }
 
+/// Rewrite `v-bind()` in AUTHORED (possibly non-CSS) style content, before
+/// handing it to an external SCSS/Less/Stylus preprocessor.
+#[napi]
 pub fn prepare_style_for_preprocessor(
-    css: &str,
+    css: Buffer,
     options: PrepareStyleForPreprocessorOptions,
-) -> std::result::Result<PrepareStyleForPreprocessorResult, StyleOpError> {
-    let filename = options.filename.as_deref().unwrap_or("style");
-    let input = verter_compiler::style_planner::AuthoredStyleInput::new(
-        css,
-        css_dialect(options.dialect.as_deref()),
-        filename,
-        filename,
-        filename,
-    );
-    match verter_compiler::style_planner::transform_vue_v_bind(input, &options.scope_id)? {
-        verter_compiler::style_planner::StyleRewriteOutcome::Unchanged { facts } => {
-            Ok(PrepareStyleForPreprocessorResult {
-                code: css.to_string(),
-                v_bind_vars: rust_v_bind_vars(facts.v_bind_vars),
-            })
-        }
+) -> Result<PrepareStyleForPreprocessorResult> {
+    let css = buffer_to_string(css)?;
+    catch_panic(std::panic::AssertUnwindSafe(|| {
+        let filename = options.filename.as_deref().unwrap_or("style");
+        let input = verter_compiler::style_planner::AuthoredStyleInput::new(
+            &css,
+            css_dialect(options.dialect.as_deref()),
+            filename,
+            filename,
+            filename,
+        );
+        verter_compiler::style_planner::transform_vue_v_bind(input, &options.scopeId)
+            .map_err(style_rewrite_failure_error)
+    }))?
+    .map(|outcome| match outcome {
         verter_compiler::style_planner::StyleRewriteOutcome::Rewritten { code, facts, .. } => {
-            Ok(PrepareStyleForPreprocessorResult {
+            PrepareStyleForPreprocessorResult {
                 code,
-                v_bind_vars: rust_v_bind_vars(facts.v_bind_vars),
-            })
+                vBindVars: to_napi_v_bind_vars(facts.v_bind_vars),
+            }
         }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct TransformVueStyleOptions {
-    pub scope_id: String,
-    pub scoped: Option<bool>,
-    pub is_module: Option<bool>,
-    pub module_name: Option<String>,
-    pub filename: Option<String>,
-    pub sourcemap: Option<bool>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TransformVueStyleResult {
-    pub code: String,
-    pub source_map: Option<String>,
-    pub module_classes: Vec<Vec<String>>,
-    pub module_name: Option<String>,
-    pub v_bind_vars: Vec<VueStyleVBind>,
-}
-
-pub fn transform_vue_style(
-    css: &str,
-    options: TransformVueStyleOptions,
-) -> std::result::Result<TransformVueStyleResult, StyleOpError> {
-    let filename = options.filename.as_deref().unwrap_or("style.css");
-    let parsed = verter_compiler::style_planner::parse_plain_css_for_verification(
-        css,
-        verter_compiler::style_planner::StyleRewriteStage::AuthoredVBind,
-    )?;
-    let verified =
-        verter_compiler::style_planner::VerifiedPlainCss::from_parsed_native_css(&parsed)
-            .ok_or_else(|| StyleOpError {
-                message: "verification parser did not produce native CSS syntax IR".to_string(),
-            })?;
-    let module = options.is_module.unwrap_or(false);
-    let want_source_map = options.sourcemap.unwrap_or(false);
-    let outcome = verter_compiler::style_planner::transform_vue_style(
-        verified,
-        filename,
-        filename,
-        filename,
-        &options.scope_id,
-        module,
-        options.scoped.unwrap_or(false),
-        want_source_map,
-    );
-    if !verter_compiler::style_planner::cascade_output_is_publishable(&outcome, css) {
-        return Err(StyleOpError::from_failures(&outcome.stage_failures));
-    }
-    let source_map = if want_source_map {
-        verter_compiler::style_planner::cascade_requested_source_map(&outcome, css, filename)
-    } else {
-        None
-    };
-    Ok(TransformVueStyleResult {
-        code: outcome.code,
-        source_map,
-        module_classes: outcome
-            .facts
-            .module_classes
-            .into_iter()
-            .map(|(name, hashed)| vec![name, hashed])
-            .collect(),
-        module_name: module.then(|| options.module_name.unwrap_or_else(|| "$style".to_string())),
-        v_bind_vars: rust_v_bind_vars(outcome.facts.v_bind_vars),
+        verter_compiler::style_planner::StyleRewriteOutcome::Unchanged { facts } => {
+            PrepareStyleForPreprocessorResult {
+                code: css,
+                vBindVars: to_napi_v_bind_vars(facts.v_bind_vars),
+            }
+        }
     })
 }
 
-#[derive(Debug, Clone, Default)]
+#[napi(object)]
+#[derive(Default)]
+pub struct TransformVueStyleOptions {
+    /// Scope ID string (e.g., "a4f2eed6")
+    pub scopeId: String,
+    /// Whether this style block is scoped
+    pub scoped: Option<bool>,
+    /// Whether this is a CSS module block
+    pub isModule: Option<bool>,
+    /// Custom module name (None = "$style")
+    pub moduleName: Option<String>,
+    /// Source filename for source map generation
+    pub filename: Option<String>,
+    /// Whether to generate a source map
+    pub sourcemap: Option<bool>,
+}
+
+#[napi(object)]
+pub struct TransformVueStyleResult {
+    /// Transformed CSS code
+    pub code: String,
+    /// Source map as JSON string (only when `sourcemap: true` was requested).
+    pub sourceMap: Option<String>,
+    /// CSS module class mappings (original → hashed), each entry is [original, hashed]
+    pub moduleClasses: Vec<Vec<String>>,
+    /// CSS module variable name (e.g. "$style" or custom name from `<style module="...">`)
+    pub moduleName: Option<String>,
+    /// v-bind() expressions found and replaced
+    pub vBindVars: Vec<VueStyleVBind>,
+    /// Per-selector soft refusals the cascade tolerated (`code` still
+    /// published, minus the untrustworthy rule each entry names) — a
+    /// caller-visible signal for exactly the case
+    /// `cascade_output_is_publishable` deliberately does NOT refuse the
+    /// whole call over. Empty on every ordinary successful transform.
+    pub refusals: Vec<String>,
+}
+
+/// Run Vue's v-bind + CSS-Modules + scoped-selector cascade over CSS the
+/// caller already treats as plain (already preprocessed, if it originated as
+/// SCSS/Less/Stylus).
+#[napi]
+pub fn transform_vue_style(
+    css: Buffer,
+    options: TransformVueStyleOptions,
+) -> Result<TransformVueStyleResult> {
+    let css = buffer_to_string(css)?;
+    catch_panic(std::panic::AssertUnwindSafe(|| {
+        let filename = options.filename.as_deref().unwrap_or("style.css");
+        // `transform_vue_style` never trusts a bare caller-asserted "this
+        // is CSS" label — it parses the received bytes as native CSS
+        // through the shared verification entry and builds the
+        // `VerifiedPlainCss` witness from that parse (call-site
+        // discipline, not a compiler-enforced proof that every witness
+        // anywhere was built this way).
+        let parsed = verter_compiler::style_planner::parse_plain_css_for_verification(
+            &css,
+            verter_compiler::style_planner::StyleRewriteStage::AuthoredVBind,
+        )
+        .map_err(style_rewrite_failure_error)?;
+        let verified =
+            verter_compiler::style_planner::VerifiedPlainCss::from_parsed_native_css(&parsed)
+                .ok_or_else(|| {
+                    Error::new(
+                        Status::GenericFailure,
+                        "verification parser did not produce native CSS syntax IR",
+                    )
+                })?;
+        let module = options.isModule.unwrap_or(false);
+        let want_source_map = options.sourcemap.unwrap_or(false);
+        let outcome = verter_compiler::style_planner::transform_vue_style(
+            verified,
+            filename,
+            filename,
+            filename,
+            &options.scopeId,
+            module,
+            options.scoped.unwrap_or(false),
+            want_source_map,
+        );
+        if !verter_compiler::style_planner::cascade_output_is_publishable(&outcome, &css) {
+            return Err(Error::new(
+                Status::GenericFailure,
+                outcome
+                    .stage_failures
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+        let source_map = if want_source_map {
+            verter_compiler::style_planner::cascade_requested_source_map(&outcome, &css, filename)
+        } else {
+            None
+        };
+        let module_name = if module {
+            Some(options.moduleName.unwrap_or_else(|| "$style".to_string()))
+        } else {
+            None
+        };
+        let refusals = outcome
+            .facts
+            .refusals
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        Ok(TransformVueStyleResult {
+            code: outcome.code,
+            sourceMap: source_map,
+            moduleClasses: outcome
+                .facts
+                .module_classes
+                .into_iter()
+                .map(|(name, hashed)| vec![name, hashed])
+                .collect(),
+            moduleName: module_name,
+            vBindVars: to_napi_v_bind_vars(outcome.facts.v_bind_vars),
+            refusals,
+        })
+    }))?
+}
+
+#[napi(object)]
+#[derive(Default)]
 pub struct AnalyzeStyleOptions {
-    pub scope_id: String,
+    pub scopeId: String,
+    /// Authored dialect: "css" (default) | "scss" | "sass" | "less" | "stylus".
     pub dialect: Option<String>,
     pub filename: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[napi(object)]
 pub struct AnalyzeStyleResult {
-    pub static_classes: Vec<String>,
-    pub module_classes: Vec<Vec<String>>,
+    /// Every complete static class selector, in first-occurrence order.
+    pub staticClasses: Vec<String>,
+    /// CSS-Modules would-be hashed name for each, each entry is [original, hashed]
+    pub moduleClasses: Vec<Vec<String>>,
 }
 
-pub fn analyze_style(
-    css: &str,
-    options: AnalyzeStyleOptions,
-) -> std::result::Result<AnalyzeStyleResult, StyleOpError> {
-    let filename = options.filename.as_deref().unwrap_or("style");
-    let input = verter_compiler::style_planner::AuthoredStyleInput::new(
-        css,
-        css_dialect(options.dialect.as_deref()),
-        filename,
-        filename,
-        filename,
-    );
-    let analysis = verter_compiler::style_planner::analyze_style(input, &options.scope_id)?;
-    Ok(AnalyzeStyleResult {
-        static_classes: analysis.static_classes,
-        module_classes: analysis
+/// Read-only style facts — NO rewrite. Drives IDE-style completions/analysis
+/// callers that need to know what a style block declares without paying for
+/// (or risking) a rewrite.
+#[napi]
+pub fn analyze_style(css: Buffer, options: AnalyzeStyleOptions) -> Result<AnalyzeStyleResult> {
+    let css = buffer_to_string(css)?;
+    catch_panic(std::panic::AssertUnwindSafe(|| {
+        let filename = options.filename.as_deref().unwrap_or("style");
+        let input = verter_compiler::style_planner::AuthoredStyleInput::new(
+            &css,
+            css_dialect(options.dialect.as_deref()),
+            filename,
+            filename,
+            filename,
+        );
+        verter_compiler::style_planner::analyze_style(input, &options.scopeId)
+            .map_err(style_rewrite_failure_error)
+    }))?
+    .map(|analysis| AnalyzeStyleResult {
+        staticClasses: analysis.static_classes,
+        moduleClasses: analysis
             .module_classes
             .into_iter()
             .map(|(name, hashed)| vec![name, hashed])

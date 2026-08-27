@@ -745,6 +745,37 @@ fn the_napi_transport_matches_the_in_process_host_route() {
         "napi/processStyle: the `sourcemap` axis has become live at the transport; the recorded \
          route description must be updated"
     );
+
+    let transformed = &record["cases"]["transformVueStyle"];
+    let parsed = verter_compiler::style_planner::parse_plain_css_for_verification(
+        ".x{color:red}",
+        verter_compiler::style_planner::StyleRewriteStage::AuthoredVBind,
+    )
+    .expect("the in-process CSS verification parse accepts the probe block");
+    let verified =
+        verter_compiler::style_planner::VerifiedPlainCss::from_parsed_native_css(&parsed)
+            .expect("the verification parser produced native CSS syntax IR");
+    let expected_transform = verter_compiler::style_planner::transform_vue_style(
+        verified,
+        "style.css",
+        "style.css",
+        "style.css",
+        "probe1234",
+        false,
+        true,
+        true,
+    );
+    assert!(expected_transform.stage_failures.is_empty());
+    assert_eq!(
+        transformed["code"].as_str(),
+        Some(expected_transform.code.as_str()),
+        "napi/transformVueStyle: the transported CSS differs from the in-process route's"
+    );
+    assert_eq!(
+        transformed["hasMap"], true,
+        "napi/transformVueStyle: the `sourcemap` axis is a live product — the transport \
+         must publish a map when one is requested"
+    );
 }
 
 /// NAPI batch vs in-process host, item-for-item. Refusal in the middle so
@@ -989,8 +1020,9 @@ fn every_exported_napi_spelling_is_executed_or_classified_out_of_scope() {
         "transformVueStyle",
     ] {
         assert!(
-            !module_exports.iter().any(|export| export == spelling),
-            "private style helper `{spelling}` leaked as a NAPI module export: {module_exports:?}"
+            module_exports.contains(&spelling.to_string()),
+            "the standalone CSS spelling `{spelling}` is absent from the built artifact: \
+             {module_exports:?}"
         );
     }
     assert!(

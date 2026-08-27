@@ -7,6 +7,16 @@ export * from "./audit";
 
 // =============================================================================
 // Standalone CSS Style Processing (for preprocessed CSS from Vite plugin)
+//
+// Live export: `processStyle`. Dual-exported beside it (not yet consumed by
+// bundlers):
+// - `prepareStyleForPreprocessor` — rewrite v-bind() in AUTHORED (possibly
+//   non-CSS) style content before an external SCSS/Less/Stylus preprocessor
+//   runs.
+// - `transformVueStyle` — the v-bind + CSS-Modules + scoped-selector cascade
+//   over CSS the caller already treats as plain.
+// - `analyzeStyle` — read-only style fact extraction (static + CSS-Modules
+//   class names), no rewrite.
 // =============================================================================
 
 /**
@@ -93,6 +103,110 @@ export declare function processStyle(
   css: string | Buffer,
   options: ProcessStyleOptions,
 ): ProcessStyleResult;
+
+/** A v-bind() expression that was replaced with a CSS variable. */
+export interface VueStyleVBind {
+  /** The original expression text (e.g., "color" or "theme.color") */
+  expression: string;
+  /** The generated CSS variable name (e.g., "--a4f2eed6-color") */
+  varName: string;
+}
+
+export interface PrepareStyleForPreprocessorOptions {
+  /** Scope ID string (e.g., "a4f2eed6") */
+  scopeId: string;
+  /** Authored dialect. Defaults to `"css"`. */
+  dialect?: "css" | "scss" | "sass" | "less" | "stylus";
+  filename?: string;
+}
+
+export interface PrepareStyleForPreprocessorResult {
+  /** Authored code with `v-bind()` rewritten to `var(--scope-hash)`. */
+  code: string;
+  vBindVars: VueStyleVBind[];
+}
+
+/**
+ * Rewrite `v-bind()` in AUTHORED (possibly non-CSS) style content, before
+ * handing it to an external SCSS/Less/Stylus preprocessor.
+ *
+ * @param css - Authored style content as a string or Buffer (UTF-8 bytes).
+ */
+export declare function prepareStyleForPreprocessor(
+  css: string | Buffer,
+  options: PrepareStyleForPreprocessorOptions,
+): PrepareStyleForPreprocessorResult;
+
+export interface TransformVueStyleOptions {
+  /** Scope ID string (e.g., "a4f2eed6") */
+  scopeId: string;
+  /** Whether this style block is scoped */
+  scoped?: boolean;
+  /** Whether this is a CSS module block */
+  isModule?: boolean;
+  /** Custom module name (None = "$style") */
+  moduleName?: string;
+  /** Source filename for source map generation */
+  filename?: string;
+  /** Whether to generate a source map */
+  sourcemap?: boolean;
+}
+
+export interface TransformVueStyleResult {
+  /** Transformed CSS code */
+  code: string;
+  /** Source map as JSON string (only when `sourcemap: true` was requested). */
+  sourceMap?: string;
+  /** CSS module class mappings (each entry is [original, hashed]) */
+  moduleClasses: [string, string][];
+  /** Resolved CSS module name (e.g., "$style" or a custom name) */
+  moduleName?: string;
+  /** v-bind() expressions found and replaced */
+  vBindVars: VueStyleVBind[];
+  /**
+   * Per-selector soft refusals the cascade tolerated — `code` still
+   * publishes, minus the untrustworthy rule each entry names. Empty on
+   * every ordinary successful transform; a caller that ignores a non-empty
+   * list is shipping silently-dropped CSS.
+   */
+  refusals: string[];
+}
+
+/**
+ * Run Vue's v-bind + CSS-Modules + scoped-selector cascade over CSS the
+ * caller already treats as plain (already preprocessed, if it originated as
+ * SCSS/Less/Stylus).
+ *
+ * @param css - Valid CSS as a string or Buffer (UTF-8 bytes).
+ */
+export declare function transformVueStyle(
+  css: string | Buffer,
+  options: TransformVueStyleOptions,
+): TransformVueStyleResult;
+
+export interface AnalyzeStyleOptions {
+  scopeId: string;
+  /** Authored dialect. Defaults to `"css"`. */
+  dialect?: "css" | "scss" | "sass" | "less" | "stylus";
+  filename?: string;
+}
+
+export interface AnalyzeStyleResult {
+  /** Every complete static class selector, in first-occurrence order. */
+  staticClasses: string[];
+  /** CSS-Modules would-be hashed name for each (each entry is [original, hashed]) */
+  moduleClasses: [string, string][];
+}
+
+/**
+ * Read-only style facts — NO rewrite.
+ *
+ * @param css - Valid CSS as a string or Buffer (UTF-8 bytes).
+ */
+export declare function analyzeStyle(
+  css: string | Buffer,
+  options: AnalyzeStyleOptions,
+): AnalyzeStyleResult;
 
 // =============================================================================
 // Runtime-gated deep memory audit (always compiled, single binary)

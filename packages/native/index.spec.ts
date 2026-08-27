@@ -1,6 +1,8 @@
 /**
  * @ai-generated - Tests for @verter/native exports.
- * Verifies that VerterHost and processStyle work correctly with both string and Buffer inputs.
+ * Verifies that VerterHost, live `processStyle`, and the three-way CSS
+ * style API (transformVueStyle / prepareStyleForPreprocessor / analyzeStyle)
+ * work correctly with both string and Buffer inputs.
  */
 import { basename, sep } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -8,6 +10,9 @@ import { describe, it, expect } from "vitest";
 import {
   VerterHost,
   processStyle,
+  transformVueStyle,
+  prepareStyleForPreprocessor,
+  analyzeStyle,
   parseSelectorThreadInvocations,
   type HostPublicApiProjectionError,
   type HostTscDeclarationShapeReason,
@@ -937,9 +942,12 @@ describe("VerterHost type declarations in sync with native binary", () => {
     ).toEqual([]);
   });
 
-  it("top-level exports should include processStyle and VerterHost", () => {
+  it("top-level exports should include processStyle, the three-way CSS style API, and VerterHost", () => {
     const native = require("./index.js");
     expect(typeof native.processStyle).toBe("function");
+    expect(typeof native.transformVueStyle).toBe("function");
+    expect(typeof native.prepareStyleForPreprocessor).toBe("function");
+    expect(typeof native.analyzeStyle).toBe("function");
     expect(typeof native.VerterHost).toBe("function");
     // `compileBatch` does not exist; batch SFC compile is
     // the `host.compileMany` instance method. Negative assertion to
@@ -995,6 +1003,145 @@ describe("processStyle", () => {
     });
 
     expect(result.code).toContain("abc123");
+  });
+});
+
+describe("transformVueStyle", () => {
+  const SOURCE = ".foo { color: red }";
+  // Minimal surgical edit: the scoped-selector rewrite inserts the scope
+  // attribute right after the compound, touching NOTHING else — an exact
+  // byte pin, not a substring search, so a stray reformat/normalization
+  // (e.g. a re-introduced full AST reprint) fails this test.
+  const EXPECTED = ".foo[data-v-abc123] { color: red }";
+
+  it("should scope CSS selectors (string input)", () => {
+    const result = transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: true,
+    });
+
+    expect(result.code).toBe(EXPECTED);
+  });
+
+  it("should scope CSS selectors (Buffer input)", () => {
+    const result = transformVueStyle(Buffer.from(SOURCE), {
+      scopeId: "abc123",
+      scoped: true,
+    });
+
+    expect(result.code).toBe(EXPECTED);
+  });
+
+  it("publishes a requested source map with real multi-point authored coordinates", () => {
+    const result = transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: true,
+      sourcemap: true,
+    });
+
+    expect(result.sourceMap).toBeTypeOf("string");
+    const map = JSON.parse(result.sourceMap as string);
+    // Not merely "valid JSON with one mapped token" — sourcesContent must
+    // be the AUTHORED bytes (not an intermediate stage's), and there must
+    // be more than one distinct authored-source column mapped, proving
+    // real per-position data rather than a placeholder token.
+    expect(map.sourcesContent).toEqual([SOURCE]);
+    const decoded = decodeMappings(map.mappings as string);
+    const authoredColumns = new Set(decoded.filter((seg) => seg.length >= 4).map((seg) => seg[3]));
+    expect(authoredColumns.size).toBeGreaterThanOrEqual(2);
+  });
+
+  it("publishes no source map when none was requested", () => {
+    const result = transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: true,
+    });
+
+    expect(result.sourceMap).toBeUndefined();
+  });
+
+  it("reports an empty refusals list on an ordinary successful transform", () => {
+    const result = transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: true,
+    });
+
+    expect(result.refusals).toEqual([]);
+  });
+
+  it("surfaces a per-selector soft refusal instead of silently dropping content", () => {
+    // The scoped-selector stage refuses `.bad { color red; }` (an untrusted,
+    // malformed rule) but still publishes `.good` — the tolerant, per-rule
+    // disposition `cascade_output_is_publishable` deliberately does not
+    // refuse the whole call over. A caller that never inspects `refusals`
+    // ships the dropped `.bad` rule with zero signal.
+    const source = ".good { color: red } .bad { color red; }";
+    const result = transformVueStyle(source, {
+      scopeId: "abc123",
+      scoped: true,
+    });
+
+    expect(result.code).toContain(".good[data-v-abc123]");
+    expect(result.code).not.toContain(".bad");
+    expect(result.refusals.length).toBeGreaterThan(0);
+    expect(result.refusals[0]).toContain("UntrustedRewriteTarget");
+  });
+});
+
+/** Minimal VLQ mappings decoder — one segment array per mapping entry. */
+function decodeMappings(mappings: string): number[][] {
+  const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const segments: number[][] = [];
+  for (const group of mappings.split(";")) {
+    if (!group) continue;
+    for (const raw of group.split(",")) {
+      if (!raw) continue;
+      const values: number[] = [];
+      let value = 0;
+      let shift = 0;
+      for (const ch of raw) {
+        const digit = BASE64.indexOf(ch);
+        const cont = digit & 32;
+        const bits = digit & 31;
+        value += bits << shift;
+        if (cont) {
+          shift += 5;
+          continue;
+        }
+        const negate = value & 1;
+        value >>>= 1;
+        values.push(negate ? -value : value);
+        value = 0;
+        shift = 0;
+      }
+      segments.push(values);
+    }
+  }
+  return segments;
+}
+
+describe("prepareStyleForPreprocessor", () => {
+  it("rewrites v-bind() before an external preprocessor would run (SCSS dialect)", () => {
+    const result = prepareStyleForPreprocessor(".foo { color: v-bind(primary); }", {
+      scopeId: "abc123",
+      dialect: "scss",
+    });
+
+    expect(result.code).toContain("var(--abc123-primary)");
+    expect(result.vBindVars).toEqual([{ expression: "primary", varName: "--abc123-primary" }]);
+  });
+});
+
+describe("analyzeStyle", () => {
+  it("lists static and CSS-Modules classes without rewriting bytes", () => {
+    const source = ".btn { color: red; } .card { display: flex; }";
+    const result = analyzeStyle(source, { scopeId: "abc123" });
+
+    expect(result.staticClasses).toEqual(["btn", "card"]);
+    expect(result.moduleClasses).toHaveLength(2);
+    const btnHash = result.moduleClasses.find(([name]) => name === "btn")?.[1];
+    expect(btnHash).toBeDefined();
+    expect(btnHash).not.toBe("btn");
   });
 });
 

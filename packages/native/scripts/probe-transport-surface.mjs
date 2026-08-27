@@ -367,4 +367,18 @@ function renderProfile({ ssr, sourceMap }) {
   };
 }
 
+{
+  const transformed = binding.transformVueStyle(".x{color:red}", {
+    scopeId: "probe1234",
+    scoped: true,
+    sourcemap: true,
+  });
+  results.cases.transformVueStyle = {
+    code: transformed.code,
+    hasMap: transformed.sourceMap !== null && transformed.sourceMap !== undefined,
+    moduleClasses: transformed.moduleClasses,
+    refusals: transformed.refusals,
+  };
+}
+
 process.stdout.write(JSON.stringify(results));

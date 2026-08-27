@@ -1,5 +1,5 @@
 {
-  "note": "The reachable public/default request surface for framework PRODUCTS other than Vue runtime-render output. One row per SEMANTIC case; transport spellings that converge on the same typed host request are listed as routeAliases of that one case, never as separate cases. `hostEntryPoint` rows are proven live by the tests in framework_product_surface_tests.rs (calling them is the existence proof the compiler enforces); `routeAliases` are read-verified citations by default; the ones the feature-gated transport suite DRIVES are the NAPI and WASM host methods listed in NAPI_EXECUTED / WASM_EXECUTED (transport_route_equivalence_tests.rs) plus the NAPI free function `processStyle`, and the bundler aliases itemized below. Private Rust style helpers (`prepare_style_for_preprocessor`, `transform_vue_style`, `analyze_style`) are classified below and are not module exports. A driven ALIAS is held to route identity plus publication — the bundler's product must equal the in-process host's product for the same typed request — never to a semantic case of its own.",
+  "note": "The reachable public/default request surface for framework PRODUCTS other than Vue runtime-render output. One row per SEMANTIC case; transport spellings that converge on the same typed host request are listed as routeAliases of that one case, never as separate cases. `hostEntryPoint` rows are proven live by the tests in framework_product_surface_tests.rs (calling them is the existence proof the compiler enforces); `routeAliases` are read-verified citations by default; the ones the feature-gated transport suite DRIVES are the NAPI and WASM host methods listed in NAPI_EXECUTED / WASM_EXECUTED (transport_route_equivalence_tests.rs) plus the NAPI free function `processStyle`, and the bundler aliases itemized below. The three-way CSS NAPI exports (`prepareStyleForPreprocessor`, `transformVueStyle`, `analyzeStyle`) are classified below as module exports unused by bundlers; `processStyle` remains the live bundler-facing CSS spelling. A driven ALIAS is held to route identity plus publication — the bundler's product must equal the in-process host's product for the same typed request — never to a semantic case of its own.",
   "bundlerAliasStatus": [
     "DRIVEN, route identity + publication: the style lane (packages/unplugin/src/index.ts:68) and the virtual-node inventory listing beside it (index.ts:63), reached through the Svelte carrier transform, by the_bundler_style_lane_publishes_the_hosts_style_products_and_none_without_a_style_block. It loads every style sub-request the published wrapper points at, compares code + whole map against the host's Style{0} node for the profile that entry builds, and rests its count on a Vue carrier with no `<style>`, which must publish none.",
     "DRIVEN, route identity + publication: the load lane (index.ts:668), by the_bundler_load_lane_serves_the_hosts_node_and_nothing_for_an_unregistered_carrier. A `?vue&type=template` request is never cached by the carrier transform, so answering it means the lane fell through to the host; the product is compared against the host's Template node, and the same request for a carrier the plugin never transformed must publish nothing.",
@@ -302,7 +302,7 @@
       "id": "css.prepare-style-for-preprocessor",
       "hostEntryPoint": null,
       "requestType": "(authored style bytes, PrepareStyleForPreprocessorOptions)",
-      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:263 is a private Rust helper (not a NAPI module export) that calls verter_compiler::style_planner::transform_vue_v_bind over the authored dialect. It returns rewritten bytes and v-bind facts, and exposes no source-map field.",
+      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:260 is a NAPI module export that calls verter_compiler::style_planner::transform_vue_v_bind over the authored dialect. It returns rewritten bytes and v-bind facts, and exposes no source-map field. Bundlers do not yet call it.",
       "products": [
         "css",
         "v-bind-vars"
@@ -315,12 +315,12 @@
       "routeAliases": [
         {
           "transport": "napi",
-          "entryPoint": "crates/verter_napi/src/lib.rs:263",
-          "spelling": "prepare_style_for_preprocessor (private helper, not a module export)"
+          "entryPoint": "crates/verter_napi/src/lib.rs:260",
+          "spelling": "prepareStyleForPreprocessor (free function, not a host method)"
         }
       ],
       "successForRepresentativeInput": {
-        "vue": "yes in-process; not a NAPI module export",
+        "vue": "yes; unused by bundlers",
         "svelte": "n/a — this is a Vue authored-style operation"
       }
     },
@@ -328,7 +328,7 @@
       "id": "css.transform-vue-style",
       "hostEntryPoint": null,
       "requestType": "(plain CSS bytes, TransformVueStyleOptions)",
-      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:310 is a private Rust helper (not a NAPI module export) that verifies the bytes through the shared native-CSS parse entry and wraps verter_compiler::style_planner::transform_vue_style. A requested map is published only when cascade_requested_source_map returns a composed or identity map for the returned bytes.",
+      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:334 is a NAPI module export that verifies the bytes through the shared native-CSS parse entry and wraps verter_compiler::style_planner::transform_vue_style. A requested map is published only when cascade_requested_source_map returns a composed or identity map for the returned bytes. Bundlers do not yet call it.",
       "products": [
         "css",
         "source-map",
@@ -346,12 +346,12 @@
       "routeAliases": [
         {
           "transport": "napi",
-          "entryPoint": "crates/verter_napi/src/lib.rs:310",
-          "spelling": "transform_vue_style (private helper, not a module export)"
+          "entryPoint": "crates/verter_napi/src/lib.rs:334",
+          "spelling": "transformVueStyle (free function, not a host method)"
         }
       ],
       "successForRepresentativeInput": {
-        "vue": "yes in-process; not a NAPI module export",
+        "vue": "yes; unused by bundlers",
         "svelte": "n/a — this is a Vue plain-CSS transform"
       }
     },
@@ -359,7 +359,7 @@
       "id": "css.analyze-style",
       "hostEntryPoint": null,
       "requestType": "(authored style bytes, AnalyzeStyleOptions)",
-      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:371 is a private Rust helper (not a NAPI module export) that calls verter_compiler::style_planner::analyze_style directly. It returns read-only static-class and would-be module-class facts and exposes neither rewritten bytes nor a source map.",
+      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:436 is a NAPI module export that calls verter_compiler::style_planner::analyze_style directly. It returns read-only static-class and would-be module-class facts and exposes neither rewritten bytes nor a source map. Bundlers do not yet call it.",
       "products": [
         "static-class-names",
         "css-module-classes"
@@ -372,12 +372,12 @@
       "routeAliases": [
         {
           "transport": "napi",
-          "entryPoint": "crates/verter_napi/src/lib.rs:371",
-          "spelling": "analyze_style (private helper, not a module export)"
+          "entryPoint": "crates/verter_napi/src/lib.rs:436",
+          "spelling": "analyzeStyle (free function, not a host method)"
         }
       ],
       "successForRepresentativeInput": {
-        "vue": "yes in-process; not a NAPI module export",
+        "vue": "yes; unused by bundlers",
         "svelte": "n/a — this is a Vue style fact surface"
       }
     },
@@ -385,7 +385,7 @@
       "id": "css.process-style",
       "hostEntryPoint": null,
       "requestType": "(css bytes, ProcessStyleOptions)",
-      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:157 calls verter_compiler::css::process_style directly; it never constructs or consults a VerterHost, so it carries no compile slot, no diagnostics snapshot and no publication relationship to any other product. This remains the live NAPI module export.",
+      "route": "NO HOST ROUTE. crates/verter_napi/src/lib.rs:171 calls verter_compiler::css::process_style directly; it never constructs or consults a VerterHost, so it carries no compile slot, no diagnostics snapshot and no publication relationship to any other product. This remains the live NAPI module export.",
       "products": [
         "css",
         "source-map",
@@ -403,7 +403,7 @@
       "routeAliases": [
         {
           "transport": "napi",
-          "entryPoint": "crates/verter_napi/src/lib.rs:157",
+          "entryPoint": "crates/verter_napi/src/lib.rs:171",
           "spelling": "processStyle (free function, not a host method)"
         },
         {
