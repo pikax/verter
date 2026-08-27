@@ -1,13 +1,15 @@
+use std::sync::Arc;
+
+use bumpalo::Bump;
 use smallvec::SmallVec;
 use verter_span::Span;
 
+use crate::arena::{alloc_str, bump_for_source, freeze_vec, BumpSlice, BumpStr};
 use crate::diagnostic::{CssDiagnostic, CssParseFailure, CssStructureTooLarge};
 use crate::dialect::CssDialect;
 use crate::event::{NodeFlags, ParseEvent, ParseEventSink, SyntaxKind};
 use crate::parser::{parse_with_sink, CssEntryPoint, CssParseMode, CssSource};
-use crate::selector::{
-    SelectorComponent, SelectorComponentKind, SelectorList, SelectorSink, SelectorStructure,
-};
+use crate::selector::{SelectorComponent, SelectorComponentKind, SelectorList, SelectorSink};
 use crate::svelte_compat::svelte_read_value_text;
 use crate::token::{css_identifier_eq_ignore_ascii_case, SyntaxToken, TokenKind};
 use crate::version::CssSyntaxGrammarVersion;
@@ -28,7 +30,7 @@ pub enum StyleBlockKind {
 pub struct StyleBlock {
     kind: StyleBlockKind,
     span: Span,
-    statements: Vec<StyleStatement>,
+    statements: BumpSlice<StyleStatement>,
     completeness: StyleCompleteness,
 }
 
@@ -42,7 +44,7 @@ impl StyleBlock {
     }
 
     pub fn statements(&self) -> &[StyleStatement] {
-        &self.statements
+        self.statements.as_slice()
     }
 
     pub const fn completeness(&self) -> StyleCompleteness {
@@ -117,7 +119,7 @@ pub struct StyleDirective {
     /// parse time, over the already-delimited [`Self::opaque_args`] span —
     /// see [`crate::svelte_read_value_text`]'s doc for why a plain trim
     /// under-approximates this. A reader never re-decodes it.
-    prelude_text: std::sync::Arc<str>,
+    prelude_text: BumpStr,
     body: Option<StyleBlock>,
     completeness: StyleCompleteness,
 }
@@ -137,7 +139,7 @@ impl StyleDirective {
 
     /// The at-rule's decoded prelude text — see [`Self::prelude_text`]'s doc.
     pub fn prelude_text(&self) -> &str {
-        &self.prelude_text
+        self.prelude_text.as_str()
     }
 
     pub fn body(&self) -> Option<&StyleBlock> {
@@ -225,7 +227,7 @@ pub enum StyleStatement {
 #[derive(Debug, Clone)]
 pub struct ComponentValueTree {
     span: Span,
-    values: Vec<ComponentValue>,
+    values: BumpSlice<ComponentValue>,
     completeness: StyleCompleteness,
 }
 
@@ -235,7 +237,7 @@ impl ComponentValueTree {
     }
 
     pub fn values(&self) -> &[ComponentValue] {
-        &self.values
+        self.values.as_slice()
     }
 
     pub const fn completeness(&self) -> StyleCompleteness {
@@ -245,7 +247,7 @@ impl ComponentValueTree {
     fn empty(at: u32) -> Self {
         Self {
             span: Span::new(at, at),
-            values: Vec::new(),
+            values: BumpSlice::empty(),
             completeness: StyleCompleteness::Complete,
         }
     }
@@ -292,7 +294,7 @@ impl ComponentToken {
 pub struct ComponentFunction {
     name_span: Span,
     full_span: Span,
-    values: Vec<ComponentValue>,
+    values: BumpSlice<ComponentValue>,
     complete: bool,
 }
 
@@ -306,7 +308,7 @@ impl ComponentFunction {
     }
 
     pub fn values(&self) -> &[ComponentValue] {
-        &self.values
+        self.values.as_slice()
     }
 
     pub const fn is_complete(&self) -> bool {
@@ -325,7 +327,7 @@ pub enum ComponentDelimiter {
 pub struct ComponentBlock {
     delimiter: ComponentDelimiter,
     full_span: Span,
-    values: Vec<ComponentValue>,
+    values: BumpSlice<ComponentValue>,
     complete: bool,
 }
 
@@ -339,7 +341,7 @@ impl ComponentBlock {
     }
 
     pub fn values(&self) -> &[ComponentValue] {
-        &self.values
+        self.values.as_slice()
     }
 
     pub const fn is_complete(&self) -> bool {
@@ -351,7 +353,7 @@ impl ComponentBlock {
 pub struct ValueInterpolation {
     full_span: Span,
     payload_span: Span,
-    values: Vec<ComponentValue>,
+    values: BumpSlice<ComponentValue>,
     complete: bool,
 }
 
@@ -365,7 +367,7 @@ impl ValueInterpolation {
     }
 
     pub fn values(&self) -> &[ComponentValue] {
-        &self.values
+        self.values.as_slice()
     }
 
     pub const fn is_complete(&self) -> bool {
@@ -384,11 +386,14 @@ impl StaticClassFact {
     }
 }
 
-#[derive(Clone)]
-pub struct StyleSyntaxIr {
+struct StyleSyntaxIrData {
+    /// Owns the bump that `statements` and nested child slices point into.
+    /// Frozen after parse: never allocated into again, so the IR is `Sync`
+    /// even though [`Bump`] itself is not.
+    _bump: Bump,
     source: CssSource,
     dialect: CssDialect,
-    statements: Vec<StyleStatement>,
+    statements: BumpSlice<StyleStatement>,
     diagnostics: Vec<CssDiagnostic>,
     imports_unresolved: bool,
     /// Every `/* … */` / line-comment span the tokenizer visited while
@@ -396,7 +401,7 @@ pub struct StyleSyntaxIr {
     /// overlap or nest, and tokens are produced in strictly increasing
     /// source-position order, so this list is already sorted by
     /// construction). Retained so a consumer can find comment boundaries
-    /// within a byte range through [`Self::comment_spans_in`] instead of
+    /// within a byte range through [`StyleSyntaxIr::comment_spans_in`] instead of
     /// re-lexing the source for comment/string state itself.
     comment_spans: Vec<Span>,
     /// The span of a `<!--` CDO token that was never paired with a later
@@ -407,13 +412,23 @@ pub struct StyleSyntaxIr {
     unpaired_cdo_span: Option<Span>,
 }
 
+// The bump is write-once during parse and immutable afterwards. Child
+// `BumpSlice`s are never written, so sharing the finished IR across threads
+// is sound even though `bumpalo::Bump` is `!Sync`.
+unsafe impl Sync for StyleSyntaxIrData {}
+
+#[derive(Clone)]
+pub struct StyleSyntaxIr {
+    data: Arc<StyleSyntaxIrData>,
+}
+
 impl StyleSyntaxIr {
     pub fn source(&self) -> &CssSource {
-        &self.source
+        &self.data.source
     }
 
-    pub const fn dialect(&self) -> CssDialect {
-        self.dialect
+    pub fn dialect(&self) -> CssDialect {
+        self.data.dialect
     }
 
     /// Grammar identity that cache keys must include for this projection.
@@ -422,26 +437,26 @@ impl StyleSyntaxIr {
     }
 
     pub fn statements(&self) -> &[StyleStatement] {
-        &self.statements
+        self.data.statements.as_slice()
     }
 
     pub fn diagnostics(&self) -> &[CssDiagnostic] {
-        &self.diagnostics
+        &self.data.diagnostics
     }
 
-    pub const fn imports_unresolved(&self) -> bool {
-        self.imports_unresolved
+    pub fn imports_unresolved(&self) -> bool {
+        self.data.imports_unresolved
     }
 
     pub fn selector_components(&self) -> std::vec::IntoIter<&SelectorComponent> {
         let mut components = Vec::new();
-        collect_statement_components(&self.statements, &mut components);
+        collect_statement_components(self.statements(), &mut components);
         components.into_iter()
     }
 
     pub fn complete_static_classes(&self) -> std::vec::IntoIter<StaticClassFact> {
         let mut classes = Vec::new();
-        collect_complete_static_classes(&self.statements, &mut classes);
+        collect_complete_static_classes(self.statements(), &mut classes);
         classes.into_iter()
     }
 
@@ -455,20 +470,21 @@ impl StyleSyntaxIr {
     }
 
     /// Every retained comment span FULLY CONTAINED in `range`, in source
-    /// order — a binary-search slice of [`Self::comment_spans`], never a
+    /// order — a binary-search slice of the parse-time comment inventory, never a
     /// re-lex of `range`'s bytes.
     /// The span of an unpaired `<!--` CDO token, if the parse saw one.
-    /// See [`Self::unpaired_cdo_span`] field doc.
+    /// See [`StyleSyntaxIrData::unpaired_cdo_span`] field doc.
     #[must_use]
-    pub const fn unpaired_cdo_span(&self) -> Option<Span> {
-        self.unpaired_cdo_span
+    pub fn unpaired_cdo_span(&self) -> Option<Span> {
+        self.data.unpaired_cdo_span
     }
 
     pub fn comment_spans_in(&self, range: Span) -> impl Iterator<Item = Span> + '_ {
         let start_idx = self
+            .data
             .comment_spans
             .partition_point(|comment| comment.start < range.start);
-        self.comment_spans[start_idx..]
+        self.data.comment_spans[start_idx..]
             .iter()
             .copied()
             .take_while(move |comment| comment.end <= range.end)
@@ -556,26 +572,26 @@ fn collect_statement_components<'a>(
                         }
                     }
                 }
-                collect_statement_components(&rule.body.statements, output);
+                collect_statement_components(rule.body.statements(), output);
             }
             StyleStatement::AtRule(value) => {
                 if let Some(body) = &value.body {
-                    collect_statement_components(&body.statements, output);
+                    collect_statement_components(body.statements(), output);
                 }
             }
             StyleStatement::MixinOrFunction(value) => {
                 if let Some(body) = &value.body {
-                    collect_statement_components(&body.statements, output);
+                    collect_statement_components(body.statements(), output);
                 }
             }
             StyleStatement::Unknown(value) => {
                 if let Some(body) = &value.body {
-                    collect_statement_components(&body.statements, output);
+                    collect_statement_components(body.statements(), output);
                 }
             }
             StyleStatement::Declaration(value) => {
                 if let Some(body) = &value.body {
-                    collect_statement_components(&body.statements, output);
+                    collect_statement_components(body.statements(), output);
                 }
             }
         }
@@ -601,27 +617,28 @@ fn collect_component_refs<'a>(
     }
 }
 
-struct OpenFrame {
+struct OpenFrame<'b> {
     kind: SyntaxKind,
     flags: NodeFlags,
     start: u32,
     token_start: usize,
-    statements: Vec<StyleStatement>,
-    values: Vec<ComponentValue>,
+    statements: bumpalo::collections::Vec<'b, StyleStatement>,
+    values: bumpalo::collections::Vec<'b, ComponentValue>,
     value_tree: Option<ComponentValueTree>,
     selector_list: Option<SelectorList>,
     block: Option<StyleBlock>,
     recovered: bool,
 }
 
-pub(crate) struct StyleSyntaxIrSink {
+pub(crate) struct StyleSyntaxIrSink<'b> {
+    bump: &'b Bump,
     source: CssSource,
     dialect: CssDialect,
-    open: SmallVec<[OpenFrame; 16]>,
-    tokens: Vec<SyntaxToken>,
-    statements: Vec<StyleStatement>,
+    open: SmallVec<[OpenFrame<'b>; 16]>,
+    tokens: bumpalo::collections::Vec<'b, SyntaxToken>,
+    statements: bumpalo::collections::Vec<'b, StyleStatement>,
     diagnostics: Vec<CssDiagnostic>,
-    selector_sink: Option<(usize, SelectorSink)>,
+    selector_sink: Option<(usize, SelectorSink<'b>)>,
     imports_unresolved: bool,
     root_value_tree: Option<ComponentValueTree>,
     /// Whole-source comment inventory, accumulated at event time. Comment
@@ -637,16 +654,32 @@ pub(crate) struct StyleSyntaxIrSink {
     unpaired_cdo_span: Option<Span>,
 }
 
-impl StyleSyntaxIrSink {
-    pub fn new(source: CssSource, dialect: CssDialect) -> Self {
-        Self::with_entry_point(source, dialect, CssEntryPoint::Stylesheet)
+struct FrozenStyleIr {
+    source: CssSource,
+    dialect: CssDialect,
+    statements: BumpSlice<StyleStatement>,
+    diagnostics: Vec<CssDiagnostic>,
+    imports_unresolved: bool,
+    comment_spans: Vec<Span>,
+    unpaired_cdo_span: Option<Span>,
+    root_value_tree: Option<ComponentValueTree>,
+}
+
+impl<'b> StyleSyntaxIrSink<'b> {
+    pub fn new(bump: &'b Bump, source: CssSource, dialect: CssDialect) -> Self {
+        Self::with_entry_point(bump, source, dialect, CssEntryPoint::Stylesheet)
     }
 
     /// A sink sized for `entry`. Only a stylesheet parse produces top-level statements, so a
     /// component-value parse reserves none: `parse_component_value_tree` returns just the value
     /// tree, and `verter_semantic` drives that path for variable extraction — a reservation it
     /// would never fill.
-    pub fn with_entry_point(source: CssSource, dialect: CssDialect, entry: CssEntryPoint) -> Self {
+    pub fn with_entry_point(
+        bump: &'b Bump,
+        source: CssSource,
+        dialect: CssDialect,
+        entry: CssEntryPoint,
+    ) -> Self {
         let token_cap = (source.text().len() / 3).max(16);
         let statement_cap = if matches!(entry, CssEntryPoint::Stylesheet) {
             (source.text().len() / 24).max(8)
@@ -654,11 +687,12 @@ impl StyleSyntaxIrSink {
             0
         };
         Self {
+            bump,
             source,
             dialect,
             open: SmallVec::new(),
-            tokens: Vec::with_capacity(token_cap),
-            statements: Vec::with_capacity(statement_cap),
+            tokens: bumpalo::collections::Vec::with_capacity_in(token_cap, bump),
+            statements: bumpalo::collections::Vec::with_capacity_in(statement_cap, bump),
             diagnostics: Vec::new(),
             selector_sink: None,
             imports_unresolved: false,
@@ -668,16 +702,17 @@ impl StyleSyntaxIrSink {
         }
     }
 
-    pub fn finish(self) -> Result<StyleSyntaxIr, CssStructureTooLarge> {
+    fn finish_frozen(self) -> Result<FrozenStyleIr, CssStructureTooLarge> {
         verter_debug_assert!(self.open.is_empty(), "parser must balance IR frames");
-        Ok(StyleSyntaxIr {
+        Ok(FrozenStyleIr {
             source: self.source,
             dialect: self.dialect,
-            statements: self.statements,
+            statements: freeze_vec(self.statements),
             diagnostics: self.diagnostics,
             imports_unresolved: self.imports_unresolved,
             comment_spans: self.comment_spans,
             unpaired_cdo_span: self.unpaired_cdo_span,
+            root_value_tree: self.root_value_tree,
         })
     }
 
@@ -707,7 +742,7 @@ impl StyleSyntaxIrSink {
         )
     }
 
-    fn close_frame(&mut self, frame: OpenFrame, end: u32) {
+    fn close_frame(&mut self, frame: OpenFrame<'b>, end: u32) {
         let span = Span::new(frame.start, end);
         let tokens = &self.tokens[frame.token_start..];
         let completeness = if frame.recovered || frame.flags.0 & NodeFlags::RECOVERED.0 != 0 {
@@ -728,7 +763,7 @@ impl StyleSyntaxIrSink {
                     Some(ComponentValue::Function(ComponentFunction {
                         name_span: Span::new(opener.start, opener.end.saturating_sub(1)),
                         full_span: span,
-                        values: trim_delimiters(frame.values, closed),
+                        values: freeze_vec(trim_delimiters(frame.values, closed)),
                         complete: closed && completeness == StyleCompleteness::Complete,
                     }))
                 }
@@ -746,7 +781,7 @@ impl StyleSyntaxIrSink {
                     Some(ComponentValue::Block(ComponentBlock {
                         delimiter,
                         full_span: span,
-                        values: trim_delimiters(frame.values, closed),
+                        values: freeze_vec(trim_delimiters(frame.values, closed)),
                         complete: closed && completeness == StyleCompleteness::Complete,
                     }))
                 }
@@ -762,7 +797,7 @@ impl StyleSyntaxIrSink {
                     Some(ComponentValue::Interpolation(ValueInterpolation {
                         full_span: span,
                         payload_span: Span::new(opener.end, payload_end),
-                        values: trim_delimiters(frame.values, closed),
+                        values: freeze_vec(trim_delimiters(frame.values, closed)),
                         complete: closed && completeness == StyleCompleteness::Complete,
                     }))
                 }
@@ -780,7 +815,7 @@ impl StyleSyntaxIrSink {
             SyntaxKind::ComponentValueList | SyntaxKind::AtRulePrelude => {
                 let tree = ComponentValueTree {
                     span,
-                    values: frame.values,
+                    values: freeze_vec(frame.values),
                     completeness,
                 };
                 if let Some(parent) = self.open.last_mut() {
@@ -797,7 +832,7 @@ impl StyleSyntaxIrSink {
                         StyleBlockKind::Braced
                     },
                     span,
-                    statements: frame.statements,
+                    statements: freeze_vec(frame.statements),
                     completeness,
                 };
                 if let Some(parent) = self.open.last_mut() {
@@ -860,7 +895,7 @@ impl StyleSyntaxIrSink {
                     span,
                     head_span,
                     opaque_args,
-                    prelude_text: std::sync::Arc::from(prelude_text),
+                    prelude_text: alloc_str(self.bump, &prelude_text),
                     body: frame.block,
                     completeness,
                 }));
@@ -922,7 +957,10 @@ impl StyleSyntaxIrSink {
     }
 }
 
-fn trim_delimiters(mut values: Vec<ComponentValue>, closed: bool) -> Vec<ComponentValue> {
+fn trim_delimiters<'b>(
+    mut values: bumpalo::collections::Vec<'b, ComponentValue>,
+    closed: bool,
+) -> bumpalo::collections::Vec<'b, ComponentValue> {
     if !values.is_empty() {
         values.remove(0);
     }
@@ -932,7 +970,7 @@ fn trim_delimiters(mut values: Vec<ComponentValue>, closed: bool) -> Vec<Compone
     values
 }
 
-impl ParseEventSink for StyleSyntaxIrSink {
+impl ParseEventSink for StyleSyntaxIrSink<'_> {
     fn event(&mut self, event: ParseEvent) -> Result<(), CssStructureTooLarge> {
         if let ParseEvent::Diagnostic(diagnostic) = event {
             self.diagnostics.push(diagnostic);
@@ -971,7 +1009,7 @@ impl ParseEventSink for StyleSyntaxIrSink {
             }
             if *depth == 0 {
                 let (_, sink) = self.selector_sink.take().expect("selector sink exists");
-                let structure: SelectorStructure = sink.finish();
+                let list = sink.finish_list();
                 if let Some(rule) = self
                     .open
                     .iter_mut()
@@ -979,7 +1017,7 @@ impl ParseEventSink for StyleSyntaxIrSink {
                     .find(|frame| frame.kind == SyntaxKind::QualifiedRule)
                 {
                     notify_parse_phase("selector_clone_enter");
-                    rule.selector_list = Some(structure.into_list());
+                    rule.selector_list = Some(list);
                     notify_parse_phase("selector_clone_exit");
                 }
             }
@@ -993,7 +1031,7 @@ impl ParseEventSink for StyleSyntaxIrSink {
             ..
         } = event
         {
-            let mut sink = SelectorSink::new(self.source.clone());
+            let mut sink = SelectorSink::new(self.bump, self.source.clone());
             sink.event(event)?;
             self.selector_sink = Some((1, sink));
             return Ok(());
@@ -1005,8 +1043,8 @@ impl ParseEventSink for StyleSyntaxIrSink {
                 flags,
                 start,
                 token_start: self.tokens.len(),
-                statements: Vec::new(),
-                values: Vec::new(),
+                statements: bumpalo::collections::Vec::new_in(self.bump),
+                values: bumpalo::collections::Vec::new_in(self.bump),
                 value_tree: None,
                 selector_list: None,
                 block: None,
@@ -1099,6 +1137,21 @@ pub(crate) fn notify_parse_phase(phase: &'static str) {
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn notify_parse_phase(_phase: &'static str) {}
 
+fn ir_from_frozen(bump: Bump, frozen: FrozenStyleIr) -> StyleSyntaxIr {
+    StyleSyntaxIr {
+        data: Arc::new(StyleSyntaxIrData {
+            _bump: bump,
+            source: frozen.source,
+            dialect: frozen.dialect,
+            statements: frozen.statements,
+            diagnostics: frozen.diagnostics,
+            imports_unresolved: frozen.imports_unresolved,
+            comment_spans: frozen.comment_spans,
+            unpaired_cdo_span: frozen.unpaired_cdo_span,
+        }),
+    }
+}
+
 pub fn parse_style_ir(
     source: CssSource,
     dialect: CssDialect,
@@ -1107,35 +1160,65 @@ pub fn parse_style_ir(
     #[cfg(any(test, feature = "test-support"))]
     STYLE_IR_PARSE_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
 
-    let mut sink = StyleSyntaxIrSink::new(source.clone(), dialect);
-    notify_parse_phase("after_sink_new");
-    parse_with_sink(&source, dialect, CssEntryPoint::Stylesheet, mode, &mut sink)?;
-    notify_parse_phase("after_parse_emit");
-    let ir = sink.finish().map_err(CssParseFailure::Structure)?;
+    let bump = bump_for_source(source.text().len());
+    let frozen = {
+        let mut sink = StyleSyntaxIrSink::new(&bump, source.clone(), dialect);
+        notify_parse_phase("after_sink_new");
+        parse_with_sink(&source, dialect, CssEntryPoint::Stylesheet, mode, &mut sink)?;
+        notify_parse_phase("after_parse_emit");
+        sink.finish_frozen().map_err(CssParseFailure::Structure)?
+    };
+    let ir = ir_from_frozen(bump, frozen);
     notify_parse_phase("after_finish");
     Ok(ir)
+}
+
+/// A component-value parse whose child lists live in an owned bump.
+pub struct OwnedComponentValueTree {
+    _ir: StyleSyntaxIr,
+    tree: ComponentValueTree,
+}
+
+impl std::ops::Deref for OwnedComponentValueTree {
+    type Target = ComponentValueTree;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tree
+    }
 }
 
 pub fn parse_component_value_tree(
     source: CssSource,
     dialect: CssDialect,
     mode: CssParseMode,
-) -> Result<ComponentValueTree, CssParseFailure> {
-    let mut sink = StyleSyntaxIrSink::with_entry_point(
-        source.clone(),
-        dialect,
-        CssEntryPoint::ComponentValueList,
-    );
-    parse_with_sink(
-        &source,
-        dialect,
-        CssEntryPoint::ComponentValueList,
-        mode,
-        &mut sink,
-    )?;
-    Ok(sink
+) -> Result<OwnedComponentValueTree, CssParseFailure> {
+    let origin = source.origin();
+    let bump = bump_for_source(source.text().len());
+    let frozen = {
+        let mut sink = StyleSyntaxIrSink::with_entry_point(
+            &bump,
+            source.clone(),
+            dialect,
+            CssEntryPoint::ComponentValueList,
+        );
+        parse_with_sink(
+            &source,
+            dialect,
+            CssEntryPoint::ComponentValueList,
+            mode,
+            &mut sink,
+        )?;
+        sink.finish_frozen().map_err(CssParseFailure::Structure)?
+    };
+    let mut frozen = frozen;
+    let tree = frozen
         .root_value_tree
-        .unwrap_or_else(|| ComponentValueTree::empty(source.origin())))
+        .take()
+        .unwrap_or_else(|| ComponentValueTree::empty(origin));
+    Ok(OwnedComponentValueTree {
+        _ir: ir_from_frozen(bump, frozen),
+        tree,
+    })
 }
 
 #[cfg(test)]
@@ -1146,7 +1229,7 @@ mod tests {
     use crate::cst::LosslessCstSink;
     use crate::diagnostic::CssDiagnosticKind;
     use crate::parser::{parse_with_sink, CssEntryPoint};
-    use crate::selector::{SelectorCompleteness, SelectorSink};
+    use crate::selector::{SelectorCompleteness, SelectorSink, SelectorStructure};
 
     fn ir(input: &str, dialect: CssDialect) -> StyleSyntaxIr {
         parse_style_ir(
@@ -1162,12 +1245,12 @@ mod tests {
     fn style_ir_and_lossless_cst_are_peer_event_sinks() {
         fn accepts_sink(_: &mut impl ParseEventSink) {}
 
-        struct Peers<'a> {
+        struct Peers<'a, 'b> {
             cst: &'a mut LosslessCstSink,
-            ir: &'a mut StyleSyntaxIrSink,
+            ir: &'a mut StyleSyntaxIrSink<'b>,
         }
 
-        impl ParseEventSink for Peers<'_> {
+        impl ParseEventSink for Peers<'_, '_> {
             fn event(&mut self, event: ParseEvent) -> Result<(), CssStructureTooLarge> {
                 self.cst.event(event)?;
                 self.ir.event(event)
@@ -1177,7 +1260,8 @@ mod tests {
         let input =
             ".card, #hero { color: calc(1px + var(--x)); content: \"x\"; } @import \"theme.css\";";
         let source = CssSource::new(Arc::from(input), 17).unwrap();
-        let mut ir_sink = StyleSyntaxIrSink::new(source.clone(), CssDialect::Css);
+        let bump = bump_for_source(source.text().len());
+        let mut ir_sink = StyleSyntaxIrSink::new(&bump, source.clone(), CssDialect::Css);
         accepts_sink(&mut ir_sink);
         let mut cst_sink = LosslessCstSink::new(source.clone());
         let mut peers = Peers {
@@ -1192,7 +1276,8 @@ mod tests {
             &mut peers,
         )
         .unwrap();
-        let ir = ir_sink.finish().unwrap();
+        let frozen = ir_sink.finish_frozen().unwrap();
+        let ir = ir_from_frozen(bump, frozen);
         let cst = cst_sink.finish().unwrap();
 
         assert_eq!(cst.reconstruct(), input);
@@ -1288,7 +1373,8 @@ mod tests {
     #[test]
     fn recovered_pseudo_selector_keeps_disjoint_complete_class_fact() {
         let source = CssSource::new(Arc::from(":is(.a .b#{$x"), 0).unwrap();
-        let mut sink = SelectorSink::new(source.clone());
+        let bump = bump_for_source(source.text().len());
+        let mut sink = SelectorSink::new(&bump, source.clone());
         parse_with_sink(
             &source,
             CssDialect::Scss,
@@ -1297,7 +1383,8 @@ mod tests {
             &mut sink,
         )
         .unwrap();
-        let structure = sink.finish();
+        let list = sink.finish_list();
+        let structure = SelectorStructure::from_parts(bump, source.clone(), list);
         let pseudo = structure
             .components()
             .into_iter()

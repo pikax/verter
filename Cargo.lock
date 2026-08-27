@@ -3770,6 +3770,7 @@ dependencies = [
 name = "verter_css_syntax"
 version = "0.0.1-beta.3"
 dependencies = [
+ "bumpalo",
  "memchr",
  "smallvec",
  "trybuild",

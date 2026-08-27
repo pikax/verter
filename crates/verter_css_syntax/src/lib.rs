@@ -8,6 +8,7 @@
 #[macro_use]
 extern crate verter_debug_assert;
 
+mod arena;
 pub mod cst;
 pub mod diagnostic;
 pub mod dialect;
@@ -53,10 +54,10 @@ pub use style_ir::parse_style_ir_thread_invocations;
 pub use style_ir::set_style_ir_parse_phase_probe;
 pub use style_ir::{
     parse_component_value_tree, parse_style_ir, ComponentBlock, ComponentDelimiter,
-    ComponentFunction, ComponentToken, ComponentValue, ComponentValueTree, StaticClassFact,
-    StyleBlock, StyleBlockKind, StyleCompleteness, StyleDeclaration, StyleDirective,
-    StyleMixinOrFunction, StyleRule, StyleStatement, StyleSyntaxIr, UnknownStatement,
-    UnknownStatementKind, ValueInterpolation,
+    ComponentFunction, ComponentToken, ComponentValue, ComponentValueTree, OwnedComponentValueTree,
+    StaticClassFact, StyleBlock, StyleBlockKind, StyleCompleteness, StyleDeclaration,
+    StyleDirective, StyleMixinOrFunction, StyleRule, StyleStatement, StyleSyntaxIr,
+    UnknownStatement, UnknownStatementKind, ValueInterpolation,
 };
 pub use svelte_compat::{
     parse_style_body, svelte_first_significant_value_span, svelte_nth_of_selector_span,

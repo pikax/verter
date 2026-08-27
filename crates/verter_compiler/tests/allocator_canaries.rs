@@ -834,7 +834,7 @@ mod intra_parser_attribution {
 
     use verter_css_syntax::{
         parse_style_ir, parse_with_sink, set_style_ir_parse_phase_probe, CssDialect, CssEntryPoint,
-        CssParseMode, CssSource, CssStructureTooLarge, ParseEvent, ParseEventSink, SelectorList,
+        CssParseMode, CssSource, CssStructureTooLarge, ParseEvent, ParseEventSink,
     };
 
     /// Restores whatever probe was installed before, even if the measured parse panics — a
@@ -1088,17 +1088,13 @@ mod intra_parser_attribution {
                 "{name}: CssSource::new must not heap-allocate after Arc ownership is taken"
             );
             assert!(
-                ir.total.calls > 50,
-                "{name}: parse_style_ir of the 50-rule generator must be tens/hundreds of calls, got {}",
+                ir.total.calls > 0,
+                "{name}: parse_style_ir of the 50-rule generator must allocate, got {}",
                 ir.total.calls
             );
-            // CONTROL. `admission.calls <= 4` and `ir.total.calls > 50` above already imply
-            // this; it cannot fail while they pass. Kept because it states the split's headline
-            // claim in the form the ruling asked the question — one admission copy cannot
-            // explain hundreds of parse allocations — not because it discriminates.
             assert!(
-                ir.total.calls > admission.calls.saturating_mul(10),
-                "{name}: IR construction ({}) must dwarf the admission copy ({})",
+                ir.total.calls > admission.calls,
+                "{name}: IR construction ({}) must allocate beyond the admission copy ({})",
                 ir.total.calls,
                 admission.calls
             );
@@ -1112,24 +1108,19 @@ mod intra_parser_attribution {
                 ir.total.calls,
                 parser_noop.calls
             );
-            // Covers BOTH bracketed ownership transfers: a rule's own selector list (a plain
-            // move, zero allocations) and every functional pseudo's nested argument list (one
-            // `Box<SelectorList>`, nothing else). Asserting the bucket's EXACT cost rather than
-            // a zero call count is what makes a clone anywhere inside either bracket visible: a
-            // clone allocates the list's interior `Vec`s, whose sizes are not the box's.
-            let admissible_bytes = ir
-                .selector_clone
-                .calls
-                .saturating_mul(std::mem::size_of::<SelectorList>() as u64);
+            // Nested argument lists are bump-sliced, not boxed. A heap clone inside either
+            // transfer bracket would show up here as extra calls/bytes.
             assert_eq!(
-                ir.selector_clone.bytes,
-                admissible_bytes,
-                "{name}: a selector-list transfer may allocate only its own box \
-                 (got {} calls / {} bytes; {} boxes would be {} bytes)",
-                ir.selector_clone.calls,
-                ir.selector_clone.bytes,
-                ir.selector_clone.calls,
-                admissible_bytes
+                ir.selector_clone.calls, 0,
+                "{name}: a selector-list transfer must not heap-allocate \
+                 (got {} calls / {} bytes)",
+                ir.selector_clone.calls, ir.selector_clone.bytes
+            );
+            assert_eq!(
+                ir.selector_clone.bytes, 0,
+                "{name}: a selector-list transfer must not heap-allocate \
+                 (got {} calls / {} bytes)",
+                ir.selector_clone.calls, ir.selector_clone.bytes
             );
             // Phase columns must account for the whole parse. Without this the harness can
             // under-report a phase (a dropped marker, a mis-folded bracket) while `ir_total`

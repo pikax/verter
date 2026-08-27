@@ -1,6 +1,8 @@
+use bumpalo::Bump;
 use smallvec::SmallVec;
 use verter_span::Span;
 
+use crate::arena::{bump_for_source, freeze_vec, BumpSlice};
 use crate::diagnostic::{CssParseFailure, CssStructureTooLarge};
 use crate::dialect::CssDialect;
 use crate::event::{ParseEvent, ParseEventSink, SyntaxKind};
@@ -100,9 +102,9 @@ pub struct SelectorComponent {
     name_span: Option<Span>,
     attribute: Option<SelectorAttribute>,
     pseudo: Option<SelectorPseudo>,
-    static_fragments: Vec<Span>,
-    interpolations: Vec<SelectorInterpolation>,
-    nested_components: Vec<SelectorComponent>,
+    static_fragments: BumpSlice<Span>,
+    interpolations: BumpSlice<SelectorInterpolation>,
+    nested_components: BumpSlice<SelectorComponent>,
 }
 
 impl SelectorComponent {
@@ -133,12 +135,12 @@ impl SelectorComponent {
 
     #[inline]
     pub fn static_fragments(&self) -> &[Span] {
-        &self.static_fragments
+        self.static_fragments.as_slice()
     }
 
     #[inline]
     pub fn interpolations(&self) -> &[SelectorInterpolation] {
-        &self.interpolations
+        self.interpolations.as_slice()
     }
 
     #[inline]
@@ -152,7 +154,7 @@ impl SelectorComponent {
     }
 
     pub fn nested_components(&self) -> &[SelectorComponent] {
-        &self.nested_components
+        self.nested_components.as_slice()
     }
 }
 
@@ -250,7 +252,7 @@ pub struct SelectorPseudo {
     kind: PseudoFunctionKind,
     selector_count: u32,
     nth: Option<NthExpression>,
-    selector_list: Option<Box<SelectorList>>,
+    selector_list: Option<SelectorList>,
     /// Svelte-compat nth-argument shape. `Some` only for
     /// [`PseudoFunctionKind::NthChild`] / [`NthLastChild`](PseudoFunctionKind::NthLastChild).
     svelte_nth_arg: Option<SvelteNthArg>,
@@ -288,7 +290,7 @@ impl SelectorPseudo {
 
     #[inline]
     pub fn selector_list(&self) -> Option<&SelectorList> {
-        self.selector_list.as_deref()
+        self.selector_list.as_ref()
     }
 
     /// The parse-time Svelte nth-argument classification. `None` when this
@@ -506,7 +508,7 @@ fn classify_compound_tail(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorCompound {
     span: Span,
-    components: Vec<SelectorComponent>,
+    components: BumpSlice<SelectorComponent>,
     facts: SelectorFacts,
     tail: CompoundTail,
 }
@@ -517,7 +519,7 @@ impl SelectorCompound {
     }
 
     pub fn components(&self) -> &[SelectorComponent] {
-        &self.components
+        self.components.as_slice()
     }
 
     pub const fn facts(&self) -> SelectorFacts {
@@ -535,7 +537,7 @@ impl SelectorCompound {
 pub struct ComplexSelector {
     kind: SelectorKind,
     span: Span,
-    parts: Vec<ComplexSelectorPart>,
+    parts: BumpSlice<ComplexSelectorPart>,
     facts: SelectorFacts,
 }
 
@@ -549,11 +551,11 @@ impl ComplexSelector {
     }
 
     pub fn parts(&self) -> &[ComplexSelectorPart] {
-        &self.parts
+        self.parts.as_slice()
     }
 
     pub fn compounds(&self) -> Vec<&SelectorCompound> {
-        self.parts
+        self.parts()
             .iter()
             .filter_map(|part| match part {
                 ComplexSelectorPart::Compound(value) => Some(value),
@@ -563,7 +565,7 @@ impl ComplexSelector {
     }
 
     pub fn combinators(&self) -> Vec<&SelectorCombinator> {
-        self.parts
+        self.parts()
             .iter()
             .filter_map(|part| match part {
                 ComplexSelectorPart::Combinator(value) => Some(value),
@@ -583,7 +585,7 @@ impl ComplexSelector {
     pub fn relative_steps(&self) -> Vec<(Option<&SelectorCombinator>, &SelectorCompound)> {
         let mut steps = Vec::new();
         let mut pending: Option<&SelectorCombinator> = None;
-        for part in &self.parts {
+        for part in self.parts() {
             match part {
                 ComplexSelectorPart::Combinator(combinator) => pending = Some(combinator),
                 ComplexSelectorPart::Compound(compound) => {
@@ -598,7 +600,7 @@ impl ComplexSelector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectorList {
     span: Span,
-    selectors: Vec<ComplexSelector>,
+    selectors: BumpSlice<ComplexSelector>,
     facts: SelectorFacts,
 }
 
@@ -608,7 +610,7 @@ impl SelectorList {
     }
 
     pub fn selectors(&self) -> &[ComplexSelector] {
-        &self.selectors
+        self.selectors.as_slice()
     }
 
     pub const fn facts(&self) -> SelectorFacts {
@@ -617,6 +619,8 @@ impl SelectorList {
 }
 
 pub struct SelectorStructure {
+    /// Retains the bump that [`Self::list`] child slices point into.
+    _bump: Bump,
     source: CssSource,
     list: SelectorList,
 }
@@ -630,8 +634,13 @@ impl SelectorStructure {
         &self.list
     }
 
-    pub(crate) fn into_list(self) -> SelectorList {
-        self.list
+    #[cfg(test)]
+    pub(crate) fn from_parts(bump: Bump, source: CssSource, list: SelectorList) -> Self {
+        Self {
+            _bump: bump,
+            source,
+            list,
+        }
     }
 
     pub fn top_level_selector_count(&self) -> u32 {
@@ -694,10 +703,10 @@ impl SelectorStructure {
 }
 
 fn collect_components<'a>(list: &'a SelectorList, output: &mut Vec<&'a SelectorComponent>) {
-    for selector in &list.selectors {
-        for part in &selector.parts {
+    for selector in list.selectors() {
+        for part in selector.parts() {
             if let ComplexSelectorPart::Compound(compound) = part {
-                for component in &compound.components {
+                for component in compound.components() {
                     output.push(component);
                     collect_nested_components(component, output);
                     if let Some(nested) = component
@@ -717,18 +726,18 @@ fn collect_nested_components<'a>(
     component: &'a SelectorComponent,
     output: &mut Vec<&'a SelectorComponent>,
 ) {
-    for nested in &component.nested_components {
+    for nested in component.nested_components() {
         output.push(nested);
         collect_nested_components(nested, output);
     }
 }
 
 fn collect_combinators<'a>(list: &'a SelectorList, output: &mut Vec<&'a SelectorCombinator>) {
-    for selector in &list.selectors {
-        for part in &selector.parts {
+    for selector in list.selectors() {
+        for part in selector.parts() {
             match part {
                 ComplexSelectorPart::Compound(compound) => {
-                    for component in &compound.components {
+                    for component in compound.components() {
                         if let Some(nested) = component
                             .pseudo
                             .as_ref()
@@ -744,55 +753,51 @@ fn collect_combinators<'a>(list: &'a SelectorList, output: &mut Vec<&'a Selector
     }
 }
 
-#[derive(Debug)]
-enum BuiltSelectorNode {
+enum BuiltSelectorNode<'b> {
     List(SelectorList),
     Complex(ComplexSelector),
     Compound(SelectorCompound),
     Combinator(SelectorCombinator),
     Component(SelectorComponent),
-    Container(Vec<BuiltSelectorNode>),
+    Container(bumpalo::collections::Vec<'b, BuiltSelectorNode<'b>>),
 }
 
-#[derive(Debug)]
-struct OpenNode {
+struct OpenNode<'b> {
     kind: SyntaxKind,
     start: u32,
     token_start: usize,
-    children: Vec<BuiltSelectorNode>,
+    children: bumpalo::collections::Vec<'b, BuiltSelectorNode<'b>>,
     recovered: bool,
 }
 
-pub(crate) struct SelectorSink {
+pub(crate) struct SelectorSink<'b> {
+    bump: &'b Bump,
     source: CssSource,
-    open: SmallVec<[OpenNode; 16]>,
-    tokens: Vec<SyntaxToken>,
+    open: SmallVec<[OpenNode<'b>; 16]>,
+    tokens: bumpalo::collections::Vec<'b, SyntaxToken>,
     list: Option<SelectorList>,
 }
 
-impl SelectorSink {
-    pub(crate) fn new(source: CssSource) -> Self {
+impl<'b> SelectorSink<'b> {
+    pub(crate) fn new(bump: &'b Bump, source: CssSource) -> Self {
         Self {
+            bump,
             source,
             open: SmallVec::new(),
-            tokens: Vec::new(),
+            tokens: bumpalo::collections::Vec::new_in(bump),
             list: None,
         }
     }
 
-    pub(crate) fn finish(self) -> SelectorStructure {
-        let list = self.list.unwrap_or_else(|| SelectorList {
+    pub(crate) fn finish_list(self) -> SelectorList {
+        self.list.unwrap_or_else(|| SelectorList {
             span: Span::new(self.source.origin(), self.source.end()),
-            selectors: Vec::new(),
+            selectors: BumpSlice::empty(),
             facts: SelectorFacts::default(),
-        });
-        SelectorStructure {
-            source: self.source,
-            list,
-        }
+        })
     }
 
-    fn build_node(&self, open: OpenNode, end: u32) -> Option<BuiltSelectorNode> {
+    fn build_node(&self, open: OpenNode<'b>, end: u32) -> Option<BuiltSelectorNode<'b>> {
         let span = Span::new(open.start, end);
         let tokens = &self.tokens[open.token_start..];
         let recovered = open.recovered;
@@ -806,37 +811,34 @@ impl SelectorSink {
         };
         match open.kind {
             SyntaxKind::SelectorList => {
-                let selectors: Vec<_> = open
-                    .children
-                    .into_iter()
-                    .filter_map(|child| match child {
-                        BuiltSelectorNode::Complex(value) => Some(value),
-                        _ => None,
-                    })
-                    .collect();
+                let mut selectors = bumpalo::collections::Vec::new_in(self.bump);
+                for child in open.children {
+                    if let BuiltSelectorNode::Complex(value) = child {
+                        selectors.push(value);
+                    }
+                }
                 let facts = selectors.iter().fold(recovered_facts, |facts, selector| {
                     facts.combine(selector.facts)
                 });
                 Some(BuiltSelectorNode::List(SelectorList {
                     span,
-                    selectors,
+                    selectors: freeze_vec(selectors),
                     facts,
                 }))
             }
             SyntaxKind::Selector => {
-                let parts: Vec<_> = open
-                    .children
-                    .into_iter()
-                    .filter_map(|child| match child {
+                let mut parts = bumpalo::collections::Vec::new_in(self.bump);
+                for child in open.children {
+                    match child {
                         BuiltSelectorNode::Compound(value) => {
-                            Some(ComplexSelectorPart::Compound(value))
+                            parts.push(ComplexSelectorPart::Compound(value));
                         }
                         BuiltSelectorNode::Combinator(value) => {
-                            Some(ComplexSelectorPart::Combinator(value))
+                            parts.push(ComplexSelectorPart::Combinator(value));
                         }
-                        _ => None,
-                    })
-                    .collect();
+                        _ => {}
+                    }
+                }
                 let facts = parts.iter().fold(recovered_facts, |facts, part| {
                     let child = match part {
                         ComplexSelectorPart::Compound(value) => value.facts,
@@ -847,26 +849,24 @@ impl SelectorSink {
                 Some(BuiltSelectorNode::Complex(ComplexSelector {
                     kind: SelectorKind::Complex,
                     span,
-                    parts,
+                    parts: freeze_vec(parts),
                     facts,
                 }))
             }
             SyntaxKind::CompoundSelector => {
-                let components: Vec<_> = open
-                    .children
-                    .into_iter()
-                    .filter_map(|child| match child {
-                        BuiltSelectorNode::Component(value) => Some(value),
-                        _ => None,
-                    })
-                    .collect();
+                let mut components = bumpalo::collections::Vec::new_in(self.bump);
+                for child in open.children {
+                    if let BuiltSelectorNode::Component(value) = child {
+                        components.push(value);
+                    }
+                }
                 let facts = components.iter().fold(recovered_facts, |facts, component| {
                     facts.combine(component.facts)
                 });
                 let tail = classify_compound_tail(&self.source, span, components.last());
                 Some(BuiltSelectorNode::Compound(SelectorCompound {
                     span,
-                    components,
+                    components: freeze_vec(components),
                     facts,
                     tail,
                 }))
@@ -876,7 +876,7 @@ impl SelectorSink {
                 span,
             })),
             kind if selector_component_kind(kind).is_some() => {
-                let mut nested_components = Vec::new();
+                let mut nested_components = bumpalo::collections::Vec::new_in(self.bump);
                 let mut nested_list = None;
                 for child in open.children {
                     match child {
@@ -884,44 +884,41 @@ impl SelectorSink {
                             nested_components.push(component);
                         }
                         BuiltSelectorNode::List(value) if nested_list.is_none() => {
-                            // A functional pseudo's argument list is MOVED into its component,
-                            // exactly as the outer list is moved into its rule. The bracket
-                            // encloses the WHOLE transfer, box included, so the bucket's only
-                            // admissible cost is one `Box<SelectorList>` per occurrence and a
-                            // clone re-introduced anywhere inside it shows up as extra calls and
-                            // off-size bytes. Leaving `Box::new` outside let a clone hide in the
-                            // gap between the exit marker and the box.
                             notify_parse_phase("selector_clone_enter");
-                            nested_list = Some(Box::new(value));
+                            nested_list = Some(value);
                             notify_parse_phase("selector_clone_exit");
                         }
                         _ => {}
                     }
                 }
-                let mut interpolations: Vec<_> = nested_components
-                    .iter()
-                    .filter(|component| component.kind == SelectorComponentKind::Interpolation)
-                    .filter_map(|component| component.interpolations.first().copied())
-                    .collect();
+                let mut interpolations = bumpalo::collections::Vec::new_in(self.bump);
+                for component in nested_components.iter() {
+                    if component.kind == SelectorComponentKind::Interpolation {
+                        if let Some(first) = component.interpolations.as_slice().first() {
+                            interpolations.push(*first);
+                        }
+                    }
+                }
                 let mut component_kind = selector_component_kind(kind).unwrap();
                 if kind == SyntaxKind::ClassSelector && !interpolations.is_empty() {
                     component_kind = SelectorComponentKind::DynamicClass;
                 }
                 let name_span = selector_name_span(component_kind, tokens);
                 let static_fragments = if component_kind == SelectorComponentKind::DynamicClass {
-                    tokens
-                        .iter()
-                        .filter(|token| {
-                            token.kind() == TokenKind::Ident
-                                && !interpolations.iter().any(|interpolation| {
-                                    interpolation.full_span.start <= token.start
-                                        && token.end <= interpolation.full_span.end
-                                })
-                        })
-                        .map(|token| Span::new(token.start, token.end))
-                        .collect()
+                    let mut fragments = bumpalo::collections::Vec::new_in(self.bump);
+                    for token in tokens {
+                        if token.kind() == TokenKind::Ident
+                            && !interpolations.iter().any(|interpolation| {
+                                interpolation.full_span.start <= token.start
+                                    && token.end <= interpolation.full_span.end
+                            })
+                        {
+                            fragments.push(Span::new(token.start, token.end));
+                        }
+                    }
+                    freeze_vec(fragments)
                 } else {
-                    Vec::new()
+                    BumpSlice::empty()
                 };
                 let attribute = (kind == SyntaxKind::AttributeSelector).then(|| {
                     let value_quoted = attribute_value_quoted(tokens);
@@ -969,7 +966,7 @@ impl SelectorSink {
                     let argument_is_empty = classify_argument_is_empty(
                         &self.source,
                         argument_span,
-                        nested_list.as_deref(),
+                        nested_list.as_ref(),
                     );
                     SelectorPseudo {
                         span,
@@ -1013,7 +1010,7 @@ impl SelectorSink {
                         SelectorCompleteness::Complete
                     },
                 };
-                for nested in &nested_components {
+                for nested in nested_components.iter() {
                     facts = facts.combine(nested.facts);
                 }
                 if let Some(list) = pseudo.as_ref().and_then(SelectorPseudo::selector_list) {
@@ -1027,8 +1024,8 @@ impl SelectorSink {
                     attribute,
                     pseudo,
                     static_fragments,
-                    interpolations,
-                    nested_components,
+                    interpolations: freeze_vec(interpolations),
+                    nested_components: freeze_vec(nested_components),
                 }))
             }
             _ if !open.children.is_empty() => Some(BuiltSelectorNode::Container(open.children)),
@@ -1037,14 +1034,14 @@ impl SelectorSink {
     }
 }
 
-impl ParseEventSink for SelectorSink {
+impl ParseEventSink for SelectorSink<'_> {
     fn event(&mut self, event: ParseEvent) -> Result<(), CssStructureTooLarge> {
         match event {
             ParseEvent::StartNode { kind, start, .. } => self.open.push(OpenNode {
                 kind,
                 start,
                 token_start: self.tokens.len(),
-                children: Vec::new(),
+                children: bumpalo::collections::Vec::new_in(self.bump),
                 recovered: false,
             }),
             ParseEvent::Token(token) => self.tokens.push(token),
@@ -1128,15 +1125,23 @@ pub fn parse_selector_structure(
 ) -> Result<SelectorStructure, CssParseFailure> {
     #[cfg(any(test, feature = "test-support"))]
     SELECTOR_STRUCTURE_PARSE_INVOCATIONS.with(|count| count.set(count.get() + 1));
-    let mut sink = SelectorSink::new(source.clone());
-    parse_with_sink(
-        source,
-        dialect,
-        CssEntryPoint::SelectorList,
-        CssParseMode::Strict,
-        &mut sink,
-    )?;
-    Ok(sink.finish())
+    let bump = bump_for_source(source.text().len());
+    let list = {
+        let mut sink = SelectorSink::new(&bump, source.clone());
+        parse_with_sink(
+            source,
+            dialect,
+            CssEntryPoint::SelectorList,
+            CssParseMode::Strict,
+            &mut sink,
+        )?;
+        sink.finish_list()
+    };
+    Ok(SelectorStructure {
+        _bump: bump,
+        source: source.clone(),
+        list,
+    })
 }
 
 #[cfg(any(test, feature = "test-support"))]
