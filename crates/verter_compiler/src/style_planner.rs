@@ -119,11 +119,12 @@ struct StyleSourceIdentity<'a> {
     content_artifact_token: &'a str,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct AuthoredStyleInput<'a> {
     code: &'a str,
     dialect: CssDialect,
     source: StyleSourceIdentity<'a>,
+    prepared: Option<&'a StyleSyntaxIr>,
 }
 
 impl<'a> AuthoredStyleInput<'a> {
@@ -143,7 +144,14 @@ impl<'a> AuthoredStyleInput<'a> {
                 source_space_token,
                 content_artifact_token,
             },
+            prepared: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_prepared(mut self, ir: &'a StyleSyntaxIr) -> Self {
+        self.prepared = Some(ir);
+        self
     }
 }
 
@@ -182,6 +190,46 @@ impl<'a> PlainCssInput<'a> {
     #[must_use]
     pub const fn code(&self) -> &'a str {
         self.code
+    }
+}
+
+/// Host-retained parsed style IR, threaded into later compile/analysis.
+///
+/// Companion carrier — not a field on public `StyleBlockAnalysis`. Clone is
+/// Arc-cheap. Excluded from request/cache identity.
+#[derive(Clone)]
+pub struct PreparedStyleIr {
+    ir: Arc<StyleSyntaxIr>,
+}
+
+impl PreparedStyleIr {
+    #[must_use]
+    pub fn new(ir: StyleSyntaxIr) -> Self {
+        Self { ir: Arc::new(ir) }
+    }
+
+    #[must_use]
+    pub fn from_arc(ir: Arc<StyleSyntaxIr>) -> Self {
+        Self { ir }
+    }
+
+    #[must_use]
+    pub fn ir(&self) -> &StyleSyntaxIr {
+        &self.ir
+    }
+
+    #[must_use]
+    pub fn clone_arc(&self) -> Arc<StyleSyntaxIr> {
+        Arc::clone(&self.ir)
+    }
+}
+
+impl std::fmt::Debug for PreparedStyleIr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedStyleIr")
+            .field("dialect", &self.ir.dialect())
+            .field("origin", &self.ir.source().origin())
+            .finish_non_exhaustive()
     }
 }
 
@@ -385,6 +433,86 @@ pub fn parse_plain_css_for_verification(
     parse_ir(code, CssDialect::Css, stage).map(|parsed| parsed.inner)
 }
 
+/// Parse supplied preprocessor CSS once at host admission.
+#[must_use]
+pub fn prepare_supplied_plain_css(code: &str) -> Option<PreparedStyleIr> {
+    parse_plain_css_for_verification(code, StyleRewriteStage::PostPreprocessModules)
+        .ok()
+        .map(PreparedStyleIr::new)
+}
+
+fn relocate_edits(
+    edits: Vec<StyleEdit>,
+    origin: u32,
+    stage: StyleRewriteStage,
+    dialect: CssDialect,
+) -> Result<Vec<StyleEdit>, StyleRewriteFailure> {
+    if origin == 0 {
+        return Ok(edits);
+    }
+    edits
+        .into_iter()
+        .map(|edit| match edit {
+            StyleEdit::Overwrite { span, content } => {
+                let start = span.start.checked_sub(origin).ok_or_else(|| {
+                    StyleRewriteFailure::new(
+                        StyleRewriteFailureClass::ParseFailure,
+                        stage,
+                        dialect,
+                        Some(span),
+                    )
+                })?;
+                let end = span.end.checked_sub(origin).ok_or_else(|| {
+                    StyleRewriteFailure::new(
+                        StyleRewriteFailureClass::ParseFailure,
+                        stage,
+                        dialect,
+                        Some(span),
+                    )
+                })?;
+                Ok(StyleEdit::Overwrite {
+                    span: Span::new(start, end),
+                    content,
+                })
+            }
+            StyleEdit::Insert { at, content } => {
+                let at = at.checked_sub(origin).ok_or_else(|| {
+                    StyleRewriteFailure::new(
+                        StyleRewriteFailureClass::ParseFailure,
+                        stage,
+                        dialect,
+                        Some(Span::new(at, at)),
+                    )
+                })?;
+                Ok(StyleEdit::Insert { at, content })
+            }
+        })
+        .collect()
+}
+
+fn relocate_v_bind_vars(vars: Vec<VBindVar>, origin: u32) -> Vec<VBindVar> {
+    if origin == 0 {
+        return vars;
+    }
+    vars.into_iter()
+        .map(|mut var| {
+            var.expr_start = var.expr_start.saturating_sub(origin);
+            var.expr_end = var.expr_end.saturating_sub(origin);
+            var
+        })
+        .collect()
+}
+
+fn authored_or_parsed_ir(
+    input: AuthoredStyleInput<'_>,
+    stage: StyleRewriteStage,
+) -> Result<ParsedStyleIr, StyleRewriteFailure> {
+    if let Some(prepared) = input.prepared {
+        return Ok(ParsedStyleIr::from_existing(prepared.clone()));
+    }
+    parse_ir(input.code, input.dialect, stage)
+}
+
 fn parse_ir(
     code: &str,
     dialect: CssDialect,
@@ -516,8 +644,16 @@ pub fn transform_vue_v_bind(
     input: AuthoredStyleInput<'_>,
     scope_id: &str,
 ) -> Result<StyleRewriteOutcome, StyleRewriteFailure> {
-    let ir = parse_ir(input.code, input.dialect, StyleRewriteStage::AuthoredVBind)?;
+    let ir = authored_or_parsed_ir(input, StyleRewriteStage::AuthoredVBind)?;
+    let origin = ir.source().origin();
     let (edits, vars) = v_bind_edits_from_ir(&ir, input.dialect, scope_id)?;
+    let edits = relocate_edits(
+        edits,
+        origin,
+        StyleRewriteStage::AuthoredVBind,
+        input.dialect,
+    )?;
+    let vars = relocate_v_bind_vars(vars, origin);
     let facts = VueStyleFacts {
         rewrites: VueStyleRewriteMask {
             v_bind: !edits.is_empty(),
@@ -948,11 +1084,7 @@ pub fn analyze_css_module_classes(
     input: AuthoredStyleInput<'_>,
     scope_id: &str,
 ) -> Result<Vec<(String, String)>, StyleRewriteFailure> {
-    let ir = parse_ir(
-        input.code,
-        input.dialect,
-        StyleRewriteStage::PostPreprocessModules,
-    )?;
+    let ir = authored_or_parsed_ir(input, StyleRewriteStage::PostPreprocessModules)?;
     let (_edits, classes) = module_classes_and_edits_from_ir(&ir, input.dialect, scope_id)?;
     Ok(classes.into_iter().collect())
 }
@@ -1386,9 +1518,17 @@ pub fn run_vue_style_cascade(
     // original authored bytes.
     {
         let stage: Result<_, StyleRewriteFailure> = (|| {
-            let ir = parse_ir(input.code, input.dialect, StyleRewriteStage::AuthoredVBind)?;
+            let ir = authored_or_parsed_ir(input, StyleRewriteStage::AuthoredVBind)?;
             observe_style_ir(StyleRewriteStage::AuthoredVBind, &ir);
+            let origin = ir.source().origin();
             let (edits, vars) = v_bind_edits_from_ir(&ir, input.dialect, scope_id)?;
+            let edits = relocate_edits(
+                edits,
+                origin,
+                StyleRewriteStage::AuthoredVBind,
+                input.dialect,
+            )?;
+            let vars = relocate_v_bind_vars(vars, origin);
             Ok((ir, edits, vars))
         })();
         match stage {
@@ -1461,6 +1601,7 @@ pub fn run_vue_style_cascade(
 ///
 /// The supplied parse is reused for the first stage. If that stage leaves the
 /// bytes unchanged, the same parsed structure continues into later stages.
+#[allow(clippy::too_many_arguments)]
 pub fn run_vue_style_cascade_verified(
     verified: VerifiedPlainCss<'_>,
     source_name: &str,
@@ -1484,7 +1625,16 @@ pub fn run_vue_style_cascade_verified(
     let mut retained_ir = None;
 
     observe_style_ir(StyleRewriteStage::AuthoredVBind, &parsed);
-    match v_bind_edits_from_ir(&parsed, CssDialect::Css, scope_id) {
+    let origin = parsed.source().origin();
+    match v_bind_edits_from_ir(&parsed, CssDialect::Css, scope_id).and_then(|(edits, vars)| {
+        let edits = relocate_edits(
+            edits,
+            origin,
+            StyleRewriteStage::AuthoredVBind,
+            CssDialect::Css,
+        )?;
+        Ok((edits, relocate_v_bind_vars(vars, origin)))
+    }) {
         Ok((edits, vars)) => {
             facts.v_bind_vars = vars;
             facts.rewrites.v_bind = !edits.is_empty();
@@ -1551,6 +1701,7 @@ pub fn run_vue_style_cascade_verified(
 
 /// Type-state-gated entry point for Vue transforms over CSS-grammar-proven
 /// bytes.
+#[allow(clippy::too_many_arguments)]
 pub fn transform_vue_style(
     verified: VerifiedPlainCss<'_>,
     source_name: &str,
@@ -1677,8 +1828,15 @@ fn run_post_v_bind_stages(
                 )?,
             };
             observe_style_ir(StyleRewriteStage::PostPreprocessModules, &ir);
+            let origin = ir.source().origin();
             let (edits, classes) =
                 module_classes_and_edits_from_ir(&ir, CssDialect::Css, scope_id)?;
+            let edits = relocate_edits(
+                edits,
+                origin,
+                StyleRewriteStage::PostPreprocessModules,
+                CssDialect::Css,
+            )?;
             Ok((plain, ir, edits, classes))
         })();
         match stage {
@@ -1737,7 +1895,14 @@ fn run_post_v_bind_stages(
                 )?,
             };
             observe_style_ir(StyleRewriteStage::PostPreprocessScoping, &ir);
+            let origin = ir.source().origin();
             let (edits, stage_facts) = scoped_edits_and_facts_from_ir(&ir, scope_id)?;
+            let edits = relocate_edits(
+                edits,
+                origin,
+                StyleRewriteStage::PostPreprocessScoping,
+                CssDialect::Css,
+            )?;
             Ok((plain, edits, stage_facts))
         })();
         match stage {

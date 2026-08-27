@@ -284,6 +284,8 @@ pub struct SvelteRuntimeOptions {
     /// refusal, and every other value (`0`, `6`, …) is an official
     /// `options_invalid_value` error. The default `5` (or absent) is supported.
     pub compatibility_component_api: Option<u32>,
+    /// Host-retained parsed style IRs in inventory order.
+    pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
 }
 
 /// A runtime-lowering diagnostic.

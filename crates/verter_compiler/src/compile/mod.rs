@@ -784,6 +784,7 @@ fn derive_legacy_vue_options(
         template_used_vars: execution_inputs.template_used_vars.clone(),
         runtime_template_hole: execution_inputs.runtime_template_hole,
         runtime_inline_template_chunk: execution_inputs.runtime_inline_template_chunk,
+        prepared_styles: execution_inputs.prepared_styles.clone(),
     };
 
     (codegen_options, resolved_flags)
@@ -898,7 +899,7 @@ fn compile_inner(
     let mut total_style_duration_ms: f64 = 0.0;
 
     if options.target.needs_style() {
-        for style in parsed.style_nodes() {
+        for (style_index, style) in parsed.style_nodes().iter().enumerate() {
             let style_start = Instant::now();
             let mut style_module_classes = Vec::new();
             let style_code = if let Some(content) = &style.content {
@@ -911,13 +912,27 @@ fn compile_inner(
                 // CSS-only (row 19, `css/modules.rs`, untouched); only that
                 // one stage is conditioned on the resolved dialect.
                 let cascade_module = style.module && dialect == Some(CssDialect::Css);
-                let cascade_input = AuthoredStyleInput::new(
+                let mut cascade_input = AuthoredStyleInput::new(
                     style_source,
                     authored_dialect,
                     source_name,
                     "standalone:carrier",
                     "standalone:carrier-bytes",
                 );
+                let prepared = verter_options
+                    .prepared_styles
+                    .get(style_index)
+                    .and_then(|slot| slot.as_ref())
+                    .or_else(|| {
+                        verter_options
+                            .prepared_styles
+                            .iter()
+                            .flatten()
+                            .find(|slot| slot.ir().source().text() == style_source)
+                    });
+                if let Some(prepared) = prepared {
+                    cascade_input = cascade_input.with_prepared(prepared.ir());
+                }
 
                 let outcome = run_vue_style_cascade(
                     cascade_input,
@@ -2442,6 +2457,7 @@ pub(crate) mod legacy_test_support {
             template_used_vars: verter_options.template_used_vars.clone(),
             runtime_template_hole: verter_options.runtime_template_hole,
             runtime_inline_template_chunk: verter_options.runtime_inline_template_chunk,
+            prepared_styles: Vec::new(),
         }
     }
 

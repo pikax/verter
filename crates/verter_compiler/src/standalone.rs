@@ -1283,6 +1283,7 @@ fn direct_svelte_runtime_options(
         immutable: None,
         hmr: None,
         compatibility_component_api: None,
+        prepared_styles: Vec::new(),
     })
 }
 
@@ -1589,6 +1590,7 @@ mod tests {
         template_used_vars: None,
         runtime_template_hole: false,
         runtime_inline_template_chunk: false,
+        prepared_styles: Vec::new(),
     };
     static LEAKED_VUE_MACROS: &VueMacroSemanticInput = &VueMacroSemanticInput::Unavailable;
 

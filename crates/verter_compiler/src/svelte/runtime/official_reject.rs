@@ -72,7 +72,16 @@ pub(super) fn official_reject_gate_with_runes(
     parsed: &ParsedSvelte,
     runes_override: Option<bool>,
 ) -> Option<OfficialRejection> {
-    css::clear_admitted_style_irs();
+    let mut admitted = css::AdmittedStyleIrs::default();
+    official_reject_gate_with_admitted(source, parsed, runes_override, &mut admitted)
+}
+
+pub(super) fn official_reject_gate_with_admitted(
+    source: &str,
+    parsed: &ParsedSvelte,
+    runes_override: Option<bool>,
+    admitted: &mut css::AdmittedStyleIrs,
+) -> Option<OfficialRejection> {
     // ─── PARSE PHASE (official `phases/1-parse`) — the SINGLE parser-owned,
     // encounter-ordered defect stream is the SOLE parse-error arbitration source. Every
     // parse defect (close-tag / strict-parse / script-domain / explicit-`</p>` autoclose)
@@ -80,7 +89,7 @@ pub(super) fn official_reject_gate_with_runes(
     // single forward pass; the gate selects the FIRST-discovered (minimum `encounter_order`)
     // unsuppressed defect, matching official, which stops at the first parse error. Equal
     // discovery orders use the shared span/severity/code/argument diagnostic key. ───
-    if let Some(defect) = select_parse_phase_defect(source, parsed) {
+    if let Some(defect) = select_parse_phase_defect(source, parsed, admitted) {
         return Some(defect.rejection);
     }
 
@@ -664,10 +673,14 @@ pub(crate) fn deferred_parse_defects_excluding_css(
 /// via [`deferred_parse_defects`]. Runtime-gate-only: this defect class does
 /// NOT publish through the carrier's mapped-diagnostic channel (see
 /// [`deferred_parse_defects_excluding_css`]).
-fn deferred_css_style_defects(source: &str, parsed: &ParsedSvelte) -> Vec<SelectedParseDefect> {
+fn deferred_css_style_defects(
+    source: &str,
+    parsed: &ParsedSvelte,
+    admitted: &mut css::AdmittedStyleIrs,
+) -> Vec<SelectedParseDefect> {
     let mut defects = Vec::new();
     for probe in &parsed.style_body_probes {
-        if let Some(code) = css::admit_style_body(source, probe.content) {
+        if let Some(code) = css::admit_style_body(source, probe.content, admitted) {
             defects.push(SelectedParseDefect {
                 encounter_order: probe.encounter_order,
                 span: Span::new(
@@ -696,15 +709,17 @@ fn deferred_css_style_defects(source: &str, parsed: &ParsedSvelte) -> Vec<Select
 pub(crate) fn deferred_parse_defects(
     source: &str,
     parsed: &ParsedSvelte,
+    admitted: &mut css::AdmittedStyleIrs,
 ) -> Vec<SelectedParseDefect> {
     let mut defects = deferred_parse_defects_excluding_css(source, parsed);
-    defects.extend(deferred_css_style_defects(source, parsed));
+    defects.extend(deferred_css_style_defects(source, parsed, admitted));
     defects
 }
 
 pub(crate) fn select_parse_phase_defect(
     source: &str,
     parsed: &ParsedSvelte,
+    admitted: &mut css::AdmittedStyleIrs,
 ) -> Option<SelectedParseDefect> {
     // The `<p>` elements in an IMPLICIT-autoclose situation (a direct disallowed block child
     // but NO explicit `</p>`) — their parser-reported `Unclosed` is a FEATURE, not a reject,
@@ -797,7 +812,7 @@ pub(crate) fn select_parse_phase_defect(
 
     // Fill the reserved script/CSS/custom-element slots once. Their discovery
     // order remains part of the runtime's exact first-error arbitration.
-    for defect in deferred_parse_defects(source, parsed) {
+    for defect in deferred_parse_defects(source, parsed, admitted) {
         consider(defect.encounter_order, defect.span, defect.rejection);
     }
 

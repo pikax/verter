@@ -77,6 +77,7 @@ pub(crate) struct SuppliedContentArtifact {
     processor_identity: String,
     processor_version: String,
     config_fingerprint: Option<BlockContentHashToken>,
+    parsed: Option<verter_compiler::style_planner::PreparedStyleIr>,
 }
 
 impl SuppliedContentArtifact {
@@ -926,6 +927,7 @@ impl VerterHost {
                 final_output_space: selected.source_descriptor.clone(),
                 immediate_maps: Vec::new(),
                 composed_map: identity_qualified_map(&selected.source_space_token),
+                parsed_style: None,
             });
         }
 
@@ -978,6 +980,7 @@ impl VerterHost {
                         .into_iter()
                         .collect(),
                     composed_map: supplied.qualified_source_map,
+                    parsed_style: supplied.parsed.clone(),
                 });
             }
         }
@@ -1001,6 +1004,7 @@ impl VerterHost {
             final_output_space: selected.source_descriptor.clone(),
             immediate_maps: Vec::new(),
             composed_map: identity_qualified_map(&selected.source_space_token),
+            parsed_style: None,
         })
     }
 
@@ -1106,12 +1110,14 @@ impl VerterHost {
             } else {
                 snapshot.lang.clone()
             };
+            let parsed = snapshot.parsed_style.clone();
             let input = RuntimeBlockContentInput {
                 code,
                 source_map: snapshot.source_map,
                 lang: output_lang,
                 content_artifact_token: snapshot.content_artifact_token.to_string(),
                 source_space_token: snapshot.source_space_token.to_string(),
+                parsed,
             };
             match role {
                 SectionRole::TemplateHost => projection.template = Some(input),
@@ -1222,12 +1228,51 @@ impl VerterHost {
                 usage_complete = false;
                 continue;
             };
+            let already_analyzed_inline = snapshot.availability
+                == BlockContentAvailability::NativeAvailable
+                && style.content_is_available()
+                && style
+                    .source_space_token
+                    .as_deref()
+                    .is_none_or(|token| token == snapshot.source_space_token.as_str());
+            if already_analyzed_inline {
+                for binding in &style.v_binds {
+                    v_bind_vars.extend(binding.expr_roots.iter().cloned());
+                    usage_complete &= binding.roots_complete;
+                }
+                continue;
+            }
             if matches!(
                 snapshot.availability,
                 BlockContentAvailability::NativeAvailable
                     | BlockContentAvailability::SuppliedAvailable
             ) {
-                if let Some(content) = snapshot.content.as_deref() {
+                if let Some(prepared) = snapshot.parsed_style.as_ref() {
+                    let input = verter_compiler::style_planner::AuthoredStyleInput::new(
+                        prepared.ir().source().text(),
+                        prepared.ir().dialect(),
+                        "style-usage",
+                        "style-usage",
+                        "style-usage",
+                    )
+                    .with_prepared(prepared.ir());
+                    match verter_compiler::style_planner::transform_vue_v_bind(input, "usage") {
+                        Ok(
+                            verter_compiler::style_planner::StyleRewriteOutcome::Unchanged {
+                                facts,
+                            }
+                            | verter_compiler::style_planner::StyleRewriteOutcome::Rewritten {
+                                facts,
+                                ..
+                            },
+                        ) => {
+                            for binding in facts.v_bind_vars {
+                                v_bind_vars.push(binding.expression);
+                            }
+                        }
+                        Err(_) => usage_complete = false,
+                    }
+                } else if let Some(content) = snapshot.content.as_deref() {
                     let usage_lang = if snapshot.availability
                         == BlockContentAvailability::SuppliedAvailable
                         && snapshot.content_class == BlockContentClass::Style
@@ -1615,6 +1660,9 @@ impl VerterHost {
                 content_hash: entry.code_hash.clone(),
                 utf8_byte_len: entry.code.len() as u64,
             };
+            let parsed = (current.content_class == BlockContentClass::Style)
+                .then(|| verter_compiler::style_planner::prepare_supplied_plain_css(&entry.code))
+                .flatten();
             #[cfg(test)]
             {
                 let hook = self.block_content.admission_seam_hook.lock().clone();
@@ -1644,6 +1692,7 @@ impl VerterHost {
                     processor_identity: entry.processor_identity,
                     processor_version: entry.processor_version,
                     config_fingerprint: entry.config_fingerprint,
+                    parsed,
                 },
             ));
         }
@@ -1817,6 +1866,7 @@ mod tests {
             processor_identity: String::new(),
             processor_version: String::new(),
             config_fingerprint: None,
+            parsed: None,
         }
     }
 

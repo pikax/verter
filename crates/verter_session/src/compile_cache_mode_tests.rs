@@ -88,6 +88,7 @@ fn empty_input() -> CompileInput {
         framework_parse: None,
         style_v_bind_vars: Vec::new(),
         style_v_bind_usage_complete: true,
+        prepared_styles: Vec::new(),
     }
 }
 

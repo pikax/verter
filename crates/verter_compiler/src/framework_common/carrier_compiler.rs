@@ -423,6 +423,9 @@ pub struct RuntimeCompileOptions {
     /// execution-input carrier: excluded from `CompileRequest` identity,
     /// but no longer erased — a Svelte carrier simply ignores it.
     pub vue_facts: Option<crate::compile::types::VueExecutionInputs>,
+    /// Host-retained parsed style IRs, one slot per style block in inventory
+    /// order. Excluded from request/cache identity.
+    pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -466,6 +469,7 @@ impl Default for RuntimeCompileOptions {
             block_content: RuntimeBlockContentInputs::default(),
             inline: None,
             vue_facts: None,
+            prepared_styles: Vec::new(),
         }
     }
 }
@@ -482,6 +486,8 @@ pub struct RuntimeBlockContentInput {
     pub content_artifact_token: String,
     /// Host-minted source space containing `code`.
     pub source_space_token: String,
+    /// Parsed IR for these exact bytes, when the host admitted one.
+    pub parsed: Option<crate::style_planner::PreparedStyleIr>,
 }
 
 /// Parser-local projection of validated block content. Ordering exists only at

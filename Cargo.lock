@@ -4188,6 +4188,7 @@ dependencies = [
  "uuid",
  "verter_audit",
  "verter_compiler",
+ "verter_css_syntax",
  "verter_debug_assert",
  "verter_identity",
  "verter_language",

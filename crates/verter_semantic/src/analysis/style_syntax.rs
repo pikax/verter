@@ -17,20 +17,25 @@ use super::style::{
     SelectorCombinator, SelectorPseudoClass, SpecialPseudoKind, StructuredSelector,
 };
 
-pub(super) fn project_style(
+pub(super) fn parse_style_block(
     css_content: &str,
     content_offset: u32,
     dialect: CssDialect,
-) -> Option<(CssAnalysis, Vec<AnalyzedSpecialPseudo>)> {
+) -> Option<verter_css_syntax::StyleSyntaxIr> {
     let source = CssSource::new(Arc::from(css_content), content_offset).ok()?;
-    let ir = parse_style_ir(source.clone(), dialect, CssParseMode::Recover).ok()?;
+    parse_style_ir(source, dialect, CssParseMode::Recover).ok()
+}
+
+pub(super) fn project_style_from_ir(
+    ir: &verter_css_syntax::StyleSyntaxIr,
+) -> (CssAnalysis, Vec<AnalyzedSpecialPseudo>) {
     let mut projection = Projection {
-        source: &source,
+        source: ir.source(),
         analysis: CssAnalysis::default(),
         special_pseudos: Vec::new(),
     };
     projection.statements(ir.statements(), None, false);
-    Some((projection.analysis, projection.special_pseudos))
+    (projection.analysis, projection.special_pseudos)
 }
 
 pub(super) fn parse_selector_authority(selector_text: &str) -> Option<StructuredSelector> {

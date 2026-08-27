@@ -114,7 +114,8 @@ pub use scope::AnalysisScope;
 pub use selector_match::{match_selector, MatchResult};
 pub use style::{
     build_css_style_analysis, build_external_src_style_analysis, build_preprocessor_style_analysis,
-    build_scanned_style_analysis, compute_structured_specificity, parse_selector, AnalyzedSelector,
+    build_scanned_style_analysis, build_scanned_style_analysis_from_ir,
+    compute_structured_specificity, parse_selector, parse_style_ir_for_analysis, AnalyzedSelector,
     AttributeOperator, AttributeSelector, BlockContentAvailability, CompoundSelector,
     SelectorCombinator, SelectorPseudoClass, SpecialPseudoInput, SpecialPseudoKind,
     StructuredSelector, StyleAnalysisFlags, StyleAnalysisLang, StyleBlockAnalysis, VBindInput,

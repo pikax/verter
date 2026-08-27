@@ -41,8 +41,7 @@ use crate::framework_common::generated_chunk::{
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::style_planner::{
-    parse_plain_css_for_verification, run_vue_style_cascade, transform_vue_style,
-    AuthoredStyleInput, StyleRewriteStage, VerifiedPlainCss,
+    run_vue_style_cascade, transform_vue_style, AuthoredStyleInput, VerifiedPlainCss,
 };
 use verter_language::ParseOptions;
 
@@ -926,6 +925,13 @@ impl CarrierCompiler for VueCarrierCompiler {
             template_used_vars: None,
             runtime_template_hole: supplied_inline_template,
             runtime_inline_template_chunk: false,
+            prepared_styles: if opts.prepared_styles.is_empty() {
+                extras
+                    .map(|facts| facts.prepared_styles.clone())
+                    .unwrap_or_default()
+            } else {
+                opts.prepared_styles.clone()
+            },
         };
 
         // Vue uses `VerterCompileResult` INTERNALLY here; the returned bundle
@@ -1253,13 +1259,22 @@ impl CarrierCompiler for VueCarrierCompiler {
                     // output, so all 3 stages apply in one cascade — a stage
                     // that produces no edits hands its retained IR to the next
                     // instead of forcing a re-parse (A10i).
-                    let authored = AuthoredStyleInput::new(
+                    let mut authored = AuthoredStyleInput::new(
                         &current,
                         selected_dialect,
                         &input.source_space_token,
                         &input.source_space_token,
                         &input.content_artifact_token,
                     );
+                    let prepared = input.parsed.as_ref().or_else(|| {
+                        opts.prepared_styles
+                            .iter()
+                            .flatten()
+                            .find(|slot| slot.ir().source().text() == current.as_str())
+                    });
+                    if let Some(prepared) = prepared {
+                        authored = authored.with_prepared(prepared.ir());
+                    }
                     let cascade_module = node.module && selected_dialect == CssDialect::Css;
                     let outcome = run_vue_style_cascade(
                         authored,
@@ -1304,21 +1319,22 @@ impl CarrierCompiler for VueCarrierCompiler {
                             applied_rewrite_stages.saturating_add(stage_count as u8);
                     }
                 } else {
-                    // A completed external-preprocessor result is parsed under
-                    // the native CSS grammar before it reaches Vue transforms.
-                    // Recovery-mode parsing establishes provenance, not content
-                    // validity; the rewrite planners retain their own trust
-                    // checks for recovered structure.
-                    let ir = parse_plain_css_for_verification(
-                        current.as_str(),
-                        StyleRewriteStage::PostPreprocessModules,
-                    )
-                    .map_err(|_| {
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                    // A completed external-preprocessor result is parsed once
+                    // at host admission. The retained IR is required here —
+                    // raw bytes are not a transform fallback.
+                    let prepared = input
+                        .parsed
+                        .as_ref()
+                        .or_else(|| {
+                            opts.prepared_styles
+                                .iter()
+                                .flatten()
+                                .find(|slot| slot.ir().source().text() == current.as_str())
+                        })
+                        .ok_or(CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
-                        }
-                    })?;
-                    let verified = VerifiedPlainCss::from_parsed_native_css(&ir).ok_or(
+                        })?;
+                    let verified = VerifiedPlainCss::from_parsed_native_css(prepared.ir()).ok_or(
                         CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
                         },
@@ -1886,6 +1902,7 @@ mod tests {
             lang: lang.to_string(),
             content_artifact_token: format!("content:{lang}"),
             source_space_token: format!("space:{lang}"),
+            parsed: None,
         }
     }
 
@@ -2414,6 +2431,7 @@ mod tests {
                             lang: "css".to_string(),
                             content_artifact_token: "artifact:theme-css".to_string(),
                             source_space_token: "space:theme-css".to_string(),
+                            parsed: None,
                         })],
                         ..Default::default()
                     },
@@ -2458,6 +2476,7 @@ mod tests {
                             lang: "css".to_string(),
                             content_artifact_token: "artifact:theme-css".to_string(),
                             source_space_token: "space:theme-css".to_string(),
+                            parsed: None,
                         })],
                         ..Default::default()
                     },
@@ -2542,6 +2561,8 @@ mod tests {
         let compiler = VueCarrierCompiler;
         let alloc = oxc_allocator::Allocator::new();
         reset_parse_ir_invocation_count();
+        let prepared = crate::style_planner::prepare_supplied_plain_css("body { color: red; }")
+            .expect("supplied css parses");
         let output = compiler
             .compile_bundle_expect_produced(
                 source,
@@ -2557,6 +2578,7 @@ mod tests {
                             lang: "css".to_string(),
                             content_artifact_token: "artifact:theme-scss".to_string(),
                             source_space_token: "space:theme-scss".to_string(),
+                            parsed: Some(prepared),
                         })],
                         ..Default::default()
                     },

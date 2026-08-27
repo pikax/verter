@@ -273,6 +273,7 @@ verter_session = { path = ".", features = ["test-support"] }
 # compiles `verter_compiler` with those raw entries absent. Same idiom as
 # the `verter_scheduler`/`verter_semantic` edges above.
 verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
+verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_type_expr = { workspace = true }
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }

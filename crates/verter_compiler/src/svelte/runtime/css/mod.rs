@@ -33,50 +33,79 @@ pub mod matcher;
 pub mod render;
 pub mod types;
 
-use std::cell::RefCell;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use verter_css_syntax::{parse_style_ir, CssDialect, CssParseMode, CssSource, StyleSyntaxIr};
 use verter_span::Span;
 
-thread_local! {
-    /// Parse-once admission cache: `admit_style_body` (the official-reject
-    /// probe) retains a clean IR so `analyze_style_body` does not parse the
-    /// same body again. Keyed by the parser-minted content span. Thread-local
-    /// because the probe and the analysis run on the same compile-request
-    /// thread. It is not a reject-shape classifier — `svelte_reject_from_ir`
-    /// neither reads nor writes this map. Unconsumed entries live until the
-    /// next `clear_admitted_style_irs` / `take_admitted_style_ir` on this
-    /// thread (the parse-once cache's lifecycle, not reject projection).
-    static ADMITTED_STYLE_IRS: RefCell<FxHashMap<(u32, u32), StyleSyntaxIr>> =
-        RefCell::new(FxHashMap::default());
+/// Request-scoped admitted style IRs. Official-reject and analysis share this
+/// map so a style body is parsed once per compile, never via thread-local
+/// ambient admission.
+#[derive(Default)]
+pub(super) struct AdmittedStyleIrs {
+    irs: FxHashMap<(u32, u32), StyleSyntaxIr>,
 }
 
-pub(super) fn clear_admitted_style_irs() {
-    ADMITTED_STYLE_IRS.with(|cache| cache.borrow_mut().clear());
+impl AdmittedStyleIrs {
+    pub(super) fn insert_prepared(&mut self, content: Span, ir: StyleSyntaxIr) {
+        self.irs.insert((content.start, content.end), ir);
+    }
+
+    fn take(&mut self, content: Span) -> Option<StyleSyntaxIr> {
+        self.irs.remove(&(content.start, content.end))
+    }
+
+    fn get(&self, content: Span) -> Option<&StyleSyntaxIr> {
+        self.irs.get(&(content.start, content.end))
+    }
+}
+
+pub(super) fn seed_admitted_from_prepared(
+    source: &str,
+    parsed: &crate::svelte::parser::ParsedSvelte,
+    prepared_styles: &[Option<crate::style_planner::PreparedStyleIr>],
+    admitted: &mut AdmittedStyleIrs,
+) {
+    for (index, style) in parsed.styles.iter().enumerate() {
+        let Some(prepared) = prepared_styles.get(index).and_then(|slot| slot.as_ref()) else {
+            continue;
+        };
+        let Some(content) = style.content else {
+            continue;
+        };
+        let Some(css) = source.get(content.start as usize..content.end as usize) else {
+            continue;
+        };
+        if prepared.ir().source().text() != css || prepared.ir().source().origin() != content.start
+        {
+            continue;
+        }
+        admitted.insert_prepared(content, prepared.ir().clone());
+    }
 }
 
 /// Parse the style body once for the official-reject race. On a Svelte CSS
 /// parse code, return it; on a clean body, retain the IR for
 /// [`analyze_style_body`].
-pub(super) fn admit_style_body(source: &str, content: Span) -> Option<&'static str> {
+pub(super) fn admit_style_body(
+    source: &str,
+    content: Span,
+    admitted: &mut AdmittedStyleIrs,
+) -> Option<&'static str> {
+    if let Some(ir) = admitted.get(content) {
+        return verter_css_syntax::svelte_reject_from_ir(ir);
+    }
     match verter_css_syntax::parse_style_body(source, content) {
         Ok(ir) => {
             if let Some(code) = verter_css_syntax::svelte_reject_from_ir(&ir) {
                 return Some(code);
             }
-            ADMITTED_STYLE_IRS.with(|cache| {
-                cache.borrow_mut().insert((content.start, content.end), ir);
-            });
+            admitted.insert_prepared(content, ir);
             None
         }
         Err(_) => Some("css_expected_identifier"),
     }
-}
-
-fn take_admitted_style_ir(content: Span) -> Option<StyleSyntaxIr> {
-    ADMITTED_STYLE_IRS.with(|cache| cache.borrow_mut().remove(&(content.start, content.end)))
 }
 // `ComplexSelectorPart`/`StyleStatement` are read only by the alloc-probe
 // bridge below (`reread_cached_css_facts_for_alloc_probe`, itself gated the
@@ -152,6 +181,15 @@ pub fn analyze_style_body(
     source: &str,
     content: Span,
 ) -> Result<AnalyzedStyleBody, StylePlanFailure> {
+    let mut admitted = AdmittedStyleIrs::default();
+    analyze_style_body_admitted(source, content, &mut admitted)
+}
+
+pub(super) fn analyze_style_body_admitted(
+    source: &str,
+    content: Span,
+    admitted: &mut AdmittedStyleIrs,
+) -> Result<AnalyzedStyleBody, StylePlanFailure> {
     verter_audit::attribute_scope!(StyleAnalysis);
     let css = source
         .get(content.start as usize..content.end as usize)
@@ -161,7 +199,7 @@ pub fn analyze_style_body(
             span: content,
             construct: None,
         })?;
-    let tree = if let Some(admitted) = take_admitted_style_ir(content) {
+    let tree = if let Some(admitted) = admitted.take(content) {
         admitted
     } else {
         let syntax_source =

@@ -2237,6 +2237,9 @@ pub struct BlockContentSnapshot {
     pub final_output_space: BlockContentSourceSpaceDescriptor,
     pub immediate_maps: Vec<QualifiedBlockContentSourceMap>,
     pub composed_map: QualifiedBlockContentSourceMap,
+    /// Host-retained parse of supplied style CSS, when admission produced one.
+    #[doc(hidden)]
+    pub parsed_style: Option<verter_compiler::style_planner::PreparedStyleIr>,
 }
 
 /// Typed refusal from the host-only supplied-content admission boundary.
@@ -2925,6 +2928,9 @@ pub(crate) struct ParseSnapshot {
     pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
     pub(crate) style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis>,
+    /// Prepared style IRs retained beside this snapshot, inventory order.
+    /// Not a field on public `StyleBlockAnalysis`.
+    pub(crate) prepared_styles: Vec<Option<verter_compiler::style_planner::PreparedStyleIr>>,
     /// Resolvable class-name tokens in carrier markup, for carriers WITHOUT a
     /// template element IR (Svelte `class="x"` entries + `class:x` directives).
     /// Empty for Vue (its template element tree carries class facts).
@@ -3273,6 +3279,8 @@ pub(crate) struct CompileInput {
     pub(crate) style_v_bind_vars: Vec<String>,
     /// Whether every selected style `v-bind()` expression was parsed cleanly.
     pub(crate) style_v_bind_usage_complete: bool,
+    /// Host-retained parsed style IRs in inventory order.
+    pub(crate) prepared_styles: Vec<Option<verter_compiler::style_planner::PreparedStyleIr>>,
 }
 
 /// Cached Arc-wrapped views of immutable `ScriptAnalysisSnapshot` fields.

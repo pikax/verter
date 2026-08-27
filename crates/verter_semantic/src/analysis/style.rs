@@ -756,11 +756,69 @@ pub fn build_scanned_style_analysis(
         }
     };
 
-    let (css, scanned_pseudos) =
-        match super::style_syntax::project_style(css_content, content_offset, dialect) {
-            Some((css, pseudos)) => (Some(css), pseudos),
-            None => (None, Vec::new()),
-        };
+    match super::style_syntax::parse_style_block(css_content, content_offset, dialect) {
+        Some(ir) => build_scanned_style_analysis_from_ir(
+            lang,
+            &ir,
+            vue_input,
+            scoped,
+            is_module,
+            module_name,
+            content_offset,
+        ),
+        None => {
+            let v_binds = convert_v_binds(&vue_input);
+            let special_pseudos = convert_special_pseudos(&vue_input);
+            let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, None);
+            StyleBlockAnalysis {
+                lang,
+                scoped,
+                is_module,
+                module_name: module_name.map(|s| s.to_string()),
+                block_ref: None,
+                block_token: None,
+                source_space_token: None,
+                content_offset,
+                v_binds,
+                special_pseudos,
+                css: None,
+                content_availability: BlockContentAvailability::NativeAvailable,
+                flags: flags.bits(),
+            }
+        }
+    }
+}
+
+/// Parse a native style block once. The caller retains the IR and projects
+/// facts through [`build_scanned_style_analysis_from_ir`].
+pub fn parse_style_ir_for_analysis(
+    css_content: &str,
+    content_offset: u32,
+    lang: StyleAnalysisLang,
+) -> Option<verter_css_syntax::StyleSyntaxIr> {
+    let dialect = match lang {
+        StyleAnalysisLang::Css => verter_css_syntax::CssDialect::Css,
+        StyleAnalysisLang::Scss => verter_css_syntax::CssDialect::Scss,
+        StyleAnalysisLang::Sass => verter_css_syntax::CssDialect::Sass,
+        StyleAnalysisLang::Less => verter_css_syntax::CssDialect::Less,
+        StyleAnalysisLang::Stylus => verter_css_syntax::CssDialect::Stylus,
+        StyleAnalysisLang::Unknown => return None,
+    };
+    super::style_syntax::parse_style_block(css_content, content_offset, dialect)
+}
+
+/// Project semantic style facts from an already-parsed syntax IR.
+pub fn build_scanned_style_analysis_from_ir(
+    lang: StyleAnalysisLang,
+    ir: &verter_css_syntax::StyleSyntaxIr,
+    vue_input: VueStyleInput,
+    scoped: bool,
+    is_module: bool,
+    module_name: Option<&str>,
+    content_offset: u32,
+) -> StyleBlockAnalysis {
+    let (css, scanned_pseudos) = super::style_syntax::project_style_from_ir(ir);
+    let css = Some(css);
 
     let v_binds = convert_v_binds(&vue_input);
     let mut special_pseudos = convert_special_pseudos(&vue_input);
