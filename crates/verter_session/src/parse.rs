@@ -1784,14 +1784,16 @@ fn build_style_analyses_from_inventory(
         use verter_semantic::analysis::StyleAnalysisLang;
         match authored.map(str::to_ascii_lowercase).as_deref() {
             None => match dialect {
-                StyleDialect::Css | StyleDialect::PostCss => StyleAnalysisLang::Css,
+                StyleDialect::Css => StyleAnalysisLang::Css,
                 StyleDialect::Scss => StyleAnalysisLang::Scss,
                 StyleDialect::Sass => StyleAnalysisLang::Sass,
                 StyleDialect::Less => StyleAnalysisLang::Less,
                 StyleDialect::Stylus => StyleAnalysisLang::Stylus,
-                StyleDialect::Custom { .. } | StyleDialect::Missing => StyleAnalysisLang::Unknown,
+                StyleDialect::PostCss | StyleDialect::Custom { .. } | StyleDialect::Missing => {
+                    StyleAnalysisLang::Unknown
+                }
             },
-            Some("css" | "postcss") => StyleAnalysisLang::Css,
+            Some("css") => StyleAnalysisLang::Css,
             Some("scss") => StyleAnalysisLang::Scss,
             Some("sass") => StyleAnalysisLang::Sass,
             Some("less") => StyleAnalysisLang::Less,
@@ -1859,66 +1861,42 @@ fn build_style_analyses_from_inventory(
         // v-bind facts. `Err` means at least one `v-bind()` target in this
         // block was too ambiguous for the rewrite stage to trust — fail OPEN
         // below (never silently "no v-binds"). Spans from a shared parse are
-        // already SFC-absolute (`CssSource` origin = `content_offset`); the
-        // fallback `transform_vue_v_bind` parse is origin-0 and needs the
-        // offset added.
+        // already SFC-absolute (`CssSource` origin = `content_offset`).
+        // Native dialect admission that yields no IR must NOT parse the
+        // bytes as CSS: publish incomplete/uncertain facts instead.
         let v_bind_result = vue_style_semantics.then(|| {
             let component_name = verter_compiler::compile::extract_component_name(canonical_id);
             let scope_id = verter_compiler::compile::get_hash(&component_name);
-            if let Some(prepared) = &prepared_ir {
-                verter_compiler::style_planner::v_bind_vars_from_parsed_ir(
+            match &prepared_ir {
+                Some(prepared) => verter_compiler::style_planner::v_bind_vars_from_parsed_ir(
                     prepared.ir(),
                     prepared.ir().dialect(),
                     &scope_id,
                 )
-                .map(|vars| (vars, true))
-            } else {
-                let input = verter_compiler::style_planner::AuthoredStyleInput::new_css(
-                    css_content,
-                    "vue-style-analysis",
-                    "vue-style-analysis",
-                    "vue-style-analysis",
-                )
-                .without_source_map();
-                verter_compiler::style_planner::transform_vue_v_bind(input, &scope_id).map(
-                    |outcome| {
-                        let vars = match outcome {
-                            verter_compiler::style_planner::StyleRewriteOutcome::Unchanged {
-                                facts,
-                            }
-                            | verter_compiler::style_planner::StyleRewriteOutcome::Rewritten {
-                                facts,
-                                ..
-                            } => facts.v_bind_vars,
-                        };
-                        (vars, false)
-                    },
-                )
+                .map_err(|_| ()),
+                None => Err(()),
             }
         });
 
         let vue_input = verter_semantic::analysis::VueStyleInput {
             v_binds: match v_bind_result {
-                Some(Ok((vars, already_absolute))) => {
-                    let span_base = if already_absolute { 0 } else { content_offset };
-                    vars.into_iter()
-                        .map(|vb| {
-                            let roots =
-                                verter_compiler::compile::style_usage::expression_free_roots(
-                                    &vb.expression,
-                                );
-                            verter_semantic::analysis::VBindInput {
-                                expression: vb.expression.clone(),
-                                quoted: false,
-                                start: span_base + vb.expr_start,
-                                end: span_base + vb.expr_end,
-                                generated_var_name: Some(vb.var_name.clone()),
-                                roots_complete: roots.is_some(),
-                                expr_roots: roots.unwrap_or_default(),
-                            }
-                        })
-                        .collect()
-                }
+                Some(Ok(vars)) => vars
+                    .into_iter()
+                    .map(|vb| {
+                        let roots = verter_compiler::compile::style_usage::expression_free_roots(
+                            &vb.expression,
+                        );
+                        verter_semantic::analysis::VBindInput {
+                            expression: vb.expression.clone(),
+                            quoted: false,
+                            start: vb.expr_start,
+                            end: vb.expr_end,
+                            generated_var_name: Some(vb.var_name.clone()),
+                            roots_complete: roots.is_some(),
+                            expr_roots: roots.unwrap_or_default(),
+                        }
+                    })
+                    .collect(),
                 Some(Err(_)) => vec![verter_semantic::analysis::VBindInput {
                     expression: String::new(),
                     quoted: false,
@@ -1948,9 +1926,8 @@ fn build_style_analyses_from_inventory(
                 (analysis, Some(prepared))
             }
             None => (
-                verter_semantic::analysis::build_scanned_style_analysis(
+                verter_semantic::analysis::build_incomplete_style_analysis(
                     analysis_lang,
-                    css_content,
                     vue_input,
                     !vue_style_semantics || *scoped,
                     is_module,

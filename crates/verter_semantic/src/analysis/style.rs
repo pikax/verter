@@ -766,26 +766,14 @@ pub fn build_scanned_style_analysis(
             module_name,
             content_offset,
         ),
-        None => {
-            let v_binds = convert_v_binds(&vue_input);
-            let special_pseudos = convert_special_pseudos(&vue_input);
-            let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, None);
-            StyleBlockAnalysis {
-                lang,
-                scoped,
-                is_module,
-                module_name: module_name.map(|s| s.to_string()),
-                block_ref: None,
-                block_token: None,
-                source_space_token: None,
-                content_offset,
-                v_binds,
-                special_pseudos,
-                css: None,
-                content_availability: BlockContentAvailability::NativeAvailable,
-                flags: flags.bits(),
-            }
-        }
+        None => build_incomplete_style_analysis(
+            lang,
+            vue_input,
+            scoped,
+            is_module,
+            module_name,
+            content_offset,
+        ),
     }
 }
 
@@ -805,6 +793,47 @@ pub fn parse_style_ir_for_analysis(
         StyleAnalysisLang::Unknown => return None,
     };
     super::style_syntax::parse_style_block(css_content, content_offset, dialect)
+}
+
+/// Typed incomplete/uncertain style facts: no IR and no second parse.
+/// Unknown dialects stay `ProcessedContentRequired`; a known dialect whose
+/// parse produced no IR stays native with `css: None`.
+pub fn build_incomplete_style_analysis(
+    lang: StyleAnalysisLang,
+    vue_input: VueStyleInput,
+    scoped: bool,
+    is_module: bool,
+    module_name: Option<&str>,
+    content_offset: u32,
+) -> StyleBlockAnalysis {
+    if lang == StyleAnalysisLang::Unknown {
+        return build_preprocessor_style_analysis(
+            lang,
+            vue_input,
+            scoped,
+            is_module,
+            module_name,
+            content_offset,
+        );
+    }
+    let v_binds = convert_v_binds(&vue_input);
+    let special_pseudos = convert_special_pseudos(&vue_input);
+    let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, None);
+    StyleBlockAnalysis {
+        lang,
+        scoped,
+        is_module,
+        module_name: module_name.map(|s| s.to_string()),
+        block_ref: None,
+        block_token: None,
+        source_space_token: None,
+        content_offset,
+        v_binds,
+        special_pseudos,
+        css: None,
+        content_availability: BlockContentAvailability::NativeAvailable,
+        flags: flags.bits(),
+    }
 }
 
 /// Project semantic style facts from an already-parsed syntax IR.

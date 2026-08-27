@@ -468,6 +468,24 @@ function isClientComponent(filename: string): boolean {
 }
 
 /**
+ * Publish a native Vue style transform only when every rule was trusted.
+ * Soft refusals delete untrusted rules from `code`; publishing that
+ * truncated CSS with no signal is forbidden.
+ */
+function publishTransformedVueStyle(
+  code: string,
+  options: Parameters<typeof transformVueStyle>[1],
+): ReturnType<typeof transformVueStyle> {
+  const result = transformVueStyle(code, options);
+  if (result.refusals.length > 0) {
+    throw new Error(
+      `transformVueStyle refused untrusted style rules and will not publish deleted CSS: ${result.refusals.join("; ")}`,
+    );
+  }
+  return result;
+}
+
+/**
  * Vite style post-process. Live authority is native `transformVueStyle`
  * (scoping + v-bind). Vite's CSS pipeline has already preprocessed
  * SCSS/SASS/Less before this lane runs.
@@ -478,7 +496,7 @@ function applyViteStyleLane(
   scopeId: string,
   scoped: boolean,
 ): { code: string; map: unknown } {
-  const result = transformVueStyle(code, {
+  const result = publishTransformedVueStyle(code, {
     scopeId,
     scoped,
     filename,
@@ -500,8 +518,7 @@ function applyViteStyleLane(
  * (CSS scoping + v-bind).
  */
 function applyNonViteStyleLane(css: string, scopeId: string, scoped: boolean): string {
-  const processed = transformVueStyle(css, { scopeId, scoped });
-  return processed.code;
+  return publishTransformedVueStyle(css, { scopeId, scoped }).code;
 }
 
 interface StyleBlockEntry {
