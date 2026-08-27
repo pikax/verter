@@ -2,8 +2,11 @@
 //!
 //! Child lists live in a single [`bumpalo::Bump`] owned by the parent IR. The
 //! public accessors still return `&[T]`; the pointer is valid for the bump's
-//! lifetime. Nodes must not outlive the IR / [`crate::SelectorStructure`] that
-//! produced them.
+//! lifetime. Public bump-backed nodes are not `Clone` or `Copy`, so a caller
+//! cannot take an owned handle that outlives [`crate::StyleSyntaxIr`] /
+//! [`crate::SelectorStructure`]. Clone the IR (`Arc`) when an owned handle is
+//! needed; that clone keeps the bump alive. `BumpSlice` / `BumpStr` themselves
+//! stay crate-private `Copy` handles.
 
 use std::fmt;
 use std::marker::PhantomData;

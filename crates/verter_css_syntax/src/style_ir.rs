@@ -1,3 +1,10 @@
+//! Bump-backed stylesheet IR.
+//!
+//! Public node types (`StyleBlock`, `StyleRule`, `StyleStatement`,
+//! `ComponentValueTree`, …) borrow storage from [`StyleSyntaxIr`] and are
+//! not `Clone` or `Copy`. Clone [`StyleSyntaxIr`] (an `Arc`) when an owned
+//! handle is needed; that clone keeps the bump alive.
+
 use std::sync::Arc;
 
 use bumpalo::Bump;
@@ -26,7 +33,7 @@ pub enum StyleBlockKind {
     Indented,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StyleBlock {
     kind: StyleBlockKind,
     span: Span,
@@ -52,7 +59,7 @@ impl StyleBlock {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StyleRule {
     span: Span,
     selector_list: SelectorList,
@@ -78,7 +85,7 @@ impl StyleRule {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StyleDeclaration {
     span: Span,
     name_span: Span,
@@ -109,7 +116,7 @@ impl StyleDeclaration {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StyleDirective {
     span: Span,
     head_span: Span,
@@ -151,7 +158,7 @@ impl StyleDirective {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct StyleMixinOrFunction {
     span: Span,
     head_span: Span,
@@ -189,7 +196,7 @@ pub enum UnknownStatementKind {
     Recovery,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct UnknownStatement {
     kind: UnknownStatementKind,
     span: Span,
@@ -215,7 +222,7 @@ impl UnknownStatement {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum StyleStatement {
     Rule(StyleRule),
     Declaration(StyleDeclaration),
@@ -224,7 +231,7 @@ pub enum StyleStatement {
     Unknown(UnknownStatement),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ComponentValueTree {
     span: Span,
     values: BumpSlice<ComponentValue>,
@@ -253,7 +260,7 @@ impl ComponentValueTree {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ComponentValue {
     Token(ComponentToken),
     String(ComponentToken),
@@ -290,7 +297,7 @@ impl ComponentToken {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ComponentFunction {
     name_span: Span,
     full_span: Span,
@@ -323,7 +330,7 @@ pub enum ComponentDelimiter {
     Braces,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ComponentBlock {
     delimiter: ComponentDelimiter,
     full_span: Span,
@@ -349,7 +356,7 @@ impl ComponentBlock {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ValueInterpolation {
     full_span: Span,
     payload_span: Span,
@@ -417,6 +424,7 @@ struct StyleSyntaxIrData {
 // is sound even though `bumpalo::Bump` is `!Sync`.
 unsafe impl Sync for StyleSyntaxIrData {}
 
+/// Parsed stylesheet. `Clone` is an `Arc` clone and keeps bump-backed nodes valid.
 #[derive(Clone)]
 pub struct StyleSyntaxIr {
     data: Arc<StyleSyntaxIrData>,

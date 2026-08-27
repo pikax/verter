@@ -1,3 +1,10 @@
+//! Selector IR.
+//!
+//! Public bump-backed nodes (`SelectorCompound`, `SelectorList`,
+//! `SelectorComponent`, `SelectorPseudo`, `ComplexSelector`, …) are not
+//! independently `Clone` or `Copy`. Borrow them from [`crate::StyleSyntaxIr`]
+//! or [`SelectorStructure`].
+
 use bumpalo::Bump;
 use smallvec::SmallVec;
 use verter_span::Span;
@@ -94,7 +101,7 @@ pub enum SvelteNthArg {
     Other,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SelectorComponent {
     kind: SelectorComponentKind,
     facts: SelectorFacts,
@@ -245,7 +252,7 @@ impl SelectorAttribute {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SelectorPseudo {
     span: Span,
     argument_span: Span,
@@ -381,7 +388,7 @@ impl Default for SelectorFacts {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum ComplexSelectorPart {
     Compound(SelectorCompound),
     Combinator(SelectorCombinator),
@@ -505,7 +512,7 @@ fn classify_compound_tail(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SelectorCompound {
     span: Span,
     components: BumpSlice<SelectorComponent>,
@@ -533,7 +540,7 @@ impl SelectorCompound {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ComplexSelector {
     kind: SelectorKind,
     span: Span,
@@ -597,7 +604,7 @@ impl ComplexSelector {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SelectorList {
     span: Span,
     selectors: BumpSlice<ComplexSelector>,

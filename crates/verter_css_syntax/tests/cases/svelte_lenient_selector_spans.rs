@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use verter_css_syntax::{
     svelte_nth_of_selector_span, svelte_percentage_selector_span, svelte_reject_from_ir,
-    svelte_trailing_type_selector_span, svelte_trim_js_whitespace, CompoundTail, CssDialect,
-    CssParseMode, CssSource, StyleStatement, SvelteNthArg,
+    svelte_trailing_type_selector_span, svelte_trim_js_whitespace, ComplexSelectorPart,
+    CompoundTail, CssDialect, CssParseMode, CssSource, StyleStatement, SvelteNthArg,
 };
 use verter_span::Span;
 
@@ -324,22 +324,24 @@ fn compound_tail_reports_malformed_leading_dot_for_a_digit_led_class_name() {
 // official code) — if reject still re-read bytes those tests would stay GREEN.
 
 fn first_rule_compound(
-    css: &str,
-) -> (
-    verter_css_syntax::StyleSyntaxIr,
-    verter_css_syntax::SelectorCompound,
-) {
-    let ir = parse_style(css);
+    ir: &verter_css_syntax::StyleSyntaxIr,
+) -> &verter_css_syntax::SelectorCompound {
     let StyleStatement::Rule(rule) = &ir.statements()[0] else {
         panic!("expected a rule");
     };
-    let compound = rule.selector_list().selectors()[0].compounds()[0].clone();
-    (ir, compound)
+    rule.selector_list().selectors()[0]
+        .parts()
+        .iter()
+        .find_map(|part| match part {
+            ComplexSelectorPart::Compound(compound) => Some(compound),
+            ComplexSelectorPart::Combinator(_) => None,
+        })
+        .expect("expected a compound")
 }
 
 fn first_nth_arg(css: &str) -> SvelteNthArg {
-    let (_ir, compound) = first_rule_compound(css);
-    compound
+    let ir = parse_style(css);
+    first_rule_compound(&ir)
         .components()
         .iter()
         .find_map(|component| component.pseudo())
@@ -348,8 +350,8 @@ fn first_nth_arg(css: &str) -> SvelteNthArg {
 }
 
 fn first_functional_argument_is_empty(css: &str) -> bool {
-    let (_ir, compound) = first_rule_compound(css);
-    compound
+    let ir = parse_style(css);
+    first_rule_compound(&ir)
         .components()
         .iter()
         .find_map(|component| component.pseudo())
@@ -441,7 +443,8 @@ fn global_and_lang_empty_arguments_mint_argument_is_empty() {
 
 #[test]
 fn unclassified_at_and_hash_delims_mint_expected_identifier() {
-    let (_ir, at_compound) = first_rule_compound("@ { color: red; }");
+    let at_ir = parse_style("@ { color: red; }");
+    let at_compound = first_rule_compound(&at_ir);
     match at_compound.tail() {
         CompoundTail::Unclassified {
             expected_identifier: true,
@@ -450,7 +453,8 @@ fn unclassified_at_and_hash_delims_mint_expected_identifier() {
         } => {}
         other => panic!("expected unclassified expected_identifier for `@ {{}}`, got {other:?}"),
     }
-    let (_ir, hash_compound) = first_rule_compound("# { color: red; }");
+    let hash_ir = parse_style("# { color: red; }");
+    let hash_compound = first_rule_compound(&hash_ir);
     match hash_compound.tail() {
         CompoundTail::Unclassified {
             expected_identifier: true,
@@ -459,7 +463,8 @@ fn unclassified_at_and_hash_delims_mint_expected_identifier() {
         } => {}
         other => panic!("expected unclassified expected_identifier for `# {{}}`, got {other:?}"),
     }
-    let (_ir, digit_compound) = first_rule_compound("1px { color: red; }");
+    let digit_ir = parse_style("1px { color: red; }");
+    let digit_compound = first_rule_compound(&digit_ir);
     match digit_compound.tail() {
         CompoundTail::Unclassified {
             expected_identifier: true,
@@ -474,7 +479,8 @@ fn reject_follows_the_minted_nth_arg_fact() {
     // Discriminates "reject reads the stored fact": forcing
     // `classify_svelte_nth_arg` to always return `Formula` makes
     // `:nth-child(-2)` project `None` instead of `css_expected_identifier`.
-    let (ir, compound) = first_rule_compound("p:nth-child(-2) { color: red; }");
+    let ir = parse_style("p:nth-child(-2) { color: red; }");
+    let compound = first_rule_compound(&ir);
     assert_eq!(
         compound
             .components()
@@ -491,7 +497,8 @@ fn reject_follows_the_minted_trailing_identifier_fact() {
     // Discriminates "reject reads the stored trailing-identifier fact":
     // forcing `classify_svelte_nth_arg` to always return `Other` makes
     // `:nth-child(foo)` project `css_selector_invalid` instead of `None`.
-    let (ir, compound) = first_rule_compound("p:nth-child(foo) { color: red; }");
+    let ir = parse_style("p:nth-child(foo) { color: red; }");
+    let compound = first_rule_compound(&ir);
     assert_eq!(
         compound
             .components()
@@ -508,7 +515,8 @@ fn reject_follows_the_minted_unclassified_expected_identifier_flag() {
     // Discriminates "reject reads the stored tail flag": forcing
     // `svelte_unclassified_expected_identifier` to always return `false`
     // makes `@ {}` project `None` instead of `css_expected_identifier`.
-    let (ir, compound) = first_rule_compound("@ { color: red; }");
+    let ir = parse_style("@ { color: red; }");
+    let compound = first_rule_compound(&ir);
     match compound.tail() {
         CompoundTail::Unclassified {
             expected_identifier: true,
@@ -517,4 +525,20 @@ fn reject_follows_the_minted_unclassified_expected_identifier_flag() {
         other => panic!("expected expected_identifier, got {other:?}"),
     }
     assert_eq!(svelte_reject_from_ir(&ir), Some("css_expected_identifier"));
+}
+
+#[test]
+fn style_syntax_ir_clone_keeps_bump_backed_nodes_readable() {
+    let ir = parse_style(".card { color: red; }");
+    let kept = ir.clone();
+    drop(ir);
+    let compound = first_rule_compound(&kept);
+    assert_eq!(compound.components().len(), 1);
+    assert_eq!(compound.tail(), CompoundTail::Claimed);
+}
+
+#[test]
+fn bump_backed_compound_cannot_clone_out_of_the_ir() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/compile-fail/bump_backed_node_clone_outlives_ir.rs");
 }
