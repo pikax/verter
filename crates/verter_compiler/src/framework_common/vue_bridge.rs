@@ -1286,7 +1286,10 @@ impl CarrierCompiler for VueCarrierCompiler {
                     .count();
                     if stage_count > 0 {
                         current = outcome.code;
-                        current_map = opts.source_map.then_some(outcome.source_map);
+                        current_map = opts
+                            .source_map
+                            .then_some(outcome.source_map)
+                            .filter(|map| !map.is_empty());
                         descriptor = RuntimeOutputDescriptor::generated(
                             &current,
                             current_map.as_deref(),
@@ -1344,7 +1347,10 @@ impl CarrierCompiler for VueCarrierCompiler {
                     .count();
                     if stage_count > 0 {
                         current = outcome.code;
-                        current_map = opts.source_map.then_some(outcome.source_map);
+                        current_map = opts
+                            .source_map
+                            .then_some(outcome.source_map)
+                            .filter(|map| !map.is_empty());
                         descriptor = RuntimeOutputDescriptor::generated(
                             &current,
                             current_map.as_deref(),

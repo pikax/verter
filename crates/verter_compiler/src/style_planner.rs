@@ -16,8 +16,9 @@ use verter_css_syntax::{
 };
 use verter_span::Span;
 
-use crate::code_transform::{CodeTransform, SourceMapOptions};
+use crate::code_transform::{advance_generated_position, CodeTransform, SourceMapOptions};
 use crate::framework_common::{RuntimeOutputDescriptor, SourceMapFidelity};
+use oxc_sourcemap::{SourceMap, Token};
 
 /// Generate a Vue CSS variable name from a scope ID and authored expression.
 #[must_use]
@@ -257,6 +258,48 @@ thread_local! {
     static PARSE_IR_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    static NEXT_STYLE_IR_IDENTITY: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+    static STYLE_IR_STAGE_OBSERVATIONS: std::cell::RefCell<Vec<(StyleRewriteStage, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct ParsedStyleIr {
+    inner: StyleSyntaxIr,
+    #[cfg(test)]
+    identity: usize,
+}
+
+impl std::ops::Deref for ParsedStyleIr {
+    type Target = StyleSyntaxIr;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+#[cfg(test)]
+fn observe_style_ir(stage: StyleRewriteStage, ir: &ParsedStyleIr) {
+    STYLE_IR_STAGE_OBSERVATIONS.with(|observations| {
+        observations.borrow_mut().push((stage, ir.identity));
+    });
+}
+
+#[cfg(not(test))]
+fn observe_style_ir(_stage: StyleRewriteStage, _ir: &ParsedStyleIr) {}
+
+#[cfg(test)]
+pub(crate) fn reset_style_ir_stage_observations() {
+    NEXT_STYLE_IR_IDENTITY.with(|identity| identity.set(1));
+    STYLE_IR_STAGE_OBSERVATIONS.with(|observations| observations.borrow_mut().clear());
+}
+
+#[cfg(test)]
+pub(crate) fn style_ir_stage_observations() -> Vec<(StyleRewriteStage, usize)> {
+    STYLE_IR_STAGE_OBSERVATIONS.with(|observations| observations.borrow().clone())
+}
+
 /// Current `parse_ir` invocation count on the calling thread. Test-only
 /// observability hook.
 #[must_use]
@@ -270,62 +313,55 @@ pub fn reset_parse_ir_invocation_count() {
     PARSE_IR_INVOCATIONS.with(|count| count.set(0));
 }
 
-thread_local! {
-    /// Counts every `CodeTransform::build_string()` call this module issues —
-    /// the outer call inside `emit` plus the inner call inside
-    /// `render_special_argument`'s own nested sub-span build. This is the exact
-    /// edit-composition depth `M` the Edit-topology bound names: M=1 for a flat
-    /// edit set, M=2 when a construct (e.g. `:slotted()`) needs one nested
-    /// sub-span build in addition to the outer emit. Thread-local for the same
-    /// per-test-isolation reason as `PARSE_IR_INVOCATIONS`.
-    static BUILD_STRING_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// Current `build_string` invocation count on the calling thread. Test-only
 /// observability hook.
+#[cfg(test)]
 #[must_use]
 pub fn build_string_invocation_count() -> usize {
-    BUILD_STRING_INVOCATIONS.with(std::cell::Cell::get)
+    crate::code_transform::code_transform_build_string_call_count()
 }
 
 /// Resets the `build_string` invocation counter on the calling thread.
 /// Test-only observability hook.
+#[cfg(test)]
 pub fn reset_build_string_invocation_count() {
-    BUILD_STRING_INVOCATIONS.with(|count| count.set(0));
+    crate::code_transform::reset_code_transform_build_string_call_count();
 }
 
 fn parse_ir(
     code: &str,
     dialect: CssDialect,
     stage: StyleRewriteStage,
-) -> Result<StyleSyntaxIr, StyleRewriteFailure> {
+) -> Result<ParsedStyleIr, StyleRewriteFailure> {
     PARSE_IR_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let source = CssSource::new(Arc::from(code), 0).map_err(|_| {
         StyleRewriteFailure::new(StyleRewriteFailureClass::ParseFailure, stage, dialect, None)
     })?;
-    parse_style_ir(source, dialect, CssParseMode::Recover).map_err(|_| {
+    let inner = parse_style_ir(source, dialect, CssParseMode::Recover).map_err(|_| {
         StyleRewriteFailure::new(StyleRewriteFailureClass::ParseFailure, stage, dialect, None)
+    })?;
+    Ok(ParsedStyleIr {
+        inner,
+        #[cfg(test)]
+        identity: NEXT_STYLE_IR_IDENTITY.with(|identity| {
+            let current = identity.get();
+            identity.set(current + 1);
+            current
+        }),
     })
 }
 
-/// `want_source_map` mirrors the caller's `RuntimeCompileOptions::source_map`
-/// intent (`css::process_style`'s `ProcessStyleOptions::sourcemap` has the
-/// same role). `CodeTransform::generate_map` + `to_json_string()` are not
-/// free — a caller that does not want a source map must not pay for building
-/// and stringifying one. When `false`, `emit` skips that machinery and
-/// returns an empty `source_map` / `raw_map: None`, matching the
-/// `Unchanged`/no-map shape callers already handle.
-fn emit(
+fn build_transform_output(
     code: &str,
-    source: StyleSourceIdentity<'_>,
     dialect: CssDialect,
     stage: StyleRewriteStage,
     mut edits: Vec<StyleEdit>,
-    facts: VueStyleFacts,
+    source_name: Option<&str>,
+    accumulated: Option<&SourceMap<'static>>,
     want_source_map: bool,
-) -> Result<StyleRewriteOutcome, StyleRewriteFailure> {
+) -> Result<Option<(String, Option<SourceMap<'static>>)>, StyleRewriteFailure> {
     if edits.is_empty() {
-        return Ok(StyleRewriteOutcome::Unchanged { facts });
+        return Ok(None);
     }
     edits.sort_by_key(|edit| (edit.start(), edit.end()));
     let mut previous_end = 0;
@@ -355,15 +391,55 @@ fn emit(
             }
         }
     }
-    let source_map = if want_source_map {
-        transform
-            .generate_map(SourceMapOptions::new().with_source(source.source_name))
-            .to_json_string()
-    } else {
-        String::new()
-    };
     let output = transform.build_string();
-    BUILD_STRING_INVOCATIONS.with(|count| count.set(count.get() + 1));
+    let source_map = if !want_source_map {
+        None
+    } else {
+        match (source_name, accumulated) {
+            (Some(source_name), None) => {
+                Some(transform.generate_map(SourceMapOptions::new().with_source(source_name)))
+            }
+            (None, Some(accumulated)) => transform.chain_source_map(accumulated).ok(),
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                unreachable!("a transform cannot build a fresh map and compose one simultaneously")
+            }
+        }
+    };
+    Ok(Some((output, source_map)))
+}
+
+/// `want_source_map` mirrors the caller's `RuntimeCompileOptions::source_map`
+/// intent (`css::process_style`'s `ProcessStyleOptions::sourcemap` has the
+/// same role). `CodeTransform::generate_map` + `to_json_string()` are not
+/// free — a caller that does not want a source map must not pay for building
+/// and stringifying one. When `false`, `emit` skips that machinery and
+/// returns an empty `source_map` / `raw_map: None`, matching the
+/// `Unchanged`/no-map shape callers already handle.
+fn emit(
+    code: &str,
+    source: StyleSourceIdentity<'_>,
+    dialect: CssDialect,
+    stage: StyleRewriteStage,
+    edits: Vec<StyleEdit>,
+    facts: VueStyleFacts,
+    want_source_map: bool,
+) -> Result<StyleRewriteOutcome, StyleRewriteFailure> {
+    let Some((output, source_map)) = build_transform_output(
+        code,
+        dialect,
+        stage,
+        edits,
+        want_source_map.then_some(source.source_name),
+        None,
+        want_source_map,
+    )?
+    else {
+        return Ok(StyleRewriteOutcome::Unchanged { facts });
+    };
+    let source_map = source_map
+        .map(|map| map.to_json_string())
+        .unwrap_or_default();
     let raw_map = want_source_map.then_some(source_map.as_str());
     let output_descriptor = RuntimeOutputDescriptor::generated(
         &output,
@@ -1059,8 +1135,8 @@ pub struct VueStyleCascadeOutcome {
     /// Final code after every requested stage's edits. Byte-identical to the
     /// authored input when no stage produced any edit.
     pub code: String,
-    /// Source map covering the LAST stage that actually rewrote bytes; empty
-    /// when no stage rewrote anything.
+    /// Authored-source-to-final-code map composed across every rewrite. Empty
+    /// when no rewrite occurred or composition could not be completed.
     pub source_map: String,
     pub facts: VueStyleFacts,
     /// Stage-level failures (as opposed to `facts.refusals`' soft,
@@ -1072,37 +1148,151 @@ pub struct VueStyleCascadeOutcome {
     pub stage_failures: Vec<StyleRewriteFailure>,
 }
 
+/// Whether a `StyleRewriteFailureClass` participates in the publish gate at
+/// all. Exhaustive over the enum — no wildcard arm — so adding a new class
+/// fails to compile here until its disposition is decided explicitly.
+#[must_use]
+const fn failure_class_gates_publication(class: StyleRewriteFailureClass) -> bool {
+    match class {
+        StyleRewriteFailureClass::StageRequiresPlainCss
+        | StyleRewriteFailureClass::ParseFailure
+        | StyleRewriteFailureClass::UntrustedRewriteTarget
+        | StyleRewriteFailureClass::OverlappingEdits
+        | StyleRewriteFailureClass::IndentedLayoutMutation => true,
+    }
+}
+
+/// Reports whether the cascade result can be published without exposing
+/// output cleared by a failed plain-CSS rewrite. An authored-v-bind failure
+/// does not gate publication because that rewrite precedes caller-supplied
+/// preprocessed bytes and never clears the cascade output.
+///
+/// Every class ultimately reduces to the same rule: a failure whose `stage`
+/// is `AuthoredVBind` never blocks publication; a failure on either
+/// post-preprocess stage blocks publication only when it left the output
+/// wiped to empty for a non-empty authored input.
+#[must_use]
+pub fn cascade_output_is_publishable(
+    outcome: &VueStyleCascadeOutcome,
+    authored_code: &str,
+) -> bool {
+    let post_preprocess_failure = outcome.stage_failures.iter().any(|failure| {
+        failure_class_gates_publication(failure.class)
+            && !matches!(failure.stage, StyleRewriteStage::AuthoredVBind)
+    });
+    if !post_preprocess_failure {
+        return true;
+    }
+    !(outcome.code.is_empty() && !authored_code.is_empty())
+}
+
+/// Returns an honest map for a requested cascade result: the accumulated map
+/// for rewritten content, an identity map for byte-identical passthrough, or
+/// no map when rewritten bytes could not be composed through every rewrite.
+///
+/// [`build_identity_source_map`] emits a token per authored character, so
+/// every generated position resolves to the true authored position — not
+/// just chunk/line boundaries.
+#[must_use]
+pub fn cascade_requested_source_map(
+    outcome: &VueStyleCascadeOutcome,
+    authored_code: &str,
+    source_name: &str,
+) -> Option<String> {
+    if !outcome.source_map.is_empty() {
+        return Some(outcome.source_map.clone());
+    }
+    if outcome.code != authored_code {
+        return None;
+    }
+    Some(build_identity_source_map(authored_code, source_name))
+}
+
+/// A genuinely byte-accurate identity map: one token per authored
+/// character, generated position == authored position at every one.
+/// Deliberately not `CodeTransform::generate_map` on a zero-edit transform —
+/// that emits tokens only at chunk/line boundaries.
+fn build_identity_source_map(source: &str, source_name: &str) -> String {
+    let mut tokens: Vec<Token> = Vec::with_capacity(source.chars().count().max(1));
+    let mut line = 0u32;
+    let mut column = 0u32;
+    let mut char_buf = [0u8; 4];
+    for ch in source.chars() {
+        tokens.push(Token::new(line, column, line, column, Some(0), None));
+        advance_generated_position(ch.encode_utf8(&mut char_buf), &mut line, &mut column);
+    }
+    tokens.push(Token::new(line, column, line, column, Some(0), None));
+    SourceMap::new(
+        None,
+        Vec::new(),
+        None,
+        vec![std::borrow::Cow::Owned(source_name.to_owned())],
+        vec![Some(std::borrow::Cow::Owned(source.to_owned()))],
+        tokens.into_boxed_slice(),
+        None,
+    )
+    .to_json_string()
+}
+
+#[derive(Debug, Clone)]
+enum MapComposition {
+    NotStarted,
+    Composing(Box<SourceMap<'static>>),
+    Abandoned,
+}
+
+impl MapComposition {
+    const fn accumulated(&self) -> Option<&SourceMap<'static>> {
+        match self {
+            Self::Composing(map) => Some(map),
+            Self::NotStarted | Self::Abandoned => None,
+        }
+    }
+}
+
 /// Applies a stage's collected edits against `code`, returning the new
-/// `(code, source_map)` pair when the stage rewrote anything, or `None` when
-/// it did not (in which case the caller retains its already-parsed IR for the
-/// next stage instead of re-parsing — the A10i invariant).
+/// `(code, map composition)` pair when the stage rewrote anything, or `None`
+/// when it did not (in which case the caller retains its already-parsed IR
+/// for the next stage instead of re-parsing).
 fn apply_cascade_stage(
     code: &str,
     source: StyleSourceIdentity<'_>,
     dialect: CssDialect,
     stage: StyleRewriteStage,
     edits: Vec<StyleEdit>,
+    composition: &MapComposition,
     want_source_map: bool,
-) -> Result<Option<(String, String)>, StyleRewriteFailure> {
+) -> Result<Option<(String, MapComposition)>, StyleRewriteFailure> {
     if edits.is_empty() {
         return Ok(None);
     }
-    match emit(
+    let (source_name, accumulated) = if !want_source_map {
+        (None, None)
+    } else {
+        match composition {
+            MapComposition::NotStarted => (Some(source.source_name), None),
+            MapComposition::Composing(map) => (None, Some(map.as_ref())),
+            MapComposition::Abandoned => (None, None),
+        }
+    };
+    let Some((code, source_map)) = build_transform_output(
         code,
-        source,
         dialect,
         stage,
         edits,
-        VueStyleFacts::default(),
+        source_name,
+        accumulated,
         want_source_map,
-    )? {
-        StyleRewriteOutcome::Rewritten {
-            code, source_map, ..
-        } => Ok(Some((code, source_map))),
-        StyleRewriteOutcome::Unchanged { .. } => {
-            unreachable!("non-empty edits always produce StyleRewriteOutcome::Rewritten")
-        }
-    }
+    )?
+    else {
+        unreachable!("non-empty edits always produce a rewrite")
+    };
+    let composition = match (composition, source_map) {
+        (MapComposition::Abandoned, _) => MapComposition::Abandoned,
+        (_, Some(source_map)) => MapComposition::Composing(Box::new(source_map)),
+        (_, None) => MapComposition::Abandoned,
+    };
+    Ok(Some((code, composition)))
 }
 
 /// Runs Vue's authored-v-bind → CSS-Modules → scoped-selector cascade,
@@ -1128,18 +1318,19 @@ pub fn run_vue_style_cascade(
     scoped: bool,
     want_source_map: bool,
 ) -> VueStyleCascadeOutcome {
-    let mut owned: Option<(String, String)> = None;
+    let mut owned: Option<(String, MapComposition)> = None;
     let mut facts = VueStyleFacts::default();
     let mut stage_failures = Vec::new();
-    let mut retained_ir: Option<StyleSyntaxIr> = None;
+    let mut retained_ir: Option<ParsedStyleIr> = None;
 
-    // Stage 1: authored v-bind — always runs, on the authored dialect. A
+    // Authored v-bind — always runs, on the authored dialect. A
     // stage failure is recorded without clearing the accumulated output:
     // the modules/scoped-selector stages below still run against the
     // original authored bytes.
     {
         let stage: Result<_, StyleRewriteFailure> = (|| {
             let ir = parse_ir(input.code, input.dialect, StyleRewriteStage::AuthoredVBind)?;
+            observe_style_ir(StyleRewriteStage::AuthoredVBind, &ir);
             let (edits, vars) = v_bind_edits_from_ir(&ir, input.dialect, scope_id)?;
             Ok((ir, edits, vars))
         })();
@@ -1153,9 +1344,10 @@ pub fn run_vue_style_cascade(
                     input.dialect,
                     StyleRewriteStage::AuthoredVBind,
                     edits,
+                    &MapComposition::NotStarted,
                     want_source_map,
                 ) {
-                    Ok(Some((code, sm))) => owned = Some((code, sm)),
+                    Ok(Some(rewritten)) => owned = Some(rewritten),
                     Ok(None) => retained_ir = Some(ir),
                     Err(failure) => stage_failures.push(failure),
                 }
@@ -1168,6 +1360,11 @@ pub fn run_vue_style_cascade(
         .as_ref()
         .map_or(input.code, |(code, _)| code.as_str())
         .to_string();
+    let composition = owned
+        .as_ref()
+        .map_or(MapComposition::NotStarted, |(_, composition)| {
+            composition.clone()
+        });
     let post = run_post_v_bind_stages(
         &current_code,
         input.source,
@@ -1178,6 +1375,7 @@ pub fn run_vue_style_cascade(
         scoped,
         &mut facts,
         &mut stage_failures,
+        composition,
         want_source_map,
     );
     if let Some(rewritten) = post {
@@ -1185,7 +1383,13 @@ pub fn run_vue_style_cascade(
     }
 
     let (code, source_map) = match owned {
-        Some((code, source_map)) => (code, source_map),
+        Some((code, composition)) => (
+            code,
+            composition
+                .accumulated()
+                .map(SourceMap::to_json_string)
+                .unwrap_or_default(),
+        ),
         None => (input.code.to_string(), String::new()),
     };
     VueStyleCascadeOutcome {
@@ -1221,9 +1425,19 @@ pub fn run_vue_style_cascade_post_preprocess(
         scoped,
         &mut facts,
         &mut stage_failures,
+        MapComposition::NotStarted,
         want_source_map,
     );
-    let (code, source_map) = post.unwrap_or_else(|| (input.code.to_string(), String::new()));
+    let (code, source_map) = match post {
+        Some((code, composition)) => (
+            code,
+            composition
+                .accumulated()
+                .map(SourceMap::to_json_string)
+                .unwrap_or_default(),
+        ),
+        None => (input.code.to_string(), String::new()),
+    };
     VueStyleCascadeOutcome {
         code,
         source_map,
@@ -1250,16 +1464,23 @@ fn run_post_v_bind_stages(
     current_code: &str,
     source: StyleSourceIdentity<'_>,
     dialect: CssDialect,
-    mut retained_ir: Option<StyleSyntaxIr>,
+    mut retained_ir: Option<ParsedStyleIr>,
     scope_id: &str,
     module: bool,
     scoped: bool,
     facts: &mut VueStyleFacts,
     stage_failures: &mut Vec<StyleRewriteFailure>,
+    composition_in: MapComposition,
     want_source_map: bool,
-) -> Option<(String, String)> {
-    let mut owned: Option<(String, String)> = None;
+) -> Option<(String, MapComposition)> {
+    let mut owned: Option<(String, MapComposition)> = None;
     let mut output_cleared_by_failure = false;
+    let composition_for = |owned: &Option<(String, MapComposition)>| {
+        owned.as_ref().map_or_else(
+            || composition_in.clone(),
+            |(_, composition)| composition.clone(),
+        )
+    };
 
     // Stage 2: CSS Modules — plain-CSS only.
     if module {
@@ -1282,6 +1503,7 @@ fn run_post_v_bind_stages(
                     StyleRewriteStage::PostPreprocessModules,
                 )?,
             };
+            observe_style_ir(StyleRewriteStage::PostPreprocessModules, &ir);
             let (edits, classes) =
                 module_classes_and_edits_from_ir(&ir, CssDialect::Css, scope_id)?;
             Ok((plain, ir, edits, classes))
@@ -1290,19 +1512,21 @@ fn run_post_v_bind_stages(
             Ok((plain, ir, edits, classes)) => {
                 facts.module_classes = classes.into_iter().collect();
                 facts.rewrites.css_modules = !edits.is_empty();
+                let composition = composition_for(&owned);
                 match apply_cascade_stage(
                     plain.code,
                     source,
                     CssDialect::Css,
                     StyleRewriteStage::PostPreprocessModules,
                     edits,
+                    &composition,
                     want_source_map,
                 ) {
                     Ok(Some(rewritten)) => owned = Some(rewritten),
                     Ok(None) => retained_ir = Some(ir),
                     Err(failure) => {
                         stage_failures.push(failure);
-                        owned = Some((String::new(), String::new()));
+                        owned = Some((String::new(), MapComposition::Abandoned));
                         retained_ir = None;
                         output_cleared_by_failure = true;
                     }
@@ -1310,7 +1534,7 @@ fn run_post_v_bind_stages(
             }
             Err(failure) => {
                 stage_failures.push(failure);
-                owned = Some((String::new(), String::new()));
+                owned = Some((String::new(), MapComposition::Abandoned));
                 retained_ir = None;
                 output_cleared_by_failure = true;
             }
@@ -1339,6 +1563,7 @@ fn run_post_v_bind_stages(
                     StyleRewriteStage::PostPreprocessScoping,
                 )?,
             };
+            observe_style_ir(StyleRewriteStage::PostPreprocessScoping, &ir);
             let (edits, stage_facts) = scoped_edits_and_facts_from_ir(&ir, scope_id)?;
             Ok((plain, edits, stage_facts))
         })();
@@ -1350,25 +1575,27 @@ fn run_post_v_bind_stages(
                 facts.rewrites.keyframes |= stage_facts.rewrites.keyframes;
                 facts.rewrites.scoped_selector |= stage_facts.rewrites.scoped_selector;
                 facts.refusals.extend(stage_facts.refusals);
+                let composition = composition_for(&owned);
                 match apply_cascade_stage(
                     plain.code,
                     source,
                     CssDialect::Css,
                     StyleRewriteStage::PostPreprocessScoping,
                     edits,
+                    &composition,
                     want_source_map,
                 ) {
                     Ok(Some(rewritten)) => owned = Some(rewritten),
                     Ok(None) => {}
                     Err(failure) => {
                         stage_failures.push(failure);
-                        owned = Some((String::new(), String::new()));
+                        owned = Some((String::new(), MapComposition::Abandoned));
                     }
                 }
             }
             Err(failure) => {
                 stage_failures.push(failure);
-                owned = Some((String::new(), String::new()));
+                owned = Some((String::new(), MapComposition::Abandoned));
             }
         }
     }
@@ -1745,7 +1972,6 @@ impl VueScopePlanner<'_> {
             }
         }
         let rendered = transform.build_string();
-        BUILD_STRING_INVOCATIONS.with(|count| count.set(count.get() + 1));
         Ok(rendered)
     }
 

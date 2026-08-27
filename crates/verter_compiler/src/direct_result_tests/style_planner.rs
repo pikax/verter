@@ -1,11 +1,17 @@
+use crate::code_transform::{
+    code_transform_construction_count, reset_code_transform_construction_count,
+};
 /**
  * @ai-generated - Exercises the typed two-stage framework style planner boundary.
  */
 use crate::style_planner::{
-    analyze_css_module_classes, build_string_invocation_count, parse_ir_invocation_count,
-    reset_build_string_invocation_count, reset_parse_ir_invocation_count, run_vue_style_cascade,
-    transform_vue_css_modules, transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput,
-    PlainCssInput, StyleRewriteFailureClass, StyleRewriteOutcome, StyleRewriteStage,
+    analyze_css_module_classes, build_string_invocation_count, cascade_output_is_publishable,
+    cascade_requested_source_map, parse_ir_invocation_count, reset_build_string_invocation_count,
+    reset_parse_ir_invocation_count, reset_style_ir_stage_observations, run_vue_style_cascade,
+    run_vue_style_cascade_post_preprocess, style_ir_stage_observations, transform_vue_css_modules,
+    transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
+    StyleRewriteFailure, StyleRewriteFailureClass, StyleRewriteOutcome, StyleRewriteStage,
+    VueStyleCascadeOutcome,
 };
 use crate::{
     compile::{types::VueExecutionInputs, VueMacroSemanticInput},
@@ -704,10 +710,22 @@ fn v_bind_js_key_and_css_var_reference_agree() {
 #[test]
 fn css_modules_class_analysis_native_for_all_five_dialects() {
     let cases = [
-        (CssDialect::Css, ".active { color: red; }"),
-        (CssDialect::Scss, ".active { color: red; }"),
-        (CssDialect::Sass, ".active\n  color: red\n"),
-        (CssDialect::Less, ".active { color: red; }"),
+        (
+            CssDialect::Css,
+            "@layer components { .active { color: red; } }",
+        ),
+        (
+            CssDialect::Scss,
+            "$tone: red; @mixin paint { color: $tone; } .active { @include paint; }",
+        ),
+        (
+            CssDialect::Sass,
+            "$tone: red\n=paint\n  color: $tone\n.active\n  +paint\n",
+        ),
+        (
+            CssDialect::Less,
+            "@tone: red; .paint() { color: @tone; } .active { .paint(); }",
+        ),
         (CssDialect::Stylus, ".active\n  color: red\n"),
     ];
 
@@ -724,6 +742,10 @@ fn css_modules_class_analysis_native_for_all_five_dialects() {
             .unwrap_or_else(|e| panic!("{dialect:?} class analysis must not be refused: {e}"));
         assert_eq!(classes.len(), 1, "{dialect:?}: {classes:?}");
         assert_eq!(classes[0].0, "active", "{dialect:?}: {classes:?}");
+        assert!(
+            classes.iter().all(|(name, _)| name != "paint"),
+            "{dialect:?}: native mixin/function syntax must not become a class: {classes:?}"
+        );
         hashed_names.push(classes[0].1.clone());
     }
 
@@ -746,11 +768,17 @@ fn css_modules_class_analysis_native_for_all_five_dialects() {
 #[test]
 fn plain_passthrough_preserves_authored_bytes_all_five_dialects() {
     let cases = [
-        (CssDialect::Css, ".a { color: red; }\n"),
-        (CssDialect::Scss, "$c: red;\n.a { color: $c; }\n"),
-        (CssDialect::Sass, ".a\n  color: red\n"),
+        (
+            CssDialect::Css,
+            "@media (width >= 1px) { .a { color: red; } }\n",
+        ),
+        (
+            CssDialect::Scss,
+            "$c: red;\n@mixin paint { color: $c; }\n.a { @include paint; }\n",
+        ),
+        (CssDialect::Sass, "$c: red\n.a\n  color: $c\n"),
         (CssDialect::Less, "@c: red;\n.a { color: @c; }\n"),
-        (CssDialect::Stylus, ".a\n  color red\n"),
+        (CssDialect::Stylus, "c = red\n.a\n  color c\n"),
     ];
 
     for (dialect, source) in cases {
@@ -768,6 +796,16 @@ fn plain_passthrough_preserves_authored_bytes_all_five_dialects() {
             StyleRewriteOutcome::Rewritten { code, .. } => {
                 panic!("{dialect:?} expected byte-identical passthrough, got: {code}")
             }
+        }
+
+        let cascaded = run_vue_style_cascade(input, "sc1", false, false, false);
+        assert_eq!(cascaded.code, source, "{dialect:?} authored bytes changed");
+        for forbidden in ["data-v-sc1", "var(--sc1-", "active_"] {
+            assert!(
+                !cascaded.code.contains(forbidden),
+                "{dialect:?} unexpected rewrite {forbidden:?}: {}",
+                cascaded.code
+            );
         }
     }
 }
@@ -814,7 +852,8 @@ fn css_nesting_transforms_correctly_all_five_dialects() {
 // `@media (min-width:1px)` must never silently become `(width >= 1px)`.
 #[test]
 fn no_modern_syntax_normalization_of_untouched_declarations() {
-    let source = "@media (min-width:1px) { .a { color: red; } }";
+    let source =
+        "@media (min-width:1px) { .a { color: color(display-p3 1 0 0); width: calc(1px + 2%); } }";
     let input = AuthoredStyleInput::new(
         source,
         CssDialect::Css,
@@ -831,7 +870,14 @@ fn no_modern_syntax_normalization_of_untouched_declarations() {
 
     let scoped_code = scoped(source, "sc1");
     assert!(scoped_code.contains("(min-width:1px)"), "{scoped_code}");
+    assert!(
+        scoped_code.contains("color: color(display-p3 1 0 0)"),
+        "{scoped_code}"
+    );
+    assert!(scoped_code.contains("calc(1px + 2%)"), "{scoped_code}");
     assert!(!scoped_code.contains("(width >= 1px)"), "{scoped_code}");
+    assert!(!scoped_code.contains("color: red"), "{scoped_code}");
+    assert!(!scoped_code.contains("calc(2% + 1px)"), "{scoped_code}");
 }
 
 // ─── §2 Bounds: Edit topology ───────────────────────────────────────────────
@@ -880,6 +926,105 @@ fn zero_edit_style_block_returns_unchanged_variant() {
     ));
 }
 
+// @ai-generated - Every direct and cascaded zero-edit route returns before
+// `CodeTransform::new`; outcome-variant checks alone cannot establish this.
+#[test]
+fn zero_edit_routes_construct_no_code_transform() {
+    for (dialect, source) in [
+        (CssDialect::Css, "body { color: red; }"),
+        (CssDialect::Scss, "$tone: red; body { color: $tone; }"),
+        (CssDialect::Sass, "body\n  color: red\n"),
+        (CssDialect::Less, "@tone: red; body { color: @tone; }"),
+        (CssDialect::Stylus, "body\n  color red\n"),
+    ] {
+        reset_code_transform_construction_count();
+        let input = AuthoredStyleInput::new(
+            source,
+            dialect,
+            "probe.style",
+            "space:probe",
+            "artifact:probe",
+        );
+        let outcome = transform_vue_v_bind(input, "sc1")
+            .unwrap_or_else(|error| panic!("{dialect:?} must not be refused: {error}"));
+        assert!(!matches!(outcome, StyleRewriteOutcome::Rewritten { .. }));
+        assert_eq!(
+            code_transform_construction_count(),
+            0,
+            "{dialect:?} authored zero-edit route constructed CodeTransform"
+        );
+    }
+
+    reset_code_transform_construction_count();
+    let plain = PlainCssInput::try_new(
+        "body { color: red; }",
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    )
+    .unwrap();
+    let outcome = transform_vue_css_modules(plain, "sc1").expect("no module edits");
+    assert!(!matches!(outcome, StyleRewriteOutcome::Rewritten { .. }));
+    assert_eq!(
+        code_transform_construction_count(),
+        0,
+        "module zero-edit route constructed CodeTransform"
+    );
+
+    reset_code_transform_construction_count();
+    let empty = PlainCssInput::try_new(
+        "",
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    )
+    .unwrap();
+    let outcome = transform_vue_scoped_css(empty, "sc1").expect("no scoped edits");
+    assert!(!matches!(outcome, StyleRewriteOutcome::Rewritten { .. }));
+    assert_eq!(
+        code_transform_construction_count(),
+        0,
+        "scoped zero-edit route constructed CodeTransform"
+    );
+
+    for (module, scoped) in [(false, false), (true, false), (false, true), (true, true)] {
+        reset_code_transform_construction_count();
+        let input = AuthoredStyleInput::new(
+            "",
+            CssDialect::Css,
+            "probe.css",
+            "space:probe",
+            "artifact:probe",
+        );
+        let outcome = run_vue_style_cascade(input, "sc1", module, scoped, true);
+        assert_eq!(outcome.code, "");
+        assert_eq!(
+            code_transform_construction_count(),
+            0,
+            "authored cascade module={module} scoped={scoped} constructed CodeTransform"
+        );
+
+        reset_code_transform_construction_count();
+        let plain = PlainCssInput::try_new(
+            "",
+            CssDialect::Css,
+            "probe.css",
+            "space:probe",
+            "artifact:probe",
+        )
+        .unwrap();
+        let outcome = run_vue_style_cascade_post_preprocess(plain, "sc1", module, scoped, true);
+        assert_eq!(outcome.code, "");
+        assert_eq!(
+            code_transform_construction_count(),
+            0,
+            "post-preprocess cascade module={module} scoped={scoped} constructed CodeTransform"
+        );
+    }
+}
+
 // @ai-generated - Edit topology bound: `build_string()` runs exactly M times,
 // the edit-composition depth the construct requires. M=1 for a flat edit set
 // (plain scope-attribute insertion, `:deep()`'s argument render, which never
@@ -889,8 +1034,51 @@ fn zero_edit_style_block_returns_unchanged_variant() {
 #[test]
 fn build_string_call_count_matches_edit_composition_depth() {
     reset_build_string_invocation_count();
-    let _ = scoped(".a { color: red }", "sc1");
+    let input = AuthoredStyleInput::new(
+        ".a { color: v-bind(tone); }",
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    );
+    let v_bind = rewritten(transform_vue_v_bind(input, "sc1").expect("v-bind rewrite")).0;
+    assert!(!v_bind.contains("v-bind("), "{v_bind}");
+    assert_eq!(build_string_invocation_count(), 1, "authored v-bind emit");
+
+    reset_build_string_invocation_count();
+    let plain = PlainCssInput::try_new(
+        ".a { color: red; }",
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    )
+    .unwrap();
+    let modules = rewritten(transform_vue_css_modules(plain, "sc1").expect("module rewrite")).0;
+    assert!(!modules.contains(".a {"), "{modules}");
+    assert_eq!(build_string_invocation_count(), 1, "CSS Modules emit");
+
+    reset_build_string_invocation_count();
+    let flat = scoped(".a { color: red }", "sc1");
+    assert!(!flat.contains(".a {"), "{flat}");
     assert_eq!(build_string_invocation_count(), 1, "flat scope insertion");
+
+    reset_build_string_invocation_count();
+    let input = AuthoredStyleInput::new(
+        ".a { color: v-bind(tone); }",
+        CssDialect::Css,
+        "probe.css",
+        "space:probe",
+        "artifact:probe",
+    );
+    let cascaded = run_vue_style_cascade(input, "sc1", true, true, true);
+    assert!(!cascaded.code.contains("v-bind("), "{}", cascaded.code);
+    assert!(!cascaded.code.contains(".a {"), "{}", cascaded.code);
+    assert_eq!(
+        build_string_invocation_count(),
+        3,
+        "v-bind, module, and scoped categories each build exactly once"
+    );
 
     reset_build_string_invocation_count();
     let _ = scoped(".a :deep(.b) { color: red }", "sc1");
@@ -923,9 +1111,33 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
     // 0 stages change (empty style block): a single initial parse, retained
     // through modules and scoping untouched.
     reset_parse_ir_invocation_count();
+    reset_style_ir_stage_observations();
     let input = AuthoredStyleInput::new("", CssDialect::Css, "p.css", "space:p", "artifact:p");
     let outcome = run_vue_style_cascade(input, "sc1", true, true, true);
     assert_eq!(outcome.code, "");
+    let observations = style_ir_stage_observations();
+    assert_eq!(
+        observations
+            .iter()
+            .map(|(stage, _)| *stage)
+            .collect::<Vec<_>>(),
+        vec![
+            StyleRewriteStage::AuthoredVBind,
+            StyleRewriteStage::PostPreprocessModules,
+            StyleRewriteStage::PostPreprocessScoping,
+        ],
+        "all three stages must consume an IR"
+    );
+    assert!(
+        observations
+            .iter()
+            .all(|(_, identity)| *identity == observations[0].1),
+        "unchanged stages received different parsed IR values: {observations:?}"
+    );
+    assert!(
+        !observations.windows(2).any(|pair| pair[0].1 != pair[1].1),
+        "retained IR identity changed across an unchanged handoff: {observations:?}"
+    );
     assert_eq!(
         parse_ir_invocation_count(),
         1,
@@ -980,6 +1192,7 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
     // rewritten bytes — 1 (initial) + 1 (re-parse for modules, which then
     // hands its own retained IR straight through to scoping) = 2, never 3.
     reset_parse_ir_invocation_count();
+    reset_style_ir_stage_observations();
     let input = AuthoredStyleInput::new(
         "body { color: v-bind(c); }",
         CssDialect::Css,
@@ -997,8 +1210,22 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
         "one stage (v-bind) forcing a successor re-parse must cost exactly 2, \
          never the pre-fix baseline's 3"
     );
+    let observations = style_ir_stage_observations();
+    assert_eq!(observations.len(), 3, "{observations:?}");
+    assert_ne!(
+        observations[0].1, observations[1].1,
+        "a byte-changing stage must invalidate its IR: {observations:?}"
+    );
+    assert_eq!(
+        observations[1].1, observations[2].1,
+        "unchanged modules must hand the same reparsed IR to scoping: {observations:?}"
+    );
+    assert!(
+        !(observations[1].1 != observations[2].1),
+        "no replacement IR may appear after an unchanged module stage: {observations:?}"
+    );
 
-    // Worst case within this cascade: v-bind AND modules both change (a
+    // Worst case within this cascade: v-bind AND modules both change (a)
     // class selector), each forcing the immediate next stage to re-parse —
     // scoping (last) inevitably changes too but costs nothing further:
     // 1 (initial) + 1 (re-parse for modules) + 1 (re-parse for scoping) = 3.
@@ -1100,6 +1327,462 @@ fn style_pipeline_v_bind_stage_failure_does_not_clear_output() {
         outcome.code, ".a { color: v-bind(#{$x}); }",
         "a v-bind-stage failure alone must not clear the accumulated output"
     );
+}
+
+#[test]
+fn cascade_publishability_gates_post_preprocess_failure_but_not_authored_v_bind_failure() {
+    let post_failure_source = ".good { color: v-bind(c); } .bad { color red; }";
+    let post_failure = run_vue_style_cascade(
+        AuthoredStyleInput::new(
+            post_failure_source,
+            CssDialect::Css,
+            "p.css",
+            "space:p",
+            "artifact:p",
+        ),
+        "sc1",
+        true,
+        true,
+        true,
+    );
+    assert!(
+        !cascade_output_is_publishable(&post_failure, post_failure_source),
+        "wiped output after a post-preprocessor failure must not be publishable"
+    );
+    assert_eq!(
+        post_failure.code, "",
+        "the refusal fixture must wipe output"
+    );
+
+    let authored_failure_source = ".a { color: v-bind(#{$x}); }";
+    let authored_failure = run_vue_style_cascade(
+        AuthoredStyleInput::new(
+            authored_failure_source,
+            CssDialect::Scss,
+            "p.scss",
+            "space:p",
+            "artifact:p",
+        ),
+        "sc1",
+        false,
+        false,
+        true,
+    );
+    assert!(
+        cascade_output_is_publishable(&authored_failure, authored_failure_source),
+        "an authored-v-bind refusal is upstream of the supplied bytes"
+    );
+    assert_ne!(
+        authored_failure.stage_failures[0].stage,
+        StyleRewriteStage::PostPreprocessModules,
+        "the non-gating control must not be a post-preprocessor failure"
+    );
+}
+
+#[test]
+fn cascade_passthrough_is_byte_identical_and_maps_after_non_bmp_character() {
+    let source = "/* 😀x */\n.a { color: red; }";
+    let outcome = run_vue_style_cascade(
+        AuthoredStyleInput::new(
+            source,
+            CssDialect::Css,
+            "emoji.css",
+            "space:emoji",
+            "artifact:emoji",
+        ),
+        "sc1",
+        false,
+        false,
+        true,
+    );
+    assert_eq!(outcome.code.as_bytes(), source.as_bytes());
+
+    let map_json = cascade_requested_source_map(&outcome, source, "emoji.css")
+        .expect("byte-identical passthrough must have an identity map");
+    assert!(!map_json.is_empty(), "identity map must not be empty");
+    let map =
+        oxc_sourcemap::OwnedSourceMap::from_json_string(&map_json).expect("valid identity map");
+    let lookup = map.generate_lookup_table();
+    let token = map
+        .lookup_token(&lookup, 0, 5)
+        .expect("the x after the emoji must resolve at UTF-16 column 5");
+    assert_eq!((token.get_src_line(), token.get_src_col()), (0, 5));
+    assert!(
+        !map.get_tokens()
+            .any(|token| token.get_dst_line() == 0 && token.get_dst_col() == 4),
+        "an identity token at column 4 would split the emoji's UTF-16 surrogate pair"
+    );
+}
+
+#[test]
+fn cascade_requested_map_returns_the_single_rewrite_map() {
+    let source = ".a { color: v-bind(theme); }";
+    let outcome = run_vue_style_cascade(
+        AuthoredStyleInput::new(
+            source,
+            CssDialect::Css,
+            "single.css",
+            "space:single",
+            "artifact:single",
+        ),
+        "sc1",
+        false,
+        false,
+        true,
+    );
+    let requested = cascade_requested_source_map(&outcome, source, "single.css")
+        .expect("a single rewrite has an honest cascade map");
+    assert_eq!(requested, outcome.source_map);
+    assert!(
+        outcome.code.contains("var(--sc1-theme)"),
+        "{}",
+        outcome.code
+    );
+    assert!(
+        !outcome.code.contains("v-bind("),
+        "rewritten CSS must not retain the authored v-bind call"
+    );
+}
+
+#[test]
+fn cascade_requested_map_refuses_uncomposable_multi_stage_rewrite() {
+    let source = ".a { color: v-bind(theme); }";
+    let outcome = run_vue_style_cascade(
+        AuthoredStyleInput::new(
+            source,
+            CssDialect::Css,
+            "multi.css",
+            "space:multi",
+            "artifact:multi",
+        ),
+        "sc1",
+        true,
+        true,
+        true,
+    );
+    assert!(outcome.facts.rewrites.v_bind);
+    assert!(outcome.facts.rewrites.css_modules);
+    assert!(outcome.facts.rewrites.scoped_selector);
+    assert!(outcome.code.contains("[data-v-sc1]"), "{}", outcome.code);
+    assert!(
+        cascade_requested_source_map(&outcome, source, "multi.css").is_none(),
+        "a later stage's local map must not be presented as the whole cascade map"
+    );
+    assert!(
+        !outcome.source_map.contains("multi.css"),
+        "an abandoned composition must not retain a partial stage map"
+    );
+}
+
+#[test]
+fn cascade_requested_source_map_builds_a_real_identity_map_for_an_unchanged_outcome() {
+    let source = ".x { color: red; }";
+    let input = AuthoredStyleInput::new(source, CssDialect::Css, "Passthrough.css", "sp", "art");
+    let outcome = run_vue_style_cascade(input, "probe1234", false, false, true);
+    assert!(
+        outcome.stage_failures.is_empty(),
+        "{:?}",
+        outcome.stage_failures
+    );
+    assert_eq!(
+        outcome.code, source,
+        "an unmarked block must pass through byte-identical"
+    );
+    assert!(
+        outcome.source_map.is_empty(),
+        "the cascade itself must not fabricate a map for a stage it never ran"
+    );
+
+    let map_json = cascade_requested_source_map(&outcome, source, "Passthrough.css")
+        .expect("an unchanged outcome with no stage failures must still yield a real map");
+    let map = oxc_sourcemap::OwnedSourceMap::from_json_string(&map_json)
+        .expect("the identity map must be valid source-map JSON");
+    assert_eq!(
+        map.get_source_content(0),
+        Some(source),
+        "the identity map must retain the authored source"
+    );
+    let mut checked = 0;
+    for column in 0..source.len() as u32 {
+        let position = map
+            .get_tokens()
+            .filter(|token| token.get_dst_line() == 0 && token.get_dst_col() <= column)
+            .max_by_key(|token| token.get_dst_col())
+            .unwrap_or_else(|| panic!("no token covers generated column {column}"));
+        assert_eq!(
+            position.get_dst_col(),
+            column,
+            "column {column} resolved to a token at {}, not its own exact position — the map is \
+             sparser than byte-accurate identity",
+            position.get_dst_col()
+        );
+        assert_eq!(
+            position.get_src_col(),
+            column,
+            "generated column {column} must map to the SAME authored column, not {}",
+            position.get_src_col()
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, source.len() as u32, "sanity: covered every byte");
+}
+
+#[test]
+fn cascade_requested_source_map_builds_a_real_identity_map_across_multiple_lines() {
+    let source = ".a {\n  color: red;\n}\n.b {\n  color: blue;\n}";
+    let input = AuthoredStyleInput::new(source, CssDialect::Css, "Multiline.css", "sp", "art");
+    let outcome = run_vue_style_cascade(input, "probe1234", false, false, true);
+    assert!(
+        outcome.stage_failures.is_empty(),
+        "{:?}",
+        outcome.stage_failures
+    );
+    assert_eq!(outcome.code, source);
+
+    let map_json = cascade_requested_source_map(&outcome, source, "Multiline.css").expect(
+        "an unchanged multi-line outcome with no stage failures must still yield a real map",
+    );
+    let map = oxc_sourcemap::OwnedSourceMap::from_json_string(&map_json)
+        .expect("the identity map must be valid source-map JSON");
+
+    let mut expected: Vec<(u32, u32)> = Vec::with_capacity(source.len());
+    let mut line = 0u32;
+    let mut column = 0u32;
+    for ch in source.chars() {
+        expected.push((line, column));
+        if ch == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += ch.len_utf16() as u32;
+        }
+    }
+    assert!(
+        line > 0,
+        "sanity: the fixture must actually span multiple lines"
+    );
+
+    let mut checked = 0;
+    for (dst_line, dst_col) in expected {
+        let token = map
+            .get_tokens()
+            .filter(|t| t.get_dst_line() == dst_line && t.get_dst_col() <= dst_col)
+            .max_by_key(|t| t.get_dst_col())
+            .unwrap_or_else(|| panic!("no token covers generated ({dst_line}, {dst_col})"));
+        assert_eq!(
+            (token.get_dst_line(), token.get_dst_col()),
+            (dst_line, dst_col),
+            "generated ({dst_line}, {dst_col}) resolved to a token at ({}, {}), not its own \
+             exact position",
+            token.get_dst_line(),
+            token.get_dst_col()
+        );
+        assert_eq!(
+            (token.get_src_line(), token.get_src_col()),
+            (dst_line, dst_col),
+            "generated ({dst_line}, {dst_col}) must map to the SAME authored (line, column), \
+             got ({}, {})",
+            token.get_src_line(),
+            token.get_src_col()
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked,
+        source.chars().count(),
+        "sanity: covered every character"
+    );
+}
+
+#[test]
+fn cascade_requested_source_map_passes_through_a_real_rewrite_map_unchanged() {
+    let source = ".x { color: red; }";
+    let input = AuthoredStyleInput::new(source, CssDialect::Css, "Transformed.css", "sp", "art");
+    let outcome = run_vue_style_cascade(input, "probe1234", false, true, true);
+    assert!(
+        outcome.stage_failures.is_empty(),
+        "{:?}",
+        outcome.stage_failures
+    );
+    assert_ne!(outcome.code, source, "scoping must rewrite the selector");
+    assert!(
+        !outcome.source_map.is_empty(),
+        "a rewriting stage must already produce a real map via emit()"
+    );
+
+    let map_json = cascade_requested_source_map(&outcome, source, "Transformed.css")
+        .expect("a rewritten outcome must yield its own map");
+    assert_eq!(
+        map_json, outcome.source_map,
+        "cascade_requested_source_map must not alter a map a stage actually produced"
+    );
+}
+
+#[test]
+fn cascade_requested_source_map_is_none_after_a_hard_stage_failure_clears_output() {
+    let source = ".x[";
+    let input = AuthoredStyleInput::new(source, CssDialect::Css, "Broken.css", "sp", "art");
+    let outcome = run_vue_style_cascade(input, "probe1234", true, false, true);
+    assert!(
+        !outcome.stage_failures.is_empty(),
+        "malformed module input must hard-fail a stage"
+    );
+    assert_eq!(
+        outcome.code, "",
+        "a hard stage failure must clear the output"
+    );
+    assert_eq!(
+        cascade_requested_source_map(&outcome, source, "Broken.css"),
+        None,
+        "no identity map may be published over output the cascade discarded"
+    );
+}
+
+#[test]
+fn cascade_output_is_publishable_refuses_a_hard_failure_that_wiped_non_empty_content() {
+    let source = ".good { color: v-bind(c); } .bad { color red; }";
+    let input = AuthoredStyleInput::new(source, CssDialect::Css, "p.css", "space:p", "artifact:p");
+    let outcome = run_vue_style_cascade(input, "sc1", true, true, true);
+    assert_eq!(
+        outcome.stage_failures[0].class,
+        StyleRewriteFailureClass::UntrustedRewriteTarget
+    );
+    assert_eq!(
+        outcome.stage_failures[0].stage,
+        StyleRewriteStage::PostPreprocessModules
+    );
+    assert_eq!(
+        outcome.code, "",
+        "sanity: the modules stage must have cleared the output"
+    );
+    assert!(
+        !cascade_output_is_publishable(&outcome, source),
+        "a hard stage failure that wiped non-empty authored content must not be publishable"
+    );
+}
+
+#[test]
+fn cascade_output_is_publishable_refuses_stage_requires_plain_css() {
+    let source = ".a { color: red; }";
+    let input =
+        AuthoredStyleInput::new(source, CssDialect::Scss, "p.scss", "space:p", "artifact:p");
+    let outcome = run_vue_style_cascade(input, "sc1", false, true, true);
+    assert_eq!(
+        outcome.stage_failures[0].class,
+        StyleRewriteFailureClass::StageRequiresPlainCss
+    );
+    assert_eq!(
+        outcome.stage_failures[0].stage,
+        StyleRewriteStage::PostPreprocessScoping
+    );
+    assert_eq!(outcome.code, "");
+    assert!(!cascade_output_is_publishable(&outcome, source));
+}
+
+#[test]
+fn cascade_output_is_publishable_accepts_an_indented_layout_mutation_refusal() {
+    let source = ".a\n  color: rgba(v-bind(\n    tone\n  ), 1)\n";
+    let input =
+        AuthoredStyleInput::new(source, CssDialect::Sass, "p.sass", "space:p", "artifact:p");
+    let outcome = run_vue_style_cascade(input, "sc1", false, false, true);
+    assert_eq!(
+        outcome.stage_failures[0].class,
+        StyleRewriteFailureClass::IndentedLayoutMutation
+    );
+    assert_eq!(
+        outcome.stage_failures[0].stage,
+        StyleRewriteStage::AuthoredVBind
+    );
+    assert_eq!(
+        outcome.code, source,
+        "sanity: an authored-v-bind-stage failure must not clear the output"
+    );
+    assert!(cascade_output_is_publishable(&outcome, source));
+}
+
+#[test]
+fn cascade_output_is_publishable_refuses_a_parse_failure_that_wiped_non_empty_content() {
+    let source = ".a { color: red; }";
+    let outcome = VueStyleCascadeOutcome {
+        code: String::new(),
+        source_map: String::new(),
+        facts: crate::style_planner::VueStyleFacts::default(),
+        stage_failures: vec![StyleRewriteFailure {
+            class: StyleRewriteFailureClass::ParseFailure,
+            stage: StyleRewriteStage::PostPreprocessModules,
+            dialect: CssDialect::Css,
+            span: None,
+        }],
+    };
+    assert!(
+        !cascade_output_is_publishable(&outcome, source),
+        "a post-preprocess ParseFailure that wiped non-empty authored content \
+         must not be publishable"
+    );
+}
+
+#[test]
+fn cascade_output_is_publishable_accepts_an_overlapping_edits_refusal_on_v_bind_stage() {
+    let source = ".a { color: v-bind(c); }";
+    let outcome = VueStyleCascadeOutcome {
+        code: source.to_string(),
+        source_map: String::new(),
+        facts: crate::style_planner::VueStyleFacts::default(),
+        stage_failures: vec![StyleRewriteFailure {
+            class: StyleRewriteFailureClass::OverlappingEdits,
+            stage: StyleRewriteStage::AuthoredVBind,
+            dialect: CssDialect::Css,
+            span: None,
+        }],
+    };
+    assert!(
+        cascade_output_is_publishable(&outcome, source),
+        "an authored-v-bind-stage OverlappingEdits refusal must never gate \
+         publication, same as any other v-bind-stage-only failure"
+    );
+}
+
+#[test]
+fn cascade_output_is_publishable_accepts_a_v_bind_only_failure() {
+    let source = ".a { color: v-bind(#{$x}); }";
+    let input =
+        AuthoredStyleInput::new(source, CssDialect::Scss, "p.scss", "space:p", "artifact:p");
+    let outcome = run_vue_style_cascade(input, "sc1", false, false, true);
+    assert_eq!(
+        outcome.stage_failures.len(),
+        1,
+        "{:?}",
+        outcome.stage_failures
+    );
+    assert_eq!(
+        outcome.stage_failures[0].class,
+        StyleRewriteFailureClass::UntrustedRewriteTarget
+    );
+    assert_eq!(
+        outcome.stage_failures[0].stage,
+        StyleRewriteStage::AuthoredVBind
+    );
+    assert_eq!(
+        outcome.code, source,
+        "sanity: the v-bind failure must not clear the output"
+    );
+    assert!(
+        cascade_output_is_publishable(&outcome, source),
+        "a v-bind-only failure that left the output intact must stay publishable"
+    );
+}
+
+#[test]
+fn cascade_output_is_publishable_accepts_a_clean_outcome() {
+    let source = ".x { color: red; }";
+    let input = AuthoredStyleInput::new(source, CssDialect::Css, "p.css", "space:p", "artifact:p");
+    let outcome = run_vue_style_cascade(input, "sc1", false, true, true);
+    assert!(
+        outcome.stage_failures.is_empty(),
+        "{:?}",
+        outcome.stage_failures
+    );
+    assert!(cascade_output_is_publishable(&outcome, source));
 }
 
 // @ai-generated - A10i must hold through the REAL production compile()

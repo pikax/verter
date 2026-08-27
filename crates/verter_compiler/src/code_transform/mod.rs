@@ -44,6 +44,11 @@ pub use chain::SourceMapChainError;
 pub use code_transform::CodeTransform;
 pub(crate) use code_transform::GeneratedContentMarker;
 pub use code_transform::GeneratedSourceRange;
+#[cfg(test)]
+pub(crate) use code_transform::{
+    code_transform_build_string_call_count, code_transform_construction_count,
+    reset_code_transform_build_string_call_count, reset_code_transform_construction_count,
+};
 // The typed refusal surface of the checked (`try_*`) operations, re-exported
 // alongside `CodeTransform` as this module's public error type (the inner
 // module is private, so this is its only public path).

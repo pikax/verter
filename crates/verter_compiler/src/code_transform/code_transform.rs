@@ -7,6 +7,32 @@ use super::chunk::Chunk;
 use crate::cursor::position::PositionResolver;
 use oxc_allocator::Allocator;
 
+#[cfg(test)]
+thread_local! {
+    static CODE_TRANSFORM_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CODE_TRANSFORM_BUILD_STRING_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn code_transform_construction_count() -> usize {
+    CODE_TRANSFORM_CONSTRUCTIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_code_transform_construction_count() {
+    CODE_TRANSFORM_CONSTRUCTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn code_transform_build_string_call_count() -> usize {
+    CODE_TRANSFORM_BUILD_STRING_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_code_transform_build_string_call_count() {
+    CODE_TRANSFORM_BUILD_STRING_CALLS.with(|count| count.set(0));
+}
+
 /// Result of scanning chunks for a target position.
 #[allow(dead_code)] // Used by move_slice() which is test/API only for now
 enum SplitResult {
@@ -189,6 +215,9 @@ fn push_preserved_source_ranges(
 impl<'a> CodeTransform<'a> {
     /// Create a new CodeTransform from source text and an allocator
     pub fn new(source: &'a str, allocator: &'a Allocator) -> Self {
+        #[cfg(test)]
+        CODE_TRANSFORM_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+
         let len = source.len() as u32;
 
         // Pre-allocate chunks capacity based on source size.
@@ -1406,6 +1435,9 @@ impl<'a> CodeTransform<'a> {
     #[must_use]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn build_string(&self) -> String {
+        #[cfg(test)]
+        CODE_TRANSFORM_BUILD_STRING_CALLS.with(|count| count.set(count.get() + 1));
+
         // Capacity from tracked delta — avoids a full scan of all chunks.
         let capacity = (self.original.len() as i64 + self.output_delta) as usize
             + self.intro.len()
