@@ -43,8 +43,8 @@ use crate::parser::Syntax;
 use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
-    analyze_css_module_classes, complete_static_class_names, run_vue_style_cascade,
-    AuthoredStyleInput, StyleRewriteFailure,
+    analyze_css_module_classes, complete_static_class_names, prepared_style_for_sealed_slot,
+    run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -919,18 +919,12 @@ fn compile_inner(
                     "standalone:carrier",
                     "standalone:carrier-bytes",
                 );
-                let prepared = verter_options
-                    .prepared_styles
-                    .get(style_index)
-                    .and_then(|slot| slot.as_ref())
-                    .or_else(|| {
-                        verter_options
-                            .prepared_styles
-                            .iter()
-                            .flatten()
-                            .find(|slot| slot.ir().source().text() == style_source)
-                    });
-                if let Some(prepared) = prepared {
+                if let Some(prepared) = prepared_style_for_sealed_slot(
+                    None,
+                    &verter_options.prepared_styles,
+                    style_index,
+                    style_source,
+                ) {
                     cascade_input = cascade_input.with_prepared(prepared.ir());
                 }
 

@@ -233,6 +233,23 @@ impl std::fmt::Debug for PreparedStyleIr {
     }
 }
 
+/// Bind a host-retained prepared IR to one style inventory slot.
+///
+/// Join is the sealed slot only: `slot_parsed` (host-resolved block content)
+/// or `prepared_styles[index]`. Identical source bytes in another slot are
+/// not a match. A present slot whose IR bytes do not equal `code` is a
+/// mismatch and yields `None`.
+#[must_use]
+pub fn prepared_style_for_sealed_slot<'a>(
+    slot_parsed: Option<&'a PreparedStyleIr>,
+    prepared_styles: &'a [Option<PreparedStyleIr>],
+    index: usize,
+    code: &str,
+) -> Option<&'a PreparedStyleIr> {
+    let prepared = slot_parsed.or_else(|| prepared_styles.get(index).and_then(Option::as_ref))?;
+    (prepared.ir().source().text() == code).then_some(prepared)
+}
+
 /// Proof that these bytes came from a `StyleSyntaxIr` parse tagged with the
 /// native CSS dialect.
 ///
@@ -2528,4 +2545,33 @@ fn selector_is_trusted_for_scoping(selector: &ComplexSelector) -> bool {
                 .is_none_or(selector_list_is_trusted_for_scoping)
         }),
     })
+}
+
+#[cfg(test)]
+mod prepared_slot_join_tests {
+    use super::{prepare_supplied_plain_css, prepared_style_for_sealed_slot};
+
+    #[test]
+    fn sealed_slot_join_does_not_alias_same_bytes_in_another_slot() {
+        let css = ".card { color: red; }";
+        let prepared = prepare_supplied_plain_css(css).expect("css parses");
+        let styles = vec![Some(prepared.clone()), None];
+
+        assert!(
+            prepared_style_for_sealed_slot(None, &styles, 0, css).is_some(),
+            "index 0 is the sealed slot"
+        );
+        assert!(
+            prepared_style_for_sealed_slot(None, &styles, 1, css).is_none(),
+            "identical bytes at another index are not a join"
+        );
+        assert!(
+            prepared_style_for_sealed_slot(Some(&prepared), &[], 0, css).is_some(),
+            "host-resolved slot_parsed is the sealed join"
+        );
+        assert!(
+            prepared_style_for_sealed_slot(None, &styles, 0, ".other { color: red; }").is_none(),
+            "byte mismatch on a sealed slot fails closed"
+        );
+    }
 }

@@ -41,7 +41,8 @@ use crate::framework_common::generated_chunk::{
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::style_planner::{
-    run_vue_style_cascade, transform_vue_style, AuthoredStyleInput, VerifiedPlainCss,
+    prepared_style_for_sealed_slot, run_vue_style_cascade, transform_vue_style, AuthoredStyleInput,
+    VerifiedPlainCss,
 };
 use verter_language::ParseOptions;
 
@@ -1205,12 +1206,13 @@ impl CarrierCompiler for VueCarrierCompiler {
             .strip_prefix("data-v-")
             .unwrap_or(&bundle.scope_id)
             .to_string();
-        for ((slot, selected), node) in opts
+        for (style_index, ((slot, selected), node)) in opts
             .block_content
             .styles
             .iter()
             .zip(bundle.styles.iter_mut())
             .zip(parsed.style_nodes())
+            .enumerate()
         {
             if let Some(input) = slot {
                 let authored_dialect = match node.lang {
@@ -1266,13 +1268,12 @@ impl CarrierCompiler for VueCarrierCompiler {
                         &input.source_space_token,
                         &input.content_artifact_token,
                     );
-                    let prepared = input.parsed.as_ref().or_else(|| {
-                        opts.prepared_styles
-                            .iter()
-                            .flatten()
-                            .find(|slot| slot.ir().source().text() == current.as_str())
-                    });
-                    if let Some(prepared) = prepared {
+                    if let Some(prepared) = prepared_style_for_sealed_slot(
+                        input.parsed.as_ref(),
+                        &opts.prepared_styles,
+                        style_index,
+                        current.as_str(),
+                    ) {
                         authored = authored.with_prepared(prepared.ir());
                     }
                     let cascade_module = node.module && selected_dialect == CssDialect::Css;
@@ -1322,18 +1323,17 @@ impl CarrierCompiler for VueCarrierCompiler {
                     // A completed external-preprocessor result is parsed once
                     // at host admission. The retained IR is required here —
                     // raw bytes are not a transform fallback.
-                    let prepared = input
-                        .parsed
-                        .as_ref()
-                        .or_else(|| {
-                            opts.prepared_styles
-                                .iter()
-                                .flatten()
-                                .find(|slot| slot.ir().source().text() == current.as_str())
-                        })
-                        .ok_or(CompileUnsupported::BlockContentRuntimeUnavailable {
+                    let prepared = prepared_style_for_sealed_slot(
+                        input.parsed.as_ref(),
+                        &opts.prepared_styles,
+                        style_index,
+                        current.as_str(),
+                    )
+                    .ok_or(
+                        CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
-                        })?;
+                        },
+                    )?;
                     let verified = VerifiedPlainCss::from_parsed_native_css(prepared.ir()).ok_or(
                         CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
@@ -2598,6 +2598,60 @@ mod tests {
             style.code.contains("body[data-v-scope123]"),
             "{}",
             style.code
+        );
+    }
+
+    #[test]
+    fn prepared_ir_does_not_join_by_source_text() {
+        let source = concat!(
+            "<template><div/></template>",
+            "<style module scoped lang=\"scss\" src=\"./a.scss\"></style>",
+            "<style module scoped lang=\"scss\" src=\"./b.scss\"></style>",
+        );
+        let css = ".card { color: red; }";
+        let prepared = crate::style_planner::prepare_supplied_plain_css(css).expect("css parses");
+        let compiler = VueCarrierCompiler;
+        let alloc = oxc_allocator::Allocator::new();
+        let err = compiler
+            .compile_bundle(
+                source,
+                &artifact_for(source),
+                &RuntimeCompileOptions {
+                    filename: Some("Two.vue".to_string()),
+                    component_id: Some("scope123".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        styles: vec![
+                            Some(RuntimeBlockContentInput {
+                                code: Arc::from(css),
+                                source_map: None,
+                                lang: "css".to_string(),
+                                content_artifact_token: "artifact:a".to_string(),
+                                source_space_token: "space:a".to_string(),
+                                parsed: None,
+                            }),
+                            Some(RuntimeBlockContentInput {
+                                code: Arc::from(css),
+                                source_map: None,
+                                lang: "css".to_string(),
+                                content_artifact_token: "artifact:b".to_string(),
+                                source_space_token: "space:b".to_string(),
+                                parsed: None,
+                            }),
+                        ],
+                        ..Default::default()
+                    },
+                    prepared_styles: vec![Some(prepared), None],
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect_err("second block must fail closed, not steal the first IR by text");
+        assert!(
+            matches!(
+                err,
+                CompileUnsupported::BlockContentRuntimeUnavailable { .. }
+            ),
+            "{err:?}"
         );
     }
 

@@ -165,8 +165,8 @@ fn preprocessed_result_adds_exactly_one_parse() {
         );
     }
 
-    // Worst-case Vue: non-CSS dialect, all three stages rewriting. Mutation
-    // that reddens: add a fourth parse to this path.
+    // Worst-case Vue: non-CSS dialect, all three stages rewriting on the
+    // supplied CSS identity. Mutation that reddens: add a fourth parse.
     {
         let host = VerterHost::new_standalone(HostConfig::default());
         let before = parse_count();
@@ -177,7 +177,7 @@ fn preprocessed_result_adds_exactly_one_parse() {
                 source: Arc::from(
                     "<template><div class=\"card\">x</div></template>\
                      <style lang=\"postcss\" scoped module>\
-                     .card { color: v-bind(theme); }\
+                     .card { color: v-bind(theme); nested { display: block; } }\
                      </style>",
                 ),
                 file_language: FileLanguage::vue(),
@@ -189,11 +189,39 @@ fn preprocessed_result_adds_exactly_one_parse() {
             .first()
             .expect("postcss needs external preprocessing")
             .clone();
+        // Supplied result is CSS (preprocessor output). Nested syntax is
+        // flattened so the modules rewrite sees a class selector.
         admit_and_compile(
             &host,
             &update.canonical_id,
             &request,
-            ".card { color: v-bind(theme); }",
+            ".card { color: v-bind(theme); }\n.card nested { display: block; }",
+        );
+        let style = compile_style(&host, &update.canonical_id);
+        assert!(
+            style.code.contains("var(--"),
+            "v-bind stage must rewrite: {}",
+            style.code
+        );
+        assert!(
+            style.code.contains("card_"),
+            "css-modules stage must rewrite: {}",
+            style.code
+        );
+        assert!(
+            style.code.contains("[data-v-"),
+            "scoped stage must rewrite: {}",
+            style.code
+        );
+        assert!(
+            !style.code.contains("v-bind("),
+            "v-bind source must not survive: {}",
+            style.code
+        );
+        assert!(
+            !style.code.contains(".card {") && !style.code.contains(".card nested"),
+            "unhashed class selectors must not survive modules: {}",
+            style.code
         );
         let worst = parse_count() - before;
         assert!(
@@ -201,14 +229,8 @@ fn preprocessed_result_adds_exactly_one_parse() {
             "worst-case non-CSS + three Vue stages must not exceed five parses, got {worst}"
         );
         assert_eq!(
-            worst, 3,
-            "realized worst-case is authored + supplied + one successor reparse (ceiling five)"
-        );
-        let style = compile_style(&host, &update.canonical_id);
-        assert!(
-            style.code.contains("[data-v-") || style.code.contains("var(--"),
-            "worst-case compile must reach Vue style transforms: {}",
-            style.code
+            worst, 5,
+            "worst-case non-CSS + three Vue stages totals five, got {worst}"
         );
     }
 }
