@@ -924,6 +924,13 @@ implementation_ref = "refs/heads/block/module-resolver-core"
 landing_order = 1
 candidate_sha = "0be9f2e867c634926c646b52fba75e9e7b60bc59"
 candidate_tree = "7ca20dde813ba73c03ba252c7802fd59fc68d4fe"
+# Registered C1-only repair authority for the round-4 frozen source. This is
+# not a candidate stamp: the reviewed subject remains rejected pending a new
+# implementation, freeze, and three exact-candidate reviews.
+kernel_retention_authority = "RULING-2026-08-27-C1-KERNEL-RETENTION-AUTHORITY"
+kernel_retention_reviewed_subject_sha = "d4bed980bea382a7d42dae4b932f16ba247065dc"
+kernel_retention_reviewed_subject_tree = "b2f56be5201560710df45bca7f2dde3f106cedf3"
+kernel_retention_meter_ids = ["C1-ALIAS-GEOMETRY-RETENTION-001", "C1-COMPLETED-WITNESS-RETENTION-001"]
 accepted_sha = ""
 accepted_tree = ""
 landing_equivalence_digest = ""
