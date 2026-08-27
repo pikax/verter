@@ -7,7 +7,7 @@ use crate::token::{css_identifier_eq_ignore_ascii_case, SyntaxToken, TokenFlags,
 /// Whitespace classification profile a scan uses. `Css` is the CSS Syntax Module Level 3 ASCII
 /// set ([`is_css_whitespace`]); `JsUnicode` is JS `\s` (that ASCII core, plus vertical tab, plus a
 /// run of Unicode space codepoints) — the profile the Svelte compat validation reader
-/// ([`crate::svelte_compat`]) needs so its scans match upstream `svelte@5.56.3`'s own
+/// ([`crate::svelte_compat`]) needs so its scans match upstream `svelte@5.56.10`'s own
 /// Unicode-aware `\s` regexes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WhitespaceProfile {
@@ -17,7 +17,7 @@ pub(crate) enum WhitespaceProfile {
 
 /// Identifier name-start/name-continue codepoint profile. `Css` treats any codepoint `>= 128` as
 /// an identifier char (the general CSS Syntax Module rule this lexer otherwise applies);
-/// `SvelteCompat` narrows that threshold to `>= 160`, matching upstream `svelte@5.56.3`'s own
+/// `SvelteCompat` narrows that threshold to `>= 160`, matching upstream `svelte@5.56.10`'s own
 /// identifier-char test (which excludes the U+0080..U+009F block the general rule admits).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdentifierProfile {
@@ -53,7 +53,7 @@ pub(crate) fn is_whitespace_codepoint(cp: u32, profile: WhitespaceProfile) -> bo
 
 /// JS `\s` (`WhiteSpace` ∪ `LineTerminator`): the [`is_css_whitespace`] ASCII core, plus vertical
 /// tab `\x0B` (which CSS does not treat as whitespace), plus the Unicode space run. Used by the
-/// Svelte compat profile ([`crate::svelte_compat`]) to match upstream `svelte@5.56.3`'s
+/// Svelte compat profile ([`crate::svelte_compat`]) to match upstream `svelte@5.56.10`'s
 /// Unicode-aware `\s` regexes — genuinely wider than the general CSS Syntax Module ASCII set.
 #[inline]
 pub(crate) fn is_js_whitespace_codepoint(cp: u32) -> bool {
@@ -69,7 +69,7 @@ pub(crate) fn is_js_whitespace_codepoint(cp: u32) -> bool {
 
 /// Whether `byte` (an ASCII byte `< 0x80`) is an identifier name char under `profile`. `Css`
 /// delegates to the general [`is_name`] rule (alphanumeric, `_`, `-`, plus the CSS Syntax Module's
-/// NUL-substitution allowance); `SvelteCompat` is upstream `svelte@5.56.3`'s own narrower
+/// NUL-substitution allowance); `SvelteCompat` is upstream `svelte@5.56.10`'s own narrower
 /// `REGEX_VALID_IDENTIFIER_CHAR = /[a-zA-Z0-9_-]/` (no NUL allowance).
 #[inline]
 fn is_ascii_name_char(byte: u8, profile: IdentifierProfile) -> bool {
@@ -479,7 +479,7 @@ impl<'a> Lexer<'a> {
 
     /// Consume one escape sequence (the `\` this method is called on, plus its hex numeral or
     /// single escaped char) under `whitespace_profile` for the hex form's optional trailing
-    /// separator — [`WhitespaceProfile::JsUnicode`] matches upstream `svelte@5.56.3`'s
+    /// separator — [`WhitespaceProfile::JsUnicode`] matches upstream `svelte@5.56.10`'s
     /// `REGEX_UNICODE_SEQUENCE` (`\r\n`, or any single JS-`\s` codepoint including multi-byte
     /// Unicode spaces), narrower [`WhitespaceProfile::Css`] only ever closes on a single ASCII
     /// whitespace byte.
