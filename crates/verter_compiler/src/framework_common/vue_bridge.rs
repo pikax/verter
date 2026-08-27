@@ -41,7 +41,8 @@ use crate::framework_common::generated_chunk::{
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::style_planner::{
-    run_vue_style_cascade, run_vue_style_cascade_post_preprocess, AuthoredStyleInput, PlainCssInput,
+    parse_plain_css_for_verification, run_vue_style_cascade, transform_vue_style,
+    AuthoredStyleInput, StyleRewriteStage, VerifiedPlainCss,
 };
 use verter_language::ParseOptions;
 
@@ -1303,27 +1304,31 @@ impl CarrierCompiler for VueCarrierCompiler {
                             applied_rewrite_stages.saturating_add(stage_count as u8);
                     }
                 } else {
-                    // Already-preprocessed CSS output: the authored v-bind
-                    // stage does not apply (its content is upstream of the
-                    // supplied bytes), so this branch starts the cascade at
-                    // the modules stage instead — an unchanged modules stage
-                    // still hands its retained IR into the scoped-selector
-                    // stage rather than forcing a second parse (A10i).
-                    let plain = PlainCssInput::try_new(
-                        &current,
-                        selected_dialect,
-                        &input.source_space_token,
-                        &input.source_space_token,
-                        &input.content_artifact_token,
+                    // A completed external-preprocessor result is parsed under
+                    // the native CSS grammar before it reaches Vue transforms.
+                    // Recovery-mode parsing establishes provenance, not content
+                    // validity; the rewrite planners retain their own trust
+                    // checks for recovered structure.
+                    let ir = parse_plain_css_for_verification(
+                        current.as_str(),
+                        StyleRewriteStage::PostPreprocessModules,
                     )
                     .map_err(|_| {
                         CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
                         }
                     })?;
+                    let verified = VerifiedPlainCss::from_parsed_native_css(&ir).ok_or(
+                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                            adapter_id: self.adapter_id(),
+                        },
+                    )?;
                     let cascade_module = node.module && selected_dialect == CssDialect::Css;
-                    let outcome = run_vue_style_cascade_post_preprocess(
-                        plain,
+                    let outcome = transform_vue_style(
+                        verified,
+                        &input.source_space_token,
+                        &input.source_space_token,
+                        &input.content_artifact_token,
                         &style_scope,
                         cascade_module,
                         node.scoped,
@@ -1335,6 +1340,7 @@ impl CarrierCompiler for VueCarrierCompiler {
                         });
                     }
                     let stage_count = [
+                        outcome.facts.rewrites.v_bind,
                         outcome.facts.rewrites.css_modules,
                         outcome.facts.rewrites.scoped_selector
                             || outcome.facts.rewrites.keyframes
@@ -2486,7 +2492,7 @@ mod tests {
     fn supplied_preprocessor_output_reuses_parsed_ir_across_modules_and_scoped() {
         use crate::style_planner::{
             parse_ir_invocation_count, reset_parse_ir_invocation_count, transform_vue_css_modules,
-            transform_vue_scoped_css, StyleRewriteOutcome,
+            transform_vue_scoped_css, PlainCssInput, StyleRewriteOutcome,
         };
 
         let plain_input = || {

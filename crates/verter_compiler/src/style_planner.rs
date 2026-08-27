@@ -185,6 +185,29 @@ impl<'a> PlainCssInput<'a> {
     }
 }
 
+/// Proof that these bytes came from a `StyleSyntaxIr` parse tagged with the
+/// native CSS dialect.
+///
+/// This witness establishes provenance only. The parser runs in recovery
+/// mode, so it does not claim that the bytes contain only valid plain CSS.
+pub struct VerifiedPlainCss<'a> {
+    ir: &'a StyleSyntaxIr,
+}
+
+impl<'a> VerifiedPlainCss<'a> {
+    /// Mints a witness only from an already-parsed native-CSS syntax IR.
+    #[must_use]
+    pub fn from_parsed_native_css(ir: &'a StyleSyntaxIr) -> Option<Self> {
+        (ir.dialect() == CssDialect::Css).then_some(Self { ir })
+    }
+
+    /// Returns the exact bytes carried by the verified parse.
+    #[must_use]
+    pub fn code(&self) -> &'a str {
+        self.ir.source().text()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VueStyleRewriteMask {
     pub v_bind: bool,
@@ -271,6 +294,20 @@ struct ParsedStyleIr {
     identity: usize,
 }
 
+impl ParsedStyleIr {
+    fn from_existing(inner: StyleSyntaxIr) -> Self {
+        Self {
+            inner,
+            #[cfg(test)]
+            identity: NEXT_STYLE_IR_IDENTITY.with(|identity| {
+                let current = identity.get();
+                identity.set(current + 1);
+                current
+            }),
+        }
+    }
+}
+
 impl std::ops::Deref for ParsedStyleIr {
     type Target = StyleSyntaxIr;
 
@@ -326,6 +363,26 @@ pub fn build_string_invocation_count() -> usize {
 #[cfg(test)]
 pub fn reset_build_string_invocation_count() {
     crate::code_transform::reset_code_transform_build_string_call_count();
+}
+
+/// Parses plain CSS through this module's shared, COUNTED parse funnel and
+/// returns the IR a [`VerifiedPlainCss`] witness can be minted from.
+///
+/// Callers outside this module must obtain their IR here rather than reaching
+/// for the CSS grammar directly. The witness only requires a parsed IR, so a
+/// direct parse satisfies the type while leaving the parse INVISIBLE to
+/// `parse_ir_invocation_count` — and that counter is the observable proof that
+/// a style block is parsed once per content identity. Bypassing the funnel does
+/// not break the type-state; it blinds the instrument that watches it, which is
+/// the harder defect to notice because every test still passes.
+///
+/// The IR is returned by value because the witness borrows it: the caller owns
+/// the IR for as long as it holds the witness.
+pub fn parse_plain_css_for_verification(
+    code: &str,
+    stage: StyleRewriteStage,
+) -> Result<StyleSyntaxIr, StyleRewriteFailure> {
+    parse_ir(code, CssDialect::Css, stage).map(|parsed| parsed.inner)
 }
 
 fn parse_ir(
@@ -1398,6 +1455,122 @@ pub fn run_vue_style_cascade(
         facts,
         stage_failures,
     }
+}
+
+/// Runs the full Vue style cascade from native-CSS grammar provenance.
+///
+/// The supplied parse is reused for the first stage. If that stage leaves the
+/// bytes unchanged, the same parsed structure continues into later stages.
+pub fn run_vue_style_cascade_verified(
+    verified: VerifiedPlainCss<'_>,
+    source_name: &str,
+    source_space_token: &str,
+    content_artifact_token: &str,
+    scope_id: &str,
+    module: bool,
+    scoped: bool,
+    want_source_map: bool,
+) -> VueStyleCascadeOutcome {
+    let code = verified.code();
+    let source = StyleSourceIdentity {
+        source_name,
+        source_space_token,
+        content_artifact_token,
+    };
+    let parsed = ParsedStyleIr::from_existing(verified.ir.clone());
+    let mut owned: Option<(String, MapComposition)> = None;
+    let mut facts = VueStyleFacts::default();
+    let mut stage_failures = Vec::new();
+    let mut retained_ir = None;
+
+    observe_style_ir(StyleRewriteStage::AuthoredVBind, &parsed);
+    match v_bind_edits_from_ir(&parsed, CssDialect::Css, scope_id) {
+        Ok((edits, vars)) => {
+            facts.v_bind_vars = vars;
+            facts.rewrites.v_bind = !edits.is_empty();
+            match apply_cascade_stage(
+                code,
+                source,
+                CssDialect::Css,
+                StyleRewriteStage::AuthoredVBind,
+                edits,
+                &MapComposition::NotStarted,
+                want_source_map,
+            ) {
+                Ok(Some(rewritten)) => owned = Some(rewritten),
+                Ok(None) => retained_ir = Some(parsed),
+                Err(failure) => stage_failures.push(failure),
+            }
+        }
+        Err(failure) => stage_failures.push(failure),
+    }
+
+    let current_code = owned
+        .as_ref()
+        .map_or(code, |(value, _)| value.as_str())
+        .to_string();
+    let composition = owned
+        .as_ref()
+        .map_or(MapComposition::NotStarted, |(_, composition)| {
+            composition.clone()
+        });
+    let post = run_post_v_bind_stages(
+        &current_code,
+        source,
+        CssDialect::Css,
+        retained_ir,
+        scope_id,
+        module,
+        scoped,
+        &mut facts,
+        &mut stage_failures,
+        composition,
+        want_source_map,
+    );
+    if let Some(rewritten) = post {
+        owned = Some(rewritten);
+    }
+
+    let (code, source_map) = match owned {
+        Some((code, composition)) => (
+            code,
+            composition
+                .accumulated()
+                .map(SourceMap::to_json_string)
+                .unwrap_or_default(),
+        ),
+        None => (code.to_string(), String::new()),
+    };
+    VueStyleCascadeOutcome {
+        code,
+        source_map,
+        facts,
+        stage_failures,
+    }
+}
+
+/// Type-state-gated entry point for Vue transforms over CSS-grammar-proven
+/// bytes.
+pub fn transform_vue_style(
+    verified: VerifiedPlainCss<'_>,
+    source_name: &str,
+    source_space_token: &str,
+    content_artifact_token: &str,
+    scope_id: &str,
+    module: bool,
+    scoped: bool,
+    want_source_map: bool,
+) -> VueStyleCascadeOutcome {
+    run_vue_style_cascade_verified(
+        verified,
+        source_name,
+        source_space_token,
+        content_artifact_token,
+        scope_id,
+        module,
+        scoped,
+        want_source_map,
+    )
 }
 
 /// Runs the CSS-Modules → scoped-selector continuation of the cascade for
