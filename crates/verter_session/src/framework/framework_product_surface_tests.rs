@@ -46,6 +46,37 @@ fn inventory() -> serde_json::Value {
     serde_json::from_str(INVENTORY).expect("the committed product-surface inventory is JSON")
 }
 
+fn workspace_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("repo root")
+        .to_path_buf()
+}
+
+fn alias_entry_path(entry: &str) -> &str {
+    match entry.rsplit_once(':') {
+        Some((path, rest)) if rest.chars().all(|c| c.is_ascii_digit()) => path,
+        _ => entry,
+    }
+}
+
+fn camel_to_snake(ident: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in ident.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Every product id the inventory names, across all of its semantic cases.
 /// The inventory's `tsc-declaration` product is the one
 /// [`the_tsc_product_is_published_only_when_its_target_bit_is_requested`]
@@ -296,6 +327,28 @@ fn the_inventory_is_internally_well_formed() {
                 assert!(
                     alias[field].as_str().is_some_and(|value| !value.is_empty()),
                     "{id}: a route alias is missing `{field}`"
+                );
+            }
+            let entry = alias["entryPoint"].as_str().expect("entryPoint string");
+            let rel = alias_entry_path(entry);
+            let path = workspace_root().join(rel);
+            assert!(
+                path.is_file(),
+                "{id}: route alias entryPoint {entry} is not a file at {}",
+                path.display()
+            );
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("{id}: read {}: {err}", path.display()));
+            let spelling = alias["spelling"].as_str().expect("spelling string");
+            let ident: String = spelling
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !ident.is_empty() {
+                let snake = camel_to_snake(&ident);
+                assert!(
+                    src.contains(&ident) || src.contains(&snake),
+                    "{id}: {rel} does not contain spelling token {ident:?} or {snake:?}"
                 );
             }
         }

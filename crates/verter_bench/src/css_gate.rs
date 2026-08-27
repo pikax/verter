@@ -25,6 +25,30 @@ use crate::css_identities::{allocation_category_universe, universe, CssMeasuredO
 /// Record schema version. Bump on any breaking field change.
 pub const RECORD_SCHEMA_VERSION: u32 = 1;
 
+/// Live capture pipeline discriminant. The committed pre-convergence
+/// baseline still records [`PIPELINE_LEGACY_LIGHTNINGCSS`]; a capture of
+/// the live `style_planner` pipeline must not reuse that name.
+pub const PIPELINE_STYLE_PLANNER: &str = "style-planner";
+/// Frozen pre-deletion baseline discriminant. Capture must not reuse it.
+pub const PIPELINE_LEGACY_LIGHTNINGCSS: &str = "legacy-lightningcss";
+/// Default `--pipeline` for `css_latency_gate capture` / `gate`.
+pub const CAPTURE_PIPELINE_DEFAULT: &str = PIPELINE_STYLE_PLANNER;
+
+/// Refuse a capture discriminant that names the deleted lightningcss pipeline
+/// (or is empty). Compare against the committed legacy baseline must declare
+/// `--expect-transition legacy-lightningcss:style-planner`.
+pub fn validate_capture_pipeline(pipeline: &str) -> Result<(), String> {
+    if pipeline.is_empty() {
+        return Err("pipeline discriminant must be non-empty".to_string());
+    }
+    if pipeline.contains("lightningcss") {
+        return Err(format!(
+            "lightningcss is not a live capture pipeline (got {pipeline:?}); capture as              {CAPTURE_PIPELINE_DEFAULT:?} and compare with --expect-transition              {PIPELINE_LEGACY_LIGHTNINGCSS}:{CAPTURE_PIPELINE_DEFAULT}"
+        ));
+    }
+    Ok(())
+}
+
 /// Wall-clock ceiling: candidate median must be <= 1.2x baseline median.
 pub const WALL_RATIO_CEILING_NUM: u128 = 12;
 pub const WALL_RATIO_CEILING_DEN: u128 = 10;
@@ -247,6 +271,12 @@ pub fn compare_records(
             b.enabled_features, c.enabled_features
         ));
     }
+    if b.load_thermal_policy != c.load_thermal_policy {
+        failures.push(format!(
+            "load/thermal policy mismatch: baseline {:?} vs candidate {:?}",
+            b.load_thermal_policy, c.load_thermal_policy
+        ));
+    }
 
     // Stage 3: pipeline discriminant policy.
     match &policy.allowed_pipeline_transition {
@@ -267,6 +297,24 @@ pub fn compare_records(
                     b.pipeline, c.pipeline
                 ));
             }
+        }
+    }
+    // Same-pipeline records must have been captured against the same
+    // css_bench.rs / css_identities.rs blobs. A declared cross-pipeline
+    // transition is allowed to rewrite those files (the identity SET is
+    // still checked in stage 4).
+    if policy.allowed_pipeline_transition.is_none() {
+        if b.css_bench_blob != c.css_bench_blob {
+            failures.push(format!(
+                "css_bench.rs blob mismatch: baseline {:?} vs candidate {:?}",
+                b.css_bench_blob, c.css_bench_blob
+            ));
+        }
+        if b.css_identities_blob != c.css_identities_blob {
+            failures.push(format!(
+                "css_identities.rs blob mismatch: baseline {:?} vs candidate {:?}",
+                b.css_identities_blob, c.css_identities_blob
+            ));
         }
     }
     if !failures.is_empty() {
@@ -921,6 +969,77 @@ mod tests {
         assert!(err.iter().any(|e| e.contains("pipeline")));
     }
 
+    #[test]
+    fn capture_pipeline_default_is_not_lightningcss() {
+        assert_eq!(CAPTURE_PIPELINE_DEFAULT, PIPELINE_STYLE_PLANNER);
+        assert!(!CAPTURE_PIPELINE_DEFAULT.contains("lightningcss"));
+        validate_capture_pipeline(CAPTURE_PIPELINE_DEFAULT).expect("live default is admissible");
+    }
+
+    #[test]
+    fn validate_capture_pipeline_refuses_lightningcss_and_empty() {
+        let err = validate_capture_pipeline("legacy-lightningcss").expect_err("legacy name");
+        assert!(err.contains("lightningcss"), "{err}");
+        let err = validate_capture_pipeline("").expect_err("empty");
+        assert!(err.contains("non-empty"), "{err}");
+    }
+
+    #[test]
+    fn compare_fails_on_load_thermal_policy_mismatch() {
+        let baseline = synthetic_record("style-planner", 1000);
+        let mut candidate = synthetic_record("style-planner", 1000);
+        candidate.provenance.load_thermal_policy = "a different policy".to_string();
+        seal(&mut candidate);
+        let err = compare_records(
+            &identity_universe(),
+            &baseline,
+            &candidate,
+            &ComparePolicy::default(),
+        )
+        .expect_err("load/thermal policy mismatch must refuse");
+        assert!(
+            err.iter().any(|e| e.contains("load/thermal")),
+            "refusal names the load/thermal policy: {err:?}"
+        );
+    }
+
+    #[test]
+    fn compare_fails_on_css_bench_blob_mismatch_same_pipeline() {
+        let baseline = synthetic_record("style-planner", 1000);
+        let mut candidate = synthetic_record("style-planner", 1000);
+        candidate.provenance.css_bench_blob = "different-blob".to_string();
+        seal(&mut candidate);
+        let err = compare_records(
+            &identity_universe(),
+            &baseline,
+            &candidate,
+            &ComparePolicy::default(),
+        )
+        .expect_err("css_bench blob mismatch must refuse");
+        assert!(
+            err.iter().any(|e| e.contains("css_bench.rs blob")),
+            "refusal names the css_bench blob: {err:?}"
+        );
+    }
+
+    #[test]
+    fn compare_allows_css_bench_blob_mismatch_on_declared_transition() {
+        let mut baseline = synthetic_record(PIPELINE_LEGACY_LIGHTNINGCSS, 1000);
+        let mut candidate = synthetic_record(PIPELINE_STYLE_PLANNER, 1000);
+        baseline.provenance.css_bench_blob = "legacy-blob".to_string();
+        candidate.provenance.css_bench_blob = "new-blob".to_string();
+        seal(&mut baseline);
+        seal(&mut candidate);
+        let policy = ComparePolicy {
+            allowed_pipeline_transition: Some((
+                PIPELINE_LEGACY_LIGHTNINGCSS.to_string(),
+                PIPELINE_STYLE_PLANNER.to_string(),
+            )),
+        };
+        compare_records(&identity_universe(), &baseline, &candidate, &policy)
+            .expect("declared transition may rewrite the identities blob");
+    }
+
     // -------------------------------------------------------------------------
     // Generator-mirror byte identity (Copy B = css_identities)
     // -------------------------------------------------------------------------
@@ -1046,6 +1165,31 @@ mod tests {
         );
         assert_eq!(record.identities.len(), 42);
         assert_eq!(record.allocation_by_category.len(), 11);
+    }
+
+    #[test]
+    fn committed_baseline_allocation_counts_match_a29_retained_table() {
+        const RETAINED: &[(&str, u64)] = &[
+            ("class_rules", 422),
+            ("descendant_selectors", 371),
+            ("pseudo_selectors", 371),
+            ("selector_lists", 822),
+            ("v_bind_rules", 929),
+            ("v_bind_dotted", 929),
+            ("deep_rules", 522),
+            ("slotted_rules", 472),
+            ("mixed_vue", 648),
+            ("global_rules", 370),
+            ("repeated_classes", 371),
+        ];
+        let record = committed_baseline();
+        let actual: std::collections::BTreeMap<&str, u64> = record
+            .allocation_by_category
+            .iter()
+            .map(|row| (row.category.as_str(), row.alloc_count))
+            .collect();
+        let expected: std::collections::BTreeMap<&str, u64> = RETAINED.iter().copied().collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]

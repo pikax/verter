@@ -799,33 +799,33 @@ fn sass_and_stylus_recovery_coverage_parity_with_css_and_less() {
     }
 
     // Walk `CssDiagnosticKind`'s discriminants the same way the CST suite
-    // walks `SyntaxKind`'s: an explicit list here would be hand-maintained,
-    // so the list is derived instead and the exhaustive `disposition` match
-    // is what forces a new variant to be dispositioned.
-    const EVERY_DIAGNOSTIC: [CssDiagnosticKind; 15] = [
-        CssDiagnosticKind::UnexpectedClosingDelimiter,
-        CssDiagnosticKind::MismatchedDelimiter,
-        CssDiagnosticKind::UnterminatedBlock,
-        CssDiagnosticKind::ExpectedAtRuleTerminator,
-        CssDiagnosticKind::ExpectedRuleBlock,
-        CssDiagnosticKind::ExpectedDeclarationColon,
-        CssDiagnosticKind::UnterminatedComment,
-        CssDiagnosticKind::UnterminatedString,
-        CssDiagnosticKind::BadString,
-        CssDiagnosticKind::UnterminatedUrl,
-        CssDiagnosticKind::BadUrl,
-        CssDiagnosticKind::InconsistentIndentation,
-        CssDiagnosticKind::UnexpectedIndentation,
-        CssDiagnosticKind::AmbiguousStatement,
-        CssDiagnosticKind::UnterminatedInterpolation,
-    ];
+    // walks `SyntaxKind`'s. A hand-maintained array would silently omit a
+    // new variant; `from_raw` + `kind as u8 != raw` is the derived walk,
+    // and the exhaustive `disposition` match forces a new variant to be
+    // dispositioned.
+    let every_diagnostic: Vec<CssDiagnosticKind> = {
+        let mut kinds = Vec::new();
+        for raw in 0u8.. {
+            let kind = CssDiagnosticKind::from_raw(raw);
+            if kind as u8 != raw {
+                break;
+            }
+            kinds.push(kind);
+        }
+        kinds
+    };
+    assert!(
+        every_diagnostic.len() >= 15,
+        "the discriminant walk must have found the real variant set, got {}",
+        every_diagnostic.len()
+    );
 
     // Every fixture named anywhere in the inventory, so `Unreachable` can be
     // checked against the whole inventory rather than trusted.
     let mut every_fixture: Vec<(&'static str, CssEntryPoint)> = Vec::new();
     let mut observed_recoveries: Vec<RecoveryKind> = Vec::new();
 
-    for kind in EVERY_DIAGNOSTIC {
+    for kind in every_diagnostic.iter().copied() {
         match disposition(kind) {
             Disposition::Symmetric(source, entry, recovery) => {
                 every_fixture.push((source, entry));
@@ -870,7 +870,7 @@ fn sass_and_stylus_recovery_coverage_parity_with_css_and_less() {
     }
 
     // `Unreachable` is checked against the WHOLE inventory, not trusted.
-    for kind in EVERY_DIAGNOSTIC {
+    for kind in every_diagnostic.iter().copied() {
         if !matches!(disposition(kind), Disposition::Unreachable(_)) {
             continue;
         }

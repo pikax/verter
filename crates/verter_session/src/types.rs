@@ -461,7 +461,7 @@ mod stable_hash_snapshot_tests {
 /// for fine-grained control. This enum is retained for FFI backwards compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisLevel {
-    /// Full analysis: OXC script parsing + lightningcss style analysis.
+    /// Full analysis: OXC script parsing + native StyleSyntaxIr style analysis.
     /// Use for LSP (auto-complete, diagnostics, hover, etc.).
     Full,
     /// Essential analysis: OXC script parsing only (imports, macros, bindings).

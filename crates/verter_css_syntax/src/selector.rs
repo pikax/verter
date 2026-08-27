@@ -9,7 +9,7 @@ use bumpalo::Bump;
 use smallvec::SmallVec;
 use verter_span::Span;
 
-use crate::arena::{bump_for_source, freeze_vec, BumpSlice};
+use crate::arena::{bump_for_source, freeze_vec, BumpSlice, FrozenBump};
 use crate::diagnostic::{CssParseFailure, CssStructureTooLarge};
 use crate::dialect::CssDialect;
 use crate::event::{ParseEvent, ParseEventSink, SyntaxKind};
@@ -626,10 +626,10 @@ impl SelectorList {
 }
 
 pub struct SelectorStructure {
-    /// Retains the bump that [`Self::list`] child slices point into.
-    _bump: Bump,
     source: CssSource,
     list: SelectorList,
+    /// Frozen last so the bump outlives bump-backed child slices on drop.
+    _bump: FrozenBump,
 }
 
 impl SelectorStructure {
@@ -644,9 +644,9 @@ impl SelectorStructure {
     #[cfg(test)]
     pub(crate) fn from_parts(bump: Bump, source: CssSource, list: SelectorList) -> Self {
         Self {
-            _bump: bump,
             source,
             list,
+            _bump: FrozenBump::freeze(bump),
         }
     }
 
@@ -1126,7 +1126,8 @@ fn selector_name_span(kind: SelectorComponentKind, tokens: &[SyntaxToken]) -> Op
     }
 }
 
-pub fn parse_selector_structure(
+#[allow(dead_code)] // test parse facade; production has no caller
+pub(crate) fn parse_selector_structure(
     source: &CssSource,
     dialect: CssDialect,
 ) -> Result<SelectorStructure, CssParseFailure> {
@@ -1145,9 +1146,9 @@ pub fn parse_selector_structure(
         sink.finish_list()
     };
     Ok(SelectorStructure {
-        _bump: bump,
         source: source.clone(),
         list,
+        _bump: FrozenBump::freeze(bump),
     })
 }
 

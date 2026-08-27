@@ -4,11 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::selector::parse_selector_structure;
 use verter_css_syntax::{
-    decode_css_identifier, parse_selector_structure, parse_style_ir, parse_with_sink, CssDialect,
-    CssEntryPoint, CssParseMode, CssSource, Lexer, NodeFlags, ParseEvent, ParseEventSink,
-    SelectorComponentKind, StyleCompleteness, StyleStatement, SyntaxKind, SyntaxToken, TokenFlags,
-    TokenKind,
+    decode_css_identifier, parse_style_ir, parse_with_sink, CssDialect, CssEntryPoint,
+    CssParseMode, CssSource, Lexer, NodeFlags, ParseEvent, ParseEventSink, SelectorComponentKind,
+    StyleCompleteness, StyleStatement, SyntaxKind, SyntaxToken, TokenFlags, TokenKind,
 };
 
 use crate::cst::parse_lossless;

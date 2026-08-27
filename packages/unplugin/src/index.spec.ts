@@ -59,6 +59,11 @@ describe("unplugin factory", () => {
   // Plugin-source discriminators: both bundler lanes call transformVueStyle;
   // compileStyleAsync and processStyle are gone. Searches every `.ts` file
   // under `src/` (excluding specs and test fixtures).
+
+  function withoutComments(src: string): string {
+    return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[\s;{}])\/\/.*$/gm, "$1");
+  }
+
   function readPluginSourceFiles(): string[] {
     const srcDir = dirname(fileURLToPath(import.meta.url));
     const files: string[] = [];
@@ -80,7 +85,7 @@ describe("unplugin factory", () => {
   it("Vite style lane does not call compileStyleAsync", () => {
     let sawCompileStyleAsync = false;
     for (const file of readPluginSourceFiles()) {
-      const src = readFileSync(file, "utf8");
+      const src = withoutComments(readFileSync(file, "utf8"));
       if (src.includes("compileStyleAsync")) sawCompileStyleAsync = true;
     }
     expect(sawCompileStyleAsync).toBe(false);
@@ -89,18 +94,24 @@ describe("unplugin factory", () => {
   it("non-Vite style lane does not import or call processStyle", () => {
     let sawProcessStyle = false;
     for (const file of readPluginSourceFiles()) {
-      const src = readFileSync(file, "utf8");
+      const src = withoutComments(readFileSync(file, "utf8"));
       if (/\bprocessStyle\b/.test(src)) sawProcessStyle = true;
     }
     expect(sawProcessStyle).toBe(false);
   });
 
   it("both bundler style lanes call transformVueStyle", () => {
-    const indexSrc = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), "index.ts"),
-      "utf8",
+    const indexSrc = withoutComments(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8"),
     );
-    expect(/\btransformVueStyle\s*\(/.test(indexSrc)).toBe(true);
+    const viteIdx = indexSrc.indexOf("function applyViteStyleLane(");
+    const nonViteIdx = indexSrc.indexOf("function applyNonViteStyleLane(");
+    expect(viteIdx).toBeGreaterThanOrEqual(0);
+    expect(nonViteIdx).toBeGreaterThan(viteIdx);
+    const viteSlice = indexSrc.slice(viteIdx, nonViteIdx);
+    const nonViteSlice = indexSrc.slice(nonViteIdx);
+    expect(/\btransformVueStyle\s*\(/.test(viteSlice)).toBe(true);
+    expect(/\btransformVueStyle\s*\(/.test(nonViteSlice)).toBe(true);
     expect(indexSrc).not.toContain("compileStyleAsync");
     expect(/\bprocessStyle\b/.test(indexSrc)).toBe(false);
   });
@@ -349,9 +360,9 @@ $border: #555;
     const transformed = await plugin.transform(style.code, styleId);
 
     expect(transformed).toBeDefined();
-    expect(transformed.code).toContain("[data-v-");
-    expect(transformed.code).toContain(".scoped-transform");
-    expect(transformed.code).toContain("red");
+    const id = /\[data-v-([a-z0-9]+)\]/.exec(transformed.code)?.[1];
+    expect(id).toBeTruthy();
+    expect(transformed.code).toBe(`\n.scoped-transform[data-v-${id}] {\n  color: red;\n}\n`);
   });
 
   it("transform() does NOT scope non-scoped blocks", async () => {
@@ -564,9 +575,11 @@ const primary = "red";
 
     const transformed = await plugin.transform(".box { color: v-bind(primary); }\n", styleId);
     expect(transformed).toBeDefined();
-    expect(transformed.code).toContain("[data-v-");
-    expect(transformed.code).toContain(".box");
+    const id = /\[data-v-([a-z0-9]+)\]/.exec(transformed.code)?.[1];
+    expect(id).toBeTruthy();
+    expect(transformed.code).toContain(`.box[data-v-${id}]`);
     expect(transformed.code).toMatch(/var\(--[a-z0-9]+-primary\)/);
+    expect(transformed.code).not.toContain("v-bind(");
   });
 
   it("transform() leaves unregistered style requests untouched", async () => {

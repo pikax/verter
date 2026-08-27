@@ -443,6 +443,68 @@ mod allocation_ceiling {
     }
 
     #[test]
+    fn canary_category_names_match_css_identities_allocation_universe() {
+        const EXPECTED: [&str; 11] = [
+            "class_rules",
+            "descendant_selectors",
+            "pseudo_selectors",
+            "selector_lists",
+            "v_bind_rules",
+            "v_bind_dotted",
+            "deep_rules",
+            "slotted_rules",
+            "mixed_vue",
+            "global_rules",
+            "repeated_classes",
+        ];
+        let names: Vec<&str> = all_categories().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, EXPECTED);
+    }
+
+    #[test]
+    fn retained_legacy_alloc_matches_committed_baseline_json() {
+        let json =
+            include_str!("../../../docs/arch/refactor/rev11/evidence/J1/css-baseline-legacy.json");
+        let start = json
+            .find("\"allocation_by_category\"")
+            .expect("allocation_by_category");
+        let mut rest = &json[start..];
+        let mut from_json = BTreeMap::new();
+        while let Some(cat_at) = rest.find("\"category\"") {
+            rest = &rest[cat_at + 10..];
+            let Some(colon) = rest.find(':') else { break };
+            rest = rest[colon + 1..].trim_start();
+            if !rest.starts_with('"') {
+                break;
+            }
+            rest = &rest[1..];
+            let Some(end) = rest.find('"') else { break };
+            let name = &rest[..end];
+            rest = &rest[end + 1..];
+            let Some(count_at) = rest.find("\"alloc_count\"") else {
+                break;
+            };
+            rest = &rest[count_at + 13..];
+            let Some(colon) = rest.find(':') else { break };
+            rest = rest[colon + 1..].trim_start();
+            let digits_end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            let count: u64 = rest[..digits_end].parse().expect("alloc_count");
+            from_json.insert(name, count);
+            rest = &rest[digits_end..];
+        }
+        assert_eq!(from_json.len(), 11, "json categories: {from_json:?}");
+        for (name, count) in RETAINED_LEGACY_ALLOC {
+            assert_eq!(
+                from_json.get(name).copied(),
+                Some(*count),
+                "{name} retained {count} vs json {from_json:?}"
+            );
+        }
+    }
+
+    #[test]
     fn allocation_ceiling_passes_when_sets_match_and_ratios_under_bound() {
         let universe = universe_names();
         let retained = retained_map();
@@ -838,6 +900,8 @@ mod intra_parser_attribution {
         static PHASE_LOG: RefCell<PhaseLog> = const { RefCell::new(PhaseLog::new()) };
         static CLONE_MARK: Cell<Totals> = const { Cell::new(Totals { calls: 0, bytes: 0 }) };
         static CLONE_TOTAL: Cell<Totals> = const { Cell::new(Totals { calls: 0, bytes: 0 }) };
+        static CLONE_ENTER: Cell<u32> = const { Cell::new(0) };
+        static CLONE_EXIT: Cell<u32> = const { Cell::new(0) };
     }
 
     fn on_phase(phase: &'static str) {
@@ -845,11 +909,13 @@ mod intra_parser_attribution {
         if phase == "selector_clone_enter" {
             // Fold parse work since the last marker into parse_emit so the
             // clone sandwich does not drop those allocations from the log.
+            CLONE_ENTER.with(|count| count.set(count.get() + 1));
             PHASE_LOG.with(|log| log.borrow_mut().record("after_parse_emit", now));
             CLONE_MARK.with(|mark| mark.set(now));
             return;
         }
         if phase == "selector_clone_exit" {
+            CLONE_EXIT.with(|count| count.set(count.get() + 1));
             let before = CLONE_MARK.with(Cell::get);
             CLONE_TOTAL.with(|total| {
                 let so_far = total.get();
@@ -905,6 +971,8 @@ mod intra_parser_attribution {
         parse_emit: Totals,
         selector_clone: Totals,
         finish: Totals,
+        clone_enter: u32,
+        clone_exit: u32,
     }
 
     fn measure_parse_style_ir(css: &str) -> IrSplit {
@@ -912,11 +980,15 @@ mod intra_parser_attribution {
         let guard = PhaseProbeGuard::install(on_phase);
         reset_alloc_counter();
         CLONE_TOTAL.with(|total| total.set(Totals { calls: 0, bytes: 0 }));
+        CLONE_ENTER.with(|count| count.set(0));
+        CLONE_EXIT.with(|count| count.set(0));
         PHASE_LOG.with(|log| log.borrow_mut().reset(Totals::capture()));
         let ir = parse_style_ir(source, CssDialect::Css, CssParseMode::Recover).unwrap();
         drop(guard);
         std::hint::black_box(&ir);
         let selector_clone = CLONE_TOTAL.with(Cell::get);
+        let clone_enter = CLONE_ENTER.with(Cell::get);
+        let clone_exit = CLONE_EXIT.with(Cell::get);
         PHASE_LOG.with(|log| {
             let log = log.borrow();
             IrSplit {
@@ -925,6 +997,8 @@ mod intra_parser_attribution {
                 parse_emit: log.delta("after_parse_emit"),
                 selector_clone,
                 finish: log.delta("after_finish"),
+                clone_enter,
+                clone_exit,
             }
         })
     }
@@ -946,6 +1020,7 @@ mod intra_parser_attribution {
 
     #[test]
     fn admission_copy_cannot_explain_parse_initial() {
+        let empty = measure_parse_style_ir("");
         for (name, css) in all_categories() {
             let (admission, source_wrap, parser_noop, ir) = attribute(&css);
             eprintln!(
@@ -989,9 +1064,18 @@ mod intra_parser_attribution {
                 "{name}: CssSource::new must not heap-allocate after Arc ownership is taken"
             );
             assert!(
-                ir.total.calls > 0,
-                "{name}: parse_style_ir of the 50-rule generator must allocate, got {}",
-                ir.total.calls
+                ir.clone_enter > 0,
+                "{name}: selector_clone_enter probe must fire (a dead probe still reports 0/0 clones)"
+            );
+            assert_eq!(
+                ir.clone_enter, ir.clone_exit,
+                "{name}: selector_clone enter/exit sandwich must be balanced (enter {} exit {})",
+                ir.clone_enter, ir.clone_exit
+            );
+            assert!(
+                ir.total.calls > empty.total.calls,
+                "{name}: 50-rule parse ({}) must allocate more than an empty stylesheet ({}) —                  bump_for_source alone makes total.calls > 0",
+                ir.total.calls, empty.total.calls
             );
             assert!(
                 ir.total.calls > admission.calls,

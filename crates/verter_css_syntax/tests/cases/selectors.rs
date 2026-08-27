@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
+use crate::selector::parse_selector_structure;
 use verter_css_syntax::{
-    parse_selector_structure, AttributeMatcher, CombinatorKind, CssDialect, CssEntryPoint,
-    CssParseMode, CssSource, NthExpression, PseudoFunctionKind, SelectorComponentKind,
-    SelectorTrust, TokenFlags, TokenKind,
+    AttributeMatcher, CombinatorKind, CssDialect, CssEntryPoint, CssParseMode, CssSource,
+    NthExpression, PseudoFunctionKind, SelectorComponentKind, SelectorTrust, TokenFlags, TokenKind,
 };
 
 use crate::cst::parse_lossless;

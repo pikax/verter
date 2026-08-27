@@ -127,13 +127,13 @@ fn each_session_route_charges_one_top_level_parse_entry() {
         let _ = compile_main(&host, &canonical, CompileProfile::default());
         let inline = inline_count() - before_inline;
         let ir = parse_count() - before_ir;
-        assert!(
-            inline >= 1 && inline <= 2,
-            "VDOM compile charges the nested inline parse, got inline={inline}"
+        assert_eq!(
+            inline, 2,
+            "VDOM compile charges two nested inline parses, got inline={inline}"
         );
-        assert!(
-            ir >= 1 && ir <= 2,
-            "VDOM compile charges the nested style_ir parse, got ir={ir}"
+        assert_eq!(
+            ir, 2,
+            "VDOM compile charges two nested style_ir parses, got ir={ir}"
         );
     }
     {
@@ -154,13 +154,13 @@ fn each_session_route_charges_one_top_level_parse_entry() {
         let _ = compile_main(&host, &canonical, profile);
         let inline = inline_count() - before_inline;
         let ir = parse_count() - before_ir;
-        assert!(
-            inline >= 1 && inline <= 2,
-            "SSR compile charges the nested inline parse, got inline={inline}"
+        assert_eq!(
+            inline, 2,
+            "SSR compile charges two nested inline parses, got inline={inline}"
         );
-        assert!(
-            ir >= 1 && ir <= 2,
-            "SSR compile charges the nested style_ir parse, got ir={ir}"
+        assert_eq!(
+            ir, 2,
+            "SSR compile charges two nested style_ir parses, got ir={ir}"
         );
     }
     {

@@ -148,3 +148,19 @@ pub(crate) fn alloc_str(bump: &Bump, text: &str) -> BumpStr {
 pub(crate) fn bump_for_source(source_len: usize) -> Bump {
     Bump::with_capacity(source_len.saturating_mul(32).max(2048))
 }
+
+/// Write-once bump. Allocated into during parse, then never again.
+/// This is the freeze type-state: a live [`Bump`] cannot inhabit a finished IR.
+#[allow(dead_code)]
+pub(crate) struct FrozenBump(Bump);
+
+impl FrozenBump {
+    pub(crate) fn freeze(bump: Bump) -> Self {
+        Self(bump)
+    }
+}
+
+// Safety: the inner bump is never allocated into after freeze. Child
+// `BumpSlice`s are never written, so sharing a finished IR across threads
+// is sound even though `bumpalo::Bump` is `!Sync`.
+unsafe impl Sync for FrozenBump {}

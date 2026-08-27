@@ -42,11 +42,11 @@ pub use parser::{
 #[cfg(any(test, feature = "test-support"))]
 pub use selector::parse_selector_structure_thread_invocations;
 pub use selector::{
-    parse_selector_structure, AttributeMatcher, CombinatorKind, ComplexSelector,
-    ComplexSelectorPart, CompoundTail, NthExpression, PseudoFunctionKind, SelectorAttribute,
-    SelectorCombinator, SelectorCompleteness, SelectorComponent, SelectorComponentKind,
-    SelectorCompound, SelectorFacts, SelectorInterpolation, SelectorKind, SelectorList,
-    SelectorPseudo, SelectorStructure, SelectorTrust, SvelteNthArg,
+    AttributeMatcher, CombinatorKind, ComplexSelector, ComplexSelectorPart, CompoundTail,
+    NthExpression, PseudoFunctionKind, SelectorAttribute, SelectorCombinator, SelectorCompleteness,
+    SelectorComponent, SelectorComponentKind, SelectorCompound, SelectorFacts,
+    SelectorInterpolation, SelectorKind, SelectorList, SelectorPseudo, SelectorStructure,
+    SelectorTrust, SvelteNthArg,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use style_ir::parse_style_ir_thread_invocations;

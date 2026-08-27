@@ -4,7 +4,9 @@
  * (transformVueStyle / prepareStyleForPreprocessor / analyzeStyle)
  * work correctly with both string and Buffer inputs.
  */
-import { basename, sep } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { basename, dirname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
 import {
@@ -941,6 +943,26 @@ describe("VerterHost type declarations in sync with native binary", () => {
     ).toEqual([]);
   });
 
+  it("tracked wrapper and types do not declare processStyle", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const needles = ["processStyle", "ProcessStyleOptions", "ProcessStyleResult"];
+    for (const rel of ["index.ts", "index.js", "host-types.ts"]) {
+      const src = readFileSync(join(here, rel), "utf8");
+      for (const needle of needles) {
+        expect(src, `${rel} must not declare ${needle}`).not.toMatch(new RegExp(`\\b${needle}\\b`));
+      }
+    }
+    const distTypes = join(here, "dist", "index.d.ts");
+    if (existsSync(distTypes)) {
+      const src = readFileSync(distTypes, "utf8");
+      for (const needle of needles) {
+        expect(src, `dist/index.d.ts must not declare ${needle}`).not.toMatch(
+          new RegExp(`\\b${needle}\\b`),
+        );
+      }
+    }
+  });
+
   it("top-level exports should include the three-way CSS style API and VerterHost", () => {
     const native = require("./index.js");
     expect(typeof native.processStyle).toBe("undefined");
@@ -1125,11 +1147,18 @@ describe("analyzeStyle", () => {
     const source = ".btn { color: red; } .card { display: flex; }";
     const result = analyzeStyle(source, { scopeId: "abc123" });
 
+    expect(result).not.toHaveProperty("code");
+    expect(Object.keys(result).sort()).toEqual(["moduleClasses", "staticClasses"]);
     expect(result.staticClasses).toEqual(["btn", "card"]);
     expect(result.moduleClasses).toHaveLength(2);
     const btnHash = result.moduleClasses.find(([name]) => name === "btn")?.[1];
     expect(btnHash).toBeDefined();
     expect(btnHash).not.toBe("btn");
+
+    // Discriminator: a Vue-owned rewrite of the same bytes DOES change them.
+    const rewritten = transformVueStyle(source, { scopeId: "abc123", scoped: true });
+    expect(rewritten.code).not.toBe(source);
+    expect(rewritten.code).toContain(".btn[data-v-abc123]");
   });
 });
 

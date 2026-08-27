@@ -118,13 +118,15 @@ fn host_error(err: host::HostError) -> Error {
 // - `analyzeStyle` — read-only fact extraction, no rewrite.
 // =============================================================================
 
-fn css_dialect(value: Option<&str>) -> verter_css_syntax::CssDialect {
+fn css_dialect(value: Option<&str>) -> Result<verter_css_syntax::CssDialect> {
     match value {
-        Some("scss") => verter_css_syntax::CssDialect::Scss,
-        Some("sass") => verter_css_syntax::CssDialect::Sass,
-        Some("less") => verter_css_syntax::CssDialect::Less,
-        Some("stylus") => verter_css_syntax::CssDialect::Stylus,
-        _ => verter_css_syntax::CssDialect::Css,
+        None => Ok(verter_css_syntax::CssDialect::Css),
+        Some(lang) => verter_css_syntax::CssDialect::from_lang(lang).ok_or_else(|| {
+            Error::new(
+                Status::InvalidArg,
+                format!("unknown CSS dialect {lang:?}; expected css, scss, sass, less, or stylus"),
+            )
+        }),
     }
 }
 
@@ -181,7 +183,7 @@ pub fn prepare_style_for_preprocessor(
         let filename = options.filename.as_deref().unwrap_or("style");
         let input = verter_compiler::style_planner::AuthoredStyleInput::new(
             &css,
-            css_dialect(options.dialect.as_deref()),
+            css_dialect(options.dialect.as_deref())?,
             filename,
             filename,
             filename,
@@ -354,7 +356,7 @@ pub fn analyze_style(css: Buffer, options: AnalyzeStyleOptions) -> Result<Analyz
         let filename = options.filename.as_deref().unwrap_or("style");
         let input = verter_compiler::style_planner::AuthoredStyleInput::new(
             &css,
-            css_dialect(options.dialect.as_deref()),
+            css_dialect(options.dialect.as_deref())?,
             filename,
             filename,
             filename,

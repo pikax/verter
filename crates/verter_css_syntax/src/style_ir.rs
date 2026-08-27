@@ -11,7 +11,7 @@ use bumpalo::Bump;
 use smallvec::SmallVec;
 use verter_span::Span;
 
-use crate::arena::{alloc_str, bump_for_source, freeze_vec, BumpSlice, BumpStr};
+use crate::arena::{alloc_str, bump_for_source, freeze_vec, BumpSlice, BumpStr, FrozenBump};
 use crate::diagnostic::{CssDiagnostic, CssParseFailure, CssStructureTooLarge};
 use crate::dialect::CssDialect;
 use crate::event::{NodeFlags, ParseEvent, ParseEventSink, SyntaxKind};
@@ -394,10 +394,6 @@ impl StaticClassFact {
 }
 
 struct StyleSyntaxIrData {
-    /// Owns the bump that `statements` and nested child slices point into.
-    /// Frozen after parse: never allocated into again, so the IR is `Sync`
-    /// even though [`Bump`] itself is not.
-    _bump: Bump,
     source: CssSource,
     dialect: CssDialect,
     statements: BumpSlice<StyleStatement>,
@@ -417,12 +413,10 @@ struct StyleSyntaxIrData {
     /// paired HTML comment. Minted from the parse's own token stream so the
     /// Svelte reject projection does not re-scan source for the pairing.
     unpaired_cdo_span: Option<Span>,
+    /// Frozen last so the bump outlives every bump-backed child on drop.
+    /// A live [`Bump`] cannot inhabit this struct: freeze is the type-state.
+    _bump: FrozenBump,
 }
-
-// The bump is write-once during parse and immutable afterwards. Child
-// `BumpSlice`s are never written, so sharing the finished IR across threads
-// is sound even though `bumpalo::Bump` is `!Sync`.
-unsafe impl Sync for StyleSyntaxIrData {}
 
 /// Parsed stylesheet. `Clone` is an `Arc` clone and keeps bump-backed nodes valid.
 #[derive(Clone)]
@@ -1148,7 +1142,6 @@ pub(crate) fn notify_parse_phase(_phase: &'static str) {}
 fn ir_from_frozen(bump: Bump, frozen: FrozenStyleIr) -> StyleSyntaxIr {
     StyleSyntaxIr {
         data: Arc::new(StyleSyntaxIrData {
-            _bump: bump,
             source: frozen.source,
             dialect: frozen.dialect,
             statements: frozen.statements,
@@ -1156,6 +1149,7 @@ fn ir_from_frozen(bump: Bump, frozen: FrozenStyleIr) -> StyleSyntaxIr {
             imports_unresolved: frozen.imports_unresolved,
             comment_spans: frozen.comment_spans,
             unpaired_cdo_span: frozen.unpaired_cdo_span,
+            _bump: FrozenBump::freeze(bump),
         }),
     }
 }

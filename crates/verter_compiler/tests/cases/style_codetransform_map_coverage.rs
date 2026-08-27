@@ -30,8 +30,8 @@ use verter_compiler::framework_common::carrier_compiler::{
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{CarrierCompilerRegistry, FrameworkParseArtifact};
 use verter_compiler::style_planner::{
-    transform_vue_css_modules, transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput,
-    PlainCssInput, StyleRewriteOutcome,
+    run_vue_style_cascade, transform_vue_css_modules, transform_vue_scoped_css,
+    transform_vue_v_bind, AuthoredStyleInput, PlainCssInput, StyleRewriteOutcome,
 };
 use verter_css_syntax::CssDialect;
 use verter_language::carrier_grammar::{
@@ -313,6 +313,15 @@ fn vue_scoped_selector_inserted_attribute_stays_unmapped_across_its_entire_span(
         Some(0),
         "the position right after the synthetic attribute must resume mapping to real source"
     );
+    let authored_after = source
+        .find(" { color: red; }")
+        .expect("trailing authored text");
+    let expected = byte_offset_to_line_col(source, authored_after);
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col()),
+        expected,
+        "the position right after the synthetic attribute must resume at the authored          trailing coordinates, not only a matching source_id"
+    );
 }
 
 // ─── category 3: UTF-16 / non-ASCII positions ──────────────────────────────────
@@ -554,6 +563,41 @@ fn vue_style_source_map_toggle_is_a_genuine_caller_facing_ab_option_through_comp
         .as_deref()
         .expect("source_map: true must hand the caller a map");
     let map = decode(map_json);
+    assert!(
+        map.get_tokens().next().is_some(),
+        "the returned map must carry real mappings"
+    );
+}
+
+#[test]
+fn vue_style_cascade_source_map_toggle_is_a_genuine_ab_option() {
+    let source = ".x { color: red; }";
+    let input = || {
+        AuthoredStyleInput::new(
+            source,
+            CssDialect::Css,
+            "cascade.css",
+            "space:cascade",
+            "artifact:cascade",
+        )
+    };
+    let off = run_vue_style_cascade(input(), "scope123", false, true, false);
+    let on = run_vue_style_cascade(input(), "scope123", false, true, true);
+    assert!(off.code.contains(".x[data-v-scope123]"), "{}", off.code);
+    assert_eq!(
+        off.code, on.code,
+        "the source_map toggle must never change emitted code"
+    );
+    assert!(
+        off.source_map.is_empty(),
+        "want_source_map: false must not hand back a map: {:?}",
+        off.source_map
+    );
+    assert!(
+        !on.source_map.is_empty(),
+        "want_source_map: true must hand back a map"
+    );
+    let map = decode(&on.source_map);
     assert!(
         map.get_tokens().next().is_some(),
         "the returned map must carry real mappings"

@@ -1,3 +1,10 @@
+> Historical recapture of the deleted lightningcss pipeline. This file is the
+> frozen A31 baseline, not a live capture recipe. Lightningcss is gone; do not
+> recapture this pipeline. The live A29 named canary
+> `converged_style_pipeline_allocation_within_ratified_ceiling` is the 1.2x
+> allocation gate and must stay GREEN. The table below that says every category
+> misses 1.2x is this pre-arena recapture, not the live canary.
+
 # J1 §2 Bounds — recaptured latency and allocation baseline
 
 Recapture of the pre-deletion CSS style-pipeline baseline on this tree, through

@@ -128,8 +128,12 @@ fn capture_record(args: &[String]) -> Result<(String, CssBaselineRecord), ExitCo
         eprintln!("capture requires --out <path>\n{USAGE}");
         return Err(ExitCode::from(2));
     };
-    let pipeline =
-        arg_value(args, "--pipeline").unwrap_or_else(|| "legacy-lightningcss".to_string());
+    let pipeline = arg_value(args, "--pipeline")
+        .unwrap_or_else(|| verter_bench::css_gate::CAPTURE_PIPELINE_DEFAULT.to_string());
+    if let Err(err) = verter_bench::css_gate::validate_capture_pipeline(&pipeline) {
+        eprintln!("REFUSED: {err}\n{USAGE}");
+        return Err(ExitCode::from(2));
+    }
 
     if !build_is_optimized() && !args.iter().any(|a| a == "--allow-unoptimized") {
         eprintln!(

@@ -57,6 +57,18 @@ fn a1_resolved_dependency_graph_carries_no_lightningcss_package() {
         .get("packages")
         .and_then(|v| v.as_array())
         .expect("`cargo metadata` packages array");
+    assert!(
+        !packages.is_empty(),
+        "`cargo metadata` returned an empty packages array — an empty graph would make the          lightningcss-absence check vacuously true"
+    );
+    let names: Vec<&str> = packages
+        .iter()
+        .filter_map(|pkg| pkg.get("name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(
+        names.contains(&"verter_compiler"),
+        "the metadata graph must include this workspace crate as a positive control, got {names:?}"
+    );
     let lightningcss_nodes: Vec<&str> = packages
         .iter()
         .filter_map(|p| p.get("name").and_then(|n| n.as_str()))

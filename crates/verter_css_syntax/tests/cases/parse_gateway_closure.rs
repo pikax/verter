@@ -17,14 +17,18 @@ const GATEWAY: &[&str] = &["parse_with_sink"];
 const RECORDED: &[&str] = &[
     "parse_component_value_tree",
     "parse_inline_style_declarations",
-    "parse_selector_structure",
     "parse_style_body",
     "parse_style_ir",
 ];
 
 /// Sealed routes: must not appear in crate-root re-exports, and each has
 /// a trybuild compile-fail at both the crate root and the module path.
-const FORBIDDEN_CLASSES: &[&str] = &["parse_lossless", "Parser", "style_body_reject_code"];
+const FORBIDDEN_CLASSES: &[&str] = &[
+    "parse_lossless",
+    "Parser",
+    "style_body_reject_code",
+    "parse_selector_structure",
+];
 
 fn lib_rs() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
@@ -148,4 +152,16 @@ fn style_body_reject_code_is_hidden_at_the_crate_root() {
 fn style_body_reject_code_is_hidden_at_its_module_path() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/compile-fail/style_body_reject_code_module_path.rs");
+}
+
+#[test]
+fn parse_selector_structure_is_hidden_at_the_crate_root() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/compile-fail/parse_selector_structure_crate_root.rs");
+}
+
+#[test]
+fn parse_selector_structure_is_hidden_at_its_module_path() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/compile-fail/parse_selector_structure_module_path.rs");
 }

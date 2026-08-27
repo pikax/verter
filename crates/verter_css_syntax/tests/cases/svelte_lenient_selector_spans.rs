@@ -541,4 +541,6 @@ fn style_syntax_ir_clone_keeps_bump_backed_nodes_readable() {
 fn bump_backed_compound_cannot_clone_out_of_the_ir() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/compile-fail/bump_backed_node_clone_outlives_ir.rs");
+    tests.compile_fail("tests/compile-fail/bump_backed_rule_clone_outlives_ir.rs");
+    tests.compile_fail("tests/compile-fail/bump_backed_selector_list_clone_outlives_ir.rs");
 }

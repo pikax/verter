@@ -908,9 +908,9 @@ fn compile_inner(
                 let source_name = options.filename.as_deref().unwrap_or("<style>");
                 let authored_dialect = dialect.unwrap_or(CssDialect::Css);
 
-                // The CSS-Modules byte-level class-name *rewrite* stays
-                // CSS-only (row 19, `css/modules.rs`, untouched); only that
-                // one stage is conditioned on the resolved dialect.
+                // The CSS-Modules byte-level class-name rewrite stays
+                // CSS-only; only that one stage is conditioned on the
+                // resolved dialect.
                 let cascade_module = style.module && dialect == Some(CssDialect::Css);
                 let mut cascade_input = AuthoredStyleInput::new(
                     style_source,

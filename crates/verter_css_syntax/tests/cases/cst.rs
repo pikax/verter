@@ -1492,6 +1492,7 @@ fn production_dependency_closure_is_framework_neutral() {
         "bumpalo",
         "memchr",
         "smallvec",
+        "verter_audit",
         "verter_debug_assert",
         "verter_span",
     ]
@@ -1544,6 +1545,7 @@ fn production_dependency_closure_is_framework_neutral() {
         ("bumpalo".to_owned(), "normal".to_owned(), None),
         ("memchr".to_owned(), "normal".to_owned(), None),
         ("smallvec".to_owned(), "normal".to_owned(), None),
+        ("verter_audit".to_owned(), "normal".to_owned(), None),
         ("verter_debug_assert".to_owned(), "normal".to_owned(), None),
         ("verter_span".to_owned(), "normal".to_owned(), None),
     ]

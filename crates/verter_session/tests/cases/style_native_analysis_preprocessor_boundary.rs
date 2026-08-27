@@ -131,12 +131,10 @@ fn preprocess_dependent_request_fails_closed_as_external() {
         })
         .unwrap();
 
-    // "styl" is not one of the five recognized native dialect strings
-    // (css/scss/sass/less/stylus) — the host must issue a preprocessor
-    // request rather than silently treat it as native CSS. The Vue parser
-    // aliases `styl` onto Stylus for *tag classification*, but analysis_lang
-    // and the block-content native set key off the authored string, so this
-    // spelling stays preprocessing-dependent.
+    // `styl` is Vue's tag-classification alias of Stylus, but analysis_lang
+    // keys off the authored string, so this spelling stays preprocessing-
+    // dependent. `lang="stylus"` (below) is native — if analysis starts
+    // treating `styl` as Stylus, this External fixture turns Native and fails.
     assert_eq!(
         update.preprocessor_requests.len(),
         1,
@@ -161,6 +159,30 @@ fn preprocess_dependent_request_fails_closed_as_external() {
         "preprocessing-dependent facts must fail closed, never be fabricated \
          from unprocessed bytes: {:?}",
         style.css
+    );
+
+    let stylus = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/Stylus.vue".to_string(),
+            source: Arc::from(
+                "<template><div class=\"stylus-root\"/></template>\
+                 <style lang=\"stylus\">\n.native-stylus\n  color red\n</style>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let stylus_analysis = host.get_analysis(&stylus.canonical_id).unwrap();
+    let stylus_style = stylus_analysis.styles.first().expect("stylus style");
+    assert_eq!(
+        stylus_style.content_availability,
+        BlockContentAvailability::NativeAvailable,
+        "lang=stylus must stay native so lang=styl can remain the External contrast"
+    );
+    assert!(
+        stylus_style.css.is_some(),
+        "lang=stylus must publish native css facts"
     );
 
     // The host-level block-content query (the LSP's real read path) must

@@ -175,3 +175,58 @@ fn three_way_style_ops_are_napi_exported() {
         transform_vue_style;
     let _: fn(Buffer, AnalyzeStyleOptions) -> napi::Result<AnalyzeStyleResult> = analyze_style;
 }
+
+#[test]
+fn three_way_style_ops_carry_the_napi_attribute() {
+    let src = include_str!("../../src/lib.rs");
+    for name in [
+        "prepare_style_for_preprocessor",
+        "transform_vue_style",
+        "analyze_style",
+    ] {
+        let sig = format!("pub fn {name}(");
+        let idx = src
+            .find(&sig)
+            .unwrap_or_else(|| panic!("{name} missing from napi lib.rs"));
+        let window = &src[idx.saturating_sub(24)..idx];
+        assert!(
+            window.contains("#[napi]"),
+            "{name} is exported to JS only through #[napi]; a type-witness still compiles if the              attribute is stripped:\n{window:?}"
+        );
+    }
+}
+
+#[test]
+fn retired_process_style_spellings_are_absent_from_napi_source() {
+    let src = include_str!("../../src/lib.rs");
+    for needle in [
+        "ProcessStyleOptions",
+        "ProcessStyleResult",
+        "fn process_style",
+    ] {
+        assert!(
+            !src.contains(needle),
+            "napi source still names retired {needle}"
+        );
+    }
+}
+
+#[test]
+fn unknown_dialect_is_refused() {
+    let err = match prepare_style_for_preprocessor(
+        css_buf(".a { color: red; }"),
+        PrepareStyleForPreprocessorOptions {
+            scopeId: "x".to_string(),
+            dialect: Some("postcss".to_string()),
+            filename: None,
+        },
+    ) {
+        Err(err) => err,
+        Ok(_) => panic!("unknown dialect must fail closed"),
+    };
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("postcss") || msg.contains("dialect"),
+        "refusal must name the unknown dialect: {msg}"
+    );
+}

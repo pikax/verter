@@ -22,6 +22,19 @@ impl CssDialect {
     /// Closed dialect universe this crate parses natively.
     pub const ALL: [Self; 5] = [Self::Css, Self::Scss, Self::Sass, Self::Less, Self::Stylus];
 
+    /// Map an authored `lang` / dialect spelling onto the closed native set.
+    /// Unknown strings are `None` — callers must fail closed, not default to CSS.
+    pub fn from_lang(value: &str) -> Option<Self> {
+        match value {
+            "css" => Some(Self::Css),
+            "scss" => Some(Self::Scss),
+            "sass" => Some(Self::Sass),
+            "less" => Some(Self::Less),
+            "stylus" => Some(Self::Stylus),
+            _ => None,
+        }
+    }
+
     #[inline]
     pub(crate) const fn allows_line_comments(self) -> bool {
         matches!(self, Self::Scss | Self::Sass | Self::Less | Self::Stylus)
