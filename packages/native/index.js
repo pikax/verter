@@ -41,6 +41,7 @@ const {
   memoryAuditSnapshot,
   memoryAuditResetHighWater,
   memoryAuditSites,
+  parseSelectorThreadInvocations,
 } = nativeBinding;
 
 const ComponentMetaHost = MetaProject;
@@ -110,3 +111,4 @@ module.exports.memoryAuditEnable = memoryAuditEnable;
 module.exports.memoryAuditSnapshot = memoryAuditSnapshot;
 module.exports.memoryAuditResetHighWater = memoryAuditResetHighWater;
 module.exports.memoryAuditSites = memoryAuditSites;
+module.exports.parseSelectorThreadInvocations = parseSelectorThreadInvocations;

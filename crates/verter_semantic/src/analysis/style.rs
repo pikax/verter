@@ -1015,22 +1015,21 @@ pub fn extract_var_references(
 /// Parse a complete static CSS selector into the legacy semantic matcher shape.
 /// Dynamic, recovered, and evaluation-dependent selectors fail closed.
 pub fn parse_selector(selector_text: &str) -> Option<StructuredSelector> {
-    #[cfg(any(test, feature = "test-support"))]
     PARSE_SELECTOR_INVOCATIONS.with(|count| count.set(count.get() + 1));
     super::style_syntax::parse_selector_authority(selector_text)
 }
 
-#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static PARSE_SELECTOR_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Per-thread count of [`parse_selector`] executions. Test observability only.
-#[cfg(any(test, feature = "test-support"))]
+/// Per-thread count of [`parse_selector`] executions.
+/// The CSS selector-match boundary must not increment this.
 #[must_use]
 pub fn parse_selector_thread_invocations() -> u64 {
     PARSE_SELECTOR_INVOCATIONS.with(std::cell::Cell::get)
 }
+
 /// Compute specificity from a `StructuredSelector`.
 pub fn compute_structured_specificity(selector: &StructuredSelector) -> (u32, u32, u32) {
     let mut a: u32 = 0; // IDs

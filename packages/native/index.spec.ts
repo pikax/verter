@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import {
   VerterHost,
   processStyle,
+  parseSelectorThreadInvocations,
   type HostPublicApiProjectionError,
   type HostTscDeclarationShapeReason,
 } from "./index.js";
@@ -1189,8 +1190,24 @@ describe("CSS selector-structure boundary", () => {
       source,
       fileKind: "vue",
     });
+    const analysisJson = host.getAnalysis(result.canonicalId);
+    expect(analysisJson).not.toBeNull();
+    const analysis = JSON.parse(analysisJson as string) as {
+      styles: Array<{ css?: { selectors: Array<{ text: string; structure?: unknown }> } }>;
+    };
+    const selectors = analysis.styles[0]?.css?.selectors ?? [];
+    expect(
+      selectors.some((selector) => selector.text === ".card" && selector.structure != null),
+    ).toBe(true);
+    expect(selectors.some((selector) => selector.structure == null)).toBe(true);
+
+    const before = parseSelectorThreadInvocations();
     const matches = host.matchCssSelectors(result.canonicalId);
+    expect(
+      parseSelectorThreadInvocations() - before,
+      "the native boundary must skip, not re-parse, structure-less selectors",
+    ).toBe(0);
     expect(matches.some((row) => row.selectorText === ".card")).toBe(true);
-    expect(matches.some((row) => row.selectorText.includes("#{$x}"))).toBe(false);
+    expect(matches.every((row) => row.selectorText !== ".foo#{$x}")).toBe(true);
   });
 });

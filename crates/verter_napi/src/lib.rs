@@ -189,6 +189,13 @@ pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<Proces
     })
 }
 
+/// Per-thread count of `parse_selector` executions.
+/// `matchCssSelectors` must not increment this.
+#[napi]
+pub fn parse_selector_thread_invocations() -> f64 {
+    verter_semantic::analysis::parse_selector_thread_invocations() as f64
+}
+
 // =============================================================================
 // NAPI ↔ FFI zero-copy boundary structs
 //

@@ -168,6 +168,12 @@ export declare function memoryAuditResetHighWater(): boolean;
  */
 export declare function memoryAuditSites(topK: number): string | null;
 
+/**
+ * Per-thread count of `parse_selector` executions.
+ * `matchCssSelectors` must not increment this.
+ */
+export declare function parseSelectorThreadInvocations(): number;
+
 // =============================================================================
 // Host-backed batch compile — VerterHost.compileMany
 //
