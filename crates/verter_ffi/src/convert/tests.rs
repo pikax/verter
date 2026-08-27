@@ -53,6 +53,11 @@ fn valid_block_override_entry() -> FfiBlockOverrideEntry {
         code_hash: "code-hash".to_string(),
         source_map: Some("{}".to_string()),
         source_map_hash: Some("map-hash".to_string()),
+        dependencies: Vec::new(),
+        diagnostics: Vec::new(),
+        processor_identity: None,
+        processor_version: None,
+        config_fingerprint: None,
         supplied_provenance: None,
     }
 }
@@ -128,6 +133,112 @@ fn block_override_wire_rejects_every_malformed_nominal_token() {
             "wrong refusal for {field}: {error}"
         );
     }
+}
+
+/// A caller still sending the superseded `suppliedProvenance` field (the
+/// pre-six-field wire shape) must not be hard-rejected by
+/// `deny_unknown_fields` — the JS-side migration to the new field shape
+/// lands separately, and this Rust-side rename must not be a silent
+/// behavioral regression for a caller that hasn't landed yet.
+#[test]
+fn ffi_block_override_entry_accepts_the_retired_supplied_provenance_field() {
+    let json = serde_json::json!({
+        "correlationToken": "correlation",
+        "blockToken": "block",
+        "ownerRevision": "revision",
+        "artifactToken": "artifact",
+        "expectedLanguage": "pug",
+        "priorBasisToken": serde_json::Value::Null,
+        "basisToken": "basis",
+        "sourceSpaceToken": "source-space",
+        "code": "compiled",
+        "codeHash": "code-hash",
+        "sourceMap": serde_json::Value::Null,
+        "sourceMapHash": serde_json::Value::Null,
+        "suppliedProvenance": "legacy-provider",
+    });
+    let entry = serde_json::from_value::<FfiBlockOverrideEntry>(json)
+        .expect("the retired suppliedProvenance field must not hard-reject deserialization");
+    assert_eq!(
+        entry.supplied_provenance.as_deref(),
+        Some("legacy-provider")
+    );
+    assert!(entry.dependencies.is_empty());
+    assert!(entry.diagnostics.is_empty());
+    assert_eq!(entry.processor_identity, None);
+    assert_eq!(entry.processor_version, None);
+    assert_eq!(entry.config_fingerprint, None);
+}
+
+/// Negative control: `deny_unknown_fields` must still refuse a genuinely
+/// unrecognized field (a typo, or real wire drift) — tolerating the one
+/// named legacy field must not have collaterally disabled the guard.
+#[test]
+fn ffi_block_override_entry_still_refuses_a_genuinely_unrecognized_field() {
+    let mut json = serde_json::json!({
+        "correlationToken": "correlation",
+        "blockToken": "block",
+        "ownerRevision": "revision",
+        "artifactToken": "artifact",
+        "expectedLanguage": "pug",
+        "priorBasisToken": serde_json::Value::Null,
+        "basisToken": "basis",
+        "sourceSpaceToken": "source-space",
+        "code": "compiled",
+        "codeHash": "code-hash",
+        "sourceMap": serde_json::Value::Null,
+        "sourceMapHash": serde_json::Value::Null,
+    });
+    json["totallyUnrecognizedField"] = serde_json::json!(true);
+    let err = match serde_json::from_value::<FfiBlockOverrideEntry>(json) {
+        Ok(_) => panic!("a genuinely unrecognized field must still refuse deserialization"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("totallyUnrecognizedField"),
+        "expected the unknown-field error to name the field, got: {err}"
+    );
+}
+
+/// Every genuinely recognized field (the new six-field shape, all set at
+/// once) must still deserialize cleanly.
+#[test]
+fn ffi_block_override_entry_accepts_every_recognized_new_field_together() {
+    let json = serde_json::json!({
+        "correlationToken": "correlation",
+        "blockToken": "block",
+        "ownerRevision": "revision",
+        "artifactToken": "artifact",
+        "expectedLanguage": "scss",
+        "priorBasisToken": serde_json::Value::Null,
+        "basisToken": "basis",
+        "sourceSpaceToken": "source-space",
+        "code": ".a{color:red}",
+        "codeHash": "code-hash",
+        "sourceMap": serde_json::Value::Null,
+        "sourceMapHash": serde_json::Value::Null,
+        "dependencies": ["/workspace/_vars.scss"],
+        "diagnostics": [{
+            "severity": "warning",
+            "message": "unused variable",
+            "line": 3,
+            "column": 5,
+        }],
+        "processorIdentity": "sass",
+        "processorVersion": "1.77.0",
+        "configFingerprint": "fingerprint-v1",
+    });
+    let entry = serde_json::from_value::<FfiBlockOverrideEntry>(json)
+        .expect("every recognized new field together must deserialize cleanly");
+    assert_eq!(
+        entry.dependencies,
+        vec!["/workspace/_vars.scss".to_string()]
+    );
+    assert_eq!(entry.diagnostics.len(), 1);
+    assert_eq!(entry.processor_identity.as_deref(), Some("sass"));
+    assert_eq!(entry.processor_version.as_deref(), Some("1.77.0"));
+    assert_eq!(entry.config_fingerprint.as_deref(), Some("fingerprint-v1"));
+    assert_eq!(entry.supplied_provenance, None);
 }
 
 #[test]

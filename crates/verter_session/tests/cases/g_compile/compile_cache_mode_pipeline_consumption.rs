@@ -86,7 +86,11 @@ fn supplied(request: &PreprocessorRequest, code: &str) -> BlockOverrideEntry {
         code_hash: hash_block_content(code),
         source_map: None,
         source_map_hash: None,
-        supplied_provenance: Some("test".to_string()),
+        dependencies: Vec::new(),
+        diagnostics: Vec::new(),
+        processor_identity: "test".to_string(),
+        processor_version: "0.0.0-test".to_string(),
+        config_fingerprint: None,
     }
 }
 
@@ -133,7 +137,11 @@ fn unissued(code: &str) -> BlockOverrideEntry {
         code_hash: hash_block_content(code),
         source_map: None,
         source_map_hash: None,
-        supplied_provenance: None,
+        dependencies: Vec::new(),
+        diagnostics: Vec::new(),
+        processor_identity: String::new(),
+        processor_version: String::new(),
+        config_fingerprint: None,
     }
 }
 

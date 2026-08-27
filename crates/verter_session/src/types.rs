@@ -2162,7 +2162,11 @@ pub enum BlockContentOrigin {
         content_hash: String,
     },
     SuppliedValidated {
-        provenance: Option<String>,
+        dependencies: Vec<String>,
+        diagnostics: Vec<PreprocessorDiagnostic>,
+        processor_identity: String,
+        processor_version: String,
+        config_fingerprint: Option<BlockContentHashToken>,
     },
 }
 
@@ -2373,10 +2377,30 @@ pub(crate) struct PendingPreprocessorRequest {
     pub(crate) custom_type: Option<String>,
 }
 
+/// A diagnostic reported by an external preprocessor tool (e.g. a Sass
+/// compiler error/warning) for one [`BlockOverrideEntry`]. The host carries
+/// this typed record but never interprets or remaps its position — mapping
+/// it back through the sealed source map into SFC-absolute coordinates is a
+/// later concern, not this boundary's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreprocessorDiagnostic {
+    pub severity: HostSeverity,
+    pub message: String,
+    /// Line/column within the preprocessor's OWN source (its input, e.g. a
+    /// `.scss` file) — NOT SFC-absolute, unlike [`HostDiagnostic::span`].
+    /// `None` when the tool reported no position.
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
 /// A single preprocessed block override to inject into the compile pipeline.
 ///
 /// Used in [`BlockOverrideRequest`] to provide the preprocessed output for
-/// a template, script, style, or custom block.
+/// a template, script, style, or custom block. Carries the complete
+/// six-field external-preprocessor result contract: processed bytes
+/// (`code`), source map, dependencies, diagnostics, processor
+/// identity+version, and configuration fingerprint — every field distinct
+/// and typed, none folded into an opaque blob.
 #[derive(Debug, Clone)]
 pub struct BlockOverrideEntry {
     pub correlation_token: BlockContentCorrelationToken,
@@ -2392,8 +2416,21 @@ pub struct BlockOverrideEntry {
     /// Source map from the preprocessor, if available.
     pub source_map: Option<Arc<str>>,
     pub source_map_hash: Option<BlockContentHashToken>,
-    /// Opaque supplied provenance. The host carries but never interprets it.
-    pub supplied_provenance: Option<String>,
+    /// Files the preprocessor's result depended on (e.g. `@import`/`@use`
+    /// targets). The host carries this list for upstream cache-invalidation
+    /// correctness; it does not itself watch or resolve these paths.
+    pub dependencies: Vec<String>,
+    /// Diagnostics the preprocessor reported while producing `code`.
+    pub diagnostics: Vec<PreprocessorDiagnostic>,
+    /// Identifying name of the external tool that produced `code` (e.g.
+    /// `"sass"`, `"less"`, `"stylus"`). Empty when the caller supplied none.
+    pub processor_identity: String,
+    /// Version string of the external tool that produced `code`.
+    pub processor_version: String,
+    /// Opaque fingerprint of the external tool's configuration. `None` when
+    /// the tool has no configurable state relevant to this result. The host
+    /// carries but never interprets it.
+    pub config_fingerprint: Option<BlockContentHashToken>,
 }
 
 #[cfg(test)]
@@ -2432,7 +2469,11 @@ impl BlockOverrideEntry {
             code,
             source_map: None,
             source_map_hash: None,
-            supplied_provenance: None,
+            dependencies: Vec::new(),
+            diagnostics: Vec::new(),
+            processor_identity: String::new(),
+            processor_version: String::new(),
+            config_fingerprint: None,
         }
     }
 
@@ -2453,7 +2494,11 @@ impl BlockOverrideEntry {
             code,
             source_map: None,
             source_map_hash: None,
-            supplied_provenance: Some("rust-test".to_string()),
+            dependencies: Vec::new(),
+            diagnostics: Vec::new(),
+            processor_identity: "rust-test".to_string(),
+            processor_version: "0.0.0-test".to_string(),
+            config_fingerprint: None,
         }
     }
 }

@@ -72,7 +72,11 @@ pub(crate) struct SuppliedContentArtifact {
     code_hash: BlockContentHashToken,
     source_map: Option<Arc<str>>,
     source_map_hash: Option<BlockContentHashToken>,
-    provenance: Option<String>,
+    dependencies: Vec<String>,
+    diagnostics: Vec<PreprocessorDiagnostic>,
+    processor_identity: String,
+    processor_version: String,
+    config_fingerprint: Option<BlockContentHashToken>,
 }
 
 impl SuppliedContentArtifact {
@@ -80,7 +84,15 @@ impl SuppliedContentArtifact {
         self.code
             .len()
             .saturating_add(self.source_map.as_deref().map_or(0, str::len))
-            .saturating_add(self.provenance.as_deref().map_or(0, str::len))
+            .saturating_add(self.processor_identity.len())
+            .saturating_add(self.processor_version.len())
+            .saturating_add(self.dependencies.iter().map(String::len).sum::<usize>())
+            .saturating_add(
+                self.diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.len())
+                    .sum::<usize>(),
+            )
     }
 }
 
@@ -935,7 +947,11 @@ impl VerterHost {
                 return Ok(BlockContentSnapshot {
                     availability: BlockContentAvailability::SuppliedAvailable,
                     origin: Some(BlockContentOrigin::SuppliedValidated {
-                        provenance: supplied.provenance,
+                        dependencies: supplied.dependencies,
+                        diagnostics: supplied.diagnostics,
+                        processor_identity: supplied.processor_identity,
+                        processor_version: supplied.processor_version,
+                        config_fingerprint: supplied.config_fingerprint,
                     }),
                     content: Some(supplied.code),
                     content_class: selected.content_class,
@@ -1467,15 +1483,24 @@ impl VerterHost {
             {
                 return Err(terminal_on_error(BlockContentRefusal::MalformedToken));
             }
+            let supplied_provenance_bytes = entry
+                .processor_identity
+                .len()
+                .saturating_add(entry.processor_version.len())
+                .saturating_add(entry.dependencies.iter().map(String::len).sum::<usize>())
+                .saturating_add(
+                    entry
+                        .diagnostics
+                        .iter()
+                        .map(|diagnostic| diagnostic.message.len())
+                        .sum::<usize>(),
+                );
             if entry.code.len() > MAX_SUPPLIED_CODE_BYTES
                 || entry
                     .source_map
                     .as_deref()
                     .is_some_and(|map| map.len() > MAX_SUPPLIED_MAP_BYTES)
-                || entry
-                    .supplied_provenance
-                    .as_deref()
-                    .is_some_and(|value| value.len() > MAX_SUPPLIED_PROVENANCE_BYTES)
+                || supplied_provenance_bytes > MAX_SUPPLIED_PROVENANCE_BYTES
             {
                 return Err(terminal_on_error(BlockContentRefusal::PayloadTooLarge));
             }
@@ -1614,7 +1639,11 @@ impl VerterHost {
                     code_hash: entry.code_hash,
                     source_map: entry.source_map,
                     source_map_hash: entry.source_map_hash,
-                    provenance: entry.supplied_provenance,
+                    dependencies: entry.dependencies,
+                    diagnostics: entry.diagnostics,
+                    processor_identity: entry.processor_identity,
+                    processor_version: entry.processor_version,
+                    config_fingerprint: entry.config_fingerprint,
                 },
             ));
         }
@@ -1783,7 +1812,11 @@ mod tests {
             code_hash,
             source_map: None,
             source_map_hash: None,
-            provenance: None,
+            dependencies: Vec::new(),
+            diagnostics: Vec::new(),
+            processor_identity: String::new(),
+            processor_version: String::new(),
+            config_fingerprint: None,
         }
     }
 
@@ -1883,7 +1916,7 @@ mod tests {
         let provenance_request = provenance_update.preprocessor_requests[0].clone();
         let mut provenance_entry =
             BlockOverrideEntry::supplied_for_test(&provenance_request, "<p>supplied</p>");
-        provenance_entry.supplied_provenance = Some("x".repeat(MAX_SUPPLIED_PROVENANCE_BYTES + 1));
+        provenance_entry.processor_identity = "x".repeat(MAX_SUPPLIED_PROVENANCE_BYTES + 1);
         let error = provenance_host
             .apply_block_overrides(BlockOverrideRequest {
                 canonical_id: provenance_update.canonical_id,

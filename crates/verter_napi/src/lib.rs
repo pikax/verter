@@ -562,6 +562,15 @@ pub struct NapiPreprocessorRequest {
 }
 
 #[napi(object)]
+pub struct NapiPreprocessorDiagnostic {
+    /// `"error"`, `"warning"`, or `"info"`.
+    pub severity: String,
+    pub message: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+#[napi(object)]
 pub struct NapiBlockOverrideEntry {
     pub correlationToken: String,
     pub blockToken: String,
@@ -577,6 +586,17 @@ pub struct NapiBlockOverrideEntry {
     /// Source map from the preprocessor, if available.
     pub sourceMap: Option<String>,
     pub sourceMapHash: Option<String>,
+    pub dependencies: Option<Vec<String>>,
+    pub diagnostics: Option<Vec<NapiPreprocessorDiagnostic>>,
+    pub processorIdentity: Option<String>,
+    pub processorVersion: Option<String>,
+    pub configFingerprint: Option<String>,
+    /// Superseded wire field, replaced by `dependencies`/`diagnostics`/
+    /// `processorIdentity`/`processorVersion`/`configFingerprint` above.
+    /// Accepted so an un-migrated caller's object literal (still typed with
+    /// this property) keeps matching this struct's published surface instead
+    /// of silently drifting from it; never read below. Remove once every
+    /// caller migrates to the new fields.
     pub suppliedProvenance: Option<String>,
 }
 
@@ -1749,6 +1769,27 @@ impl NapiVerterHost {
                     code_hash: e.codeHash,
                     source_map: e.sourceMap,
                     source_map_hash: e.sourceMapHash,
+                    dependencies: e.dependencies.unwrap_or_default(),
+                    diagnostics: e
+                        .diagnostics
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|d| FfiPreprocessorDiagnostic {
+                            severity: d.severity,
+                            message: d.message,
+                            line: d.line,
+                            column: d.column,
+                        })
+                        .collect(),
+                    processor_identity: e.processorIdentity,
+                    processor_version: e.processorVersion,
+                    config_fingerprint: e.configFingerprint,
+                    // Superseded field, forwarded for parity with the
+                    // JSON/WASM path's `FfiBlockOverrideEntry` (never read
+                    // downstream by `ffi_block_override_to_host`) rather
+                    // than discarded here — an un-migrated caller's value
+                    // is preserved on the wire even though nothing
+                    // interprets it yet.
                     supplied_provenance: e.suppliedProvenance,
                 })
             })

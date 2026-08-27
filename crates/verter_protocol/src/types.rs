@@ -123,6 +123,19 @@ pub struct FfiUpsertRequest {
     pub aliases: Option<Vec<String>>,
 }
 
+/// A diagnostic reported by an external preprocessor tool for one
+/// [`FfiBlockOverrideEntry`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FfiPreprocessorDiagnostic {
+    /// `"error"`, `"warning"`, or `"info"`.
+    pub severity: String,
+    pub message: String,
+    /// Line/column within the preprocessor's own source, if reported.
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
 /// A single preprocessed block override (template, script, style, or custom).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -141,6 +154,26 @@ pub struct FfiBlockOverrideEntry {
     /// Source map from the preprocessor, if available.
     pub source_map: Option<String>,
     pub source_map_hash: Option<String>,
+    /// Files the preprocessor's result depended on.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    /// Diagnostics the preprocessor reported for this result.
+    #[serde(default)]
+    pub diagnostics: Vec<FfiPreprocessorDiagnostic>,
+    /// Identifying name of the external tool that produced `code`.
+    #[serde(default)]
+    pub processor_identity: Option<String>,
+    /// Version string of the external tool that produced `code`.
+    #[serde(default)]
+    pub processor_version: Option<String>,
+    /// Opaque fingerprint of the external tool's configuration.
+    pub config_fingerprint: Option<String>,
+    /// Superseded wire field, replaced by `dependencies`/`diagnostics`/
+    /// `processorIdentity`/`processorVersion`/`configFingerprint` above.
+    /// Accepted-and-ignored so `deny_unknown_fields` does not hard-reject a
+    /// payload from a caller still sending the old shape — never read by
+    /// `ffi_block_override_to_host`. Remove once no caller sends it.
+    #[serde(default)]
     pub supplied_provenance: Option<String>,
 }
 
