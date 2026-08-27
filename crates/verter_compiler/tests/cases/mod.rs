@@ -11,6 +11,7 @@ mod parse_diagnostic_determinism;
 mod pending_nav_request_compile_fail;
 mod registered_geometry_compile_fail;
 mod segmented_overwrite_compile_fail;
+mod style_codetransform_map_coverage;
 mod style_declaration_list_routing;
 mod style_pipeline_ordering;
 mod svelte_bind_contract_freshness;
