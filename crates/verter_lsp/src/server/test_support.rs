@@ -26,7 +26,7 @@ impl VerterLanguageServer {
                             .materialized_files
                             .iter()
                             .map(|path| path.as_str().to_string())
-                            .filter(|path| verter_workspace::resolver::path_is_carrier(path)),
+                            .filter(|path| verter_semantic::resolver_core::path_is_carrier(path)),
                     );
                 }
             }

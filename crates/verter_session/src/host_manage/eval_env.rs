@@ -104,8 +104,13 @@ impl VerterHost {
             oracle.is_some(),
             self.local_type_declaration_id_graph_native(canonical_source, resolved_name)
                 .is_some(),
-            "graph-native consumer-reader readiness: graph-native C1 reader diverged from the oracle on presence for \
-             ({canonical_source}, {resolved_name})"
+            concat!(
+                "graph-native consumer-reader readiness: graph-native C",
+                "1 reader diverged from the oracle on presence for ",
+                "({}, {})"
+            ),
+            canonical_source,
+            resolved_name
         );
         oracle
     }
@@ -142,7 +147,7 @@ impl VerterHost {
         owner
     }
 
-    /// Bounded, graph-native presence reader for the C1 consumer
+    /// Bounded, graph-native presence reader for the consumer
     /// (`local_type_declaration_id`). Routes the unique declaration-owner +
     /// local-type PRESENCE checks through `routed_shallow_state` and the
     /// per-symbol declaration-header index — it NEVER materialises
@@ -162,7 +167,7 @@ impl VerterHost {
     /// token: it never crosses the FFI/wire surface
     /// (`FfiResolvedTypeDeclaration` carries no `declaration_id`), is
     /// never compared cross-file, and no production reader branches on
-    /// its value. The C1 contract is therefore STABLE-AND-UNIQUE per
+    /// its value. The contract is therefore STABLE-AND-UNIQUE per
     /// `(file, name)`, NOT EQUAL-TO-ORACLE. This reader returns a stable
     /// per-`(file, name)` id derived from the header index's
     /// deterministic name ordering, with the legacy oracle retained as
@@ -464,8 +469,8 @@ impl VerterHost {
     /// Request-view-bound sibling of [`Self::resolve_value_export_route_identity`].
     ///
     /// Threads the CALLER's `ResolverContext` into the shared export-route
-    /// walk (`build_named_type_export_route_entry_with_context`) instead of
-    /// passing the bare host. Under an overlay session that difference is
+    /// walk (`build_named_type_export_route_entry_with_context`). Under an
+    /// overlay session the exact context is
     /// load-bearing: a barrel or alias surface edited in the session must be
     /// read through the session's view, not the base host's, or the walk
     /// resolves against a file the requester cannot see.
@@ -819,9 +824,9 @@ impl VerterHost {
             match self.resolve_for_persistent_state(
                 canonical_id,
                 candidate,
-                verter_workspace::ResolutionContext {
-                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                verter_semantic::resolver_core::ResolutionContext {
+                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
                 },
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -1926,8 +1931,8 @@ impl crate::VerterHost {
     ///    consuming query invalidates on a retarget or a leaf edit, and
     ///    returns the target's OWN owner. Nothing here fabricates ownership.
     ///
-    /// Every read is made through `ctx`, never through the bare host: under an
-    /// overlay session a barrel edited in that session has to resolve against
+    /// Every read is made through `ctx`: under an overlay session a barrel
+    /// edited in that session has to resolve against
     /// the session's view.
     ///
     /// The route stops at the EXPORTED declaration and deliberately does not

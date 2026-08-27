@@ -811,7 +811,7 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         // Base-view returner: hand back the DTO bundle. A partial surface is
         // already refused store admission inside `vue_macro_dtos_with_ctx`;
-        // this bare-host entry has no request-result completeness to fold.
+        // this direct query has no request-result completeness to fold.
         vue_macro_dtos_with_ctx(&host_ctx, request).dtos
     }
 }

@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{normalize_canonical_id, ProjectResolver};
+use super::ModuleResolverCoreTestExt;
 use crate::traits::WorkspaceRead;
 use crate::types::{ResolutionKind, ResolvePhase, ResolveRequest, ResolveRequestKind};
+use verter_semantic::resolver_core::{normalize_canonical_id, AttemptFailure, ModuleResolverCore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResolverObservation {
@@ -76,6 +77,21 @@ impl TraceReader {
 }
 
 impl WorkspaceRead for TraceReader {
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
+        crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<crate::resolver::LoadedResolutionInputBatch, AttemptFailure> {
+        crate::resolver::load_workspace_inputs_for_test(self, reservation)
+    }
+
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.files
             .contains(&normalize_canonical_id(canonical_id))
@@ -199,7 +215,7 @@ fn request(specifier: &str) -> ResolveRequest {
 
 #[test]
 fn resolution_witness_positive_retains_every_precedence_guard_and_both_recovery_chains() {
-    let resolver = ProjectResolver::new(Vec::new());
+    let resolver = ModuleResolverCore::new(Vec::new());
     let reader =
         TraceReader::new(&["/p/mod.tsx"]).with_realpath("/p/mod.tsx", "/store/pkg/mod.tsx");
 
@@ -239,7 +255,7 @@ fn resolution_witness_positive_retains_every_precedence_guard_and_both_recovery_
 
 #[test]
 fn resolution_witness_miss_retains_the_complete_exhausted_probe_set() {
-    let resolver = ProjectResolver::new(Vec::new());
+    let resolver = ModuleResolverCore::new(Vec::new());
     let reader = TraceReader::new(&[]);
 
     assert!(resolver

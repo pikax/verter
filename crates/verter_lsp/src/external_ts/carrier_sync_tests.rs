@@ -12,6 +12,7 @@ use crate::provider_sync::{
 use dashmap::DashMap;
 use std::sync::Arc;
 
+use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, EnvDims, ExternalTsProjectResolver, ProjectBinding,
     WorkspaceProjectResolver,
@@ -22,7 +23,6 @@ use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
 };
-use verter_workspace::membership::ConfiguredMembership;
 use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
 use verter_workspace::published_state::PublishedRoot;
 use verter_workspace::snapshot_builder::{
@@ -37,10 +37,10 @@ use crate::external_ts::{
     carrier_store_dir_for, default_carrier_store_host_version, CarrierCompanion,
     CarrierPublishCoordinator, CarrierPublishStore, Manifest, ReconcileOutcome, ReconcileReason,
 };
-use crate::project_resolver::{IdeProjectConfig, NativeProjectResolver};
 use crate::provider_surface_store::ProviderSurfaceStore;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::workspace_scanner::{classify_from_snapshot, Tier};
+use verter_semantic::resolver_core::ModuleResolverCore;
 
 fn owned_carrier_state() -> ProviderSyncState {
     ProviderSyncState {
@@ -1059,8 +1059,8 @@ fn carrier_close_target_returns_companion_paths_owner_independent() {
     // buffers must be closable regardless of its ownership state (e.g. after an owner
     // loss). A carrier path yields both companion paths under an `Unresolved` binding;
     // a non-carrier path yields `None` (the single carrier-vs-not gate).
-    let resolver = crate::project_resolver::NativeProjectResolver::new(vec![
-        crate::project_resolver::IdeProjectConfig::new(
+    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
@@ -1417,7 +1417,7 @@ async fn owned_carrier_compiling_to_empty_companions_retracts_stale_advertisemen
     //    while it STILL has an authoritative owner. The resolver resolves the owner,
     //    but the host yields no compiled artifacts (it was never compiled), so the
     //    gateway builds an EMPTY companion set under authoritative ownership.
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         ws_root.clone(),
         ws_root.clone(),
         Some(tsconfig.clone()),
@@ -1546,7 +1546,7 @@ async fn owned_carrier_compile_to_empty_propagates_a_failed_retract_instead_of_p
 
     // 3. The owned source now compiles to NOTHING: the gateway drives the
     //    `CompileFailed` retract, which FAILS against the broken store.
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         ws_root.clone(),
         ws_root.clone(),
         Some(tsconfig.clone()),
@@ -1664,7 +1664,7 @@ async fn cold_bootstrap_defer_propagates_a_failed_retract_instead_of_not_ready()
     );
     break_carrier_store_writes(&ws_root);
 
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         ws_root.clone(),
         ws_root.clone(),
         Some(tsconfig.clone()),
@@ -1774,7 +1774,7 @@ async fn terminal_owner_loss_propagates_a_failed_retract_instead_of_pending() {
     ))));
     break_carrier_store_writes(&ws_root);
 
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         ws_root.clone(),
         ws_root.clone(),
         Some(tsconfig.clone()),
@@ -1851,7 +1851,7 @@ async fn managed_tsgo_reconcile_publishes_editor_membership_and_keeps_direct_ope
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
         project_binding_snapshot(&ws_root, &tsconfig),
     )));
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         ws_root.clone(),
         ws_root.clone(),
         Some(tsconfig.clone()),
@@ -2192,9 +2192,17 @@ async fn multi_claimant_carrier_sync_serves_under_single_default_owner() {
     );
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
 
-    let resolver = NativeProjectResolver::new(vec![
-        IdeProjectConfig::new(ws_root.clone(), ws_root.clone(), Some(tsconfig_a.clone())),
-        IdeProjectConfig::new(ws_root.clone(), ws_root.clone(), Some(tsconfig_b.clone())),
+    let resolver = ModuleResolverCore::new(vec![
+        verter_workspace::ide_project_config(
+            ws_root.clone(),
+            ws_root.clone(),
+            Some(tsconfig_a.clone()),
+        ),
+        verter_workspace::ide_project_config(
+            ws_root.clone(),
+            ws_root.clone(),
+            Some(tsconfig_b.clone()),
+        ),
     ]);
     let states: DashMap<String, ProviderSyncState> = DashMap::new();
     let surfaces = ProviderSurfaceStore::new();
@@ -2312,7 +2320,7 @@ async fn unowned_carrier_sync_is_terminal_unresolved_no_provider() {
     );
     fs.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snap)));
 
-    let resolver = NativeProjectResolver::new(vec![IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
         ws_root.clone(),
         ws_root.clone(),
         Some(tsconfig.clone()),

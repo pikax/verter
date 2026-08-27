@@ -18,11 +18,63 @@ must fail closed, per the charter's own vocabulary).
 | 4 | Vue custom blocks (`<docs>`, `<i18n>`, etc.) | Opaque raw text, no parse (`compile/types.rs:455-460`, `VirtualNodeKind::Custom`) | **Verter-owned**, unchanged — opaque pass-through, zero diagnostic ownership for content, block-order lint only | No |
 | 5 | Svelte module script / snippets / runes | Module script parsed + IDE-checked; snippets IDE-checked but runtime-unsupported (`svelte/runtime/client_block_plan.rs:90-97` via `svelte/carrier.rs:639-651`; the test formerly cited here, `carrier.rs:1255-1259`, sits inside `#[cfg(test)]`); runes recognized via IDE prelude ambient decls | **content-mapped** for the IDE-checked halves (module script, snippet IDE surface); **unsupported/fail-closed** for the runtime-unsupported halves, unchanged | No — same split, new transport for the content-mapped half |
 | 6 | `<script src="...">` | `ExternalSourceRequest`/`ExternalBlockKind::Script`, forward scheduler dependency (`verter_session/src/types.rs:1643-1678`, `host_executor.rs:449-458`) | **TS-owned** — once the referenced file is a real on-disk `.ts`/`.js` file, TypeScript's own project resolution already covers it without any Verter transform; Verter's role narrows to registering the dependency edge, not projecting content | Yes — the external file no longer needs Verter's own read-as-artifact path for its *content*; Verter still owns the dependency-edge bookkeeping |
-| 7 | `<template src="...">` | Same `ExternalSourceRequest` type, already supported (`types.rs:1645-1678`, tested at `framework_common/vue_bridge.rs:3237`) | **content-mapped, model NOT YET PROVEN** — the external file's content still needs the same template→TSX transform as an inline template, so it stays on the mapper path, just sourced from a different file, but the steering permits an external unit to be content-mapped only under model 2 ("independently content-mapped under a proven project/context contract" — §11). Diagnostic ownership IS already proven (`diagnostic-ownership-matrix.md`'s external-unit row: the external file's own URI, never the owning SFC's). The independent transform-input identity, project identity, and configuration identity are NOT yet proven — see `OPEN-GAPS.md`'s `G-TEMPLATE-SRC-PROJECT-CONTEXT-CONTRACT` row. | Open — same transport model as today, but the project/context contract model-2 requires is not yet supplied |
+| 7 | `<template src="...">` | Same `ExternalSourceRequest` type, already supported (`types.rs:1645-1678`, tested at `framework_common/vue_bridge.rs:3237`) | **content-mapped, model PROVEN** — the external file's content needs the same template→TSX transform as an inline template, so it stays on the mapper path, sourced from a different file. The steering permits that only under model 2 ("independently content-mapped under a proven project/context contract" — §11), and all three identities are now established by live experiment against the pinned candidate (`probes/probe10-external-source-unit.mjs`, and §7a below). Diagnostic ownership was already proven (`diagnostic-ownership-matrix.md`'s external-unit row: the external file's own URI, never the owning SFC's). | No — the transport model is unchanged, and §7a proves the required project/context contract |
 | 8 | External `<style src="...">` / imported stylesheets | Same `ExternalSourceRequest` type (`types.rs:1645-1678`) | **Verter-owned**, unchanged — CSS never touches TypeScript regardless of inline vs. external | No |
 | 9 | Imported Svelte/Vue component assets, CSS Modules | Shared framework-adapter virtual-file-naming surface (`framework/descriptor.rs:106-133`); CSS Modules Vue-only (`ide/mod.rs:121,150`) | **content-mapped** for the imported-component surface (it resolves through the same cross-file declaration machinery as any other content-mapped carrier); **Verter-owned** for CSS-module class-name facts | No — same split |
-| 10 | Supplemental outputs (secondary generated files per component) | `VirtualFileNaming` (`framework/descriptor.rs:106-133`): `ide`, `import_surface`, `testing_api_suffix` (Vue-only), `sidecar_suffixes`, `declaration_surface` | **content-mapped**, using the protocol's own native `SupplementalOutput` field (`package-lock-and-semantic-api.md` §3) — this is a direct, purpose-built replacement, not an approximation: the upstream protocol was explicitly designed for "multiple TypeScript files from a single source" (its own example is multiple Astro script blocks) | Yes — today's supplemental-output naming convention (companion-suffix files) is superseded by the protocol's native multi-output support from ONE `transform()` call, collapsing several separately-materialized virtual files into one mapper response |
+| 10 | Supplemental outputs (secondary generated files per component) | `VirtualFileNaming` (`framework/descriptor.rs:106-133`): `ide`, `import_surface`, `testing_api_suffix` (Vue-only), `sidecar_suffixes`, `declaration_surface` | **content-mapped**, using the protocol's own native `SupplementalOutput` field (`package-lock-and-semantic-api.md` §3) — this is a direct, purpose-built replacement candidate, not an approximation: the upstream protocol was explicitly designed for "multiple TypeScript files from a single source" (its own example is multiple Astro script blocks) | Yes — the protocol's native multi-output support can carry today's companion-suffix supplemental outputs from one `transform()` call; no settlement instrument replacing the naming convention is asserted here |
 | 11 | Multi-unit helpers (intra-file `Fragment`/`SourceUnit` assembly) | `assembly/fragment.rs`, `assembly/source_unit.rs` — combines script+template+style logical units of ONE SFC into one assembled artifact | **Verter-owned**, unchanged — this is exactly the machinery that PRODUCES the one content-mapper `transform()` output; it does not itself become TypeScript's concern, it feeds the mapper | No |
+
+## 7a. Row 7's project/context contract, proven
+
+The steering's model 2 requires a PROVEN project/context contract before an external unit may be
+independently content-mapped. Three identities had to be established, and each is now settled by
+`probes/probe10-external-source-unit.mjs` driving the pinned native compiler. Each is paired in that
+probe with the rival hypothesis it excludes, and each rival is injectable on the command line so the
+assertion can be watched failing — the probe's green is only worth what its red proves.
+
+**Transform-input identity — the external file's OWN bytes, byte-exact.** The `transform` request for
+the external unit carries that file's own content: not the referencing carrier's, not a concatenation
+of the two. The fixtures are chosen so no substring of one occurs in the other, so a coincidental pass
+is not available. `--inject input` asserts the carrier's bytes instead and drives the check red.
+
+**Project identity — the referencing project's own handle, and there is not always exactly one.** The
+external unit is transformed under the SAME `projectHandle` as the carrier that references it.
+Include-membership is NOT a precondition: a file reached only through the mapper's emitted import,
+outside the owning `tsconfig`'s `include`, is still transformed under that handle. In the exercised
+fixture, the unincluded and unreferenced control file was not transformed — the observed path was demand-driven.
+
+**The multi-project case is a real finding and it is not "one owner".** Under `tsc --build` with two
+configured projects both covering the same external file, that one file is transformed TWICE, once per
+project, on two DISTINCT handles. There is no single owning project to name. Handle NUMBERS are
+assigned nondeterministically across a build, so a consumer must bind a handle by its
+`configFileName`, never by ordinal — that is a hard constraint on any implementation, and reading the
+ordinal would produce a defect that only appears under `--build`.
+
+**Configuration identity — resolved independently per referencing project.** Each project's
+`openProject.compilerOptions` are its own, and the shared external unit's transform arrives under each
+handle carrying THAT project's options. The probe makes this compile-visible rather than
+frame-inspectable: the mapper emits, for the external unit, a `const` typed from the target reported
+for the handle the transform arrived on, and each carrier asserts its own project's target. Forcing
+the external unit to always report the first project's value reddens only the second project.
+
+**The mechanism by which an external unit becomes reachable — and it is the mapper's own output.**
+TypeScript has no knowledge of the `<template src>` relationship. The external unit enters the program
+either through `include` membership, or because the mapper's emitted `text` contains an import of it —
+the mapper reads `src="..."` out of the carrier's own content and emits that import itself. **So the
+mapper's output determines whether the external unit is part of the program at all.** The specifier
+must carry the MAPPED extension: `./ext/thing.tplx` resolves and transforms, while `./ext/thing` and
+`./ext/thing.js` both fail `TS2307` with no transform issued. Resolution is relative to the carrier's
+real directory.
+
+**Bounds of this proof, stated rather than left to be assumed.** Every run is `tsc --project` or
+`tsc --build`. The tsserver/LSP project-selection path was not exercised, so the multi-project result
+is specifically about `--build` over project references and NOT about which project an editor would
+pick. One mapper package and two extensions were tested; a second mapper package claiming the external
+extension was not. A non-existent external file at a resolvable specifier was not probed. Under
+`composite`, an external unit outside `include` still transforms but raises `TS6307`/`TS6059`, and
+that transform-versus-diagnostic split was observed but not exhaustively characterised. Transform
+results were observed NOT to be reused across projects within one `--build`; the invalidation rules
+behind that were not probed.
 
 ## Decision rule this table locks
 

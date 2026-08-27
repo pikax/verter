@@ -1,13 +1,12 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
 use crate::changes::WorkspaceChange;
-use crate::membership::ConfiguredMembership;
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::{
-    ExactResolution, ParsedEdge, ResolutionContext, ResolvePhase, ResolveRequestKind,
-};
+use crate::types::{ExactResolution, ParsedEdge};
+use crate::ProjectMembership;
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 fn set_fallback_projects(ws: &MemoryWorkspace, roots: &[&str]) {
     ws.set_project_graph(ProjectGraph::from_configs(
@@ -23,7 +22,9 @@ fn set_fallback_projects(ws: &MemoryWorkspace, roots: &[&str]) {
                 workspace_aliases: Vec::new(),
                 compiler_options: IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
-                membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(root)),
+                membership: crate::membership::configured_membership_match_all_under_root(
+                    &CanonicalPath::new(root),
+                ),
             })
             .collect(),
     ));
@@ -340,7 +341,7 @@ fn resolve_import_exact_resolution_authoritative_none() {
     );
 }
 
-// ── MemoryWorkspace::resolve_import with project resolver ──
+// ── MemoryWorkspace::resolve_import with semantic module resolution ──
 
 #[test]
 fn resolve_import_via_project_resolver() {
@@ -367,7 +368,9 @@ fn resolve_import_via_project_resolver() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new("d:/project"),
+        ),
     }]);
     ws.set_project_graph(graph);
 
@@ -412,7 +415,9 @@ fn resolve_import_via_tsconfig_paths() {
             ..Default::default()
         },
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new("d:/project"),
+        ),
     }]);
     ws.set_project_graph(graph);
 
@@ -622,7 +627,9 @@ fn record_parsed_edges_relative_updates_forward_reverse() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new("d:/project"),
+        ),
     }]);
     ws.set_project_graph(graph);
 
@@ -710,7 +717,9 @@ fn configured_owner_resolution_finds_unique_project() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new("d:/project"),
+        ),
     }]);
     ws.set_project_graph(graph);
 
@@ -1190,7 +1199,9 @@ fn set_project_graph_updates_resolver() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new("d:/project"),
+        ),
     }]);
     ws.set_project_graph(graph);
 
@@ -1229,7 +1240,9 @@ fn add_explicit_project() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new("d:/project"),
+        ),
     });
 
     let root = ws.published_root().expect("published snapshot");
@@ -1305,8 +1318,6 @@ fn trait_set_exact_resolutions_delegates_to_engine() {
 
 #[test]
 fn trait_configure_resolver_builds_project_resolver() {
-    use crate::resolver::IdeProjectConfig;
-
     let ws = MemoryWorkspace::new(MemoryOptions::default());
     ws.inject_file(
         "/proj/src/App.vue".to_string(),
@@ -1318,7 +1329,7 @@ fn trait_configure_resolver_builds_project_resolver() {
     );
 
     // Configure with a path alias: @ -> /proj/src
-    let mut project = IdeProjectConfig::new(
+    let mut project = crate::resolver::ide_project_config(
         "/proj".to_string(),
         "/proj".to_string(),
         Some("/proj/tsconfig.json".to_string()),
@@ -1357,8 +1368,6 @@ fn trait_configure_resolver_builds_project_resolver() {
 
 #[test]
 fn trait_configure_resolver_empty_clears_resolver() {
-    use crate::resolver::IdeProjectConfig;
-
     let ws = MemoryWorkspace::new(MemoryOptions::default());
     ws.inject_file(
         "/proj/src/App.vue".to_string(),
@@ -1370,7 +1379,7 @@ fn trait_configure_resolver_empty_clears_resolver() {
     );
 
     // First configure with a resolver.
-    let mut project = IdeProjectConfig::new(
+    let mut project = crate::resolver::ide_project_config(
         "/proj".to_string(),
         "/proj".to_string(),
         Some("/proj/tsconfig.json".to_string()),
@@ -1423,11 +1432,10 @@ fn trait_configure_resolver_empty_clears_resolver() {
 /// did not move. PASSES post-fix: the setter republishes and bumps once.
 #[test]
 fn changing_default_resolve_extensions_republishes_resolve_env_hash() {
-    use crate::resolver::IdeProjectConfig;
     use crate::workspace_snapshot::ProjectId;
 
     let ws = MemoryWorkspace::new(MemoryOptions::default());
-    let project = IdeProjectConfig::new(
+    let project = crate::resolver::ide_project_config(
         "/proj".to_string(),
         "/proj".to_string(),
         Some("/proj/tsconfig.json".to_string()),
@@ -1607,7 +1615,7 @@ fn memory_unresolved_relative_records_stem_without_published_root() {
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: crate::types::ResolveRequestKind::EsmImport,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         }],
     );
     // /src/types.ts strips `.ts` → /src/types — finds the stem bucket.
@@ -1633,16 +1641,18 @@ fn memory_resolved_relative_does_not_leak_stem() {
             extensions: vec![".ts".into()],
             workspace_root: "/src".to_string(),
             workspace_aliases: vec![],
-            compiler_options: crate::resolver::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/src")),
+            membership: crate::membership::configured_membership_match_all_under_root(
+                &CanonicalPath::new("/src"),
+            ),
         },
     ]));
     ws.record_parsed_edges(
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: crate::types::ResolveRequestKind::EsmImport,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         }],
     );
     // Canonical hit — direct query.
@@ -1678,7 +1688,7 @@ fn memory_record_ambient_dependency_uses_ambient_class() {
 /// (a) `.vue` strips (from probe — pins F3 fix);
 /// (b) `.tsx` strips (from probe — workspace owns this, host config CANNOT narrow);
 /// (c) `.ts` strips (host configured AND probe — natural intersection);
-/// (d) `.svelte` does NOT strip (truly unknown extension).
+/// (d) every REGISTERED carrier strips; only an unregistered extension does not.
 /// The workspace's merge policy is additive — host config ADDS to probe.
 #[test]
 fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
@@ -1693,7 +1703,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/A.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Child".to_string(),
-            kind: crate::types::ResolveRequestKind::EsmImport,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1707,7 +1717,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/B.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Helper".to_string(),
-            kind: crate::types::ResolveRequestKind::EsmImport,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1721,7 +1731,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/C.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./util".to_string(),
-            kind: crate::types::ResolveRequestKind::EsmImport,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1730,17 +1740,40 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "(c) .ts must strip (host + probe)"
     );
 
-    // (d) `.svelte` does NOT strip.
+    // (d) The property, not one extension. The stripping set is the probe
+    // set, whose carrier half follows the language registry — so EVERY
+    // registered carrier strips, and only a genuinely unregistered
+    // extension does not. An earlier form named `.svelte` as the
+    // non-stripping case and justified it as "unknown extension"; the
+    // premise held only while the probe set omitted it, and case (a)
+    // asserts `.vue` strips for exactly the reason `.svelte` now does.
     ws.record_parsed_edges(
         "/src/D.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Mystery".to_string(),
-            kind: crate::types::ResolveRequestKind::EsmImport,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         }],
     );
+    let carriers = verter_language::LanguageRegistry::global().carrier_extensions();
     assert!(
-        ws.reverse_deps_for("/src/Mystery.svelte").is_empty(),
-        "(d) .svelte must NOT strip (unknown extension)"
+        !carriers.is_empty(),
+        "(d) the registry must declare a carrier or this asserts nothing"
+    );
+    for extension in &carriers {
+        assert_eq!(
+            ws.reverse_deps_for(&format!("/src/Mystery.{extension}")),
+            vec!["/src/D.vue"],
+            "(d) every registered carrier must strip, including .{extension}"
+        );
+    }
+    assert!(
+        !carriers.contains(&"unregisteredext"),
+        "(d) the negative case must use an extension the registry does not know"
+    );
+    assert!(
+        ws.reverse_deps_for("/src/Mystery.unregisteredext")
+            .is_empty(),
+        "(d) an unregistered extension must NOT strip"
     );
 }
 
@@ -1764,7 +1797,7 @@ fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: crate::types::ResolveRequestKind::EsmImport,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1776,8 +1809,8 @@ fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
         "/src/Comp.vue",
         vec![crate::types::ExactResolution {
             specifier: "./types".to_string(),
-            phase: crate::types::ResolvePhase::CodegenBlocker,
-            kind: crate::types::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/lib/types.ts".to_string()),
             possible_canonical_ids: vec![],
         }],

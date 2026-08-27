@@ -18,13 +18,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use verter_semantic::resolver_core::normalize_canonical_id;
 use verter_session::external_ts::{
     AmbiguityCause, BoundProject, CarrierOwnershipResolution, EngineBackend, EnvDims,
     ExternalTsProjectResolver, ProjectBinding, WorkspaceProjectResolver,
 };
 use verter_session::VerterHost;
 use verter_workspace::published_state::PublishedRoot;
-use verter_workspace::resolver::normalize_canonical_id;
 
 use crate::external_ts::TsgoEngineBackend;
 

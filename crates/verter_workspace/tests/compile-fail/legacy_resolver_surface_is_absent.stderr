@@ -1,0 +1,41 @@
+error[E0432]: unresolved import `verter_workspace::resolver::ProjectResolver`
+ --> tests/compile-fail/legacy_resolver_surface_is_absent.rs:7:5
+  |
+7 | use verter_workspace::resolver::ProjectResolver as ResolverProjectResolver;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ProjectResolver` in `resolver`
+
+error[E0432]: unresolved import `verter_workspace::ProjectResolver`
+ --> tests/compile-fail/legacy_resolver_surface_is_absent.rs:8:5
+  |
+8 | use verter_workspace::ProjectResolver as RootProjectResolver;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ProjectResolver` in the root
+
+error[E0432]: unresolved import `verter_workspace::resolver::NativeProjectResolver`
+ --> tests/compile-fail/legacy_resolver_surface_is_absent.rs:9:5
+  |
+9 | use verter_workspace::resolver::NativeProjectResolver;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `NativeProjectResolver` in `resolver`
+
+error[E0432]: unresolved import `verter_workspace::resolver::test_support`
+  --> tests/compile-fail/legacy_resolver_surface_is_absent.rs:10:33
+   |
+10 | use verter_workspace::resolver::test_support::legacy_preferred_specifier_candidates;
+   |                                 ^^^^^^^^^^^^ could not find `test_support` in `resolver`
+
+error[E0432]: unresolved import `verter_workspace::resolver::test_support`
+  --> tests/compile-fail/legacy_resolver_surface_is_absent.rs:11:33
+   |
+11 | use verter_workspace::resolver::test_support::legacy_project_exact_result;
+   |                                 ^^^^^^^^^^^^ could not find `test_support` in `resolver`
+
+error[E0432]: unresolved import `verter_workspace::resolver::test_support`
+  --> tests/compile-fail/legacy_resolver_surface_is_absent.rs:12:33
+   |
+12 | use verter_workspace::resolver::test_support::legacy_resolve_for_project_with_reader;
+   |                                 ^^^^^^^^^^^^ could not find `test_support` in `resolver`
+
+error[E0432]: unresolved import `verter_workspace::resolver::test_support`
+  --> tests/compile-fail/legacy_resolver_surface_is_absent.rs:13:33
+   |
+13 | use verter_workspace::resolver::test_support::legacy_resolve_with_reader;
+   |                                 ^^^^^^^^^^^^ could not find `test_support` in `resolver`

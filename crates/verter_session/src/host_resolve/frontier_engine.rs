@@ -414,11 +414,9 @@ impl VerterHost {
                 // surface re-resolves against the live file set (re-materialised
                 // from the overlay source, never the base surface — no
                 // overlay-blindness) before it is served.
-                if let Some(serve) =
-                    self.materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
-                {
-                    return Some(Arc::clone(&serve.indexed.shallow_state));
-                }
+                return self
+                    .materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
+                    .map(|serve| Arc::clone(&serve.indexed.shallow_state));
             } else {
                 // Base-passthrough view: the base-key read returns the
                 // published base artifact for a non-overlaid canonical. Serve
@@ -584,7 +582,13 @@ impl VerterHost {
         crate::resolver_core::RouteResult,
         Vec<crate::resolver_core::FactVersionRef>,
     )> {
-        self.build_named_type_export_route_entry_with_context(self, dep_canonical, requested_name)
+        self.with_base_resolver_context(|ctx| {
+            self.build_named_type_export_route_entry_with_context(
+                ctx,
+                dep_canonical,
+                requested_name,
+            )
+        })
     }
 
     pub(crate) fn build_named_type_export_route_entry_with_context(
@@ -730,11 +734,11 @@ impl VerterHost {
     /// rather than rebuilding a per-call owned workspace snapshot.
     /// Request-bound callers (`HostResolverContext`,
     /// `SessionResolverContext`) route through this variant; off-path
-    /// callers either compose a one-shot owned snapshot at the request
-    /// entry boundary or go through the `#[cfg(test)]`-only one-shot
-    /// rebuild on `impl ResolverContext for VerterHost`.
+    /// callers compose a one-shot request context at the entry boundary; the
+    /// direct-host convenience remains compile-fenced to tests.
     pub(super) fn resolve_named_type_export_target_uncached_with_store_view(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         view: &dyn crate::resolver_core::StoreView,
         dep_canonical: &str,
         requested_name: &str,
@@ -778,8 +782,8 @@ impl VerterHost {
             .resolver
             .runtime
             .routes
-            .get_or_resolve_route_observing_facts_with_context(route_key, view, self, || {
-                self.build_named_type_export_route_entry(provider, requested_name)
+            .get_or_resolve_route_observing_facts_with_context(route_key, view, ctx, || {
+                self.build_named_type_export_route_entry_with_context(ctx, provider, requested_name)
             });
         let cached_route = cached_route?;
         cached_route
@@ -791,9 +795,8 @@ impl VerterHost {
 
     /// Test-only bare wrapper. Production callers go through
     /// `ctx.resolve_named_type_export_target_shallow` (which routes
-    /// through the request-bound `_with_store_view`); the test-only
-    /// arm on `impl ResolverContext for VerterHost` reaches this
-    /// wrapper on test fixtures that call `host.<method>` directly.
+    /// through the request-bound `_with_store_view`); direct-host test
+    /// fixtures reach this wrapper through the compile-fenced seam.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn resolve_named_type_export_target_shallow(
@@ -812,6 +815,7 @@ impl VerterHost {
             .into_cold_seed_view()
             .into_inner();
         self.resolve_named_type_export_target_shallow_with_store_view(
+            self,
             &live_view,
             dep_canonical,
             requested_name,
@@ -822,11 +826,13 @@ impl VerterHost {
     /// `HostResolverContext` / `SessionResolverContext` callers.
     pub(crate) fn resolve_named_type_export_target_shallow_with_store_view(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         view: &dyn crate::resolver_core::StoreView,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(String, String)> {
         let result = self.resolve_named_type_export_target_uncached_with_store_view(
+            ctx,
             view,
             dep_canonical,
             requested_name,

@@ -1,9 +1,11 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
-use crate::membership::{ConfiguredMembership, FallbackMembership, StaticMembershipSpec};
-use crate::normalized_glob::{CompiledGlob, NormalizedGlob};
-use crate::resolver::{IdeProjectCompilerOptions, ProjectResolver};
+use crate::membership::FallbackMembership;
 use rustc_hash::FxHashSet;
+use verter_semantic::resolver_core::{
+    CompiledGlob, ConfiguredMembership, IdeProjectCompilerOptions, ModuleResolverCore,
+    NormalizedGlob, StaticMembershipSpec,
+};
 
 // ── Helpers ──
 
@@ -90,7 +92,7 @@ fn snapshot_with(mut projects: Vec<OwnershipProject>) -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,
-        resolver: ProjectResolver::default(),
+        resolver: ModuleResolverCore::default(),
         generation: SnapshotGeneration(1),
     }
 }
@@ -741,7 +743,7 @@ fn owners_for_file_pins_glob_membership_classes() {
         payload: ProjectPayload::Configured {
             tsconfig_path: CanonicalPath::new("d:/project/tsconfig.json"),
             membership: ConfiguredMembership {
-                spec: StaticMembershipSpec::with_typescript_defaults(&root_cp),
+                spec: crate::membership::static_membership_with_typescript_defaults(&root_cp),
                 materialized_files: FxHashSet::default(), // bridge → glob loops decide
             },
             compiler_options: IdeProjectCompilerOptions::default(),
@@ -779,7 +781,7 @@ fn empty_snapshot_has_no_owners() {
     let snap = WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects: vec![],
-        resolver: ProjectResolver::default(),
+        resolver: ModuleResolverCore::default(),
         generation: SnapshotGeneration(0),
     };
 

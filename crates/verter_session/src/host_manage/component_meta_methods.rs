@@ -450,7 +450,7 @@ impl VerterHost {
         result.value.map(|resolved| (resolved, admission))
     }
 
-    /// Test-only bare-host cold-compute entry. Production callers must
+    /// Test-only direct-host cold-compute entry. Production callers
     /// thread a request-bound `&dyn ResolverContext` through one of the
     /// `*_with_view` / `*_with_session_view` / `*_with_overlay` /
     /// `*_for_fallthrough` variants — those supply the overlay-aware
@@ -615,8 +615,8 @@ impl VerterHost {
     /// Cold-compute body rooted on an already-built cold-seed whose
     /// currentness is INTRINSIC (it came from one read, via
     /// [`crate::resolver_store::StoreViewRead::into_cold_seed_view`]). The
-    /// single owner of the bare-host `HostResolverContext::from_cold_seed`
-    /// build, so neither caller can pair a view with a foreign flag.
+    /// single owner of the base `HostResolverContext::from_cold_seed` build,
+    /// so neither caller can pair a view with a foreign flag.
     fn compute_component_meta_state_with_cold_seed_arg(
         &self,
         canonical: &str,
@@ -669,8 +669,8 @@ impl VerterHost {
     }
 
     /// Captured-inputs cold-compute body rooted on an already-built cold-seed
-    /// whose currentness is INTRINSIC. The single owner of the captured-inputs
-    /// bare-host `HostResolverContext::from_cold_seed` build.
+    /// whose currentness is INTRINSIC. This is the single owner of the
+    /// captured-inputs base `HostResolverContext::from_cold_seed` build.
     fn compute_component_meta_state_from_captured_with_cold_seed_arg(
         &self,
         canonical: &str,
@@ -735,8 +735,10 @@ impl VerterHost {
         // path is reserved for genuine overlays. The base host's
         // scheduler stays untouched (R17).
         let overlay_facts = if view.overlay_content_hash_for(canonical).is_some() {
-            self.materialize_overlay_indexed_ready_serve_with_view(canonical, view)
-                .map(|serve| serve.indexed)
+            Some(
+                self.materialize_overlay_indexed_ready_serve_with_view(canonical, view)?
+                    .indexed,
+            )
         } else {
             None
         };
@@ -849,18 +851,9 @@ impl VerterHost {
         registry_materialization: RegistryMaterialization,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     ) -> Option<ResolvedComponentMetaState> {
-        // The `ctx` parameter is required (no
-        // `Option`) — the previous shape carried
-        // `ctx_override: Option<&dyn ResolverContext>` with a
-        // `unwrap_or(&self as &dyn ResolverContext)` bare-host
-        // fallback, which the Claude review flagged as a
-        // production exfiltration path that could panic any caller
-        // reaching the inner via a bare-host ctx. Production callers
-        // (session-bearing + view-bearing + overlay-bearing) all
-        // supply a real request-bound ctx; the sole test-only wrapper
-        // `compute_component_meta_state` constructs a bare-host ctx
-        // via `with_bare_host_ctx_for_test` and is itself
-        // `#[cfg(any(test, feature = "test-support"))]`-gated.
+        // `ctx` is required, so every production caller supplies the exact
+        // request-bound base or session context. The direct-host fixture
+        // wrapper is compile-fenced to test support.
         let audit_enabled = self.config.audit_enabled;
         let mut audit_timings = if audit_enabled {
             captured

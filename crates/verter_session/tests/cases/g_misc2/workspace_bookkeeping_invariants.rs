@@ -25,10 +25,10 @@
 
 use std::sync::Arc;
 
+use verter_semantic::resolver_core::{ResolvePhase, ResolveRequestKind};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_workspace::{
-    ExactResolution, MemoryOptions, MemoryWorkspace, ParsedEdge, ResolvePhase, ResolveRequestKind,
-    WorkspaceAccess, WorkspaceRead,
+    ExactResolution, MemoryOptions, MemoryWorkspace, ParsedEdge, WorkspaceAccess, WorkspaceRead,
 };
 
 const COMP_SOURCE: &str = r#"<script setup lang="ts">

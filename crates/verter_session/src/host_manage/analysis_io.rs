@@ -1506,11 +1506,23 @@ impl VerterHost {
         &self,
         canonical: &str,
     ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
+        self.with_base_resolver_context(|ctx| {
+            self.observe_materialize_scope_with_context(ctx, canonical)
+        })
+    }
+
+    /// Context-threaded core of [`Self::observe_materialize_scope`].
+    /// Request-bound callers reuse their captured view and fact tracer instead
+    /// of constructing a second base context inside the observation.
+    pub(crate) fn observe_materialize_scope_with_context(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical: &str,
+    ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
         let indexed = self
             .current_content_pinned_indexed(canonical)
             .or_else(|| self.artifact_current_indexed(canonical))?;
         let observed_whole_hash = indexed.whole_hash;
-        let ctx: &dyn crate::resolver_core::ResolverContext = self;
         let syntactic_export_set =
             crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                 ctx,
@@ -1835,7 +1847,7 @@ impl VerterHost {
         let dep_id = match self.resolve_loaded_dependency_canonical(
             owner_canonical,
             specifier,
-            verter_workspace::ResolveRequestKind::SfcSrcAttr,
+            verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 match admitted.into_result() {
@@ -1843,7 +1855,7 @@ impl VerterHost {
                     None => match self.resolve_loaded_dependency_canonical(
                         owner_canonical,
                         specifier,
-                        verter_workspace::ResolveRequestKind::EsmImport,
+                        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
                             admitted.into_result()
@@ -1904,12 +1916,12 @@ impl VerterHost {
                 let resolved = if authoritative.is_some() {
                     authoritative
                 } else {
-                    let ctx = verter_workspace::ResolutionContext {
-                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                    let ctx = verter_semantic::resolver_core::ResolutionContext {
+                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
                         kind: if import.is_type_only {
-                            verter_workspace::ResolveRequestKind::TypeImport
+                            verter_semantic::resolver_core::ResolveRequestKind::TypeImport
                         } else {
-                            verter_workspace::ResolveRequestKind::EsmImport
+                            verter_semantic::resolver_core::ResolveRequestKind::EsmImport
                         },
                     };
                     match self.resolve_via_vfs(parent_canonical_id, &import.source, ctx) {
@@ -2245,7 +2257,7 @@ impl VerterHost {
             };
             let mut exact_summaries = Vec::new();
 
-            use verter_workspace::{ResolvePhase as P, ResolveRequestKind as K};
+            use verter_semantic::resolver_core::{ResolvePhase as P, ResolveRequestKind as K};
             for (phase, kind) in [
                 (P::CodegenBlocker, K::EsmImport),
                 (P::CodegenBlocker, K::TypeImport),
@@ -2771,9 +2783,9 @@ impl VerterHost {
         if self.is_canonical_evicted(&canonical_parent) {
             return None;
         }
-        let ctx = verter_workspace::ResolutionContext {
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+        let ctx = verter_semantic::resolver_core::ResolutionContext {
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
         };
         match self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),

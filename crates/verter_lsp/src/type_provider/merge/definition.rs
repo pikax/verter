@@ -366,9 +366,9 @@ pub fn merge_definitions_with_barrel_resolver(
         // TSGO may return both the real definition (.d.mts) and carrier consumer files.
         let has_non_carrier = locations
             .iter()
-            .any(|l| !verter_workspace::path_is_carrier(l.uri.as_str()));
+            .any(|l| !verter_semantic::resolver_core::path_is_carrier(l.uri.as_str()));
         if has_non_carrier {
-            locations.retain(|l| !verter_workspace::path_is_carrier(l.uri.as_str()));
+            locations.retain(|l| !verter_semantic::resolver_core::path_is_carrier(l.uri.as_str()));
         }
 
         return Some(if locations.len() == 1 {
@@ -401,24 +401,28 @@ pub(crate) fn normalize_carrier_path<'a>(
     // `Bar.svelte.tsx` → `Bar.svelte`). The carrier-extension set is the
     // registry's (`path_is_carrier`), not a `.vue` literal.
     if (path.ends_with(".tsx") || path.ends_with(".jsx"))
-        && verter_workspace::path_is_carrier(&path[..path.len() - 4])
+        && verter_semantic::resolver_core::path_is_carrier(&path[..path.len() - 4])
     {
         let candidate = &path[..path.len() - 4]; // strip .tsx/.jsx
         if carrier_source_exists(candidate) {
             return candidate;
         }
-    } else if path.ends_with(".d.ts") && verter_workspace::path_is_carrier(&path[..path.len() - 5])
+    } else if path.ends_with(".d.ts")
+        && verter_semantic::resolver_core::path_is_carrier(&path[..path.len() - 5])
     {
         // The `{carrier}.d.ts` accepted-spelling alias — from node_modules, no
         // collision risk.
         return &path[..path.len() - 5];
-    } else if let Some(candidate) = path.strip_suffix(verter_workspace::CARRIER_API_VIRTUAL_SUFFIX)
+    } else if let Some(candidate) =
+        path.strip_suffix(verter_semantic::resolver_core::CARRIER_API_VIRTUAL_SUFFIX)
     {
         // The carrier PUBLIC-API surface (`{carrier}.verter.ts`, e.g.
         // `MyComp.vue.verter.ts`). The reserved `.verter.` infix is the API
         // carrier identity (a bare `{carrier}.ts` is NOT — `.svelte.ts` is a
         // rune-module path); strip the full reserved suffix, never a bare `.ts`.
-        if verter_workspace::path_is_carrier(candidate) && carrier_source_exists(candidate) {
+        if verter_semantic::resolver_core::path_is_carrier(candidate)
+            && carrier_source_exists(candidate)
+        {
             return candidate;
         }
     }
@@ -430,7 +434,7 @@ pub(crate) fn normalize_carrier_path<'a>(
 /// map. Generalized to the registry carrier-extension set (Vue + Svelte).
 pub(crate) fn is_carrier_ide_path(path: &str) -> bool {
     (path.ends_with(".tsx") || path.ends_with(".jsx"))
-        && verter_workspace::path_is_carrier(&path[..path.len() - 4])
+        && verter_semantic::resolver_core::path_is_carrier(&path[..path.len() - 4])
 }
 
 /// Whether `path` is a carrier PUBLIC-API virtual file
@@ -441,7 +445,7 @@ pub(crate) fn is_carrier_ide_path(path: &str) -> bool {
 /// sourcemap (NOT the `.tsx` IDE sourcemap).
 ///
 /// The API carrier carries the reserved `.verter.` infix
-/// ([`verter_workspace::CARRIER_API_VIRTUAL_SUFFIX`]) — a bare `{carrier}.ts`
+/// ([`verter_semantic::resolver_core::CARRIER_API_VIRTUAL_SUFFIX`]) — a bare `{carrier}.ts`
 /// (e.g. a real on-disk `App.vue.ts`, or a `.svelte.ts` rune module) is NOT an
 /// API surface. The `carrier_source_exists` guard mirrors
 /// [`normalize_carrier_path`]'s API arm.
@@ -449,9 +453,10 @@ pub(crate) fn is_carrier_api_path(
     path: &str,
     carrier_source_exists: &dyn Fn(&str) -> bool,
 ) -> bool {
-    match path.strip_suffix(verter_workspace::CARRIER_API_VIRTUAL_SUFFIX) {
+    match path.strip_suffix(verter_semantic::resolver_core::CARRIER_API_VIRTUAL_SUFFIX) {
         Some(candidate) => {
-            verter_workspace::path_is_carrier(candidate) && carrier_source_exists(candidate)
+            verter_semantic::resolver_core::path_is_carrier(candidate)
+                && carrier_source_exists(candidate)
         }
         None => false,
     }

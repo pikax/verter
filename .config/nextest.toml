@@ -88,3 +88,14 @@ slow-timeout = { period = "120s", terminate-after = 3 }
 [[profile.ci.overrides]]
 filter = 'test(/^cases::g_compile::compile_fail::/)'
 slow-timeout = { period = "120s", terminate-after = 3 }
+
+# verter_semantic's own trybuild compile-fail fixture (C1-AC-7) is the same
+# shape as the g_compile override above: a real spawned `cargo build` against
+# its own trybuild target dir, cold on every fresh worktree/CI run.
+[[profile.default.overrides]]
+filter = 'test(/^cases::resolver_observation_compile_fail::/)'
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+filter = 'test(/^cases::resolver_observation_compile_fail::/)'
+slow-timeout = { period = "120s", terminate-after = 3 }

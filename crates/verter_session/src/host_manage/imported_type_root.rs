@@ -19,9 +19,8 @@ use crate::VerterHost;
 impl VerterHost {
     /// Test-only bare wrapper. Production callers go through
     /// `ctx.resolve_imported_type_root` (which routes through the
-    /// request-bound `_with_store_view`); the test-only arm on
-    /// `impl ResolverContext for VerterHost` reaches this wrapper on
-    /// test fixtures that call `host.<method>` directly.
+    /// request-bound `_with_store_view`); direct-host test fixtures reach this
+    /// wrapper through the compile-fenced seam.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub(crate) fn resolve_imported_type_root(
@@ -60,6 +59,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts_with_store_view(
+            self,
             view,
             dep_canonical,
             imported_name,
@@ -138,6 +138,7 @@ impl VerterHost {
             .into_cold_seed_view()
             .into_inner();
         self.resolve_imported_type_root_with_facts_with_store_view(
+            self,
             &view,
             dep_canonical,
             imported_name,
@@ -152,6 +153,7 @@ impl VerterHost {
     /// named hot-path site at `imported_type_root.rs:49`).
     pub(crate) fn resolve_imported_type_root_with_facts_with_store_view(
         &self,
+        ctx: &dyn crate::resolver_core::ResolverContext,
         view: &dyn crate::resolver_core::StoreView,
         dep_canonical: &str,
         imported_name: &str,
@@ -160,7 +162,7 @@ impl VerterHost {
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
-            self,
+            ctx,
             view,
             dep_canonical,
             imported_name,

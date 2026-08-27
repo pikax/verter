@@ -9,10 +9,10 @@
 //! derivation disagree). It is DISCRIMINATING: a column edit that diverges from
 //! the production formula fails here.
 
+use verter_semantic::resolver_core::ModuleResolverCore;
 use verter_session::framework::descriptor::{
     svelte_descriptor, vue_descriptor, VirtualFileNaming, VirtualPathPolicy,
 };
-use verter_workspace::{IdeProjectConfig, NativeProjectResolver};
 
 /// Apply a `VirtualPathPolicy` to a carrier canonical (append-to-full
 /// semantics, `is_jsx = false` — a TypeScript carrier — for the conditional
@@ -35,16 +35,16 @@ fn column_paths(naming: &VirtualFileNaming, canonical: &str) -> (Option<String>,
     )
 }
 
-fn single_project_resolver() -> NativeProjectResolver {
-    let mut project = IdeProjectConfig::new(
+fn single_project_resolver() -> ModuleResolverCore {
+    let mut project = verter_workspace::ide_project_config(
         "/workspace".to_string(),
         "/workspace".to_string(),
         Some("/workspace/tsconfig.json".to_string()),
     );
-    project.membership = verter_workspace::ConfiguredMembership::match_all_under_root(
+    project.membership = verter_workspace::configured_membership_match_all_under_root(
         &verter_workspace::CanonicalPath::new("/workspace"),
     );
-    NativeProjectResolver::new(vec![project])
+    ModuleResolverCore::new(vec![project])
 }
 
 #[test]

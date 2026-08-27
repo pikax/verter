@@ -196,7 +196,7 @@ pub(crate) struct PublishedResolutionView {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedResolverSnapshot {
-    pub(crate) resolver: crate::project_resolver::NativeProjectResolver,
+    pub(crate) resolver: verter_semantic::resolver_core::ModuleResolverCore,
     /// Exact Engine-backed workspace publication paired with `resolver`.
     pub(crate) resolution_view: Option<PublishedResolutionView>,
     /// `true` after `background_init` publishes a real snapshot with the
@@ -247,7 +247,7 @@ pub(crate) struct ProviderProjectionContext {
 pub(crate) struct PreparedNonCarrierProviderSync {
     pub(crate) provider_path: String,
     pub(crate) rewritten: String,
-    pub(crate) resolved_dependencies: Vec<crate::project_resolver::ResolveResult>,
+    pub(crate) resolved_dependencies: Vec<verter_semantic::resolver_core::ResolveResult>,
 }
 
 pub(crate) struct ResolvedComponentDocument {

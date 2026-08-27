@@ -79,7 +79,7 @@
 
 use std::sync::Arc;
 
-use verter_workspace::resolver::{IdeProjectConfig, WorkspaceAlias};
+use verter_semantic::resolver_core::WorkspaceAlias;
 
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
@@ -102,7 +102,7 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
 /// carries none. `B` therefore matches the synthetic workspace default and
 /// `A` does not — the exact shape that separates the two keying paths.
 fn configure_two_projects(host: &VerterHost) {
-    let mut a = IdeProjectConfig::new(
+    let mut a = verter_workspace::ide_project_config(
         "/ws/a".to_string(),
         "/ws".to_string(),
         Some("/ws/a/tsconfig.json".to_string()),
@@ -112,7 +112,7 @@ fn configure_two_projects(host: &VerterHost) {
         replacement: "/ws/a/src".to_string(),
     });
     a.compiler_options.base_url = Some("/ws/a".to_string());
-    let b = IdeProjectConfig::new(
+    let b = verter_workspace::ide_project_config(
         "/ws/b".to_string(),
         "/ws".to_string(),
         Some("/ws/b/tsconfig.json".to_string()),

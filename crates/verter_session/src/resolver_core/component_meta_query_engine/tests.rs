@@ -1913,9 +1913,9 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
             extensions: vec![],
             workspace_root: "/workspace/node_modules/@me/inner-pkg".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace/node_modules/@me/inner-pkg"),
             ),
         }]);
@@ -1930,13 +1930,11 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
     );
     let ws_access: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
     let host = VerterHost::new(HostConfig::default(), ws_access);
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace/node_modules/@me/inner-pkg".to_string(),
-            "/workspace/node_modules/@me/inner-pkg".to_string(),
-            Some("/workspace/node_modules/@me/inner-pkg/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace/node_modules/@me/inner-pkg".to_string(),
+        "/workspace/node_modules/@me/inner-pkg".to_string(),
+        Some("/workspace/node_modules/@me/inner-pkg/tsconfig.json".to_string()),
+    )]);
     assert!(host.ensure_loaded(workspace_linked_canonical));
 
     // Sanity: the typed accessor on the host's resolver-context

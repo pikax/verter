@@ -146,7 +146,7 @@ fn import_backed_surface_arm_is_missing(
     match host.resolve_loaded_dependency_canonical(
         owner_canonical,
         &import.source,
-        verter_workspace::ResolveRequestKind::TypeImport,
+        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
     ) {
         verter_workspace::ResolutionPublication::Admitted(admitted) => {
             let Some(target) = admitted.into_result() else {
@@ -179,7 +179,7 @@ fn export_surface_verdict(
     if depth > MAX_EXPORT_ROUTE_DEPTH || !visited.insert(canonical.to_string()) {
         return ExportSurfaceVerdict::Unknowable;
     }
-    if crate::resolver_core::ResolverContext::workspace_is_package_backed(host, canonical) {
+    if host.workspace_read().is_package_backed(canonical) {
         return ExportSurfaceVerdict::Unknowable;
     }
     let Some(indexed) = host
@@ -234,7 +234,7 @@ fn follow_export_surface_route(
     match host.resolve_loaded_dependency_canonical(
         from_canonical,
         source,
-        verter_workspace::ResolveRequestKind::TypeImport,
+        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
     ) {
         verter_workspace::ResolutionPublication::Admitted(admitted) => {
             match admitted.into_result() {

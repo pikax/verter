@@ -110,8 +110,8 @@ fn arm_fence_every_materialize(host: &Arc<VerterHost>) {
             OTHER,
             vec![verter_workspace::ExactResolution {
                 specifier: format!("./fence_probe_{n}"),
-                phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                kind: verter_workspace::ResolveRequestKind::TypeImport,
+                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(DEP.to_string()),
                 possible_canonical_ids: vec![DEP.to_string()],
             }],

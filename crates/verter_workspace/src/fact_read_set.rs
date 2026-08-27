@@ -82,7 +82,7 @@ use crate::fact_cache::{
     compaction_domain, AggregateGenerations, AggregatePopulation, CompactionDomain,
     DomainGenerationFact, FactVersionRef, ViewPopulation,
 };
-use crate::resolution_currency::ResolutionPopulation;
+use verter_semantic::resolver_core::ResolutionPopulation;
 
 pub const FACT_SIGNATURE_CAP: usize = 1_024;
 

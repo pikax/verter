@@ -44,8 +44,6 @@ mod merged_symbol_identity;
 mod multi_candidate_storage;
 #[path = "g_misc1/multi_project_no_collision_resolved_imports.rs"]
 mod multi_project_no_collision_resolved_imports;
-#[path = "g_misc1/no_bare_host_resolver_shims.rs"]
-mod no_bare_host_resolver_shims;
 #[path = "g_misc1/no_eager_invalidation.rs"]
 mod no_eager_invalidation;
 #[path = "g_misc1/no_lib_rs_growth.rs"]

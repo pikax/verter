@@ -261,6 +261,10 @@ The codebase MUST build, test, and materialize on macOS, Windows, AND Linux. Pla
 
 Guard-enforced — `tracked_paths_are_portable` (`crates/verter_source_policy_gate/tests/cases/tracked_paths_are_portable.rs`) enumerates `git ls-files -z` and enforces: valid UTF-8; no NTFS-illegal characters (`< > : " | ? * \` plus control chars); no trailing dot or space; no reserved device basenames (`CON`/`PRN`/`AUX`/`NUL`/`COM1`–`COM9`/`LPT1`–`LPT9`, with or without extension, plus `CONIN$`/`CONOUT$` — the `$`-suffixed forms only); no case-insensitive path collisions (lowercase-fold approximation of NTFS/APFS folding, not the exact filesystem fold tables); ≤200-byte relative paths.
 
+Portable content and exact authority evidence use two distinct guard rails. `tracked_paths_no_machine_roots` (`crates/verter_source_policy_gate/tests/cases/tracked_paths_no_machine_roots.rs`) still reads and scans every tracked file's raw bytes for its closed set of known machine-root markers. Build/test/runtime inputs, generated output, source, fixtures, and portable documentation fail on any hit. Exact, already-ratified authority evidence may retain the environment where it was produced only through `docs/arch/portability-machine-marker-evidence-exceptions.tsv`: exact repository path, exact worktree SHA-256, an existing pin document containing that digest, a permitted evidence/ruling root, and a manifest digest pinned by `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-SOURCE-POLICY-EVIDENCE.md` are all required. There is no directory, suffix, basename, glob, or generic `docs`/`evidence` exemption, and stale rows fail in either direction.
+
+Future machine-bound raw logs default to external digest-bound bundles. Do not commit a new raw log and grow the exception manifest merely for convenience; keep the raw bundle external and commit only the portable ruling/summary plus its exact digest unless a new architecture act explicitly authorizes in-tree evidence.
+
 Review-enforced (the guard does not cover these):
 
 - Sanitize generated on-disk names (e.g. `blake3:<hash>` → `blake3-<hash>`) — logical identifiers are unconstrained; only the on-disk boundary is. The guard only sees tracked paths, so it catches a generated name once committed, not at generation time.
@@ -269,7 +273,7 @@ Review-enforced (the guard does not cover these):
 - OS-specific binaries (`tsgo`, `.exe` suffixes) are discovered platform-aware, never via a hardcoded per-OS name.
 - Temp and cwd paths come from std abstractions, not literal paths.
 
-Guards: `tracked_paths_are_portable`.
+Guards: `tracked_paths_are_portable`, `tracked_files_contain_no_machine_specific_path_markers`, and the authority-evidence admission/liveness tests in `tracked_paths_no_machine_roots.rs`. Durable mechanism record: `docs/arch/portability-fixed-marker-scanner-rulings.md`.
 
 ### Anti-Binary-Growth Integration-Test Layout (CRITICAL)
 

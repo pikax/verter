@@ -19,7 +19,7 @@ maintainer or the amendment process to adopt when each block is authorized.
   the prior one incomplete; see that file's own hedge). TCM1's acceptance bar should include the FFI wire
   types, not stop at the in-process boundary — otherwise TCM1 leaves a second string-encoded path alive at
   the NAPI/WASM boundary, in tension with the "one clean cutover" rule.
-- **~~Single point of origin.~~ SUPERSEDED 2026-08-23 — `CodeTransform` is NOT a single point of origin.**
+- **~~Single point of origin.~~ CORRECTED BY THE SOURCE INVENTORY — `CodeTransform` is not the only point of origin.**
   This bullet originally read: *"TCM1 should replace the discard-to-string pattern at `CodeTransform`'s own
   `generate_map`/`generate_map_json*` (`code_transform/source_map.rs`), not at each downstream consumer
   site — the typed intermediate (`oxc_sourcemap::SourceMap<'static>`) already exists transiently at exactly
@@ -40,8 +40,8 @@ maintainer or the amendment process to adopt when each block is authorized.
   (bounded-timeout deadlock control build) shape the discriminating test must take. TCM2's charter
   should reference this spec directly as its acceptance criterion for the invariant, rather than
   restating the invariant prose without a concrete test shape.
-- **~~The exact wire method-name spelling is an open verification gap, not settled fact.~~ SUPERSEDED
-  2026-08-23 — TCM0 has since captured it live.** This bullet originally required TCM2 to close the
+- **~~The exact wire method-name spelling is an open verification gap, not settled fact.~~ CLOSED FOR THE
+  CAPTURED COMPILE BY LIVE PROBE EVIDENCE.** This bullet originally required TCM2 to close the
   spelling (live protocol trace or `typescript-go` source read) because §3 recorded only structural (Go
   type-name) evidence. `probes/probe7-mapper-wire-capture.mjs` now records every frame against a real
   configured mapper: `initialize` / `openProject` / `transform` / `closeProject`, params shapes, handle
@@ -79,24 +79,29 @@ maintainer or the amendment process to adopt when each block is authorized.
 
 - **A required design constraint, from a reproduced defect.** Never retain a `Program`/`Checker` handle
   past its owning `Snapshot`'s `dispose()` — the exact candidate build silently serves stale cached data
-  from such a handle with no error, while every sibling method fails closed
+  from such a handle with no error, while the four probed siblings `getSemanticDiagnostics`,
+  `getSourceFileNames`, `emitToString`, and `getSyntacticDiagnostics` fail closed
   (`evidence/TCM0/package-lock-and-semantic-api.md` §4c). TCM3's charter should add this as an explicit
   acceptance criterion (a structural/type-state rule if the surrounding language allows it, per this
   program's general preference for structural guards over runtime discipline), not leave it to
   case-by-case caller discipline.
-- **~~The session-attach topology needs its own certification pass.~~ SUPERSEDED 2026-08-23 — TCM0 has
-  now run this probe itself.** This bullet originally read: TCM0 certified the direct-native-client
-  topology candidate live; it explicitly did NOT probe `API.fromLSPConnection`
-  (`custom/initializeAPISession`) for the session-initialization-hang defect class, so TCM3's charter
-  should name this as a required probe before that topology candidate may be selected.
-  `probes/probe8-lsp-session-attach.mjs` now drives a real LSP handshake, obtains the API pipe via
-  `custom/initializeAPISession`, attaches, and answers a `Checker` query over it. **No hang.** TCM3 no
-  longer needs to run it to certify the path; what TCM3 inherits instead is a hard constraint TCM0 found
-  while probing — the attach topology is ASYNC-CLIENT-ONLY (`dist/api/sync/client.js:11` refuses socket
-  connections), plus a bind race requiring bounded retry. See `package-lock-and-semantic-api.md`
-  §4a-attach. The original wording is retained struck-through as the record of what was true before the
-  probe existed. (This supersession note previously sat under the cancellation bullet below, which it
-  does not supersede — re-anchored 2026-08-24.)
+- **The session-attach topology needs its own certification pass — STANDS, and TCM0 has probed it once.**
+  TCM0 certified the direct-native-client topology candidate live; it did not, in its first pass, probe
+  `API.fromLSPConnection` (`custom/initializeAPISession`) for the session-initialization-hang defect
+  class, so TCM3's charter should name this as a required probe before that topology candidate may be
+  selected. It has since probed it: `probes/probe8-lsp-session-attach.mjs` drives a real LSP handshake,
+  obtains the API pipe via `custom/initializeAPISession`, attaches, and answers a `Checker` query over
+  it. **No hang**, and one hard constraint nothing had recorded — the attach topology is
+  ASYNC-CLIENT-ONLY (`dist/api/sync/client.js:11` refuses socket connections), plus a bind race requiring
+  bounded retry. See `package-lock-and-semantic-api.md` §4a-attach.
+  **The refinement is NOT withdrawn, and an earlier revision of this bullet was wrong to withdraw it.**
+  `rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md` clause 2 gates this probe to TCM3 by
+  ratified assignment, and one probe run by another block is evidence, not a discharge of that
+  assignment — only a fresh ratification act discharges it. TCM3 therefore still owns the probe, and
+  inherits TCM0's run and the async-client-only constraint as a head start on it. What a future
+  amendment may reasonably do with this evidence is narrow the probe's scope; that is the maintainer's
+  act to take, not this document's to assume. (This note previously sat under the cancellation bullet
+  below, which it does not supersede — re-anchored 2026-08-24.)
 - **No cancellation primitive exists in the candidate API.** TCM3 must design its own in-flight-query
   abandonment strategy (fresh snapshot, not server cancel) rather than assuming a cancel-token pattern is
   available to build on.

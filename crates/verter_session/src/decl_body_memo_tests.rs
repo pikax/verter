@@ -596,6 +596,164 @@ fn unknown_names_are_none_without_lowering() {
     assert_eq!(parses(&provenance), 0, "a miss parses nothing");
 }
 
+/// `peek_type_decl`/`peek_value_decl` (the `ResolverObservation`-facing
+/// non-blocking accessors) must NEVER
+/// trigger lowering — the whole point of a peek is that it never calls
+/// `acquire_lease`'s worker-thread rendezvous.
+#[test]
+fn peek_never_triggers_lowering() {
+    use verter_semantic::resolver_core::AttemptOutcome;
+
+    let (memo, provenance) = memo_for(FIVE_DECLS);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+
+    let peeked = memo.peek_type_decl(FIXTURE_CANONICAL, owner, "Var0");
+    assert!(
+        peeked.is_need_inputs(),
+        "inventoried but never demanded ⇒ NeedInputs, not a blocking lower"
+    );
+    assert_eq!(bodies(&provenance), 0, "a peek must lower nothing");
+    assert_eq!(parses(&provenance), 0, "a peek must parse nothing");
+
+    // Discriminates: a peek that fell back to the blocking demand path
+    // would make this assertion pass by accident (Complete instead of
+    // NeedInputs) while still violating the "never triggers lowering"
+    // contract — the bodies/parses counters are the real proof.
+    match peeked {
+        AttemptOutcome::NeedInputs(_) => {}
+        other => panic!("expected NeedInputs, got {other:?}"),
+    }
+}
+
+/// The declaration-body memo boundary requires that
+/// `peek_type_decl`'s `NeedInputs` must carry `DeclarationSpace::Type` and
+/// `peek_value_decl`'s must carry `DeclarationSpace::Value` — a shared
+/// `LoadSet` builder that forgot to thread the space through would emit
+/// the same `InputKey::DeclBody` for both, and a retry driver could not
+/// tell which space actually needed the reload.
+#[test]
+fn peek_need_inputs_carries_the_correct_declaration_space() {
+    use verter_semantic::resolver_core::{AttemptOutcome, DeclarationSpace, InputKey};
+
+    const BOTH_SPACES_SRC: &str = "export type Foo = string;\nexport const Foo = 1;\n";
+    let (memo, _provenance) = memo_for(BOTH_SPACES_SRC);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+
+    match memo.peek_type_decl(FIXTURE_CANONICAL, owner, "Foo") {
+        AttemptOutcome::NeedInputs(load_set) => {
+            let space = load_set
+                .keys()
+                .iter()
+                .find_map(|key| match key {
+                    InputKey::DeclBody { space, .. } => Some(*space),
+                    _ => None,
+                })
+                .expect("a DeclBody key");
+            assert_eq!(space, DeclarationSpace::Type);
+        }
+        other => panic!("expected NeedInputs, got {other:?}"),
+    }
+
+    match memo.peek_value_decl(FIXTURE_CANONICAL, owner, "Foo") {
+        AttemptOutcome::NeedInputs(load_set) => {
+            let space = load_set
+                .keys()
+                .iter()
+                .find_map(|key| match key {
+                    InputKey::DeclBody { space, .. } => Some(*space),
+                    _ => None,
+                })
+                .expect("a DeclBody key");
+            assert_eq!(space, DeclarationSpace::Value);
+        }
+        other => panic!("expected NeedInputs, got {other:?}"),
+    }
+}
+
+#[test]
+fn peek_after_demand_serves_the_same_cached_entry() {
+    use verter_semantic::resolver_core::AttemptOutcome;
+
+    let (memo, provenance) = memo_for(FIVE_DECLS);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+
+    let demanded = memo.type_decl_in(owner, "Var0").expect("Var0 exists");
+    assert_eq!(
+        bodies(&provenance),
+        1,
+        "the demand lowered exactly one body"
+    );
+
+    let peeked = memo.peek_type_decl(FIXTURE_CANONICAL, owner, "Var0");
+    match peeked {
+        AttemptOutcome::Complete(Some(decl)) => {
+            assert!(
+                Arc::ptr_eq(&decl, &demanded),
+                "the peek must serve the SAME cached Arc the demand committed, \
+                 not a fresh lowering"
+            );
+        }
+        other => panic!("expected Complete(Some(_)), got {other:?}"),
+    }
+    assert_eq!(
+        bodies(&provenance),
+        1,
+        "a post-demand peek must lower nothing further"
+    );
+}
+
+#[test]
+fn peek_unknown_symbol_is_a_stable_complete_none() {
+    use verter_semantic::resolver_core::AttemptOutcome;
+
+    let (memo, provenance) = memo_for(FIVE_DECLS);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+
+    // Discriminates: an uninventoried name is a GENUINE, cacheable
+    // absence — Complete(None) — never NeedInputs. A buggy peek that
+    // couldn't distinguish "not inventoried" from "inventoried but not
+    // yet demanded" would report NeedInputs here, which would make the
+    // caller retry forever against a name that can never resolve.
+    match memo.peek_type_decl(FIXTURE_CANONICAL, owner, "Missing") {
+        AttemptOutcome::Complete(None) => {}
+        other => panic!("expected Complete(None), got {other:?}"),
+    }
+    match memo.peek_value_decl(FIXTURE_CANONICAL, owner, "Missing") {
+        AttemptOutcome::Complete(None) => {}
+        other => panic!("expected Complete(None), got {other:?}"),
+    }
+    assert_eq!(bodies(&provenance), 0, "peeking a miss lowers nothing");
+    assert_eq!(parses(&provenance), 0, "peeking a miss parses nothing");
+}
+
+#[test]
+fn peek_value_decl_after_demand_serves_the_same_cached_entry() {
+    use verter_semantic::resolver_core::AttemptOutcome;
+
+    const VALUE_SRC: &str = "export const answer = 42;\n";
+    let (memo, provenance) = memo_for(VALUE_SRC);
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+
+    assert!(
+        memo.peek_value_decl(FIXTURE_CANONICAL, owner, "answer")
+            .is_need_inputs(),
+        "inventoried but never demanded ⇒ NeedInputs"
+    );
+
+    let demanded = memo.value_decl("answer").expect("answer exists");
+    match memo.peek_value_decl(FIXTURE_CANONICAL, owner, "answer") {
+        AttemptOutcome::Complete(Some(decl)) => {
+            assert!(Arc::ptr_eq(&decl, &demanded));
+        }
+        other => panic!("expected Complete(Some(_)), got {other:?}"),
+    }
+    assert_eq!(
+        bodies(&provenance),
+        1,
+        "exactly one body lowered, by the demand"
+    );
+}
+
 /// Header↔lowerer arm parity, proven EXHAUSTIVELY rather than by
 /// per-kind spot-checks: build an all-decl-kinds fixture, enumerate
 /// EVERY symbol the shallow header walk indexed, and assert each one

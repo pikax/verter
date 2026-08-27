@@ -11,7 +11,7 @@ pub(crate) fn canonical_test_path(path: &Path) -> String {
         .unwrap_or_else(|| path.to_path_buf())
         .to_string_lossy()
         .replace('\\', "/");
-    verter_workspace::resolver::normalize_canonical_id(&raw)
+    verter_semantic::resolver_core::normalize_canonical_id(&raw)
 }
 
 /// Create a test VFS workspace with a published resolver snapshot wrapped in RwLock.
@@ -33,13 +33,15 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
     // carrier owner for external-TS).
     let payload = match tsconfig {
         Some(tsconfig) => {
-            let spec = verter_workspace::StaticMembershipSpec {
+            let spec = verter_semantic::resolver_core::StaticMembershipSpec {
                 files: Vec::new(),
-                include: vec![verter_workspace::CompiledGlob::new(
-                    verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
+                include: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                    verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+                        &root_cp, "**/*",
+                    ),
                 )],
-                exclude: vec![verter_workspace::CompiledGlob::new(
-                    verter_workspace::NormalizedGlob::from_root_and_pattern(
+                exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                    verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
                         &root_cp,
                         "node_modules/**",
                     ),
@@ -48,11 +50,12 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
             };
             verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-                membership: verter_workspace::ConfiguredMembership {
+                membership: verter_semantic::resolver_core::ConfiguredMembership {
                     spec,
                     materialized_files: Default::default(),
                 },
-                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 workspace_aliases: Vec::new(),
             }
@@ -60,8 +63,11 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
         None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
             membership: verter_workspace::FallbackMembership {
                 root: root_cp.clone(),
-                exclude: vec![verter_workspace::CompiledGlob::new(
-                    verter_workspace::NormalizedGlob::new(&format!("{}/node_modules/**", root)),
+                exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                    verter_semantic::resolver_core::NormalizedGlob::new(&format!(
+                        "{}/node_modules/**",
+                        root
+                    )),
                 )]
                 .into(),
             },
@@ -74,8 +80,8 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
         payload,
     }];
 
-    let resolver = verter_workspace::ProjectResolver::new(vec![
-        crate::project_resolver::IdeProjectConfig::new(
+    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        verter_workspace::ide_project_config(
             root.to_string(),
             root.to_string(),
             tsconfig.map(|s| s.to_string()),
@@ -120,15 +126,15 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
             // spec-bridge `include: {root}/**/*`). Otherwise an inferred Fallback.
             let payload = match &p.tsconfig_path {
                 Some(tsconfig) => {
-                    let spec = verter_workspace::StaticMembershipSpec {
+                    let spec = verter_semantic::resolver_core::StaticMembershipSpec {
                         files: Vec::new(),
-                        include: vec![verter_workspace::CompiledGlob::new(
-                            verter_workspace::NormalizedGlob::from_root_and_pattern(
+                        include: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
                                 &root_cp, "**/*",
                             ),
                         )],
-                        exclude: vec![verter_workspace::CompiledGlob::new(
-                            verter_workspace::NormalizedGlob::from_root_and_pattern(
+                        exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
                                 &root_cp,
                                 "node_modules/**",
                             ),
@@ -137,11 +143,12 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
                     };
                     verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                         tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-                        membership: verter_workspace::ConfiguredMembership {
+                        membership: verter_semantic::resolver_core::ConfiguredMembership {
                             spec,
                             materialized_files: Default::default(),
                         },
-                        compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                        compiler_options:
+                            verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                         references: Vec::new(),
                         workspace_aliases: Vec::new(),
                     }
@@ -149,8 +156,8 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
                 None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
                     membership: verter_workspace::FallbackMembership {
                         root: root_cp.clone(),
-                        exclude: vec![verter_workspace::CompiledGlob::new(
-                            verter_workspace::NormalizedGlob::new(&format!(
+                        exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                            verter_semantic::resolver_core::NormalizedGlob::new(&format!(
                                 "{}/node_modules/**",
                                 p.root
                             )),
@@ -183,11 +190,11 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
     parking_lot::RwLock::new(Some(vfs_ws))
 }
 
-/// Create a test VFS workspace from a pre-built `NativeProjectResolver`.
+/// Create a test VFS workspace from a pre-built `ModuleResolverCore`.
 ///
 /// Creates fallback projects for each workspace root in the resolver.
 pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
-    resolver: verter_workspace::ProjectResolver,
+    resolver: verter_semantic::resolver_core::ModuleResolverCore,
     project_roots: &[(&str, &str, Option<&str>)], // (root, workspace_root, tsconfig)
 ) -> parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>> {
     let vfs_ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
@@ -208,7 +215,7 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
 /// entry — the ownership substrate the VFS helper above publishes, exposed
 /// on its own for tests that need the ownership decision without a workspace.
 pub(crate) fn make_test_snapshot(
-    resolver: verter_workspace::ProjectResolver,
+    resolver: verter_semantic::resolver_core::ModuleResolverCore,
     project_roots: &[(&str, &str, Option<&str>)], // (root, workspace_root, tsconfig)
 ) -> Arc<verter_workspace::WorkspaceSnapshot> {
     let projects: Vec<verter_workspace::workspace_snapshot::OwnershipProject> = project_roots
@@ -222,15 +229,15 @@ pub(crate) fn make_test_snapshot(
             // inferred Fallback project (never a carrier owner for external-TS).
             let payload = match tsconfig {
                 Some(tsconfig) => {
-                    let spec = verter_workspace::StaticMembershipSpec {
+                    let spec = verter_semantic::resolver_core::StaticMembershipSpec {
                         files: Vec::new(),
-                        include: vec![verter_workspace::CompiledGlob::new(
-                            verter_workspace::NormalizedGlob::from_root_and_pattern(
+                        include: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
                                 &root_cp, "**/*",
                             ),
                         )],
-                        exclude: vec![verter_workspace::CompiledGlob::new(
-                            verter_workspace::NormalizedGlob::from_root_and_pattern(
+                        exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
                                 &root_cp,
                                 "node_modules/**",
                             ),
@@ -239,11 +246,12 @@ pub(crate) fn make_test_snapshot(
                     };
                     verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                         tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-                        membership: verter_workspace::ConfiguredMembership {
+                        membership: verter_semantic::resolver_core::ConfiguredMembership {
                             spec,
                             materialized_files: Default::default(),
                         },
-                        compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                        compiler_options:
+                            verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                         references: Vec::new(),
                         workspace_aliases: Vec::new(),
                     }
@@ -251,8 +259,8 @@ pub(crate) fn make_test_snapshot(
                 None => verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
                     membership: verter_workspace::FallbackMembership {
                         root: root_cp.clone(),
-                        exclude: vec![verter_workspace::CompiledGlob::new(
-                            verter_workspace::NormalizedGlob::new(&format!(
+                        exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                            verter_semantic::resolver_core::NormalizedGlob::new(&format!(
                                 "{}/node_modules/**",
                                 root
                             )),

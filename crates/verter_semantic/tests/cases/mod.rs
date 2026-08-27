@@ -4,3 +4,5 @@
 //! do NOT centralise shared helpers here, and keep this list sorted.
 
 mod jsdoc_tag_type_payload_parity;
+mod resolver_core_ownership;
+mod resolver_observation_compile_fail;

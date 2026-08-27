@@ -963,14 +963,16 @@ impl VerterHost {
         }
 
         // R5 dedupe by (specifier, kind) — NOT by specifier alone.
-        let mut seen: rustc_hash::FxHashSet<(String, verter_workspace::ResolveRequestKind)> =
-            rustc_hash::FxHashSet::default();
+        let mut seen: rustc_hash::FxHashSet<(
+            String,
+            verter_semantic::resolver_core::ResolveRequestKind,
+        )> = rustc_hash::FxHashSet::default();
 
         for imp in imports {
             let kind = if imp.is_type_only {
-                verter_workspace::ResolveRequestKind::TypeImport
+                verter_semantic::resolver_core::ResolveRequestKind::TypeImport
             } else {
-                verter_workspace::ResolveRequestKind::EsmImport
+                verter_semantic::resolver_core::ResolveRequestKind::EsmImport
             };
             if !seen.insert((imp.source.clone(), kind)) {
                 continue;
@@ -990,9 +992,9 @@ impl VerterHost {
 
         for modref in module_references {
             let kind = if modref.is_type_only {
-                verter_workspace::ResolveRequestKind::TypeImport
+                verter_semantic::resolver_core::ResolveRequestKind::TypeImport
             } else {
-                verter_workspace::ResolveRequestKind::EsmImport
+                verter_semantic::resolver_core::ResolveRequestKind::EsmImport
             };
 
             if let Some(specifier) = modref.literal_specifier.as_ref() {

@@ -54,11 +54,11 @@ use verter_session::{
     VerterHost,
 };
 
+use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
 };
-use verter_workspace::membership::ConfiguredMembership;
 use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
 use verter_workspace::published_state::PublishedRoot;
 use verter_workspace::snapshot_builder::{

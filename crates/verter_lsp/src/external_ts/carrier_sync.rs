@@ -45,13 +45,13 @@ use crate::external_ts::{
     resolve_carrier_ownership_over_vfs, CarrierCompanion, CarrierPublishCoordinator,
     PendingProviderReady, ProviderReadyReceipt, ReconcileOutcome, ReconcileReason,
 };
-use crate::project_resolver::NativeProjectResolver;
 use crate::provider_surface_store::ProviderSurfaceStore;
 use crate::provider_sync::{
     prepare_sync_transition, CarrierCommitStamp, ProviderOwnerBinding, ProviderPathKind,
     ProviderSyncState, ProviderSyncTransition,
 };
 use crate::server::block_in_place_guarded as block_in_place_if_available;
+use verter_semantic::resolver_core::ModuleResolverCore;
 
 /// How the semantic provider receives carrier companions after durable editor
 /// membership has been reconciled.
@@ -96,7 +96,7 @@ pub(crate) struct CarrierSyncRequest<'a> {
     pub ownership_ready: bool,
     /// The published native resolver (computes the owner-aware companion paths — path
     /// transforms only, NOT the ownership authority).
-    pub resolver: &'a NativeProjectResolver,
+    pub resolver: &'a ModuleResolverCore,
     /// The per-source provider-state map the committed transition reads.
     pub provider_sync_states: &'a DashMap<String, ProviderSyncState>,
     /// The generation-stamped provider-surface store (records published companions).
@@ -260,7 +260,7 @@ enum NotOwnedReason {
 /// A NON-OWNED carrier-sync outcome whose disposition is owned by the coordinator.
 ///
 /// `#[must_use]` + a private reason: a site can neither discard it (the requeue / owner-loss
-/// barrier advance would be lost — the F3/F4 dropped-outcome class) nor read the reason to
+/// barrier advance would be lost — the dropped-outcome class) nor read the reason to
 /// route it with its own hand-rolled requeue. The ONLY consumer is
 /// [`CarrierTransactionCoordinator::settle`], which performs the requeue / barrier advance
 /// and hands back a [`SettleClass`] the site uses for its editor-liveness buffer conversion
@@ -437,7 +437,7 @@ pub(crate) fn project_ownership_diagnostics_for(
     host: &VerterHost,
     canonical_id: &str,
 ) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
-    if !verter_workspace::resolver::path_is_carrier(canonical_id) {
+    if !verter_semantic::resolver_core::path_is_carrier(canonical_id) {
         return Vec::new();
     }
     let Some((resolution, _generation)) = crate::tsgo::project_binding::resolve_carrier(
@@ -1455,7 +1455,7 @@ fn committed_ide_surface_for_commit(
 /// bypassing the ownership decision. Non-carrier (shadow) state has its own
 /// [`crate::provider_sync::non_carrier_sync_state_for_source`].
 fn carrier_owned_sync_state(
-    resolver: &NativeProjectResolver,
+    resolver: &ModuleResolverCore,
     source_id: &str,
     is_jsx: bool,
     decl_path: Option<String>,
@@ -1493,7 +1493,7 @@ fn carrier_owned_sync_state(
 /// companion). The owner-resolved sync+commit path routes through
 /// [`reconcile_carrier_source`] instead.
 pub(crate) fn carrier_close_target(
-    resolver: &NativeProjectResolver,
+    resolver: &ModuleResolverCore,
     canonical_id: &str,
     is_jsx: bool,
     decl_path: Option<String>,

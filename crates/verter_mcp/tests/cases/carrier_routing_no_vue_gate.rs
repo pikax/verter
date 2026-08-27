@@ -449,7 +449,7 @@ fn mcp_routing_has_no_hardcoded_vue_gate() {
          substrate instead:\n\
            - `file_language.is_framework_carrier()` when you hold a `FileLanguage`\n\
              (e.g. `list_files()` yields `(String, FileLanguage)` tuples),\n\
-           - `verter_workspace::path_is_carrier(path)` for a bare path string.\n\
+           - `verter_semantic::resolver_core::path_is_carrier(path)` for a bare path string.\n\
          Allowlisted ONLY: the enumerated Vue-INTRINSIC tools (Provide/Inject,\n\
          migration targets, Pinia/Vuex store analysis, Vue-lifecycle SSR), test\n\
          code, comments, and explicit `is_svelte()` checks.\n\n\
@@ -498,7 +498,7 @@ const POST_CHANGE_CLEAN_LINES: &[&str] = &[
     ".filter(|(_, k)| k.is_framework_carrier())",
     "\"files_checked\": files.iter().filter(|(_, k)| k.is_framework_carrier()).count(),",
     "let component_files: Vec<_> = files.iter().filter(|(_, k)| k.is_framework_carrier()).collect();",
-    "if !found_test && verter_workspace::path_is_carrier(file) {",
+    "if !found_test && verter_semantic::resolver_core::path_is_carrier(file) {",
     // The additive carrier-neutral wire key + its deprecated alias (both carry
     // the carrier-generic count) are NOT gates.
     "\"componentFiles\": component_files.len(),",
@@ -506,7 +506,7 @@ const POST_CHANGE_CLEAN_LINES: &[&str] = &[
     "if file_language.is_svelte() {",
     // The carrier-generic scanner gate that REPLACES the `"vue" => {}` arm —
     // a path-based carrier check, not a match-arm literal.
-    "let is_carrier = verter_workspace::path_is_carrier(&canonical);",
+    "let is_carrier = verter_semantic::resolver_core::path_is_carrier(&canonical);",
     "if !is_carrier && !is_script_dep {",
     // A `=>` line whose `"vue"` is on the VALUE side (display / mapping), not in
     // pattern position, must NOT be flagged by the match-arm clause.

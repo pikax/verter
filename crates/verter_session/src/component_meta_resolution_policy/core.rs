@@ -410,7 +410,8 @@ fn rewrite_ref_node(
     // Rule 1: package-backed refs stay symbolic.
     if ctx
         .host
-        .workspace_is_package_backed(&lookup.canonical_source)
+        .workspace_read()
+        .is_package_backed(&lookup.canonical_source)
     {
         return None;
     }

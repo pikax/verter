@@ -1449,7 +1449,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
 /// promotes a result computed from a NON-CURRENT seed.
 ///
 /// The fix makes the view-bound compute REUSE the executor's `(store_view,
-/// base_is_current)` as the single seed (matching the bare-host and session-
+/// base_is_current)` as the single seed (matching the base and session-
 /// host paths, which already rebind through `StoreViewRead::from_executor_
 /// snapshot`). Then the compute seed IS the promotion-gating read — the
 /// divergence is structurally impossible.

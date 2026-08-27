@@ -1,6 +1,6 @@
 // TCM0 probe 3 — the post-dispose stale `getSourceFile` asymmetry (evidence §4c).
 // A `Program` handle retained past its owning `Snapshot.dispose()` keeps serving `getSourceFile` from
-// the client-side cache with no validity check, while every sibling `Program` method fails closed.
+// the client-side cache with no validity check, while the four sibling `Program` methods probed fail closed.
 import {
   resolveCandidate,
   loadSyncApi,
@@ -74,7 +74,7 @@ try {
     });
   }
 
-  check("the asymmetry is exactly one method wide", () => {
+  check("the asymmetry is one of five probed Program methods", () => {
     assert(
       !getSourceFileError && sfAfter === sfBefore,
       "getSourceFile did not survive, so there is no asymmetry to size",

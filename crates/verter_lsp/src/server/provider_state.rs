@@ -406,9 +406,9 @@ impl VerterLanguageServer {
                 .materialized_files
                 .iter()
                 .map(|path| path.as_str().to_string())
-                .filter(|path| verter_workspace::resolver::path_is_carrier(path))
+                .filter(|path| verter_semantic::resolver_core::path_is_carrier(path))
                 .collect();
-            if verter_workspace::resolver::path_is_carrier(&canonical) {
+            if verter_semantic::resolver_core::path_is_carrier(&canonical) {
                 sources.push(canonical.clone());
             }
             sources.sort_unstable();
@@ -599,7 +599,7 @@ impl VerterLanguageServer {
                 let Some(resolved) = resolved else {
                     continue;
                 };
-                if verter_workspace::resolver::path_is_carrier(&resolved) {
+                if verter_semantic::resolver_core::path_is_carrier(&resolved) {
                     continue;
                 }
                 if seen_barrels.insert(resolved.clone()) {
@@ -642,7 +642,7 @@ impl VerterLanguageServer {
                     }
                     verter_workspace::ResolutionPublication::Refused(_) => return false,
                 };
-                if verter_workspace::resolver::path_is_carrier(&target) {
+                if verter_semantic::resolver_core::path_is_carrier(&target) {
                     re_exports_carrier = true;
                     push_carrier(target, &mut carrier_targets);
                 } else if seen_barrels.insert(target.clone()) {
@@ -717,7 +717,7 @@ impl VerterLanguageServer {
     pub(super) fn carrier_multi_claimancy(&self, uri: &Uri) -> CarrierMultiClaimancy {
         let host = self.documents.host();
         let canonical = crate::documents::uri_to_canonical_id(uri);
-        if !verter_workspace::resolver::path_is_carrier(&canonical) {
+        if !verter_semantic::resolver_core::path_is_carrier(&canonical) {
             return CarrierMultiClaimancy::NotMultiClaimant(None);
         }
         let Some(published) = host.workspace_read().published_root() else {

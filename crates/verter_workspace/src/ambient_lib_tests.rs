@@ -12,12 +12,10 @@ use std::sync::Arc;
 
 use crate::ambient_lib::{AmbientLibError, AmbientLibSpec};
 use crate::canonical_path::CanonicalPath;
-use crate::membership::ConfiguredMembership;
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-use crate::project_key::ProjectStableKey;
-use crate::resolver::IdeProjectCompilerOptions;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 
 const STUB_LIB_ES5: &str = r#"
     interface Pick<T, K extends keyof T> { /* */ }
@@ -46,7 +44,9 @@ fn make_project(
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(project_root)),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new(project_root),
+        ),
     }
 }
 
@@ -271,7 +271,7 @@ fn register_ambient_lib_project_rebuild_stable_identity() {
         .iter()
         .find(|p| p.root.as_str() == "/ws/a")
         .unwrap();
-    let new_key = ProjectStableKey::from_project(new_a, &new_a.workspace_root);
+    let new_key = crate::project_key::project_stable_key_from_project(new_a, &new_a.workspace_root);
     assert_eq!(
         initial_key, new_key,
         "ProjectStableKey MUST be stable across graph rebuilds at the same tsconfig path"

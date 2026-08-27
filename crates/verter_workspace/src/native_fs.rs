@@ -7,6 +7,13 @@ use rustc_hash::FxHashMap;
 use crate::error::{DirEntry, VfsError};
 use crate::path_matches_prefix;
 
+#[derive(Debug)]
+pub(crate) enum BoundedFileRead {
+    Missing,
+    Complete(Arc<str>),
+    Exceeded,
+}
+
 /// Native filesystem wrapper — the sole disk-touch boundary.
 ///
 /// ALL `std::fs` calls in `verter_workspace` go through this struct.
@@ -73,6 +80,60 @@ impl NativeFs {
         }
     }
 
+    /// Read at most `maximum_bytes` plus one discriminator byte. A growing
+    /// file can therefore be rejected without allocating or reading its
+    /// unrestricted payload.
+    pub(crate) fn read_file_bounded_live(
+        &self,
+        path: &str,
+        maximum_bytes: u64,
+    ) -> std::io::Result<BoundedFileRead> {
+        use std::io::Read;
+
+        let os_path = to_os_path(path);
+        let mut file = match std::fs::File::open(&os_path) {
+            Ok(file) => file,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(BoundedFileRead::Missing);
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes =
+            Vec::with_capacity(usize::try_from(maximum_bytes.min(1_048_576)).unwrap_or(1_048_576));
+        file.by_ref()
+            .take(maximum_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > maximum_bytes {
+            return Ok(BoundedFileRead::Exceeded);
+        }
+        let source = String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        Ok(BoundedFileRead::Complete(Arc::from(source)))
+    }
+
+    /// Current raw file length through metadata only; no payload is read.
+    pub(crate) fn file_len_live(&self, path: &str) -> std::io::Result<Option<u64>> {
+        let os_path = to_os_path(path);
+        match std::fs::metadata(&os_path) {
+            Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
+            Ok(_) => Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Check if a file exists on disk.
     pub fn file_exists(&self, path: &str) -> bool {
         let os_path = to_os_path(path);
@@ -81,24 +142,40 @@ impl NativeFs {
 
     /// Typed metadata probe used by resolution. In particular, permission and
     /// transient I/O failures are never reported as a stable absence.
-    pub fn probe_path(&self, path: &str) -> crate::resolution_currency::PathProbe {
+    pub fn probe_path(&self, path: &str) -> verter_semantic::resolver_core::PathProbe {
+        self.probe_path_live(path)
+            .unwrap_or(verter_semantic::resolver_core::PathProbe::Unknown)
+    }
+
+    /// Probe current metadata without consulting or populating a directory
+    /// index. Unlike the compatibility [`Self::probe_path`] surface, an
+    /// unstable operating-system failure stays typed so bounded resolution
+    /// preflight can apply its explicit transient-retry policy.
+    pub(crate) fn probe_path_live(
+        &self,
+        path: &str,
+    ) -> std::io::Result<verter_semantic::resolver_core::PathProbe> {
         let os_path = to_os_path(path);
         match std::fs::metadata(&os_path) {
-            Ok(metadata) if metadata.is_file() => crate::resolution_currency::PathProbe::File,
-            Ok(metadata) if metadata.is_dir() => crate::resolution_currency::PathProbe::Directory,
-            Ok(_) => crate::resolution_currency::PathProbe::Unknown,
+            Ok(metadata) if metadata.is_file() => {
+                Ok(verter_semantic::resolver_core::PathProbe::File)
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                Ok(verter_semantic::resolver_core::PathProbe::Directory)
+            }
+            Ok(_) => Ok(verter_semantic::resolver_core::PathProbe::Unknown),
             Err(error)
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) =>
             {
-                crate::resolution_currency::PathProbe::Absent
+                Ok(verter_semantic::resolver_core::PathProbe::Absent)
             }
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                crate::resolution_currency::PathProbe::Inaccessible
+                Ok(verter_semantic::resolver_core::PathProbe::Inaccessible)
             }
-            Err(_) => crate::resolution_currency::PathProbe::Unknown,
+            Err(error) => Err(error),
         }
     }
 
@@ -710,7 +787,7 @@ mod tests {
 
         assert_eq!(
             NativeFs::new().probe_path(&canonical),
-            crate::resolution_currency::PathProbe::Absent,
+            verter_semantic::resolver_core::PathProbe::Absent,
             "ENOTDIR is stable absence, not transient filesystem uncertainty"
         );
     }

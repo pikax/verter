@@ -24,19 +24,22 @@ test-support = []
 [dependencies]
 verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span" }
+# Leaf observability substrate (layer 1): path helpers keep their
+# work-attribution counters, which the cold meta-compile performance cell gates.
+verter_audit = { path = "../verter_audit" }
 verter_parser = { path = "../verter_parser" }
-verter_workspace = { path = "../verter_workspace" }
-# The stage-1 framework script-fact trait names the framework adapter / language
-# ids and the carrier-language syntax gate. `verter_language` is a
-# `verter_span`-only leaf, so this edge introduces no cycle (verter_semantic
-# already depends on parser/workspace/span; verter_language depends on none of
-# them).
+# Framework script facts name the framework adapter/language ids and the
+# carrier-language syntax gate. `verter_language` is a `verter_span`-only leaf,
+# so this dependency preserves the semantic layer's dependency direction.
 verter_language = { path = "../verter_language" }
 verter_css_syntax = { path = "../verter_css_syntax" }
 verter_no_typeexpr = { workspace = true }
 verter_type_expr = { workspace = true }
 verter_type_expr_oxc = { workspace = true }
 rustc-hash = { workspace = true }
+glob = "0.3.3"
+parking_lot = "0.12.5"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hotpath = { version = "0.23", optional = true }
@@ -56,6 +59,9 @@ web-time = "1.1"
 
 [dev-dependencies]
 static_assertions = "1.1.0"
+# Compile-fail fixture proving `ResolverObservation`'s seal rejects an external,
+# host-shaped implementor.
+trybuild = "1.0"
 verter_test_support = { path = "../verter_test_support" }
 # Activates the `test-support` feature on `verter_css_syntax` for
 # `cargo test --package verter_semantic` (and example/bench) builds only —

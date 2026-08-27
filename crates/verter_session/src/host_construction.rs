@@ -69,7 +69,7 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
         .chain((b'a'..=b'z').map(|drive| format!("{}:/", char::from(drive))));
     let projects = roots
         .map(|root| {
-            let mut membership = verter_workspace::ConfiguredMembership::match_all_under_root(
+            let mut membership = verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new(&root),
             );
             let include = if root == "/" {
@@ -77,16 +77,18 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
             } else {
                 format!("{}**/*", root)
             };
-            membership.spec.include = vec![verter_workspace::CompiledGlob::new(
-                verter_workspace::NormalizedGlob::new(&include),
+            membership.spec.include = vec![verter_semantic::resolver_core::CompiledGlob::new(
+                verter_semantic::resolver_core::NormalizedGlob::new(&include),
             )];
             membership.spec.exclude =
                 ["node_modules/**", "bower_components/**", "jspm_packages/**"]
                     .into_iter()
                     .map(|pattern| {
-                        verter_workspace::CompiledGlob::new(verter_workspace::NormalizedGlob::new(
-                            &format!("{root}{pattern}"),
-                        ))
+                        verter_semantic::resolver_core::CompiledGlob::new(
+                            verter_semantic::resolver_core::NormalizedGlob::new(&format!(
+                                "{root}{pattern}"
+                            )),
+                        )
                     })
                     .collect();
             let tsconfig_path = if root == "/" {
@@ -95,7 +97,7 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
                 format!("{root}__verter_test__/tsconfig.json")
             };
             let mut project =
-                verter_workspace::IdeProjectConfig::new(root.clone(), root, Some(tsconfig_path));
+                verter_workspace::ide_project_config(root.clone(), root, Some(tsconfig_path));
             project.membership = membership;
             project
         })
@@ -658,11 +660,23 @@ impl VerterHost {
     /// construct this dispatcher directly — it goes through the
     /// component-meta resolver / engine. The accessor's existence is
     /// a documented test-bridge, not a public-API stability promise.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn semantic_dispatch(
         &self,
     ) -> crate::project_semantic_dispatch::ProjectSemanticDispatch<'_> {
         crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
+    }
+
+    /// Run one base-lane operation through a sealed request-bound context.
+    pub(crate) fn with_base_resolver_context<R>(
+        &self,
+        operation: impl FnOnce(&dyn crate::resolver_core::ResolverContext) -> R,
+    ) -> R {
+        let base = self.resolver_store_view_read().into_cold_seed_view();
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let ctx = crate::resolver_core::HostResolverContext::from_cold_seed(self, &base, overlay);
+        operation(&ctx)
     }
 
     /// Access the project-global type-resolution cache root.
@@ -878,7 +892,7 @@ impl VerterHost {
     /// this accessor performs the ONE downcast at store acquisition to the typed
     /// [`FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
     /// exactly the public-hidden downcast doctrine the carriers use. Used by the
-    /// relocated [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]
+    /// [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]
     /// to materialize each `.vue` macro surface once per `(canonical, content,
     /// macro, level)`.
     ///

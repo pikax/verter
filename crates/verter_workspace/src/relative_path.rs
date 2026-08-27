@@ -13,7 +13,7 @@
 /// are retained byte-for-byte.
 ///
 /// `\` is a path separator in module specifiers (TS `normalizeSlashes` — the
-/// same `pathIsRelative` class the resolver's [`crate::resolver::join_paths`]
+/// same `pathIsRelative` class the resolver's [`verter_semantic::resolver_core::join_paths`]
 /// route normalizes via `normalize_canonical_id`), so `'..\index'` joins
 /// byte-identically to `'../index'`. Without the rewrite a backslash segment
 /// survives verbatim and the joined path can never match a canonical id
@@ -21,7 +21,7 @@
 /// backslash spelling would be probed at a path that cannot exist.
 ///
 /// The rewrite is gated on the shared
-/// [`crate::resolver::is_relative_specifier`] predicate: a dot-prefixed
+/// [`verter_semantic::resolver_core::is_relative_specifier`] predicate: a dot-prefixed
 /// specifier OUTSIDE the TS `pathIsRelative` class (`.alias\types` — TS:
 /// package-ish, a resolution error) keeps its bytes, so its backslash
 /// segment stays verbatim and the joined path stays unmatchable
@@ -37,12 +37,13 @@ pub fn join_relative(importer_id: &str, specifier: &str) -> String {
         specifier.starts_with('.'),
         "join_relative expects a relative specifier (starts with '.'); got {specifier:?}",
     );
-    let specifier: std::borrow::Cow<'_, str> =
-        if specifier.contains('\\') && crate::resolver::is_relative_specifier(specifier) {
-            std::borrow::Cow::Owned(specifier.replace('\\', "/"))
-        } else {
-            std::borrow::Cow::Borrowed(specifier)
-        };
+    let specifier: std::borrow::Cow<'_, str> = if specifier.contains('\\')
+        && verter_semantic::resolver_core::is_relative_specifier(specifier)
+    {
+        std::borrow::Cow::Owned(specifier.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(specifier)
+    };
     let mut parts: Vec<&str> = importer_id.split('/').collect();
     parts.pop(); // remove filename
                  // Track whether the owner had a root prefix (leading empty segment from "/...")

@@ -431,8 +431,8 @@ impl StageExecutor for HostStageExecutor {
             .resolve_import_outcome(
                 canonical_id,
                 specifier,
-                verter_workspace::ResolutionContext {
-                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
+                verter_semantic::resolver_core::ResolutionContext {
+                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
                     kind,
                 },
             )
@@ -451,7 +451,7 @@ impl StageExecutor for HostStageExecutor {
         for req in &parse.external_requests {
             let Some(resolved) = resolve_dep(
                 &req.specifier,
-                verter_workspace::ResolveRequestKind::SfcSrcAttr,
+                verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
             ) else {
                 return ExtractedDeps::default();
             };
@@ -461,9 +461,10 @@ impl StageExecutor for HostStageExecutor {
         // Forward deps from relative imports.
         for imp in &parse.script_analysis.imports {
             if imp.source.starts_with('.') || imp.source.starts_with("../") {
-                let Some(resolved) =
-                    resolve_dep(&imp.source, verter_workspace::ResolveRequestKind::EsmImport)
-                else {
+                let Some(resolved) = resolve_dep(
+                    &imp.source,
+                    verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                ) else {
                     return ExtractedDeps::default();
                 };
                 forward_deps.push(resolved);
@@ -477,7 +478,7 @@ impl StageExecutor for HostStageExecutor {
             if dep.import_source.starts_with('.') || dep.import_source.starts_with("../") {
                 let Some(resolved) = resolve_dep(
                     &dep.import_source,
-                    verter_workspace::ResolveRequestKind::TypeImport,
+                    verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
                 ) else {
                     return ExtractedDeps::default();
                 };

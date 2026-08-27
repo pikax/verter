@@ -495,24 +495,17 @@ impl<'g> Drop for LexicalDemandScopeGuard<'g> {
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
-    /// Create a dispatcher bound to `ctx`.
+    /// Create a dispatcher bound to a sealed request context.
     ///
-    /// Locked-in signature: takes `&dyn ResolverContext`,
-    /// not concrete `&VerterHost`. External callers (test fixtures and
-    /// `component_meta_materialize.rs`) pass `&host` directly; the
-    /// implicit `&host as &dyn ResolverContext` upcast handles
-    /// type-erasure at the call site because `impl ResolverContext for
-    /// VerterHost` is registered in `resolver_core/resolver_context.rs`.
+    /// Production construction paths supply `HostResolverContext` or
+    /// `SessionResolverContext`. Test-support builds may additionally use the
+    /// explicitly fenced host seam when exercising dispatch in isolation.
     #[must_use]
     pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
-        // Bump `bare_engine_constructions` when this dispatcher is
-        // bound to a non-request-bound ctx. Nested
-        // `ProjectSemanticDispatch` ctors inherit their ctx from the
-        // enclosing `ComponentMetaQueryEngine`, so they typically do
-        // NOT bump (the engine's ctx flows through); but a bare-host
-        // direct `ProjectSemanticDispatch::new(host)` construction
-        // (e.g. a future cold entry-point regression)
-        // would bump here.
+        // The non-request-bound construction counter belongs only to the
+        // explicit test-support seam. Production implementations of the
+        // sealed trait are request-bound by construction.
+        #[cfg(any(test, feature = "test-support"))]
         if !ctx.is_request_bound() {
             crate::request_context::bump_bare_engine_construction();
         }
@@ -1673,6 +1666,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// `_with_mode(scope, expr, m)` ≡
     /// `_with_context(scope, expr, published(m))` — existing
     /// publication callers keep their semantics unchanged.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn lower_type_expr_in_scope_with_context(
         &self,
         scope_canonical_id: &str,
@@ -3796,9 +3790,9 @@ impl<'a> SessionDispatchHost<'a> {
     /// base node or a scope payload — it re-resolves per-base scope on
     /// every call via [`Self::base_scope`].
     ///
-    /// Locked-in signature: takes `&dyn ResolverContext`.
-    /// Existing call sites pass `&host` (concrete `&VerterHost`) and
-    /// upcast implicitly because `impl ResolverContext for VerterHost`.
+    /// Locked-in signature: takes a sealed, request-bound
+    /// `&dyn ResolverContext`. Direct-host construction exists only in the
+    /// compile-fenced test configuration.
     #[must_use]
     pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
         Self { ctx }

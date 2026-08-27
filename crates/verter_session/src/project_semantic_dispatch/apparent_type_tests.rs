@@ -53,9 +53,9 @@ fn project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         extensions: vec![".ts".into(), ".d.ts".into()],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
         ),
     }

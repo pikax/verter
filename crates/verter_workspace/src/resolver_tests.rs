@@ -1,10 +1,36 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
-use crate::membership::ConfiguredMembership;
-use crate::types::ResolvePhase;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use verter_semantic::resolver_core::ResolvePhase;
+use verter_semantic::resolver_core::{
+    ancestor_dirs, ancestor_dirs_from_dir, carrier_api_provider_path, carrier_ide_provider_path,
+    collapse_path, is_relative_specifier, join_paths, normalize_canonical_id, path_is_carrier,
+    strip_carrier_extension, AttemptFailure, ProviderTarget, ResolutionKind, ResolveRequestKind,
+    WorkspaceAlias,
+};
+
+#[test]
+fn canonical_manifest_replay_appends_without_recanonicalizing() {
+    for directory in [
+        "",
+        "/",
+        "/repo/pkg",
+        "/repo/pkg/",
+        "c:/repo/pkg",
+        "//host/share/pkg",
+    ] {
+        assert_eq!(
+            canonical_manifest_path(directory),
+            join_paths(directory, "package.json"),
+            "canonical append must preserve the existing join result for {directory:?}"
+        );
+    }
+
+    // Revert control: route replay through `join_paths`; the A6 attribution
+    // counter regains three calls per consumed package-manifest key.
+}
 
 fn project(
     root: &str,
@@ -12,7 +38,7 @@ fn project(
     tsconfig_path: Option<&str>,
     membership: ProjectMembership,
 ) -> IdeProjectConfig {
-    let mut project = IdeProjectConfig::new(
+    let mut project = ide_project_config(
         root.to_string(),
         workspace_root.to_string(),
         tsconfig_path.map(str::to_string),
@@ -61,6 +87,21 @@ impl TestReader {
 }
 
 impl crate::traits::WorkspaceRead for TestReader {
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
+        crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<crate::resolver::LoadedResolutionInputBatch, AttemptFailure> {
+        crate::resolver::load_workspace_inputs_for_test(self, reservation)
+    }
+
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.texts
             .get(&normalize_canonical_id(canonical_id))
@@ -205,6 +246,21 @@ impl CountingReader {
 }
 
 impl crate::traits::WorkspaceRead for CountingReader {
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
+        crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<crate::resolver::LoadedResolutionInputBatch, AttemptFailure> {
+        crate::resolver::load_workspace_inputs_for_test(self, reservation)
+    }
+
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.read_file_count.fetch_add(1, Ordering::Relaxed);
         let normalized = normalize_canonical_id(canonical_id);
@@ -297,7 +353,7 @@ impl crate::traits::WorkspaceAccess for CountingReader {
 
 #[test]
 fn owner_selection_ignores_solution_style_root_membership() {
-    let resolver = ProjectResolver::new(vec![
+    let resolver = ModuleResolverCore::new(vec![
         project(
             "/workspace",
             "/workspace",
@@ -346,7 +402,7 @@ fn live_resolver_files_are_immune_to_exclude() {
     // so `Keep.vue` (under the excluded `src/excluded`) was wrongly rejected ⇒
     // `nearest_config_for_path` returned `None` (the red). After the fix the file is
     // owned.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -388,7 +444,7 @@ fn live_resolver_exclude_only_owns_default_include_minus_exclude() {
     // The membership shape here is exactly what `load_project_membership` +
     // `spec_to_membership` round-trip to for `{"exclude":["dist"]}`: a default
     // `**/*` include plus the user exclude.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -424,7 +480,7 @@ fn live_resolver_explicit_empty_files_owns_nothing() {
     // own every non-excluded file (because the TS-default exclude is non-empty)
     // — the red. After the fix an empty-include + empty-files membership owns
     // nothing.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -458,7 +514,7 @@ fn ambiguous_configured_owners_are_preserved_non_collapsing() {
     //
     // DISCRIMINATING: a collapsing single-owner API returns 1 (invents a winner) or 0
     // (loses the file); the non-collapsing contract returns BOTH.
-    let resolver = ProjectResolver::new(vec![
+    let resolver = ModuleResolverCore::new(vec![
         project(
             "/workspace",
             "/workspace",
@@ -506,7 +562,7 @@ fn descendant_configured_owner_wins_over_ancestor_configured_owner() {
     // descendant, plus a real package tsconfig that also claims the file.
     // The nearest (deepest-root) configured owner wins — the ancestor must
     // not make the package file ambiguous.
-    let resolver = ProjectResolver::new(vec![
+    let resolver = ModuleResolverCore::new(vec![
         project(
             "/workspace",
             "/workspace",
@@ -558,7 +614,7 @@ fn incomparable_configured_roots_each_own_only_their_own_files() {
     // `workspace_snapshot_tests::incomparable_configured_roots_overlap_is_ambiguous`).
     // The real reachable property here: each config owns ONLY files under its own
     // root, and a file under neither root resolves to None.
-    let resolver = ProjectResolver::new(vec![
+    let resolver = ModuleResolverCore::new(vec![
         project(
             "/workspace/packages/a",
             "/workspace",
@@ -624,18 +680,18 @@ fn resolve_for_project_uses_owner_tsconfig_paths_without_importer_file() {
         .paths
         .push(("vue/*".to_string(), vec!["types/vue/*.d.ts".to_string()]));
 
-    let resolver = ProjectResolver::new(vec![configured]);
+    let resolver = ModuleResolverCore::new(vec![configured]);
     let reader = TestReader::with_files(&[
         "/workspace/types/vue/index.d.ts",
         "/workspace/types/vue/jsx.d.ts",
     ]);
-    let owner = crate::types::ProjectOwnership {
+    let owner = verter_semantic::resolver_core::ProjectOwnership {
         project_root: "/workspace".to_string(),
         tsconfig_path: Some("/workspace/tsconfig.json".to_string()),
     };
     let ctx = ResolutionContext {
         phase: ResolvePhase::ProviderGraph,
-        kind: crate::types::ResolveRequestKind::TypeImport,
+        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
     };
 
     let vue = resolver
@@ -651,7 +707,7 @@ fn resolve_for_project_uses_owner_tsconfig_paths_without_importer_file() {
 
 #[test]
 fn provider_id_uses_original_path_for_non_vue() {
-    let resolver = ProjectResolver::new(vec![
+    let resolver = ModuleResolverCore::new(vec![
         project(
             "/workspace",
             "/workspace",
@@ -682,7 +738,7 @@ fn provider_id_uses_original_path_for_non_vue() {
 
 #[test]
 fn provider_paths_keep_vue_as_public_api_targets() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -705,7 +761,7 @@ fn provider_paths_keep_vue_as_public_api_targets() {
 
 #[test]
 fn provider_ide_id_appends_tsx_to_vue() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -738,7 +794,7 @@ fn provider_paths_derive_both_virtual_files_for_svelte_carriers() {
     // api virtual file (`.svelte.verter.ts`, the reserved redirect-reached
     // infix) and the IDE virtual file (`.svelte.tsx`), derived from the registry
     // carrier-extension set — not a `.vue`-literal.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -796,7 +852,7 @@ fn rune_modules_are_not_carriers_and_serve_their_own_provider_path() {
     assert!(!extensions.contains(&"svelte.ts"));
     assert!(!extensions.contains(&"svelte.js"));
 
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -865,7 +921,7 @@ fn carrier_api_provider_path_appends_verter_ts_to_full_carrier() {
 
 #[test]
 fn provider_paths_round_trip_back_to_source_ids() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -898,7 +954,7 @@ fn provider_paths_round_trip_back_to_source_ids() {
 
 #[test]
 fn resolve_relative_vue_import_returns_real_source_and_provider_api() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -941,7 +997,7 @@ fn resolve_workspace_alias_rewrites_to_shadow_provider_file() {
         find: "@/".to_string(),
         replacement: "/workspace/src/".to_string(),
     }];
-    let resolver = ProjectResolver::new(vec![app_project]);
+    let resolver = ModuleResolverCore::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/utils.ts"]);
 
     let resolved = resolver
@@ -983,7 +1039,7 @@ fn resolve_tsconfig_paths_before_base_url() {
         )],
         ..Default::default()
     };
-    let resolver = ProjectResolver::new(vec![app_project]);
+    let resolver = ModuleResolverCore::new(vec![app_project]);
     let reader =
         TestReader::with_files(&["/workspace/generated/shared.ts", "/workspace/src/shared.ts"]);
 
@@ -1022,7 +1078,7 @@ fn resolve_base_url_when_no_paths_match() {
         paths: Vec::new(),
         ..Default::default()
     };
-    let resolver = ProjectResolver::new(vec![app_project]);
+    let resolver = ModuleResolverCore::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/shared.ts"]);
 
     let resolved = resolver
@@ -1045,7 +1101,7 @@ fn resolve_base_url_when_no_paths_match() {
 
 #[test]
 fn resolve_relative_paths_use_realpath_normalization() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1107,7 +1163,7 @@ fn resolve_project_references_after_local_tsconfig_options() {
         ..Default::default()
     };
 
-    let resolver = ProjectResolver::new(vec![app_project, shared_project]);
+    let resolver = ModuleResolverCore::new(vec![app_project, shared_project]);
     let reader = TestReader::with_files(&["/workspace/packages/shared/src/index.ts"]);
 
     let resolved = resolver
@@ -1140,7 +1196,7 @@ fn resolve_project_references_after_local_tsconfig_options() {
 
 #[test]
 fn resolve_package_imports_from_nearest_package_json() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1180,7 +1236,7 @@ fn resolve_package_imports_subpath_substitutes_js_specifier_to_ts_sibling() {
     // `.ts` sibling. The fixture maps `#internal/*` -> `./src/internal/*` and the
     // consumer imports `#internal/InternalComp.js`; the real file is
     // `InternalComp.ts`, so the resolver must substitute `.js` -> `.ts`.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1219,7 +1275,7 @@ fn resolve_package_imports_subpath_substitutes_js_specifier_to_ts_sibling() {
 fn resolve_relative_js_specifier_substitutes_to_ts_sibling() {
     // The extension rewrite is general (not `#imports`-specific): a relative
     // `./x.js` import resolves to `./x.ts` when only the `.ts` sibling exists.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1246,7 +1302,7 @@ fn resolve_relative_js_specifier_substitutes_to_ts_sibling() {
 fn resolve_js_specifier_prefers_source_ts_over_colocated_dts() {
     // TS extension substitution: when BOTH `./x.ts` and `./x.d.ts` exist, a
     // `./x.js` specifier resolves to the SOURCE `./x.ts`, not the declaration.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1277,7 +1333,7 @@ fn sfc_src_attr_js_does_not_substitute_to_ts_sibling() {
     // An SFC `src="./setup.js"` reads the LITERAL file bytes — it is NOT TS
     // import resolution. When both `setup.js` and `setup.ts` exist it MUST
     // resolve to the literal `.js`, never substitute to `.ts`.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1310,7 +1366,7 @@ fn sfc_src_attr_js_does_not_substitute_to_ts_even_when_js_absent() {
     // `setup.ts` present (no `setup.js`), the `src` does NOT resolve to the
     // `.ts` sibling: it stays unresolved (a missing-file `src=`), distinguishing
     // the literal-bytes semantics from import substitution.
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1339,7 +1395,7 @@ fn sfc_src_attr_js_does_not_substitute_to_ts_even_when_js_absent() {
 fn esm_import_js_still_substitutes_to_ts_when_js_absent() {
     // Contrast with the SFC src case: an ESM IMPORT `./setup.js` DOES substitute
     // to the `.ts` sibling (TS file-extension-substitution).
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1364,7 +1420,7 @@ fn esm_import_js_still_substitutes_to_ts_when_js_absent() {
 
 #[test]
 fn resolve_package_exports_prefers_types_for_root_imports() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1413,7 +1469,7 @@ fn resolve_package_exports_prefers_types_for_root_imports() {
 
 #[test]
 fn resolve_package_exports_distinguishes_import_and_require() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1477,7 +1533,7 @@ fn resolve_package_exports_distinguishes_import_and_require() {
 
 #[test]
 fn resolve_node_modules_prefers_typings_before_main() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1518,7 +1574,7 @@ fn resolve_node_modules_prefers_typings_before_main() {
 
 #[test]
 fn resolve_node_modules_falls_back_to_main_without_type_entries() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1553,10 +1609,10 @@ fn resolve_node_modules_falls_back_to_main_without_type_entries() {
     assert_eq!(resolved.provider_specifier, "legacy-main");
 }
 
-// Verify backward compat type alias
+// Verify the semantic resolver is constructible from workspace ingress.
 #[test]
-fn native_project_resolver_alias_works() {
-    let resolver: NativeProjectResolver = ProjectResolver::new(vec![project(
+fn module_resolver_core_accepts_workspace_project_config() {
+    let resolver: ModuleResolverCore = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         None,
@@ -1566,7 +1622,7 @@ fn native_project_resolver_alias_works() {
         resolver
             .nearest_config_for_path("/workspace/src/App.vue")
             .is_some(),
-        "NativeProjectResolver alias should be interchangeable with ProjectResolver"
+        "the semantic-owned resolver must accept workspace-produced configuration"
     );
 }
 
@@ -1578,7 +1634,7 @@ fn native_project_resolver_alias_works() {
 #[test]
 fn resolve_relative_without_project_owner() {
     // Only project is /workspace — importer is /other/src/App.ts (unowned)
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -1609,7 +1665,7 @@ fn resolve_relative_without_project_owner() {
 /// the result should carry the correct owner metadata (provider_id, provider_target, etc.).
 #[test]
 fn resolve_relative_unowned_to_owned_target() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -1653,7 +1709,7 @@ fn resolve_relative_unowned_to_owned_target() {
 /// `import type { PrimitiveProps } from '..'` regression shape.)
 #[test]
 fn bare_parent_and_current_dir_specifiers_resolve_to_directory_index() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -1729,7 +1785,7 @@ fn is_relative_specifier_matches_ts_path_is_relative() {
 /// `{ancestor}/node_modules/..` collapses back to the ancestor itself).
 #[test]
 fn backslash_relative_specifiers_resolve_identically_to_slash_forms() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -1787,7 +1843,7 @@ fn backslash_relative_specifiers_resolve_identically_to_slash_forms() {
 /// Absolute path imports should resolve for unowned importers.
 #[test]
 fn resolve_absolute_without_project_owner() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -1813,7 +1869,7 @@ fn resolve_absolute_without_project_owner() {
 /// Bare node_modules imports should resolve for unowned importers.
 #[test]
 fn resolve_node_modules_without_project_owner() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -1850,7 +1906,7 @@ fn resolve_node_modules_without_project_owner() {
 /// Package #imports should resolve for unowned importers.
 #[test]
 fn resolve_hash_import_without_project_owner() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -1891,7 +1947,7 @@ fn resolve_alias_requires_project_owner() {
         paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
         ..Default::default()
     };
-    let resolver = ProjectResolver::new(vec![app_project]);
+    let resolver = ModuleResolverCore::new(vec![app_project]);
     let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
 
     let result = resolver.resolve_with_reader(
@@ -1942,7 +1998,7 @@ fn resolve_tsconfig_paths_arbitrary_patterns() {
         ],
         ..Default::default()
     };
-    let resolver = ProjectResolver::new(vec![p]);
+    let resolver = ModuleResolverCore::new(vec![p]);
     let reader = TestReader::with_files(&[
         "/workspace/.nuxt/imports.d.ts",
         "/workspace/node_modules/nuxt/dist/app/index.d.ts",
@@ -1998,289 +2054,6 @@ fn resolve_tsconfig_paths_arbitrary_patterns() {
     assert_eq!(resolved.resolution_kind, ResolutionKind::TsConfigPath);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// preferred_specifier tests
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[test]
-fn preferred_specifier_returns_tsconfig_alias() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    app_project.compiler_options = IdeProjectCompilerOptions {
-        base_url: None,
-        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
-        ..Default::default()
-    };
-    let resolver = ProjectResolver::new(vec![app_project]);
-    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
-
-    let result =
-        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue");
-
-    assert_eq!(
-        result.as_deref(),
-        Some("@/Foo.vue"),
-        "should return tsconfig path alias"
-    );
-}
-
-#[test]
-fn preferred_specifier_returns_none_when_no_match() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    app_project.compiler_options = IdeProjectCompilerOptions {
-        base_url: None,
-        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
-        ..Default::default()
-    };
-    let resolver = ProjectResolver::new(vec![app_project]);
-    let reader = TestReader::with_files(&["/other/Foo.vue"]);
-
-    let result = resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/other/Foo.vue");
-
-    assert!(
-        result.is_none(),
-        "target outside all aliases should return None — got: {result:?}"
-    );
-}
-
-#[test]
-fn preferred_specifier_prefers_shortest() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    app_project.compiler_options = IdeProjectCompilerOptions {
-        base_url: None,
-        paths: vec![
-            ("@/*".to_string(), vec!["/workspace/src/*".to_string()]),
-            (
-                "@components/*".to_string(),
-                vec!["/workspace/src/components/*".to_string()],
-            ),
-        ],
-        ..Default::default()
-    };
-    let resolver = ProjectResolver::new(vec![app_project]);
-    let reader = TestReader::with_files(&["/workspace/src/components/Bar.vue"]);
-
-    let result = resolver.preferred_specifier(
-        &reader,
-        "/workspace/src/App.ts",
-        "/workspace/src/components/Bar.vue",
-    );
-
-    assert_eq!(
-        result.as_deref(),
-        Some("@components/Bar.vue"),
-        "should prefer shorter (more specific) alias"
-    );
-}
-
-#[test]
-fn preferred_specifier_round_trips() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    app_project.compiler_options = IdeProjectCompilerOptions {
-        base_url: None,
-        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
-        ..Default::default()
-    };
-    let resolver = ProjectResolver::new(vec![app_project]);
-    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
-
-    let specifier = resolver
-        .preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue")
-        .expect("should find alias specifier");
-
-    // Forward-resolve the specifier and verify it matches the original target
-    let request = ResolveRequest {
-        importer_id: "/workspace/src/App.ts".to_string(),
-        specifier: specifier.clone(),
-        kind: ResolveRequestKind::EsmImport,
-        phase: ResolvePhase::ProviderGraph,
-    };
-    let forward = resolver
-        .resolve_with_reader(&reader, &request)
-        .expect("forward resolve of preferred specifier should succeed");
-
-    assert_eq!(
-        forward.source_id, "/workspace/src/Foo.vue",
-        "round-trip: forward({specifier}) should resolve to original target"
-    );
-}
-
-#[test]
-fn preferred_specifier_none_for_provider_paths() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    app_project.compiler_options = IdeProjectCompilerOptions {
-        base_url: None,
-        paths: vec![("@/*".to_string(), vec!["/workspace/src/*".to_string()])],
-        ..Default::default()
-    };
-    let resolver = ProjectResolver::new(vec![app_project]);
-    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
-
-    // .vue.verter.ts is a provider path, not a real file — should not match
-    let result = resolver.preferred_specifier(
-        &reader,
-        "/workspace/src/App.ts",
-        "/workspace/src/Foo.vue.verter.ts",
-    );
-
-    assert!(
-        result.is_none(),
-        "provider paths (.vue.verter.ts) should return None — got: {result:?}"
-    );
-}
-
-#[test]
-fn preferred_specifier_multi_target_first_wins() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    // "@/*" maps to both src/ and lib/, first target wins
-    app_project.compiler_options = IdeProjectCompilerOptions {
-        base_url: None,
-        paths: vec![(
-            "@/*".to_string(),
-            vec![
-                "/workspace/src/*".to_string(),
-                "/workspace/lib/*".to_string(),
-            ],
-        )],
-        ..Default::default()
-    };
-    let resolver = ProjectResolver::new(vec![app_project]);
-    let reader = TestReader::with_files(&["/workspace/src/Foo.vue", "/workspace/lib/Foo.vue"]);
-
-    // Target in src/ — first target, should round-trip successfully
-    let result =
-        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue");
-    assert_eq!(
-        result.as_deref(),
-        Some("@/Foo.vue"),
-        "target in first replacement should produce alias"
-    );
-}
-
-#[test]
-fn preferred_specifier_multi_target_shadowed() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    // "@/*" maps to src/ first, then lib/. Target in lib/ is shadowed.
-    app_project.compiler_options = IdeProjectCompilerOptions {
-        base_url: None,
-        paths: vec![(
-            "@/*".to_string(),
-            vec![
-                "/workspace/src/*".to_string(),
-                "/workspace/lib/*".to_string(),
-            ],
-        )],
-        ..Default::default()
-    };
-    let resolver = ProjectResolver::new(vec![app_project]);
-    // Only lib/Bar.vue exists (NOT src/Bar.vue)
-    let reader = TestReader::with_files(&["/workspace/lib/Bar.vue"]);
-
-    // Target is lib/Bar.vue — @/Bar.vue forward-resolves to lib/Bar.vue
-    // (src/Bar.vue doesn't exist, so TypeScript tries lib/ next)
-    let result =
-        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/lib/Bar.vue");
-    assert_eq!(
-        result.as_deref(),
-        Some("@/Bar.vue"),
-        "when first target doesn't exist, second target should round-trip"
-    );
-}
-
-#[test]
-fn preferred_specifier_workspace_alias_fallback() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    // No tsconfig paths, but has a workspace alias
-    app_project.workspace_aliases = vec![WorkspaceAlias {
-        find: "~/".to_string(),
-        replacement: "/workspace/src/".to_string(),
-    }];
-    let resolver = ProjectResolver::new(vec![app_project]);
-    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
-
-    let result =
-        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue");
-
-    assert_eq!(
-        result.as_deref(),
-        Some("~/Foo.vue"),
-        "workspace alias should be used when no tsconfig paths match"
-    );
-}
-
-/// Vite normalization stores find with trailing slash (`@/`) and replacement
-/// WITHOUT trailing slash (`/workspace/src`). The reverse-alias must not
-/// produce double-slash specifiers like `@//Foo.vue`.
-#[test]
-fn preferred_specifier_workspace_alias_no_double_slash() {
-    let mut app_project = project(
-        "/workspace",
-        "/workspace",
-        Some("/workspace/tsconfig.app.json"),
-        ProjectMembership::MatchAll,
-    );
-    // Simulates Vite's normalize_alias_pair output:
-    // find = "@/" (with trailing slash), replacement = "/workspace/src" (NO trailing slash)
-    app_project.workspace_aliases = vec![WorkspaceAlias {
-        find: "@/".to_string(),
-        replacement: "/workspace/src".to_string(),
-    }];
-    let resolver = ProjectResolver::new(vec![app_project]);
-    let reader = TestReader::with_files(&["/workspace/src/Foo.vue"]);
-
-    let result =
-        resolver.preferred_specifier(&reader, "/workspace/src/App.ts", "/workspace/src/Foo.vue");
-
-    let specifier = result.expect("should find workspace alias specifier");
-    assert_eq!(
-        specifier, "@/Foo.vue",
-        "must NOT produce double-slash like @//Foo.vue"
-    );
-    assert!(
-        !specifier.contains("//"),
-        "specifier must not contain double-slash: {specifier}"
-    );
-}
-
 // ── Context-aware resolution tests ──
 
 /// Same specifier → different target depending on (phase, kind).
@@ -2291,7 +2064,7 @@ fn preferred_specifier_workspace_alias_no_double_slash() {
 /// - `(CodegenBlocker, TypeImport)` → d.ts      (type entry)
 #[test]
 fn context_aware_exports_codegen_esm_picks_runtime() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -2326,7 +2099,7 @@ fn context_aware_exports_codegen_esm_picks_runtime() {
 
 #[test]
 fn context_aware_exports_provider_esm_picks_types() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -2361,7 +2134,7 @@ fn context_aware_exports_provider_esm_picks_types() {
 
 #[test]
 fn context_aware_exports_codegen_type_import_picks_types() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -2400,7 +2173,7 @@ fn context_aware_exports_codegen_type_import_picks_types() {
 /// - `(ProviderGraph, EsmImport)` → t.d.ts (types key)
 #[test]
 fn context_aware_legacy_codegen_picks_main() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -2434,7 +2207,7 @@ fn context_aware_legacy_codegen_picks_main() {
 
 #[test]
 fn context_aware_legacy_provider_picks_types() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -2469,7 +2242,7 @@ fn context_aware_legacy_provider_picks_types() {
 /// RequireCall → CJS entry via "require" export condition.
 #[test]
 fn context_aware_require_picks_cjs() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.app.json"),
@@ -2506,7 +2279,7 @@ fn context_aware_require_picks_cjs() {
 /// import source is a bare module with `exports: { ".": { "types": "..." } }`.
 #[test]
 fn type_import_codegen_blocker_resolves_types_condition() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -2556,7 +2329,7 @@ fn type_import_codegen_blocker_resolves_types_condition() {
 
 #[test]
 fn type_import_codegen_blocker_falls_back_to_manifest_types_when_exports_lack_types() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -2599,7 +2372,7 @@ fn type_import_codegen_blocker_falls_back_to_manifest_types_when_exports_lack_ty
 
 #[test]
 fn type_import_relative_js_specifier_prefers_declaration_companion() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -2639,7 +2412,7 @@ fn type_import_relative_js_specifier_prefers_declaration_companion() {
 
 #[test]
 fn type_import_relative_package_follow_requires_package_manifest_confirmation() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -2700,7 +2473,7 @@ fn counting_reader_tracks_calls() {
 #[test]
 fn bare_package_json_reread_per_importer() {
     use crate::engine::Engine;
-    use crate::types::{ResolutionContext, ResolveRequestKind};
+    use verter_semantic::resolver_core::{ResolutionContext, ResolveRequestKind};
 
     let mut reader = CountingReader::with_files(&[
         "/repo/src/0.vue",
@@ -2721,7 +2494,7 @@ fn bare_package_json_reread_per_importer() {
     let engine = Engine::new();
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-        use crate::resolver::IdeProjectCompilerOptions;
+        use verter_semantic::resolver_core::IdeProjectCompilerOptions;
         let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
             root: "/repo".to_string(),
             rank: ProjectRank::Inferred,
@@ -2732,7 +2505,9 @@ fn bare_package_json_reread_per_importer() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
+            membership: crate::membership::configured_membership_match_all_under_root(
+                &CanonicalPath::new("/repo"),
+            ),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2763,7 +2538,7 @@ fn bare_package_json_reread_per_importer() {
 #[test]
 fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier() {
     use crate::engine::Engine;
-    use crate::types::{ResolutionContext, ResolveRequestKind};
+    use verter_semantic::resolver_core::{ResolutionContext, ResolveRequestKind};
 
     let mut reader =
         CountingReader::with_files(&["/repo/src/App.vue", "/repo/node_modules/pkg/dist/index.js"]);
@@ -2775,7 +2550,7 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
     let engine = Engine::new();
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-        use crate::resolver::IdeProjectCompilerOptions;
+        use verter_semantic::resolver_core::IdeProjectCompilerOptions;
         let graph = ProjectGraph::from_configs(
             ["/repo", "/repo/node_modules/pkg"]
                 .into_iter()
@@ -2789,9 +2564,9 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
                     workspace_aliases: vec![],
                     compiler_options: IdeProjectCompilerOptions::default(),
                     references: vec![],
-                    membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(
-                        root,
-                    )),
+                    membership: crate::membership::configured_membership_match_all_under_root(
+                        &CanonicalPath::new(root),
+                    ),
                 })
                 .collect(),
         );
@@ -2849,7 +2624,7 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
 #[test]
 fn package_imports_reread_per_importer() {
     use crate::engine::Engine;
-    use crate::types::{ResolutionContext, ResolveRequestKind};
+    use verter_semantic::resolver_core::{ResolutionContext, ResolveRequestKind};
 
     let mut reader = CountingReader::with_files(&[
         "/repo/src/a.vue",
@@ -2866,7 +2641,7 @@ fn package_imports_reread_per_importer() {
     let engine = Engine::new();
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-        use crate::resolver::IdeProjectCompilerOptions;
+        use verter_semantic::resolver_core::IdeProjectCompilerOptions;
         let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
             root: "/repo".to_string(),
             rank: ProjectRank::Inferred,
@@ -2877,7 +2652,9 @@ fn package_imports_reread_per_importer() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
+            membership: crate::membership::configured_membership_match_all_under_root(
+                &CanonicalPath::new("/repo"),
+            ),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2911,7 +2688,7 @@ fn package_imports_reread_per_importer() {
 #[test]
 fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
     use crate::engine::Engine;
-    use crate::types::{ResolutionContext, ResolveRequestKind};
+    use verter_semantic::resolver_core::{ResolutionContext, ResolveRequestKind};
 
     let mut reader = CountingReader::with_files(&[
         "/repo/src/components/App.vue",
@@ -2925,7 +2702,7 @@ fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
     let engine = Engine::new();
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-        use crate::resolver::IdeProjectCompilerOptions;
+        use verter_semantic::resolver_core::IdeProjectCompilerOptions;
         let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
             root: "/repo".to_string(),
             rank: ProjectRank::Inferred,
@@ -2936,7 +2713,9 @@ fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("/repo")),
+            membership: crate::membership::configured_membership_match_all_under_root(
+                &CanonicalPath::new("/repo"),
+            ),
         }]);
         *engine.project_graph.write() = graph;
         engine.rebuild_and_publish();
@@ -2969,7 +2748,7 @@ fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
 
 #[test]
 fn provider_id_for_source_vue_without_ownership() {
-    let resolver = NativeProjectResolver::new(vec![]);
+    let resolver = ModuleResolverCore::new(vec![]);
     assert_eq!(
         resolver.provider_id_for_source("/foo.vue"),
         Some("/foo.vue.verter.ts".to_string()),
@@ -2979,7 +2758,7 @@ fn provider_id_for_source_vue_without_ownership() {
 
 #[test]
 fn provider_id_for_source_non_vue_without_ownership() {
-    let resolver = NativeProjectResolver::new(vec![]);
+    let resolver = ModuleResolverCore::new(vec![]);
     assert_eq!(
         resolver.provider_id_for_source("/foo.ts"),
         Some("/foo.ts".to_string()),
@@ -2989,7 +2768,7 @@ fn provider_id_for_source_non_vue_without_ownership() {
 
 #[test]
 fn provider_id_for_source_custom_ext_without_ownership() {
-    let resolver = NativeProjectResolver::new(vec![]);
+    let resolver = ModuleResolverCore::new(vec![]);
     assert_eq!(
         resolver.provider_id_for_source("/foo.custom"),
         Some("/foo.custom".to_string()),
@@ -2999,7 +2778,7 @@ fn provider_id_for_source_custom_ext_without_ownership() {
 
 #[test]
 fn provider_ide_id_for_source_vue_tsx_without_ownership() {
-    let resolver = NativeProjectResolver::new(vec![]);
+    let resolver = ModuleResolverCore::new(vec![]);
     assert_eq!(
         resolver.provider_ide_id_for_source("/foo.vue", false),
         Some("/foo.vue.tsx".to_string()),
@@ -3009,7 +2788,7 @@ fn provider_ide_id_for_source_vue_tsx_without_ownership() {
 
 #[test]
 fn provider_ide_id_for_source_vue_jsx_without_ownership() {
-    let resolver = NativeProjectResolver::new(vec![]);
+    let resolver = ModuleResolverCore::new(vec![]);
     assert_eq!(
         resolver.provider_ide_id_for_source("/foo.vue", true),
         Some("/foo.vue.jsx".to_string()),
@@ -3019,7 +2798,7 @@ fn provider_ide_id_for_source_vue_jsx_without_ownership() {
 
 #[test]
 fn provider_ide_id_for_source_svelte_jsx_without_ownership() {
-    let resolver = NativeProjectResolver::new(vec![]);
+    let resolver = ModuleResolverCore::new(vec![]);
     assert_eq!(
         resolver.provider_ide_id_for_source("/foo.svelte", true),
         Some("/foo.svelte.jsx".to_string()),
@@ -3029,7 +2808,7 @@ fn provider_ide_id_for_source_svelte_jsx_without_ownership() {
 
 #[test]
 fn provider_ide_id_for_source_non_vue_returns_none() {
-    let resolver = NativeProjectResolver::new(vec![]);
+    let resolver = ModuleResolverCore::new(vec![]);
     assert_eq!(
         resolver.provider_ide_id_for_source("/foo.ts", false),
         None,
@@ -3039,7 +2818,7 @@ fn provider_ide_id_for_source_non_vue_returns_none() {
 
 #[test]
 fn type_import_package_with_pnpm_realpath_prefers_types_entry() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -3142,7 +2921,7 @@ fn type_import_package_with_pnpm_realpath_prefers_types_entry() {
 
 #[test]
 fn type_import_package_with_nested_node_conditions_and_pnpm_realpath_prefers_types_entry() {
-    let resolver = ProjectResolver::new(vec![project(
+    let resolver = ModuleResolverCore::new(vec![project(
         "/workspace",
         "/workspace",
         Some("/workspace/tsconfig.json"),
@@ -3292,7 +3071,7 @@ fn tsconfig_path_to_package_dir_respects_type_import_context() {
         )],
         ..Default::default()
     };
-    let resolver = ProjectResolver::new(vec![project]);
+    let resolver = ModuleResolverCore::new(vec![project]);
     let mut reader = TestReader::with_files(&[
         "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/package.json",
         "/workspace/node_modules/.pnpm/vue-router@5.0.3/node_modules/vue-router/index.cjs",
@@ -3426,7 +3205,7 @@ fn owned_resolution_stops_node_modules_walk_at_workspace_root() {
     );
     configured.compiler_options = IdeProjectCompilerOptions::default();
 
-    let resolver = ProjectResolver::new(vec![configured]);
+    let resolver = ModuleResolverCore::new(vec![configured]);
 
     let mut reader = CountingReader::with_files(&[]);
     reader.add_file(
@@ -3481,7 +3260,7 @@ fn package_imports_obey_workspace_root_boundary() {
     );
     configured.compiler_options = IdeProjectCompilerOptions::default();
 
-    let resolver = ProjectResolver::new(vec![configured]);
+    let resolver = ModuleResolverCore::new(vec![configured]);
 
     let mut reader = CountingReader::with_files(&[]);
     reader.add_file(
@@ -3519,7 +3298,7 @@ fn package_imports_obey_workspace_root_boundary() {
 #[test]
 fn unowned_resolution_remains_unbounded() {
     // When no project owner exists, resolution should not be bounded
-    let resolver = ProjectResolver::new(vec![]);
+    let resolver = ModuleResolverCore::new(vec![]);
 
     let mut reader = CountingReader::with_files(&[]);
     reader.add_file(
@@ -3656,7 +3435,7 @@ fn resolving_project(name: &str, specifier: &str) -> IdeProjectConfig {
 }
 
 fn resolve_bare(
-    resolver: &ProjectResolver,
+    resolver: &ModuleResolverCore,
     reader: &TestReader,
     importer_id: &str,
     specifier: &str,
@@ -3679,7 +3458,7 @@ fn cyclic_project_references_terminate_without_overflow() {
     // the reference cycle until the stack overflows.
     let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
     let b = referencing_project("b", &["/workspace/packages/a/tsconfig.json"]);
-    let resolver = ProjectResolver::new(vec![a, b]);
+    let resolver = ModuleResolverCore::new(vec![a, b]);
     let reader = TestReader::default();
 
     let resolved = resolve_bare(
@@ -3698,7 +3477,7 @@ fn cyclic_project_references_terminate_without_overflow() {
     // resolution itself.
     let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
     let b = resolving_project("b", "shared");
-    let resolver = ProjectResolver::new(vec![a, b]);
+    let resolver = ModuleResolverCore::new(vec![a, b]);
     let reader = TestReader::with_files(&["/workspace/packages/b/src/index.ts"]);
 
     let resolved = resolve_bare(
@@ -3718,7 +3497,7 @@ fn n_cycle_project_references_terminate() {
     let a = referencing_project("a", &["/workspace/packages/b/tsconfig.json"]);
     let b = referencing_project("b", &["/workspace/packages/c/tsconfig.json"]);
     let c = referencing_project("c", &["/workspace/packages/a/tsconfig.json"]);
-    let resolver = ProjectResolver::new(vec![a, b, c]);
+    let resolver = ModuleResolverCore::new(vec![a, b, c]);
     let reader = TestReader::default();
 
     let resolved = resolve_bare(
@@ -3743,7 +3522,7 @@ fn deep_acyclic_project_reference_chain_still_resolves() {
     let b = referencing_project("b", &["/workspace/packages/c/tsconfig.json"]);
     let c = referencing_project("c", &["/workspace/packages/d/tsconfig.json"]);
     let d = resolving_project("d", "deep-lib");
-    let resolver = ProjectResolver::new(vec![a, b, c, d]);
+    let resolver = ModuleResolverCore::new(vec![a, b, c, d]);
     let reader = TestReader::with_files(&["/workspace/packages/d/src/index.ts"]);
 
     let resolved = resolve_bare(
@@ -3776,7 +3555,7 @@ fn cyclic_branch_skipped_but_sibling_reference_resolves() {
     );
     let b = referencing_project("b", &["/workspace/packages/a/tsconfig.json"]);
     let c = resolving_project("c", "sib");
-    let resolver = ProjectResolver::new(vec![a, b, c]);
+    let resolver = ModuleResolverCore::new(vec![a, b, c]);
     let reader = TestReader::with_files(&["/workspace/packages/c/src/index.ts"]);
 
     let resolved = resolve_bare(
@@ -3860,7 +3639,7 @@ fn diamond_project_references_resolve_through_both_arms() {
         projects.push(referencing_project(&format!("l{i}"), &[next.as_str()]));
     }
     projects.push(resolving_project("r", "diamond-lib"));
-    let resolver = ProjectResolver::new(projects);
+    let resolver = ModuleResolverCore::new(projects);
     let reader = TestReader::with_files(&["/workspace/packages/r/src/index.ts"]);
 
     let resolved = resolve_bare(
@@ -3893,7 +3672,7 @@ fn project_reference_depth_budget_bounds_deep_chain() {
     // stop the descent and return None rather than walk (or overflow into)
     // arbitrarily deep reference chains.
     let projects = chained_projects("deep", 300, "over-lib");
-    let resolver = ProjectResolver::new(projects);
+    let resolver = ModuleResolverCore::new(projects);
     let reader = TestReader::with_files(&["/workspace/packages/deep299/src/index.ts"]);
 
     let resolved = resolve_bare(
@@ -3911,7 +3690,7 @@ fn project_reference_depth_budget_bounds_deep_chain() {
     // Under-budget side: the same shape at 10 projects — comfortably inside
     // the fuse. The budget must not cut off legitimate sub-budget chains.
     let projects = chained_projects("short", 10, "under-lib");
-    let resolver = ProjectResolver::new(projects);
+    let resolver = ModuleResolverCore::new(projects);
     let reader = TestReader::with_files(&["/workspace/packages/short9/src/index.ts"]);
 
     let resolved = resolve_bare(

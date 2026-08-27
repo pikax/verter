@@ -1,0 +1,45 @@
+# cand disabled arm: 2b84640168ae5db0e6bdf0d449d8261c12f224ea8bb1cc64f126b921c93f7ecf  target/release/examples/attribution_baseline
+# Exact gated fields from four consecutive `/usr/bin/time -l` invocations.
+### invocation 1
+corpus: 41 files (40 components + 1 shared module), runs: 30, attribution: OFF
+warmup resolved 40/40 components
+wall_median_ms	99.27
+wall_min_ms	97.57
+files	40
+runs	30
+attribution	0
+        3.77 real         4.88 user         0.68 sys
+            77119488  maximum resident set size
+
+### invocation 2
+corpus: 41 files (40 components + 1 shared module), runs: 30, attribution: OFF
+warmup resolved 40/40 components
+wall_median_ms	100.08
+wall_min_ms	97.35
+files	40
+runs	30
+attribution	0
+        3.15 real         4.80 user         0.66 sys
+            75415552  maximum resident set size
+
+### invocation 3
+corpus: 41 files (40 components + 1 shared module), runs: 30, attribution: OFF
+warmup resolved 40/40 components
+wall_median_ms	100.43
+wall_min_ms	97.26
+files	40
+runs	30
+attribution	0
+        3.18 real         4.86 user         0.65 sys
+            74809344  maximum resident set size
+
+### invocation 4
+corpus: 41 files (40 components + 1 shared module), runs: 30, attribution: OFF
+warmup resolved 40/40 components
+wall_median_ms	101.20
+wall_min_ms	97.03
+files	40
+runs	30
+attribution	0
+        3.17 real         4.86 user         0.67 sys
+            75661312  maximum resident set size

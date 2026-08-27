@@ -148,7 +148,7 @@ async fn fixture_for_carrier(
     let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let server = service.inner();
     server.documents.set_semantic_analysis_enabled(true);
-    host.configure_projects(vec![crate::project_resolver::IdeProjectConfig::new(
+    host.configure_projects(vec![verter_workspace::ide_project_config(
         workspace_id.clone(),
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.json")),

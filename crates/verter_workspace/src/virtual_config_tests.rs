@@ -15,8 +15,10 @@
 
 use std::sync::Arc;
 
+use crate::env_hash::IdeProjectConfigEnvHash;
 use crate::memory::{MemoryOptions, MemoryWorkspace};
-use crate::resolver::{IdeProjectConfig, ProjectMembership};
+use crate::ProjectMembership;
+use verter_semantic::resolver_core::IdeProjectConfig;
 
 use super::compute_virtual_config_identity;
 
@@ -61,7 +63,7 @@ fn virtual_identity_does_not_alias_non_virtual_project_identity() {
                 include: vec!["d:/ws/src/**/*.vue".to_string()],
                 exclude: Vec::new(),
             },
-            &crate::resolver::IdeProjectCompilerOptions::default(),
+            &verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
         ),
     }
     .project_identity();

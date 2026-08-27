@@ -1153,7 +1153,7 @@ fn binding_usage_precedence(usage: TscBindingUsage) -> u8 {
 /// interface in this SFC's own `<script>`) is retained normally (its
 /// declaration is in scope). A cross-file reference into a plain `.ts`/`.d.ts`
 /// module is also kept — that import resolves. The carrier classification is
-/// the registry-backed [`verter_workspace::resolver::path_is_carrier`], the
+/// the registry-backed [`verter_semantic::resolver_core::path_is_carrier`], the
 /// single structural authority (a new carrier extends the registry, not this
 /// predicate).
 pub(super) fn emit_type_is_cross_sfc_carrier(
@@ -1169,7 +1169,7 @@ pub(super) fn emit_type_is_cross_sfc_carrier(
         SemanticNodeData::InstantiationRef { base, .. } => base.canonical_id.as_ref(),
         _ => return false,
     };
-    canonical != owner_canonical && verter_workspace::resolver::path_is_carrier(canonical)
+    canonical != owner_canonical && verter_semantic::resolver_core::path_is_carrier(canonical)
 }
 
 /// Testing-surface type text for a prop whose resolved type is a type declared

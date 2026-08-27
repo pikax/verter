@@ -9,13 +9,13 @@ use super::*;
 
 #[test]
 fn carrier_close_target_derives_nested_package_companion_paths() {
-    let resolver = NativeProjectResolver::new(vec![
-        crate::project_resolver::IdeProjectConfig::new(
+    let resolver = ModuleResolverCore::new(vec![
+        verter_workspace::ide_project_config(
             "/workspace/pkg-a".to_string(),
             "/workspace".to_string(),
             Some("/workspace/pkg-a/tsconfig.json".to_string()),
         ),
-        crate::project_resolver::IdeProjectConfig::new(
+        verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             None,
@@ -54,12 +54,11 @@ fn carrier_close_target_derives_nested_package_companion_paths() {
 
 #[test]
 fn current_owner_binding_reflects_resolver_owner_and_none() {
-    let resolver =
-        NativeProjectResolver::new(vec![crate::project_resolver::IdeProjectConfig::new(
-            "/workspace/pkg-a".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/pkg-a/tsconfig.json".to_string()),
-        )]);
+    let resolver = ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
+        "/workspace/pkg-a".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/pkg-a/tsconfig.json".to_string()),
+    )]);
 
     // Owned: a file under pkg-a resolves to its tsconfig key.
     let owned = current_owner_binding_for_source(&resolver, "/workspace/pkg-a/src/App.vue");

@@ -1,14 +1,14 @@
 //! Ambient lib registration types and engine storage.
 //!
 //! sub-plan: per-project ambient TypeScript libs (e.g. lib.es5.d.ts)
-//! are registered against a [`crate::project_key::ProjectStableKey`] and stored
+//! are registered against a [`verter_semantic::resolver_core::ProjectStableKey`] and stored
 //! lock-free on the [`crate::engine::Engine`] via `ArcSwap`. They are visible
 //! only via [`WorkspaceAccess::read_ambient_lib`] / `lookup_ambient_symbol`,
 //! and shadow under user files via [`WorkspaceAccess::file_exists`] (A5).
 //!
 //! Identity rule (A3): keys include the workspace root so multi-root setups
 //! with the same `tsconfig.json` paths produce distinct keys. See
-//! [`crate::project_key::ProjectStableKey`].
+//! [`verter_semantic::resolver_core::ProjectStableKey`].
 //!
 //! Path normalization (A7): `register_ambient_lib` and `read_ambient_lib`
 //! normalize via [`normalize_canonical_id`] (`\` -> `/`, trim leading `/`)
@@ -20,8 +20,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use verter_scheduler::invalidation::Hash16;
 
-use crate::project_key::ProjectStableKey;
 use crate::workspace_snapshot::ProjectId;
+use verter_semantic::resolver_core::ProjectStableKey;
 
 /// Public spec passed to [`crate::traits::WorkspaceAccess::register_ambient_lib`].
 ///
@@ -49,19 +49,6 @@ pub enum AmbientLibError {
     NonAmbientCollision(Arc<str>),
     #[error("lib parse failed: {0}")]
     ParseFailure(String),
-}
-
-/// Hit returned by [`crate::traits::WorkspaceAccess::lookup_ambient_symbol`].
-///
-/// `canonical_id` is the trimmed normalized canonical (e.g. `lib.es5.d.ts`).
-/// `virtual_id` is the project-scoped `ambient:/<C|F><32hex>/<canonical>`
-/// form used as the file id in scheduler / dep graph.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AmbientSymbolHit {
-    pub project: ProjectStableKey,
-    pub canonical_id: Arc<str>,
-    pub virtual_id: Arc<str>,
-    pub lib_order: u32,
 }
 
 /// Engine-side ambient lib registry, swapped lock-free via `ArcSwap`.

@@ -28,9 +28,9 @@
 
 use std::sync::Arc;
 
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
-    VfsProjectConfig,
+    MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
 };
 
 fn build_workspace_at_generation_n() -> Arc<MemoryWorkspace> {
@@ -49,7 +49,7 @@ fn build_workspace_at_generation_n() -> Arc<MemoryWorkspace> {
             ..Default::default()
         },
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("/projN"),
         ),
     }]);
@@ -77,7 +77,7 @@ fn bump_workspace_config(workspace: &MemoryWorkspace) {
                 ..Default::default()
             },
             references: vec![],
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/projN"),
             ),
         },
@@ -91,7 +91,7 @@ fn bump_workspace_config(workspace: &MemoryWorkspace) {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/projM"),
             ),
         },

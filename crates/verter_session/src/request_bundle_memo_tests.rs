@@ -437,8 +437,8 @@ fn resolution_retarget_between_snapshots_misses_memo() {
         OWNER,
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_workspace::ResolvePhase::ProviderGraph,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some(UNRELATED.to_string()),
             possible_canonical_ids: vec![UNRELATED.to_string()],
         }],

@@ -131,8 +131,8 @@ fn external_src_compile_uses_the_session_slot_not_the_template_slot() {
         OWNER,
         vec![verter_workspace::ExactResolution {
             specifier: "./partial.html".to_string(),
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/proj/partial.html".to_string()),
             possible_canonical_ids: vec!["/proj/partial.html".to_string()],
         }],

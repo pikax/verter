@@ -83,7 +83,7 @@ pub fn find_vite_config(
 ) -> Option<String> {
     VITE_CONFIG_NAMES
         .iter()
-        .map(|name| crate::resolver::join_paths(project_root, name))
+        .map(|name| verter_semantic::resolver_core::join_paths(project_root, name))
         .find(|p| ws.file_exists(p))
 }
 
@@ -125,7 +125,7 @@ pub fn analyze_vite_config(
         None => return ViteConfigAnalysis::NotFound,
     };
 
-    let config_dir_str = crate::resolver::parent_dir(&config_path_str);
+    let config_dir_str = verter_semantic::resolver_core::parent_dir(&config_path_str);
     let config_dir = std::path::Path::new(&config_dir_str);
 
     let source = match ws.read_file(&config_path_str) {

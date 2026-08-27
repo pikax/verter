@@ -29,10 +29,9 @@ use std::time::Instant;
 use verter_session::HostConfig;
 use verter_session::VerterHost;
 
-use verter_semantic::analysis::project_resolver::IdeProjectConfig;
+use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_workspace::{
-    IdeProjectCompilerOptions, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank,
-    VfsProjectConfig, WorkspaceAccess,
+    MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
 const NUM_COMPONENTS: usize = 16;
@@ -84,7 +83,7 @@ fn build_host() -> (Arc<VerterHost>, Vec<String>) {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+            membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace"),
             ),
         },
@@ -96,7 +95,7 @@ fn build_host() -> (Arc<VerterHost>, Vec<String>) {
     }
     let ws_access: Arc<dyn WorkspaceAccess> = workspace;
     let host = VerterHost::new(HostConfig::default(), ws_access);
-    host.configure_projects(vec![IdeProjectConfig::new(
+    host.configure_projects(vec![verter_workspace::ide_project_config(
         "/workspace".to_string(),
         "/workspace".to_string(),
         Some("/workspace/tsconfig.json".to_string()),

@@ -38,7 +38,7 @@
 
 use std::sync::Arc;
 
-use verter_workspace::ProjectStableKey;
+use verter_semantic::resolver_core::ProjectStableKey;
 
 use crate::semantic_query::{
     ApparentDemandScope, ApparentTypeContext, ProjectionMode, ProjectionReductionContext,

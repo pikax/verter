@@ -11,16 +11,17 @@ use verter_audit::{
 
 use verter_scheduler::invalidation::Hash16;
 
-use crate::ambient_lib::{AmbientLibError, AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit};
+use crate::ambient_lib::{AmbientLibError, AmbientLibSpec, AmbientLibsByProject};
 use crate::exact_resolution::DependencySnapshotView;
-use crate::project_key::ProjectStableKey;
 use crate::published_state::ProjectEnvHashArray;
-use crate::types::{
-    ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, ProjectOwnership,
-    ResolutionContext, ResolvePhase, ResolveRequestKind, ResolveResult,
-};
+use crate::types::{ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge};
 use crate::workspace_snapshot::ProjectId;
 use verter_language::FileLanguage;
+use verter_semantic::resolver_core::ProjectStableKey;
+use verter_semantic::resolver_core::{
+    AmbientSymbolHit, ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind,
+    ResolveResult,
+};
 
 /// Lightweight resource snapshot for first-class Rust audit.
 #[derive(Debug, Clone, Default)]
@@ -81,8 +82,8 @@ pub trait WorkspaceRead: Send + Sync {
     /// The ONLY path-classification seam resolution may use: no
     /// resolver-side code path may reach [`Self::file_exists`], because
     /// that boolean folds
-    /// [`PathProbe::Inaccessible`](crate::resolution_currency::PathProbe::Inaccessible)
-    /// and [`PathProbe::Unknown`](crate::resolution_currency::PathProbe::Unknown)
+    /// [`PathProbe::Inaccessible`](verter_semantic::resolver_core::PathProbe::Inaccessible)
+    /// and [`PathProbe::Unknown`](verter_semantic::resolver_core::PathProbe::Unknown)
     /// into `false` — laundering an I/O error into a witnessable
     /// `Absent`, the one outcome a resolution witness may never cache.
     ///
@@ -93,13 +94,13 @@ pub trait WorkspaceRead: Send + Sync {
     /// for error-channel-free adapters (in-memory and fixture readers),
     /// where "not present" is total information and no laundering is
     /// possible.
-    fn probe_path(&self, canonical_id: &str) -> crate::resolution_currency::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
         if self.file_exists(canonical_id) {
-            crate::resolution_currency::PathProbe::File
+            verter_semantic::resolver_core::PathProbe::File
         } else if self.is_dir(canonical_id) {
-            crate::resolution_currency::PathProbe::Directory
+            verter_semantic::resolver_core::PathProbe::Directory
         } else {
-            crate::resolution_currency::PathProbe::Absent
+            verter_semantic::resolver_core::PathProbe::Absent
         }
     }
 
@@ -119,6 +120,80 @@ pub trait WorkspaceRead: Send + Sync {
     /// non-admission. The provided body is a no-op for readers with no
     /// transaction to refuse on; those callers already produce no admission.
     fn note_resolution_budget_exhausted(&self) {}
+
+    /// Record the exact rejected prospective budget action, then retain the
+    /// existing non-admission behavior for implementations that only need the
+    /// coarse hook.
+    fn note_input_resolution_budget_exhausted(
+        &self,
+        _event: verter_semantic::resolver_core::InputResolutionBudgetExhaustion,
+    ) {
+        self.note_resolution_budget_exhausted();
+    }
+
+    /// Mark a bounded-load integrity failure as non-admissible. Readers with
+    /// no transaction retain the no-op default.
+    fn note_input_resolution_terminal_failure(&self) {}
+
+    fn note_input_load_integrity_failure(&self) {
+        self.note_input_resolution_terminal_failure();
+    }
+
+    /// Reserve the exact supported input delta without reading or parsing an
+    /// unrestricted payload. The default is deliberately incapable: custom
+    /// readers never fall back to the legacy unrestricted read methods.
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        _basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<
+        crate::resolver::ResolutionInputReservationBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        if let Some(failure) = keys
+            .iter()
+            .find_map(crate::resolver::unsupported_input_failure)
+        {
+            return Err(failure);
+        }
+        Err(
+            verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
+                key: keys.first().cloned().unwrap_or_else(|| {
+                    verter_semantic::resolver_core::InputKey::PathProbe {
+                        path: Arc::from("<empty-bounded-preflight>"),
+                    }
+                }),
+            },
+        )
+    }
+
+    /// Load exactly a prior bounded reservation. The default never delegates
+    /// to unrestricted reads and therefore cannot turn an unsupported custom
+    /// reader into a zero-byte loader.
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<
+        crate::resolver::LoadedResolutionInputBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        Err(
+            verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
+                key: reservation.keys().first().cloned().unwrap_or_else(|| {
+                    verter_semantic::resolver_core::InputKey::PathProbe {
+                        path: Arc::from("<empty-bounded-load>"),
+                    }
+                }),
+            },
+        )
+    }
+
+    /// Publish loader-local payload and manifest observations only after the
+    /// enclosing resolution operation has passed its final integrity and
+    /// conditional-commit fences. Readers without shared load caches keep the
+    /// default no-op.
+    fn commit_loaded_resolution_inputs(&self, _entries: &[crate::resolver::LoadedResolutionInput]) {
+    }
 
     /// Whether every resolver-visible backend mutation is serialized through
     /// this workspace's resolution-world publisher.
@@ -177,8 +252,8 @@ pub trait WorkspaceRead: Send + Sync {
     /// Standalone readers observe the base population. Engine-backed editor
     /// workspaces override this with their independently fenced overlay
     /// session.
-    fn resolution_population(&self) -> crate::resolution_currency::ResolutionPopulation {
-        crate::resolution_currency::ResolutionPopulation::Base
+    fn resolution_population(&self) -> verter_semantic::resolver_core::ResolutionPopulation {
+        verter_semantic::resolver_core::ResolutionPopulation::Base
     }
 
     /// Capture this reader's immutable resolution world for the population
@@ -626,8 +701,8 @@ pub trait WorkspaceRead: Send + Sync {
 /// audit-sink registry, and ambient-lib mutators.
 ///
 /// All workspace I/O (reads, writes, walks, resolution) goes through this
-/// trait hierarchy. There is no separate `ProjectResolverReader` or
-/// `ConfigFileReader`. The resolver, config parser, and host all take
+/// trait hierarchy. There is no separate partial resolver or config-file
+/// reader capability. The resolver, config parser, and host all take
 /// `&dyn WorkspaceAccess` (or the narrower `&dyn WorkspaceRead` for
 /// read-only consumers).
 ///
@@ -665,12 +740,12 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// (which bypasses `exact_resolutions` per R5). Stores `Bare` specifiers.
     /// Per R4 lifecycle: clears `exact_resolutions`, `exact_resolved`,
     /// `lazy_resolved`, and `semantic_transitive` for the file. **Does NOT
-    /// clear `ambient_resolved` (F1.5).**
+    /// clear `ambient_resolved`.**
     fn record_parsed_edges(&self, canonical_id: &str, edges: &[ParsedEdge]);
 
     /// Replace bundler-injected exact resolutions for a file. The active
     /// stem set is recomputed AFTER the exact mutation; parsed-unresolved
-    /// entries are NOT destroyed (F18 active-stem model).
+    /// entries are NOT destroyed (active-stem model).
     fn set_exact_resolutions(
         &self,
         canonical_id: &str,
@@ -696,11 +771,11 @@ pub trait WorkspaceAccess: WorkspaceRead {
     ) -> ExactResolutionResult;
 
     /// Replace owner's transitive-semantic dep set. Always fires regardless
-    /// of `cc.dependencies` union equality (closes F15).
+    /// of `cc.dependencies` union equality.
     fn replace_semantic_transitive(&self, canonical_id: &str, deps: BTreeSet<String>);
 
     /// Set the workspace's reverse-dep-stripping extension list. Merges
-    /// with `probe_extensions()` and sorts longest-first at set-time (F4).
+    /// with `probe_extensions()` and sorts longest-first at set-time.
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>);
 
     /// Monotonic generation of the SOURCE-ENV compaction domain — the
@@ -780,10 +855,11 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// the file is no longer resolvable or tracked. Default: no-op.
     fn notify_delete(&self, _canonical_id: &str) {}
 
-    /// Configure the project resolver from a list of project configs.
+    /// Configure semantic module resolution from a list of project configs.
     /// Called by the host when `configure_projects()` is used.
-    /// Default: no-op. Concrete workspaces override to rebuild the resolver.
-    fn configure_resolver(&self, _projects: Vec<crate::resolver::IdeProjectConfig>) {}
+    /// Default: no-op. Concrete workspaces override to rebuild the semantic core.
+    fn configure_resolver(&self, _projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    }
 
     // ── Directory and mutation operations ──
 
@@ -861,7 +937,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
             // resolver's manifest lane, so an `Inaccessible` / `Unknown`
             // manifest entry must reach the transaction as itself rather
             // than as a witnessable absence.
-            if self.probe_path(&candidate) != crate::resolution_currency::PathProbe::File {
+            if self.probe_path(&candidate) != verter_semantic::resolver_core::PathProbe::File {
                 return None;
             }
             Some(self.realpath(&candidate).unwrap_or(candidate))
@@ -915,7 +991,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
 
     /// Record a session-side reverse-dep edge from a consumer file to the
     /// ambient virtual id. Routes to the dedicated `ambient_resolved`
-    /// dep class (F1.5: ambient deps survive parse re-records).
+    /// dependency class (ambient deps survive parse re-records).
     /// Re-registration of the lib bumps the content generation so the
     /// fact-rail self-root validators reject downstream caches that
     /// pinned the prior content.
@@ -1273,8 +1349,8 @@ mod ambient_default_tests {
 
     use super::{DependencySnapshotView, WorkspaceAccess, WorkspaceRead};
     use crate::ambient_lib::{AmbientLibError, AmbientLibSpec};
-    use crate::project_key::ProjectStableKey;
     use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
+    use verter_semantic::resolver_core::ProjectStableKey;
 
     /// Minimal backend that opts out of ambient lib support — exercises the
     /// trait defaults.
@@ -1399,13 +1475,13 @@ mod ambient_default_tests {
         fn file_exists(&self, id: &str) -> bool {
             id == TYPED_PROBE_TYPES_CANDIDATE
         }
-        fn probe_path(&self, id: &str) -> crate::resolution_currency::PathProbe {
+        fn probe_path(&self, id: &str) -> verter_semantic::resolver_core::PathProbe {
             if id == TYPED_PROBE_TYPES_CANDIDATE {
                 // The one divergence: occupancy says "there", typed
                 // classification says "the answer is unknowable".
-                crate::resolution_currency::PathProbe::Inaccessible
+                verter_semantic::resolver_core::PathProbe::Inaccessible
             } else {
-                crate::resolution_currency::PathProbe::Absent
+                verter_semantic::resolver_core::PathProbe::Absent
             }
         }
         fn is_package_backed(&self, _id: &str) -> bool {

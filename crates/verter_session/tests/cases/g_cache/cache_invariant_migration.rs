@@ -60,9 +60,9 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+        membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
         ),
     }
@@ -79,13 +79,11 @@ fn build_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
     }
     let ws_access: Arc<dyn WorkspaceAccess> = workspace;
     let host = VerterHost::new(HostConfig::default(), ws_access);
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     Arc::new(host)
 }
 
@@ -232,13 +230,11 @@ fn cache_invalidation_after_dep_edit_surfaces_new_content() {
 
     let ws_access: Arc<dyn WorkspaceAccess> = workspace.clone();
     let host = VerterHost::new(HostConfig::default(), ws_access);
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let host = Arc::new(host);
 
     // Cold pass — captures the pre-edit shape into all caches.
@@ -332,13 +328,11 @@ fn evicted_owner_reloads_after_dep_edit() {
 
     let ws_access: Arc<dyn WorkspaceAccess> = workspace.clone();
     let host = VerterHost::new(HostConfig::default(), ws_access);
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let host = Arc::new(host);
 
     // Cold pass — captures the pre-edit shape into all caches.

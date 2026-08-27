@@ -1326,7 +1326,9 @@ pub(crate) fn carrier_dependency_ids(
         let Some(resolved) = resolved else {
             continue;
         };
-        if verter_workspace::path_is_carrier(&resolved) && seen.insert(resolved.clone()) {
+        if verter_semantic::resolver_core::path_is_carrier(&resolved)
+            && seen.insert(resolved.clone())
+        {
             deps.push(resolved);
         }
     }

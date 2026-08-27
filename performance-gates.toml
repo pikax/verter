@@ -134,7 +134,7 @@ operation = "cold_project_batch_component_meta_then_compile_many"
 # every changed line is a `//!` doc line or blank, and no executable line moved — so the
 # corpus and the recorded measurement below are UNCHANGED and were not re-taken. A
 # corpus-identity re-pin, not a re-measured cell.
-corpus_fingerprint = "git-blob:efa9ea54a14772ecd87511d6bb07017aa33940ba (crates/verter_bench/examples/attribution_baseline.rs); sha256:1d208e61688efdf6b8e33adce7d0095c1195377e65a06579c26b75b08ea9bb73"
+corpus_fingerprint = "git-blob:efa9ea54a14772ecd87511d6bb07017aa33940ba (crates/verter_bench/examples/attribution_baseline.rs); sha256:5e06d35dda284a8ef049bf0dd3dc39974b904729f740da58c650ec59e806f632"
 # SHA-256 over the exact request description string recorded in
 # evidence/A6/baseline-measurement.md; the Revision 11 normalized product-request
 # type does not exist at lock time, so the request is pinned by its literal

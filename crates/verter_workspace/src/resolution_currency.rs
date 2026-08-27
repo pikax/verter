@@ -7,16 +7,23 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use imbl::{HashMap, HashSet};
 use parking_lot::Mutex;
 
 use crate::published_state::PublishedRoot;
-use crate::types::{
-    ExactResolution, ResolutionContext, ResolvePhase, ResolveRequestKind, ResolveResult,
-};
+use crate::types::ExactResolution;
 use crate::{
     AggregateStamp, FactReadSet, FactVersionRef, FactVersionValidator, ResolveImportsFactRef,
     SignatureAdmission,
+};
+#[cfg(test)]
+use verter_semantic::resolver_core::SessionFingerprint;
+use verter_semantic::resolver_core::{
+    PathProbe, ResolutionContext, ResolutionPopulation, ResolutionWorldId, ResolvePhase,
+    ResolveRequestKind, ResolveResult,
 };
 
 /// Effective bytes revision for one canonical.
@@ -26,29 +33,11 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentRevision([u8; 16]);
 
-/// Version of one resolution-observable fact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResolutionFactVersion(u64);
-
-impl ResolutionFactVersion {
-    pub(crate) const INITIAL: Self = Self(0);
-
-    pub(crate) fn fresh(raw: u64) -> Self {
-        assert_ne!(raw, 0, "resolution fact versions must be non-zero");
-        Self(raw)
-    }
-}
-
-/// Identity of one immutable resolution world.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResolutionWorldId(u64);
-
-impl ResolutionWorldId {
-    pub(crate) fn fresh(raw: u64) -> Self {
-        assert_ne!(raw, 0, "resolution world ids must be non-zero");
-        Self(raw)
-    }
-}
+pub use verter_semantic::facts::resolution::{
+    CanonicalResolutionId, NormalizedSpecifier, ProjectIdentity, ProviderPolicyIdentity,
+    RawSpecifier, ResolutionEntry, ResolutionFactKey, ResolutionFactRef, ResolutionFactVersion,
+    ResolutionQueryKey, ResolveContextId, ResolveEnvHash, ResolverPolicyIdentity,
+};
 
 /// Compare-before-publication epoch. Stable epochs are even.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,238 +53,15 @@ impl ResolutionEpoch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CanonicalResolutionId(String);
-
-impl CanonicalResolutionId {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NormalizedSpecifier(String);
-
-impl NormalizedSpecifier {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
-        Self(normalize_specifier(&value.into()))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RawSpecifier(String);
-
-impl RawSpecifier {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-}
-
-fn normalize_specifier(value: &str) -> String {
-    if value.starts_with('.')
-        || value.starts_with('\\')
-        || value.contains("/./")
-        || value.contains("\\.\\")
-    {
-        crate::relative_path::normalize_relative_specifier(value)
-    } else {
-        value.replace('\\', "/")
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProjectIdentity([u8; 16]);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResolverPolicyIdentity([u8; 16]);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProviderPolicyIdentity([u8; 16]);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResolveEnvHash([u8; 16]);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SessionFingerprint([u8; 16]);
-
-impl SessionFingerprint {
-    pub(crate) fn fresh(raw: u64) -> Self {
-        assert_ne!(raw, 0, "session fingerprints must be non-zero");
-        let mut bytes = [0_u8; 16];
-        bytes[..8].copy_from_slice(&raw.to_le_bytes());
-        bytes[8..].copy_from_slice(&(!raw).to_le_bytes());
-        Self(bytes)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ResolutionPopulation {
-    Base,
-    Session(SessionFingerprint),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ResolutionEntry {
-    Importer(CanonicalResolutionId),
-    ExplicitProject(ProjectIdentity),
-}
-
-/// Structurally split selected resolution context.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResolveContextId {
-    project_identity: ProjectIdentity,
-    resolver_policy_identity: ResolverPolicyIdentity,
-    provider_policy_identity: ProviderPolicyIdentity,
-    resolve_env_hash: ResolveEnvHash,
-}
-
-impl ResolveContextId {
-    pub(crate) fn from_hashes(project_identity: [u8; 16], resolve_env_hash: [u8; 16]) -> Self {
-        Self {
-            project_identity: ProjectIdentity(project_identity),
-            // These policy domains are intentionally distinct types even while
-            // the current published resolver derives them from the same
-            // project-scoped inputs.
-            resolver_policy_identity: ResolverPolicyIdentity(resolve_env_hash),
-            provider_policy_identity: ProviderPolicyIdentity(project_identity),
-            resolve_env_hash: ResolveEnvHash(resolve_env_hash),
-        }
-    }
-
-    /// Stable context identity for an entry no configured project owns.
-    ///
-    /// "No owning project" is a complete observation of the published
-    /// project-selection index — a real observed value, not a missing
-    /// observation. The identity is a fixed constant so it never derives
-    /// from the project set: a project republish that does not change the
-    /// entry's (non-)ownership must keep this context and its version.
-    pub(crate) fn unowned() -> Self {
-        Self::from_hashes([0xA1; 16], [0xA2; 16])
-    }
-
-    pub(crate) fn with_provider_projection(mut self, target: &Self) -> Self {
-        self.provider_policy_identity = ProviderPolicyIdentity(target.project_identity.0);
-        self
-    }
-
-    pub(crate) fn with_external_provider_projection(
-        mut self,
-        result: &crate::types::ResolveResult,
-    ) -> Self {
-        fn write_field(buffer: &mut Vec<u8>, value: &str) {
-            buffer.extend_from_slice(&(value.len() as u64).to_le_bytes());
-            buffer.extend_from_slice(value.as_bytes());
-        }
-
-        let mut identity = Vec::with_capacity(
-            result.source_id.len()
-                + result.provider_id.len()
-                + result.provider_specifier.len()
-                + 64,
-        );
-        identity.extend_from_slice(b"verter:external-provider-projection:v1");
-        write_field(&mut identity, &result.source_id);
-        write_field(&mut identity, &result.provider_id);
-        write_field(&mut identity, &result.provider_specifier);
-        identity.push(match result.provider_target {
-            crate::types::ProviderTarget::SourceFile => 0,
-            crate::types::ProviderTarget::CarrierPublicApi => 1,
-            crate::types::ProviderTarget::ShadowSourceFile => 2,
-        });
-        identity.push(match result.resolution_kind {
-            crate::types::ResolutionKind::Relative => 0,
-            crate::types::ResolutionKind::TsConfigPath => 1,
-            crate::types::ResolutionKind::ProjectReference => 2,
-            crate::types::ResolutionKind::NodeModules => 3,
-            crate::types::ResolutionKind::PackageExports => 4,
-            crate::types::ResolutionKind::PackageImports => 5,
-            crate::types::ResolutionKind::WorkspaceAlias => 6,
-            crate::types::ResolutionKind::Bundler => 7,
-            crate::types::ResolutionKind::PlaygroundMap => 8,
-        });
-        self.provider_policy_identity =
-            ProviderPolicyIdentity(xxhash_rust::xxh3::xxh3_128(&identity).to_le_bytes());
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn identity_parts(&self) -> ([u8; 16], [u8; 16], [u8; 16]) {
-        (
-            self.project_identity.0,
-            self.resolver_policy_identity.0,
-            self.provider_policy_identity.0,
-        )
-    }
-}
-
-/// Complete semantic identity of one resolution demand.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResolutionQueryKey {
-    entry: ResolutionEntry,
-    normalized_specifier: NormalizedSpecifier,
-    phase: ResolvePhase,
-    request_kind: ResolveRequestKind,
-    context: ResolveContextId,
-    population: ResolutionPopulation,
-}
-
-impl ResolutionQueryKey {
-    pub(crate) fn importer(
-        importer_id: &str,
-        specifier: &str,
-        context: ResolutionContext,
-        selected: ResolveContextId,
-        population: ResolutionPopulation,
-    ) -> Self {
-        Self {
-            entry: ResolutionEntry::Importer(CanonicalResolutionId::new(importer_id)),
-            normalized_specifier: NormalizedSpecifier::new(specifier),
-            phase: context.phase,
-            request_kind: context.kind,
-            context: selected,
-            population,
-        }
-    }
-
-    pub(crate) fn explicit_project(
-        project: ProjectIdentity,
-        specifier: &str,
-        context: ResolutionContext,
-        selected: ResolveContextId,
-        population: ResolutionPopulation,
-    ) -> Self {
-        Self {
-            entry: ResolutionEntry::ExplicitProject(project),
-            normalized_specifier: NormalizedSpecifier::new(specifier),
-            phase: context.phase,
-            request_kind: context.kind,
-            context: selected,
-            population,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn context(&self) -> &ResolveContextId {
-        &self.context
-    }
-}
-
-/// Typed path-probe result. Error-tolerant states are not absence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PathProbe {
-    File,
-    Directory,
-    Absent,
-    Inaccessible,
-    Unknown,
-}
-
 /// Immutable request-local overlay input for one Engine-owned resolution
 /// batch. `Some(bytes)` is an upsert and `None` is an explicit tombstone.
 #[derive(Debug, Clone, Default)]
 pub struct ResolutionOverlaySnapshot {
     entries: Arc<HashMap<String, Option<Arc<str>>>>,
 }
+
+#[cfg(test)]
+static OVERLAY_LOOKUP_NORMALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 impl ResolutionOverlaySnapshot {
     #[must_use]
@@ -306,12 +72,15 @@ impl ResolutionOverlaySnapshot {
         let mut entries = HashMap::new();
         for (canonical, source) in upserts {
             entries.insert(
-                crate::resolver::normalize_canonical_id(&canonical),
+                verter_semantic::resolver_core::normalize_canonical_id(&canonical),
                 Some(source),
             );
         }
         for canonical in tombstones {
-            entries.insert(crate::resolver::normalize_canonical_id(&canonical), None);
+            entries.insert(
+                verter_semantic::resolver_core::normalize_canonical_id(&canonical),
+                None,
+            );
         }
         Self {
             entries: Arc::new(entries),
@@ -319,67 +88,17 @@ impl ResolutionOverlaySnapshot {
     }
 
     fn get(&self, canonical_id: &str) -> Option<Option<Arc<str>>> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        #[cfg(test)]
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.fetch_add(1, Ordering::Relaxed);
         self.entries
-            .get(&crate::resolver::normalize_canonical_id(canonical_id))
+            .get(&verter_semantic::resolver_core::normalize_canonical_id(
+                canonical_id,
+            ))
             .cloned()
     }
-}
-
-/// Closed resolution-input taxonomy.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ResolutionFactKey {
-    PathProbe {
-        canonical: CanonicalResolutionId,
-        population: ResolutionPopulation,
-    },
-    Manifest {
-        canonical: CanonicalResolutionId,
-        population: ResolutionPopulation,
-    },
-    Realpath {
-        requested: CanonicalResolutionId,
-        population: ResolutionPopulation,
-    },
-    ExactResolution {
-        entry: ResolutionEntry,
-        specifier: RawSpecifier,
-        phase: ResolvePhase,
-        kind: ResolveRequestKind,
-        population: ResolutionPopulation,
-    },
-    DirectoryMembers {
-        canonical: CanonicalResolutionId,
-        population: ResolutionPopulation,
-    },
-    RecoveryScope {
-        canonical_prefix: CanonicalResolutionId,
-        population: ResolutionPopulation,
-    },
-    ContextSelection {
-        entry: ResolutionEntry,
-        population: ResolutionPopulation,
-    },
-    /// **Derived node.** The resolution decision for one complete query
-    /// identity.
-    ///
-    /// Its version is the single fact a consumer records instead of the
-    /// query's whole transitive leaf set. Its direct dependency edges —
-    /// the primitive facts the query itself observed plus the child
-    /// decisions it reused — live in [`ResolutionFactRoot`], and a
-    /// mutation reaching any of them advances this node through reverse
-    /// propagation.
-    Decision { query: Box<ResolutionQueryKey> },
-    /// **Derived node.** One owner's complete set of direct resolution
-    /// decisions.
-    ///
-    /// Records CHILD DECISIONS, never their leaves, so an owner witness
-    /// is bounded by the owner's authored specifier count rather than by
-    /// the transitive closure of everything those specifiers resolve
-    /// through.
-    OwnerResolutionSet {
-        owner: CanonicalResolutionId,
-        population: ResolutionPopulation,
-    },
 }
 
 /// How one observation participates in the resolution decision DAG.
@@ -439,233 +158,6 @@ pub(crate) fn classify_resolution_observation(fact: &FactVersionRef) -> Resoluti
         | FactVersionRef::DomainGeneration(_)
         | FactVersionRef::ProgramAnalysis(_)
         | FactVersionRef::StrictSelfRootWorld(_) => ResolutionEdgeClass::Terminal,
-    }
-}
-
-impl ResolutionFactKey {
-    /// Build the derived node key for one query identity.
-    pub(crate) fn decision(query: ResolutionQueryKey) -> Self {
-        Self::Decision {
-            query: Box::new(query),
-        }
-    }
-
-    /// Build the derived node key for one owner's decision set.
-    pub(crate) fn owner_resolution_set(owner: &str, population: ResolutionPopulation) -> Self {
-        Self::OwnerResolutionSet {
-            owner: CanonicalResolutionId::new(crate::resolver::normalize_canonical_id(owner)),
-            population,
-        }
-    }
-
-    /// Whether this key names a derived DAG node rather than a primitive
-    /// resolution input.
-    pub(crate) fn is_derived_node(&self) -> bool {
-        matches!(
-            self,
-            Self::Decision { .. } | Self::OwnerResolutionSet { .. }
-        )
-    }
-
-    pub(crate) fn population(&self) -> ResolutionPopulation {
-        match self {
-            Self::PathProbe { population, .. }
-            | Self::Manifest { population, .. }
-            | Self::Realpath { population, .. }
-            | Self::ExactResolution { population, .. }
-            | Self::DirectoryMembers { population, .. }
-            | Self::RecoveryScope { population, .. }
-            | Self::ContextSelection { population, .. }
-            | Self::OwnerResolutionSet { population, .. } => *population,
-            // A decision's population is its query's: the query identity
-            // already carries one, and two populations for one node
-            // would be two answers to the same question.
-            Self::Decision { query } => query.population,
-        }
-    }
-
-    pub(crate) fn in_population(&self, population: ResolutionPopulation) -> Self {
-        let mut key = self.clone();
-        match &mut key {
-            Self::PathProbe {
-                population: current,
-                ..
-            }
-            | Self::Manifest {
-                population: current,
-                ..
-            }
-            | Self::Realpath {
-                population: current,
-                ..
-            }
-            | Self::ExactResolution {
-                population: current,
-                ..
-            }
-            | Self::DirectoryMembers {
-                population: current,
-                ..
-            }
-            | Self::RecoveryScope {
-                population: current,
-                ..
-            }
-            | Self::ContextSelection {
-                population: current,
-                ..
-            }
-            | Self::OwnerResolutionSet {
-                population: current,
-                ..
-            } => *current = population,
-            Self::Decision { query } => query.population = population,
-        }
-        key
-    }
-
-    pub(crate) fn canonical_id(&self) -> Option<&str> {
-        match self {
-            Self::PathProbe { canonical, .. }
-            | Self::Manifest { canonical, .. }
-            | Self::DirectoryMembers { canonical, .. } => Some(&canonical.0),
-            Self::Realpath { requested, .. } => Some(&requested.0),
-            Self::RecoveryScope {
-                canonical_prefix, ..
-            } => Some(&canonical_prefix.0),
-            Self::OwnerResolutionSet { owner, .. } => Some(&owner.0),
-            Self::ExactResolution { entry, .. } | Self::ContextSelection { entry, .. } => {
-                match entry {
-                    ResolutionEntry::Importer(canonical) => Some(&canonical.0),
-                    ResolutionEntry::ExplicitProject(_) => None,
-                }
-            }
-            Self::Decision { query } => match &query.entry {
-                ResolutionEntry::Importer(canonical) => Some(&canonical.0),
-                ResolutionEntry::ExplicitProject(_) => None,
-            },
-        }
-    }
-
-    /// The owner a `Decision` belongs to, for the owner-set index.
-    fn owner_canonical(&self) -> Option<&str> {
-        match self {
-            Self::Decision { query } => match &query.entry {
-                ResolutionEntry::Importer(canonical) => Some(&canonical.0),
-                ResolutionEntry::ExplicitProject(_) => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// The canonical whose CURRENT DISK STATE is this fact's value, if any.
-    ///
-    /// Only these three families can be re-observed by re-reading a path:
-    /// the typed probe, the realpath, and the manifest fingerprint. A
-    /// `RecoveryScope` names an ancestor PREFIX (up to and including `/`) and
-    /// is advanced only by an imprecise watcher mutation; `DirectoryMembers`
-    /// is advanced through the parent of a path that moved;
-    /// `ExactResolution` and `ContextSelection` are table lookups, not disk
-    /// reads. Treating any of those as a path to re-read would enumerate
-    /// directories the resolver never consulted.
-    ///
-    /// Exhaustive by construction: a new fact family cannot compile until it
-    /// declares which side of this line it is on.
-    pub(crate) fn reobservable_path_canonical_id(&self) -> Option<&str> {
-        match self {
-            Self::PathProbe { canonical, .. } | Self::Manifest { canonical, .. } => {
-                Some(&canonical.0)
-            }
-            Self::Realpath { requested, .. } => Some(&requested.0),
-            Self::ExactResolution { .. }
-            | Self::DirectoryMembers { .. }
-            | Self::RecoveryScope { .. }
-            | Self::ContextSelection { .. }
-            // A derived node is computed, never read off a path. Handing
-            // one to the re-observation walk would re-read a canonical
-            // the resolver never probed.
-            | Self::Decision { .. }
-            | Self::OwnerResolutionSet { .. } => None,
-        }
-    }
-
-    pub(crate) fn exact_importer(
-        importer_id: &str,
-        specifier: &str,
-        context: ResolutionContext,
-        population: ResolutionPopulation,
-    ) -> Self {
-        Self::ExactResolution {
-            entry: ResolutionEntry::Importer(CanonicalResolutionId::new(importer_id)),
-            specifier: RawSpecifier::new(specifier),
-            phase: context.phase,
-            kind: context.kind,
-            population,
-        }
-    }
-
-    pub(crate) fn context_importer(importer_id: &str, population: ResolutionPopulation) -> Self {
-        Self::ContextSelection {
-            entry: ResolutionEntry::Importer(CanonicalResolutionId::new(importer_id)),
-            population,
-        }
-    }
-
-    pub(crate) fn exact_explicit(
-        project: ProjectIdentity,
-        specifier: &str,
-        context: ResolutionContext,
-        population: ResolutionPopulation,
-    ) -> Self {
-        Self::ExactResolution {
-            entry: ResolutionEntry::ExplicitProject(project),
-            specifier: RawSpecifier::new(specifier),
-            phase: context.phase,
-            kind: context.kind,
-            population,
-        }
-    }
-
-    pub(crate) fn context_explicit(
-        project: ProjectIdentity,
-        population: ResolutionPopulation,
-    ) -> Self {
-        Self::ContextSelection {
-            entry: ResolutionEntry::ExplicitProject(project),
-            population,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ResolutionFactRef {
-    pub(crate) key: ResolutionFactKey,
-    pub(crate) version: ResolutionFactVersion,
-}
-
-impl ResolutionFactRef {
-    pub(crate) fn new(key: ResolutionFactKey, version: ResolutionFactVersion) -> Self {
-        Self { key, version }
-    }
-
-    /// Whether this ref names the OWNER-SCOPED resolution set.
-    ///
-    /// The read-only oracle a consumer crate needs to assert what it
-    /// rooted on: the key's own shape stays crate-private, so this is the
-    /// only way to ask the question from outside without exposing the
-    /// taxonomy.
-    #[must_use]
-    pub fn is_owner_resolution_set(&self) -> bool {
-        matches!(self.key, ResolutionFactKey::OwnerResolutionSet { .. })
-    }
-
-    /// Whether this ref names one query's derived decision node.
-    ///
-    /// Consumer crates use this read-only oracle to verify that a witness
-    /// carries bounded DAG nodes without exposing the key's private fields.
-    #[must_use]
-    pub fn is_decision(&self) -> bool {
-        matches!(self.key, ResolutionFactKey::Decision { .. })
     }
 }
 
@@ -886,7 +378,10 @@ impl ResolutionFactRoot {
         population: ResolutionPopulation,
     ) -> Vec<ResolutionFactKey> {
         self.owner_decisions
-            .get(&(crate::resolver::normalize_canonical_id(owner), population))
+            .get(&(
+                verter_semantic::resolver_core::normalize_canonical_id(owner),
+                population,
+            ))
             .map(|decisions| decisions.iter().cloned().collect())
             .unwrap_or_default()
     }
@@ -1273,8 +768,9 @@ struct ContextMembershipRow {
 ///   selection — the exact stale answer that makes a changed selection
 ///   invisible to propagation.
 /// - **It does not cover the direct membership callers.** The memo sits
-///   at `selected_context_for_path`. `ProjectResolver::nearest_config_for_path`
-///   and `effective_configs_for_path` are also called directly — seven
+///   at `selected_context_for_path`. The semantic core's direct
+///   `nearest_config_for_path` and `effective_configs_for_path` queries
+///   are also called directly — seven
 ///   times inside `resolver.rs` itself and five times from `verter_lsp`
 ///   (`provider_sync.rs` ×2, `background_drain_decl_closure.rs`,
 ///   `background_init.rs`, `server_utils.rs`). Those walk the resolver
@@ -1365,14 +861,15 @@ impl std::fmt::Debug for PublishedContextSelection {
 
 fn project_for_config<'a>(
     published: &'a PublishedRoot,
-    config: &crate::resolver::IdeProjectConfig,
+    config: &verter_semantic::resolver_core::IdeProjectConfig,
 ) -> Option<&'a crate::workspace_snapshot::OwnershipProject> {
-    let root = crate::resolver::normalize_canonical_id(&config.root);
-    let workspace_root = crate::resolver::normalize_canonical_id(&config.workspace_root);
+    let root = verter_semantic::resolver_core::normalize_canonical_id(&config.root);
+    let workspace_root =
+        verter_semantic::resolver_core::normalize_canonical_id(&config.workspace_root);
     let tsconfig = config
         .tsconfig_path
         .as_deref()
-        .map(crate::resolver::normalize_canonical_id);
+        .map(verter_semantic::resolver_core::normalize_canonical_id);
     published.snapshot.projects.iter().find(|project| {
         if project.root.as_str() != root || project.workspace_root.as_str() != workspace_root {
             return false;
@@ -1476,17 +973,18 @@ fn evaluate_selected_context(
 
 pub(crate) fn explicit_context(
     world: &ResolutionWorldRoot,
-    owner: &crate::types::ProjectOwnership,
+    owner: &verter_semantic::resolver_core::ProjectOwnership,
 ) -> Result<(ProjectIdentity, ResolveContextId), ContextProvenanceError> {
     let published = world
         .published
         .as_ref()
         .ok_or(ContextProvenanceError::NoPublishedRoot)?;
-    let normalized_root = crate::resolver::normalize_canonical_id(&owner.project_root);
+    let normalized_root =
+        verter_semantic::resolver_core::normalize_canonical_id(&owner.project_root);
     let normalized_tsconfig = owner
         .tsconfig_path
         .as_deref()
-        .map(crate::resolver::normalize_canonical_id);
+        .map(verter_semantic::resolver_core::normalize_canonical_id);
     let project = published
         .snapshot
         .projects
@@ -1506,13 +1004,15 @@ pub(crate) fn explicit_context(
         })
         .ok_or(ContextProvenanceError::ProjectProjectionMissing)?;
     let context = context_for_project(published, project)?;
-    Ok((context.project_identity, context))
+    Ok((context.project_identity(), context))
 }
 
 impl ResolutionWorldRoot {
     fn context_version(&self, entry: &ResolutionEntry) -> ResolutionFactVersion {
         let context = match entry {
-            ResolutionEntry::Importer(canonical) => selected_context_for_path(self, &canonical.0),
+            ResolutionEntry::Importer(canonical) => {
+                selected_context_for_path(self, canonical.as_str())
+            }
             ResolutionEntry::ExplicitProject(identity) => {
                 let published = self
                     .published
@@ -2282,6 +1782,7 @@ pub(crate) struct ResolutionTransaction {
     direct_edges: Vec<ResolutionFactKey>,
     observed_values: ObservedResolutionValues,
     non_admission: Option<verter_audit::NonAdmissionReason>,
+    input_resolution_terminal: bool,
     query: Option<ResolutionQueryKey>,
     /// Per-domain generations this transaction compacts against. Only the
     /// resolution domain is populated — see [`Self::new`].
@@ -2357,7 +1858,9 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         match self.overlay.get(canonical_id) {
-            Some(Some(_)) => Some(crate::resolver::normalize_canonical_id(canonical_id)),
+            Some(Some(_)) => Some(verter_semantic::resolver_core::normalize_canonical_id(
+                canonical_id,
+            )),
             Some(None) => None,
             None => self.inner.realpath(canonical_id),
         }
@@ -2369,6 +1872,117 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
             Some(None) => None,
             None => self.inner.read_package_manifest(canonical_id),
         }
+    }
+
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<
+        crate::resolver::ResolutionInputReservationBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        crate::resolver::preflight_supported_resolution_inputs(
+            keys,
+            basis,
+            |path| {
+                let _ = self.inner.take_resolution_directory_observations();
+                let value = self.probe_path(path);
+                Ok((value, self.inner.take_resolution_directory_observations()))
+            },
+            |path| {
+                let _ = self.inner.take_resolution_directory_observations();
+                let value = self.realpath(path);
+                Ok((value, self.inner.take_resolution_directory_observations()))
+            },
+            |manifest_path, key| match self.overlay.get(manifest_path) {
+                Some(Some(source)) => Ok((true, source.len() as u64, Vec::new())),
+                Some(None) => Ok((false, 0, Vec::new())),
+                None => {
+                    let batch = self
+                        .inner
+                        .preflight_resolution_inputs_bounded(std::slice::from_ref(key), basis)?;
+                    match batch.entries().first() {
+                        Some(crate::resolver::ResolutionInputReservation::PackageManifest {
+                            present,
+                            raw_bytes,
+                            directories,
+                            ..
+                        }) => Ok((*present, *raw_bytes, directories.clone())),
+                        _ => Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            unresolved: vec![key.clone()],
+                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                        }),
+                    }
+                }
+            },
+        )
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<
+        crate::resolver::LoadedResolutionInputBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        crate::resolver::load_supported_resolution_inputs(
+            reservation,
+            |manifest_path, expected_present, reserved_raw_bytes, key| match self
+                .overlay
+                .get(manifest_path)
+            {
+                Some(source) => {
+                    if source.is_some() != expected_present {
+                        return Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                                unresolved: vec![key.clone()],
+                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                            });
+                    }
+                    let Some(source) = source else {
+                        return Ok(None);
+                    };
+                    if source.len() as u64 > reserved_raw_bytes {
+                        return Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                                unresolved: vec![key.clone()],
+                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                            });
+                    }
+                    Ok(Some(crate::package_index::parse_package_json(&source)))
+                }
+                None => {
+                    let entry = reservation
+                            .entries()
+                            .iter()
+                            .find(|entry| entry.key() == key)
+                            .cloned()
+                            .ok_or_else(|| verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                                unresolved: vec![key.clone()],
+                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                            })?;
+                    let batch = crate::resolver::ResolutionInputReservationBatch::new(
+                            vec![key.clone()],
+                            reservation.basis(),
+                            vec![entry],
+                        )
+                        .ok_or_else(|| verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            unresolved: vec![key.clone()],
+                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                        })?;
+                    let loaded = self.inner.load_preflighted_resolution_inputs(&batch)?;
+                    match loaded.entries().first() {
+                            Some(crate::resolver::LoadedResolutionInput::PackageManifest {
+                                value,
+                                ..
+                            }) => Ok(value.clone()),
+                            _ => Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                                unresolved: vec![key.clone()],
+                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                            }),
+                        }
+                }
+            },
+        )
     }
 
     fn is_workspace_owned(&self, canonical_id: &str) -> bool {
@@ -2459,6 +2073,66 @@ impl<'a> TransactionReader<'a> {
         }
         result
     }
+
+    pub(crate) fn record_snapshot_directories(&self, directories: &[String]) {
+        let mut transaction = self.transaction.lock();
+        for canonical in directories {
+            transaction.observe_directory(canonical);
+        }
+    }
+
+    pub(crate) fn record_snapshot_canonical_path(&self, canonical_id: &str, outcome: PathProbe) {
+        self.transaction
+            .lock()
+            .observe_canonical_path(canonical_id, outcome);
+    }
+
+    pub(crate) fn record_snapshot_canonical_realpath(
+        &self,
+        canonical_id: &str,
+        resolved: Option<&str>,
+    ) {
+        self.transaction
+            .lock()
+            .observe_canonical_realpath(canonical_id, resolved);
+    }
+
+    pub(crate) fn record_snapshot_canonical_manifest(
+        &self,
+        canonical_id: &str,
+        fingerprint: Option<[u8; 16]>,
+    ) {
+        self.transaction
+            .lock()
+            .observe_canonical_manifest(canonical_id, fingerprint);
+    }
+
+    pub(crate) fn record_snapshot_canonical_recovery_scope(&self, canonical_prefix: &str) {
+        self.transaction
+            .lock()
+            .observe_canonical_recovery_scope(canonical_prefix);
+    }
+}
+
+pub(crate) fn resolution_basis_for_reader(
+    reader: &dyn crate::traits::WorkspaceRead,
+) -> Option<verter_semantic::resolver_core::ResolutionBasis> {
+    let authority = verter_semantic::resolver_core::WorkspaceAuthorityId::from_raw(
+        reader.strict_self_root_authority_id()?,
+    );
+    let population = reader.resolution_population();
+    let world = reader.capture_resolution_world()?;
+    let crate::fact_cache::AggregateStamp::ResolutionRoots { base, session } =
+        world.resolution_stamp(population)?
+    else {
+        return None;
+    };
+    Some(verter_semantic::resolver_core::ResolutionBasis::new(
+        verter_semantic::resolver_core::ResolutionWorldBasis::new(
+            authority, population, base, session,
+        ),
+        None,
+    ))
 }
 
 impl crate::traits::WorkspaceRead for TransactionReader<'_> {
@@ -2496,12 +2170,56 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         self.transaction.lock().mark_budget_exhausted();
     }
 
+    fn note_input_resolution_budget_exhausted(
+        &self,
+        _event: verter_semantic::resolver_core::InputResolutionBudgetExhaustion,
+    ) {
+        self.transaction.lock().mark_budget_exhausted();
+    }
+
+    fn note_input_load_integrity_failure(&self) {
+        self.transaction
+            .lock()
+            .mark_input_resolution_terminal_failure();
+    }
+
+    fn note_input_resolution_terminal_failure(&self) {
+        self.transaction
+            .lock()
+            .mark_input_resolution_terminal_failure();
+    }
+
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<
+        crate::resolver::ResolutionInputReservationBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        self.inner.preflight_resolution_inputs_bounded(keys, basis)
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<
+        crate::resolver::LoadedResolutionInputBatch,
+        verter_semantic::resolver_core::AttemptFailure,
+    > {
+        self.inner.load_preflighted_resolution_inputs(reservation)
+    }
+
     fn resolution_event_bridge_complete(&self) -> bool {
         true
     }
 
     fn resolution_population(&self) -> ResolutionPopulation {
         self.transaction.lock().population()
+    }
+
+    fn capture_resolution_world(&self) -> Option<Arc<CapturedResolutionWorld>> {
+        self.inner.capture_resolution_world()
     }
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
@@ -2535,6 +2253,10 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn content_generation(&self) -> u64 {
         self.inner.content_generation()
+    }
+
+    fn strict_self_root_authority_id(&self) -> Option<u64> {
+        self.inner.strict_self_root_authority_id()
     }
 
     fn resolution_fact_generation(&self) -> u64 {
@@ -2593,7 +2315,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn read_ambient_lib(
         &self,
-        stable_key: crate::project_key::ProjectStableKey,
+        stable_key: verter_semantic::resolver_core::ProjectStableKey,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
         self.inner.read_ambient_lib(stable_key, canonical_id)
@@ -2601,7 +2323,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn ambient_virtual_canonical_id(
         &self,
-        stable_key: crate::project_key::ProjectStableKey,
+        stable_key: verter_semantic::resolver_core::ProjectStableKey,
         canonical_id: &str,
     ) -> Arc<str> {
         self.inner
@@ -2611,15 +2333,15 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
     fn project_stable_key(
         &self,
         project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<crate::project_key::ProjectStableKey> {
+    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
         self.inner.project_stable_key(project_id)
     }
 
     fn lookup_ambient_symbol(
         &self,
-        consumer_project: crate::project_key::ProjectStableKey,
+        consumer_project: verter_semantic::resolver_core::ProjectStableKey,
         symbol: &str,
-    ) -> Option<crate::ambient_lib::AmbientSymbolHit> {
+    ) -> Option<verter_semantic::resolver_core::AmbientSymbolHit> {
         self.inner.lookup_ambient_symbol(consumer_project, symbol)
     }
 
@@ -2650,6 +2372,7 @@ impl ResolutionTransaction {
             direct_edges: Vec::new(),
             observed_values: ObservedResolutionValues::default(),
             non_admission: None,
+            input_resolution_terminal: false,
             query: None,
         }
     }
@@ -2731,6 +2454,21 @@ impl ResolutionTransaction {
     /// invalidate a signature that never witnessed it.
     pub(crate) fn mark_budget_exhausted(&mut self) {
         self.non_admission = Some(verter_audit::NonAdmissionReason::BudgetExceeded);
+        self.input_resolution_terminal = true;
+    }
+
+    pub(crate) fn mark_input_resolution_terminal_failure(&mut self) {
+        self.non_admission = Some(verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance);
+        self.input_resolution_terminal = true;
+    }
+
+    pub(crate) fn input_resolution_terminal_admission(&self) -> Option<SignatureAdmission> {
+        self.input_resolution_terminal.then(|| {
+            SignatureAdmission::NonCacheable(
+                self.non_admission
+                    .unwrap_or(verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance),
+            )
+        })
     }
 
     pub(crate) fn mark_untracked_backend(&mut self) {
@@ -2738,15 +2476,19 @@ impl ResolutionTransaction {
     }
 
     pub(crate) fn observe_path(&mut self, canonical: &str, outcome: PathProbe) {
-        let canonical = crate::resolver::normalize_canonical_id(canonical);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        self.observe_canonical_path(&canonical, outcome);
+    }
+
+    fn observe_canonical_path(&mut self, canonical: &str, outcome: PathProbe) {
         self.observed_values
             .path_probes
-            .push((canonical.clone(), outcome));
+            .push((canonical.to_string(), outcome));
         self.observe(ResolutionFactKey::PathProbe {
-            canonical: CanonicalResolutionId::new(canonical.clone()),
+            canonical: CanonicalResolutionId::new(canonical.to_string()),
             population: self.population(),
         });
-        self.observe_recovery_chain(&canonical);
+        self.observe_recovery_chain(canonical);
         match outcome {
             PathProbe::Inaccessible => {
                 self.non_admission =
@@ -2764,37 +2506,52 @@ impl ResolutionTransaction {
     /// A manifest observed as ABSENT records `None` — that is a value, not
     /// an absence of one.
     pub(crate) fn observe_manifest(&mut self, canonical: &str, fingerprint: Option<[u8; 16]>) {
-        let canonical = crate::resolver::normalize_canonical_id(canonical);
+        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        self.observe_canonical_manifest(&canonical, fingerprint);
+    }
+
+    fn observe_canonical_manifest(&mut self, canonical: &str, fingerprint: Option<[u8; 16]>) {
         self.observed_values
             .manifests
-            .push((canonical.clone(), fingerprint));
+            .push((canonical.to_string(), fingerprint));
         self.observe(ResolutionFactKey::Manifest {
-            canonical: CanonicalResolutionId::new(canonical),
+            canonical: CanonicalResolutionId::new(canonical.to_string()),
             population: self.population(),
         });
     }
 
     pub(crate) fn observe_realpath(&mut self, requested: &str, resolved: Option<&str>) {
-        let requested = crate::resolver::normalize_canonical_id(requested);
-        self.observed_values.realpaths.push((
-            requested.clone(),
-            resolved.map(crate::resolver::normalize_canonical_id),
-        ));
+        let requested = verter_semantic::resolver_core::normalize_canonical_id(requested);
+        let resolved = resolved.map(verter_semantic::resolver_core::normalize_canonical_id);
+        self.observe_canonical_realpath(&requested, resolved.as_deref());
+    }
+
+    fn observe_canonical_realpath(&mut self, requested: &str, resolved: Option<&str>) {
+        self.observed_values
+            .realpaths
+            .push((requested.to_string(), resolved.map(str::to_string)));
         self.observe(ResolutionFactKey::Realpath {
-            requested: CanonicalResolutionId::new(requested.clone()),
+            requested: CanonicalResolutionId::new(requested.to_string()),
             population: self.population(),
         });
-        self.observe_recovery_chain(&requested);
+        self.observe_recovery_chain(requested);
         if let Some(resolved) = resolved {
-            self.observe_recovery_chain(&crate::resolver::normalize_canonical_id(resolved));
+            self.observe_recovery_chain(resolved);
         }
+    }
+
+    fn observe_canonical_recovery_scope(&mut self, canonical_prefix: &str) {
+        self.observe(ResolutionFactKey::RecoveryScope {
+            canonical_prefix: CanonicalResolutionId::new(canonical_prefix.to_string()),
+            population: self.population(),
+        });
     }
 
     pub(crate) fn observe_directory(&mut self, canonical: &str) {
         self.observe(ResolutionFactKey::DirectoryMembers {
-            canonical: CanonicalResolutionId::new(crate::resolver::normalize_canonical_id(
-                canonical,
-            )),
+            canonical: CanonicalResolutionId::new(
+                verter_semantic::resolver_core::normalize_canonical_id(canonical),
+            ),
             population: self.population(),
         });
     }
@@ -2859,9 +2616,65 @@ pub(crate) fn ancestor_scopes(path: &str) -> Vec<String> {
 mod transaction_contract_tests {
     use super::*;
 
+    fn reset_overlay_lookup_normalize_calls() {
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.store(0, Ordering::Relaxed);
+    }
+
+    fn overlay_lookup_normalize_calls() -> usize {
+        OVERLAY_LOOKUP_NORMALIZE_CALLS.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn empty_overlay_returns_without_normalizing_the_lookup() {
+        let overlay = ResolutionOverlaySnapshot::default();
+        reset_overlay_lookup_normalize_calls();
+
+        assert_eq!(overlay.get(r"C:\repo\unknown.ts"), None);
+        assert_eq!(overlay_lookup_normalize_calls(), 0);
+
+        // Revert control: remove only the empty-map return from `get`; this
+        // becomes one call while the three nonempty controls stay green.
+    }
+
+    #[test]
+    fn nonempty_overlay_normalizes_raw_lookup_for_an_upsert() {
+        let source: Arc<str> = Arc::from("export const value = 1;");
+        let overlay = ResolutionOverlaySnapshot::new(
+            [(r"C:\repo\file.ts".to_string(), Arc::clone(&source))],
+            [],
+        );
+        reset_overlay_lookup_normalize_calls();
+
+        assert_eq!(overlay.get(r"C:\repo\file.ts"), Some(Some(source)));
+        assert_eq!(overlay_lookup_normalize_calls(), 1);
+    }
+
+    #[test]
+    fn nonempty_overlay_normalizes_raw_lookup_for_a_tombstone() {
+        let overlay = ResolutionOverlaySnapshot::new([], [r"C:\repo\deleted.ts".to_string()]);
+        reset_overlay_lookup_normalize_calls();
+
+        assert_eq!(overlay.get(r"C:\repo\deleted.ts"), Some(None));
+        assert_eq!(overlay_lookup_normalize_calls(), 1);
+    }
+
+    #[test]
+    fn nonempty_overlay_normalizes_unknown_raw_lookup_before_absence() {
+        let overlay = ResolutionOverlaySnapshot::new(
+            [(r"C:\repo\known.ts".to_string(), Arc::from("known"))],
+            [],
+        );
+        reset_overlay_lookup_normalize_calls();
+
+        assert_eq!(overlay.get(r"C:\repo\unknown.ts"), None);
+        assert_eq!(overlay_lookup_normalize_calls(), 1);
+    }
+
     fn captured_world() -> Arc<CapturedResolutionWorld> {
         Arc::new(CapturedResolutionWorld {
-            base: Arc::new(ResolutionWorldRoot::bootstrap(ResolutionWorldId::fresh(1))),
+            base: Arc::new(ResolutionWorldRoot::bootstrap(ResolutionWorldId::from_raw(
+                1,
+            ))),
             session: None,
             population: ResolutionPopulation::Base,
         })
@@ -2878,6 +2691,56 @@ mod transaction_contract_tests {
             ResolveContextId::from_hashes([0xA1; 16], [0xA2; 16]),
             ResolutionPopulation::Base,
         )
+    }
+
+    #[test]
+    fn canonical_replay_matches_raw_ingress_and_trusts_its_provenance() {
+        let raw_path = r"C:\repo\src\main.ts";
+        let raw_realpath = r"C:\repo\real\main.ts";
+        let raw_manifest = r"C:\repo\node_modules\pkg\package.json";
+        let raw_scope = r"C:\repo\src";
+        let canonical_path = verter_semantic::resolver_core::normalize_canonical_id(raw_path);
+        let canonical_realpath =
+            verter_semantic::resolver_core::normalize_canonical_id(raw_realpath);
+        let canonical_manifest =
+            verter_semantic::resolver_core::normalize_canonical_id(raw_manifest);
+        let canonical_scope = verter_semantic::resolver_core::normalize_canonical_id(raw_scope);
+        let fingerprint = Some([0xA5; 16]);
+
+        let mut raw = ResolutionTransaction::new(captured_world());
+        raw.observe_path(raw_path, PathProbe::File);
+        raw.observe_realpath(raw_path, Some(raw_realpath));
+        raw.observe_manifest(raw_manifest, fingerprint);
+        raw.observe(ResolutionFactKey::RecoveryScope {
+            canonical_prefix: CanonicalResolutionId::new(canonical_scope.clone()),
+            population: raw.population(),
+        });
+
+        let mut replay = ResolutionTransaction::new(captured_world());
+        replay.observe_canonical_path(&canonical_path, PathProbe::File);
+        replay.observe_canonical_realpath(&canonical_path, Some(&canonical_realpath));
+        replay.observe_canonical_manifest(&canonical_manifest, fingerprint);
+        replay.observe_canonical_recovery_scope(&canonical_scope);
+
+        assert_eq!(replay.direct_edges(), raw.direct_edges());
+        let raw_values = raw.take_observed_values();
+        let replay_values = replay.take_observed_values();
+        assert_eq!(replay_values.path_probes, raw_values.path_probes);
+        assert_eq!(replay_values.realpaths, raw_values.realpaths);
+        assert_eq!(replay_values.manifests, raw_values.manifests);
+
+        let mut provenance_control = ResolutionTransaction::new(captured_world());
+        provenance_control.observe_canonical_path("/repo/./trusted.ts", PathProbe::Absent);
+        assert_eq!(
+            provenance_control.take_observed_values().path_probes[0].0,
+            "/repo/./trusted.ts",
+            "canonical replay must not silently restore raw-ingress normalization"
+        );
+
+        // Revert controls: route any canonical method through its raw
+        // counterpart; the provenance control changes spelling. Change the
+        // canonical fact/value/order logic; the raw-versus-replay equality
+        // fails instead.
     }
 
     #[test]
@@ -3079,7 +2942,7 @@ mod transaction_contract_tests {
         let foreign_session = FactVersionRef::DomainGeneration(DomainGenerationFact {
             domain: CompactionDomain::Resolution,
             population: AggregatePopulation::Resolution(ResolutionPopulation::Session(
-                SessionFingerprint::fresh(7),
+                SessionFingerprint::from_raw(7),
             )),
             // Deliberately the numerically-matching generation: population
             // identity, not the number, is what must reject it.
@@ -3297,7 +3160,7 @@ mod transaction_contract_tests {
     /// suppression keyed on canonical, on variant, or on any proper subset of
     /// the key collapses at least one pair and shortens the witness.
     fn distinguishing_keys() -> Vec<ResolutionFactKey> {
-        let session = ResolutionPopulation::Session(SessionFingerprint::fresh(7));
+        let session = ResolutionPopulation::Session(SessionFingerprint::from_raw(7));
         vec![
             ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new("/p/a.ts"),

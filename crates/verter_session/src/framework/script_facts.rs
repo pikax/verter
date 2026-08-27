@@ -703,7 +703,7 @@ fn resolved_package_for_import(
     let canonical = resolved_canonical?;
     // Structural package-backing test (the classification authority), never a
     // path substring.
-    if !ResolverContext::workspace_is_package_backed(host, canonical) {
+    if !host.workspace_read().is_package_backed(canonical) {
         return None;
     }
     let name = bare_specifier_package_name(specifier)?;
@@ -1039,9 +1039,9 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                                     })
                                 })
                                 .or_else(|| {
-                                    let ctx = verter_workspace::ResolutionContext {
-                                        phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                                        kind: verter_workspace::ResolveRequestKind::TypeImport,
+                                    let ctx = verter_semantic::resolver_core::ResolutionContext {
+                                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                                        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
                                     };
                                     match host.resolve_via_vfs(canonical, specifier, ctx) {
                                         verter_workspace::ResolutionPublication::Admitted(

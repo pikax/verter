@@ -12,12 +12,12 @@
 use std::sync::Arc;
 
 use crate::memory::{MemoryOptions, MemoryWorkspace};
-use crate::resolution_currency::{
-    CapturedResolutionWorld, ResolutionPopulation, SessionFingerprint,
-};
+use crate::resolution_currency::CapturedResolutionWorld;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 use crate::{ReadSetSignature, ResolutionPublication};
+use verter_semantic::resolver_core::{
+    ResolutionContext, ResolutionPopulation, ResolvePhase, ResolveRequestKind, SessionFingerprint,
+};
 
 const CONTEXT: ResolutionContext = ResolutionContext {
     phase: ResolvePhase::ProviderGraph,
@@ -122,7 +122,7 @@ fn a_session_witness_never_validates_against_a_base_or_foreign_session_capture()
     let base = capture_population(&workspace, ResolutionPopulation::Base);
     let foreign = capture_population(
         &workspace,
-        ResolutionPopulation::Session(SessionFingerprint::fresh(0x5153_5f43_3541)),
+        ResolutionPopulation::Session(SessionFingerprint::from_raw(0x5153_5f43_3541)),
     );
 
     assert!(
@@ -160,7 +160,7 @@ fn an_overlay_only_fact_stays_inside_its_session_capture() {
     let base = capture_population(&workspace, ResolutionPopulation::Base);
     let foreign = capture_population(
         &workspace,
-        ResolutionPopulation::Session(SessionFingerprint::fresh(0x5153_5f43_3542)),
+        ResolutionPopulation::Session(SessionFingerprint::from_raw(0x5153_5f43_3542)),
     );
 
     assert!(

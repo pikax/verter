@@ -51,10 +51,18 @@ fallback: an unknown future contract fails closed until Verter is updated (steer
    versioned and versionless init codecs; not a `V1 | V2` runtime enum; not the TypeScript-Go historical
    protocol; not semver-selected wire formats; not a fallback codec; not a compatibility parser spanning
    protocol generations.
-3. **Close the exact wire method-name spelling gap** TCM0 left open (`package-lock-and-semantic-api.md`
-   §5: structural Go type-name evidence for the four-step lifecycle exists; a byte-exact wire trace does
-   not) — via live protocol trace or `typescript-go` source read, before claiming byte-exact protocol
-   fidelity (`tcm1-tcm4-charter-refinements.md`'s TCM2 note).
+3. **Close the residual content-mapper wire gap** — narrowed 2026-08-25, and the premise this criterion
+   carried is withdrawn. It read that TCM0 left the method-name spelling open because "a byte-exact wire
+   trace does not [exist]". **That is false on the evidence**: `evidence/TCM0/probes/probe7-mapper-wire-capture.mjs`
+   captures every frame the compiler sends to a real configured mapper and asserts the four-step
+   lifecycle by NAME and ORDER, giving `initialize` / `openProject` / `transform` / `closeProject`
+   (`package-lock-and-semantic-api.md` §3a). The RESPONSE contract is likewise derived at §3b by
+   `probes/probe9-transform-response-contract.mjs`.
+   **The obligation is not removed, only narrowed to what is genuinely open**: TCM2 satisfies itself of
+   the wire contract before claiming byte-exact protocol fidelity, and what remains underived is
+   recorded as the residue in `package-lock-and-semantic-api.md` §3b — read it there rather than from a
+   restatement here, so this criterion cannot go stale as that residue shrinks
+   (`tcm1-tcm4-charter-refinements.md`'s TCM2 note).
 4. **Speak the current JSON-RPC protocol over stdio**, writing ONLY protocol frames to stdout; logs and
    telemetry route through a separate non-protocol channel.
 5. **Call the canonical Verter compiler/cache implementation** for its process — no second compiler.

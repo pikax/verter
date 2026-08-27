@@ -78,10 +78,12 @@ carrier architecture.
 9. **Deletion, exactly per `deletion-closure.md`'s 19-item cross-check** (2026-08-23 correction) — TCM4
    executes that manifest for the 17 items it names, it does not re-derive the deletion list at execution
    time. Items 17-18 (old DTOs whose only owner was the removed route; historical content-mapper codecs)
-   are an OPEN TCM0 gap, not a settled part of this manifest — see `evidence/TCM0/OPEN-GAPS.md`'s
-   `G-DELETION-CLOSURE-ITEMS-17-18` row. TCM4 executes whichever resolution TCM0's own acceptance record
-   ratifies for those two items (either an enumerated closure it can execute exactly, mirroring items
-   1-16, or a per-type execution-time discovery method TCM0 explicitly authorises); TCM4 may not invent
+   were an open gap when this was written and are **no longer** — corrected 2026-08-25. They were
+   relocated by amendment: the RECORDING half is bound on TCM1's, TCM2's and TCM3's own added exit
+   criteria, and the VERIFYING half was already bound on this charter's exit criterion 5. Owner and
+   status live in `evidence/TCM0/closure-register.md` and are not repeated here.
+   **TCM4's obligation is unchanged and is the one it already had**: it verifies a handed-over inventory
+   rather than discovering one, and may not invent
    that resolution itself.
 10. **TCM3-EC-G1 gate respected**: TCM4 may delete `feature-ownership-ledger.md` rows #25-26's code only
     after the maintainer ruling TCM3's exit criterion 5 requires is recorded.

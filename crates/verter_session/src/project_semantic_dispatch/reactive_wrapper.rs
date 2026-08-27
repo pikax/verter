@@ -334,14 +334,14 @@ mod tests {
     /// The envelope limit is settable only inside this module tree, which is why
     /// the host-boundary acceptance test
     /// (`return_wrapper_role_degrades_typed_and_is_never_warmed`) delegates this
-    /// arm here: this test constructs its dispatch directly on the bare host, so
+    /// arm here: this test constructs its dispatch through the direct-host test seam, so
     /// `current_request_budget()` is `None` at the sole projection-op charge
     /// site (`project_semantic_dispatch/mod.rs`) and the envelope class is
     /// proven through the connected-work limit rather than the projection fuse.
     ///
     /// The production consumer resolves under the component-meta request's
     /// already-installed `RequestContext` instead — that the demand runs through
-    /// the request's own context, and not the bare host, is proven at the public
+    /// the request's own context is proven at the public
     /// boundary by
     /// `component_meta_binding_return_wrapper_role_demand_is_request_bound`
     /// (a session overlay decides the role). No test asserts a projection-fuse

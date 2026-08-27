@@ -66,7 +66,7 @@ fn assert_edge_package_route_preconditions(host: &VerterHost) {
     let package_runtime = host.resolve_loaded_dependency_canonical(
         "/workspace/src/flow_return_edge_cross.ts",
         "synthetic-edge-values/tools",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
     assert_eq!(
         package_runtime.as_deref(),

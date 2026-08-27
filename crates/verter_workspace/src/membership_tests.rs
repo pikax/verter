@@ -1,6 +1,6 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
-use crate::normalized_glob::{CompiledGlob, NormalizedGlob};
+use verter_semantic::resolver_core::{CompiledGlob, NormalizedGlob};
 
 fn root() -> CanonicalPath {
     CanonicalPath::new("d:/project")
@@ -57,7 +57,7 @@ fn files_immune_to_exclude_even_specific_pattern() {
 
 #[test]
 fn no_filters_uses_typescript_defaults() {
-    let spec = StaticMembershipSpec::with_typescript_defaults(&root());
+    let spec = crate::membership::static_membership_with_typescript_defaults(&root());
 
     // Should match normal source files
     assert!(spec.matches(&CanonicalPath::new("d:/project/src/foo.ts")));
@@ -66,7 +66,7 @@ fn no_filters_uses_typescript_defaults() {
 
 #[test]
 fn no_filters_excludes_node_modules() {
-    let spec = StaticMembershipSpec::with_typescript_defaults(&root());
+    let spec = crate::membership::static_membership_with_typescript_defaults(&root());
 
     // Default exclude should exclude node_modules
     assert!(
@@ -77,7 +77,7 @@ fn no_filters_excludes_node_modules() {
 
 #[test]
 fn no_filters_excludes_bower_components() {
-    let spec = StaticMembershipSpec::with_typescript_defaults(&root());
+    let spec = crate::membership::static_membership_with_typescript_defaults(&root());
 
     assert!(
         !spec.matches(&CanonicalPath::new(
@@ -179,7 +179,7 @@ fn configured_membership_contains() {
     materialized.insert(CanonicalPath::new("d:/project/src/app.vue"));
 
     let membership = ConfiguredMembership {
-        spec: StaticMembershipSpec::with_typescript_defaults(&root()),
+        spec: crate::membership::static_membership_with_typescript_defaults(&root()),
         materialized_files: materialized,
     };
 
@@ -280,7 +280,7 @@ fn exclude_only_no_files_no_include_matches_nothing() {
 fn configured_membership_bridge_fallback_when_empty_materialized() {
     // When materialized_files is empty but spec has include patterns,
     // contains() should fall back to spec.matches() (bridge mode).
-    let spec = StaticMembershipSpec::with_typescript_defaults(&root());
+    let spec = crate::membership::static_membership_with_typescript_defaults(&root());
 
     let membership = ConfiguredMembership {
         spec,
@@ -363,7 +363,7 @@ fn fallback_invalid_exclude_glob_never_excludes() {
 /// GREEN on the fall-through fix.
 #[test]
 fn configured_membership_set_miss_falls_through_to_spec_not_terminal_false() {
-    let spec = StaticMembershipSpec::with_typescript_defaults(&root());
+    let spec = crate::membership::static_membership_with_typescript_defaults(&root());
 
     // Non-empty materialized set (>= 1 file present at build time).
     let mut materialized = FxHashSet::default();
@@ -439,7 +439,7 @@ fn spec_from_includes(
         .map(|inc| crate::config::resolve_membership_path(r.as_str(), inc, true))
         .collect();
     let resolved_refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
-    StaticMembershipSpec::from_includes(&r, &[], &resolved_refs, &[], &supported)
+    crate::membership::static_membership_from_includes(&r, &[], &resolved_refs, &[], &supported)
 }
 
 /// Case 1 — `include: ["src"]` (directory glob) OWNS `src/Foo.vue` AND
@@ -517,7 +517,8 @@ fn separate_per_extension_entries_own_carrier_sources() {
 fn default_include_owns_every_carrier_source() {
     let carriers = registered_carrier_exts();
     let supported = SupportedExtensions::new(false, &carriers);
-    let spec = StaticMembershipSpec::with_supported_extension_defaults(&root(), &supported);
+    let spec =
+        crate::membership::static_membership_with_supported_extension_defaults(&root(), &supported);
     for ext in &carriers {
         let path = CanonicalPath::new(&format!("d:/project/src/Foo.{ext}"));
         assert!(
@@ -537,7 +538,7 @@ fn excluded_carrier_source_is_not_owned() {
     let carriers = registered_carrier_exts();
     let r = root();
     let supported = SupportedExtensions::new(false, &carriers);
-    let spec = StaticMembershipSpec::from_includes(
+    let spec = crate::membership::static_membership_from_includes(
         &r,
         &[],
         &["d:/project/src/**/*"],
@@ -578,8 +579,13 @@ fn bare_star_does_not_own_unknown_extension() {
     // matched literally) — proving the model only filters the EXPANDED set.
     let r = root();
     let supported = SupportedExtensions::new(false, &carriers);
-    let explicit =
-        StaticMembershipSpec::from_includes(&r, &[], &["d:/project/src/**/*.foo"], &[], &supported);
+    let explicit = crate::membership::static_membership_from_includes(
+        &r,
+        &[],
+        &["d:/project/src/**/*.foo"],
+        &[],
+        &supported,
+    );
     assert!(
         explicit.matches(&CanonicalPath::new("d:/project/src/Foo.foo")),
         "an extension-specific `.foo` glob is matched literally (never expanded)"
@@ -643,7 +649,7 @@ fn supported_set_always_includes_full_ts_family() {
 //
 // The default-exclude compiled-glob set is built ONCE per root and shared
 // (`Arc<[CompiledGlob]>`): membership construction runs on hot host paths
-// (snapshot rebuilds, `IdeProjectConfig::new`, the workspace-default env-hash
+// (snapshot rebuilds, `crate::resolver::ide_project_config`, the workspace-default env-hash
 // fallback), and recompiling three `glob::Pattern`s per call dominated
 // allocation profiles. These tests pin the sharing invariant, root precision,
 // and correctness across memo overflow.
@@ -704,7 +710,7 @@ fn default_excludes_stay_correct_across_memo_overflow() {
     let pinned_root = CanonicalPath::new("d:/memo-overflow-pinned");
     let before = typescript_default_excludes(&pinned_root);
 
-    for i in 0..(DEFAULT_EXCLUDES_MEMO_CAP + 8) {
+    for i in 0..(64 + 8) {
         let _ = typescript_default_excludes(&CanonicalPath::new(&format!("d:/memo-overflow-{i}")));
     }
 

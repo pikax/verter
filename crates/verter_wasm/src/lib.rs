@@ -637,7 +637,7 @@ impl WasmVerterHost {
             .map(ffi_module_reference_to_analysis)
             .collect::<Result<Vec<_>, _>>()?;
         let specifiers =
-            verter_semantic::analysis::project_resolver::collect_resolvable_module_reference_specifiers(
+            verter_semantic::resolver_core::collect_resolvable_module_reference_specifiers(
                 &module_references,
             );
         to_wasm_value(&specifiers)
@@ -663,13 +663,12 @@ impl WasmVerterHost {
         } else {
             parse_wasm_input::<Vec<String>>(extensions)?
         };
-        let resolved =
-            verter_semantic::analysis::project_resolver::resolve_known_module_reference_dependencies(
-                owner_id,
-                &module_references,
-                &known_ids,
-                &extensions,
-            );
+        let resolved = verter_semantic::resolver_core::resolve_known_module_reference_dependencies(
+            owner_id,
+            &module_references,
+            &known_ids,
+            &extensions,
+        );
         to_wasm_value(&resolved)
     }
 

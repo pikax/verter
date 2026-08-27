@@ -32,7 +32,8 @@ npm install typescript@7.1.0-dev.20260822.1 --no-save
 cd <repo>/docs/arch/refactor/rev11/evidence/TCM0/probes
 for p in probe1-init-timing probe2-stale-snapshot probe3-stale-sourcefile-confirm \
          probe4-filechanges-correct probe5-bulk-semantic-api probe6-out-of-range-completion-panic \
-         probe7-mapper-wire-capture probe8-lsp-session-attach; do
+         probe7-mapper-wire-capture probe8-lsp-session-attach \
+         probe9-transform-response-contract probe10-external-source-unit; do
   node "$p.mjs" --ts /tmp/tcm0-probe
 done
 ```
@@ -48,21 +49,26 @@ name and refuses to proceed if it is not the pin — verified by pointing a prob
 silently resolving whatever `typescript` the repository happens to have installed.
 
 **Exit status.** Probes 2-8 exit 0 only when every one of their assertions held, and non-zero otherwise.
-Probe 1 is the exception: it is pure measurement (timings and counts have no pass/fail bound that would not
-be flaky on a loaded host), so it reports numbers and always exits 0. Read probe 1 as an observation, never
-as a passed check.
+Probe 1 is nearly the exception, and the difference matters: its TIMINGS assert nothing (no count or
+duration has a pass/fail bound that would not be flaky on a loaded host), but the probe is not
+assertion-free — it carries exactly one, at `probe1-init-timing.mjs:85`, that every iteration completed,
+which is the charter's actual liveness question and fails the probe if the cold path ever hangs. So probe 1
+exits non-zero on that one condition and zero otherwise. Read every NUMBER probe 1 reports as an
+observation and never as a passed check; read its exit status as the single liveness assertion it is.
 
 ## What each probe covers
 
 | Probe | Charter item 2 clause | What it establishes |
 |---|---|---|
-| `probe1-init-timing.mjs` | session initialisation | MEASUREMENT ONLY — construction, cold first snapshot, warm unchanged snapshot; no hang in the in-process spawn path. Asserts nothing. |
+| `probe1-init-timing.mjs` | session initialisation | MEASUREMENT ONLY for its numbers — construction, cold first snapshot, warm unchanged snapshot. Its one assertion (`:85`) is that every iteration completed, i.e. no hang in the in-process spawn path; no timing is asserted. |
 | `probe2-stale-snapshot.mjs` | snapshot update | Control, asserted: `updateSnapshot()` does not poll the filesystem. A new snapshot without `fileChanges` serves pre-edit content **by design**. Fails if the server ever observes an edit it was not told about. |
-| `probe3-stale-sourcefile-confirm.mjs` | snapshot disposal | The post-dispose asymmetry, asserted in both directions: `Program.getSourceFile` returns the **identical object** with no round-trip, while all four sibling `Program` methods throw `snapshot N not found`. Fails if either half stops holding — including if the defect is fixed. |
+| `probe3-stale-sourcefile-confirm.mjs` | snapshot disposal | The post-dispose asymmetry, asserted in both directions: `Program.getSourceFile` returns the **identical object** with no round-trip, while the four probed siblings — `getSemanticDiagnostics`, `getSourceFileNames`, `emitToString`, and `getSyntacticDiagnostics` — throw `snapshot N not found`. Fails if either half stops holding — including if the defect is fixed. |
 | `probe4-filechanges-correct.mjs` | snapshot update | Asserted: passing `fileChanges.changed` makes the next snapshot observe **exactly** the appended byte count, not merely "some change". |
 | `probe5-bulk-semantic-api.mjs` | project/source-file lookup, `Program` and `Checker` operations, bulk symbol/type/reference queries, completions, diagnostics, cancellation, failure behaviour | The bulk surface. 50+ checks, each asserting a discriminating property rather than merely reporting a value. |
-| `probe8-lsp-session-attach.mjs` | charter item 2 (LSP API-session behaviour) | Spawns `tsc --lsp`, obtains an API pipe via `custom/initializeAPISession`, and attaches a second client. Establishes that attach works, that it is ASYNC-CLIENT-ONLY, and that no session-attach hang occurs. Closes the §4a delegation. |
-| `probe7-mapper-wire-capture.mjs` | charter item 1 (exact mapper request/response shapes) | LIVE capture of the content-mapper JSON-RPC protocol: runs the pinned native `tsc --runExternalCode` against a real `contentMappers` config with a stub mapper, and asserts the four-step lifecycle by NAME and ORDER plus every params shape. Closes the wire-spelling gap §3 had delegated. |
+| `probe8-lsp-session-attach.mjs` | charter item 2 (LSP API-session behaviour) | Spawns `tsc --lsp`, obtains an API pipe via `custom/initializeAPISession`, and attaches a second client. Establishes that attach works, that it is ASYNC-CLIENT-ONLY, and that no hang was observed on the exercised attach path. TCM3's duty to run the session-attach probe before selecting that topology is ratified by `docs/arch/refactor/rev11/rulings/MAINTAINER-RULING-TCM-PACKAGE-CERTIFICATION-SETTLED.md` §2. |
+| `probe7-mapper-wire-capture.mjs` | charter item 1 (mapper request capture) | LIVE capture of one content-mapper JSON-RPC compile: runs the pinned native `tsc --runExternalCode` against a real `contentMappers` config with a stub mapper, and asserts the captured four-step lifecycle by NAME and ORDER plus the params shapes exercised in that compile. Probe 7 establishes that request sample; Probe 9 derives the response body, including the `diagnosticDirectives` entry layouts, with the four remaining limits recorded in `../closure-register.md` row `S1.d`. |
+| `probe9-transform-response-contract.mjs` | charter item 1 (exact mapper request/response shapes) | The successful `transform` RESPONSE contract, derived by driving the pinned compiler and reading the decoder's typed errors: the flat `{extension, text, mappings?, supplemental?, diagnostics?, diagnosticDirectives?}` object, the 5-or-6-number mapping tuple and its bounds, the three `SpanMapKind` values, and the extension domain over 14 tested values. Records the vacuous-pass trap that kept the gap open: `content` is an IGNORED field, and `{extension, content}` "succeeds" only because an empty program type-checks. |
+| `probe10-external-source-unit.mjs` | charter item 6 (`<template src>` under the steering's model 2) | Transform-input, project and configuration identity for a file referenced from inside a carrier. Each assertion pairs with an injectable rival hypothesis (`--inject input|project|config|mapper`), all four observed driving it red. |
 | `probe6-out-of-range-completion-panic.mjs` | failure behaviour | Asserted in both halves: an out-of-range completion position produces a Go `slice bounds out of range` panic with a stack trace on the client, **and** the session is still serving afterwards. Fails if the panic stops reproducing or if it stops being contained. |
 
 ## Discrimination
@@ -92,8 +98,8 @@ Both are now proven to discriminate by planting the reversal and observing red:
 Each plant was verified present, unique and new in the source before the run, and the unplanted copy was
 re-run as a control and stayed green.
 
-The probe-7 plant matters for a specific reason: that probe's whole value is the claim that the wire
-lifecycle is exactly those four method names. A check that merely printed whatever it captured would
+The probe-7 plant matters for a specific reason: that probe establishes that the captured compile's
+inbound lifecycle uses those four method names in that order. A check that merely printed whatever it captured would
 "establish" any protocol at all. Asserting a wrong name goes red, so the assertion is load-bearing rather
 than descriptive.
 
@@ -113,3 +119,45 @@ it stale — it says what that build did, and that stays true. **TCM4 owns futur
 certified-engine gate: its mapper-conformance and semantic-capability probes must pass before
 activation.** Re-running these probes against a newer package is therefore TCM4's act at that gate, not a
 maintenance obligation hanging over this directory.
+
+## Tree derivations (not package probes)
+
+Two scripts here read the REPOSITORY rather than the pinned candidate package, so they need no `--ts`
+and no network:
+
+| Script | Backs | What it derives |
+|---|---|---|
+| `closure-validator.mjs` | acceptance admission | Derives every sentence in the charter's Scope, acyclic-invariant, and Acceptance sections, requires verbatim row claims to tile them, and refuses acceptance while any mandatory register row is open. |
+| `capability-provider-hop-walk.mjs` | the ownership ledger's capability verdicts | Walks each steering-named capability's request path from its LSP entry point, reporting the shortest path to a provider hop (a call to a method derived from the trait body, or a read of the `type_provider` handle). Edges resolve by CALL SHAPE, not name alone. Writes `../capability-provider-hop-walk.md`. |
+| `typeprovider-call-site-derivation.mjs` | the ownership ledger's caller column | Reads the method list out of the `TypeProvider` trait body and lexes every `.rs` file under `crates/`, classifying every occurrence of every method: trait declaration, implementation, production call, same-name forwarding call, trait default-body call, test call, bare reference, or a mention in a comment or string. Writes `../typeprovider-call-sites.md`. |
+
+`typeprovider-call-site-derivation.mjs --check` re-derives from the live tree and exits 1 on any drift —
+a new call site, a deleted one, or a new trait method. Its own header states what a textual derivation
+cannot see (identifier collisions, generic-parameter receivers, a method reached under a renamed alias,
+macro-pasted identifiers) and why its counts are an upper bound on true provider call sites rather than a
+lower one.
+
+It is proven to discriminate by planting, each verified present, unique and absent-before-planting, then
+reverted:
+
+| Plant | Expected | Result |
+|---|---|---|
+| a new `fn` in the `TypeProvider` trait body | the method count comes from the trait, not from a list | `44` → `45` |
+| a call in a non-test `impl` (`tsgo/composite.rs`) | classified `call-production` | classified `call-production` |
+| a call in a `#[cfg(test)] mod`-gated file (`real_provider_tests/completion.rs`) | classified `call-test`, NOT production | classified `call-test` |
+
+`--check` exited 1 under the plants and 0 after reverting them. The third plant is the load-bearing one:
+several directories of test code live under `src/` with no `#[cfg(test)]` in their own files, gated only
+by a `#[cfg(test)] mod NAME;` declaration in a parent, and a derivation that read in-file attributes
+alone would have promoted hundreds of test calls into the production column.
+
+`capability-provider-hop-walk.mjs --check` behaves the same way. Its header records the four false rails
+that earlier revisions reported before the resolution rules were tightened — `HandlerGuard::new`,
+`Box::new`, `tokio::spawn` and `crate::type_provider::specifier_rewrite` each handed every capability a
+hop through code it never calls — because a walk that answers HOP for everything answers nothing, and the
+next reader is owed the reason each rule exists.
+
+Proven to discriminate: a two-edge provider call planted under the `directives` entry point
+(`features/hover_directive_names.rs`), verified present, unique and absent-before-planting, flipped that
+capability from `NO-HOP` to `HOP`, named both edges and printed the planted line; `--check` exited 1 under
+the plant and 0 after reverting it.

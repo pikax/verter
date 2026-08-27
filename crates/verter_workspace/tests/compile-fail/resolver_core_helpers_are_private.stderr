@@ -1,0 +1,95 @@
+error[E0603]: module `node_modules_resolution` is private
+ --> tests/compile-fail/resolver_core_helpers_are_private.rs:5:37
+  |
+5 | use verter_semantic::resolver_core::node_modules_resolution::resolve_node_modules_package;
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `node_modules_resolution` is defined here
+ --> $WORKSPACE/crates/verter_semantic/src/resolver_core/mod.rs
+  |
+  | mod node_modules_resolution;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `node_modules_resolution` is private
+ --> tests/compile-fail/resolver_core_helpers_are_private.rs:6:37
+  |
+6 | use verter_semantic::resolver_core::node_modules_resolution::resolve_node_modules_package_from_dir;
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `node_modules_resolution` is defined here
+ --> $WORKSPACE/crates/verter_semantic/src/resolver_core/mod.rs
+  |
+  | mod node_modules_resolution;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `node_modules_resolution` is private
+ --> tests/compile-fail/resolver_core_helpers_are_private.rs:7:37
+  |
+7 | use verter_semantic::resolver_core::node_modules_resolution::resolve_node_modules_package_from_dirs;
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `node_modules_resolution` is defined here
+ --> $WORKSPACE/crates/verter_semantic/src/resolver_core/mod.rs
+  |
+  | mod node_modules_resolution;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `package_target_resolution` is private
+ --> tests/compile-fail/resolver_core_helpers_are_private.rs:8:37
+  |
+8 | use verter_semantic::resolver_core::package_target_resolution::resolve_legacy_package;
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `package_target_resolution` is defined here
+ --> $WORKSPACE/crates/verter_semantic/src/resolver_core/mod.rs
+  |
+  | mod package_target_resolution;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `package_target_resolution` is private
+ --> tests/compile-fail/resolver_core_helpers_are_private.rs:9:37
+  |
+9 | use verter_semantic::resolver_core::package_target_resolution::resolve_manifest_types_entry;
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ private module
+  |
+note: the module `package_target_resolution` is defined here
+ --> $WORKSPACE/crates/verter_semantic/src/resolver_core/mod.rs
+  |
+  | mod package_target_resolution;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `package_target_resolution` is private
+  --> tests/compile-fail/resolver_core_helpers_are_private.rs:10:37
+   |
+10 | use verter_semantic::resolver_core::package_target_resolution::resolve_package_exports;
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ private module
+   |
+note: the module `package_target_resolution` is defined here
+  --> $WORKSPACE/crates/verter_semantic/src/resolver_core/mod.rs
+   |
+   | mod package_target_resolution;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `package_target_resolution` is private
+  --> tests/compile-fail/resolver_core_helpers_are_private.rs:11:37
+   |
+11 | use verter_semantic::resolver_core::package_target_resolution::resolve_package_path;
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ private module
+   |
+note: the module `package_target_resolution` is defined here
+  --> $WORKSPACE/crates/verter_semantic/src/resolver_core/mod.rs
+   |
+   | mod package_target_resolution;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `package_target_resolution` is private
+  --> tests/compile-fail/resolver_core_helpers_are_private.rs:12:37
+   |
+12 | use verter_semantic::resolver_core::package_target_resolution::resolve_package_target;
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^ private module
+   |
+note: the module `package_target_resolution` is defined here
+  --> $WORKSPACE/crates/verter_semantic/src/resolver_core/mod.rs
+   |
+   | mod package_target_resolution;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

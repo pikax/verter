@@ -381,9 +381,17 @@ impl VerterMcpServer {
             "ignore_patterns": resolved.config.ignore_patterns,
         });
 
-        // Detect routing framework after scanning
+        // Detect routing framework after scanning — a package.json-only
+        // read, not the full route-analysis directory walk
+        // `build_route_analysis_inputs` performs (this call site only
+        // needs the framework name, not routes/layouts/navigation).
+        let mut route_inputs = verter_semantic::analysis::RouteAnalysisInputs::new();
+        let pkg_path = format!("{}/package.json", root_canonical.trim_end_matches('/'));
+        if let Some(content) = workspace.read_file(&pkg_path) {
+            route_inputs.insert_file(pkg_path, content);
+        }
         let route_framework =
-            verter_semantic::analysis::detect_routing_framework(&*workspace, &root_canonical);
+            verter_semantic::analysis::detect_routing_framework(&route_inputs, &root_canonical);
         let route_info = serde_json::json!({
             "framework": route_framework,
         });
@@ -2750,7 +2758,7 @@ impl VerterMcpServer {
                 }
             }
 
-            if !found_test && verter_workspace::path_is_carrier(file) {
+            if !found_test && verter_semantic::resolver_core::path_is_carrier(file) {
                 untested.push(file.clone());
             }
         }
@@ -2936,8 +2944,12 @@ impl VerterMcpServer {
 
         let workspace = self.host.workspace_read();
         let project_root_str = project_root.to_string_lossy().replace('\\', "/");
-        verter_semantic::analysis::build_route_analysis(
+        let inputs = verter_session::route_analysis_inputs::build_route_analysis_inputs(
             &*workspace,
+            &project_root_str,
+        );
+        verter_semantic::analysis::build_route_analysis(
+            &inputs,
             &project_root_str,
             &template_components,
         )

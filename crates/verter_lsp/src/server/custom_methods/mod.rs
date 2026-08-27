@@ -615,8 +615,10 @@ impl VerterLanguageServer {
         }
 
         let workspace = self.documents.host.workspace_read();
+        let inputs =
+            verter_session::route_analysis_inputs::build_route_analysis_inputs(&*workspace, root);
         let snapshot = verter_semantic::analysis::routes::build_route_analysis(
-            &*workspace,
+            &inputs,
             root,
             &template_components,
         );

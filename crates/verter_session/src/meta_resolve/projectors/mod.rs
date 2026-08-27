@@ -408,9 +408,8 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 //    whether to reduce (operator-shape / generic instantiation cases) or
 //    publish shallow (bare alias case already covered above).
 //
-// Strictly request-bound: the `debug_assert!` enforces that the caller's
-// `ResolverContext` is request-bound. Bare-host invocation would force a
-// workspace snapshot rebuild.
+// Strictly request-bound: the sealed `ResolverContext` and the `debug_assert!`
+// require the caller's request view.
 // =============================================================================
 
 /// Result of peeking whether a type's shape is known cheaply.

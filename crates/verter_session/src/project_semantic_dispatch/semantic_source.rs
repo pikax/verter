@@ -1444,9 +1444,8 @@ pub fn demand_semantic_source_type_expr(
 }
 
 /// Context-generic body of [`demand_semantic_source_type_expr`]: the same
-/// demand walk bound to an arbitrary [`ResolverContext`] — a bare host for
-/// base-view assertions, a session-bound wrapper for overlay-view
-/// assertions. One probe body, two view bindings; never a second engine.
+/// demand walk runs against base-view and overlay-view test contexts. One
+/// probe body, two view bindings; never a second engine.
 ///
 /// [`ResolverContext`]: crate::resolver_core::resolver_context::ResolverContext
 #[cfg(any(test, feature = "test-support"))]

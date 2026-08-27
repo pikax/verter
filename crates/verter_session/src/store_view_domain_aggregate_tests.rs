@@ -877,7 +877,7 @@ fn request_basis_arms_the_stable_view_domains_in_the_exact_completion_population
 #[test]
 fn request_signature_refuses_a_mixed_resolution_and_content_aggregate() {
     use crate::resolver_core::{CanonicalCompletionOverlay, RequestStoreView};
-    use verter_workspace::ResolutionPopulation;
+    use verter_semantic::resolver_core::ResolutionPopulation;
 
     let host = host_with_a_file();
     let base = freshly_built_view(&host);

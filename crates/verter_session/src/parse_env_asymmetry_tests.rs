@@ -70,12 +70,12 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
 fn parse_env_hash_is_project_independent_so_the_key_asymmetry_is_unreachable() {
     let host = VerterHost::new_standalone(HostConfig::default());
     host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+        verter_workspace::ide_project_config(
             "/ws/a".to_string(),
             "/ws".to_string(),
             Some("/ws/a/tsconfig.json".to_string()),
         ),
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
+        verter_workspace::ide_project_config(
             "/ws/b".to_string(),
             "/ws".to_string(),
             Some("/ws/b/tsconfig.json".to_string()),

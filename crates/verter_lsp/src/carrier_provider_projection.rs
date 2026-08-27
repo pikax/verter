@@ -11,12 +11,13 @@ use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 use verter_compiler::code_transform::CodeTransform;
 use verter_semantic::analysis::{build_script_analysis_with_scope, AnalysisScope};
+use verter_semantic::resolver_core::CARRIER_API_VIRTUAL_SUFFIX;
 use verter_workspace::workspace_snapshot::{ConfiguredOwnerResolution, ProjectPayload};
-use verter_workspace::{FilesystemWorkspace, WorkspaceRead, CARRIER_API_VIRTUAL_SUFFIX};
+use verter_workspace::{FilesystemWorkspace, WorkspaceRead};
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::TransformedBufferMap;
-use crate::project_resolver::{ResolvePhase, ResolveRequestKind};
+use verter_semantic::resolver_core::{ResolvePhase, ResolveRequestKind};
 
 /// The exact bytes a provider holds for a carrier companion, together with the
 /// generated→provider map that describes *those* bytes.
@@ -103,7 +104,7 @@ fn owner_resolves_verter_types(
         published,
         canonical_id,
         "@verter/types",
-        verter_workspace::ResolutionContext {
+        verter_semantic::resolver_core::ResolutionContext {
             kind: ResolveRequestKind::TypeImport,
             phase: ResolvePhase::ProviderGraph,
         },
@@ -346,7 +347,7 @@ fn prepare_carrier_provider_imports_with_verter_types(
                     published,
                     canonical_id,
                     specifier,
-                    verter_workspace::ResolutionContext {
+                    verter_semantic::resolver_core::ResolutionContext {
                         kind: if reference.is_type_only {
                             ResolveRequestKind::TypeImport
                         } else {
@@ -367,7 +368,9 @@ fn prepare_carrier_provider_imports_with_verter_types(
                 None
             };
             match resolved {
-                Some(resolved) if verter_workspace::path_is_carrier(&resolved.source_id) => {
+                Some(resolved)
+                    if verter_semantic::resolver_core::path_is_carrier(&resolved.source_id) =>
+                {
                     if resolved
                         .provider_specifier
                         .ends_with(CARRIER_API_VIRTUAL_SUFFIX)
@@ -380,7 +383,7 @@ fn prepare_carrier_provider_imports_with_verter_types(
                         )
                     }
                 }
-                _ if verter_workspace::path_is_carrier(specifier) => {
+                _ if verter_semantic::resolver_core::path_is_carrier(specifier) => {
                     format!("{specifier}{CARRIER_API_VIRTUAL_SUFFIX}")
                 }
                 _ => continue,
@@ -480,7 +483,7 @@ mod tests {
         // consumer-local `std::fs` probe: `realpath` is what the published
         // resolution world keys on (on macOS `/var` is a symlink to
         // `/private/var`), and routing the write through `WorkspaceAccess`
-        // is what feeds the C1 evidence bridge its invalidation signal.
+        // is what feeds the resolution-world bridge its invalidation signal.
         let root = {
             let probe = FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
                 roots: vec![temp_root.clone()],
@@ -503,7 +506,7 @@ mod tests {
         .expect("write child carrier");
         verter_workspace::WorkspaceAccess::configure_resolver(
             &workspace,
-            vec![verter_workspace::IdeProjectConfig::new(
+            vec![verter_workspace::ide_project_config(
                 root.clone(),
                 root,
                 None,

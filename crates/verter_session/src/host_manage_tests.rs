@@ -220,8 +220,8 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_workspace::ResolutionContext,
-    ) -> Option<verter_workspace::ResolveResult> {
+        ctx: verter_semantic::resolver_core::ResolutionContext,
+    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
         *self
             .resolve_counts
             .lock()
@@ -234,7 +234,7 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_workspace::ResolutionContext,
+        ctx: verter_semantic::resolver_core::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         *self
             .resolve_counts
@@ -349,7 +349,7 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.notify_delete(canonical_id);
     }
 
-    fn configure_resolver(&self, projects: Vec<verter_workspace::resolver::IdeProjectConfig>) {
+    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
         self.inner.configure_resolver(projects);
     }
 
@@ -1454,9 +1454,9 @@ fn owner_import_route_witness_is_side_effect_free() {
             .resolve_import(
                 importer,
                 "./theme",
-                verter_workspace::ResolutionContext {
-                    phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                    kind: verter_workspace::ResolveRequestKind::TypeImport,
+                verter_semantic::resolver_core::ResolutionContext {
+                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
                 },
             )
             .map(|r| r.source_id),
@@ -2957,8 +2957,8 @@ fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_
         "/workspace/src/App.vue",
         vec![verter_workspace::ExactResolution {
             specifier: "./partial.html".to_string(),
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/src/partial.html".to_string()),
             possible_canonical_ids: vec!["/workspace/src/partial.html".to_string()],
         }],
@@ -3015,8 +3015,8 @@ import { dep } from "@/dep"
         "/workspace/src/App.vue",
         vec![verter_workspace::ExactResolution {
             specifier: "@/dep".to_string(),
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/src/dep.ts".to_string()),
             possible_canonical_ids: vec!["/workspace/src/dep.ts".to_string()],
         }],
@@ -3026,13 +3026,13 @@ import { dep } from "@/dep"
     let first = host.resolve_loaded_dependency_canonical(
         "/workspace/src/App.vue",
         "@/dep",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
     let second = host.resolve_import("/workspace/src/App.vue", "@/dep");
     let third = host.resolve_loaded_dependency_canonical(
         "/workspace/src/App.vue",
         "@/dep",
-        verter_workspace::ResolveRequestKind::EsmImport,
+        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
     );
 
     assert_eq!(
@@ -3790,25 +3790,21 @@ fn get_analysis_resolves_alias_import() {
     );
     // Configure workspace resolver via host wrapper.
     {
-        host.configure_projects(vec![
-            verter_semantic::analysis::project_resolver::IdeProjectConfig {
-                root: "/project".to_string(),
-                workspace_root: "/project".to_string(),
-                tsconfig_path: None,
-                provider_root: "/project".to_string(),
-                workspace_aliases: vec![verter_workspace::WorkspaceAlias {
-                    find: "@/".to_string(),
-                    replacement: "/project/src/".to_string(),
-                }],
-                compiler_options:
-                    verter_semantic::analysis::project_resolver::IdeProjectCompilerOptions::default(
-                    ),
-                references: vec![],
-                membership: verter_workspace::ConfiguredMembership::match_all_under_root(
-                    &verter_workspace::CanonicalPath::new("/project"),
-                ),
-            },
-        ]);
+        host.configure_projects(vec![verter_semantic::resolver_core::IdeProjectConfig {
+            root: "/project".to_string(),
+            workspace_root: "/project".to_string(),
+            tsconfig_path: None,
+            provider_root: "/project".to_string(),
+            workspace_aliases: vec![verter_semantic::resolver_core::WorkspaceAlias {
+                find: "@/".to_string(),
+                replacement: "/project/src/".to_string(),
+            }],
+            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            references: vec![],
+            membership: verter_workspace::configured_membership_match_all_under_root(
+                &verter_workspace::CanonicalPath::new("/project"),
+            ),
+        }]);
     }
 
     let analysis = host.get_analysis("/project/src/App.vue").unwrap();
@@ -5376,13 +5372,11 @@ fn resolve_component_meta_uses_workspace_type_resolution_for_package_declaration
     );
 
     let host = VerterHost::new(HostConfig::default(), ws);
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     upsert_vue(
         &host,
         "/workspace/src/Consumer.vue",
@@ -9052,7 +9046,7 @@ fn component_meta_binding_return_wrapper_role_demand_is_request_bound() {
         a6_binding(&overlaid, "counter").return_wrapper_role,
         Some(verter_type_expr::ReactiveWrapperRole::ComputedRef),
         "the demand must resolve through the REQUEST's context, so the session \
-         overlay decides the role — a bare-host dispatch would answer from the \
+         overlay decides the role — a base-view dispatch would answer from the \
          shared base and still report Ref"
     );
     assert_eq!(
@@ -10602,13 +10596,11 @@ fn indexed_barrel_wildcard_surface_is_specifier_only_and_resolves_ts_first() {
     // A configured project makes the workspace resolver resolve relative
     // specifiers (mirrors a real workspace; a bare unconfigured workspace
     // cannot resolve `./runtime`).
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     let indexed = host
         .ensure_indexed_ready(barrel)
@@ -10666,13 +10658,11 @@ fn indexed_barrel_wildcard_surface_is_specifier_only_and_resolves_ts_first() {
 #[test]
 fn unresolvable_wildcard_route_miss_reresolves_after_target_appears() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     // A barrel that re-exports from a target which does NOT yet exist.
     upsert_non_sfc(&host, "/workspace/index.ts", "export * from './missing';\n");
@@ -10728,13 +10718,11 @@ fn unresolvable_wildcard_route_miss_reresolves_after_target_appears() {
 #[test]
 fn mixed_barrel_indexed_wildcard_known_miss_already_rooted_via_export_signatures() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     // A resolvable sibling exists; the wildcard target does NOT yet exist.
     upsert_non_sfc(
@@ -10801,13 +10789,11 @@ fn mixed_barrel_indexed_wildcard_known_miss_already_rooted_via_export_signatures
 #[test]
 fn base_seed_does_not_rebake_stale_known_miss_after_target_appears() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     upsert_non_sfc(
         &host,
@@ -10885,13 +10871,11 @@ fn base_seed_does_not_rebake_stale_known_miss_after_target_appears() {
 fn overlay_seed_does_not_rebake_stale_known_miss_after_target_appears() {
     use crate::session_view::OverlaidView;
     let host = Arc::new(make_host());
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     const OWNER_SOURCE: &str = "export type { Foo } from './missing';\n";
     upsert_non_sfc(&host, "/workspace/owner.ts", OWNER_SOURCE);
@@ -10975,13 +10959,11 @@ fn overlay_seed_does_not_rebake_stale_known_miss_after_target_appears() {
 #[test]
 fn owner_import_surface_unresolved_direct_import_reresolves_after_target_appears() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     upsert_non_sfc(
         &host,
@@ -11027,13 +11009,11 @@ fn owner_import_surface_unresolved_direct_import_reresolves_after_target_appears
 #[test]
 fn bindingless_import_surface_reresolves_after_target_appears() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     upsert_non_sfc(
         &host,
@@ -11102,13 +11082,11 @@ fn bindingless_import_surface_reresolves_after_target_appears() {
 #[test]
 fn import_route_witness_moves_when_a_positive_retargets() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     upsert_non_sfc(&host, "/workspace/dep.js", "export const dep = 1;\n");
     upsert_non_sfc(
@@ -11180,13 +11158,11 @@ fn import_route_witness_moves_when_a_positive_retargets() {
 #[test]
 fn host_resolution_populates_no_host_side_route_memo() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     upsert_non_sfc(&host, "/workspace/dep.ts", "export const dep = 1;\n");
     upsert_non_sfc(
@@ -11256,13 +11232,11 @@ fn host_resolution_populates_no_host_side_route_memo() {
 #[test]
 fn route_resolved_via_later_wildcard_not_dropped_by_unresolvable_earlier_wildcard() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     upsert_non_sfc(
         &host,
@@ -11339,13 +11313,11 @@ fn route_resolved_via_later_wildcard_not_dropped_by_unresolvable_earlier_wildcar
 #[test]
 fn import_route_fact_admitted_only_when_it_covers_unresolved_wildcard_source() {
     let host = make_host();
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     // A resolvable sibling exists; the wildcard target does NOT yet exist.
     upsert_non_sfc(
@@ -11955,8 +11927,8 @@ fn esm_fallback_normalization_parity_between_route_edge_and_known_miss() {
         owner,
         vec![verter_workspace::ExactResolution {
             specifier: "runtimedep".to_string(),
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
             possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
         }],
@@ -12014,8 +11986,8 @@ fn overlay_materializer_esm_fallback_normalizes_like_shared_route_edge_policy() 
         barrel,
         vec![verter_workspace::ExactResolution {
             specifier: "runtimedep".to_string(),
-            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-            kind: verter_workspace::ResolveRequestKind::EsmImport,
+            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
             possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
         }],
@@ -12243,6 +12215,125 @@ fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
         "the wildcard edge must retarget after a base file-set change — the \
          surface names the AUTHORED specifier and the one authority resolves it"
     );
+}
+
+struct DecliningOverlayView {
+    base: crate::session_view::HostView,
+    canonical: String,
+    hash: verter_semantic::analysis::Hash16,
+}
+
+impl crate::session_view::SessionView for DecliningOverlayView {
+    fn source(&self, canonical: &str) -> Option<Arc<str>> {
+        if canonical == self.canonical {
+            return None;
+        }
+        crate::session_view::SessionView::source(&self.base, canonical)
+    }
+
+    fn content_hash_for(&self, canonical: &str) -> Option<verter_semantic::analysis::Hash16> {
+        crate::session_view::SessionView::content_hash_for(&self.base, canonical)
+    }
+
+    fn overlay_content_hash_for(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_semantic::analysis::Hash16> {
+        (canonical == self.canonical).then_some(self.hash)
+    }
+
+    fn project_identity(&self) -> verter_semantic::resolver_core::ProjectIdentity {
+        crate::session_view::SessionView::project_identity(&self.base)
+    }
+
+    fn env_hashes(&self) -> &verter_semantic::resolver_core::EnvHashes {
+        crate::session_view::SessionView::env_hashes(&self.base)
+    }
+
+    fn resolved_import_facts(
+        &self,
+        canonical: &str,
+    ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
+        crate::session_view::SessionView::resolved_import_facts(&self.base, canonical)
+    }
+
+    fn overlay_canonicals(&self) -> Vec<String> {
+        vec![self.canonical.clone()]
+    }
+}
+
+/// An explicit overlay whose publication identity is incomplete is a real
+/// request-bound refusal. Every sibling adapter must preserve that refusal
+/// even when a complete base artifact for the same canonical is available.
+#[test]
+fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries() {
+    use crate::resolver_core::{ComponentMetaRequestHost, ResolverContext, SessionResolverContext};
+    use crate::session_view::SessionView;
+    use verter_session_query::{QueryHostError, QueryHostPort};
+    use verter_type_expr::locators::{
+        AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
+    };
+
+    let canonical = "/workspace/refusal.ts";
+    let host = Arc::new(make_host());
+    upsert_non_sfc(
+        &host,
+        canonical,
+        "export interface Ready { value: string }\n",
+    );
+    assert!(host.ensure_indexed_ready_serve(canonical).is_some());
+    let base_store = host.resolver_store_view_read().into_owned_view();
+    assert!(host
+        .capture_component_meta_inputs(canonical, &base_store)
+        .is_some());
+    assert!(host.routed_shallow_state(canonical).is_some());
+
+    let base = crate::session_view::HostView::new(Arc::clone(&host));
+    let hash = base
+        .content_hash_for(canonical)
+        .expect("base fixture has current content");
+    let view = DecliningOverlayView {
+        base,
+        canonical: canonical.to_string(),
+        hash,
+    };
+    let store_view = host
+        .resolver_store_view_read()
+        .into_cold_seed_view()
+        .with_session_overlay(&host, &view);
+    let completion = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = SessionResolverContext::from_cold_seed(&host, &view, &store_view, completion);
+
+    assert!(ctx.ensure_indexed_ready_serve(canonical).is_none());
+    assert!(host
+        .capture_component_meta_inputs_with_view(canonical, &view)
+        .is_none());
+    assert!(host
+        .routed_shallow_state_with_view(canonical, Some(&view))
+        .is_none());
+
+    let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+        anchor: AuthoredAnchor {
+            canonical_id: Arc::from(canonical),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: Arc::from("Ready"),
+            space: LocatorSymbolSpace::Type,
+        },
+        path: Arc::from([]),
+    });
+    let port = crate::query_host_port::SessionQueryHostPort::new(&ctx);
+    let answer = port.lower_authored_body(&locator);
+    assert!(matches!(answer.outcome, Err(QueryHostError::UnknownFile)));
+
+    assert!(host.ensure_indexed_ready_serve(canonical).is_some());
+    assert!(host
+        .capture_component_meta_inputs(canonical, &base_store)
+        .is_some());
+    assert!(host.routed_shallow_state(canonical).is_some());
+
+    // Mutation controls: replace any of the three explicit-overlay branches
+    // with a `.or_else(...)` base fallback; the corresponding `is_none`
+    // assertion above becomes RED while the base preconditions remain green.
 }
 
 /// DISCRIMINATING regression: the BASE shallow reader (`shallow_file_state` →
@@ -18162,9 +18253,10 @@ mod manifest_types_entry_routing_tests {
                 extensions: vec![".ts".into(), ".js".into(), ".vue".into()],
                 workspace_root: "/ws/node_modules/@scope/local-pkg".to_string(),
                 workspace_aliases: vec![],
-                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: vec![],
-                membership: verter_workspace::ConfiguredMembership::match_all_under_root(
+                membership: verter_workspace::configured_membership_match_all_under_root(
                     &verter_workspace::CanonicalPath::new("/ws/node_modules/@scope/local-pkg"),
                 ),
             },

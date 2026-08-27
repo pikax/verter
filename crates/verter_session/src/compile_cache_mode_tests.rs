@@ -43,8 +43,8 @@ use verter_semantic::analysis::{
     AnalyzedImport, AnalyzedImportBinding, AnalyzedMacroKind, MacroTypeDep,
 };
 use verter_semantic::input::ImportBindingKind;
+use verter_semantic::resolver_core::WorkspaceAlias;
 use verter_span::Span;
-use verter_workspace::WorkspaceAlias;
 
 use super::*;
 use crate::types::{

@@ -1,0 +1,25 @@
+error[E0277]: the trait bound `FakeHostHandle: observation::sealed::Sealed` is not satisfied
+  --> tests/compile-fail/host_holding_type_does_not_satisfy_resolver_observation.rs:29:30
+   |
+29 | impl ResolverObservation for FakeHostHandle {
+   |                              ^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `observation::sealed::Sealed` is not implemented for `FakeHostHandle`
+  --> tests/compile-fail/host_holding_type_does_not_satisfy_resolver_observation.rs:21:1
+   |
+21 | struct FakeHostHandle {
+   | ^^^^^^^^^^^^^^^^^^^^^
+   = note: `FakeHostHandle` implements similarly named trait `unicode_width::private::Sealed`, but not `observation::sealed::Sealed`
+help: the trait `observation::sealed::Sealed` is implemented for `ResolverAttemptView`
+  --> src/resolver_core/resolver_attempt_view.rs
+   |
+   | impl Sealed for ResolverAttemptView {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `ResolverObservation`
+  --> src/resolver_core/observation.rs
+   |
+   | pub trait ResolverObservation: sealed::Sealed {
+   |                                ^^^^^^^^^^^^^^ required by this bound in `ResolverObservation`
+   = note: `ResolverObservation` is a "sealed trait", because to implement it you also need to implement `verter_semantic::resolver_core::observation::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following type implements the trait:
+             verter_semantic::resolver_core::ResolverAttemptView

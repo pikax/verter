@@ -397,11 +397,11 @@ pub struct ProjectConfig {
     /// Canonical tsconfig path when this project is backed by a discovered config.
     pub tsconfig_path: Option<String>,
     /// Resolved tsconfig file membership for owner selection.
-    pub membership: crate::project_resolver::ProjectMembership,
+    pub membership: verter_workspace::ProjectMembership,
     /// Existing IDE alias sources (currently Vite aliases) injected ahead of tsconfig paths.
-    pub workspace_aliases: Vec<crate::project_resolver::WorkspaceAlias>,
+    pub workspace_aliases: Vec<verter_semantic::resolver_core::WorkspaceAlias>,
     /// Preserved tsconfig compiler options for the native resolver.
-    pub compiler_options: crate::project_resolver::IdeProjectCompilerOptions,
+    pub compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions,
     /// Resolved project-reference edges for the native resolver.
     pub references: Vec<String>,
     /// Lint configuration for this project.
@@ -473,8 +473,8 @@ pub fn is_client_only_file(path: &str) -> bool {
 }
 
 impl ProjectConfig {
-    pub fn to_ide_project_config(&self) -> crate::project_resolver::IdeProjectConfig {
-        let mut project = crate::project_resolver::IdeProjectConfig::new(
+    pub fn to_ide_project_config(&self) -> verter_semantic::resolver_core::IdeProjectConfig {
+        let mut project = verter_workspace::ide_project_config(
             self.root.clone(),
             self.workspace_root.clone(),
             self.tsconfig_path.clone(),
@@ -525,7 +525,7 @@ impl ProjectRegistry {
         let mut trust_required = Vec::new();
 
         for root_uri in roots {
-            let canonical = verter_workspace::resolver::normalize_canonical_id(
+            let canonical = verter_semantic::resolver_core::normalize_canonical_id(
                 &crate::documents::uri_to_canonical_id_from_str(root_uri),
             );
             let root_path = PathBuf::from(&canonical);
@@ -593,7 +593,7 @@ impl ProjectRegistry {
                             fallback_workspace_aliases = aliases
                                 .iter()
                                 .map(|(find, replacement)| {
-                                    crate::project_resolver::WorkspaceAlias {
+                                    verter_semantic::resolver_core::WorkspaceAlias {
                                         find: find.clone(),
                                         replacement: replacement.clone(),
                                     }
@@ -631,7 +631,7 @@ impl ProjectRegistry {
                                             .aliases
                                             .iter()
                                             .map(|(find, replacement)| {
-                                                crate::project_resolver::WorkspaceAlias {
+                                                verter_semantic::resolver_core::WorkspaceAlias {
                                                     find: find.clone(),
                                                     replacement: replacement.clone(),
                                                 }
@@ -646,7 +646,7 @@ impl ProjectRegistry {
                                         fallback_workspace_aliases = lkg
                                             .iter()
                                             .map(|(find, replacement)| {
-                                                crate::project_resolver::WorkspaceAlias {
+                                                verter_semantic::resolver_core::WorkspaceAlias {
                                                     find: find.clone(),
                                                     replacement: replacement.clone(),
                                                 }
@@ -675,9 +675,10 @@ impl ProjectRegistry {
                 root: canonical,
                 workspace_root: crate::documents::uri_to_canonical_id_from_str(root_uri),
                 tsconfig_path: None,
-                membership: crate::project_resolver::ProjectMembership::MatchAll,
+                membership: verter_workspace::ProjectMembership::MatchAll,
                 workspace_aliases: fallback_workspace_aliases,
-                compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 lint_config: lint.clone(),
                 linter,
@@ -707,7 +708,7 @@ impl ProjectRegistry {
         let mut projects = Vec::new();
 
         for &root in roots {
-            let root = verter_workspace::resolver::normalize_canonical_id(root);
+            let root = verter_semantic::resolver_core::normalize_canonical_id(root);
             let root_path = PathBuf::from(&root);
 
             let discovered = verter_workspace::config::discover_tsconfigs(&root_path);
@@ -748,9 +749,10 @@ impl ProjectRegistry {
                 root: root.to_string(),
                 workspace_root: root.to_string(),
                 tsconfig_path: None,
-                membership: crate::project_resolver::ProjectMembership::MatchAll,
+                membership: verter_workspace::ProjectMembership::MatchAll,
                 workspace_aliases: Vec::new(),
-                compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 lint_config: lint.clone(),
                 linter,
@@ -769,7 +771,7 @@ impl ProjectRegistry {
     ///
     /// Falls back to `None` if no project root is a prefix of the file path.
     pub fn find_project(&self, file_path: &str) -> Option<&ProjectConfig> {
-        let normalized = verter_workspace::resolver::normalize_canonical_id(file_path);
+        let normalized = verter_semantic::resolver_core::normalize_canonical_id(file_path);
         self.projects
             .iter()
             .find(|project| project_matches_file(project, &normalized))
@@ -829,8 +831,8 @@ impl ProjectRegistry {
         &self.projects
     }
 
-    pub fn to_native_project_resolver(&self) -> crate::project_resolver::NativeProjectResolver {
-        crate::project_resolver::NativeProjectResolver::new(
+    pub fn to_native_project_resolver(&self) -> verter_semantic::resolver_core::ModuleResolverCore {
+        verter_semantic::resolver_core::ModuleResolverCore::new(
             self.projects
                 .iter()
                 .map(ProjectConfig::to_ide_project_config)
@@ -882,8 +884,8 @@ fn project_matches_file(project: &ProjectConfig, file_path: &str) -> bool {
     }
 
     match &project.membership {
-        crate::project_resolver::ProjectMembership::MatchAll => true,
-        crate::project_resolver::ProjectMembership::IncludeExclude {
+        verter_workspace::ProjectMembership::MatchAll => true,
+        verter_workspace::ProjectMembership::IncludeExclude {
             files,
             include,
             exclude,
@@ -1525,9 +1527,10 @@ export default defineConfig(({ mode }) => ({
                 root: "/workspace/app".to_string(),
                 workspace_root: "/workspace".to_string(),
                 tsconfig_path: None,
-                membership: crate::project_resolver::ProjectMembership::MatchAll,
+                membership: verter_workspace::ProjectMembership::MatchAll,
                 workspace_aliases: Vec::new(),
-                compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
 
                 lint_config: ResolvedLintConfig::default(),
@@ -1559,9 +1562,10 @@ export default defineConfig(({ mode }) => ({
                     root: "/workspace/explicit/".to_string(),
                     workspace_root: "/workspace".to_string(),
                     tsconfig_path: None,
-                    membership: crate::project_resolver::ProjectMembership::MatchAll,
+                    membership: verter_workspace::ProjectMembership::MatchAll,
                     workspace_aliases: Vec::new(),
-                    compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                    compiler_options:
+                        verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                     references: Vec::new(),
 
                     lint_config: ResolvedLintConfig {
@@ -1581,9 +1585,10 @@ export default defineConfig(({ mode }) => ({
                     root: "/workspace/default/".to_string(),
                     workspace_root: "/workspace".to_string(),
                     tsconfig_path: None,
-                    membership: crate::project_resolver::ProjectMembership::MatchAll,
+                    membership: verter_workspace::ProjectMembership::MatchAll,
                     workspace_aliases: Vec::new(),
-                    compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                    compiler_options:
+                        verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                     references: Vec::new(),
 
                     lint_config: ResolvedLintConfig::default(),
@@ -1673,7 +1678,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = verter_workspace::resolver::normalize_canonical_id(
+        let root = verter_semantic::resolver_core::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
         let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
@@ -1715,7 +1720,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = verter_workspace::resolver::normalize_canonical_id(
+        let root = verter_semantic::resolver_core::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
         let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
@@ -1765,7 +1770,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = verter_workspace::resolver::normalize_canonical_id(
+        let root = verter_semantic::resolver_core::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
         let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
@@ -1890,9 +1895,10 @@ export default defineConfig(({ mode }) => ({
                 root: "/workspace/app".to_string(),
                 workspace_root: "/workspace".to_string(),
                 tsconfig_path: None,
-                membership: crate::project_resolver::ProjectMembership::MatchAll,
+                membership: verter_workspace::ProjectMembership::MatchAll,
                 workspace_aliases: Vec::new(),
-                compiler_options: crate::project_resolver::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
 
                 lint_config: ResolvedLintConfig::default(),

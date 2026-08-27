@@ -32,7 +32,7 @@
 //! - **`NativeFs`** (`native_fs.rs`) is the sole disk boundary. All `std::fs`
 //!   calls are concentrated here.
 //! - **`WorkspaceAccess`** is the single workspace trait. There is no separate
-//!   `ProjectResolverReader` or `ConfigFileReader`.
+//!   partial resolver or config-file reader capability.
 //! - **Context-aware resolution**: every `resolve_import` call carries a
 //!   [`ResolutionContext`] `{ phase, kind }` that determines which package.json
 //!   export conditions and legacy fields are used.
@@ -49,7 +49,7 @@
 //! ## Resolution priority
 //!
 //! 1. Exact resolutions (authoritative, injected by bundler/LSP)
-//! 2. Project resolver (tsconfig paths, workspace aliases, node_modules)
+//! 2. Semantic module resolver (tsconfig paths, workspace aliases, node_modules)
 //! 3. `None` — no heuristic fallback
 //!
 //! ## File read priority (FilesystemWorkspace)
@@ -81,7 +81,6 @@ pub mod error;
 pub mod exact_resolution;
 pub mod fact_cache;
 pub mod fact_read_set;
-pub mod fact_registry;
 pub mod filesystem;
 pub mod intrinsic_library;
 pub mod membership;
@@ -89,17 +88,24 @@ pub mod memory;
 pub mod module_resolution;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_fs;
-pub mod normalized_glob;
 pub mod overlay;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "package_classification_tests.rs"]
 mod package_classification_tests;
 pub mod package_index;
+#[cfg(test)]
+mod preferred_specifier_round_trip_tests;
 pub(crate) mod project_graph;
 pub mod project_key;
 pub mod published_state;
 pub mod relative_path;
+#[cfg(test)]
+mod resolution_conversion_registration_tests;
+#[cfg(test)]
+mod resolution_conversion_tests;
 pub mod resolution_currency;
+#[cfg(test)]
+mod resolution_driver_tests;
 pub mod resolver;
 pub mod snapshot_builder;
 pub mod traits;
@@ -131,8 +137,7 @@ pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
 pub use ambient_lib::{
     ambient_virtual_canonical_id, compute_ambient_hash16,
     normalize_canonical_id as normalize_ambient_canonical_id, parse_ambient_virtual_canonical_id,
-    AmbientLibEntry, AmbientLibError, AmbientLibSpec, AmbientLibsByProject, AmbientSymbolHit,
-    ProjectAmbientLibs,
+    AmbientLibEntry, AmbientLibError, AmbientLibSpec, AmbientLibsByProject, ProjectAmbientLibs,
 };
 pub use canonical_path::{canonicalize_path, CanonicalPath};
 #[cfg(not(target_arch = "wasm32"))]
@@ -166,26 +171,22 @@ pub use filesystem::{FilesystemOptions, FilesystemWorkspace};
 pub use intrinsic_library::NativeIntrinsicLibrary;
 pub use intrinsic_library::{InMemoryIntrinsicLibrary, IntrinsicLibraryAccess};
 pub use membership::{
-    typescript_default_excludes, ConfiguredMembership, FallbackMembership, StaticMembershipSpec,
+    configured_membership_match_all_under_root, static_membership_from_includes,
+    static_membership_with_supported_extension_defaults,
+    static_membership_with_typescript_defaults, FallbackMembership, ProjectMembership,
+    SupportedExtensions,
 };
 pub use memory::{MemoryOptions, MemorySnapshot, MemoryWorkspace};
-pub use normalized_glob::{CompiledGlob, NormalizedGlob};
 pub use overlay::OverlayStore;
 pub use package_index::PackageIndex;
-pub use project_key::ProjectStableKey;
+pub use project_key::project_stable_key_from_project;
 pub use published_state::{ProjectEnvHashArray, PublishedRoot};
 pub use resolution_currency::{
-    AdmittedResolution, CapturedResolutionWorld, ContentRevision, PathProbe, ResolutionEpoch,
+    AdmittedResolution, CapturedResolutionWorld, ContentRevision, ResolutionEpoch,
     ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionOverlaySnapshot,
-    ResolutionPopulation, ResolutionPublication, ResolutionPublicationRefusal, ResolutionQueryKey,
-    ResolutionWorldId, ResolveContextId,
+    ResolutionPublication, ResolutionPublicationRefusal, ResolutionQueryKey, ResolveContextId,
 };
-pub use resolver::{
-    carrier_api_provider_path, carrier_ide_provider_path, carrier_source_extensions,
-    path_is_carrier, strip_carrier_extension, IdeProjectCompilerOptions, IdeProjectConfig,
-    NativeProjectResolver, ProjectMembership, ProjectResolver, WorkspaceAlias,
-    CARRIER_API_MODULE_SPECIFIER_SUFFIX, CARRIER_API_VIRTUAL_SUFFIX,
-};
+pub use resolver::ide_project_config;
 pub use snapshot_builder::build_workspace_snapshot_simple;
 #[cfg(not(target_arch = "wasm32"))]
 pub use snapshot_builder::{
@@ -197,10 +198,9 @@ pub use traits::{
     WorkspaceResourceSnapshot,
 };
 pub use types::{
-    ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, ProjectOwnership,
-    ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequest,
-    ResolveRequestKind, ResolveResult, VfsProvenanceSnapshot,
+    ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, VfsProvenanceSnapshot,
 };
+pub use verter_semantic::resolver_core::InputResolutionBudgets;
 #[cfg(not(target_arch = "wasm32"))]
 pub use virtual_config::{compute_virtual_config_identity, VirtualConfigIdentity};
 #[cfg(not(target_arch = "wasm32"))]

@@ -1,10 +1,13 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
-use crate::membership::{ConfiguredMembership, FallbackMembership, StaticMembershipSpec};
-use crate::normalized_glob::{CompiledGlob, NormalizedGlob};
-use crate::resolver::{IdeProjectCompilerOptions, ProjectMembership};
+use crate::membership::FallbackMembership;
 use crate::workspace_snapshot::{
     ConfiguredOwnerResolution, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+};
+use crate::ProjectMembership;
+use verter_semantic::resolver_core::{
+    CompiledGlob, ConfiguredMembership, IdeProjectCompilerOptions, NormalizedGlob,
+    StaticMembershipSpec,
 };
 
 // ── Helpers ──
@@ -78,7 +81,7 @@ fn spec_with_include_exclude(include: &[&str], exclude: &[&str]) -> StaticMember
 }
 
 fn default_spec(root: &str) -> StaticMembershipSpec {
-    StaticMembershipSpec::with_typescript_defaults(&CanonicalPath::new(root))
+    crate::membership::static_membership_with_typescript_defaults(&CanonicalPath::new(root))
 }
 
 /// The supported-extension set the production builder uses (carrier extensions
@@ -200,7 +203,8 @@ fn parse_both_paths(root: &str, tsconfig_body: &str) -> (StaticMembershipSpec, I
     let raw = crate::config::load_project_membership(&ws, &tsconfig);
     let spec = membership_to_spec(&root_cp, &raw, &test_supported());
 
-    let mut ide = IdeProjectConfig::new(root.to_string(), root.to_string(), Some(tsconfig));
+    let mut ide =
+        crate::resolver::ide_project_config(root.to_string(), root.to_string(), Some(tsconfig));
     ide.membership = ConfiguredMembership {
         spec: spec.clone(),
         materialized_files: rustc_hash::FxHashSet::default(),
@@ -231,7 +235,8 @@ fn parse_both_paths_with_base(
     let raw = crate::config::load_project_membership(&ws, &tsconfig);
     let spec = membership_to_spec(&root_cp, &raw, &test_supported());
 
-    let mut ide = IdeProjectConfig::new(root.to_string(), root.to_string(), Some(tsconfig));
+    let mut ide =
+        crate::resolver::ide_project_config(root.to_string(), root.to_string(), Some(tsconfig));
     ide.membership = ConfiguredMembership {
         spec: spec.clone(),
         materialized_files: rustc_hash::FxHashSet::default(),
@@ -686,7 +691,7 @@ fn materialize_walks_filesystem_and_finds_matching_files() {
 
     let project_str = project.to_string_lossy().replace('\\', "/");
     let root = CanonicalPath::new(&project_str);
-    let spec = StaticMembershipSpec::with_typescript_defaults(&root);
+    let spec = crate::membership::static_membership_with_typescript_defaults(&root);
 
     let ws = crate::filesystem::FilesystemWorkspace::new(
         crate::filesystem::FilesystemOptions::default(),
@@ -723,7 +728,7 @@ fn materialize_excludes_node_modules_via_default_excludes() {
 
     let project_str = project.to_string_lossy().replace('\\', "/");
     let root = CanonicalPath::new(&project_str);
-    let spec = StaticMembershipSpec::with_typescript_defaults(&root);
+    let spec = crate::membership::static_membership_with_typescript_defaults(&root);
 
     let ws = crate::filesystem::FilesystemWorkspace::new(
         crate::filesystem::FilesystemOptions::default(),
@@ -1075,7 +1080,9 @@ fn bridge_configured_project_from_vfs_config() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec!["d:/project/tsconfig.app.json".to_string()],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new("d:/project"),
+        ),
     };
 
     let project = ownership_project_from_vfs_config(&config, ProjectId(0));
@@ -1109,7 +1116,9 @@ fn bridge_fallback_project_from_vfs_config() {
         workspace_aliases: vec![],
         compiler_options: IdeProjectCompilerOptions::default(),
         references: vec![],
-        membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new("d:/project")),
+        membership: crate::membership::configured_membership_match_all_under_root(
+            &CanonicalPath::new("d:/project"),
+        ),
     };
 
     let project = ownership_project_from_vfs_config(&config, ProjectId(0));

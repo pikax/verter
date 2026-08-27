@@ -1,29 +1,5 @@
-//! Regression: the shared-host / SESSION component-meta entry must
-//! provide a real request-bound `ResolverContext` (with a working
-//! `store_view`) all the way down to the macro-DTO surface read.
-//!
-//! ## The bug this characterizes
-//!
-//! `extract_component_meta_from_resolved{,_with_facts}` receive a real
-//! `ctx: &dyn ResolverContext` but used to pass the **bare `&VerterHost`**
-//! (not `ctx`) into `component_meta_resolved_macros`, whose body calls
-//! `vue_macro_dtos_with_ctx(ctx, …)` → `ctx.store_view()`. On the bare
-//! `impl ResolverContext for VerterHost` rail, `store_view()` panics in a
-//! production (`debug_assertions` OFF) build:
-//!
-//! ```text
-//! internal compiler error: ResolverContext::store_view() called on bare
-//! &VerterHost — construct HostResolverContext::new(host, &view, overlay)
-//! at the request entry
-//! ```
-//!
-//! That is exactly the panic the `repo_first_pass` meta-ui benchmark hit
-//! on every nuxt-ui component (the bench is a `--release`, i.e.
-//! `debug_assertions` OFF, native build). The host-direct
-//! `VerterHost::get_component_meta` corpus test did NOT catch it because
-//! it threads its own ctx end-to-end; the session payload entry
-//! (`MetaSession::get_component_meta_payload` — the napi `getComponentMeta`
-//! path the bench drives) reached the bare-host call.
+//! The shared-host session component-meta entries carry one request-bound
+//! `ResolverContext` all the way through macro-DTO surface reads.
 //!
 //! ## Why the loop body must fire (and what triggers it)
 //!
@@ -38,23 +14,9 @@
 //!
 //! ## Discrimination
 //!
-//! This is an INTEGRATION test (`tests/*.rs`): the lib is compiled with
-//! `cfg(test)` OFF. The bare-host `store_view()` fallback is gated
-//! `#[cfg(any(test, debug_assertions))]` (leak) vs
-//! `#[cfg(not(any(test, debug_assertions)))]` (panic). So:
-//!
-//! - `cargo test -p verter_session --tests` (DEBUG → `debug_assertions`
-//!   ON): the leak arm returns a valid base view, so the buggy and fixed
-//!   trees BOTH resolve the (correct) cross-file surface and this test
-//!   passes. It still locks the resolved surface content against future
-//!   regressions of the cross-file resolution itself.
-//! - `cargo test --release -p verter_session
-//!   --test main session_meta_store_view_regression` (RELEASE →
-//!   `debug_assertions` OFF, `cfg(test)` OFF): the panic arm is active.
-//!   On the PRE-FIX tree the bare host reaches `store_view()` and this
-//!   test PANICS. On the POST-FIX tree the real ctx is threaded and it
-//!   passes. That release run is the discriminating reproduction of the
-//!   bench panic — run it both ways to prove the discrimination.
+//! This integration target compiles the library with `cfg(test)` off, so it
+//! exercises the production request-bound construction path while locking the
+//! resolved cross-file surface content.
 
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{AnalysisLevel, HostConfig};
@@ -99,10 +61,7 @@ fn make_host() -> ComponentMetaHost {
     host
 }
 
-/// The exact bench entry: napi `getComponentMeta` →
-/// `MetaSession::get_component_meta_payload`. PRE-FIX this panics on the
-/// bare-host `store_view()` in a release build; POST-FIX it threads the
-/// real ctx and returns the encoded payload.
+/// NAPI-equivalent payload entry: `MetaSession::get_component_meta_payload`.
 #[test]
 fn session_payload_cross_file_macros_resolve_via_real_ctx() {
     let host = make_host();
@@ -123,15 +82,14 @@ fn session_payload_cross_file_macros_resolve_via_real_ctx() {
 
     let payload = session
         .get_component_meta_payload("/Comp.vue", encode)
-        .expect("payload call succeeds (no bare-host store_view panic)")
+        .expect("payload call succeeds through the request-bound context")
         .expect("owner resolves to a component payload");
     let text = String::from_utf8(payload).expect("payload is the marker string");
 
     // Discriminating content: the cross-file `ButtonProps` (label, size)
     // plus `defineModel`'s `modelValue` => 3 props; `ButtonEmits` (click)
     // plus model's `update:modelValue` => 2 events; `ButtonSlots`
-    // (default, row) => 2 slots. A bare-host read in a leak (debug) build
-    // resolves the SAME surface, so this also locks the resolution.
+    // (default, row) => 2 slots.
     assert_eq!(
         text, "props=3 events=2 slots=2",
         "session payload path must resolve the cross-file macro surface; got `{text}`"
@@ -140,8 +98,7 @@ fn session_payload_cross_file_macros_resolve_via_real_ctx() {
 
 /// The structured session entry (`MetaSession::get_component_meta`) shares
 /// the same `extract_component_meta_from_resolved_with_facts` ->
-/// `component_meta_resolved_macros` path, so it has the same bare-host
-/// exposure. Assert the concrete member NAMES so the surface is locked,
+/// `component_meta_resolved_macros` path. Assert the concrete member NAMES so the surface is locked,
 /// not just the counts.
 #[test]
 fn session_structured_cross_file_macros_resolve_via_real_ctx() {
@@ -150,7 +107,7 @@ fn session_structured_cross_file_macros_resolve_via_real_ctx() {
 
     let meta = session
         .get_component_meta("/Comp.vue")
-        .expect("query succeeds (no bare-host store_view panic)")
+        .expect("query succeeds through the request-bound context")
         .expect("owner resolves to a component");
 
     let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
@@ -200,7 +157,7 @@ fn session_child_cross_file_props_resolve_via_real_ctx() {
 
     let meta = session
         .get_component_meta("/Child.vue")
-        .expect("query succeeds (no bare-host store_view panic)")
+        .expect("query succeeds through the request-bound context")
         .expect("child resolves to a component");
 
     let prop_names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();

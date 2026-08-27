@@ -32,7 +32,7 @@ use crate::fact_cache::{
     DomainGenerationFact, FactVersionRef, ParseEnvHash, ParseFactRef, ResolveImportsFactRef,
     RouteSurfaceFactRef, SessionOverlayFingerprint, ViewPopulation,
 };
-use crate::fact_registry::{
+use verter_semantic::facts::registry::{
     AugmentationTargetKindTag, FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
 };
 
@@ -47,9 +47,11 @@ fn test_parse_key(marker: u8) -> verter_language::ParseKey {
 }
 use crate::resolution_currency::{
     CanonicalResolutionId, RawSpecifier, ResolutionEntry, ResolutionFactKey, ResolutionFactRef,
-    ResolutionFactVersion, ResolutionPopulation, SessionFingerprint,
+    ResolutionFactVersion,
 };
-use crate::types::{ResolvePhase, ResolveRequestKind};
+use verter_semantic::resolver_core::{
+    ResolutionPopulation, ResolvePhase, ResolveRequestKind, SessionFingerprint,
+};
 
 // ────────────────────────────────────────────────────────────────────
 // Corpus
@@ -169,7 +171,7 @@ fn diverse_corpus() -> Vec<FactVersionRef> {
         resolution_fact(
             ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new("/p/dep.ts".to_string()),
-                population: ResolutionPopulation::Session(SessionFingerprint::fresh(0x51)),
+                population: ResolutionPopulation::Session(SessionFingerprint::from_raw(0x51)),
             },
             7,
         ),
@@ -1194,7 +1196,7 @@ fn a_resolution_bucket_partitions_by_its_own_population_not_the_view() {
 /// base-population aggregate that never observed them.
 #[test]
 fn two_populations_in_one_domain_lift_independently() {
-    let session = ResolutionPopulation::Session(SessionFingerprint::fresh(0x5E55));
+    let session = ResolutionPopulation::Session(SessionFingerprint::from_raw(0x5E55));
     let basis = AggregateGenerations {
         resolution: Some(AggregateStamp::Generation(5)),
         ..Default::default()

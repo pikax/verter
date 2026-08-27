@@ -1,15 +1,52 @@
 use super::*;
 
-/// Build a real-disk workspace for tests that write fixture files via
-/// `std::fs::write`.
-fn fs_workspace() -> verter_workspace::FilesystemWorkspace {
-    verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default())
-}
-
 /// Convert a [`std::path::Path`] to the canonical forward-slash string the
 /// workspace API expects.
 fn canonical_str(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// Test-only: recursively walks `dir` on real disk and captures the entire
+/// subtree into `inputs` (`routes.rs` production code consumes only
+/// the immutable snapshot). A real LSP/MCP caller
+/// builds a narrower, framework-detection-driven snapshot; an eager
+/// whole-subtree walk is simpler and sufficient here, since every test
+/// exercises one small fixture directory at a time.
+fn walk_into_inputs(dir: &str, inputs: &mut RouteAnalysisInputs) {
+    let dir_path = std::path::Path::new(dir);
+    if !dir_path.is_dir() {
+        return;
+    }
+    let Ok(read_dir) = std::fs::read_dir(dir_path) else {
+        return;
+    };
+    let mut entries = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = canonical_str(&entry.path());
+        entries.push(RouteDirEntry {
+            path,
+            is_dir: entry.file_type().is_ok_and(|kind| kind.is_dir()),
+        });
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let projected = entries.clone();
+    inputs.insert_directory(dir.to_string(), projected);
+    for entry in &entries {
+        if entry.is_dir {
+            walk_into_inputs(&entry.path, inputs);
+        } else if let Ok(content) = std::fs::read_to_string(&entry.path) {
+            inputs.insert_file(entry.path.clone(), content);
+        }
+    }
+}
+
+/// Builds a `RouteAnalysisInputs` snapshot of `dir` (and everything under
+/// it) from real disk — the test-only replacement for passing a live
+/// a live filesystem handle directly to a `routes.rs` function.
+fn inputs_for_dir(dir: &str) -> RouteAnalysisInputs {
+    let mut inputs = RouteAnalysisInputs::new();
+    walk_into_inputs(dir, &mut inputs);
+    inputs
 }
 
 use verter_test_support::unique_temp_dir;
@@ -312,7 +349,10 @@ fn test_file_based_routes_with_temp_dir() {
     std::fs::write(pages.join("index.vue"), "<template>Home</template>").unwrap();
     std::fs::write(pages.join("about.vue"), "<template>About</template>").unwrap();
 
-    let routes = extract_file_based_routes(&fs_workspace(), &canonical_str(&pages));
+    let routes = extract_file_based_routes(
+        &inputs_for_dir(&canonical_str(&pages)),
+        &canonical_str(&pages),
+    );
 
     assert_eq!(routes.len(), 2);
 
@@ -337,7 +377,10 @@ fn test_file_based_dynamic_params() {
 
     std::fs::write(users.join("[id].vue"), "<template>User</template>").unwrap();
 
-    let routes = extract_file_based_routes(&fs_workspace(), &canonical_str(&pages));
+    let routes = extract_file_based_routes(
+        &inputs_for_dir(&canonical_str(&pages)),
+        &canonical_str(&pages),
+    );
 
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].full_path, "/users/:id");
@@ -352,7 +395,10 @@ fn test_file_based_catch_all() {
 
     std::fs::write(pages.join("[...slug].vue"), "<template>404</template>").unwrap();
 
-    let routes = extract_file_based_routes(&fs_workspace(), &canonical_str(&pages));
+    let routes = extract_file_based_routes(
+        &inputs_for_dir(&canonical_str(&pages)),
+        &canonical_str(&pages),
+    );
 
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].full_path, "/:slug(.*)*");
@@ -360,7 +406,8 @@ fn test_file_based_catch_all() {
 
 #[test]
 fn test_file_based_nonexistent_dir() {
-    let routes = extract_file_based_routes(&fs_workspace(), "/nonexistent/pages");
+    let routes =
+        extract_file_based_routes(&inputs_for_dir("/nonexistent/pages"), "/nonexistent/pages");
     assert!(routes.is_empty());
 }
 
@@ -375,7 +422,10 @@ fn test_file_based_ignores_non_vue() {
     std::fs::write(pages.join("utils.ts"), "export const x = 1").unwrap();
     std::fs::write(pages.join("README.md"), "# Pages").unwrap();
 
-    let routes = extract_file_based_routes(&fs_workspace(), &canonical_str(&pages));
+    let routes = extract_file_based_routes(
+        &inputs_for_dir(&canonical_str(&pages)),
+        &canonical_str(&pages),
+    );
 
     assert_eq!(routes.len(), 1, "should only include .vue files");
     assert_eq!(routes[0].full_path, "/");
@@ -1038,4 +1088,82 @@ fn test_health_guard_coverage_no_guards() {
     assert_eq!(gc.total_routes, 1);
     assert_eq!(gc.routes_with_guards, 0);
     assert!(!gc.has_global_guard);
+}
+
+// =============================================================================
+// RouteAnalysisInputs tests
+// =============================================================================
+
+#[test]
+fn inputs_read_file_returns_none_when_never_inserted() {
+    let inputs = RouteAnalysisInputs::new();
+    assert_eq!(inputs.read_file("/p/package.json"), None);
+}
+
+#[test]
+fn inputs_read_file_returns_the_inserted_content() {
+    let mut inputs = RouteAnalysisInputs::new();
+    inputs.insert_file("/p/package.json", "{}");
+    assert_eq!(inputs.read_file("/p/package.json").as_deref(), Some("{}"));
+    // Discriminates: an accessor that ignored the path key (e.g. always
+    // returning the last-inserted file) would still pass the assertion
+    // above but fail this one.
+    assert_eq!(inputs.read_file("/p/other.json"), None);
+}
+
+#[test]
+fn inputs_insert_file_also_marks_the_path_as_existing() {
+    let mut inputs = RouteAnalysisInputs::new();
+    inputs.insert_file("/p/router.ts", "export const routes = []");
+    // Discriminates: a builder that only populated `files` (not
+    // `existing_files`) would make `discover_router_configs`-style
+    // existence probes wrongly report absence for a file whose content IS
+    // recorded.
+    assert!(inputs.file_exists("/p/router.ts"));
+}
+
+#[test]
+fn inputs_file_exists_is_false_without_an_explicit_insert() {
+    let inputs = RouteAnalysisInputs::new();
+    assert!(!inputs.file_exists("/p/router.ts"));
+}
+
+#[test]
+fn inputs_insert_existing_file_records_existence_without_content() {
+    let mut inputs = RouteAnalysisInputs::new();
+    inputs.insert_existing_file("/p/router.ts");
+    assert!(inputs.file_exists("/p/router.ts"));
+    // Discriminates: a builder that fabricated empty content on existence
+    // alone would return `Some("")` here instead of the honest `None` —
+    // "exists, content not captured" must stay distinct from "exists,
+    // empty content".
+    assert_eq!(inputs.read_file("/p/router.ts"), None);
+}
+
+#[test]
+fn inputs_insert_directory_backs_both_is_dir_and_read_dir() {
+    let mut inputs = RouteAnalysisInputs::new();
+    let entries = vec![RouteDirEntry {
+        path: "/p/pages/index.vue".to_string(),
+        is_dir: false,
+    }];
+    inputs.insert_directory("/p/pages", entries.clone());
+
+    assert!(inputs.is_dir("/p/pages"));
+    assert_eq!(inputs.read_dir("/p/pages"), Some(entries.as_slice()));
+    // Discriminates: a directory never inserted must answer both
+    // `is_dir == false` and `read_dir == None`, matching the original
+    // `WorkspaceRead`-backed code's fold of a missing directory into
+    // "does not exist" (never a fabricated empty listing).
+    assert!(!inputs.is_dir("/p/layouts"));
+    assert_eq!(inputs.read_dir("/p/layouts"), None);
+}
+
+#[test]
+fn inputs_default_is_empty() {
+    let inputs = RouteAnalysisInputs::default();
+    assert_eq!(inputs.read_file("/anything"), None);
+    assert!(!inputs.file_exists("/anything"));
+    assert!(!inputs.is_dir("/anything"));
+    assert_eq!(inputs.read_dir("/anything"), None);
 }

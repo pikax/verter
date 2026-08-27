@@ -136,7 +136,7 @@ async fn frontier_fixture_with(
     let workspace_id = crate::test_utils::canonical_test_path(&workspace);
     let server = service.inner();
     server.documents.set_semantic_analysis_enabled(true);
-    host.configure_projects(vec![crate::project_resolver::IdeProjectConfig::new(
+    host.configure_projects(vec![verter_workspace::ide_project_config(
         workspace_id.clone(),
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.json")),
@@ -192,13 +192,16 @@ fn install_materialized_workspace_with_paths(
     ));
     let root_cp = verter_workspace::CanonicalPath::new(root);
     let tsconfig = format!("{root}/tsconfig.json");
-    let spec = verter_workspace::StaticMembershipSpec {
+    let spec = verter_semantic::resolver_core::StaticMembershipSpec {
         files: Vec::new(),
-        include: vec![verter_workspace::CompiledGlob::new(
-            verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
+        include: vec![verter_semantic::resolver_core::CompiledGlob::new(
+            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
         )],
-        exclude: vec![verter_workspace::CompiledGlob::new(
-            verter_workspace::NormalizedGlob::from_root_and_pattern(&root_cp, "node_modules/**"),
+        exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+                &root_cp,
+                "node_modules/**",
+            ),
         )]
         .into(),
     };
@@ -216,11 +219,12 @@ fn install_materialized_workspace_with_paths(
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(&tsconfig),
-                membership: verter_workspace::ConfiguredMembership {
+                membership: verter_semantic::resolver_core::ConfiguredMembership {
                     spec,
                     materialized_files,
                 },
-                compiler_options: verter_workspace::IdeProjectCompilerOptions::default(),
+                compiler_options:
+                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 workspace_aliases: Vec::new(),
             },
@@ -232,30 +236,33 @@ fn install_materialized_workspace_with_paths(
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
                 membership: verter_workspace::FallbackMembership {
                     root: root_cp.clone(),
-                    exclude: vec![verter_workspace::CompiledGlob::new(
-                        verter_workspace::NormalizedGlob::new(&format!("{root}/node_modules/**")),
+                    exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                        verter_semantic::resolver_core::NormalizedGlob::new(&format!(
+                            "{root}/node_modules/**"
+                        )),
                     )]
                     .into(),
                 },
             },
         },
     ];
-    let mut project_config = crate::project_resolver::IdeProjectConfig::new(
+    let mut project_config = verter_workspace::ide_project_config(
         root.to_string(),
         root.to_string(),
         Some(tsconfig.clone()),
     );
     if !paths.is_empty() {
-        project_config.compiler_options = crate::project_resolver::IdeProjectCompilerOptions {
-            base_url: Some(root.to_string()),
-            paths: paths
-                .iter()
-                .map(|(find, target)| (find.to_string(), vec![target.to_string()]))
-                .collect(),
-            ..Default::default()
-        };
+        project_config.compiler_options =
+            verter_semantic::resolver_core::IdeProjectCompilerOptions {
+                base_url: Some(root.to_string()),
+                paths: paths
+                    .iter()
+                    .map(|(find, target)| (find.to_string(), vec![target.to_string()]))
+                    .collect(),
+                ..Default::default()
+            };
     }
-    let resolver = verter_workspace::ProjectResolver::new(vec![project_config]);
+    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![project_config]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,

@@ -145,26 +145,42 @@ None=0  All=1048575
 ### The function
 
 ```
-mask(class, relation, region, owner_policy, capability_pin)
-    = CLASS_BASELINE[class]
+mask(class_domain_member, relation, region, owner_policy, capability_pin)
+    = CLASS_BASELINE[class_domain_member]
     & RELATION[relation]
     & REGION[region]
     & OWNER_WIRE_ELIGIBLE
     & CAPABILITY[capability_pin]
 ```
 
+**The composition is AND-only, so no factor can ever widen another** — every factor can only clear bits
+that an earlier one set. That property is what makes the AND well-defined rather than an ordering
+question, and it is also a constraint on how the factors must be written: **a rule that WIDENS a class's
+baseline cannot be expressed as a factor at all, because `0 & anything` is `0`.** The one such rule in
+this contract — the `DocumentedAmbientSymbol` widening of a synthesized helper — is therefore not a
+factor. It is a refinement of the CLASS DOMAIN, decided before the function is evaluated, so that
+`CLASS_BASELINE` maps each domain member to its own unconditional constant. See factor 1.
+
 Each factor is defined below over its whole domain. `supportsFeature` upstream is
 `(segment.features & feature) !== 0` (`dist/ast/spanMap.js:354-356`), so an AND of masks is exactly the
 composition upstream evaluates — the five factors are independently restrictive, which is what makes the
 AND well-defined rather than an ordering question.
 
-#### Factor 1 — `CLASS_BASELINE`, five classes, unconditional constants
+#### Factor 1 — `CLASS_BASELINE`, six class-domain members, unconditional constants
+
+**The class domain has six members, not five.** The five PROJECTION CLASSES are the class set the
+steering ratifies and this contract does not change. The MASK FUNCTION'S class domain is those five with
+`SynthesizedHelper` refined by one closed, decidable predicate — membership of the
+`DocumentedAmbientSymbol` registry below — into two distinct domain members. The refinement is decided on
+the span before the function is evaluated (exact symbol identity, a total predicate over a closed set),
+which is what lets each domain member carry an unconditional baseline and keeps the composition pure AND.
 
 | Class | Baseline | Value | Note |
 |---|---|---|---|
 | `AuthoredVerbatim` | `All` | 1048575 | unchanged |
 | `AuthoredTransformed` | `All` | 1048575 | **changed from prose.** Its two conditional exclusions were both conditions on the transform's reversibility, which is exactly what `relation` encodes — they are relocated to factor 2, leaving this baseline unconditional. |
-| `SynthesizedHelper` | `None` | 0 | **changed from prose.** The original "`Hover \| Definition` only when the helper is a stable documented ambient symbol; `None` otherwise" is resolved fail-closed: the baseline is `None`, and a helper span is widened to `Hover \| Definition` (9) only if its symbol is a member of the closed `DocumentedAmbientSymbol` registry defined below. |
+| `SynthesizedHelper` (registry NON-MEMBER) | `None` | 0 | **changed from prose.** The original "`Hover \| Definition` only when the helper is a stable documented ambient symbol; `None` otherwise" is resolved fail-closed by splitting the class domain: a helper span whose symbol is not a `DocumentedAmbientSymbol` registry member takes this member's baseline, unconditionally. |
+| `SynthesizedHelper` (registry MEMBER) | `Hover \| Definition` | 9 | the other half of the same split. A helper span whose symbol IS a registry member takes this baseline, unconditionally. **This is a separate domain member rather than a widening applied to the row above, because the function is AND-only and `0 & 9` is `0`** — a widening expressed as a factor could not produce this value at all. |
 | `ExternalUnit` | `All` | 1048575 | unchanged — a routing distinction, not a feature restriction |
 | `DefinitionAnchor` | `Definition` | 8 | unchanged |
 
@@ -173,8 +189,14 @@ are stable, documented, and worth explaining to a user. Membership is by exact s
 name pattern (consistent with this contract's own ban on deriving masks from string heuristics). Its
 initial member is `$props`. Adding a member is an amendment to this contract and a reviewable diff; a
 helper span whose symbol is not a member emits `SpanMapFeature.None`, which is a legal explicit value and
-not an omission. This keeps the factor total — every synthesized span gets 0 or 9, decided by set
-membership — while preserving the fail-closed direction the charter requires.
+not an omission.
+
+**Membership is a total predicate, which is what makes the split legitimate.** Every synthesized helper
+span carries a symbol identity, and that identity either is or is not in a finite enumerated set — so the
+predicate is decidable for every span, with no third outcome and no judgement at emission time. It selects
+which class-domain member the span occupies; it never modifies a mask. Every synthesized span therefore
+gets 0 or 9 by set membership, preserving the fail-closed direction the charter requires while leaving the
+mask function itself unconditional.
 
 #### Factor 2 — `RELATION`, three relations, derived from upstream's own fidelity rule
 
@@ -287,8 +309,9 @@ owner column assigns rename to `VerterWithTypeSemanticOracle` precisely because 
 template-side occurrences, so setting `SpanMapFeature.Rename` on a mapper segment would invite TypeScript
 to answer a rename Verter owns and produce a partial edit — the exact failure the Project-Bound
 External-TS Contract's rename fail-closed rule exists to prevent. Row #15's capability/mask cells are
-therefore superseded by this factor: **the correct wire value is `Rename` CLEARED**, and the ledger cell is
-a stale artifact of the pre-mask-contract draft. Row #15 is the only mask-bearing row with this conflict;
+therefore conflicts with this factor. **Within this mask contract the wire value is `Rename` CLEARED**;
+the ledger cell remains a stale pre-mask-contract artifact rather than being declared superseded without
+an instrument. Row #15 is the only mask-bearing row with this conflict;
 the other ten were checked. The
 `AuthoredTransformed` prose agonised over when to exclude `Rename`; the answer is always.
 
@@ -314,15 +337,15 @@ re-certification is what decides which. That is the whole purpose of this factor
 
 ### The resulting table, computed
 
-Fifteen cells, one per `class × relation`, after ANDing the empty-exception `REGION` and the full
-`CAPABILITY`:
+Eighteen cells — six class-domain members × three relations — after ANDing the empty-exception `REGION`
+and the full `CAPABILITY`:
 
-| Class | `ExactCopy` | `Atom` | `IdentityAlias` |
+| Class-domain member | `ExactCopy` | `Atom` | `IdentityAlias` |
 |---|---|---|---|
 | `AuthoredVerbatim` | **13535** | 12511 | 12511 |
 | `AuthoredTransformed` | 13535 | **12511** | **12511** |
-| `SynthesizedHelper` | 0 | 0 | 0 |
-| `SynthesizedHelper` ∈ registry | 9 | **9** | 9 |
+| `SynthesizedHelper` (registry NON-MEMBER) | 0 | **0** | 0 |
+| `SynthesizedHelper` (registry MEMBER) | 9 | **9** | 9 |
 | `ExternalUnit` | **13535** | 12511 | 12511 |
 | `DefinitionAnchor` | 8 | **8** | 8 |
 
@@ -339,7 +362,11 @@ Decoded:
 - **9** = `Hover|Definition`
 - **8** = `Definition`
 
-Recomputable in one line:
+**Recomputable — the whole table, not just its constants.** Paste this into `node` and it prints all
+eighteen cells. It is the table's falsification test: if any printed value differs from the cell above it,
+one of the two is wrong. (Checked by mutation as well as by agreement — changing the registry-member
+baseline to `0` makes exactly the three member cells diverge, so an agreeing run is evidence rather than a
+coincidence.)
 
 ```js
 const F={Hover:1,SignatureHelp:2,Completion:4,Definition:8,TypeDefinition:16,Implementation:32,
@@ -350,9 +377,29 @@ const EDIT=F.Rename|F.CodeActions|F.Formatting|F.LinkedEditing|F.AutoInsert;   /
 const READ=ALL&~EDIT;                                                          // 848639
 const OWNER=F.Hover|F.SignatureHelp|F.Completion|F.Definition|F.TypeDefinition
            |F.References|F.DocumentHighlights|F.CodeActions|F.InlayHints|F.SemanticTokens; // 13535
+const CLASS_BASELINE={AuthoredVerbatim:ALL, AuthoredTransformed:ALL,
+  "SynthesizedHelper(non-member)":0, "SynthesizedHelper(member)":F.Hover|F.Definition,
+  ExternalUnit:ALL, DefinitionAnchor:F.Definition};          // six class-domain members
+const RELATION={ExactCopy:ALL, Atom:READ, IdentityAlias:READ};
+const REGION=ALL, CAPABILITY=ALL;              // EXCEPTIONS is empty; the pinned candidate is full
+for (const c of Object.keys(CLASS_BASELINE))
+  for (const r of Object.keys(RELATION))
+    console.log(c.padEnd(32), r.padEnd(14), CLASS_BASELINE[c]&RELATION[r]&REGION&OWNER&CAPABILITY);
 ```
 
 ### What this does and does not close
+
+**Correction, 2026-08-25: the function did not compose, and the cell count did not match its own table.**
+Two defects, both mechanical, both now fixed above and recorded rather than quietly repaired. First, the
+`DocumentedAmbientSymbol` widening was written as a rule applied on top of a `SynthesizedHelper` baseline
+of `None` — and the composition is AND-only, so `0 & 9` is `0` and the documented registry value of `9`
+was **not producible by the stated function at all**. It is now a refinement of the class domain, decided
+before the function runs, so each domain member carries an unconditional baseline and the composition
+stays pure AND. Second, the computed table was introduced as "fifteen cells" while listing six rows across
+three relations — **eighteen**. The six class-domain members make eighteen the correct figure; every cell
+VALUE in the table was already right and none changed. The lesson is worth the paragraph: a function
+described as total is not total until someone evaluates it, and an AND-only composition cannot express a
+widening no matter how the prose reads.
 
 **What this section produced.** The policy is written as a total function: five factors, each total over
 its domain, composing by AND into an explicit value for every combination. TCM2's terminal-mask emission
@@ -364,11 +411,13 @@ evidence.
 
 **The "therefore CLOSED" verdict is WITHDRAWN.** `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
 Q1 returns this block's round-3 candidate as wrongly scoped, lands its work as a NON-ACCEPTANCE evidence
-package, and hands the incomplete contract remainder to a successor block **with fresh verification** — and
+package, and at the time handed the remainder to a successor block **with fresh verification** — and
 totality is exactly the kind of claim that must be independently checkable rather than self-certified: it
-is a statement about all fifteen `class × relation` cells and all twenty feature bits, provable only by
-someone re-deriving the table. `G-PROJECTION-MASK-TOTALITY` is therefore OPEN with the successor as owner
-(`OPEN-GAPS.md`; scope: `successor-block-scope.md`).
+is a statement about all eighteen `class-domain member × relation` cells and all twenty feature bits, provable only by
+someone re-deriving the table, which the recomputation above now lets any reader do. **That successor block does
+not exist** — the round limit was lifted and this block closed its own remainder under act `4f0efc5e9`.
+**Owner and status: see
+`closure-register.md`.**
 
 **Not closed, and unchanged by this section.** `feature-ownership-ledger.md`'s reconciliation note defers
 per-row `projection_class` ASSIGNMENT for the `TokenCompletion` grouping to TCM1/TCM2. That is a different

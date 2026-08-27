@@ -1,8 +1,9 @@
 # TCM0 §1-2 — Exact package lock and semantic API certification
 
-Scope: charter items 1 ("Exact package lock") and 2 ("Semantic API certification"). Every claim below
-is against bytes actually downloaded and executed during this investigation — nothing is inferred from
-the GitHub PR descriptions alone. Reproduction commands are recorded so a reviewer can re-run them.
+Scope: charter items 1 ("Exact package lock") and 2 ("Semantic API certification"). Claims explicitly
+tied to an executed probe below are against bytes downloaded and run during this investigation; derivations
+and unexercised limits are identified separately rather than attributed to those probes. Nothing is
+inferred from GitHub PR descriptions alone. Reproduction commands are recorded so a reviewer can re-run them.
 
 ## 1. Package identity (verified against the live registry, not documentation)
 
@@ -86,13 +87,12 @@ microsoft/typescript-go#4712 (merged, per its own text, as "Content Mappers" —
 **Initialize → OpenProject → Transform (repeated) → CloseProject**) and microsoft/TypeScript#63936
 ("Content Mappers Round 2", merged 2026-08-21, removing `protocolVersion` in favour of LSP-style
 `capabilities`, making diagnostic `code` required, allowing overlapping original-text spans, and adding
-multi-projection hover/folding/CodeLens/signature-help/formatting support). **Caveat originally recorded here, now SUPERSEDED by §3a**: static `strings` extraction on a stripped,
+multi-projection hover/folding/CodeLens/signature-help/formatting support). **Limitation of the static extraction, answered by the observation in §3a**: static `strings` extraction on a stripped,
 optimized Go binary could not isolate the literal lowercase wire method-name strings, so the type-name
 evidence above was strong structural corroboration of the 4-step lifecycle rather than a byte-exact wire
 trace. That caveat named its own remedy — "a live protocol capture (spawning `tsc --runExternalCode` with
-a stub mapper process and tracing stdio)" — and recorded the gap as a TCM2 follow-up. **The capture has now
-been done (§3a), so the delegation is withdrawn and the request half of the wire contract is closed here,
-in TCM0, where the charter assigns it.**
+a stub mapper process and tracing stdio)" — and recorded the gap as a TCM2 follow-up. **The capture in §3a
+now supplies direct evidence for the request half of the wire contract.**
 
 ### 3a. The wire protocol, captured live from the running compiler
 
@@ -121,7 +121,7 @@ Facts this establishes, each asserted by the probe so a rename or reorder goes r
 | `transform` params | `{fileName, content, projectHandle}` — TypeScript supplies the file's authored bytes; the mapper is not asked to read the file itself |
 | `closeProject` params | `{projectHandle}` and nothing else |
 | `projectHandle` format | `{package}@{version}:{n}` |
-| Dispatch scope | `transform` is sent ONLY for the mapper's declared `extensions`; the sibling `.ts` file never reaches the mapper |
+| Dispatch scope | In the captured compile, `transform` is sent for the declared `.stub` extension; the sibling `.ts` control does not reach the mapper |
 
 **Configuration shape, also established by the capture** (each key discovered by iterating against the
 binary's own typed config errors, so each is confirmed by the compiler rather than guessed): the tsconfig
@@ -138,13 +138,100 @@ exactly four inbound frames on the mapper connection, all lifecycle requests —
 probe asserts that count. This is the same conclusion §4.0a reaches structurally from the `rejectHandler`
 symbols, reached here empirically from the opposite side.
 
-**What is still NOT closed, narrowed.** The `transform` RESPONSE body shape is not captured: several
-plausible encodings of the mapped output (`primary`/`outputs` carrying `extension`/`content`/`segments`)
-were rejected by the decoder with "returned an output with unsupported virtual extension ''", so the exact
-field layout of a SUCCESSFUL transform result remains unknown. The residual gap is therefore narrowed from
-"the wire method-name spelling is unverified" (closed) to "the transform response body layout is
-unverified", and is still owned by TCM2 — which will discover it directly the moment it implements a
-mapper, since the decoder reports typed errors for a wrong shape.
+### 3b. The `transform` RESPONSE contract, derived by experiment
+
+An earlier revision of this section recorded the successful response layout as UNKNOWN, on the evidence
+that several plausible encodings were rejected with "returned an output with unsupported virtual
+extension ''". That was an accurate report of what had been tried and a wrong conclusion about what was
+obtainable. `probes/probe9-transform-response-contract.mjs` derives the contract by driving the pinned
+native compiler against a stub mapper and reading the decoder's own typed diagnostics. The probe exercises
+the response cases explicitly labelled as tested below. It exits non-zero for its implemented assertions;
+unexercised extension and override-name cases are not certified by that run.
+
+**The response is a FLAT object.** Nested forms (`outputs: [...]`, `primary: {...}`, `output: {...}`) are
+not decoded.
+
+| field | type | behaviour |
+|---|---|---|
+| `extension` | string, REQUIRED, leading dot | the virtual file's extension. Accepted (8 tested): `.ts` `.tsx` `.js` `.jsx` `.mts` `.cts` `.mjs` `.cjs`. Rejected (2 tested): `.d.ts` and a dot-less `ts`, each via TS100056 naming the offending value |
+| `text` | string, optional, defaults `""` | **the virtual TypeScript source.** This is the field the whole protocol turns on |
+| `mappings` | array of 5- or 6-number tuples | position mappings; layout below |
+| `supplemental` | array of `{extension, text?, mappings?}` | additional virtual outputs. The exercised supplemental entry is named `<originalFile>.0.<ext>`, establishing index-based naming for that case; no override-name spelling is tested |
+| `diagnostics` | array of `{code, category, start, length, messageText}` | mapper-authored diagnostics. `start` is a VIRTUAL offset, mapped back through `mappings`; a span outside `text` is rejected as an invalid response |
+| `diagnosticDirectives` | object `{unusedExpectDirectiveDiagnostics?, directives?}` | both members are independently optional arrays; exact entry layouts and validation are below |
+| anything else | — | ignored |
+
+**The trap that kept this open, recorded because the same shape will recur.** An earlier attempt read
+`{extension, content}` as the answer, because that payload makes the compile exit 0. It is wrong twice
+over: `content` is an ignored unknown field, and the compile succeeded only because `text` defaulted to
+`""` — **an empty program type-checks**. A green exit was a vacuous pass, and taking it for a positive
+result inverted the conclusion. The discriminating evidence is not a clean compile: it is a payload whose
+`text` carries a deliberate type error, which the compiler must then report against the mapped file. That
+is the check that can go red, and it is the only kind worth believing.
+
+**The `mappings` entry layout.** Entries are numeric TUPLES; the object form is rejected even spelled with
+the exact field names `dist/ast/spanMap.d.ts` uses. The binary's own decoder message —
+`span map segment %d: expected 5 or 6 values, got %d` — fixes the arity, and arities 4 and 7 are rejected.
+
+```
+[virtualStart, virtualLength, originalStart, originalLength, kind, features?]
+```
+
+Both sides are `(start, LENGTH)`, not `(start, end)` — settled by an asymmetric case where a virtual
+`text` longer than the original decodes under the length reading and is rejected under the end reading.
+`virtualStart + virtualLength <= len(text)` and `originalStart + originalLength <= len(original)`, both
+bisected. `kind` is `SpanMapKind`: `0` Verbatim, `1` Atom, `2` Alias; `3` and above raise TS100040.
+`features` is a `SpanMapFeature` bitmask valid over `0..1048575`; a value above `All`, or a negative,
+raises TS100039; omitting it is the legal 5-tuple form.
+
+Semantics observed: a Verbatim mapping requires `text[vs..vs+vl]` to equal `original[os..os+ol]` and
+raises TS100029 otherwise; overlapping VIRTUAL spans raise TS100037; entries supplied out of virtual order
+are sorted rather than rejected; original spans may overlap and repeat. A Verbatim mapping carries a
+checker error to its exact original column, Atom and Alias collapse it to the segment start, and with no
+mappings at all the diagnostic surfaces with a "no corresponding location" note.
+
+**The `diagnosticDirectives` layouts.** The field is an OBJECT, not the array previously recorded.
+Both members are independently optional and default to an empty array:
+
+```
+{
+  unusedExpectDirectiveDiagnostics?: Array<{ code: number, messageText: string }>,
+  directives?: Array<[
+    originalStart, originalLength, virtualStart, virtualEnd, policy,
+    unusedExpectDirectiveIndex?
+  ]>
+}
+```
+
+Each directive is a 5- or 6-number tuple; arities 4 and 7, an object entry, and a string substituted
+into each of the six slots one at a time are rejected. `originalStart` and `originalLength` are observed
+directly in the pretty diagnostic's column and underline width. `virtualStart` and the EXCLUSIVE
+`virtualEnd` are observed independently by moving each boundary across a TS2322 diagnostic: policy `0`
+suppresses only when the diagnostic is inside that half-open range. Policy `1` is Expect and surfaces the
+selected unused-expect diagnostic when the range has no diagnostic; policy `2` is rejected by the typed
+"invalid policy '2'" error.
+
+The sixth slot indexes the shared `unusedExpectDirectiveDiagnostics` array. It may be omitted only when
+that array has exactly one entry; omission with two entries and an out-of-range explicit index have
+distinct typed errors. Each shared entry decodes `code` as a number and `messageText` as a string. The
+decoder is permissive about omission: absent `code` becomes `0`, while absent `messageText` decodes and
+then the diagnostic renderer panics with `Unknown diagnostic message`. Those are observed failure
+behaviours, not legal mapper output; a usable response supplies both fields.
+
+**What is still NOT closed, and it is now a different and much smaller list.** The offset UNIT under
+`positionEncoding: "utf-16"` is untested — every case run was ASCII, where the two encodings coincide.
+What the individual `features` bits actually gate was not observed: `0` and `All` produced identical
+compiler output for a Verbatim mapping, which may mean the CLI surface exercises no gated feature rather
+than that the bits are inert. The semantics of `diagnostics.category` (values 0-4 are all accepted and
+all printed as `error`) were not derived. Two
+decoder messages were never triggered — TS100027 (required position mappings absent) and TS100028 (a
+mapping points outside the original content) — because out-of-range positions are rejected as decode
+errors first; what conditions reach them is unknown.
+
+**TCM2's own obligations are untouched by this.** The live register and `TCM2.md` place the wire contract
+on TCM2, and closing TCM0's Scope-1 obligation here removes nothing from them: what TCM2 inherits is a
+derived contract and a runnable probe, which is a head start on its work and not a substitute for it. A
+real reallocation would need a TCM2 charter amendment, and nothing here is one.
 
 **Trust/`--runExternalCode`** — confirmed in the JS client, `dist/api/options.d.ts:16-17`:
 ```ts
@@ -330,8 +417,9 @@ program.getSourceFileNames();                       // throws "api: client error
 program.emitToString();                              // throws "api: client error: snapshot 1 not found"
 ```
 
-`getSourceFile` alone survives dispose, silently, with zero server round-trip (0ms) and zero error —
-every other `Program` method invoked in the identical post-dispose state fails closed correctly. Root
+Among the five `Program` methods probed, only `getSourceFile` survives dispose, silently, with zero server round-trip (0ms) and zero error —
+the four siblings invoked in the identical post-dispose state — `getSemanticDiagnostics`,
+`getSourceFileNames`, `emitToString`, and `getSyntacticDiagnostics` — fail closed correctly. Root
 cause, read directly from the shipped client source:
 
 - `Program.getSourceFile` (`dist/api/sync/api.js:671-678`) checks a client-side `SourceFileCache` keyed
@@ -352,7 +440,8 @@ cause, read directly from the shipped client source:
   `api.js:104-106`) or `api.close()` runs (`api.js:124-126`). This is very likely intentional — it lets a
   disposed-but-still-latest snapshot's file cache warm-start the next `updateSnapshot` — but the
   **observable inconsistency** (one method silently serves stale data forever if no further snapshot is
-  ever taken; every sibling method fails closed) is not documented anywhere in the shipped source as an
+  ever taken; the four probed siblings `getSemanticDiagnostics`, `getSourceFileNames`, `emitToString`, and
+  `getSyntacticDiagnostics` fail closed) is not documented anywhere in the shipped source as an
   intentional asymmetry, and is exactly the shape of bug a naive TCM3 caller (one that retains a
   `Program`/`Checker` past a `Snapshot.dispose()` call, which the type signatures do nothing to prevent)
   would hit silently in production.
@@ -472,13 +561,13 @@ offsets into the file the diagnostic is attributed to, and `fileName` is present
 caller-side bookkeeping.
 
 **(b) There is no project-wide "find all references" primitive, and the failure mode is silent.**
-`Checker.getReferencesToSymbolInFile(file, symbol)` matches only a symbol whose identity is local to that
-file. Probed on a fixture where `main.ts` imports and calls `helper` from `dep.ts`: the declaration symbol
+In the exercised two-file fixture, `Checker.getReferencesToSymbolInFile(file, symbol)` matches the symbol
+whose identity is local to the queried file. There, `main.ts` imports and calls `helper` from `dep.ts`: the declaration symbol
 obtained from `dep.ts` finds its declaration in `dep.ts` and **zero** references in `main.ts`; the
 import-site symbol in `main.ts` (`SymbolFlags.Alias`) finds two; and `getAliasedSymbol` of that alias —
 i.e. the resolved declaration — again finds **zero** in `main.ts`. A cross-file references or rename
-feature must therefore be assembled caller-side: enumerate candidate files, resolve each file's own local
-alias symbol, and union. Passing the declaration symbol to every file returns an empty result with no
+feature for that fixture can be assembled caller-side by enumerating candidate files, resolving each file's own local
+alias symbol, and unioning results. Passing the declaration symbol to `main.ts` returns an empty result with no
 error, which is indistinguishable from "no references". This is a required design constraint for TCM3's
 `References`/`Rename` capability rows, and it bears directly on the rename fail-closed rule the
 Project-Bound External-TS Contract already carries.
@@ -533,21 +622,27 @@ grepping type declarations. The probe now walks the entire prototype chain of th
 none. That is a stronger proof of the same claim, and it does not change §4e's conclusion or its
 consequence for TCM3.
 
-### 6.4 What remains open
+### 6.4 What probes 1-6 left to the later probes
 
-The two gaps §5 already delegates are unchanged and are NOT closed by this section: the exact
-content-mapper wire method-name spelling (TCM2) and the `API.fromLSPConnection` session-attach path
-(TCM3). Both concern surfaces these probes do not touch — probes 1-6 all drive the in-process spawn path
-(`new API({ cwd })`), never an attached LSP pipe, and never the content-mapper protocol, which runs in the
-opposite direction (§3).
+This section is scoped to probes 1-6, and those probes close neither of the two gaps §5 delegates: they
+all drive the in-process spawn path (`new API({ cwd })`), never an attached LSP pipe, and never the
+content-mapper protocol, which runs in the opposite direction (§3).
+
+**Both gaps are nevertheless closed elsewhere in this document, by probes added after this section was
+written, and this paragraph must not be read as a live statement of what remains open.** The exact
+content-mapper wire method-name spelling is captured live in §3a — `initialize`, `openProject`,
+`transform`, `closeProject`, lowercase-initial camelCase, with every frame recorded by
+`probes/probe7-mapper-wire-capture.mjs`. The `API.fromLSPConnection` session-attach path is exercised in
+§4a-attach by `probes/probe8-lsp-session-attach.mjs`, which completes a handshake, attaches a second
+client and answers a `Checker` query. What TCM2 and TCM3 still own is applying those contracts, not
+discovering them.
 
 Bulk-method live correctness — the substance of `G-SEMANTIC-API-CERTIFICATION` — is EVIDENCED by §6:
 the probes exist, are committed, assert discriminating properties, and were executed against the pin.
 
-**The row itself is OPEN, not closed by this block.** `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
-Q1 admits these probes and their transcript as evidence but returns the round-3 candidate as wrongly
-scoped and hands the incomplete contract remainder to a successor block **with fresh verification**. No
-ruling decides whether charter item 2's bulk probes must be run by the block that is accepted, or whether
-an amendment reallocates them — so the certification verdict is the successor's to make on independently
-checkable grounds. See `OPEN-GAPS.md`'s `G-SEMANTIC-API-CERTIFICATION` row and
-`successor-block-scope.md`.
+**For the current obligation disposition, see `closure-register.md` Scope 2, rows `S2.a` through `S2.k`.** `docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-24-TCM0-DECISIONS.md`
+Q1 explains why an earlier revision left the question to a successor with fresh verification. That is
+historical context, not the current disposition. See `OPEN-GAPS.md`'s historical
+`G-SEMANTIC-API-CERTIFICATION` row and
+`successor-block-scope.md`. **That construct does not exist**: the round limit was lifted and this block closed
+its own remainder under act `4f0efc5e9`, running charter item 2's bulk probes itself. **Owner and status: see `closure-register.md`.**

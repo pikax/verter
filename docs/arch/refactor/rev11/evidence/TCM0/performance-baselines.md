@@ -101,7 +101,7 @@ cold path completes on every iteration, i.e. that there is no hang, which is the
 question and does not depend on a wall-clock threshold. Every figure it prints is labelled an observation.
 
 A representative run is committed in `probes/transcript.md`. The material fact it records is the
-**spread**: fastest-to-slowest construction, cold and warm each show a double-digit-or-larger multiple
+**spread**: fastest-to-slowest construction/cold/warm are 3x/1x/1x in the currently committed run
 within one ten-iteration run, and — because the probe has been re-run and re-committed several times over
 the course of this investigation — the exact multiple is itself unstable: 11x/6x/30x, then 54x/6x/2x, then
 5x/7x/10x (construction/cold/warm respectively) across three different committed versions of the same

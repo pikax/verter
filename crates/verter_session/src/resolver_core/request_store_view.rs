@@ -54,7 +54,7 @@
 //! then retries with a fresh base view, and the old overlay is dropped
 //! along with the retried context.
 //!
-//! ## 6.B preservation
+//! ## Session-overlay preservation
 //!
 //! - **Session-overlay validation**: the wrapper chains in front of an
 //!   already session-rooted [`HostStoreView`] (constructed via
@@ -511,8 +511,8 @@ impl CanonicalCompletionOverlay {
     /// authoritative source for the completion overlay's entries, NOT
     /// the base host's scheduler-rooted state. Without this routing the
     /// completion overlay's `whole_hashes` would shadow the session-
-    /// overlay's hash with the base hash, breaking the 6.B session-
-    /// overlay validation contract (`096e124a2`): a session-overlaid
+    /// overlay's hash with the base hash, breaking the session-overlay
+    /// validation contract: a session-overlaid
     /// canonical's facts would mis-validate against the base hash on
     /// subsequent reads inside the same request.
     ///
@@ -603,10 +603,7 @@ impl CanonicalCompletionOverlay {
         // `None`, and the request's frozen overlay is not an external
         // mutation — so an overlay-identity difference must NOT read as a
         // supersession here.
-        let base_external = crate::resolver_store::StoreViewValidationToken {
-            overlay_identity: None,
-            ..base.validation_token()
-        };
+        let base_external = base.validation_token().with_overlay_identity(None);
         if base_external.externally_superseded_by(&host.current_validation_token()) {
             return;
         }
@@ -616,8 +613,8 @@ impl CanonicalCompletionOverlay {
         // state for the canonical, that state is the request-scoped
         // authority — NOT the base scheduler. Without this branch the
         // completion overlay would shadow the session-rooted base
-        // view's overlay hash with the scheduler's base hash, breaking
-        // the 6.B session-overlay validation contract (096e124a2).
+        // view's overlay hash with the scheduler's base hash, breaking the
+        // session-overlay validation contract.
         if let Some(view) = view {
             if view.is_tombstoned(canonical) {
                 // The session deleted the file; there is no current
@@ -785,7 +782,7 @@ impl CanonicalCompletionOverlay {
     /// lookups + the epoch guard so a test can stage the exact
     /// overlay shape it needs without driving the full
     /// `ensure_loaded` flow. Used by the overlay-shape discriminating
-    /// test in `block_6c_view_hoist_tests`.
+    /// test in `request_view_reuse_tests`.
     #[cfg(test)]
     pub(crate) fn insert_whole_hash_for_tests(&self, canonical: &str, whole_hash: Hash16) {
         self.revision

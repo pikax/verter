@@ -268,7 +268,7 @@ impl VerterLanguageServer {
 
             let child_canonical = uri_to_canonical_id(&child.uri);
             let child_carrier_api_path =
-                verter_workspace::carrier_api_provider_path(&child_canonical);
+                verter_semantic::resolver_core::carrier_api_provider_path(&child_canonical);
 
             return ChildPropUsageClass::Resolved(Box::new(ResolvedChildPropUsage {
                 usage: ChildPropUsage {

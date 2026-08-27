@@ -724,9 +724,9 @@ impl VerterHost {
                     let resolved = match self.resolve_for_persistent_state(
                         &canonical_id,
                         specifier,
-                        verter_workspace::ResolutionContext {
-                            phase: verter_workspace::ResolvePhase::CodegenBlocker,
-                            kind: verter_workspace::ResolveRequestKind::SfcSrcAttr,
+                        verter_semantic::resolver_core::ResolutionContext {
+                            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                            kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
                         },
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => admitted

@@ -17,11 +17,13 @@ pub mod css;
 pub mod hashing;
 pub mod reactivity;
 pub mod registry;
+pub mod resolution;
 pub mod route;
 pub mod route_closure;
 pub mod route_facts;
 pub mod runtime_schema;
 pub mod symbol;
+pub mod version;
 
 pub use hashing::{
     compute_member_presence_hash, compute_member_shape_hash, compute_semantic_hash,

@@ -933,7 +933,8 @@ fn raw_paths_json_inherits_base_url_when_child_overrides_paths() {
     let (base_url, paths) = result.expect("should find paths");
 
     // baseUrl should come from the base config (resolved to its directory)
-    let expected_base = crate::resolver::normalize_canonical_id(&tmp.path().to_string_lossy());
+    let expected_base =
+        verter_semantic::resolver_core::normalize_canonical_id(&tmp.path().to_string_lossy());
     assert_eq!(
         base_url, expected_base,
         "baseUrl should be inherited from base config, not default to child dir"
@@ -983,7 +984,8 @@ fn raw_paths_json_child_base_url_overrides_inherited_paths() {
     let (base_url, paths) = result.expect("should find paths");
 
     // baseUrl should be the child's override (packages/app/)
-    let expected_base = crate::resolver::normalize_canonical_id(&sub.to_string_lossy());
+    let expected_base =
+        verter_semantic::resolver_core::normalize_canonical_id(&sub.to_string_lossy());
     assert_eq!(
         base_url, expected_base,
         "baseUrl should be child's override, not base's"

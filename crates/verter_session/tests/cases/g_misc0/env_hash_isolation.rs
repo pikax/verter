@@ -25,9 +25,10 @@ use verter_session::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, ProjectIdentity,
 };
 
+use verter_semantic::resolver_core::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
 use verter_workspace::env_hash::EnvHashInputs;
+use verter_workspace::env_hash::IdeProjectConfigEnvHash;
 use verter_workspace::module_resolution::{ConditionSet, ModuleResolutionMode};
-use verter_workspace::resolver::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
 
 fn baseline_conditions() -> &'static ConditionSet {
     static C: OnceLock<ConditionSet> = OnceLock::new();
@@ -35,7 +36,7 @@ fn baseline_conditions() -> &'static ConditionSet {
 }
 
 fn baseline_cfg() -> IdeProjectConfig {
-    let mut cfg = IdeProjectConfig::new(
+    let mut cfg = verter_workspace::ide_project_config(
         "/ws/proj".to_string(),
         "/ws".to_string(),
         Some("/ws/proj/tsconfig.json".to_string()),
@@ -50,7 +51,7 @@ fn baseline_cfg() -> IdeProjectConfig {
         ..Default::default()
     };
     cfg.references = Vec::new();
-    cfg.membership = verter_workspace::ConfiguredMembership::match_all_under_root(
+    cfg.membership = verter_workspace::configured_membership_match_all_under_root(
         &verter_workspace::CanonicalPath::new("/ws/proj"),
     );
     cfg

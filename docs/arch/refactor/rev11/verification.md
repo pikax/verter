@@ -473,6 +473,8 @@ unrequested optional native enrichment
 
 # 8. Performance decision methodology
 
+Each remaining C-train block receives one evidence-backed, architecture-safe optimization pass by default and at most two when a second such pass is justified; formal performance verdict measurement runs only on that block's final frozen subject. After those safe passes are exhausted, record the limitation once in existing evidence and consolidate comparative optimization through `C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001` at C4/C-train close, without a new per-block ledger or any automatic waiver. Literal comparative failures remain failures absent an exact registered authority act, and correctness, absolute wall, absolute and relative RSS, and code quality are non-waivable.
+
 ## 8.1 Gate immutability
 
 `A6` freezes populated cells in `performance-gates.toml` against the exact post-A3, post-instrumentation implementation baseline before `B1` and every later non-safety foundational cutover. A gate may be recalibrated only when:

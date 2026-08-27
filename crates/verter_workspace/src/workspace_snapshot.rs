@@ -18,8 +18,10 @@ use dashmap::DashMap;
 use smallvec::SmallVec;
 
 use crate::canonical_path::CanonicalPath;
-use crate::membership::{ConfiguredMembership, FallbackMembership};
-use crate::resolver::{IdeProjectCompilerOptions, ProjectResolver, WorkspaceAlias};
+use crate::membership::FallbackMembership;
+use verter_semantic::resolver_core::{
+    ConfiguredMembership, IdeProjectCompilerOptions, ModuleResolverCore, WorkspaceAlias,
+};
 
 /// Index into [`WorkspaceSnapshot::projects`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -43,7 +45,7 @@ pub struct WorkspaceSnapshot {
     /// Configured before Fallback at same root, alphabetical tiebreak).
     pub projects: Vec<OwnershipProject>,
     /// Import resolver built from all project configs.
-    pub resolver: ProjectResolver,
+    pub resolver: ModuleResolverCore,
     /// Monotonic generation counter.
     pub generation: SnapshotGeneration,
     /// Bounded memo for [`Self::owners_for_file`] — see [`OwnersMemo`].
@@ -437,7 +439,8 @@ impl WorkspaceSnapshot {
         claimants: &[ProjectId],
     ) -> Option<ProjectId> {
         // computeConfigFileName: nearest literal-config solution to the file dir.
-        let start_dir = CanonicalPath::new(&crate::resolver::parent_dir(path.as_str()));
+        let start_dir =
+            CanonicalPath::new(&verter_semantic::resolver_core::parent_dir(path.as_str()));
         let mut entry = self.nearest_solution_config(&start_dir);
         // Ordered visited set over solutions — the strictly-decreasing climb
         // already terminates, this makes cycle-freedom explicit and bulletproof.
@@ -463,8 +466,9 @@ impl WorkspaceSnapshot {
             }
 
             // Climb to the nearest solution STRICTLY above this solution's root.
-            let parent =
-                crate::resolver::parent_dir(self.projects[solution.0 as usize].root.as_str());
+            let parent = verter_semantic::resolver_core::parent_dir(
+                self.projects[solution.0 as usize].root.as_str(),
+            );
             if parent.is_empty() {
                 break;
             }

@@ -9,14 +9,14 @@ use parking_lot::RwLock;
 use super::Engine;
 use crate::changes::WorkspaceChange;
 use crate::resolution_currency::{
-    CanonicalResolutionId, PathProbe as ProbeOutcome, ResolutionEpoch, ResolutionFactKey,
-    ResolutionFactVersion, ResolutionPopulation, SessionFingerprint,
+    CanonicalResolutionId, ResolutionEpoch, ResolutionFactKey, ResolutionFactVersion,
 };
-use crate::resolver::{normalize_canonical_id, IdeProjectConfig, WorkspaceAlias};
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::types::{
-    ExactResolution, ExactResolutionResult, ParsedEdge, ResolutionContext, ResolvePhase,
-    ResolveRequestKind, ResolveResult, VfsProvenanceSnapshot,
+use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge, VfsProvenanceSnapshot};
+use verter_semantic::resolver_core::{
+    normalize_canonical_id, AttemptFailure, IdeProjectConfig, PathProbe as ProbeOutcome,
+    ResolutionContext, ResolutionPopulation, ResolvePhase, ResolveRequestKind, ResolveResult,
+    SessionFingerprint, WorkspaceAlias,
 };
 
 const CONTEXT: ResolutionContext = ResolutionContext {
@@ -118,6 +118,21 @@ impl ContractReader {
 }
 
 impl WorkspaceRead for ContractReader {
+    fn preflight_resolution_inputs_bounded(
+        &self,
+        keys: &[verter_semantic::resolver_core::InputKey],
+        basis: verter_semantic::resolver_core::ResolutionBasis,
+    ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
+        crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
+    }
+
+    fn load_preflighted_resolution_inputs(
+        &self,
+        reservation: &crate::resolver::ResolutionInputReservationBatch,
+    ) -> Result<crate::resolver::LoadedResolutionInputBatch, AttemptFailure> {
+        crate::resolver::load_workspace_inputs_for_test(self, reservation)
+    }
+
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         self.files
             .read()
@@ -223,9 +238,9 @@ fn engine_with_fallback_project(root: &str) -> Engine {
             extensions: vec![".ts".to_string()],
             workspace_root: root.to_string(),
             workspace_aliases: Vec::new(),
-            compiler_options: crate::resolver::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
             references: Vec::new(),
-            membership: crate::ConfiguredMembership::match_all_under_root(
+            membership: crate::membership::configured_membership_match_all_under_root(
                 &crate::CanonicalPath::new(root),
             ),
         },
@@ -426,7 +441,11 @@ fn filesystem_live_os_resolution_is_typed_return_only() {
         });
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![IdeProjectConfig::new(root.clone(), root, None)],
+        vec![crate::resolver::ide_project_config(
+            root.clone(),
+            root,
+            None,
+        )],
     );
 
     let outcome = workspace
@@ -818,7 +837,7 @@ fn every_closed_resolution_fact_family_has_a_live_mutation_rail() {
         ResolutionFactVersion::INITIAL
     );
 
-    let project = IdeProjectConfig::new(
+    let project = crate::resolver::ide_project_config(
         "/p".to_string(),
         "/".to_string(),
         Some("/p/tsconfig.json".to_string()),
@@ -924,7 +943,7 @@ fn session_overlay_root_is_independent_and_shields_hidden_base_mutations() {
     let ResolutionPopulation::Session(session) = population else {
         panic!("engine-backed editor workspaces must resolve through a session population");
     };
-    let other_session = SessionFingerprint::fresh(0x5E5510);
+    let other_session = SessionFingerprint::from_raw(0x5E5510);
     let engine = &workspace.engine;
     let base_key = ResolutionFactKey::PathProbe {
         canonical: CanonicalResolutionId::new("/p/dep.ts"),
@@ -1023,7 +1042,7 @@ fn later_parsed_edge_refusal_preserves_the_entire_previously_admitted_batch() {
     workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const dep = 1;"));
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![IdeProjectConfig::new(
+        vec![crate::resolver::ide_project_config(
             "/p".to_string(),
             "/".to_string(),
             Some("/p/tsconfig.json".to_string()),
@@ -1071,7 +1090,7 @@ fn later_parsed_edge_refusal_preserves_the_entire_previously_admitted_batch() {
 #[test]
 fn query_context_records_target_provider_projection_identity() {
     fn projects(provider_root: &str) -> Vec<IdeProjectConfig> {
-        let mut importer = IdeProjectConfig::new(
+        let mut importer = crate::resolver::ide_project_config(
             "/app".to_string(),
             "/".to_string(),
             Some("/app/tsconfig.json".to_string()),
@@ -1080,7 +1099,7 @@ fn query_context_records_target_provider_projection_identity() {
             find: "@lib".to_string(),
             replacement: "/lib/dep".to_string(),
         }];
-        let mut target = IdeProjectConfig::new(
+        let mut target = crate::resolver::ide_project_config(
             "/lib".to_string(),
             "/".to_string(),
             Some("/lib/tsconfig.json".to_string()),
@@ -1132,7 +1151,7 @@ fn query_context_records_target_provider_projection_identity() {
 fn publish_snapshot_completes_missing_project_context_projection() {
     let workspace = crate::memory::MemoryWorkspace::new(Default::default());
     workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const dep = 1"));
-    let project = IdeProjectConfig::new(
+    let project = crate::resolver::ide_project_config(
         "/p".to_string(),
         "/".to_string(),
         Some("/p/tsconfig.json".to_string()),
@@ -1174,13 +1193,13 @@ fn query_context_uses_the_resolvers_actual_overlap_selection_policy() {
     let workspace = crate::memory::MemoryWorkspace::new(Default::default());
     workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const dep = 1"));
 
-    let mut solution = IdeProjectConfig::new(
+    let mut solution = crate::resolver::ide_project_config(
         "/p".to_string(),
         "/".to_string(),
         Some("/p/tsconfig.json".to_string()),
     );
     solution.references = vec!["/p/z.json".to_string()];
-    let leaf = IdeProjectConfig::new(
+    let leaf = crate::resolver::ide_project_config(
         "/p".to_string(),
         "/".to_string(),
         Some("/p/z.json".to_string()),
@@ -1221,7 +1240,7 @@ fn query_context_uses_the_resolvers_actual_overlap_selection_policy() {
         .0;
     assert_eq!(
         query_identity, nearest_identity,
-        "query provenance must use ProjectResolver::nearest_config_for_path, not the provider-default owner policy"
+        "query provenance must use ModuleResolverCore::nearest_config_for_path, not the provider-default owner policy"
     );
 
     // Mutation recipe: replace selected_context_for_path with
@@ -1426,7 +1445,7 @@ fn resolution_currency_project_provider_change_retargets_selected_context_only()
         "/outside/stable.ts".to_string(),
         Arc::from("export const stable = 1"),
     );
-    let mut project = IdeProjectConfig::new(
+    let mut project = crate::resolver::ide_project_config(
         "/p".to_string(),
         "/".to_string(),
         Some("/p/tsconfig.json".to_string()),
@@ -1449,7 +1468,7 @@ fn resolution_currency_project_provider_change_retargets_selected_context_only()
         "/outside/stable.ts"
     );
 
-    let mut changed = IdeProjectConfig::new(
+    let mut changed = crate::resolver::ide_project_config(
         "/p".to_string(),
         "/".to_string(),
         Some("/p/tsconfig.json".to_string()),
@@ -1633,7 +1652,7 @@ fn each_engine_owned_compaction_domain_has_a_live_producer() {
     let source_env_before = engine.current_source_env_generation();
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![IdeProjectConfig::new(
+        vec![crate::resolver::ide_project_config(
             "/p".to_string(),
             "/".to_string(),
             Some("/p/tsconfig.json".to_string()),
@@ -1732,7 +1751,7 @@ fn memory_workspace_exposes_the_source_env_generation_through_the_access_trait()
 /// move on every resolution mutation, precise ones included.
 ///
 /// Mutation recipe, VERIFIED: delete the
-/// `replacement.id = ResolutionWorldId::fresh(...)` mint from the
+/// `replacement.id = ResolutionWorldId::from_raw(...)` mint from the
 /// `WorldWrite::Publish` arm of `mutate_resolution_world_locked`. The
 /// stamp stops moving and this fails with
 /// `ResolutionWorldId(1) -> ResolutionWorldId(1)`.
@@ -1809,7 +1828,7 @@ fn resolution_stamp_moves_on_context_replacement_the_ledger_never_sees() {
     let engine = &workspace.engine;
     let base = ResolutionPopulation::Base;
     let project = || {
-        IdeProjectConfig::new(
+        crate::resolver::ide_project_config(
             "/p".to_string(),
             "/".to_string(),
             Some("/p/tsconfig.json".to_string()),
@@ -2252,7 +2271,7 @@ fn resolution_decision_records_only_direct_dependencies() {
 fn resolution_decision_reintroduction_mints_fresh_version() {
     let workspace = crate::memory::MemoryWorkspace::new(Default::default());
     workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const value = 1"));
-    let project = IdeProjectConfig::new("/p".to_string(), "/".to_string(), None);
+    let project = crate::resolver::ide_project_config("/p".to_string(), "/".to_string(), None);
     WorkspaceAccess::configure_resolver(&workspace, vec![project]);
     let engine = &workspace.engine;
     let population = WorkspaceRead::resolution_population(&workspace);
@@ -2387,7 +2406,7 @@ fn resolution_decision_removal_invalidates_old_witness() {
 fn resolution_decision_overlay_never_validates_as_base() {
     let workspace = crate::memory::MemoryWorkspace::new(Default::default());
     workspace.inject_file("/p/dep.ts".to_string(), Arc::from("export const base = 1"));
-    let project = IdeProjectConfig::new("/p".to_string(), "/".to_string(), None);
+    let project = crate::resolver::ide_project_config("/p".to_string(), "/".to_string(), None);
     WorkspaceAccess::configure_resolver(&workspace, vec![project]);
     let engine = &workspace.engine;
     let population = WorkspaceRead::resolution_population(&workspace);
@@ -2469,7 +2488,7 @@ fn propagation_fixture() -> (crate::memory::MemoryWorkspace, ResolutionPopulatio
         "/p/other.ts".to_string(),
         Arc::from("export const other = 1"),
     );
-    let project = IdeProjectConfig::new("/p".to_string(), "/".to_string(), None);
+    let project = crate::resolver::ide_project_config("/p".to_string(), "/".to_string(), None);
     WorkspaceAccess::configure_resolver(&workspace, vec![project]);
     let population = WorkspaceRead::resolution_population(&workspace);
     (workspace, population)
@@ -2821,7 +2840,7 @@ fn resolution_decision_mutation_matrix_advances_exactly_the_dependent_decisions(
             Box::new(|workspace: &crate::memory::MemoryWorkspace| {
                 WorkspaceAccess::configure_resolver(
                     workspace,
-                    vec![IdeProjectConfig::new(
+                    vec![crate::resolver::ide_project_config(
                         "/p".to_string(),
                         "/".to_string(),
                         Some("/p/tsconfig.json".to_string()),
@@ -2883,7 +2902,7 @@ fn resolution_decision_context_replace_advances_version() {
 
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![IdeProjectConfig::new(
+        vec![crate::resolver::ide_project_config(
             "/p".to_string(),
             "/".to_string(),
             Some("/p/tsconfig.json".to_string()),
@@ -2916,7 +2935,7 @@ fn resolution_decision_context_replace_unchanged_selection_stays_valid() {
     // The identical project set, republished.
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![IdeProjectConfig::new(
+        vec![crate::resolver::ide_project_config(
             "/p".to_string(),
             "/".to_string(),
             None,
@@ -2990,7 +3009,7 @@ fn resolution_decision_negative_deep_appearance_advances_without_tree_dirty() {
 #[test]
 fn resolution_decision_absent_realpath_ancestor_appearance_advances() {
     let workspace = crate::memory::MemoryWorkspace::new(Default::default());
-    let project = IdeProjectConfig::new("/p".to_string(), "/".to_string(), None);
+    let project = crate::resolver::ide_project_config("/p".to_string(), "/".to_string(), None);
     WorkspaceAccess::configure_resolver(&workspace, vec![project]);
     let engine = &workspace.engine;
     let base = ResolutionPopulation::Base;
@@ -3164,7 +3183,10 @@ fn resolution_decision_unrelated_path_mutation_stays_valid() {
 // ---------------------------------------------------------------------
 
 fn owner_set_key(owner: &str, population: ResolutionPopulation) -> ResolutionFactKey {
-    ResolutionFactKey::owner_resolution_set(owner, population)
+    ResolutionFactKey::owner_resolution_set(
+        CanonicalResolutionId::new(normalize_canonical_id(owner)),
+        population,
+    )
 }
 
 fn owner_set_fact(
@@ -3508,7 +3530,7 @@ fn replace_published_resets_context_selection_memo() {
     // Republish the IDENTICAL project set: a new index all the same.
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![IdeProjectConfig::new(
+        vec![crate::resolver::ide_project_config(
             "/p".to_string(),
             "/".to_string(),
             None,
@@ -3704,7 +3726,7 @@ fn context_selection_change_advances_dependent_decision() {
     // The same project root with a tsconfig: a different selected context.
     WorkspaceAccess::configure_resolver(
         &workspace,
-        vec![IdeProjectConfig::new(
+        vec![crate::resolver::ide_project_config(
             "/p".to_string(),
             "/".to_string(),
             Some("/p/tsconfig.json".to_string()),
@@ -3765,13 +3787,13 @@ fn engine_with_chain_tail(len: usize, specifier: &str, tail_references: Vec<Stri
                 )]
             };
             let compiler_options = if index + 1 == len {
-                crate::resolver::IdeProjectCompilerOptions {
+                verter_semantic::resolver_core::IdeProjectCompilerOptions {
                     base_url: Some(format!("{root}/src")),
                     paths: vec![(specifier.to_string(), vec!["index".to_string()])],
                     ..Default::default()
                 }
             } else {
-                crate::resolver::IdeProjectCompilerOptions::default()
+                verter_semantic::resolver_core::IdeProjectCompilerOptions::default()
             };
             crate::project_graph::VfsProjectConfig {
                 root: root.clone(),
@@ -3783,7 +3805,7 @@ fn engine_with_chain_tail(len: usize, specifier: &str, tail_references: Vec<Stri
                 workspace_aliases: Vec::new(),
                 compiler_options,
                 references,
-                membership: crate::ConfiguredMembership::match_all_under_root(
+                membership: crate::configured_membership_match_all_under_root(
                     &crate::CanonicalPath::new(&root),
                 ),
             }

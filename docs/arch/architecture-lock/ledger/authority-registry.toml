@@ -553,19 +553,19 @@ sha256 = "36ce3e91698f630e1744ee5964ce4241ed46561478b57402e13994aeb5f57b46"
 id = "TCM2-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM2.md"
-sha256 = "dab2533396bb612a2181c0f988cc482aff13b6447662611b560cfc2a92d75e9d"
+sha256 = "a26a3bd3003a62fdd7462997bbadb33b88d290a2f9d5b5d3377353c8598bb336"
 
 [[document]]
 id = "TCM3-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM3.md"
-sha256 = "265d8ecd5b6d3eebcc75113a7dd4d7911e3f4031567af96aa20785414d05a433"
+sha256 = "b9add050be307cd3ff369453f164b78e8a58adb30df1c5e9ead98f8951b7e54c"
 
 [[document]]
 id = "TCM4-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/TCM4.md"
-sha256 = "a9f1b3e71d6fe7890b982971615d55a5e69be67146bbfed102367d1aea1c4575"
+sha256 = "2ab8d379f94e407a62fafa2a24f216452b13cea867bdcb196c45f7acc1063115"
 
 [[authorization]]
 block = "TCM0"
@@ -706,16 +706,76 @@ sha256 = "881eaf4e4a11e5a346e5f28006f446ec116d709768ecfeff3ebaf01d2b663b2a"
 # 8799580e161, taken unmodified from block/module-resolver-core so the two
 # stay identical across that block's eventual landing.
 [[document]]
+id = "RULING-C1-THREE-GAPS-ADDENDUM"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCH-ADDENDUM-C1-THREE-GAPS.md"
+sha256 = "fbbdc70a075877bc2985dc4dfde326609c7062982b804573d16cd70838a2ed37"
+
+[[document]]
 id = "RULING-2026-08-25-C1-STAGE2-CUTOVER"
 kind = "RULING"
 path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-25-C1-STAGE2-CUTOVER.md"
 sha256 = "95d893994fead0c5b419cb112ab777b0cdc838455991122a76315175db69e30a"
 
 [[document]]
+id = "RULING-2026-08-26-C1-LANDING-PATH"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-LANDING-PATH.md"
+sha256 = "71ce7601448d75012855a28bb0de1036dc6dff0a755148277b1350c28c9690d7"
+
+[[document]]
+id = "RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY.md"
+sha256 = "c969bc5962d2ec6ee1a8cd3d5cad7a37b2acf5a0a2d8e4b37549fb097dcd64f6"
+
+[[document]]
+id = "RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY.md"
+sha256 = "7b26645f49a62a7c5de06c6630a87f0d934ae06898c98aedf6a7e46c600ee2de"
+
+[[document]]
+id = "RULING-2026-08-26-C1-INPUT-RESOLUTION-BUDGET-AUTHORITY"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-INPUT-RESOLUTION-BUDGET-AUTHORITY.md"
+sha256 = "0c67a42b367728b148b68a3456adb20b2cd51c8490081e82c249e63bcad879cc"
+
+[[document]]
+id = "RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION.md"
+sha256 = "20b1fa75537b67cd941f48ca0c4c410754f3ec2710172812319053168c7239d3"
+
+[[document]]
+id = "RULING-2026-08-27-C1-FINAL-ROUND2-PERFORMANCE-DISPOSITION"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-27-C1-FINAL-ROUND2-PERFORMANCE-DISPOSITION.md"
+sha256 = "499d59a4e8ffc6c099d5a81d737c2fda6d942941e33aa3dfbecc996fd21778dc"
+
+[[document]]
+id = "RULING-2026-08-27-C1-KERNEL-RETENTION-AUTHORITY"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-27-C1-KERNEL-RETENTION-AUTHORITY.md"
+sha256 = "65d00fa9e5de74981adf1e77052bb98fdd942eb661506c98a811071eca20bf24"
+
+[[document]]
+id = "RULING-2026-08-27-C1-FINAL-ROUND6-PERFORMANCE-DISPOSITION"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-27-C1-FINAL-ROUND6-PERFORMANCE-DISPOSITION.md"
+sha256 = "6ed5a27d148cd6320b10848777b126b46e3920cf3cfe363d1197b8d6ada4585b"
+
+[[document]]
+id = "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE"
+kind = "RULING"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-SOURCE-POLICY-EVIDENCE.md"
+sha256 = "6c4c1869faef8779867219ef024054a9e11f3dd3c1df7ecc9d3bb222c9bf5193"
+
+[[document]]
 id = "C1-CHARTER"
 kind = "CHARTER"
 path = "docs/arch/refactor/rev11/charters/C1.md"
-sha256 = "12653a27a1cedf0c0070a7e198cd9d0776c4a97cbd1a8bd35dc91699b62dcdba"
+sha256 = "fbe821349907edb716f17ef8419b417e9f5e3321da54928deaa281721d577b73"
 
 # Three-question architecture ruling taken on ccda4256230 (lane
 # architecture-c1-charter, RESULT: FAIL, five P1 findings): the charter is not
@@ -745,10 +805,106 @@ sha256 = "1e44da3d4104cb2866f75d267cf3cdf6cebc719c099ba890760f6b6c1c64a834"
 
 [[authorization]]
 block = "C1"
-documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION"]
+documents = ["C1-CHARTER", "RULING-2026-08-24-C1-CHARTER-RATIFICATION", "RULING-C1-THREE-GAPS-ADDENDUM", "RULING-2026-08-25-C1-STAGE2-CUTOVER", "RULING-2026-08-26-C1-LANDING-PATH", "RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY", "RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY", "RULING-2026-08-26-SOURCE-POLICY-EVIDENCE", "RULING-2026-08-26-C1-INPUT-RESOLUTION-BUDGET-AUTHORITY", "RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION", "RULING-2026-08-27-C1-FINAL-ROUND2-PERFORMANCE-DISPOSITION", "RULING-2026-08-27-C1-KERNEL-RETENTION-AUTHORITY", "RULING-2026-08-27-C1-FINAL-ROUND6-PERFORMANCE-DISPOSITION"]
 ratified_by = "architecture ruling seat under explicit maintainer delegation"
 ratified_at = "2026-08-24"
 scope = "Ratifies the C1 charter text — converging ModuleResolverCore and the non-flow TypeInfoCore — as digest-bound authority, with ARCH-ADDENDUM-C1-THREE-GAPS.md governing wherever it conflicts: sealing over semantic-owned snapshots with no foreign implementations, enumerated per-module move/stay/split dispositions in place of a literal relocation, and one closed non-overridable inherent gateway in place of the exhaustive-coverage proof C1-AC-5 specifies. It is charter authority ONLY and dispatches nothing: C1 stays LOCKED, its predecessor set is unsatisfied (CM1 was REVIEW when this was written and is now ACCEPTED with all three mandates PASS; the predecessor condition is met), and RULING-2026-08-24-C1-CHARTER-RATIFIABILITY leaves two findings open against it — Stage 2 requires a separately ratified, digest-bound execution plan binding an exact rebased baseline, caller/deletion inventory, Cargo-edge and guard transition and atomic abort conditions, and no block-branch registry delta may substitute for authorization authored here. Execution authority requires a further record."
+waiver_id = "C1-A6-WALL-REL-001"
+post_result_exception_supersession = "For C1-A6-WALL-REL-001 and its exact registered subject only, supersedes A6_META_COMPILE_40_COLD_RUST post_result_exception_allowed = false for the wall_ns median relative no_regression_percent_max 3.0 failure; the field remains binding for every other candidate, cell, metric, and result."
+base_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
+base_tree = "2e7cf8637ec5c52b0fa04572d99672b052f1f85f"
+measured_wall_subject_sha = "1a4e41d5c604f7cf2e36933ca09bbd8c5ff6ea8e"
+measured_wall_subject_tree = "3cfc2f81b4b451519c3074ddfd165c6367048a5c"
+production_subject_sha = "0c22953821f57eedd32b812b1478a449a976f964"
+production_subject_tree = "8edde35fb0a18cce5fe229b87ca991c9f95bff20"
+dispatched_candidate_sha = "7ddbba827e15b9698850a7e01c21a9e41638aec3"
+dispatched_candidate_tree = "bb6dcd1908b3b81c5350ed777e1051b12cdc3a62"
+# SHA-256 over the six UTF-8 `filename<TAB>sha256<LF>` rows in the exact order
+# of the performance-authority ruling's Evidence digests table.
+evidence_table_digest = "ad09432e769adb4b37d879db0229f47aa012d2a40c0121ab3a1bc174bcd3074c"
+successor_obligation = "C2-AC-C1-A6-CONTINUATION-001"
+gap3_successor_obligation = "C2-AC-C1-GAP3-TYPEINFO-GATEWAY-001"
+final_subject_performance_exception_ids = ["C1-A6-WALL-REL-002", "C1-APM002-ALLOC-REL-001", "C1-A6-CONTROL-STABILITY-001"]
+final_subject_performance_base_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
+final_subject_performance_base_tree = "2e7cf8637ec5c52b0fa04572d99672b052f1f85f"
+final_subject_performance_subject_sha = "22532f39faa649c5d818baa67dee0a78ab18bb3a"
+final_subject_performance_subject_tree = "f4691f3efcaceabe0161511324bfac0fe1f5294e"
+final_subject_performance_prompt_sha256 = "c6522a20f42d062dd8ea2053ab85a4da115e261673701782525eaa07279d411e"
+final_subject_performance_authority_input_sha256 = "1ee8063adca40eb70b9cb1e9b46671b76aa2c357b323b167c01568e3ea463d26"
+final_subject_performance_authority_output_sha256 = "f59115c217d35a0f29b9861d7318b6439f0b8564bd633d6e28e8ae8f814aeff8"
+final_subject_performance_raw_manifest_entries = 69
+final_subject_performance_raw_manifest_sha256 = "7d3735f7146ba8e7ef97861240ad0d2c9e9cdf7d123bdbb355d7031207338ed3"
+final_subject_performance_harness_git_blob = "efa9ea54a14772ecd87511d6bb07017aa33940ba"
+final_subject_performance_harness_sha256 = "5e06d35dda284a8ef049bf0dd3dc39974b904729f740da58c650ec59e806f632"
+final_subject_performance_enabled_base_sha256 = "bf161e0dc7c13173f0d4db3dd195e713244013203b249f696e041543fcda06bc"
+final_subject_performance_enabled_subject_sha256 = "ead41678886d081233b7e6368d2e0a9b34fbc30bf5374ac427cd752190574f61"
+final_subject_performance_disabled_base_sha256 = "7c159ec75c14ae05a3d2ca5077fb7919b60b958c3c9f3bfd71c25f913a19bf79"
+final_subject_performance_disabled_subject_sha256 = "c34775e019238a99f6ffe2d96ffe99413386eab8f9cf6b536df4aa08783eade7"
+final_subject_performance_relative_wall_result = "FAIL: +12.606274% > 3%"
+final_subject_performance_allocation_count_result = "FAIL: 477374 -> 599479; +25.578477%"
+final_subject_performance_allocation_bytes_result = "FAIL: 104034454 -> 137459420; +32.128747%"
+final_subject_performance_control_stability_result = "FAIL: protocol2 +11.913095957% > 3%"
+final_subject_performance_retained_wall_result = "PASS after exact control-predicate exception: 96.025 ms <= 100 ms"
+final_subject_performance_retained_rss_result = "PASS after exact control-predicate exception: 76087296 B <= 268435456 B and +1.652621% <= +4.952%"
+final_subject_performance_successor_obligations = ["C2-AC-C1-A6-CONTINUATION-001", "C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001"]
+final_round2_performance_waiver_defer_ids = ["C1-A6-WALL-REL-003", "C1-APM002-ALLOC-REL-002", "C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001"]
+final_round2_performance_not_issued_id = "C1-A6-CONTROL-STABILITY-002"
+final_round2_performance_base_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
+final_round2_performance_base_tree = "2e7cf8637ec5c52b0fa04572d99672b052f1f85f"
+final_round2_performance_production_subject_sha = "e0d6732a26ce3bb4a3a458ae8c2c484fd42fdc7a"
+final_round2_performance_production_subject_tree = "f45176eb1fc7f517a9d2efd6c3a1d2801e8b4172"
+final_round2_performance_evidence_child_sha = "0be9f2e867c634926c646b52fba75e9e7b60bc59"
+final_round2_performance_evidence_child_tree = "7ca20dde813ba73c03ba252c7802fd59fc68d4fe"
+final_round2_performance_prompt_sha256 = "f4810b898f47e6c938e09315d7070425a20ac73c338a4e69b19f202795a48527"
+final_round2_performance_authority_output_sha256 = "0456148169cbc6e64c2f2bb2741254d9ac30caa56406c8aa7b1cf7358b9ff4f7"
+final_round2_performance_fix_evidence_sha256 = "8c23395e0ec66dcbc192e9cafdcbe596ef41093d39f3f9de21f7b0e0b4ef2291"
+final_round2_performance_evidence_sha256 = "5ecdf61545954f4c44d90a5e716ec0d882728d07b7624b831992b36fd34cf292"
+final_round2_performance_raw_manifest_entries = 66
+final_round2_performance_raw_manifest_sha256 = "91cb61887d97c6baba21cbb1cf9ba2e98a7b0ee640313e6354799ca54890b91b"
+final_round2_performance_harness_git_blob = "efa9ea54a14772ecd87511d6bb07017aa33940ba"
+final_round2_performance_harness_sha256 = "5e06d35dda284a8ef049bf0dd3dc39974b904729f740da58c650ec59e806f632"
+final_round2_performance_relative_wall_result = "FAIL: 88.440 -> 98.805 ms; +11.719810041% > 3%"
+final_round2_performance_absolute_wall_result = "PASS: 98.805 ms <= 100 ms"
+final_round2_performance_allocation_count_result = "FAIL: 477383 -> 595309; +24.702597286%"
+final_round2_performance_allocation_bytes_result = "FAIL: 104078206 -> 137007048; +31.638556491%"
+final_round2_performance_control_stability_result = "PASS: 1.009874327% <= 3%"
+final_round2_performance_absolute_rss_result = "PASS: 77512704 B <= 268435456 B"
+final_round2_performance_relative_rss_result = "PASS: +3.556966181% <= +4.952%"
+final_round2_performance_completeness_result = "PASS: 10/10 invocations, 30/30 samples, 40/40 warmup"
+final_round2_performance_work_output_result = "PASS: all configured work counters, zero counters, admissions, and component digest 7161214711717846280"
+final_round2_performance_inheritance_rule = "Evidence-only child 0be9f2e867c634926c646b52fba75e9e7b60bc59 may inherit only through an explicit content-equivalence bridge and is never the measured production subject; a later registration-only descendant may inherit only while production, harness, corpus, toolchain, configuration, and raw evidence remain unchanged."
+kernel_retention_meter_ids = ["C1-ALIAS-GEOMETRY-RETENTION-001", "C1-COMPLETED-WITNESS-RETENTION-001"]
+kernel_retention_reviewed_subject_sha = "d4bed980bea382a7d42dae4b932f16ba247065dc"
+kernel_retention_reviewed_subject_tree = "b2f56be5201560710df45bca7f2dde3f106cedf3"
+kernel_retention_disposition = "NARROW_AMENDMENT_REQUIRED; unique_keys remains first-seen complete InputKey only; one seven-field semantic-owned carrier and the existing workspace operation ledger; lazy priority-preserving alias geometry; exact composed witnesses; typed BudgetExceeded and no publication; no C2/C4 or performance scope"
+final_round6_performance_waiver_defer_ids = ["C1-A6-CONTROL-STABILITY-003", "C1-A6-WALL-REL-004", "C1-A6-WALL-ABS-001", "C1-APM002-ALLOC-REL-003", "C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001"]
+final_round6_performance_base_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
+final_round6_performance_base_tree = "2e7cf8637ec5c52b0fa04572d99672b052f1f85f"
+final_round6_performance_production_subject_sha = "2820cf2eb790caffdb69f59bc20402d7d0a6647b"
+final_round6_performance_production_subject_tree = "ef8efbec06c8e87d1d6d72d9ea8e69fa624f515b"
+final_round6_performance_evidence_child_sha = "713651edd3c9ab629ea5c68380238fb4bafa6711"
+final_round6_performance_evidence_child_tree = "1e112ba5218803e6166c2f4065732179fa339ebe"
+final_round6_performance_evidence_sha256 = "a6083c355239afa6216352f5f78bc36b8c3df9ad2fc3845a32b79e76283b0136"
+final_round6_performance_raw_manifest_entries = 149
+final_round6_performance_raw_manifest_sha256 = "11c016f9a80ea8c8ffc16d564e69a4eb52b8cc426deb4e60b9b18cd9eff86892"
+final_round6_performance_harness_git_blob = "efa9ea54a14772ecd87511d6bb07017aa33940ba"
+final_round6_performance_harness_sha256 = "5e06d35dda284a8ef049bf0dd3dc39974b904729f740da58c650ec59e806f632"
+final_round6_performance_enabled_base_binary_sha256 = "ebf6c2f0762228ae2a4ac01c3fdca5c436750b312c9d093187db99e0d0d832f3"
+final_round6_performance_enabled_subject_binary_sha256 = "16c08912af5255a641001d1b132034198ede0019144977be76a51a75425a7321"
+final_round6_performance_disabled_base_binary_sha256 = "4936acffe4e563d04c37cd7144fbda74c2ececba14e3fcfa5b0620b0a9d65ffd"
+final_round6_performance_disabled_subject_binary_sha256 = "8a53c2cb7fc2220df2830d626995e4bcb009fba493fd72d9413b08e64d1b4b1c"
+final_round6_performance_enabled_base_result_sha256 = "76afc8c3b747c92cb2af0fb47f1dad14d40344cfa4392bac481a9b1319fd04ff"
+final_round6_performance_enabled_subject_result_sha256 = "d193ac0d04f516ae0517a668518ccb3a2504d6d2d958644c2016c71c9d5ad341"
+final_round6_performance_control_stability_result = "FAIL: final session +3.096636412% > 3%; exact-session user waiver applies below 10%"
+final_round6_performance_relative_wall_result = "FAIL: 95.710 -> 111.895 ms; +16.910458677% > 3%"
+final_round6_performance_absolute_wall_result = "FAIL: 111.895 ms > 100 ms"
+final_round6_performance_allocation_count_result = "FAIL: 477365 -> 604706; +26.675814105%"
+final_round6_performance_allocation_bytes_result = "FAIL: 104030662 -> 137711352; +32.375733608%"
+final_round6_performance_absolute_rss_result = "PASS: 76709888 B <= 268435456 B"
+final_round6_performance_relative_rss_result = "PASS: +2.484404071% <= +4.952%"
+final_round6_performance_work_output_result = "PASS: all configured work counters, zero counters, admissions, and component digest 7161214711717846280"
+final_round6_performance_inheritance_rule = "The evidence-only child 713651edd3c9ab629ea5c68380238fb4bafa6711 and later authority-only descendants may inherit only while production, harness, corpus, toolchain, configuration, raw evidence and measured results remain unchanged; none is the measured production subject."
+final_round6_performance_successor_obligation = "C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001"
 
 # Three-question architecture ruling taken on 7dac2b614, the tip of the unowned
 # branch block/lsp-durable-fence (lane architecture-lspfence-ownership,

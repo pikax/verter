@@ -43,9 +43,9 @@
 use verter_scheduler::invalidation::Hash16;
 use xxhash_rust::xxh3::xxh3_128;
 
-use crate::membership::ConfiguredMembership;
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
-use crate::resolver::{IdeProjectCompilerOptions, IdeProjectConfig};
+use verter_semantic::resolver_core::ConfiguredMembership;
+use verter_semantic::resolver_core::{IdeProjectCompilerOptions, IdeProjectConfig};
 
 /// Per-call inputs to the env-hash functions that are NOT part of
 /// [`IdeProjectConfig`].
@@ -118,7 +118,20 @@ const SALT_PROJECT_IDENTITY: &[u8] = b"verter-env:project-identity";
 
 const SEP: u8 = 0u8;
 
-impl IdeProjectConfig {
+pub trait IdeProjectConfigEnvHash {
+    #[must_use]
+    fn parse_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16;
+    #[must_use]
+    fn resolve_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16;
+    #[must_use]
+    fn type_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16;
+    #[must_use]
+    fn lib_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16;
+    #[must_use]
+    fn project_identity(&self) -> Hash16;
+}
+
+impl IdeProjectConfigEnvHash for IdeProjectConfig {
     /// `parse_env_hash` — the parse dimension. TODAY it consumes exactly
     /// one input: the workspace parser-flag string
     /// (`EnvHashInputs.parser_flags`). Syntax mode / language target are
@@ -133,8 +146,7 @@ impl IdeProjectConfig {
     ///
     /// Bound by: `FileArtifactStore`, `MemberSemanticFactStore`,
     /// `MemberDisplayFactStore` keys.
-    #[must_use]
-    pub fn parse_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
+    fn parse_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
         let mut buf: Vec<u8> = Vec::with_capacity(64);
         buf.extend_from_slice(SALT_PARSE);
         buf.push(SEP);
@@ -155,8 +167,7 @@ impl IdeProjectConfig {
     ///
     /// Bound by: `ResolvedImportFacts` (NOT `lib_env_hash`), `RouteDb`
     /// (combined with `lib_env_hash` because of module augmentations).
-    #[must_use]
-    pub fn resolve_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
+    fn resolve_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
         let mut buf: Vec<u8> = Vec::with_capacity(256);
         buf.extend_from_slice(SALT_RESOLVE);
         buf.push(SEP);
@@ -208,8 +219,7 @@ impl IdeProjectConfig {
     ///
     /// Bound by: typed-IR resolve, `MaterializeStructureDb`,
     /// `SemanticGraphStore`, `ComponentMetaResultDb`.
-    #[must_use]
-    pub fn type_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
+    fn type_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
         let mut buf: Vec<u8> = Vec::with_capacity(32);
         buf.extend_from_slice(SALT_TYPE);
         buf.push(SEP);
@@ -231,8 +241,7 @@ impl IdeProjectConfig {
     /// hash; `RouteDb`, typed-IR resolve, `MaterializeStructureDb`,
     /// `SemanticGraphStore`, `ComponentMetaResultDb`
     /// MUST.
-    #[must_use]
-    pub fn lib_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
+    fn lib_env_hash(&self, inputs: &EnvHashInputs<'_>) -> Hash16 {
         let mut buf: Vec<u8> = Vec::with_capacity(256);
         buf.extend_from_slice(SALT_LIB);
         buf.push(SEP);
@@ -253,8 +262,7 @@ impl IdeProjectConfig {
     /// Independent of parse / resolve / type / lib content — two projects
     /// with identical configurations under different roots produce
     /// distinct `project_identity` values.
-    #[must_use]
-    pub fn project_identity(&self) -> Hash16 {
+    fn project_identity(&self) -> Hash16 {
         let mut buf: Vec<u8> = Vec::with_capacity(128);
         buf.extend_from_slice(SALT_PROJECT_IDENTITY);
         buf.push(SEP);

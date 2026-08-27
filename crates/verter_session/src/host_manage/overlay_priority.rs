@@ -76,7 +76,9 @@ pub(crate) fn ensure_loaded_with_view(
 /// parallel IndexedReady from the overlay source and publishes it under
 /// the overlay's content hash via
 /// [`VerterHost::materialize_overlay_indexed_ready_serve_with_view`].
-/// Otherwise falls through to [`VerterHost::ensure_indexed_ready_serve`].
+/// A declined explicit-overlay materialisation fails closed; only a request
+/// with no explicit overlay may fall through to
+/// [`VerterHost::ensure_indexed_ready_serve`].
 pub(crate) fn ensure_indexed_ready_serve_with_view(
     host: &VerterHost,
     view: &dyn SessionView,
@@ -103,14 +105,23 @@ pub(crate) fn ensure_indexed_ready_serve_with_view(
     // and its content hash from the view itself (a single authority),
     // so no stale hash can be smuggled into the candidate's key or
     // `whole_hash`.
-    if view.overlay_content_hash_for(canonical_id).is_some() {
-        if let Some(serve) =
-            host.materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
-        {
-            return Some(serve);
-        }
+    select_indexed_ready_serve(
+        view.overlay_content_hash_for(canonical_id).is_some(),
+        || host.materialize_overlay_indexed_ready_serve_with_view(canonical_id, view),
+        || host.ensure_indexed_ready_serve(canonical_id),
+    )
+}
+
+fn select_indexed_ready_serve<T>(
+    has_explicit_overlay: bool,
+    materialize_overlay: impl FnOnce() -> Option<T>,
+    load_base: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    if has_explicit_overlay {
+        materialize_overlay()
+    } else {
+        load_base()
     }
-    host.ensure_indexed_ready_serve(canonical_id)
 }
 
 /// Pre-warm overlay [`IndexedReady`](crate::project_type_store::IndexedReady)
@@ -150,5 +161,38 @@ pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
     );
     for canonical in view.overlay_canonicals() {
         let _ = ResolverContext::ensure_indexed_ready_serve(&session_ctx, canonical.as_str());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::select_indexed_ready_serve;
+
+    #[test]
+    fn explicit_overlay_materialization_refusal_never_calls_base_fallback() {
+        let base_calls = Cell::new(0);
+        let result = select_indexed_ready_serve(
+            true,
+            || None::<u8>,
+            || {
+                base_calls.set(base_calls.get() + 1);
+                Some(7)
+            },
+        );
+
+        assert_eq!(result, None);
+        assert_eq!(
+            base_calls.get(),
+            0,
+            "an explicit overlay refusal must fail closed"
+        );
+    }
+
+    #[test]
+    fn unmasked_request_uses_base_fallback() {
+        let result = select_indexed_ready_serve(false, || None::<u8>, || Some(7));
+        assert_eq!(result, Some(7));
     }
 }

@@ -1,7 +1,7 @@
-use crate::project_resolver::NativeProjectResolver;
 use crate::provider_surface_store::ContentHash;
 use dashmap::DashMap;
 use verter_semantic::analysis::types::Hash16;
+use verter_semantic::resolver_core::ModuleResolverCore;
 use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,7 +479,7 @@ pub struct ProviderSyncTransition {
 /// compile or build paths — used to decide whether an already-loaded open `.vue`
 /// file's committed binding still matches the live resolution.
 pub fn current_owner_binding_for_source(
-    resolver: &NativeProjectResolver,
+    resolver: &ModuleResolverCore,
     source_id: &str,
 ) -> ProviderOwnerBinding {
     match resolver.nearest_config_for_path(source_id) {
@@ -531,7 +531,7 @@ pub fn provider_script_language(
 }
 
 pub fn non_carrier_sync_state_for_source(
-    resolver: &NativeProjectResolver,
+    resolver: &ModuleResolverCore,
     source_id: &str,
 ) -> Option<ProviderSyncState> {
     let owner = resolver.nearest_config_for_path(source_id)?;
@@ -675,7 +675,8 @@ pub fn open_unresolved_carrier_state(
     // rather than re-deriving the `{src}.tsx`/`.jsx` formula locally — the
     // single naming authority, so a `.svelte` carrier projects `.tsx` exactly
     // as the column dictates.
-    let desired_ide_path = verter_workspace::carrier_ide_provider_path(source_id, is_jsx);
+    let desired_ide_path =
+        verter_semantic::resolver_core::carrier_ide_provider_path(source_id, is_jsx);
     // Syncability hint: the desired path is already live ONLY when the prior IDE
     // path is the SAME desired-extension artifact AND was genuinely loaded. The
     // caller reads this to choose `sync_tsx` (update) vs `open_tsx` (first open).

@@ -362,333 +362,38 @@ use std::sync::Arc;
 /// whose roots and token could be torn across a mutation.
 const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 
-/// Complete validity oracle for a [`StoreViewSnapshot`].
-///
-/// The token is the SOLE signal [`StoreViewManager`] uses to decide
-/// whether a cached `Arc<HostStoreView>` is still safe to hand back, and
-/// the SOLE signal the publish fence rechecks before promoting a cold
-/// result. Two tokens compare equal iff every validation-affecting
-/// by-value dimension of the store view is identical.
-///
-/// ## Why this set is COMPLETE (the soundness argument)
-///
-/// A [`HostStoreView`] caches two classes of state:
-///
-/// 1. **By-value snapshots** captured at build time — `whole_hashes`,
-///    `derived_hashes`, `file_facts`, `route_surface_index_fingerprints`,
-///    env hashes, project identity, project generation, and the
-///    session tombstone/overlay deltas. A stale by-value snapshot would
-///    mis-validate, so the token MUST advance whenever any of these can
-///    change. Every host mutation that alters one of these advances
-///    [`VerterHost::store_view_epoch`] (source/content, evict, reload,
-///    `clear_compile_cache`, `close`, `set_import_dependencies`,
-///    scheduler node membership) and/or
-///    [`crate::project_type_store::ProjectTypeStore::project_generation`]
-///    (project-shape / config / env / identity changes route through
-///    `bump_project_generation_and_evict`). The env-hash fold +
-///    project identity are folded in directly so the oracle is
-///    self-contained even if a future workspace mutator changed env
-///    without bumping a generation.
-///
-/// 2. **By-live-Arc-handle** dimensions — the `resolved_import_facts`
-///    `Arc<ResolvedImportFactsDb>` and the `route_db`
-///    `Arc<RouteDb>` handles. Both stay OUT of the token, but for two
-///    DIFFERENT reasons:
-///    - `ResolvedImportFactsDb` is content-addressed: its key includes
-///      `content_hash`, so a new content version is a NEW key and a
-///      fixed handle reads a correct value without a rebuild
-///      (immutable-by-key).
-///    - `RouteDb` is NOT content-addressed — its keys carry no content
-///      hash, and evict/clear/replace reuse the same key. It stays out
-///      of the token because every value it hands out is validated per
-///      candidate against THIS view through the candidate's own
-///      recorded `fact_dep_signature`: an evicted/replaced entry yields
-///      a conservative fail-closed MISS (the consumer recomputes
-///      through the cold path), never a stale positive. The token
-///      therefore does not need a `RouteDb` generation to stay sound —
-///      the per-candidate signature comparison IS the validity rail.
-///      Note the route-surface FACT domain does not read `RouteDb` at
-///      all: its sole arm
-///      ([`StoreView::validates_route_surface_domain`]) compares the
-///      consumer's recorded `expected_hash` against the
-///      augmentation-index fingerprint snapshot captured on this
-///      view's artifact root.
-///
-/// Additive lazy loads observed mid-request (a dependency `FileArtifactStore`
-/// publication that lands AFTER the snapshot was
-/// built and does NOT bump the epoch) are NOT a soundness hole: for an
-/// untracked canonical the snapshot stays untracked → the request-scoped
-/// [`crate::resolver_core::CanonicalCompletionOverlay`] shadows it; for a
-/// tracked canonical the content change already advanced the epoch.
-///
-/// `store_view_epoch` is an INPUT to the token, never the oracle by
-/// itself — the token (epoch + generation + env fold + identity +
-/// overlay identity) is the oracle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct StoreViewValidationToken {
-    /// Coarse semantic-mutation epoch
-    /// ([`VerterHost::current_store_view_epoch`]). Advances on every
-    /// host mutation that can change a by-value snapshot dimension.
-    pub(crate) store_view_epoch: u64,
-    /// Project generation
-    /// ([`crate::project_type_store::ProjectTypeStore::project_generation`]).
-    /// Advances on project-shape / config / env / identity changes via
-    /// `bump_project_generation_and_evict`.
-    pub(crate) project_generation: u64,
-    /// Indexed-artifact publication generation
-    /// ([`crate::file_artifact_store::FileArtifactStore::artifact_generation`]).
-    /// Advances on every artifact insert / replace / evict / GC and
-    /// augmentation-index mutation. This covers the BY-VALUE snapshot
-    /// dimensions (`file_facts`, `derived_hashes`,
-    /// `route_surface_index_fingerprints`) that a lazy
-    /// `ensure_indexed_ready_serve` publication changes WITHOUT bumping
-    /// `store_view_epoch` — without it a manager-cached base view would
-    /// go stale after a lazy publication and warm-hit validation would
-    /// false-miss (a steady-state warm-cache regression). The
-    /// lazy-publication burst during a cold compute is bounded, so the
-    /// cache rebuilds once then stays warm.
-    pub(crate) artifact_generation: u64,
-    /// Additive derived-state generation
-    /// ([`VerterHost::current_load_generation`]). Advances on additive
-    /// `derived_raw_cache` mutations the base view snapshots BY VALUE but
-    /// that do NOT publish into `FileArtifactStore` (so
-    /// `artifact_generation` does not cover them) and are NOT a
-    /// content/project/env mutation (so `store_view_epoch` does not cover
-    /// them). Two producers advance it:
-    ///
-    /// * a successful first-time `ensure_loaded` — a load that adds a
-    ///   scheduler node + `derived_raw_cache` state (`whole_hashes`
-    ///   membership / known-miss tags);
-    /// * a resolved dependency-EDGE registration
-    ///   ([`VerterHost::record_resolved_dependency_edge`]) — which writes
-    ///   `DependencyState.dependencies`, the reverse-dependency
-    ///   bookkeeping.
-    ///
-    /// Included in the `StoreViewManager` REUSE oracle (either mutation
-    /// invalidates the cached base view) but EXCLUDED from
-    /// [`Self::externally_superseded_by`] — a cold compute's OWN
-    /// dependency loads / route resolutions are its own work, not an
-    /// external mutation, so they must not self-fence result promotion
-    /// (same treatment as `artifact_generation`).
-    pub(crate) load_generation: u64,
-    /// Workspace content/file-set generation
-    /// ([`verter_workspace::WorkspaceAccess::content_generation`]).
-    /// Advances on every file-set mutation the workspace observes —
-    /// inject / delete / overlay batch application, an OS-watcher
-    /// recovery (`DirectoryTreeDirty`), and a resolve-extension change —
-    /// WITHOUT any host-side epoch or generation necessarily moving
-    /// (no `verter_session` handler observes `DirectoryTreeDirty`).
-    ///
-    /// A file-set mutation can supersede the captured source and resolution
-    /// roots even while an owner's bytes stay unchanged. A cached view must
-    /// therefore MISS once this advances; path-precise resolution validity
-    /// itself remains owned by the captured resolution world and its facts.
-    ///
-    /// Included in BOTH the `StoreViewManager` REUSE oracle and
-    /// [`Self::externally_superseded_by`]: unlike the two additive
-    /// generations above, a cold compute's OWN work (loads,
-    /// `ensure_indexed_ready_serve`, store-view builds) NEVER advances it —
-    /// only a real external file-set mutation does — so folding it into
-    /// the supersession fingerprint cannot self-fence promotion.
-    pub(crate) content_generation: u64,
-    /// Dedicated strict-self-root authority. It participates in manager
-    /// reuse so a live trackedness transition rebuilds the sealed roots, but
-    /// stays outside external supersession because a cold compute may create
-    /// its own derived-state membership.
-    pub(crate) strict_self_root_generation: Option<u64>,
-    /// Monotonic count of resolution FACT VERSIONS the workspace's
-    /// resolution world has minted
-    /// ([`verter_workspace::WorkspaceRead::resolution_fact_generation`]).
-    ///
-    /// The snapshot RETAINS an `Arc<CapturedResolutionWorld>` and answers
-    /// every `ResolveImportsFactRef::Resolution` validation out of that
-    /// frozen capture. Without this dimension a manager-cached view could
-    /// be reused indefinitely across a resolution-visible mutation that
-    /// moved no other dimension — the reader-driven evidence refresh and
-    /// the observed-value fold both advance fact versions inside the
-    /// resolution-world write gate without touching content, project,
-    /// artifact, load, env or overlay state — and it would keep
-    /// validating witnesses those advances had just invalidated.
-    ///
-    /// This is NOT world identity and NOT a validity oracle: validity
-    /// stays fact-precise inside the captured world. The counter decides
-    /// only whether the RETAINED capture is still the right snapshot to
-    /// answer from. A first-observation baseline fill mints no version,
-    /// so a cold compute's own discovery does not churn it.
-    ///
-    /// Included in BOTH the `StoreViewManager` REUSE oracle and
-    /// [`Self::externally_superseded_by`], and so in the lane identity and
-    /// the compat token that derive from it. Every mint is an EXTERNAL
-    /// change entering the world, never a compute's own discovery:
-    ///
-    /// * a first-observation baseline fill mints NOTHING — both the
-    ///   observed-value fold and the reader-driven evidence refresh record
-    ///   an unseen value without advancing a version, which is exactly the
-    ///   "own work" case `artifact_generation` / `load_generation` are
-    ///   excluded for;
-    /// * the fold advances a version only on a CONFLICT with the recorded
-    ///   baseline — state newer than the captured root;
-    /// * the evidence refresh advances one only when a re-read value MOVED;
-    /// * exact-table, project-publication and mutation-protocol advances are
-    ///   external by construction.
-    ///
-    /// So the criterion stated for `content_generation` above holds here
-    /// too, and excluding it would leave the fence, the lane and the compat
-    /// token blind to an exact retarget: `set_exact_resolutions` moves this
-    /// dimension and no other, so two views straddling a retarget would fold
-    /// to the same `u64`, a leader would promote a pre-retarget result, and
-    /// the request-scoped bundle memo would re-serve pre-retarget edges to
-    /// the very stability retry that exists to escape them.
-    pub(crate) resolution_fact_generation: u64,
-    /// Folded env-hash bundle (R21). Self-contained defence: even if a
-    /// future workspace mutator changed env without bumping a
-    /// generation, the fold would still distinguish the views.
-    pub(crate) env_hash_fold: Hash16,
-    /// Workspace-default project identity (R21).
-    pub(crate) project_identity: crate::file_artifact_store::ProjectIdentity,
-    /// Frozen session-overlay identity.
-    ///
-    /// `None` for a base view. `Some(_)` carries the session id plus the
-    /// structural overlay fold. Request-completion overlays do not enter
-    /// this token: they can advance within one request and are identified
-    /// separately by `ViewPopulation::RequestCompletion` in fact
-    /// signatures. `RequestStoreView::compat_token` intentionally remains
-    /// the durable base/session coalescing identity.
-    pub(crate) overlay_identity: Option<OverlayIdentity>,
-}
+/// Re-exported under the resolver-store-local name `OverlayIdentity`.
+/// `StoreViewOverlayIdentity` is named distinctly to avoid colliding with
+/// `crate::cache_runtime::world_snapshot::OverlayIdentity`, an unrelated
+/// type).
+pub(crate) use verter_semantic::resolver_core::StoreViewOverlayIdentity as OverlayIdentity;
+pub(crate) use verter_semantic::resolver_core::StoreViewProjectIdentity;
+/// Complete validity oracle for a [`StoreViewSnapshot`]. The semantic-owned
+/// value is dependency-neutral; this crate owns the host-facing construction
+/// entry point ([`capture_store_view_validation_token`]).
+pub(crate) use verter_semantic::resolver_core::StoreViewValidationToken;
 
-/// Frozen identity of a session overlay folded into a
-/// [`StoreViewValidationToken`]. Distinguishes a base view from a
-/// session-overlaid one and distinguishes two sessions whose overlay
-/// shapes differ. Request-completion identity lives on the fact-signature
-/// population rail, not here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct OverlayIdentity {
-    /// Raw session id (`SessionView`-scoped).
-    pub(crate) session_id: Option<u64>,
-    /// Structural fold of the overlay's masked canonicals (count +
-    /// per-canonical content hashes XOR-folded). Any change to the set
-    /// of overlaid/tombstoned canonicals — or their content — changes
-    /// this fold.
-    pub(crate) overlay_fingerprint: Hash16,
-}
-
-impl StoreViewValidationToken {
-    /// Whether `self` was SUPERSEDED by an EXTERNAL mutation relative to
-    /// `later` — i.e. a `store_view_epoch` / `project_generation` /
-    /// `content_generation` / `resolution_fact_generation` / env / identity
-    /// change happened between the two captures.
-    ///
-    /// Deliberately EXCLUDES `artifact_generation` / `load_generation`:
-    /// a cold compute
-    /// legitimately publishes `IndexedReady` artifacts AND loads
-    /// its dependencies (advancing those generations) as part of its own
-    /// work. The publish fence must NOT treat the compute's OWN artifact
-    /// publications or dependency loads as a supersession — only an
-    /// external content/project/env/identity mutation invalidates the
-    /// snapshot the result was produced against. (Those two generations
-    /// remain in the full token for the `StoreViewManager` REUSE oracle,
-    /// where a post-build publication / load SHOULD trigger a rebuild on
-    /// the next request.)
-    pub(crate) fn externally_superseded_by(&self, later: &Self) -> bool {
-        self.store_view_epoch != later.store_view_epoch
-            || self.project_generation != later.project_generation
-            || self.content_generation != later.content_generation
-            || self.resolution_fact_generation != later.resolution_fact_generation
-            || self.env_hash_fold != later.env_hash_fold
-            || self.project_identity != later.project_identity
-            || self.overlay_identity != later.overlay_identity
-    }
-
-    /// A `u64` fingerprint folding ONLY the EXTERNAL-supersession
-    /// dimensions ([`Self::externally_superseded_by`]: `store_view_epoch`,
-    /// `project_generation`, `content_generation`,
-    /// `resolution_fact_generation`, `env_hash_fold`, `project_identity`,
-    /// `overlay_identity`).
-    ///
-    /// Two tokens fold to the same value iff neither externally
-    /// supersedes the other (up to hash collision); they fold to
-    /// different values iff one externally superseded the other. This is
-    /// the seal-respecting `u64` the resolver-tier request executors
-    /// compare to gate stable promotion: a snapshot whose external
-    /// fingerprint no longer matches the live host fingerprint was
-    /// externally superseded mid-compute (an epoch / project / env /
-    /// identity / overlay change — e.g. a `set_default_resolve_extensions`
-    /// env-hash shift that moves NO epoch) and its result MUST NOT be
-    /// promoted to the shared cache.
-    ///
-    /// Deliberately EXCLUDES `artifact_generation` / `load_generation`
-    /// for the SAME reason
-    /// [`Self::externally_superseded_by`] does: a cold compute advances
-    /// those generations as its OWN work (publishing artifacts, loading
-    /// its dependencies, admitting its own routes), and folding them here
-    /// would make the executor self-fence its own promotion.
-    pub(crate) fn external_supersession_fingerprint(&self) -> u64 {
-        let mut hasher = rustc_hash::FxHasher::default();
-        self.store_view_epoch.hash(&mut hasher);
-        self.project_generation.hash(&mut hasher);
-        self.content_generation.hash(&mut hasher);
-        self.resolution_fact_generation.hash(&mut hasher);
-        self.env_hash_fold.hash(&mut hasher);
-        self.project_identity.hash(&mut hasher);
-        self.overlay_identity.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// Capture the current token from the host (base, no session
-    /// overlay). The `overlay_identity` is `None`; a session-overlaid
-    /// view stamps its own overlay identity in
-    /// [`HostStoreView::with_session_overlay`].
-    fn capture(host: &VerterHost) -> Self {
-        let env_hashes = host.host_view_env_hashes();
-        Self {
-            store_view_epoch: host.current_store_view_epoch(),
-            project_generation: host.project_type_store.project_generation(),
-            artifact_generation: host.project_type_store.indexed().artifact_generation(),
-            load_generation: host.current_load_generation(),
-            content_generation: host.ws().content_generation(),
-            strict_self_root_generation: host.ws().strict_self_root_generation(),
-            resolution_fact_generation: host.ws().resolution_fact_generation(),
-            env_hash_fold: fold_env_hashes(&env_hashes),
-            project_identity: host.host_view_project_identity(),
-            overlay_identity: None,
-        }
-    }
-
-    /// A `u64` fingerprint for the singleflight / stability coalescing-lane
-    /// identity
-    /// ([`crate::resolver_core::StoreViewCompatToken::validity_fingerprint`]).
-    ///
-    /// Folds the EXTERNAL-supersession dimensions ONLY (`store_view_epoch`,
-    /// `project_generation`, `content_generation`,
-    /// `resolution_fact_generation`, `env_hash_fold`, `project_identity`,
-    /// `overlay_identity`) — identical to
-    /// [`Self::external_supersession_fingerprint`]. This is the SAME oracle
-    /// the request executors' promotion fence (`is_stable`) compares, and it
-    /// MUST be: the coalescing lane hands a LEADER's stable result to
-    /// FOLLOWERS without per-follower revalidation, and the leader only
-    /// promotes a result as `stable` when its snapshot's external fingerprint
-    /// still matches the live host fingerprint. Two requests that share an
-    /// external-supersession lane are therefore validation-equivalent for the
-    /// promoted result: the leader's result is admissible exactly when the
-    /// external dimensions are coherent, and a follower on the same lane
-    /// shares those dimensions.
-    ///
-    /// Deliberately EXCLUDES `artifact_generation` / `load_generation`
-    /// for the SAME reason
-    /// [`Self::external_supersession_fingerprint`] does: a cold compute
-    /// advances those generations as its OWN work (publishing
-    /// `IndexedReady` artifacts, loading its dependencies), so two
-    /// concurrent identical
-    /// cold requests that snapshot at slightly different points in the load
-    /// sweep observe DIFFERENT additive generations. Folding them into the
-    /// lane identity would split those identical requests across distinct
-    /// lanes and spawn multiple cold winners instead of one leader + N-1
-    /// dedup-joining followers — the exact self-fencing the promotion oracle
-    /// already avoids.
-    pub(crate) fn lane_fingerprint(&self) -> u64 {
-        self.external_supersession_fingerprint()
-    }
+/// Capture the current [`StoreViewValidationToken`] from the host (base, no
+/// session overlay). The `overlay_identity` is `None`; a session-overlaid
+/// view stamps its own overlay identity in
+/// [`HostStoreView::with_session_overlay`].
+///
+/// This free function owns host capture because `verter_semantic` cannot name
+/// `VerterHost`, while the token itself remains dependency-neutral.
+fn capture_store_view_validation_token(host: &VerterHost) -> StoreViewValidationToken {
+    let env_hashes = host.host_view_env_hashes();
+    StoreViewValidationToken::new(
+        host.current_store_view_epoch(),
+        host.project_type_store.project_generation(),
+        host.project_type_store.indexed().artifact_generation(),
+        host.current_load_generation(),
+        host.ws().content_generation(),
+        host.ws().strict_self_root_generation(),
+        host.ws().resolution_fact_generation(),
+        fold_env_hashes(&env_hashes),
+        StoreViewProjectIdentity(host.host_view_project_identity().0),
+        None,
+    )
 }
 
 /// Token-relevant raw inputs and immutable store roots captured ONCE, so the
@@ -819,18 +524,18 @@ impl PreBuildTokenInputs {
     /// The complete base [`StoreViewValidationToken`] these inputs
     /// reconstruct (no overlay identity — a base view).
     fn token(&self) -> StoreViewValidationToken {
-        StoreViewValidationToken {
-            store_view_epoch: self.store_view_epoch,
-            project_generation: self.project_generation,
-            artifact_generation: self.artifact_generation,
-            load_generation: self.load_generation,
-            content_generation: self.content_generation,
-            strict_self_root_generation: self.strict_self_root_generation,
-            resolution_fact_generation: self.resolution_fact_generation,
-            env_hash_fold: fold_env_hashes(&self.env_hashes),
-            project_identity: self.project_identity,
-            overlay_identity: None,
-        }
+        StoreViewValidationToken::new(
+            self.store_view_epoch,
+            self.project_generation,
+            self.artifact_generation,
+            self.load_generation,
+            self.content_generation,
+            self.strict_self_root_generation,
+            self.resolution_fact_generation,
+            fold_env_hashes(&self.env_hashes),
+            StoreViewProjectIdentity(self.project_identity.0),
+            None,
+        )
     }
 }
 
@@ -1326,10 +1031,9 @@ impl StoreViewRead {
         }
     }
 
-    /// Extract the underlying raw [`HostStoreView`] regardless of arm, for
-    /// the bare-host owned-view rail (`ResolverContext::resolver_store_view`,
-    /// reachable only when no request-bound context was installed — a
-    /// test/debug validation fallback). Production warm validators take a
+    /// Extract the underlying raw [`HostStoreView`] regardless of arm for
+    /// compile-fenced test fixtures and request-driver snapshots. Production
+    /// warm validators take a
     /// `&CurrentHostStoreView` via [`Self::current`]; production cold
     /// builders take a [`ColdSeedHostStoreView`] via
     /// [`Self::into_cold_seed_view`]. This escape hatch is NOT a
@@ -1997,7 +1701,7 @@ impl HostStoreView {
             // that moved WITHOUT bumping `store_view_epoch` — and forces a
             // retry / `Superseded` rather than publishing a torn view whose
             // snapshot maps and token straddle the mutation.
-            let live_token = StoreViewValidationToken::capture(host);
+            let live_token = capture_store_view_validation_token(host);
             if pre_token == live_token {
                 return SnapshotBuildOutcome::Coherent {
                     view,
@@ -2576,18 +2280,18 @@ impl HostStoreView {
     /// identity so the token reflects the overlay.
     pub(crate) fn validation_token(&self) -> StoreViewValidationToken {
         let env = &self.snapshot.roots.project_env_root;
-        StoreViewValidationToken {
-            store_view_epoch: self.mutation_epoch,
-            project_generation: env.project_generation,
-            artifact_generation: self.artifact_generation,
-            load_generation: self.load_generation,
-            content_generation: self.content_generation,
-            strict_self_root_generation: self.strict_self_root_generation,
-            resolution_fact_generation: self.resolution_fact_generation,
-            env_hash_fold: fold_env_hashes(&env.env_hashes),
-            project_identity: env.project_identity,
-            overlay_identity: self.overlay_identity,
-        }
+        StoreViewValidationToken::new(
+            self.mutation_epoch,
+            env.project_generation,
+            self.artifact_generation,
+            self.load_generation,
+            self.content_generation,
+            self.strict_self_root_generation,
+            self.resolution_fact_generation,
+            fold_env_hashes(&env.env_hashes),
+            StoreViewProjectIdentity(env.project_identity.0),
+            self.overlay_identity,
+        )
     }
 
     /// Compose the sealed root token. Deliberately takes NO `&VerterHost`.
@@ -4125,7 +3829,7 @@ impl StoreViewManager {
                 }) {
                     host.bump_store_view_epoch();
                 }
-                let live = StoreViewValidationToken::capture(host);
+                let live = capture_store_view_validation_token(host);
                 if let Some((token, view)) = state.cached.as_ref() {
                     if *token == live {
                         // The cached entry's token equals the live host
@@ -4429,7 +4133,7 @@ impl StoreViewManager {
         state: &StoreViewManagerState,
     ) -> Option<StoreViewRead> {
         let (token, view) = state.cached.as_ref()?;
-        let live = StoreViewValidationToken::capture(host);
+        let live = capture_store_view_validation_token(host);
         if *token == live {
             Some(StoreViewRead::Current(CurrentHostStoreView(view.clone())))
         } else {
@@ -4514,7 +4218,7 @@ impl StoreViewManager {
         // Gate 2: the host moved past this token after the build →
         // known-stale, decline. Returning this view to a warm validator
         // would validate a cached entry against already-superseded state.
-        if token != StoreViewValidationToken::capture(host) {
+        if token != capture_store_view_validation_token(host) {
             return PublishOutcome::Declined { view };
         }
         // Gate 3: reuse an already-published same-token entry; never clobber
@@ -4789,7 +4493,7 @@ impl VerterHost {
     /// no session overlay). The publish fence rechecks against this
     /// before promoting a cold result.
     pub(crate) fn current_validation_token(&self) -> StoreViewValidationToken {
-        StoreViewValidationToken::capture(self)
+        capture_store_view_validation_token(self)
     }
 
     /// Live `u64` fold of the host's EXTERNAL-supersession dimensions
@@ -5154,7 +4858,7 @@ impl HostStoreView {
         // Defensive: ensure the knob is disarmed even if `build` did not
         // reach the firing point (it always does, but keep it leak-proof).
         FORCE_MID_BUILD_ENV_BUMP.with(|c| c.set(false));
-        let live_token = StoreViewValidationToken::capture(host);
+        let live_token = capture_store_view_validation_token(host);
         (view, pre_token, live_token)
     }
 

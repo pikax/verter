@@ -4,21 +4,16 @@
 //! between the query layer and the session host: the query layer OWNS the
 //! trait and the neutral DTOs; this module implements the demand against
 //! the session's real machinery. The adapter binds a
-//! [`RequestBoundResolverContext`] — the sealed marker subtrait
-//! implemented ONLY for the two request-bound contexts, so the retired
-//! bare-host rail is structurally unbindable — and serves the canonical
+//! [`RequestBoundResolverContext`] — the sealed marker subtrait implemented
+//! for the two production request contexts — and serves the canonical
 //! post-parse artifact through the context's overlay-aware
 //! `ensure_indexed_ready_serve` tier, so every serve is view-correct for
 //! the requesting caller: a base context reads base artifacts, a session
 //! context reads overlay-content-rooted artifacts under the
 //! overlay-scoped key — and the publication status stamped onto the
-//! port's admission signal reflects that same view. (One tracked
-//! exception, §8.2: an explicit-overlay canonical whose materializer
-//! declines still falls through to the base shared tier's
-//! `store_published: true` — a pre-existing shared-tier fail-open this
-//! port does NOT close, deferred to the P5 caller wiring plus the
-//! real-adapter overlay regression.) The
-//! authored-body-lowering demand
+//! port's admission signal reflects that same view. An explicit-overlay
+//! materialization refusal fails closed and cannot serve or publish the base
+//! artifact. The authored-body-lowering demand
 //! delegates to the decl-body memo's locator deref
 //! ([`crate::decl_body_memo::DeclBodyMemo::deref_locator_body`]), whose
 //! demanded lowering runs LEASE-ONLY through
@@ -42,9 +37,8 @@ use crate::resolver_core::RequestBoundResolverContext;
 /// Host-backed adapter implementing the query layer's host port.
 ///
 /// Binds a [`RequestBoundResolverContext`] — the sealed marker subtrait
-/// implemented ONLY for a `HostResolverContext` (base query) or a
-/// `SessionResolverContext` (overlay/session query), so the bare-host
-/// rail cannot be bound at the type level; construct via
+/// implemented for a `HostResolverContext` (base query) or a
+/// `SessionResolverContext` (overlay/session query); construct via
 /// `SessionQueryHostPort::new`. Routing (anchor canonical → canonical
 /// post-parse artifact → decl-body memo) goes through the context's
 /// `ensure_indexed_ready_serve` — the single, overlay-aware
@@ -71,10 +65,8 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
     /// completion-fence admission then reflects the correct view.
     ///
     /// The request-bound binding is STRUCTURAL: the parameter type admits
-    /// only the sealed request-bound marker's implementers, so the retired
-    /// bare-host rail (`&VerterHost`) cannot be passed — it implements
-    /// [`ResolverContext`](crate::resolver_core::ResolverContext) but not
-    /// the marker. The `debug_assert` below is
+    /// only the sealed request-bound marker's production implementers, so a
+    /// direct `&VerterHost` cannot be passed. The `debug_assert` below is
     /// therefore redundant defense-in-depth (it can only ever hold),
     /// retained so a hypothetical future marker misuse trips loudly in dev
     /// builds.
@@ -89,21 +81,17 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
 
 // ── Request-bound seal: structural discrimination ────────────────────
 //
-// `SessionQueryHostPort::new` binds `&dyn RequestBoundResolverContext`, so
-// the retired bare-host rail is UNCONSTRUCTIBLE at the type level. These
+// `SessionQueryHostPort::new` binds `&dyn RequestBoundResolverContext`. These
 // compile-time proofs discriminate the seal in both directions and are
 // checked by the ordinary `cargo check -p verter_session` build — the
 // enforcement is the type system itself, not a runtime test case. (A
 // trybuild fixture cannot discriminate this: `new` is `pub(crate)`, so an
-// external fixture fails on the pre-existing visibility wall regardless
+// external fixture fails on the crate-private visibility wall regardless
 // of the marker, which would not distinguish a sealed from an unsealed
 // binding.)
 
-// NEGATIVE — the bare host implements `ResolverContext` but NOT the
-// request-bound marker, so `&VerterHost` cannot coerce to the port's
-// binding. A launder (`impl RequestBoundResolverContext for VerterHost`)
-// would make this assertion fail to compile, widening the baseline error
-// count.
+// NEGATIVE — the direct host cannot satisfy the request-bound marker. Adding
+// any such implementation makes this assertion fail to compile.
 static_assertions::assert_not_impl_all!(crate::VerterHost: RequestBoundResolverContext);
 
 const _: () = {

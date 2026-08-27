@@ -5140,6 +5140,14 @@ fn type_def_source_files() -> Vec<(String, String)> {
             "../verter_semantic/src/analysis/component_meta.rs",
             "verter_semantic::analysis::component_meta",
         ),
+        // `FactVersionRef` and its immutable fact-value graph are semantic
+        // values. Reading the ruled owner keeps publication-sink input
+        // classification structural after the workspace cache layer stopped
+        // declaring a duplicate nominal vocabulary.
+        (
+            "../verter_semantic/src/facts/version.rs",
+            "verter_semantic::facts::version",
+        ),
         // `AuthoredBodyLocator` (returned by the decl-body sink accessors
         // `named_decl_body` / `owner_collection_expr` / the shape-cache
         // `get_or_compute`) is the content-free locator enum — `NoTypeExpr`
@@ -5167,8 +5175,8 @@ fn type_def_source_files() -> Vec<(String, String)> {
         ),
         // `SignatureAdmission { Cacheable(ReadSetSignature) | NonCacheable(reason) }`
         // and `ReadSetSignature { facts, overflowed }` are the fact-validation
-        // substrate, owned by `verter_workspace` (the lowest crate that serves
-        // every consumer — `verter_workspace` cannot depend on
+        // substrate, owned by `verter_workspace` (the lowest cache-policy crate
+        // that serves every consumer — `verter_workspace` cannot depend on
         // `verter_session`). `SignatureAdmission` is returned by the
         // fact-signature sink fns (`engine_fact_signature_for_exported_type` /
         // `…_for_materialize_memo`); reading its home lets the closure classify
@@ -7928,9 +7936,7 @@ const KNOWN_NON_AUTHORITY_INPUT_IDENTS: &[KnownNonAuthorityInput] = &[
     KnownNonAuthorityInput::Qualified("crate::types", "HostConfig"),
     KnownNonAuthorityInput::Category(
         "IdeProjectConfig",
-        NonAuthorityCategory::ExternalNonAuthority(&[
-            "verter_semantic::analysis::project_resolver",
-        ]),
+        NonAuthorityCategory::ExternalNonAuthority(&["verter_semantic::resolver_core"]),
     ),
     KnownNonAuthorityInput::Qualified("crate::semantic_query", "DeclIdentity"),
     KnownNonAuthorityInput::Qualified("crate::semantic_query", "ResolvedDeclSlotIdentity"),

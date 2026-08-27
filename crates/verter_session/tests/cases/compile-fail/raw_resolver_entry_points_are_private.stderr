@@ -1,47 +1,5 @@
-error[E0624]: method `resolve_with_reader` is private
-  --> tests/cases/compile-fail/raw_resolver_entry_points_are_private.rs:19:22
-   |
-19 |       let _ = resolver.resolve_with_reader(reader, request);
-   |                        ^^^^^^^^^^^^^^^^^^^ private method
-   |
-  ::: $WORKSPACE/crates/verter_workspace/src/resolver.rs
-   |
-   | /     fn resolve_with_reader(
-   | |         &self,
-   | |         reader: &dyn crate::traits::WorkspaceRead,
-   | |         request: &ResolveRequest,
-   | |     ) -> Option<ResolveResult> {
-   | |______________________________- private method defined here
-
-error[E0624]: method `resolve_for_project_with_reader` is private
-  --> tests/cases/compile-fail/raw_resolver_entry_points_are_private.rs:20:22
-   |
-20 |       let _ = resolver.resolve_for_project_with_reader(reader, owner, "pkg", context);
-   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
-   |
-  ::: $WORKSPACE/crates/verter_workspace/src/resolver.rs
-   |
-   | /     fn resolve_for_project_with_reader(
-   | |         &self,
-   | |         reader: &dyn crate::traits::WorkspaceRead,
-   | |         owner: &crate::types::ProjectOwnership,
-   | |         specifier: &str,
-   | |         ctx: ResolutionContext,
-   | |     ) -> Option<ResolveResult> {
-   | |______________________________- private method defined here
-
-error[E0624]: method `preferred_specifier` is private
-  --> tests/cases/compile-fail/raw_resolver_entry_points_are_private.rs:21:22
-   |
-21 |       let _ = resolver.preferred_specifier(reader, "/src/main.ts", "/src/dep.ts");
-   |                        ^^^^^^^^^^^^^^^^^^^ private method
-   |
-  ::: $WORKSPACE/crates/verter_workspace/src/resolver.rs
-   |
-   | /     fn preferred_specifier(
-   | |         &self,
-   | |         reader: &dyn crate::traits::WorkspaceRead,
-   | |         importer_id: &str,
-   | |         target_id: &str,
-   | |     ) -> Option<String> {
-   | |_______________________- private method defined here
+error[E0432]: unresolved import `verter_workspace::resolver::ProjectResolver`
+ --> tests/cases/compile-fail/raw_resolver_entry_points_are_private.rs:7:5
+  |
+7 | use verter_workspace::resolver::ProjectResolver;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ProjectResolver` in `resolver`

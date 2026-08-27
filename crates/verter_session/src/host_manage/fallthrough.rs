@@ -193,7 +193,7 @@ impl VerterHost {
             let dep_canonical = match self.resolve_loaded_dependency_canonical(
                 owner_canonical_id,
                 import.source.as_str(),
-                verter_workspace::ResolveRequestKind::EsmImport,
+                verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     let Some(dep_canonical) = admitted.into_result() else {
@@ -231,7 +231,7 @@ impl VerterHost {
                     continue;
                 }
                 let is_relative =
-                    verter_workspace::resolver::is_relative_specifier(import.source.as_str());
+                    verter_semantic::resolver_core::is_relative_specifier(import.source.as_str());
                 let candidate = (!is_relative, import.source.clone(), export_name);
                 if best.as_ref().is_none_or(|known| candidate < *known) {
                     best = Some(candidate);
@@ -529,10 +529,8 @@ impl VerterHost {
         );
         let mut fallthrough_fact_versions = resolved.fact_versions.clone();
 
-        // Macro-DTO surface read runs under the request-bound `ctx` (not
-        // `self`, the bare host) — `vue_macro_dtos_with_ctx` ->
-        // `ctx.store_view()` panics on the bare-host rail in a release
-        // build. See `tests/cases/g_session/session_meta_store_view_regression.rs`.
+        // Macro-DTO surface reads through the request-bound `ctx`, preserving
+        // the exact base or session store view selected at request entry.
         let resolved_macros = resolver_component_meta_resolved_macros(
             ctx,
             canonical_id,
@@ -1585,7 +1583,7 @@ impl VerterHost {
             dep_ref.value_mut().dependencies = new_deps;
         }
         // ALWAYS fires — even when cc.dependencies union is unchanged, the
-        // semantic-class slice may have changed (closes F15).
+        // semantic-class slice may have changed.
         //
         // A file is never its own transitive dependency. The macro
         // fact-footprint that feeds this axis records the OWNER's own
@@ -1593,7 +1591,7 @@ impl VerterHost {
         // resolution), but a self-edge is not a cross-file semantic
         // transitive dependency. Excluding it keeps the empty-cross-file
         // case genuinely empty, so removing the last macro type dep fully
-        // clears the axis instead of leaving a spurious self-edge (F15).
+        // clears the axis instead of leaving a spurious self-edge.
         let transitive_without_self: std::collections::BTreeSet<String> = transitive_deps
             .iter()
             .filter(|dep| dep.as_str() != canonical_id)

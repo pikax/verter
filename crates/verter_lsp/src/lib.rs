@@ -90,7 +90,6 @@ pub mod extension_provider;
 pub mod external_ts;
 pub mod external_ts_sync;
 pub mod features;
-pub mod project_resolver;
 pub mod provider_surface_store;
 pub mod provider_sync;
 pub mod resync_singleflight;

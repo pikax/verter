@@ -8588,13 +8588,11 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
     assert!(
         project
@@ -8998,13 +8996,11 @@ const props = withDefaults(defineProps<ColorModeSelectProps>(), {
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
     assert!(
         project
@@ -10636,13 +10632,11 @@ fn get_component_meta_prefers_declaration_entrypoints_for_package_type_imports()
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     let project = MetaProject::new(host);
     project
@@ -11053,13 +11047,11 @@ export type Lt = string | St | vt
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     let project = MetaProject::new(host);
     project
@@ -11201,13 +11193,11 @@ export { RouteLocationRaw as Lt, St, vt }
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     let project = MetaProject::new(host);
     project
@@ -11306,13 +11296,11 @@ export type PublicNode = InternalNode | {
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     let project = MetaProject::new(host);
     project
@@ -11413,13 +11401,11 @@ export interface ImportedHelper {
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 
     let project = MetaProject::new(host);
     project
@@ -22082,13 +22068,11 @@ export interface NativeElements {
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
     project
         .upsert_base("/workspace/src/App.vue", r#"<template><div /></template>"#)
@@ -22186,13 +22170,11 @@ export interface ProjectClickEvent {
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
     project
         .upsert_base("/workspace/src/App.vue", r#"<template><div /></template>"#)
@@ -22795,13 +22777,11 @@ import { FancyRoot } from 'reka-ui'
         },
         ws,
     );
-    host.configure_projects(vec![
-        verter_semantic::analysis::project_resolver::IdeProjectConfig::new(
-            "/workspace".to_string(),
-            "/workspace".to_string(),
-            Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
     let project = MetaProject::new(host);
     assert!(
         project.ensure_loaded("/workspace/src/App.vue").unwrap(),

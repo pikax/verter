@@ -1,12 +1,14 @@
 // Named only by the native-only `impl ProjectGraph` builder below.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::canonical_path::CanonicalPath;
-use crate::membership::ConfiguredMembership;
-use crate::resolver::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
+use verter_semantic::resolver_core::ConfiguredMembership;
+use verter_semantic::resolver_core::{
+    IdeProjectCompilerOptions, IdeProjectConfig, ModuleResolverCore, WorkspaceAlias,
+};
 // Likewise native-only.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::snapshot_builder::configured_membership_from_raw;
-use crate::types::ProjectOwnership;
+use verter_semantic::resolver_core::ProjectOwnership;
 
 /// Source precedence rank for a project configuration.
 ///
@@ -56,9 +58,9 @@ impl VfsProjectConfig {
         verter_span::path::is_under_dir(canonical_id, &self.root)
     }
 
-    /// Convert to an `IdeProjectConfig` for the project resolver.
+    /// Convert to an `IdeProjectConfig` for semantic module resolution.
     pub fn to_ide_project_config(&self) -> IdeProjectConfig {
-        let mut project = IdeProjectConfig::new(
+        let mut project = crate::resolver::ide_project_config(
             self.root.clone(),
             self.workspace_root.clone(),
             self.tsconfig_path.clone(),
@@ -168,9 +170,9 @@ impl ProjectGraph {
         self.projects.iter()
     }
 
-    /// Convert the project graph to a `ProjectResolver` for import resolution.
-    pub fn to_project_resolver(&self) -> crate::resolver::ProjectResolver {
-        crate::resolver::ProjectResolver::new(
+    /// Convert the project graph to a `ModuleResolverCore` for import resolution.
+    pub fn to_module_resolver_core(&self) -> ModuleResolverCore {
+        ModuleResolverCore::new(
             self.projects
                 .iter()
                 .map(VfsProjectConfig::to_ide_project_config)
@@ -315,8 +317,9 @@ impl ProjectGraph {
                 }
             }
 
-            let fallback_membership =
-                ConfiguredMembership::match_all_under_root(&CanonicalPath::new(&canonical));
+            let fallback_membership = crate::membership::configured_membership_match_all_under_root(
+                &CanonicalPath::new(&canonical),
+            );
             projects.push(VfsProjectConfig {
                 root: canonical.clone(),
                 rank: ProjectRank::Inferred,
@@ -354,7 +357,9 @@ mod tests {
             workspace_aliases: vec![],
             compiler_options: IdeProjectCompilerOptions::default(),
             references: vec![],
-            membership: ConfiguredMembership::match_all_under_root(&CanonicalPath::new(root)),
+            membership: crate::membership::configured_membership_match_all_under_root(
+                &CanonicalPath::new(root),
+            ),
         }
     }
 

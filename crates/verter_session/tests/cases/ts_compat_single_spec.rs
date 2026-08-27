@@ -102,7 +102,7 @@ const TARGET_STRUCTS: &[(&str, &str)] = &[
         "crates/verter_session/src/component_meta_caches.rs",
     ),
     (
-        "SessionResolverContext",
+        "SessionRequestLifecycle",
         "crates/verter_session/src/resolver_core/session_resolver_context.rs",
     ),
     (

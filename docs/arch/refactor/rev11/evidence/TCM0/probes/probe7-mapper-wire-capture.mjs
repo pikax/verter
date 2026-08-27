@@ -130,7 +130,7 @@ process.stdin.on("data", (c) => { buf = Buffer.concat([buf, c]);
   record("methods captured, in order", methods.join(" -> "));
 
   check(
-    "the wire lifecycle is exactly initialize -> openProject -> transform -> closeProject",
+    "the captured compile lifecycle is initialize -> openProject -> transform -> closeProject",
     () => {
       assert(
         methods.join(",") === "initialize,openProject,transform,closeProject",
@@ -181,7 +181,7 @@ process.stdin.on("data", (c) => { buf = Buffer.concat([buf, c]);
     assert(p.fileName.endsWith("thing.stub"), `fileName=${p.fileName}`);
     return `keys=[${Object.keys(p).join(",")}]`;
   });
-  check("transform is sent ONLY for the mapper's declared extension", () => {
+  check("the captured transform targets declared .stub; the .ts control is not transformed", () => {
     const transformed = inbound
       .filter((m) => m.method === "transform")
       .map((m) => m.params.fileName);
@@ -202,15 +202,12 @@ process.stdin.on("data", (c) => { buf = Buffer.concat([buf, c]);
     assert(/^stub-mapper@1\.0\.0:\d+$/.test(h), `handle=${h}`);
     return h;
   });
-  check(
-    "the mapper connection carries NO inbound request from TypeScript beyond these four",
-    () => {
-      // Corroborates the rejectHandler finding from the opposite side: across a whole compile, TypeScript
-      // issued exactly the four lifecycle requests and nothing else.
-      assert(inbound.length === 4, `${inbound.length} inbound frames: ${methods.join(",")}`);
-      return "4 frames, all lifecycle";
-    },
-  );
+  check("the captured compile has no additional inbound request beyond these four", () => {
+    // Corroborates the rejectHandler finding from the opposite side: across a whole compile, TypeScript
+    // issued exactly the four lifecycle requests and nothing else.
+    assert(inbound.length === 4, `${inbound.length} inbound frames: ${methods.join(",")}`);
+    return "4 frames, all lifecycle";
+  });
 
   record("raw frames", "");
   for (const f of frames) console.log(`    ${f.dir} ${JSON.stringify(f.msg)}`);

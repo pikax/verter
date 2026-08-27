@@ -43,7 +43,7 @@
 //! not a carrier) is left [`SpecifierRewrite::Unchanged`].
 //!
 //! Carrier-path classification is the registry-derived
-//! [`verter_workspace::path_is_carrier`] / `CARRIER_API_VIRTUAL_SUFFIX` authority —
+//! [`verter_semantic::resolver_core::path_is_carrier`] / `CARRIER_API_VIRTUAL_SUFFIX` authority —
 //! never an ad-hoc string match. A new carrier extension extends the registry, not
 //! this module.
 
@@ -170,7 +170,7 @@ fn classify_specifier(specifier: &str, ctx: &SpecifierRewriteCtx<'_>) -> Specifi
     };
     let mut matched: Option<String> = None;
     let mut match_count = 0usize;
-    for ext in verter_workspace::carrier_source_extensions() {
+    for ext in verter_semantic::resolver_core::carrier_source_extensions() {
         // The candidate carrier SOURCE path the bare specifier would resolve to.
         let candidate = join_relative(&target_dir, specifier);
         let candidate = format!("{candidate}.{ext}");
@@ -192,15 +192,17 @@ fn classify_specifier(specifier: &str, ctx: &SpecifierRewriteCtx<'_>) -> Specifi
 /// Strips a `.tsx`/`.jsx` IDE-companion suffix, the `.verter.ts` API-carrier
 /// suffix, or a `.d.<ext>.ts` DECLARATION-carrier suffix, and keeps the result
 /// only when the (reconstructed) stem is a registry-classified carrier path
-/// ([`verter_workspace::path_is_carrier`]). A non-carrier specifier (a plain
+/// ([`verter_semantic::resolver_core::path_is_carrier`]). A non-carrier specifier (a plain
 /// `./utils`, a `.svelte.ts` rune module whose stem `./store.svelte` is itself a
 /// carrier extension but which is a rune — NOT a `.svelte.tsx` companion nor a
 /// `.d.svelte.ts` declaration — and a bare `./types.d.ts` whose stem is not a
 /// carrier) yields `None`.
 fn bare_carrier_companion(specifier: &str) -> Option<String> {
     // API carrier: `./Comp.vue.verter.ts` → `./Comp.vue`.
-    if let Some(stem) = specifier.strip_suffix(verter_workspace::CARRIER_API_VIRTUAL_SUFFIX) {
-        if verter_workspace::path_is_carrier(stem) {
+    if let Some(stem) =
+        specifier.strip_suffix(verter_semantic::resolver_core::CARRIER_API_VIRTUAL_SUFFIX)
+    {
+        if verter_semantic::resolver_core::path_is_carrier(stem) {
             return Some(stem.to_string());
         }
         return None;
@@ -212,10 +214,10 @@ fn bare_carrier_companion(specifier: &str) -> Option<String> {
     // carrier — so a bare `./types.d.ts` (no carrier extension in the middle) and
     // a `.svelte.ts` rune (no `.d.` infix) are left alone. The carrier extension
     // is the registry authority, never a hardcoded literal.
-    for ext in verter_workspace::carrier_source_extensions() {
+    for ext in verter_semantic::resolver_core::carrier_source_extensions() {
         if let Some(stem) = specifier.strip_suffix(&format!(".d.{ext}.ts")) {
             let carrier_source = format!("{stem}.{ext}");
-            if verter_workspace::path_is_carrier(&carrier_source) {
+            if verter_semantic::resolver_core::path_is_carrier(&carrier_source) {
                 return Some(carrier_source);
             }
         }
@@ -223,7 +225,7 @@ fn bare_carrier_companion(specifier: &str) -> Option<String> {
     // IDE companion: `./Comp.vue.tsx` / `./Comp.svelte.jsx` → bare carrier.
     for ext in [".tsx", ".jsx"] {
         if let Some(stem) = specifier.strip_suffix(ext) {
-            if verter_workspace::path_is_carrier(stem) {
+            if verter_semantic::resolver_core::path_is_carrier(stem) {
                 return Some(stem.to_string());
             }
         }
