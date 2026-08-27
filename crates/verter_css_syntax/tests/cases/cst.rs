@@ -1584,6 +1584,254 @@ fn sass_and_stylus_cst_construct_coverage_parity_with_css_and_less() {
         kinds.iter().filter(|found| **found == kind).count()
     }
 
+    // ── the CLOSED Native construct set ──
+    //
+    // Everything below this block is a hand-selected fixture. Hand-selected
+    // fixtures, however many, are a SAMPLE: a construct nobody wrote a
+    // fixture for — or one whose Sass/Stylus behaviour silently diverges from
+    // Css/Less outside the sampled shapes — coexists with a green run. This
+    // block replaces the sample with the ENUMERATED universe. `SyntaxKind` is
+    // the closed set of constructs the Native parser can produce, and
+    // `coverage` matches over it EXHAUSTIVELY, so a new variant is a
+    // compile error (`E0004`) until it is dispositioned here — there is no
+    // way to add a construct and leave it unobserved.
+    //
+    // Two dispositions, and only two:
+    //
+    //   `Symmetric`  — all five dialects must produce byte-identical node
+    //                  shape from one fixture. This is the parity the suite
+    //                  claims.
+    //   `PerDialect` — the construct's surface syntax or its owning parser
+    //                  genuinely differs by dialect (indented layout blocks,
+    //                  each preprocessor's own interpolation and variable
+    //                  spellings). Each producing dialect names its own
+    //                  fixture, AND every dialect NOT named is required to
+    //                  produce the construct from NONE of those fixtures —
+    //                  so this disposition cannot be used to wave an
+    //                  asymmetry through; it pins the asymmetry's exact
+    //                  shape instead.
+
+    type Case = (CssDialect, &'static str, CssEntryPoint, CssParseMode);
+
+    enum Coverage {
+        Symmetric(&'static str, CssEntryPoint, CssParseMode),
+        PerDialect(&'static str, &'static [Case]),
+    }
+
+    // Exhaustive over `SyntaxKind` — the compile-time closure of the universe.
+    fn coverage(kind: SyntaxKind) -> Coverage {
+        use CssDialect::{Less, Sass, Scss, Stylus};
+        use CssEntryPoint::{ComponentValueList, SelectorList, Stylesheet};
+        use CssParseMode::{Recover, Strict};
+
+        const BASIC: &str = "div.a#b { color: red; }";
+        const RICH_SELECTOR: &str = "svg|a > .b + [x=\"y\"] ~ .c { color: red; }";
+        const PSEUDOS: &str =
+            "a:hover::before:is(.x):nth-child(2n+1 of .y):unknownfn(z) { color: red; }";
+        const INDENTED: &str = ".a\n  color: red\n";
+        const MIXIN_BRACED: &str = "@mixin m($a) { color: $a; }";
+        const CONTROL_BRACED: &str = "@if $x { .a { color: red; } }";
+        const CONTROL_INDENTED: &str = "@if $x\n  .a\n    color: red\n";
+
+        match kind {
+            SyntaxKind::Stylesheet
+            | SyntaxKind::QualifiedRule
+            | SyntaxKind::RuleBlock
+            | SyntaxKind::Declaration
+            | SyntaxKind::ComponentValueList
+            | SyntaxKind::Selector
+            | SyntaxKind::CompoundSelector
+            | SyntaxKind::ClassSelector
+            | SyntaxKind::IdSelector
+            | SyntaxKind::TypeSelector => Coverage::Symmetric(BASIC, Stylesheet, Strict),
+            SyntaxKind::SelectorList => Coverage::Symmetric(".a, .b", SelectorList, Strict),
+            SyntaxKind::Combinator
+            | SyntaxKind::NamespaceSelector
+            | SyntaxKind::AttributeSelector => {
+                Coverage::Symmetric(RICH_SELECTOR, Stylesheet, Strict)
+            }
+            SyntaxKind::NestingSelector => {
+                Coverage::Symmetric(".a { & .b { color: red; } }", Stylesheet, Strict)
+            }
+            SyntaxKind::PseudoClass
+            | SyntaxKind::PseudoElement
+            | SyntaxKind::PseudoSelectorList
+            | SyntaxKind::NthSelector
+            | SyntaxKind::NthOfSelectorList
+            | SyntaxKind::UnknownPseudoFunction => Coverage::Symmetric(PSEUDOS, Stylesheet, Strict),
+            SyntaxKind::CustomPropertyDeclaration => {
+                Coverage::Symmetric(".a { --x: 1; }", Stylesheet, Strict)
+            }
+            SyntaxKind::ComponentValueBlock | SyntaxKind::Function => Coverage::Symmetric(
+                ".a { color: rgb(1,2,3); grid: { x: y }; }",
+                Stylesheet,
+                Strict,
+            ),
+            SyntaxKind::GroupAtRule | SyntaxKind::AtRulePrelude | SyntaxKind::AtRuleBlock => {
+                Coverage::Symmetric("@media screen { .a { color: red; } }", Stylesheet, Strict)
+            }
+            SyntaxKind::DescriptorAtRule => {
+                Coverage::Symmetric("@property --x { syntax: \"*\"; }", Stylesheet, Strict)
+            }
+            SyntaxKind::KeyframesAtRule => {
+                Coverage::Symmetric("@keyframes k { from { opacity: 0; } }", Stylesheet, Strict)
+            }
+            SyntaxKind::UnknownAtRule => {
+                Coverage::Symmetric("@future x { foo; }", Stylesheet, Strict)
+            }
+            // Recovery is symmetric at the component-value entry point, which
+            // no dialect routes through the layout parser.
+            SyntaxKind::Recovery => Coverage::Symmetric("/*", ComponentValueList, Recover),
+
+            SyntaxKind::Interpolation => Coverage::PerDialect(
+                "each preprocessor spells interpolation differently, and plain CSS has none",
+                &[
+                    (Scss, ".a-#{$x} { color: red; }", Stylesheet, Strict),
+                    (Sass, ".a-#{$x} { color: red; }", Stylesheet, Strict),
+                    (Less, ".a-@{x} { color: red; }", Stylesheet, Strict),
+                    (Stylus, ".a-${x} { color: red; }", Stylesheet, Strict),
+                ],
+            ),
+            SyntaxKind::IndentedBlock => Coverage::PerDialect(
+                "plain CSS has no indentation-delimited block; Sass and Stylus are ALWAYS \
+                 routed through the layout parser, and Scss and Less reach it for brace-free \
+                 indented input",
+                &[
+                    (Scss, INDENTED, Stylesheet, Strict),
+                    (Less, INDENTED, Stylesheet, Strict),
+                    (Sass, INDENTED, Stylesheet, Strict),
+                    (Stylus, INDENTED, Stylesheet, Strict),
+                ],
+            ),
+            SyntaxKind::VariableDeclaration => Coverage::PerDialect(
+                "the layout parser classifies preprocessor variable assignment as its own \
+                 statement; the direct parser reads the same bytes as an ordinary declaration",
+                &[
+                    (Sass, "$x: red;", Stylesheet, Strict),
+                    (Stylus, "x = red;", Stylesheet, Strict),
+                ],
+            ),
+            SyntaxKind::MixinOrFunctionHeader => Coverage::PerDialect(
+                "a mixin/function header is a layout-parser statement kind: plain CSS never \
+                 reaches that parser, and Less reaches it only for the brace-free indented form",
+                &[
+                    (Scss, MIXIN_BRACED, Stylesheet, Strict),
+                    (Sass, "@mixin m($a)\n  color: $a\n", Stylesheet, Strict),
+                    (Less, "@mixin m($a)\n  color: $a\n", Stylesheet, Strict),
+                    (Stylus, "m(a)\n  color: a\n", Stylesheet, Strict),
+                ],
+            ),
+            SyntaxKind::ControlDirective => Coverage::PerDialect(
+                "a control directive is a layout-parser statement kind: plain CSS never \
+                 reaches that parser and reads the at-keyword as an unknown at-rule, while \
+                 Less reaches it only for the brace-free indented form",
+                &[
+                    (Scss, CONTROL_BRACED, Stylesheet, Strict),
+                    (Sass, CONTROL_INDENTED, Stylesheet, Strict),
+                    (Less, CONTROL_INDENTED, Stylesheet, Strict),
+                    (Stylus, CONTROL_INDENTED, Stylesheet, Strict),
+                ],
+            ),
+            SyntaxKind::AmbiguousStatement => Coverage::PerDialect(
+                "`AmbiguousStatement` is the layout parser's own vocabulary for a statement it \
+                 cannot classify; the direct parser reports its own diagnostic and recovers",
+                &[
+                    (Sass, "$tone junk: red;", Stylesheet, Recover),
+                    (Stylus, "foo bar baz\n", Stylesheet, Recover),
+                ],
+            ),
+        }
+    }
+
+    fn parse_kinds(
+        input: &str,
+        dialect: CssDialect,
+        entry: CssEntryPoint,
+        mode: CssParseMode,
+    ) -> Vec<SyntaxKind> {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let cst = parse_lossless(source, dialect, entry, mode)
+            .unwrap_or_else(|error| panic!("{dialect:?} failed to parse {input:?}: {error:?}"));
+        assert_eq!(
+            cst.reconstruct(),
+            input,
+            "{dialect:?}: {input:?} is not lossless"
+        );
+        cst.nodes().iter().map(SyntaxNode::kind).collect()
+    }
+
+    // The enumeration itself must be complete. `SyntaxKind::from_raw` maps
+    // every real discriminant back to itself and folds everything else onto
+    // `Recovery`, so a raw value that round-trips is a real variant: the loop
+    // below walks discriminants until one stops round-tripping, and that
+    // boundary IS the variant count. Adding a variant moves the boundary and
+    // grows `every_kind` automatically — this is not a hand-maintained list.
+    let mut every_kind = Vec::new();
+    for raw in 0u16.. {
+        let kind = SyntaxKind::from_raw(raw);
+        if kind as u16 != raw {
+            break;
+        }
+        every_kind.push(kind);
+    }
+    assert!(
+        every_kind.len() > 30,
+        "the discriminant walk must have found the real variant set, got {}",
+        every_kind.len()
+    );
+
+    for kind in every_kind {
+        match coverage(kind) {
+            Coverage::Symmetric(source, entry, mode) => {
+                let reference = parse_kinds(source, CssDialect::Css, entry, mode);
+                assert!(
+                    reference.contains(&kind),
+                    "{kind:?} is dispositioned Symmetric over {source:?}, but that fixture \
+                     does not produce it: {reference:?}"
+                );
+                for dialect in DIALECTS {
+                    assert_eq!(
+                        parse_kinds(source, dialect, entry, mode),
+                        reference,
+                        "{dialect:?} diverges from Css on {source:?} — the fixture covering \
+                         {kind:?} is not symmetric"
+                    );
+                }
+            }
+            Coverage::PerDialect(reason, cases) => {
+                assert!(!reason.is_empty() && !cases.is_empty(), "{kind:?}");
+                let producing: Vec<CssDialect> =
+                    cases.iter().map(|(dialect, ..)| *dialect).collect();
+                for (dialect, source, entry, mode) in cases.iter().copied() {
+                    assert!(
+                        parse_kinds(source, dialect, entry, mode).contains(&kind),
+                        "{kind:?} is dispositioned PerDialect with a {dialect:?} fixture \
+                         {source:?} that does not produce it"
+                    );
+                    // The disposition is not a loophole: every dialect NOT
+                    // named must fail to produce the construct from this very
+                    // fixture. A construct that is really symmetric cannot be
+                    // parked here, and a dialect that silently gains the
+                    // construct is caught.
+                    for other in DIALECTS.into_iter().filter(|d| !producing.contains(d)) {
+                        // A dialect that cannot parse the fixture at all
+                        // trivially does not produce the construct; one that
+                        // parses it must not produce it either.
+                        let produced = CssSource::new(Arc::from(source), 0)
+                            .ok()
+                            .and_then(|css| parse_lossless(css, other, entry, mode).ok())
+                            .is_some_and(|cst| cst.nodes().iter().any(|node| node.kind() == kind));
+                        assert!(
+                            !produced,
+                            "{other:?} is not listed as producing {kind:?}, yet it produces \
+                             one from {source:?} — the disposition is stale"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // A custom property whose value is a balanced `{ ... }` block stays exactly what it is in
     // Css/Scss/Less: one opaque, lossless value block under one CustomPropertyDeclaration, not a
     // nested statement list. This is the regression case: before the layout parser distinguished
