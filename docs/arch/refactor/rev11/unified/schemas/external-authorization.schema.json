@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Candidate-bound external authorization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "type", "authorization", "node_id", "candidate_sha", "candidate_tree", "authority_sha256", "granted_by", "ratification_path", "ratification_receipt_sha256", "expires_at", "grant_mode", "directive_scope", "payload_sha256"],
+  "properties": {
+    "schema": { "const": 2 },
+    "type": { "const": "external-authorization" },
+    "authorization": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "node_id": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidate_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "authority_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "granted_by": { "type": "string", "minLength": 1 },
+    "ratification_path": { "type": "string", "pattern": "^(?:authority/state/ratification-receipts/[A-Za-z0-9._/-]+|sources/maintainer-directive-2026-08-27\\.md)$" },
+    "ratification_receipt_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "expires_at": { "type": "string", "minLength": 1 },
+    "grant_mode": { "type": "string", "enum": ["EXTERNAL_CUSTODY", "MAINTAINER_DIRECTIVE_FINALIZED_CANDIDATE"] },
+    "directive_scope": { "type": "string" },
+    "payload_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

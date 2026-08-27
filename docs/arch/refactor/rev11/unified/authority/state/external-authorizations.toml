@@ -1,0 +1,11 @@
+schema = 2
+
+[[authorization]]
+node_id = "ORC0"
+authorization = "maintainer_unified_v2_activation"
+granted_by = "maintainer-task-thread-2026-08-27"
+ratification_path = "sources/maintainer-directive-2026-08-27.md"
+ratification_receipt_sha256 = "1865ad8cbb565906066f49675e1bbfa656476f3a746aebd3d497adf133e91e9b"
+expires_at = "never"
+grant_mode = "MAINTAINER_DIRECTIVE_FINALIZED_CANDIDATE"
+directive_scope = "unified-v2-orc0-activation-only"

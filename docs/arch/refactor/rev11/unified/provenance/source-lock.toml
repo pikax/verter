@@ -1,0 +1,20 @@
+schema = 2
+pinned_commit = "5a8ca4a391ea6d748f2891f1e39de6aaeec7987e"
+pinned_tree = "7ab8e3317fb8c8a15b7d63c6114a76f79f79f46d"
+[[source]]
+id = "compiler"
+path = "sources/compiler-proposal.md"
+bytes = 99950
+sha256 = "4637471d1a125bb238cc1c3c0c15e40466bfe452a2d17418799beb1a894e7a0f"
+
+[[source]]
+id = "expansion"
+path = "sources/successor-expansion.md"
+bytes = 186036
+sha256 = "2feb8e12939820e1d5fc64de495dc84ea2fe278225123f86f20cd2a54b6a1bcc"
+
+[[source]]
+id = "findings"
+path = "sources/orchestration-findings.md"
+bytes = 38157
+sha256 = "043bc2d7df2b6aef49537961922b9988440e1b30ed997ca186db38a8d8d344de"

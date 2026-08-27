@@ -1,0 +1,35 @@
+schema = 4
+module = "expansion-svelte-ce"
+pinned_commit = "5a8ca4a391ea6d748f2891f1e39de6aaeec7987e"
+pinned_tree = "7ab8e3317fb8c8a15b7d63c6114a76f79f79f46d"
+
+[[node]]
+id = "SCE0"
+name = "Svelte Custom Element producer and consumer retrofit"
+predecessors = ["HWC3","CPF1","SKL3"]
+conditional_predecessors = []
+phase = "expansion"
+train = "expansion.svelte-ce"
+product = "svelte_ce"
+kind = "terminal"
+semantic_role = "delivery"
+class = "successor"
+owner = "expansion.svelte-ce:Svelte release-profile CustomElement producer and consumer adapter"
+conflict_domains = ["svelte_custom_element_producer_and_consumer_retrofit", "svelte_product"]
+resource_class = "rust-mixed"
+gate_profile = "targeted-domain"
+review_profile = "architecture-3"
+dispatchable = true
+optional = false
+release_gating = "product"
+source_refs = ["source:successor-expansion.md:L1195"]
+external_requirements = []
+activation_gate = "ORC0"
+charter = "charters/expansion-svelte-ce/SCE0.md"
+size = "S"
+max_production_loc = 300
+max_production_files = 3
+max_related_packages = 1
+rescope_loc = 1500
+rescope_files = 12
+rescope_unrelated_packages = 3

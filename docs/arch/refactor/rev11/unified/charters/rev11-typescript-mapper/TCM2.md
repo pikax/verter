@@ -1,0 +1,118 @@
+<!-- unified-charter-v2
+id=TCM2
+name=Content-mapper projection plane (dormant until TCM4)
+phase=rev11
+train=rev11.typescript-mapper
+product=rev11
+kind=implementation
+semantic_role=delivery
+class=framework subsystem
+predecessors=TCM0R,TCM1
+conditional_predecessors=
+owner=rev11.typescript-mapper:ratified dual-plane mapper/snapshot/oracle identity contract
+conflict_domains=mapping_geometry
+resource_class=rust-mixed
+review_profile=semantic-3
+gate_profile=targeted-domain
+size=M
+dispatchable=true
+optional=false
+release_gating=none
+source_refs=live:docs/arch/refactor/rev11/charters/TCM2.md
+external_requirements=
+activation_gate=ORC0
+charter=charters/rev11-typescript-mapper/TCM2.md
+max_production_loc=800
+max_production_files=8
+max_related_packages=2
+rescope_loc=1500
+rescope_files=12
+rescope_unrelated_packages=3
+initial_state=
+-->
+
+# TCM2 — Content-mapper projection plane (dormant until TCM4)
+
+Authority state is derived at dispatch. The canonical CLI must validate the current phase, exact predecessor receipts, activation/release gates, external authorizations, and atomic admission before mutation.
+
+## Independently acceptable outcome
+
+Content-mapper projection plane (dormant until TCM4). The current owner is **rejected TCM0 closure package and string mapper plane**. The final and sole owner is **ratified dual-plane mapper/snapshot/oracle identity contract**. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
+
+## Concrete surfaces and APIs
+
+- Production surfaces: `crates/verter_type_runtime/src`, `crates/verter_session/src`, `packages/typescript-plugin/src`, `crates/verter_protocol/src`.
+- Named API/data boundaries: `CertifiedTypeEngineBinding`, `InputBasisId`, `QueryIdentity`, `SemanticFlightKey`, `ContentMapper`.
+- Mutation boundary: only the production surfaces and named API/data boundaries above; every changed path must be inside both that charter surface and the acquired conflict domain, and sibling ownership is excluded.
+
+## Exact predecessor contracts
+
+- **TCM0R:** exact current receipt ID and digest for “TypeScript dual-plane architecture and observation-identity rescope”; Git ancestry, touched-blob integration equivalence, and receipt currency must validate at dispatch and acceptance.
+- **TCM1:** exact current receipt ID and digest for “Compact mapping products inside CodeTransform”; Git ancestry, touched-blob integration equivalence, and receipt currency must validate at dispatch and acceptance.
+- **External custody:** no node-specific external authorization beyond the package activation boundary.
+
+## Source-specific scope
+
+- Deliver exactly “Content-mapper projection plane (dormant until TCM4)” as the independently acceptable boundary; no neighboring authority is included.
+
+## Acceptance IDs and discriminating proof
+
+- **TCM2-AC1 — sole-owner proof:** add `tcm2_rejects_displaced_authority`; planting any deleted route must make the targeted gate fail.
+- **TCM2-AC2 — positive contract:** add `tcm2_publishes_exact_certifiedtypeenginebinding`; assert exact identities, provenance, completeness, and deterministic ordering.
+- **TCM2-AC3 — incremental equivalence:** add `tcm2_incremental_equals_fresh`; cancellation/stale/partial outcomes must be refused from warm publication.
+- **TCM2-AC4 — bounded work:** capture equivalent-work counters for the named surfaces; no extra parse, resolve, plan, emit, copy, allocation, or retained candidate is hidden by wall time.
+- Test homes: `crates/verter_type_runtime/tests`, `crates/verter_session/tests/cases`.
+
+## Deletions and forbidden designs
+
+- Delete or structurally reject: **self-certified closure status**.
+- Delete or structurally reject: **tracked Python/POSIX control**.
+- Delete or structurally reject: **mapper callback into semantic oracle**.
+- Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
+- Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
+
+## Budgets and mandatory rescope
+
+- Target ceiling: 800 production LOC, 8 production files, 2 related crates/packages.
+- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
+- Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
+- Performance budget: equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance is 0.0% unless an owning-authority amendment supplies exact replacement thresholds; after warmup, retained bytes may not increase across 100 identical requests.
+
+## Abort conditions
+
+- Stop before mutation if current source disproves the named owner/API boundary, a predecessor receipt is stale, or the complete diff will not fit one review context.
+- Abort the candidate on unexplained output, source-map, diagnostic, cancellation, allocation, latency, or RSS divergence; do not convert it into residue locally.
+
+## Targeted verification
+
+1. `cargo nextest run -p verter_type_runtime -p verter_session -p verter_protocol`
+2. Run every final command in the bound `targeted-domain` profile on the landing-frozen candidate; targeted success alone is iteration evidence, not acceptance.
+3. Re-run the planted RED mutation, restore, then GREEN, and bind both outputs to the candidate SHA/tree.
+
+## Review and lower-severity findings
+
+Apply `semantic-3`. P0/P1 block final acceptance. A P2 may be accepted only when the currently binding owning policy explicitly authorizes that disposition and the evidence binds its stable fingerprint, named owner, class-wide bounded sweep, and next-cycle receipt; otherwise it blocks. P3 follows the currently binding owning policy and must be recorded when that policy requires it. Any post-review content change invalidates the gate and all three review verdicts. Final acceptance requires three independent PASS verdicts on the exact candidate tree; clean 3/3 means no P0/P1 and no unauthorized or undispositioned P2.
+
+## Dispatch-time immutable bindings
+
+The packet is incomplete and dispatch must fail unless it embeds: exact candidate base SHA/tree; canonical whole-authority digest; current charter digest; each source/corpus revision and excerpt digest; exact worktree and `codex/<node>` branch; the static conflict-domain path/symbol sets and acquired lease receipt; the complete gate command list; three named independent reviewers with assigned lenses, model `gpt-5.6-sol`, effort `ultra`, and report destinations; and the required report-back schema (candidate SHA/tree, changed paths, migration/deletion counts, RED/GREEN commands and outputs, gate receipt digests, review report digests, residual findings, and abort/rescope decisions). These values are derived by the canonical CLI from current authority and evidence; implementers never invent or restamp them.
+
+## Citations
+
+- `live:docs/arch/refactor/rev11/charters/TCM2.md`
+
+## TCM0 remediation receiving criteria
+
+- `TCM2-RC-PROJECTION-TOPOLOGY`: use TCM0's locked candidates, metrics, harness, and selection rule to select the measured projection topology. Bind the receipt to `TCM0-R-TOPOLOGY-SELECTION`; no generic criterion-number alias is accepted.
+- `TCM2-RC-IMPLEMENTATION-BASELINE`: before changing projection paths, capture the current-path comparison reference under the locked method; bind `TCM0-R-IMPLEMENTATION-BASELINE` without an absolute-machine threshold.
+- Bind the actual unresolved wire semantics and position-clamping rule/tests. Add introduced/orphaned records to the accumulated manifest. Direct stable-ID and digest equality are mandatory.
+
+## Transferred source requirement atoms
+
+These clauses are operative only for the exact applicability set shown. Cold packets include the exact applicable subset and its source digest.
+
+No clause targets this file directly. Applicable contract clauses are selected by the validated `applicable_nodes` ledger and embedded verbatim in cold packets.
+
+## Live authority inputs
+
+- `live:docs/arch/refactor/rev11/charters/TCM2.md` — 17982 bytes, SHA-256 `a26a3bd3003a62fdd7462997bbadb33b88d290a2f9d5b5d3377353c8598bb336`

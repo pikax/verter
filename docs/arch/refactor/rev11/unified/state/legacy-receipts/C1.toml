@@ -1,0 +1,16 @@
+schema = 2
+type = "legacy-accepted"
+node_id = "C1"
+verdict = "ACCEPTED"
+accepted_sha = "267cfd0079022dd278b2414e209f459f27d6a721"
+accepted_tree = "c1bf69e65346fe3febfd8ed9eccd27f7e5bf18fa"
+candidate_sha = "267cfd0079022dd278b2414e209f459f27d6a721"
+candidate_tree = "c1bf69e65346fe3febfd8ed9eccd27f7e5bf18fa"
+integration_sha = "267cfd0079022dd278b2414e209f459f27d6a721"
+integration_tree = "c1bf69e65346fe3febfd8ed9eccd27f7e5bf18fa"
+charter_sha256 = "fbe821349907edb716f17ef8419b417e9f5e3321da54928deaa281721d577b73"
+source_ledger_sha256 = "2b176c4c15730ff9698c73f677eb239800c1adff3891e4e77493a768ea630dee"
+predecessors = ["A6", "B1", "B2", "CM1"]
+gate_evidence = "docs/arch/refactor/rev11/evidence/C1/landing-record.md"
+review_evidence = "docs/arch/refactor/rev11/evidence/C1/reviews/c46c60c52f33784356a9f1d7fade31627486e874"
+payload_sha256 = "e0ed88e1e720f7f4fe48d41724ef696dbaf8f210521e7dd47ee3464553274a73"

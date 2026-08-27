@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Resource profile catalog",
+  "type": "object", "additionalProperties": false, "required": ["schema", "profile"],
+  "properties": { "schema": { "const": 2 }, "profile": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["id", "capacity_hint"], "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" }, "capacity_hint": { "type": "integer", "minimum": 1 }
+  } } } }
+}

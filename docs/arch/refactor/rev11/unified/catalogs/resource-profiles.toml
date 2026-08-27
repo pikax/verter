@@ -1,0 +1,11 @@
+schema = 2
+[[profile]]
+id = "docs-light"
+capacity_hint = 8
+[[profile]]
+id = "rust-mixed"
+capacity_hint = 2
+[[profile]]
+id = "ts-heavy"
+capacity_hint = 2
+# Capacity hints are scheduler inputs only and never DAG predecessors.

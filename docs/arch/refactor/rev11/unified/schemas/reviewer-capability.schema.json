@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Externally ratified immutable reviewer capability",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "type", "reviewer", "lens", "model", "reasoning_effort", "runner", "executable_path", "executable_sha256"],
+  "properties": {
+    "schema": { "const": 1 }, "type": { "const": "reviewer-capability" },
+    "reviewer": { "type": "string", "minLength": 1 }, "lens": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 }, "reasoning_effort": { "type": "string", "minLength": 1 },
+    "runner": { "const": "node" },
+    "executable_path": { "type": "string", "pattern": "^sources/reviewer-capabilities/[A-Za-z0-9._/-]+$" },
+    "executable_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

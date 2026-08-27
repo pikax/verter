@@ -1,0 +1,320 @@
+schema = 2
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/A0.md"
+path = "docs/arch/refactor/rev11/charters/A0.md"
+bytes = 1748
+sha256 = "68c2140d3be29de0b8737771aa80d30c17be7cf55aa249a7cfaa3b47f384cd21"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/A1.md"
+path = "docs/arch/refactor/rev11/charters/A1.md"
+bytes = 1393
+sha256 = "b92ef37570b804d170aac6877cd41299e236a7dcb237a6c1d50e76a7748f6d4c"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/A2.md"
+path = "docs/arch/refactor/rev11/charters/A2.md"
+bytes = 1374
+sha256 = "522787b1c6f90166b67bdbdef16b47b9cae5819a90a1e6365ceddb87b983632a"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/A2C.md"
+path = "docs/arch/refactor/rev11/charters/A2C.md"
+bytes = 1885
+sha256 = "a5ec39e05831bc495248c8b6b6a051b6a6955f1c73bc4c62cacfa4df229e469f"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/A3.md"
+path = "docs/arch/refactor/rev11/charters/A3.md"
+bytes = 4013
+sha256 = "33f92398b8d2ddd574dc5deba5ffd905fad264a93f1291189a2e4756b8082d8c"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/A4.md"
+path = "docs/arch/refactor/rev11/charters/A4.md"
+bytes = 1436
+sha256 = "207259a9cf46e1a2a6ed51a5e7ebe1552596834f51ae944e0256e96707fa7f3c"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/A5.md"
+path = "docs/arch/refactor/rev11/charters/A5.md"
+bytes = 1609
+sha256 = "ab41b90774ee093fe2cc79046ee21838ab2875f03d388155bd65a75e11b2a5f2"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/A6.md"
+path = "docs/arch/refactor/rev11/charters/A6.md"
+bytes = 1645
+sha256 = "428340c2b5148b5808a1f22124ae715b637f0a54f787f6c6d902c792b71060b4"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/B1.md"
+path = "docs/arch/refactor/rev11/charters/B1.md"
+bytes = 12614
+sha256 = "d7ee747f3adc1c045ccdc66f48c73f859d5d11d011886cb574c9e9a009967049"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/B2.md"
+path = "docs/arch/refactor/rev11/charters/B2.md"
+bytes = 1254
+sha256 = "340fc3b65f7b585cf50575800e9416094c692a27bc66014f63e6b5f357e7c01b"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/B3.md"
+path = "docs/arch/refactor/rev11/charters/B3.md"
+bytes = 2510
+sha256 = "868ff1a1c7359a8bd37438961fe90091d7923dd50dcf4b0a99a1b7783cf503e5"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/B4.md"
+path = "docs/arch/refactor/rev11/charters/B4.md"
+bytes = 974
+sha256 = "230aa885de1a8f5936bd2ca2222d8e2cd0674627cb1f7707b69e939dcd269f28"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/B5.md"
+path = "docs/arch/refactor/rev11/charters/B5.md"
+bytes = 706
+sha256 = "a8e8ca4b225f736d0421a0ce2b407ad5409adc1e3486f5588bb7e84b32d83848"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/B6.md"
+path = "docs/arch/refactor/rev11/charters/B6.md"
+bytes = 714
+sha256 = "da1d10efe380e5e01a67a7627d6af574179f0e5a926fcc3aa092aefe9b9f1a9b"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BA0.md"
+path = "docs/arch/refactor/rev11/charters/BA0.md"
+bytes = 5047
+sha256 = "0854eaa7d695a70529ead5fa68935c1ca8e6acbbe9ebabf6ffb54488e30cec04"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BCSS0.md"
+path = "docs/arch/refactor/rev11/charters/BCSS0.md"
+bytes = 3186
+sha256 = "57a1274c9d9fe3fff6efd060a0c16bd1b6a2b2fa528cb57e0654cd1521cd95a8"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BF1.md"
+path = "docs/arch/refactor/rev11/charters/BF1.md"
+bytes = 2269
+sha256 = "ef45ad3e19f74273ded8e41b43b31b239fda84b6eb13924ed887a5a5a8e6b98c"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BF2.md"
+path = "docs/arch/refactor/rev11/charters/BF2.md"
+bytes = 1914
+sha256 = "1f99cf7eda1a955ada751f075799dabc8c8ab1defda19b20375f7ca09aa5963b"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BF3.md"
+path = "docs/arch/refactor/rev11/charters/BF3.md"
+bytes = 3729
+sha256 = "e0e2600d12c1caa75fdeae51542c7d76abeb67f09c6a90c491e24e89816016cc"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BRT0.md"
+path = "docs/arch/refactor/rev11/charters/BRT0.md"
+bytes = 4781
+sha256 = "53e1d2a1aa97e41c7040f0b2662eaedda63424809a3789177d9db07b0e7cfd7f"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BS0.md"
+path = "docs/arch/refactor/rev11/charters/BS0.md"
+bytes = 4377
+sha256 = "5458417a476fefc6a88f52eb02cccd1cc0f66287995ca2994cb2b42aabf9dbf2"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BS1.md"
+path = "docs/arch/refactor/rev11/charters/BS1.md"
+bytes = 1709
+sha256 = "9789f45e8b4360aacaa8fc45fb3a108956c4862a111f0d376305658f74127090"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BV0.md"
+path = "docs/arch/refactor/rev11/charters/BV0.md"
+bytes = 4317
+sha256 = "81d54b0dc19bf743fd7e41ab40cfe73ad3ac89cc23f895e16f60cdc3ac10c0f2"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BV0A.md"
+path = "docs/arch/refactor/rev11/charters/BV0A.md"
+bytes = 18173
+sha256 = "5b58a0aa474e9e8f695c7124ecd2f3295948679dd13e1f8ce8fe0dbbedc6ee6d"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BV1.md"
+path = "docs/arch/refactor/rev11/charters/BV1.md"
+bytes = 3113
+sha256 = "64c8dfb32b7c6496761145da24209c86bc44f238c0ade2bf6b90925655cf98a4"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/BV2.md"
+path = "docs/arch/refactor/rev11/charters/BV2.md"
+bytes = 19925
+sha256 = "5f70d4d335f98ba423d1afdf76a66abfaa2a85d9fdcdeb4df0388832d1461940"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/C1.md"
+path = "docs/arch/refactor/rev11/charters/C1.md"
+bytes = 48138
+sha256 = "fbe821349907edb716f17ef8419b417e9f5e3321da54928deaa281721d577b73"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/C3.md"
+path = "docs/arch/refactor/rev11/charters/C3.md"
+bytes = 5035
+sha256 = "2f72f944eaa9400bd818b84d2408b8342eb1f3b0262ffa5d765af292ba18e909"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/C4.md"
+path = "docs/arch/refactor/rev11/charters/C4.md"
+bytes = 740
+sha256 = "c9887470558bd1d4bcc9a5ea53c8ae2ebd59ee0c450dfc4cb5ae42213e8c5927"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/CM1.md"
+path = "docs/arch/refactor/rev11/charters/CM1.md"
+bytes = 21773
+sha256 = "9b5b6f12a14a063e34cde6ff4da3b69cea91557db4d7b34278a97128a711a21a"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/F1.md"
+path = "docs/arch/refactor/rev11/charters/F1.md"
+bytes = 1876
+sha256 = "9307a23ca1ec11a6dfad4add3ff197f2b528243b498cc03a564d4392edd8ab79"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/F2.md"
+path = "docs/arch/refactor/rev11/charters/F2.md"
+bytes = 1923
+sha256 = "03bd453079b2ad372263d2189ca49b19a4c9957de720cf185956bb46ccd95f07"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/G2.md"
+path = "docs/arch/refactor/rev11/charters/G2.md"
+bytes = 8408
+sha256 = "6ffc1d2ea3190d588b813fa35da15fe6b2626c7cb05de2c0b1bfd9fb0fb13f02"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/G3.md"
+path = "docs/arch/refactor/rev11/charters/G3.md"
+bytes = 3094
+sha256 = "c42ef62957c1867b1567daec26744ff56f4c34922f70a1e009f1bc08eb7f5913"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/G5.md"
+path = "docs/arch/refactor/rev11/charters/G5.md"
+bytes = 3638
+sha256 = "f0e8bdbcd45158ff94353eaaf7d5346ad1ea41fc7948e9d8c95b18b5ffd1bf64"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/H2.md"
+path = "docs/arch/refactor/rev11/charters/H2.md"
+bytes = 10376
+sha256 = "15101129614bb54c28a0bdcae6f480fed830d3febc292a8f2373bc33f6c123a2"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/H3.md"
+path = "docs/arch/refactor/rev11/charters/H3.md"
+bytes = 6989
+sha256 = "cb0357265f86039322e167e2c03b76f1b50ebfd2c5c2e50a2e0a7ba50b13c153"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/J1.md"
+path = "docs/arch/refactor/rev11/charters/J1.md"
+commit = "6a6c3c1a83709f7a58918e5b4e3d1eedcbd3ddac"
+bytes = 99603
+sha256 = "6728ab98e91de2d20d99a818cb17a7daf04351f2bf149c8e31316250ea66f522"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/K3.md"
+path = "docs/arch/refactor/rev11/charters/K3.md"
+bytes = 72145
+sha256 = "7c2fb1ac70e9a3068958ec8a4962c8361790767de37523cd97e603febad10033"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/L1.md"
+path = "docs/arch/refactor/rev11/charters/L1.md"
+bytes = 1506
+sha256 = "e67809e740488c36e659c7c2971faea8411211b02b78fb67d422d9845ee85a91"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/L2.md"
+path = "docs/arch/refactor/rev11/charters/L2.md"
+bytes = 1765
+sha256 = "d203934306a62033e06ec050082389dd2477c40a710bb8c769775b280b1f091b"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/TCM0.md"
+path = "docs/arch/refactor/rev11/charters/TCM0.md"
+bytes = 6916
+sha256 = "2ea41dd85befd978e06364d952eb3b262c9b6edba1f1ac8ce37eba9845b91e97"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/TCM1.md"
+path = "docs/arch/refactor/rev11/charters/TCM1.md"
+bytes = 25715
+sha256 = "36ce3e91698f630e1744ee5964ce4241ed46561478b57402e13994aeb5f57b46"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/TCM2.md"
+path = "docs/arch/refactor/rev11/charters/TCM2.md"
+bytes = 17982
+sha256 = "a26a3bd3003a62fdd7462997bbadb33b88d290a2f9d5b5d3377353c8598bb336"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/TCM3.md"
+path = "docs/arch/refactor/rev11/charters/TCM3.md"
+bytes = 18634
+sha256 = "b9add050be307cd3ff369453f164b78e8a58adb30df1c5e9ead98f8951b7e54c"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/charters/TCM4.md"
+path = "docs/arch/refactor/rev11/charters/TCM4.md"
+bytes = 17266
+sha256 = "2ab8d379f94e407a62fafa2a24f216452b13cea867bdcb196c45f7acc1063115"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/evidence/C1/C1-exact-candidate-record.md"
+path = "docs/arch/refactor/rev11/evidence/C1/C1-exact-candidate-record.md"
+bytes = 1887
+sha256 = "92158d3f4a7906a13d548ed376efd039570ed471a19ff95c0e3aa47c4733c86d"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/evidence/J1/context-packet.md"
+path = "docs/arch/refactor/rev11/evidence/J1/context-packet.md"
+bytes = 4917
+sha256 = "5c9608374050013521dade823208acec8ee827f10830eaaec93bf2c9a753a7ad"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/program-dag.toml"
+path = "docs/arch/refactor/rev11/program-dag.toml"
+bytes = 9506
+sha256 = "5fbd1dca2126c38514a12fc52149bd2d53b3ba7cb461d9f6d3595b54bae380f1"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-TCM0-REMEDIATION.md"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-TCM0-REMEDIATION.md"
+bytes = 20062
+sha256 = "d5aca4b4b5c42a82bfb77f1cc9a91074004c6876a7532850306622b703ff66c7"
+
+[[source]]
+ref = "live:docs/arch/architecture-lock/ledger/program-state.toml"
+path = "docs/arch/architecture-lock/ledger/program-state.toml"
+bytes = 184386
+sha256 = "2b176c4c15730ff9698c73f677eb239800c1adff3891e4e77493a768ea630dee"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY.md"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-AC5-GAP3-AUTHORITY.md"
+bytes = 11042
+sha256 = "7b26645f49a62a7c5de06c6630a87f0d934ae06898c98aedf6a7e46c600ee2de"
+
+[[source]]
+ref = "live:docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY.md"
+path = "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-PERFORMANCE-AUTHORITY.md"
+bytes = 17854
+sha256 = "c969bc5962d2ec6ee1a8cd3d5cad7a37b2acf5a0a2d8e4b37549fb097dcd64f6"

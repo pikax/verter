@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "title": "Acceptance receipt",
+  "required": ["schema", "type", "node_id", "verdict", "base_sha", "candidate_sha", "candidate_tree", "integration_sha", "integration_tree", "authority_sha256", "charter_sha256", "activation_receipt", "predecessor_receipts", "opened_conditionals", "conditional_predecessor_receipts", "external_authorizations", "lease_receipt", "dispatch_receipt", "finalization_receipt", "lease_holder", "candidate_ref", "changed_paths", "gate_receipts", "review_receipts", "accepted_at", "accepted_by", "payload_sha256"],
+  "properties": {
+    "schema": {
+      "const": 2
+    },
+    "type": {
+      "const": "v2-acceptance"
+    },
+    "node_id": {
+      "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$"
+    },
+    "verdict": {
+      "const": "ACCEPTED"
+    },
+    "base_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidate_sha": {
+      "type": "string", "pattern": "^[0-9a-f]{40}$"
+    },
+    "candidate_tree": {
+      "type": "string", "pattern": "^[0-9a-f]{40}$"
+    },
+    "integration_sha": {
+      "type": "string", "pattern": "^[0-9a-f]{40}$"
+    },
+    "integration_tree": {
+      "type": "string", "pattern": "^[0-9a-f]{40}$"
+    },
+    "authority_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "charter_sha256": {
+      "type": "string", "pattern": "^[0-9a-f]{64}$"
+    },
+    "activation_receipt": { "type": "string", "pattern": "^(?:|ORC0:[0-9a-f]{64})$" },
+    "predecessor_receipts": {
+      "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*:[0-9a-f]{64}$" }
+    },
+    "opened_conditionals": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" } },
+    "conditional_predecessor_receipts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*:[0-9a-f]{64}$" } },
+    "external_authorizations": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*:[0-9a-f]{64}$" } },
+    "lease_receipt": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[0-9a-f]{64}$" },
+    "dispatch_receipt": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[0-9a-f]{64}$" },
+    "finalization_receipt": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[0-9a-f]{64}$" },
+    "lease_holder": { "type": "string", "minLength": 1 },
+    "candidate_ref": { "type": "string", "pattern": "^refs/[A-Za-z0-9._/-]+$" },
+    "changed_paths": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$" } },
+    "gate_receipts": { "type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[0-9a-f]{64}$" } },
+    "review_receipts": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[0-9a-f]{64}$" } },
+    "accepted_at": { "type": "string", "format": "date-time" },
+    "accepted_by": { "type": "string", "minLength": 1 },
+    "payload_sha256": {
+      "type": "string", "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

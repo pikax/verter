@@ -1,0 +1,21 @@
+schema = 2
+[[profile]]
+id = "targeted-domain"
+iteration = true
+final = ["node scripts/gate.mjs"]
+[[profile]]
+id = "ts-domain"
+iteration = true
+final = ["pnpm -r test"]
+[[profile]]
+id = "docs-domain"
+iteration = true
+final = ["node docs/arch/refactor/rev11/unified/tools/run-docs-gate.mjs"]
+[[profile]]
+id = "canonical"
+iteration = true
+final = ["node scripts/gate.mjs", "cargo clippy --workspace --all-targets -- -D warnings", "node docs/arch/refactor/rev11/unified/tools/validate-program-dag.mjs --strict", "node docs/arch/refactor/rev11/unified/tools/validate-negative-controls.mjs"]
+[[profile]]
+id = "legacy-receipt"
+iteration = false
+final = []

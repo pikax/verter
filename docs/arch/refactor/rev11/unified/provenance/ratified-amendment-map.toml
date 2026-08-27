@@ -1,0 +1,4 @@
+schema = 1
+source = "sources/successor-expansion.md"
+source_sha256 = "2feb8e12939820e1d5fc64de495dc84ea2fe278225123f86f20cd2a54b6a1bcc"
+amendment = []

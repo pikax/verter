@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Candidate-independent trusted ratification slots",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "slot"],
+  "properties": {
+    "schema": { "const": 2 },
+    "slot": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["purpose", "ratified_by", "receipt_path", "receipt_sha256"],
+        "properties": {
+          "purpose": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+          "ratified_by": { "type": "string", "minLength": 1 },
+          "receipt_path": { "type": "string", "pattern": "^authority/state/ratification-receipts/[A-Za-z0-9][A-Za-z0-9._-]*$" },
+          "receipt_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}
