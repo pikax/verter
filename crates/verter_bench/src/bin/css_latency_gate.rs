@@ -20,7 +20,8 @@ use std::collections::BTreeSet;
 use std::process::ExitCode;
 
 use verter_bench::css_gate::{
-    build_is_optimized, compare_records, run_capture, AllocHooks, ComparePolicy, CssBaselineRecord,
+    build_is_optimized, compare_records, compiled_binary_identity, run_capture, AllocHooks,
+    ComparePolicy, CssBaselineRecord,
 };
 use verter_bench::css_identities::identity_universe;
 
@@ -82,9 +83,9 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 // =============================================================================
 
 const USAGE: &str = "usage:
-  css_latency_gate capture --out <path> [--pipeline <discriminant>] [--allow-unoptimized]
+  css_latency_gate capture --out <path> [--pipeline <discriminant>] [--allow-unoptimized] [--allow-dirty]
   css_latency_gate compare --baseline <path> --candidate <path> [--expect-transition <from>:<to>]
-  css_latency_gate gate --baseline <path> --out <path> [--pipeline <discriminant>] [--expect-transition <from>:<to>] [--allow-unoptimized]
+  css_latency_gate gate --baseline <path> --out <path> [--pipeline <discriminant>] [--expect-transition <from>:<to>] [--allow-unoptimized] [--allow-dirty]
 
 capture measures the shared benchmark-identity universe against the style
 pipeline compiled into this binary and writes a provenance-stamped record;
@@ -143,6 +144,14 @@ fn capture_record(args: &[String]) -> Result<(String, CssBaselineRecord), ExitCo
         );
         return Err(ExitCode::from(3));
     }
+    let compiled = compiled_binary_identity();
+    if compiled.dirty && !args.iter().any(|a| a == "--allow-dirty") {
+        eprintln!(
+            "REFUSED: this binary was built from a dirty git tree ({}). Recapture from a              clean checkout, or pass --allow-dirty for a throwaway local run.",
+            compiled.commit_sha
+        );
+        return Err(ExitCode::from(3));
+    }
 
     let hooks = AllocHooks {
         reset: reset_alloc_counter,
@@ -184,11 +193,16 @@ fn compare(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
 
+    let required = compiled_binary_identity();
     let policy = match arg_value(args, "--expect-transition") {
-        None => ComparePolicy::default(),
+        None => ComparePolicy {
+            required_candidate_binary: Some(required.clone()),
+            ..ComparePolicy::default()
+        },
         Some(spec) => match spec.split_once(':') {
             Some((from, to)) if !from.is_empty() && !to.is_empty() => ComparePolicy {
                 allowed_pipeline_transition: Some((from.to_string(), to.to_string())),
+                required_candidate_binary: Some(required),
             },
             _ => {
                 eprintln!("--expect-transition takes <from>:<to>\n{USAGE}");

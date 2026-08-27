@@ -105,6 +105,10 @@ pub struct Provenance {
     pub load_avg_before: String,
     pub load_avg_after: String,
     pub captured_at_utc: String,
+    /// True when the compiling git tree was dirty. Default false so a
+    /// pre-field record round-trips without changing its integrity digest.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub compiled_dirty: bool,
 }
 
 /// Wall-clock + allocation measurement of one benchmark identity.
@@ -120,6 +124,13 @@ pub struct IdentityMeasurement {
     pub wall_ns_max: u64,
     pub alloc_count: u64,
     pub alloc_bytes: u64,
+    /// SHA-256 of the measured input bytes. Empty on pre-field records.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub input_sha256: String,
+    /// Fingerprint of the measured operation (inputs/options). Empty on
+    /// pre-field records.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub operation: String,
 }
 
 /// Allocation count for one generator category under the canary protocol.
@@ -143,17 +154,25 @@ pub struct CssBaselineRecord {
 
 /// Compute the self-integrity digest of `record` (its canonical JSON with the
 /// `integrity` field emptied).
-pub fn integrity_digest(record: &CssBaselineRecord) -> String {
-    let mut unsealed = record.clone();
-    unsealed.integrity = String::new();
-    let json = serde_json::to_string(&unsealed).expect("record serializes");
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(json.as_bytes());
+    hasher.update(bytes);
     hasher
         .finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+pub fn integrity_digest(record: &CssBaselineRecord) -> String {
+    let mut unsealed = record.clone();
+    unsealed.integrity = String::new();
+    let json = serde_json::to_string(&unsealed).expect("record serializes");
+    sha256_hex(json.as_bytes())
 }
 
 /// Seal `record` by writing its self-integrity digest.
@@ -173,6 +192,30 @@ pub struct ComparePolicy {
     /// baseline vs new pipeline candidate) must declare the exact transition
     /// `(baseline_pipeline, candidate_pipeline)` here; anything else refuses.
     pub allowed_pipeline_transition: Option<(String, String)>,
+    /// When set, the candidate must have been captured by this compiled
+    /// gate binary (commit/tree/source digests) and must not be dirty.
+    pub required_candidate_binary: Option<CompiledBinaryIdentity>,
+}
+
+/// Compile-time identity of the measuring binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledBinaryIdentity {
+    pub commit_sha: String,
+    pub tree_object_id: String,
+    pub dirty: bool,
+    pub css_bench_digest: String,
+    pub css_identities_digest: String,
+}
+
+/// Provenance baked into this binary at compile time, not live git metadata.
+pub fn compiled_binary_identity() -> CompiledBinaryIdentity {
+    CompiledBinaryIdentity {
+        commit_sha: env!("VERTER_BENCH_COMMIT_SHA").to_string(),
+        tree_object_id: env!("VERTER_BENCH_TREE_ID").to_string(),
+        dirty: env!("VERTER_BENCH_DIRTY") == "1",
+        css_bench_digest: sha256_hex(include_bytes!("../benches/css_bench.rs")),
+        css_identities_digest: sha256_hex(include_bytes!("css_identities.rs")),
+    }
 }
 
 /// One per-identity gate row of a successful comparison.
@@ -277,6 +320,38 @@ pub fn compare_records(
             b.load_thermal_policy, c.load_thermal_policy
         ));
     }
+    if let Some(required) = &policy.required_candidate_binary {
+        if c.commit_sha != required.commit_sha {
+            failures.push(format!(
+                "candidate compiled commit mismatch: record {:?} vs binary {:?}",
+                c.commit_sha, required.commit_sha
+            ));
+        }
+        if c.tree_object_id != required.tree_object_id {
+            failures.push(format!(
+                "candidate compiled tree mismatch: record {:?} vs binary {:?}",
+                c.tree_object_id, required.tree_object_id
+            ));
+        }
+        if c.css_bench_blob != required.css_bench_digest {
+            failures.push(format!(
+                "candidate css_bench digest mismatch: record {:?} vs compiled binary {:?}",
+                c.css_bench_blob, required.css_bench_digest
+            ));
+        }
+        if c.css_identities_blob != required.css_identities_digest {
+            failures.push(format!(
+                "candidate css_identities digest mismatch: record {:?} vs compiled binary {:?}",
+                c.css_identities_blob, required.css_identities_digest
+            ));
+        }
+        if c.compiled_dirty || required.dirty {
+            failures.push(
+                "candidate was captured from a dirty compiled tree; refuse mismatched/dirty builds"
+                    .to_string(),
+            );
+        }
+    }
 
     // Stage 3: pipeline discriminant policy.
     match &policy.allowed_pipeline_transition {
@@ -347,13 +422,97 @@ pub fn compare_records(
         return Err(failures);
     }
 
-    // Stage 5: per-identity wall-clock ceiling. Integer math, no rounding:
-    // cand * 10 <= base * 12.
+    // Stage 4b: immutable per-identity workload (inputs/ops) against the
+    // compiled-in universe and across the two records. Identity names matching
+    // is not enough — a transition that rewrites generators could keep names
+    // while changing the bytes or the measured op.
+    let universe_cases = universe();
+    let universe_by_id: std::collections::BTreeMap<String, &crate::css_identities::CssBenchCase> =
+        universe_cases
+            .iter()
+            .map(|case| (case.identity(), case))
+            .collect();
     let baseline_by_id: std::collections::BTreeMap<&str, &IdentityMeasurement> = baseline
         .identities
         .iter()
         .map(|m| (m.identity.as_str(), m))
         .collect();
+    for (label, record) in [("baseline", baseline), ("candidate", candidate)] {
+        for row in &record.identities {
+            let Some(case) = universe_by_id.get(&row.identity) else {
+                continue;
+            };
+            if row.category != case.category {
+                failures.push(format!(
+                    "{label} identity {:?} category {:?} does not match compiled-in workload {:?}",
+                    row.identity, row.category, case.category
+                ));
+            }
+            if row.input_len_bytes != case.css.len() as u64 {
+                failures.push(format!(
+                    "{label} identity {:?} input_len {} does not match compiled-in workload {}",
+                    row.identity,
+                    row.input_len_bytes,
+                    case.css.len()
+                ));
+            }
+            let expected_hash = sha256_hex(case.css.as_bytes());
+            if !row.input_sha256.is_empty() && row.input_sha256 != expected_hash {
+                failures.push(format!(
+                    "{label} identity {:?} input_sha256 does not match compiled-in workload",
+                    row.identity
+                ));
+            }
+            let expected_op = case.op.fingerprint();
+            if !row.operation.is_empty() && row.operation != expected_op {
+                failures.push(format!(
+                    "{label} identity {:?} operation {:?} does not match compiled-in workload {:?}",
+                    row.identity, row.operation, expected_op
+                ));
+            }
+        }
+    }
+    for cand_row in &candidate.identities {
+        let Some(base_row) = baseline_by_id.get(cand_row.identity.as_str()) else {
+            continue;
+        };
+        if base_row.category != cand_row.category {
+            failures.push(format!(
+                "workload category drift for {:?}: baseline {:?} vs candidate {:?}",
+                cand_row.identity, base_row.category, cand_row.category
+            ));
+        }
+        if base_row.input_len_bytes != cand_row.input_len_bytes {
+            failures.push(format!(
+                "workload input_len drift for {:?}: baseline {} vs candidate {}",
+                cand_row.identity, base_row.input_len_bytes, cand_row.input_len_bytes
+            ));
+        }
+        if !base_row.input_sha256.is_empty()
+            && !cand_row.input_sha256.is_empty()
+            && base_row.input_sha256 != cand_row.input_sha256
+        {
+            failures.push(format!(
+                "workload input_sha256 drift for {:?}",
+                cand_row.identity
+            ));
+        }
+        if !base_row.operation.is_empty()
+            && !cand_row.operation.is_empty()
+            && base_row.operation != cand_row.operation
+        {
+            failures.push(format!(
+                "workload operation drift for {:?}: baseline {:?} vs candidate {:?}",
+                cand_row.identity, base_row.operation, cand_row.operation
+            ));
+        }
+    }
+    if !failures.is_empty() {
+        return Err(failures);
+    }
+
+    // Stage 5: per-identity wall-clock ceiling. Integer math, no rounding:
+    // cand * 10 <= base * 12.
     let mut per_identity = Vec::new();
     for cand_row in &candidate.identities {
         let base_row = baseline_by_id[cand_row.identity.as_str()];
@@ -552,6 +711,8 @@ pub fn run_capture(pipeline: &str, hooks: &AllocHooks) -> CssBaselineRecord {
             wall_ns_max: wall.max,
             alloc_count,
             alloc_bytes,
+            input_sha256: sha256_hex(case.css.as_bytes()),
+            operation: case.op.fingerprint(),
         });
     }
 
@@ -577,19 +738,14 @@ pub fn run_capture(pipeline: &str, hooks: &AllocHooks) -> CssBaselineRecord {
 
     let load_avg_after = load_avg();
 
+    let compiled = compiled_binary_identity();
     let provenance = Provenance {
         schema_version: RECORD_SCHEMA_VERSION,
         pipeline: pipeline.to_string(),
-        commit_sha: run_cmd("git", &["rev-parse", "HEAD"]),
-        tree_object_id: run_cmd("git", &["rev-parse", "HEAD^{tree}"]),
-        css_bench_blob: run_cmd(
-            "git",
-            &["hash-object", "crates/verter_bench/benches/css_bench.rs"],
-        ),
-        css_identities_blob: run_cmd(
-            "git",
-            &["hash-object", "crates/verter_bench/src/css_identities.rs"],
-        ),
+        commit_sha: compiled.commit_sha,
+        tree_object_id: compiled.tree_object_id,
+        css_bench_blob: compiled.css_bench_digest,
+        css_identities_blob: compiled.css_identities_digest,
         machine_class: machine_class(),
         toolchain: run_cmd("rustc", &["--version"]),
         target_triple: run_cmd("rustc", &["-vV"])
@@ -611,6 +767,7 @@ pub fn run_capture(pipeline: &str, hooks: &AllocHooks) -> CssBaselineRecord {
         load_avg_before,
         load_avg_after,
         captured_at_utc: run_cmd("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"]),
+        compiled_dirty: compiled.dirty,
     };
 
     let mut record = CssBaselineRecord {
@@ -657,25 +814,28 @@ mod tests {
             load_avg_before: "{ 1.0 1.0 1.0 }".to_string(),
             load_avg_after: "{ 1.0 1.0 1.0 }".to_string(),
             captured_at_utc: "2026-08-25T00:00:00Z".to_string(),
+            compiled_dirty: false,
         }
     }
 
     /// A sealed synthetic record over the real universe with every identity's
     /// wall median set to `wall_ns`.
     fn synthetic_record(pipeline: &str, wall_ns: u64) -> CssBaselineRecord {
-        let identities = identity_universe()
+        let identities = universe()
             .into_iter()
-            .map(|identity| IdentityMeasurement {
-                identity,
-                category: "class_rules".to_string(),
-                input_len_bytes: 100,
+            .map(|case| IdentityMeasurement {
+                identity: case.identity(),
+                category: case.category.to_string(),
+                input_len_bytes: case.css.len() as u64,
                 samples: 30,
                 iters_per_sample: 100,
                 wall_ns_median: wall_ns,
-                wall_ns_min: wall_ns - 1,
-                wall_ns_max: wall_ns + 1,
+                wall_ns_min: wall_ns.saturating_sub(1),
+                wall_ns_max: wall_ns.saturating_add(1),
                 alloc_count: 10,
                 alloc_bytes: 1000,
+                input_sha256: sha256_hex(case.css.as_bytes()),
+                operation: case.op.fingerprint(),
             })
             .collect();
         let mut record = CssBaselineRecord {
@@ -804,6 +964,8 @@ mod tests {
             wall_ns_max: 1,
             alloc_count: 1,
             alloc_bytes: 1,
+            input_sha256: String::new(),
+            operation: String::new(),
         });
         seal(&mut candidate);
         let err = compare_records(
@@ -960,6 +1122,7 @@ mod tests {
                 "legacy-lightningcss".to_string(),
                 "converged".to_string(),
             )),
+            ..Default::default()
         };
         compare_records(&identity_universe(), &baseline, &candidate, &policy)
             .expect("declared transition passes");
@@ -1035,9 +1198,98 @@ mod tests {
                 PIPELINE_LEGACY_LIGHTNINGCSS.to_string(),
                 PIPELINE_STYLE_PLANNER.to_string(),
             )),
+            ..Default::default()
         };
         compare_records(&identity_universe(), &baseline, &candidate, &policy)
             .expect("declared transition may rewrite the identities blob");
+    }
+
+    fn matching_required(record: &CssBaselineRecord) -> CompiledBinaryIdentity {
+        CompiledBinaryIdentity {
+            commit_sha: record.provenance.commit_sha.clone(),
+            tree_object_id: record.provenance.tree_object_id.clone(),
+            dirty: false,
+            css_bench_digest: record.provenance.css_bench_blob.clone(),
+            css_identities_digest: record.provenance.css_identities_blob.clone(),
+        }
+    }
+
+    #[test]
+    fn compiled_binary_identity_source_digests_are_sha256() {
+        let identity = compiled_binary_identity();
+        assert_eq!(identity.css_bench_digest.len(), 64, "{identity:?}");
+        assert_eq!(identity.css_identities_digest.len(), 64, "{identity:?}");
+        assert!(
+            identity
+                .css_bench_digest
+                .chars()
+                .all(|c| c.is_ascii_hexdigit()),
+            "{identity:?}"
+        );
+        assert_ne!(identity.css_bench_digest, identity.css_identities_digest);
+    }
+
+    #[test]
+    fn compare_refuses_candidate_compiled_commit_mismatch() {
+        let baseline = synthetic_record("style-planner", 1000);
+        let candidate = synthetic_record("style-planner", 1000);
+        let mut required = matching_required(&candidate);
+        required.commit_sha = "deadbeef".to_string();
+        let err = compare_records(
+            &identity_universe(),
+            &baseline,
+            &candidate,
+            &ComparePolicy {
+                required_candidate_binary: Some(required),
+                ..Default::default()
+            },
+        )
+        .expect_err("mismatched compiled commit must refuse");
+        assert!(err.iter().any(|e| e.contains("compiled commit")), "{err:?}");
+    }
+
+    #[test]
+    fn compare_accepts_candidate_matching_required_binary() {
+        let baseline = synthetic_record("style-planner", 1000);
+        let candidate = synthetic_record("style-planner", 1000);
+        compare_records(
+            &identity_universe(),
+            &baseline,
+            &candidate,
+            &ComparePolicy {
+                required_candidate_binary: Some(matching_required(&candidate)),
+                ..Default::default()
+            },
+        )
+        .expect("matching compiled identity must pass");
+    }
+
+    #[test]
+    fn compare_refuses_workload_category_drift_across_declared_transition() {
+        let baseline = synthetic_record(PIPELINE_LEGACY_LIGHTNINGCSS, 1000);
+        let mut candidate = synthetic_record(PIPELINE_STYLE_PLANNER, 1000);
+        candidate.identities[0].category = "not-the-universe-category".to_string();
+        candidate.identities[0].input_sha256.clear();
+        candidate.identities[0].operation.clear();
+        seal(&mut candidate);
+        let err = compare_records(
+            &identity_universe(),
+            &baseline,
+            &candidate,
+            &ComparePolicy {
+                allowed_pipeline_transition: Some((
+                    PIPELINE_LEGACY_LIGHTNINGCSS.to_string(),
+                    PIPELINE_STYLE_PLANNER.to_string(),
+                )),
+                ..Default::default()
+            },
+        )
+        .expect_err("workload category drift must refuse even across a declared transition");
+        assert!(
+            err.iter()
+                .any(|e| e.contains("category") && e.contains("not-the-universe-category")),
+            "{err:?}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -1046,16 +1298,6 @@ mod tests {
 
     const MIRROR_TABLE_JSON: &str =
         include_str!("../../../docs/arch/refactor/rev11/evidence/J1/generator-mirror-digests.json");
-
-    fn sha256_hex(bytes: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(bytes);
-        hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    }
 
     fn copy_b_digest_table() -> std::collections::BTreeMap<String, String> {
         let mut table = std::collections::BTreeMap::new();

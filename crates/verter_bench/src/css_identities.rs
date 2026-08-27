@@ -213,6 +213,18 @@ fn observe_rewrite(outcome: StyleRewriteOutcome) {
 }
 
 impl CssMeasuredOp {
+    /// Stable fingerprint of the measured operation and its option axes.
+    pub fn fingerprint(self) -> String {
+        match self {
+            Self::ProcessStyle { scoped, is_module } => {
+                format!("process_style:scoped={scoped}:module={is_module}")
+            }
+            Self::Prepass => "prepass".to_string(),
+            Self::ApplyScoped => "apply_scoped".to_string(),
+            Self::ApplyCssModules => "apply_css_modules".to_string(),
+        }
+    }
+
     /// Perform exactly one measured pipeline call over `css`, black-boxing
     /// the observable outputs the criterion bench black-boxes.
     pub fn run(&self, css: &str) {

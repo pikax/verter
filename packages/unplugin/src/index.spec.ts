@@ -2,15 +2,49 @@
  * @ai-generated - Integration tests for the unplugin factory.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
+import { mkdirSync, writeFileSync, rmSync } from "fs";
+import { join } from "path";
+import { createRequire } from "node:module";
 import { tmpdir } from "os";
 import { defineConfig, resolveConfig } from "vite";
 import { transform as transformJs } from "esbuild";
+import { compileStyle } from "@vue/compiler-sfc";
+import * as vueCompilerSfc from "@vue/compiler-sfc";
 import unplugin, { unpluginFactory, Verter, VerterSvelte, VerterVue } from "./index";
 import { loadHost, resetHost } from "./core/compiler";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
+
+const require = createRequire(import.meta.url);
+const VUE_SFC_VERSION = require("@vue/compiler-sfc/package.json").version as string;
+
+function cssTokens(css: string): string[] {
+  return css
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .split(/(\s+|[{}();:,\[\]])/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function vueOracle(source: string, scopeId: string, scoped: boolean): string {
+  expect(VUE_SFC_VERSION).toBe("3.6.0-rc.5");
+  const result = compileStyle({
+    source,
+    filename: "Oracle.vue",
+    id: `data-v-${scopeId}`,
+    scoped,
+    isProd: false,
+    trim: false,
+  });
+  if (result.errors.length) {
+    throw new Error(result.errors.map(String).join("\n"));
+  }
+  return result.code;
+}
+
+function assertMatchesVueOracle(actual: string, source: string, scopeId: string, scoped: boolean) {
+  const oracle = vueOracle(source, scopeId, scoped);
+  expect(cssTokens(actual)).toEqual(cssTokens(oracle));
+}
 
 describe("unplugin factory", () => {
   it("exports unpluginFactory function", () => {
@@ -56,64 +90,22 @@ describe("unplugin factory", () => {
     expect((plugin as any).name).toBe("unplugin-verter");
   });
 
-  // Plugin-source discriminators: both bundler lanes call transformVueStyle;
-  // compileStyleAsync and processStyle are gone. Searches every `.ts` file
-  // under `src/` (excluding specs and test fixtures).
-
-  function withoutComments(src: string): string {
-    return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[\s;{}])\/\/.*$/gm, "$1");
-  }
-
-  function readPluginSourceFiles(): string[] {
-    const srcDir = dirname(fileURLToPath(import.meta.url));
-    const files: string[] = [];
-    const walk = (dir: string) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        if (entry.name === "__fixtures__") continue;
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(full);
-        } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".spec.ts")) {
-          files.push(full);
-        }
-      }
-    };
-    walk(srcDir);
-    return files;
-  }
-
-  it("Vite style lane does not call compileStyleAsync", () => {
-    let sawCompileStyleAsync = false;
-    for (const file of readPluginSourceFiles()) {
-      const src = withoutComments(readFileSync(file, "utf8"));
-      if (src.includes("compileStyleAsync")) sawCompileStyleAsync = true;
-    }
-    expect(sawCompileStyleAsync).toBe(false);
-  });
-
-  it("non-Vite style lane does not import or call processStyle", () => {
-    let sawProcessStyle = false;
-    for (const file of readPluginSourceFiles()) {
-      const src = withoutComments(readFileSync(file, "utf8"));
-      if (/\bprocessStyle\b/.test(src)) sawProcessStyle = true;
-    }
-    expect(sawProcessStyle).toBe(false);
-  });
-
-  it("both bundler style lanes call transformVueStyle", () => {
-    const indexSrc = withoutComments(
-      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "index.ts"), "utf8"),
+  it("does not call compileStyleAsync on a live style transform", async () => {
+    const spy = vi.spyOn(vueCompilerSfc, "compileStyleAsync");
+    const plugin = unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+    const filename = "/test/NoSfcCompiler.vue";
+    await plugin.transform(
+      `<template><div class="box">x</div></template>
+<style scoped>.box { color: red; }</style>`,
+      filename,
     );
-    const viteIdx = indexSrc.indexOf("function applyViteStyleLane(");
-    const nonViteIdx = indexSrc.indexOf("function applyNonViteStyleLane(");
-    expect(viteIdx).toBeGreaterThanOrEqual(0);
-    expect(nonViteIdx).toBeGreaterThan(viteIdx);
-    const viteSlice = indexSrc.slice(viteIdx, nonViteIdx);
-    const nonViteSlice = indexSrc.slice(nonViteIdx);
-    expect(/\btransformVueStyle\s*\(/.test(viteSlice)).toBe(true);
-    expect(/\btransformVueStyle\s*\(/.test(nonViteSlice)).toBe(true);
-    expect(indexSrc).not.toContain("compileStyleAsync");
-    expect(/\bprocessStyle\b/.test(indexSrc)).toBe(false);
+    const styleId = `${filename}?vue&type=style&index=0&scoped&lang.css`;
+    await plugin.transform(".box { color: red; }", styleId);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });
 
@@ -386,6 +378,57 @@ $border: #555;
     expect(transformed.code).toContain(".non-scoped");
   });
 
+  it("binds Vite style output to the pinned Vue compileStyle oracle", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "OracleVite.vue").replace(/\\/g, "/");
+    const cases = [
+      { name: "deep", source: ".host :deep(.inner) { color: red; }", forbidden: [":deep("] },
+      {
+        name: "global",
+        source: ".foo :global(.bar) { color: red; }",
+        forbidden: [":global(", ".foo"],
+      },
+      {
+        name: "keyframes",
+        source:
+          "@keyframes fade { from { opacity: 0; } to { opacity: 1; } } .x { animation-name: fade; }",
+        forbidden: ["@keyframes fade {"],
+      },
+      { name: "vbind", source: ".box { color: v-bind(primary); }", forbidden: ["v-bind("] },
+    ];
+    for (const cse of cases) {
+      const sfc = `<template><div class="x">x</div></template>
+<style scoped>
+${cse.source}
+</style>`;
+      await plugin.transform(sfc, file);
+      const styleId = `${file}?vue&type=style&index=0&lang.css`;
+      const style = await plugin.load(styleId);
+      const transformed = await plugin.transform(style.code, styleId);
+      const id = /\[data-v-([a-z0-9]+)\]/.exec(transformed.code)?.[1] ?? "unused";
+      if (cse.name !== "global") {
+        expect(id, cse.name).not.toBe("unused");
+      }
+      assertMatchesVueOracle(transformed.code, style.code, id, true);
+      for (const needle of cse.forbidden) {
+        expect(transformed.code, `${cse.name} still contains ${needle}`).not.toContain(needle);
+      }
+      expect(transformed.code).not.toContain("#00f");
+    }
+  });
+
+  it("refuses to publish deleted untrusted rules on the Vite lane", async () => {
+    const plugin = await createVitePlugin();
+    const file = join(tempDir, "RefusalVite.vue").replace(/\\/g, "/");
+    const sfc = `<template><div class="good">x</div></template>
+<style scoped>.good { color: red }</style>`;
+    await plugin.transform(sfc, file);
+    const styleId = `${file}?vue&type=style&index=0&lang.css`;
+    await expect(
+      plugin.transform(".good { color: red } .bad { color red; }", styleId),
+    ).rejects.toThrow(/refused untrusted style rules/);
+  });
+
   it("buildEnd and later transforms still work (no session lifecycle)", async () => {
     const plugin = await createVitePlugin();
     const firstFile = join(tempDir, "BuildEndOne.vue").replace(/\\/g, "/");
@@ -579,6 +622,73 @@ const primary = "red";
     expect(id).toBeTruthy();
     expect(transformed.code).toContain(`.box[data-v-${id}]`);
     expect(transformed.code).toMatch(/var\(--[a-z0-9]+-primary\)/);
+    expect(transformed.code).not.toContain("v-bind(");
+  });
+
+  it("binds non-Vite style output to the pinned Vue compileStyle oracle", async () => {
+    const plugin = createPlugin();
+    const filename = "/test/OracleRollup.vue";
+    const cases = [
+      { name: "deep", source: ".host :deep(.inner) { color: red; }", forbidden: [":deep("] },
+      {
+        name: "global",
+        source: ".foo :global(.bar) { color: red; }",
+        forbidden: [":global(", ".foo"],
+      },
+      {
+        name: "keyframes",
+        source:
+          "@keyframes fade { from { opacity: 0; } to { opacity: 1; } } .x { animation-name: fade; }",
+        forbidden: ["@keyframes fade {"],
+      },
+      { name: "vbind", source: ".box { color: v-bind(primary); }", forbidden: ["v-bind("] },
+    ];
+    for (const cse of cases) {
+      await plugin.transform(
+        `<template><div class="x">x</div></template>
+<style scoped>${cse.source}</style>`,
+        filename,
+      );
+      const styleId = `${filename}?vue&type=style&index=0&scoped&lang.css`;
+      const transformed = await plugin.transform(cse.source, styleId);
+      const id = /\[data-v-([a-z0-9]+)\]/.exec(transformed.code)?.[1] ?? "unused";
+      if (cse.name !== "global") {
+        expect(id, cse.name).not.toBe("unused");
+      }
+      assertMatchesVueOracle(transformed.code, cse.source, id, true);
+      for (const needle of cse.forbidden) {
+        expect(transformed.code, `${cse.name} still contains ${needle}`).not.toContain(needle);
+      }
+    }
+  });
+
+  it("refuses to publish deleted untrusted rules on the non-Vite lane", async () => {
+    const plugin = createPlugin();
+    const filename = "/test/RefusalRollup.vue";
+    await plugin.transform(
+      `<template><div class="good">x</div></template>
+<style scoped>.good { color: red }</style>`,
+      filename,
+    );
+    const styleId = `${filename}?vue&type=style&index=0&scoped&lang.css`;
+    await expect(
+      plugin.transform(".good { color: red } .bad { color red; }", styleId),
+    ).rejects.toThrow(/refused untrusted style rules/);
+  });
+
+  it("does not export or require processStyle for the non-Vite lane", async () => {
+    const native = require("@verter/native");
+    expect(native.processStyle).toBeUndefined();
+    const plugin = createPlugin();
+    const filename = "/test/NoProcessStyle.vue";
+    await plugin.transform(
+      `<template><div class="box">x</div></template>
+<style scoped>.box { color: red; }</style>`,
+      filename,
+    );
+    const styleId = `${filename}?vue&type=style&index=0&scoped&lang.css`;
+    const transformed = await plugin.transform(".box { color: red; }", styleId);
+    expect(transformed.code).toContain("[data-v-");
     expect(transformed.code).not.toContain("v-bind(");
   });
 

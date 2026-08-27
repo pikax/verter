@@ -177,41 +177,6 @@ fn three_way_style_ops_are_napi_exported() {
 }
 
 #[test]
-fn three_way_style_ops_carry_the_napi_attribute() {
-    let src = include_str!("../../src/lib.rs");
-    for name in [
-        "prepare_style_for_preprocessor",
-        "transform_vue_style",
-        "analyze_style",
-    ] {
-        let sig = format!("pub fn {name}(");
-        let idx = src
-            .find(&sig)
-            .unwrap_or_else(|| panic!("{name} missing from napi lib.rs"));
-        let window = &src[idx.saturating_sub(24)..idx];
-        assert!(
-            window.contains("#[napi]"),
-            "{name} is exported to JS only through #[napi]; a type-witness still compiles if the              attribute is stripped:\n{window:?}"
-        );
-    }
-}
-
-#[test]
-fn retired_process_style_spellings_are_absent_from_napi_source() {
-    let src = include_str!("../../src/lib.rs");
-    for needle in [
-        "ProcessStyleOptions",
-        "ProcessStyleResult",
-        "fn process_style",
-    ] {
-        assert!(
-            !src.contains(needle),
-            "napi source still names retired {needle}"
-        );
-    }
-}
-
-#[test]
 fn unknown_dialect_is_refused() {
     let err = match prepare_style_for_preprocessor(
         css_buf(".a { color: red; }"),

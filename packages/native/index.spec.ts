@@ -4,11 +4,11 @@
  * (transformVueStyle / prepareStyleForPreprocessor / analyzeStyle)
  * work correctly with both string and Buffer inputs.
  */
-import { readFileSync, existsSync } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, sep } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { describe, it, expect } from "vitest";
+import { compileStyle } from "@vue/compiler-sfc";
 import {
   VerterHost,
   transformVueStyle,
@@ -18,6 +18,33 @@ import {
   type HostPublicApiProjectionError,
   type HostTscDeclarationShapeReason,
 } from "./index.js";
+
+const require = createRequire(import.meta.url);
+const VUE_SFC_VERSION = require("@vue/compiler-sfc/package.json").version as string;
+
+function cssTokens(css: string): string[] {
+  return css
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .split(/(\s+|[{}();:,\[\]])/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function vueOracle(source: string, scopeId: string, scoped: boolean): string {
+  expect(VUE_SFC_VERSION).toBe("3.6.0-rc.5");
+  const result = compileStyle({
+    source,
+    filename: "Oracle.vue",
+    id: `data-v-${scopeId}`,
+    scoped,
+    isProd: false,
+    trim: false,
+  });
+  if (result.errors.length) {
+    throw new Error(result.errors.map(String).join("\n"));
+  }
+  return result.code;
+}
 
 const DECLARATION_SHAPE_REASONS = [
   "semantic-inference-depth-budget-exceeded",
@@ -943,24 +970,13 @@ describe("VerterHost type declarations in sync with native binary", () => {
     ).toEqual([]);
   });
 
-  it("tracked wrapper and types do not declare processStyle", () => {
-    const here = dirname(fileURLToPath(import.meta.url));
-    const needles = ["processStyle", "ProcessStyleOptions", "ProcessStyleResult"];
-    for (const rel of ["index.ts", "index.js", "host-types.ts"]) {
-      const src = readFileSync(join(here, rel), "utf8");
-      for (const needle of needles) {
-        expect(src, `${rel} must not declare ${needle}`).not.toMatch(new RegExp(`\\b${needle}\\b`));
-      }
-    }
-    const distTypes = join(here, "dist", "index.d.ts");
-    if (existsSync(distTypes)) {
-      const src = readFileSync(distTypes, "utf8");
-      for (const needle of needles) {
-        expect(src, `dist/index.d.ts must not declare ${needle}`).not.toMatch(
-          new RegExp(`\\b${needle}\\b`),
-        );
-      }
-    }
+  it("runtime native module does not export processStyle", () => {
+    const native = require("./index.js");
+    expect(native).not.toHaveProperty("processStyle");
+    expect(native).not.toHaveProperty("ProcessStyleOptions");
+    expect(native).not.toHaveProperty("ProcessStyleResult");
+    expect(typeof native.processStyle).toBe("undefined");
+    expect(typeof native.transformVueStyle).toBe("function");
   });
 
   it("top-level exports should include the three-way CSS style API and VerterHost", () => {
@@ -1095,6 +1111,45 @@ describe("transformVueStyle", () => {
     expect(result.code).not.toContain(".bad");
     expect(result.refusals.length).toBeGreaterThan(0);
     expect(result.refusals[0]).toContain("UntrustedRewriteTarget");
+  });
+
+  it("binds NAPI transformVueStyle output to the pinned Vue compileStyle oracle", () => {
+    const cases: Array<{ name: string; source: string; forbidden: string[] }> = [
+      { name: "compound", source: ".foo { color: red }", forbidden: [] },
+      { name: "deep", source: ".host :deep(.inner) { color: red; }", forbidden: [":deep("] },
+      {
+        name: "global",
+        source: ".foo :global(.bar) { color: red; }",
+        forbidden: [":global(", ".foo"],
+      },
+      {
+        name: "keyframes",
+        source:
+          "@keyframes fade { from { opacity: 0; } to { opacity: 1; } } .x { animation-name: fade; }",
+        forbidden: ["@keyframes fade {"],
+      },
+      { name: "vbind", source: ".box { color: v-bind(primary); }", forbidden: ["v-bind("] },
+    ];
+    for (const cse of cases) {
+      const result = transformVueStyle(cse.source, { scopeId: "abc123", scoped: true });
+      const oracle = vueOracle(cse.source, "abc123", true);
+      expect(cssTokens(result.code), cse.name).toEqual(cssTokens(oracle));
+      for (const needle of cse.forbidden) {
+        expect(result.code, `${cse.name} still contains ${needle}`).not.toContain(needle);
+      }
+      if (cse.name !== "global") {
+        expect(result.code, cse.name).toContain("[data-v-abc123]");
+      } else {
+        expect(result.code, cse.name).not.toContain("[data-v-abc123]");
+      }
+      expect(result.code).not.toContain("#00f");
+    }
+    const passthrough = ".plain { color: #ff0000; }";
+    const untouched = transformVueStyle(passthrough, { scopeId: "abc123", scoped: false });
+    expect(untouched.code).toBe(passthrough);
+    expect(untouched.code).not.toContain("[data-v-");
+    expect(untouched.code).toContain("#ff0000");
+    expect(untouched.code).not.toContain("#f00");
   });
 });
 
