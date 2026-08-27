@@ -914,15 +914,16 @@ status = "IN_PROGRESS"
 charter_digest = "fbe821349907edb716f17ef8419b417e9f5e3321da54928deaa281721d577b73"
 context_packet_digest = "de488b6e10c4bb59b47826f23a2b31d1c1fb17f1b85546cf9f22e80dba53a8f2"
 base_sha = "d1f3d50a948597f036868543b9bb21acacd730ff"
-# Active implementation identity is the clean exact final production subject
-# measured and dispositioned by the final-subject performance authority. It is
-# also the live implementation branch tip, so the rehearsal pin is ancestry-valid.
+# Active implementation identity is the exact measured round-2 production
+# subject. The live candidate is its direct evidence-only child, which adds
+# only final-round2-performance.md and inherits through the ruling's explicit
+# content-equivalence bridge; it is not the measured production subject.
 # Reviews and acceptance remain unset until the post-registration freeze.
-implementation_candidate_sha = "22532f39faa649c5d818baa67dee0a78ab18bb3a"
+implementation_candidate_sha = "e0d6732a26ce3bb4a3a458ae8c2c484fd42fdc7a"
 implementation_ref = "refs/heads/block/module-resolver-core"
 landing_order = 1
-candidate_sha = "22532f39faa649c5d818baa67dee0a78ab18bb3a"
-candidate_tree = "f4691f3efcaceabe0161511324bfac0fe1f5294e"
+candidate_sha = "0be9f2e867c634926c646b52fba75e9e7b60bc59"
+candidate_tree = "7ca20dde813ba73c03ba252c7802fd59fc68d4fe"
 accepted_sha = ""
 accepted_tree = ""
 landing_equivalence_digest = ""
@@ -1016,7 +1017,7 @@ adversarial_review = "PENDING"
 adversarial_reviewed_sha = ""
 maintainer_decision = "PENDING"
 enabling_amendment = ""
-notes = "CODEX-DEFER C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001. Owner: C4/C-train close authority through one maintainer-designated end-of-train tranche; no new DAG block. Ruling: docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION.md. Resolution gate: before C4/C-train acceptance, and it cannot roll past C-train close. Required evidence: one frozen full-train subject runs the applicable locked cells and closes the deferred APM-002 allocation count/byte regression under equivalent work and output while every absolute, correctness, counter, RSS, and code-quality gate remains green. This is the sole C-train-close state record for the consolidated limitation; no per-block duplicate is created."
+notes = "CODEX-DEFER C-TRAIN-END-PERFORMANCE-CONSOLIDATION-001. Owner: C4/C-train close authority through one maintainer-designated end-of-train tranche; no new DAG block. Rulings: docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-C1-FINAL-SUBJECT-PERFORMANCE-DISPOSITION.md and docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-27-C1-FINAL-ROUND2-PERFORMANCE-DISPOSITION.md. Current carried limitations: relative wall 88.440 -> 98.805 ms (+11.719810041% > 3%), allocation count 477383 -> 595309 (+24.702597286%), and allocation bytes 104078206 -> 137007048 (+31.638556491%); all remain literal FAIL results. Resolution gate: before C4/C-train acceptance, and it cannot roll past C-train close. Required evidence: one frozen full-train subject runs the applicable locked cells and closes the carried relative-wall and APM-002 allocation count/byte regressions under equivalent work and output while every absolute, correctness, counter, digest, RSS, code-quality, and scope gate remains green. This is the sole C-train-close state record for the consolidated limitation; no per-block duplicate is created."
 
 [[block]]
 id = "D1"
