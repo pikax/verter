@@ -614,7 +614,7 @@ struct OpenFrame {
     recovered: bool,
 }
 
-pub struct StyleSyntaxIrSink {
+pub(crate) struct StyleSyntaxIrSink {
     source: CssSource,
     dialect: CssDialect,
     open: SmallVec<[OpenFrame; 16]>,
@@ -1143,8 +1143,146 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::cst::LosslessCstSink;
+    use crate::diagnostic::CssDiagnosticKind;
     use crate::parser::{parse_with_sink, CssEntryPoint};
     use crate::selector::{SelectorCompleteness, SelectorSink};
+
+    fn ir(input: &str, dialect: CssDialect) -> StyleSyntaxIr {
+        parse_style_ir(
+            CssSource::new(Arc::from(input), 0).unwrap(),
+            dialect,
+            CssParseMode::Recover,
+        )
+        .unwrap()
+    }
+
+    // @ai-generated - Proves StyleSyntaxIr is projected directly from the same event stream as the CST.
+    #[test]
+    fn style_ir_and_lossless_cst_are_peer_event_sinks() {
+        fn accepts_sink(_: &mut impl ParseEventSink) {}
+
+        struct Peers<'a> {
+            cst: &'a mut LosslessCstSink,
+            ir: &'a mut StyleSyntaxIrSink,
+        }
+
+        impl ParseEventSink for Peers<'_> {
+            fn event(&mut self, event: ParseEvent) -> Result<(), CssStructureTooLarge> {
+                self.cst.event(event)?;
+                self.ir.event(event)
+            }
+        }
+
+        let input =
+            ".card, #hero { color: calc(1px + var(--x)); content: \"x\"; } @import \"theme.css\";";
+        let source = CssSource::new(Arc::from(input), 17).unwrap();
+        let mut ir_sink = StyleSyntaxIrSink::new(source.clone(), CssDialect::Css);
+        accepts_sink(&mut ir_sink);
+        let mut cst_sink = LosslessCstSink::new(source.clone());
+        let mut peers = Peers {
+            cst: &mut cst_sink,
+            ir: &mut ir_sink,
+        };
+        parse_with_sink(
+            &source,
+            CssDialect::Css,
+            CssEntryPoint::Stylesheet,
+            CssParseMode::Recover,
+            &mut peers,
+        )
+        .unwrap();
+        let ir = ir_sink.finish().unwrap();
+        let cst = cst_sink.finish().unwrap();
+
+        assert_eq!(cst.reconstruct(), input);
+        assert_eq!(ir.source().text(), input);
+        assert_eq!(ir.grammar_version(), CssSyntaxGrammarVersion::CURRENT);
+        assert_eq!(ir.statements().len(), 2);
+        assert!(ir.imports_unresolved());
+
+        let StyleStatement::Rule(rule) = &ir.statements()[0] else {
+            panic!("first statement must be a rule");
+        };
+        let components: Vec<_> = rule
+            .selector_list()
+            .selectors()
+            .iter()
+            .flat_map(|selector| selector.compounds())
+            .flat_map(|compound| compound.components())
+            .collect();
+        assert!(components
+            .iter()
+            .any(|component| component.kind() == SelectorComponentKind::Class));
+        assert!(components
+            .iter()
+            .any(|component| component.kind() == SelectorComponentKind::Id));
+
+        let StyleStatement::Declaration(color) = &rule.body().statements()[0] else {
+            panic!("rule body must contain a declaration");
+        };
+        assert_eq!(source.slice(color.name_span()), "color");
+        assert!(color
+            .value()
+            .values()
+            .iter()
+            .any(|value| matches!(value, ComponentValue::Function(function) if source.slice(function.name_span()) == "calc")));
+    }
+
+    /// `StyleSyntaxIrSink` hands every event inside a `SelectorList` to its nested `SelectorSink` and
+    /// then stops processing that event itself. A diagnostic raised inside that window is still the
+    /// stylesheet's diagnostic, so it must be recorded before the selector-sink hand-off — not
+    /// dropped with the rest of the event. `.a[ {}` is the discriminating input: `UnterminatedBlock`
+    /// is raised while the selector sink owns events and `ExpectedRuleBlock` after it closes, so a
+    /// hand-off that swallows in-window diagnostics keeps the second and loses the first.
+    #[test]
+    fn diagnostics_raised_inside_a_selector_list_still_reach_the_style_ir() {
+        for input in ["[ {}", ".a[ {}", ":global( {}", ".a:nth-child(-2n {}"] {
+            assert_eq!(
+                ir(input, CssDialect::Css)
+                    .diagnostics()
+                    .iter()
+                    .map(|diagnostic| diagnostic.kind)
+                    .collect::<Vec<_>>(),
+                vec![
+                    CssDiagnosticKind::UnterminatedBlock,
+                    CssDiagnosticKind::ExpectedRuleBlock,
+                ],
+                "{input}"
+            );
+        }
+
+        // The same window on the LAYOUT path. Sass and Stylus reach the IR sink through the
+        // indentation-aware parser, which surrounds the selector window with its own statement
+        // classification, so their full sequence differs from Css's — but the selector-window
+        // diagnostic itself must survive on every path, which is what the hand-off is about.
+        for dialect in [
+            CssDialect::Css,
+            CssDialect::Scss,
+            CssDialect::Less,
+            CssDialect::Sass,
+            CssDialect::Stylus,
+        ] {
+            let kinds: Vec<_> = ir(".a[ {}", dialect)
+                .diagnostics()
+                .iter()
+                .map(|diagnostic| diagnostic.kind)
+                .collect();
+            assert!(
+                kinds.contains(&CssDiagnosticKind::UnterminatedBlock),
+                "{dialect:?}: selector-window diagnostic lost, got {kinds:?}"
+            );
+        }
+
+        // Negative control: a well-formed stylesheet records no diagnostics at all, so the assertion
+        // above is not satisfied by a sink that indiscriminately records everything.
+        for dialect in [CssDialect::Css, CssDialect::Sass, CssDialect::Stylus] {
+            assert!(
+                ir(".a { color: red }", dialect).diagnostics().is_empty(),
+                "{dialect:?}"
+            );
+        }
+    }
 
     // @ai-generated - Pins pseudo-list descent to component trust, not enclosing selector completeness.
     #[test]

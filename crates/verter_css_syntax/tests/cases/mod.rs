@@ -2,7 +2,6 @@ mod carrier_blind_pseudo_classification;
 mod comment_spans;
 mod cst;
 mod dialects;
-mod ir;
 mod lexer;
 mod recovery;
 mod selectors;
