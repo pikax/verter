@@ -909,6 +909,7 @@ fn compile_inner(
                     scope_id_str,
                     cascade_module,
                     style.scoped,
+                    verter_options.source_map,
                 );
                 all_v_bind_vars.extend(outcome.facts.v_bind_vars);
                 for refusal in outcome

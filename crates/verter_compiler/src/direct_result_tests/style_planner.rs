@@ -924,7 +924,7 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
     // through modules and scoping untouched.
     reset_parse_ir_invocation_count();
     let input = AuthoredStyleInput::new("", CssDialect::Css, "p.css", "space:p", "artifact:p");
-    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    let outcome = run_vue_style_cascade(input, "sc1", true, true, true);
     assert_eq!(outcome.code, "");
     assert_eq!(
         parse_ir_invocation_count(),
@@ -942,7 +942,7 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
         "space:p",
         "artifact:p",
     );
-    let outcome = run_vue_style_cascade(input, "sc1", false, false);
+    let outcome = run_vue_style_cascade(input, "sc1", false, false, true);
     assert!(outcome.facts.rewrites.v_bind);
     assert_eq!(
         parse_ir_invocation_count(),
@@ -963,7 +963,7 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
         "space:p",
         "artifact:p",
     );
-    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    let outcome = run_vue_style_cascade(input, "sc1", true, true, true);
     assert!(outcome.facts.rewrites.scoped_selector);
     assert!(!outcome.facts.rewrites.v_bind);
     assert!(!outcome.facts.rewrites.css_modules);
@@ -987,7 +987,7 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
         "space:p",
         "artifact:p",
     );
-    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    let outcome = run_vue_style_cascade(input, "sc1", true, true, true);
     assert!(outcome.facts.rewrites.v_bind);
     assert!(!outcome.facts.rewrites.css_modules);
     assert!(outcome.facts.rewrites.scoped_selector);
@@ -1014,7 +1014,7 @@ fn style_pipeline_stage_reuses_parsed_ir_on_unchanged() {
         "space:p",
         "artifact:p",
     );
-    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    let outcome = run_vue_style_cascade(input, "sc1", true, true, true);
     assert!(outcome.facts.rewrites.v_bind);
     assert!(outcome.facts.rewrites.css_modules);
     assert!(outcome.facts.rewrites.scoped_selector);
@@ -1040,7 +1040,7 @@ fn style_pipeline_module_stage_failure_clears_output_and_skips_scoping() {
         "space:p",
         "artifact:p",
     );
-    let outcome = run_vue_style_cascade(input, "sc1", true, true);
+    let outcome = run_vue_style_cascade(input, "sc1", true, true, true);
 
     assert!(
         outcome.facts.rewrites.v_bind,
@@ -1084,7 +1084,7 @@ fn style_pipeline_v_bind_stage_failure_does_not_clear_output() {
         "space:p",
         "artifact:p",
     );
-    let outcome = run_vue_style_cascade(input, "sc1", false, false);
+    let outcome = run_vue_style_cascade(input, "sc1", false, false, true);
 
     assert_eq!(
         outcome.stage_failures.len(),

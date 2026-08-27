@@ -308,7 +308,7 @@ mod style_planner_allocation_baseline {
             "standalone:carrier",
             "standalone:carrier-bytes",
         );
-        let outcome = run_vue_style_cascade(input, SCOPE_ID, false, true);
+        let outcome = run_vue_style_cascade(input, SCOPE_ID, false, true, false);
         std::hint::black_box(&outcome.code);
     }
 
@@ -359,6 +359,66 @@ mod style_planner_allocation_baseline {
         "repeated_classes",
         generate_repeated_classes(5, 10)
     );
+
+    pub(super) fn measure_with_source_map(css: &str, want_source_map: bool) -> u64 {
+        let run = |css: &str| {
+            let input = AuthoredStyleInput::new(
+                css,
+                CssDialect::Css,
+                "<style>",
+                "standalone:carrier",
+                "standalone:carrier-bytes",
+            );
+            let outcome = run_vue_style_cascade(input, SCOPE_ID, false, true, want_source_map);
+            std::hint::black_box(&outcome.code);
+        };
+        run(css);
+        reset_alloc_counter();
+        run(css);
+        alloc_count()
+    }
+}
+
+/// Dual-pipeline instrument: both pipelines measured in one process against
+/// the same generated CSS. Asserts each half is non-zero. Does not pin a
+/// 1.2x ratio — recapture owns that gate.
+mod dual_pipeline_allocation_instrument {
+    use super::legacy_process_style_allocation_baseline as lightningcss;
+    use super::style_planner_allocation_baseline as planner;
+    use super::style_planner_gen::all_categories;
+
+    #[test]
+    fn each_category_observes_both_pipelines() {
+        for (name, css) in all_categories() {
+            let lightningcss_count = lightningcss::measure(&css);
+            let planner_count = planner::measure(&css);
+            eprintln!(
+                "J1_ALLOC_BOTH[{name}] lightningcss={lightningcss_count} planner={planner_count}"
+            );
+            assert!(
+                lightningcss_count > 0,
+                "{name}: lightningcss pipeline must allocate"
+            );
+            assert!(
+                planner_count > 0,
+                "{name}: style_planner pipeline must allocate"
+            );
+        }
+    }
+
+    #[test]
+    fn source_map_off_allocates_strictly_less_than_on() {
+        let css = super::style_planner_gen::generate_class_rules(super::style_planner_gen::N);
+        let off = planner::measure_with_source_map(&css, false);
+        let on = planner::measure_with_source_map(&css, true);
+        eprintln!("J1_SOURCE_MAP_ALLOC off={off} on={on}");
+        assert!(off > 0 && on > 0, "both source-map modes must allocate");
+        assert!(
+            off < on,
+            "a caller that does not want a source map must not pay \
+             generate_map/to_json_string (off={off}, on={on})"
+        );
+    }
 }
 
 mod svelte_css_analysis_fact_reread_allocation_probe {

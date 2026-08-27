@@ -1260,8 +1260,13 @@ impl CarrierCompiler for VueCarrierCompiler {
                         &input.content_artifact_token,
                     );
                     let cascade_module = node.module && selected_dialect == CssDialect::Css;
-                    let outcome =
-                        run_vue_style_cascade(authored, &style_scope, cascade_module, node.scoped);
+                    let outcome = run_vue_style_cascade(
+                        authored,
+                        &style_scope,
+                        cascade_module,
+                        node.scoped,
+                        opts.source_map,
+                    );
                     if !outcome.stage_failures.is_empty() {
                         return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
@@ -1319,6 +1324,7 @@ impl CarrierCompiler for VueCarrierCompiler {
                         &style_scope,
                         cascade_module,
                         node.scoped,
+                        opts.source_map,
                     );
                     if !outcome.stage_failures.is_empty() {
                         return Err(CompileUnsupported::BlockContentRuntimeUnavailable {

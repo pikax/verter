@@ -266,6 +266,13 @@ fn parse_ir(
     })
 }
 
+/// `want_source_map` mirrors the caller's `RuntimeCompileOptions::source_map`
+/// intent (`css::process_style`'s `ProcessStyleOptions::sourcemap` has the
+/// same role). `CodeTransform::generate_map` + `to_json_string()` are not
+/// free — a caller that does not want a source map must not pay for building
+/// and stringifying one. When `false`, `emit` skips that machinery and
+/// returns an empty `source_map` / `raw_map: None`, matching the
+/// `Unchanged`/no-map shape callers already handle.
 fn emit(
     code: &str,
     source: StyleSourceIdentity<'_>,
@@ -273,6 +280,7 @@ fn emit(
     stage: StyleRewriteStage,
     mut edits: Vec<StyleEdit>,
     facts: VueStyleFacts,
+    want_source_map: bool,
 ) -> Result<StyleRewriteOutcome, StyleRewriteFailure> {
     if edits.is_empty() {
         return Ok(StyleRewriteOutcome::Unchanged { facts });
@@ -305,14 +313,19 @@ fn emit(
             }
         }
     }
-    let source_map = transform
-        .generate_map(SourceMapOptions::new().with_source(source.source_name))
-        .to_json_string();
+    let source_map = if want_source_map {
+        transform
+            .generate_map(SourceMapOptions::new().with_source(source.source_name))
+            .to_json_string()
+    } else {
+        String::new()
+    };
     let output = transform.build_string();
     BUILD_STRING_INVOCATIONS.with(|count| count.set(count.get() + 1));
+    let raw_map = want_source_map.then_some(source_map.as_str());
     let output_descriptor = RuntimeOutputDescriptor::generated(
         &output,
-        Some(&source_map),
+        raw_map,
         &[(source.source_space_token, source.content_artifact_token)],
         SourceMapFidelity::Exact,
     );
@@ -345,6 +358,7 @@ pub fn transform_vue_v_bind(
         StyleRewriteStage::AuthoredVBind,
         edits,
         facts,
+        true,
     )
 }
 
@@ -772,6 +786,7 @@ pub fn transform_vue_css_modules(
         StyleRewriteStage::PostPreprocessModules,
         edits,
         facts,
+        true,
     )
 }
 
@@ -966,6 +981,7 @@ pub fn transform_vue_scoped_css(
         StyleRewriteStage::PostPreprocessScoping,
         edits,
         facts,
+        true,
     )
 }
 
@@ -1003,6 +1019,7 @@ fn apply_cascade_stage(
     dialect: CssDialect,
     stage: StyleRewriteStage,
     edits: Vec<StyleEdit>,
+    want_source_map: bool,
 ) -> Result<Option<(String, String)>, StyleRewriteFailure> {
     if edits.is_empty() {
         return Ok(None);
@@ -1014,6 +1031,7 @@ fn apply_cascade_stage(
         stage,
         edits,
         VueStyleFacts::default(),
+        want_source_map,
     )? {
         StyleRewriteOutcome::Rewritten {
             code, source_map, ..
@@ -1045,6 +1063,7 @@ pub fn run_vue_style_cascade(
     scope_id: &str,
     module: bool,
     scoped: bool,
+    want_source_map: bool,
 ) -> VueStyleCascadeOutcome {
     let mut owned: Option<(String, String)> = None;
     let mut facts = VueStyleFacts::default();
@@ -1071,6 +1090,7 @@ pub fn run_vue_style_cascade(
                     input.dialect,
                     StyleRewriteStage::AuthoredVBind,
                     edits,
+                    want_source_map,
                 ) {
                     Ok(Some((code, sm))) => owned = Some((code, sm)),
                     Ok(None) => retained_ir = Some(ir),
@@ -1095,6 +1115,7 @@ pub fn run_vue_style_cascade(
         scoped,
         &mut facts,
         &mut stage_failures,
+        want_source_map,
     );
     if let Some(rewritten) = post {
         owned = Some(rewritten);
@@ -1123,6 +1144,7 @@ pub fn run_vue_style_cascade_post_preprocess(
     scope_id: &str,
     module: bool,
     scoped: bool,
+    want_source_map: bool,
 ) -> VueStyleCascadeOutcome {
     let mut facts = VueStyleFacts::default();
     let mut stage_failures = Vec::new();
@@ -1136,6 +1158,7 @@ pub fn run_vue_style_cascade_post_preprocess(
         scoped,
         &mut facts,
         &mut stage_failures,
+        want_source_map,
     );
     let (code, source_map) = post.unwrap_or_else(|| (input.code.to_string(), String::new()));
     VueStyleCascadeOutcome {
@@ -1170,6 +1193,7 @@ fn run_post_v_bind_stages(
     scoped: bool,
     facts: &mut VueStyleFacts,
     stage_failures: &mut Vec<StyleRewriteFailure>,
+    want_source_map: bool,
 ) -> Option<(String, String)> {
     let mut owned: Option<(String, String)> = None;
     let mut output_cleared_by_failure = false;
@@ -1209,6 +1233,7 @@ fn run_post_v_bind_stages(
                     CssDialect::Css,
                     StyleRewriteStage::PostPreprocessModules,
                     edits,
+                    want_source_map,
                 ) {
                     Ok(Some(rewritten)) => owned = Some(rewritten),
                     Ok(None) => retained_ir = Some(ir),
@@ -1268,6 +1293,7 @@ fn run_post_v_bind_stages(
                     CssDialect::Css,
                     StyleRewriteStage::PostPreprocessScoping,
                     edits,
+                    want_source_map,
                 ) {
                     Ok(Some(rewritten)) => owned = Some(rewritten),
                     Ok(None) => {}
