@@ -1,5 +1,6 @@
 mod assembly;
 mod capability_matrix_compile_request_coverage;
+mod css_class_extraction_uses_style_syntax_ir;
 mod ide_no_baked_prefix_overwrite;
 mod ide_script_recovery_guard;
 mod indexed_prop_lookup;

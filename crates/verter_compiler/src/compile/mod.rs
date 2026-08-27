@@ -43,7 +43,8 @@ use crate::parser::Syntax;
 use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
-    analyze_css_module_classes, run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
+    analyze_css_module_classes, complete_static_class_names, run_vue_style_cascade,
+    AuthoredStyleInput, StyleRewriteFailure,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -67,6 +68,20 @@ fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
         Some(StyleLang::Stylus) => Some(CssDialect::Stylus),
         Some(StyleLang::Unknown) => None,
     }
+}
+
+/// Dialect used to read class names for editor completions.
+///
+/// Deliberately more tolerant than [`style_dialect`]: an unrecognised `lang`
+/// still yields class-name completions, read under the base CSS grammar,
+/// because the completion surface is advisory and a class selector is spelled
+/// the same way in every dialect this compiler accepts. `style_dialect`
+/// returns `None` for an unrecognised `lang` so that the rewriting pipeline
+/// refuses content whose grammar it cannot claim to understand; extraction
+/// carries no such risk, and returning `None` here would silently drop every
+/// completion for a block the editor can still usefully complete.
+fn class_extraction_dialect(lang: Option<StyleLang>) -> CssDialect {
+    style_dialect(lang).unwrap_or(CssDialect::Css)
 }
 
 fn push_style_rewrite_diagnostic(
@@ -1745,8 +1760,9 @@ fn compile_inner(
             .filter(|s| s.module)
             .filter_map(|s| {
                 let content_span = s.content.as_ref()?;
+                let dialect = class_extraction_dialect(s.lang);
                 let css_content = &input[content_span.start as usize..content_span.end as usize];
-                let class_names = crate::css::extract_css_class_names(css_content);
+                let class_names = complete_static_class_names(css_content, dialect);
                 if class_names.is_empty() {
                     return None;
                 }

@@ -1,8 +1,12 @@
 //! Typed framework style rewrite stages over the shared style syntax IR.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use oxc_allocator::Allocator;
+use sha2::{Digest, Sha256};
 use verter_css_syntax::{
     css_identifier_eq_ignore_ascii_case, parse_style_ir, CombinatorKind, ComplexSelector,
     ComplexSelectorPart, ComponentValue, ComponentValueTree, CssDialect, CssParseMode, CssSource,
@@ -13,9 +17,47 @@ use verter_css_syntax::{
 use verter_span::Span;
 
 use crate::code_transform::{CodeTransform, SourceMapOptions};
-pub use crate::css::types::generate_var_name;
-use crate::css::types::VBindVar;
 use crate::framework_common::{RuntimeOutputDescriptor, SourceMapFidelity};
+
+/// Generate a Vue CSS variable name from a scope ID and authored expression.
+#[must_use]
+pub fn generate_var_name(scope_id: &str, expression: &str) -> String {
+    let mut sanitized = String::with_capacity(expression.len());
+    for character in expression.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            sanitized.push(character);
+        } else {
+            sanitized.push('_');
+        }
+    }
+    format!("--{scope_id}-{sanitized}")
+}
+
+/// A `v-bind()` expression replaced with a CSS variable.
+#[derive(Debug, Clone)]
+pub struct VBindVar {
+    /// The original expression text (e.g. "color" or "theme.color").
+    pub expression: String,
+    /// The generated CSS variable name (e.g. "--a4f2eed6-color").
+    pub var_name: String,
+    /// Byte offset of the quote-stripped expression start within the style content.
+    pub expr_start: u32,
+    /// Byte offset of the quote-stripped expression end within the style content.
+    pub expr_end: u32,
+}
+
+/// Generate a content-based hash for a CSS module class name.
+fn hashed_class_name(component_id: &str, class_name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(component_id.as_bytes());
+    hasher.update(class_name.as_bytes());
+    let result = hasher.finalize();
+    let hash = format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        result[0], result[1], result[2], result[3]
+    );
+    format!("{class_name}_{hash}")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StyleRewriteStage {
@@ -739,6 +781,27 @@ fn module_classes_and_edits_from_ir(
     Ok((edits, classes))
 }
 
+fn dedup_static_class_names(ir: &StyleSyntaxIr) -> Vec<String> {
+    let source = ir.source();
+    let mut seen = HashSet::new();
+    ir.complete_static_classes()
+        .filter_map(|class| {
+            let name = source.slice(class.name_span());
+            seen.insert(name).then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Enumerate complete static class selectors in `code` for IDE `$style` completions.
+///
+/// Parse failure degrades to an empty list (never panics): completions are advisory.
+pub fn complete_static_class_names(code: &str, dialect: CssDialect) -> Vec<String> {
+    let Ok(ir) = parse_ir(code, dialect, StyleRewriteStage::PostPreprocessModules) else {
+        return Vec::new();
+    };
+    dedup_static_class_names(&ir)
+}
+
 /// Native CSS-Modules class *analysis*: enumerates every class selector an
 /// authored style block declares, plus its would-be hashed name, for any of
 /// the five native dialects (A10a/A10b) — analysis only, never a rewrite.
@@ -920,7 +983,7 @@ fn collect_module_selector_list(
                     let name = source.slice(name_span);
                     let hashed = classes
                         .entry(name.to_string())
-                        .or_insert_with(|| crate::css::modules::hashed_class_name(scope_id, name))
+                        .or_insert_with(|| hashed_class_name(scope_id, name))
                         .clone();
                     edits.push(StyleEdit::Overwrite {
                         span: name_span,

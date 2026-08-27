@@ -16,9 +16,9 @@ use oxc_allocator::Allocator;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::code_transform::{CodeTransform, GeneratedContentMarker};
-use crate::css::types::VBindVar;
 use crate::parser::types::RootNodeScript;
 use crate::script::prepared::PreparedScript;
+use crate::style_planner::VBindVar;
 use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 
