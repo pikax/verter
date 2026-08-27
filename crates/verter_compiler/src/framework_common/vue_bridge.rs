@@ -27,7 +27,7 @@ use crate::compile::types::{
 };
 use crate::compile::{
     compile_from_parsed, compile_from_parsed_legacy, parse_script_block, parse_sfc,
-    parse_template_block, template_unit_used_vars,
+    parse_template_block, style_dialect, template_unit_used_vars,
 };
 use crate::compile_request::CompileRequestError;
 use crate::framework_common::carrier_compiler::{
@@ -1215,21 +1215,13 @@ impl CarrierCompiler for VueCarrierCompiler {
             .enumerate()
         {
             if let Some(input) = slot {
-                let authored_dialect = match node.lang {
-                    None | Some(crate::parser::types::StyleLang::Css) => Some(CssDialect::Css),
-                    Some(crate::parser::types::StyleLang::Scss) => Some(CssDialect::Scss),
-                    Some(crate::parser::types::StyleLang::Sass) => Some(CssDialect::Sass),
-                    Some(crate::parser::types::StyleLang::Less) => Some(CssDialect::Less),
-                    Some(crate::parser::types::StyleLang::Stylus) => Some(CssDialect::Stylus),
-                    Some(crate::parser::types::StyleLang::Unknown) => None,
-                };
+                let authored_dialect = style_dialect(node.lang);
                 let selected_dialect = match input.lang.as_str() {
                     "css" => CssDialect::Css,
                     "scss" => CssDialect::Scss,
                     "sass" => CssDialect::Sass,
                     "less" => CssDialect::Less,
                     "stylus" | "styl" => CssDialect::Stylus,
-                    _ if authored_dialect.is_none() => CssDialect::Css,
                     _ => {
                         return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
@@ -2452,6 +2444,48 @@ mod tests {
             style.output_descriptor.source_space.token,
             "space:theme-css"
         );
+    }
+
+    /// @ai-generated - Unknown selected style lang must refuse, not rewrite as CSS.
+    #[test]
+    fn unknown_selected_style_lang_refuses_css_cascade_rewrite() {
+        let source = concat!(
+            "<template><div class=\"a\"/></template>",
+            "<style lang=\"postcss\" scoped>.a { color: red; }</style>"
+        );
+        let prepared = crate::style_planner::prepare_supplied_plain_css(".a { color: red; }")
+            .expect("css parses");
+        let compiler = VueCarrierCompiler;
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact_for(source),
+            &RuntimeCompileOptions {
+                filename: Some("UnknownDialect.vue".to_string()),
+                component_id: Some("scope123".to_string()),
+                block_content: RuntimeBlockContentInputs {
+                    styles: vec![Some(RuntimeBlockContentInput {
+                        code: Arc::from(".a { color: red; }"),
+                        source_map: None,
+                        lang: "postcss".to_string(),
+                        content_artifact_token: "artifact:postcss".to_string(),
+                        source_space_token: "space:postcss".to_string(),
+                        parsed: Some(prepared),
+                    })],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &alloc,
+        );
+        match result {
+            Err(CompileUnsupported::BlockContentRuntimeUnavailable { .. }) => {}
+            Ok(CarrierCompileOutcome::Produced(output)) => panic!(
+                "unknown selected lang must not produce a CSS cascade rewrite: {}",
+                output.styles[0].code
+            ),
+            other => panic!("expected BlockContentRuntimeUnavailable, got {other:?}"),
+        }
     }
 
     /// @ai-generated - Sequential style stages must not claim an uncomposed exact map.

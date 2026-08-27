@@ -201,21 +201,45 @@ fn vue_stage_two_refusal_is_fail_closed_per_rule() {
     assert!(!code.contains("color red"), "unsafe rule shipped: {code}");
 }
 
-// @ai-generated - SP-04 retains the old all-language v-bind behavior for CSS-like unknown langs.
+// @ai-generated - Unknown/unsupported style lang must fail closed: no CSS cascade rewrite.
 #[test]
-fn vue_unknown_css_like_lang_still_rewrites_v_bind() {
-    let result = compile_style("<style lang=\"postcss\">.a { color: v-bind(t) }</style>");
-    assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.styles[0].code, ".a { color: var(--sc100000-t) }");
+fn vue_unknown_style_lang_does_not_produce_a_css_cascade_rewrite() {
+    let v_bind = compile_style("<style lang=\"postcss\">.a { color: v-bind(t) }</style>");
+    let v_bind_code = &v_bind.styles[0].code;
+    assert!(
+        !v_bind_code.contains("var(--"),
+        "unknown lang must not rewrite v-bind as CSS: {v_bind_code}"
+    );
+    assert!(
+        v_bind_code.contains("v-bind(t)") || v_bind_code.is_empty(),
+        "unknown lang must not emit a CSS cascade rewrite: {v_bind_code}"
+    );
+    assert!(
+        v_bind.errors.iter().any(|diagnostic| {
+            diagnostic.message.contains("unknown") || diagnostic.message.contains("dialect")
+        }),
+        "unknown lang must fail closed with a diagnostic: {:?}",
+        v_bind.errors
+    );
+
+    let scoped = compile_style("<style lang=\"postcss\" scoped>.a { color: red }</style>");
+    let scoped_code = &scoped.styles[0].code;
+    assert!(
+        !scoped_code.contains("[data-v-"),
+        "unknown lang must not receive a CSS scoped rewrite: {scoped_code}"
+    );
+    assert!(
+        scoped.errors.iter().any(|diagnostic| {
+            diagnostic.message.contains("unknown") || diagnostic.message.contains("dialect")
+        }),
+        "unknown scoped lang must fail closed with a diagnostic: {:?}",
+        scoped.errors
+    );
 }
 
 // @ai-generated - R2-6 refuses scoped authored dialects until plain CSS is supplied.
 #[test]
 fn vue_scoped_non_css_never_publishes_unscoped_css() {
-    let postcss = compile_style("<style lang=\"postcss\" scoped>.a { color: red }</style>");
-    assert!(postcss.errors.is_empty(), "{:?}", postcss.errors);
-    assert_eq!(postcss.styles[0].code, ".a[data-v-sc100000] { color: red }");
-
     let less = compile_style("<style lang=\"less\" scoped>.a { color: red }</style>");
     assert!(less.styles[0].code.is_empty(), "{}", less.styles[0].code);
     assert!(

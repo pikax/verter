@@ -59,7 +59,7 @@ use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 use macro_scope_check::collect_invalid_options_scope_diagnostics;
 use macro_semantic_diagnostics::{collect_macro_semantic_diagnostics, tsc_generation_diagnostic};
 
-fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
+pub(crate) fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
     match lang {
         None | Some(StyleLang::Css) => Some(CssDialect::Css),
         Some(StyleLang::Scss) => Some(CssDialect::Scss),
@@ -904,69 +904,82 @@ fn compile_inner(
             let mut style_module_classes = Vec::new();
             let style_code = if let Some(content) = &style.content {
                 let style_source = &input[content.start as usize..content.end as usize];
-                let dialect = style_dialect(style.lang);
-                let source_name = options.filename.as_deref().unwrap_or("<style>");
-                let authored_dialect = dialect.unwrap_or(CssDialect::Css);
+                match style_dialect(style.lang) {
+                    None => {
+                        // Rewrite must refuse an unrecognized lang rather
+                        // than parse the bytes as CSS.
+                        all_diagnostics.push(Diagnostic::error_with_message(
+                            "style-planner",
+                            CompilerErrorCode::XCssParseError,
+                            "style rewrite refused unknown dialect; expected css, scss, sass, less, or stylus",
+                            *content,
+                        ));
+                        style_source.to_string()
+                    }
+                    Some(authored_dialect) => {
+                        let source_name = options.filename.as_deref().unwrap_or("<style>");
 
-                // The CSS-Modules byte-level class-name rewrite stays
-                // CSS-only; only that one stage is conditioned on the
-                // resolved dialect.
-                let cascade_module = style.module && dialect == Some(CssDialect::Css);
-                let mut cascade_input = AuthoredStyleInput::new(
-                    style_source,
-                    authored_dialect,
-                    source_name,
-                    "standalone:carrier",
-                    "standalone:carrier-bytes",
-                );
-                if let Some(prepared) = prepared_style_for_sealed_slot(
-                    None,
-                    &verter_options.prepared_styles,
-                    style_index,
-                    style_source,
-                ) {
-                    cascade_input = cascade_input.with_prepared(prepared.ir());
-                }
-
-                let outcome = run_vue_style_cascade(
-                    cascade_input,
-                    scope_id_str,
-                    cascade_module,
-                    style.scoped,
-                    verter_options.source_map,
-                );
-                all_v_bind_vars.extend(outcome.facts.v_bind_vars);
-                for refusal in outcome
-                    .facts
-                    .refusals
-                    .iter()
-                    .chain(outcome.stage_failures.iter())
-                {
-                    push_style_rewrite_diagnostic(&mut all_diagnostics, *content, refusal);
-                }
-                style_module_classes = outcome.facts.module_classes;
-                let rewritten = outcome.code;
-
-                // CSS-Modules class *analysis* is dialect-unconditional
-                // (A10a): for the 4 RECOGNIZED non-CSS dialects the
-                // byte-level rewrite above never runs against (SCSS/Sass/
-                // Less/Stylus), still analyze the authored `$style` class
-                // surface so IDE/consumer metadata is populated even though
-                // the emitted CSS text itself is left for external
-                // preprocessing to rewrite. `dialect == None` (an
-                // unrecognized `lang` attribute) is intentionally excluded —
-                // that case has no native-dialect analysis to run, matching
-                // its pre-existing "no module handling at all" behavior.
-                if style.module && dialect.is_some_and(|d| d != CssDialect::Css) {
-                    match analyze_css_module_classes(cascade_input, scope_id_str) {
-                        Ok(classes) => style_module_classes = classes,
-                        Err(error) => {
-                            push_style_rewrite_diagnostic(&mut all_diagnostics, *content, &error);
+                        // The CSS-Modules byte-level class-name rewrite stays
+                        // CSS-only; only that one stage is conditioned on the
+                        // resolved dialect.
+                        let cascade_module = style.module && authored_dialect == CssDialect::Css;
+                        let mut cascade_input = AuthoredStyleInput::new(
+                            style_source,
+                            authored_dialect,
+                            source_name,
+                            "standalone:carrier",
+                            "standalone:carrier-bytes",
+                        );
+                        if let Some(prepared) = prepared_style_for_sealed_slot(
+                            None,
+                            &verter_options.prepared_styles,
+                            style_index,
+                            style_source,
+                        ) {
+                            cascade_input = cascade_input.with_prepared(prepared.ir());
                         }
+
+                        let outcome = run_vue_style_cascade(
+                            cascade_input,
+                            scope_id_str,
+                            cascade_module,
+                            style.scoped,
+                            verter_options.source_map,
+                        );
+                        all_v_bind_vars.extend(outcome.facts.v_bind_vars);
+                        for refusal in outcome
+                            .facts
+                            .refusals
+                            .iter()
+                            .chain(outcome.stage_failures.iter())
+                        {
+                            push_style_rewrite_diagnostic(&mut all_diagnostics, *content, refusal);
+                        }
+                        style_module_classes = outcome.facts.module_classes;
+
+                        // CSS-Modules class *analysis* is dialect-unconditional
+                        // (A10a): for the 4 RECOGNIZED non-CSS dialects the
+                        // byte-level rewrite above never runs against (SCSS/Sass/
+                        // Less/Stylus), still analyze the authored `$style` class
+                        // surface so IDE/consumer metadata is populated even though
+                        // the emitted CSS text itself is left for external
+                        // preprocessing to rewrite.
+                        if style.module && authored_dialect != CssDialect::Css {
+                            match analyze_css_module_classes(cascade_input, scope_id_str) {
+                                Ok(classes) => style_module_classes = classes,
+                                Err(error) => {
+                                    push_style_rewrite_diagnostic(
+                                        &mut all_diagnostics,
+                                        *content,
+                                        &error,
+                                    );
+                                }
+                            }
+                        }
+
+                        outcome.code
                     }
                 }
-
-                rewritten
             } else {
                 String::new()
             };
