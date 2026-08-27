@@ -4,10 +4,14 @@
  * dialect. Analysis only; runtime class-name rewriting (row 19, `css/modules.rs`)
  * is untouched by this suite.
  */
-use verter_compiler::style_planner::{analyze_css_module_classes, AuthoredStyleInput};
+use verter_compiler::style_planner::{
+    analyze_css_module_classes, last_parse_ir_dialect, reset_last_parse_ir_dialect,
+    AuthoredStyleInput,
+};
 use verter_css_syntax::CssDialect;
 
 fn assert_analyzes_only_active_class(dialect: CssDialect, source: &str) {
+    reset_last_parse_ir_dialect();
     let input = AuthoredStyleInput::new(
         source,
         dialect,
@@ -17,6 +21,18 @@ fn assert_analyzes_only_active_class(dialect: CssDialect, source: &str) {
     );
     let classes = analyze_css_module_classes(input, "sc1")
         .unwrap_or_else(|e| panic!("{dialect:?} class analysis must not be refused: {e}"));
+    assert_eq!(
+        last_parse_ir_dialect(),
+        Some(dialect),
+        "{dialect:?} analysis did not use its authored parser path"
+    );
+    if dialect != CssDialect::Css {
+        assert_ne!(
+            last_parse_ir_dialect(),
+            Some(CssDialect::Css),
+            "{dialect:?} analysis was routed through CSS"
+        );
+    }
     let names: Vec<_> = classes.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names, ["active"], "{dialect:?}: {classes:?}");
     assert!(
@@ -41,7 +57,7 @@ fn module_class_analysis_native_for_css() {
 fn module_class_analysis_native_for_scss() {
     assert_analyzes_only_active_class(
         CssDialect::Scss,
-        "$tone: red; @mixin paint { color: $tone; } .active { @include paint; }",
+        "// scss-native line comment\n$tone: red; @mixin paint { color: $tone; } .active { @include paint; }",
     );
 }
 

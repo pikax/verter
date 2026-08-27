@@ -6,9 +6,9 @@ use crate::code_transform::{
  */
 use crate::style_planner::{
     analyze_css_module_classes, analyze_style, build_string_invocation_count,
-    cascade_output_is_publishable, cascade_requested_source_map, parse_ir_invocation_count,
-    reset_build_string_invocation_count, reset_parse_ir_invocation_count,
-    reset_style_ir_stage_observations, run_vue_style_cascade,
+    cascade_output_is_publishable, cascade_requested_source_map, last_parse_ir_dialect,
+    parse_ir_invocation_count, reset_build_string_invocation_count, reset_last_parse_ir_dialect,
+    reset_parse_ir_invocation_count, reset_style_ir_stage_observations, run_vue_style_cascade,
     run_vue_style_cascade_post_preprocess, style_ir_stage_observations, transform_vue_css_modules,
     transform_vue_scoped_css, transform_vue_v_bind, AuthoredStyleInput, PlainCssInput,
     StyleRewriteFailure, StyleRewriteFailureClass, StyleRewriteOutcome, StyleRewriteStage,
@@ -776,7 +776,7 @@ fn css_modules_class_analysis_native_for_all_five_dialects() {
         ),
         (
             CssDialect::Scss,
-            "$tone: red; @mixin paint { color: $tone; } .active { @include paint; }",
+            "// scss-native line comment\n$tone: red; @mixin paint { color: $tone; } .active { @include paint; }",
         ),
         (
             CssDialect::Sass,
@@ -791,6 +791,7 @@ fn css_modules_class_analysis_native_for_all_five_dialects() {
 
     let mut hashed_names = Vec::new();
     for (dialect, source) in cases {
+        reset_last_parse_ir_dialect();
         let input = AuthoredStyleInput::new(
             source,
             dialect,
@@ -800,6 +801,18 @@ fn css_modules_class_analysis_native_for_all_five_dialects() {
         );
         let classes = analyze_css_module_classes(input, "sc1")
             .unwrap_or_else(|e| panic!("{dialect:?} class analysis must not be refused: {e}"));
+        assert_eq!(
+            last_parse_ir_dialect(),
+            Some(dialect),
+            "{dialect:?} analysis did not use its authored parser path"
+        );
+        if dialect != CssDialect::Css {
+            assert_ne!(
+                last_parse_ir_dialect(),
+                Some(CssDialect::Css),
+                "{dialect:?} analysis was routed through CSS"
+            );
+        }
         assert_eq!(classes.len(), 1, "{dialect:?}: {classes:?}");
         assert_eq!(classes[0].0, "active", "{dialect:?}: {classes:?}");
         assert!(

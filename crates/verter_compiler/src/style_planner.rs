@@ -344,6 +344,8 @@ thread_local! {
     /// the observing test lives in a separate integration-test binary that links
     /// the crate's normal (non-test-cfg) build.
     static PARSE_IR_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LAST_PARSE_IR_DIALECT: std::cell::Cell<Option<CssDialect>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -413,6 +415,17 @@ pub fn parse_ir_invocation_count() -> usize {
 /// observability hook.
 pub fn reset_parse_ir_invocation_count() {
     PARSE_IR_INVOCATIONS.with(|count| count.set(0));
+}
+
+/// Last dialect passed through the shared style-IR parse entry on this thread.
+#[must_use]
+pub fn last_parse_ir_dialect() -> Option<CssDialect> {
+    LAST_PARSE_IR_DIALECT.with(std::cell::Cell::get)
+}
+
+/// Clears the calling thread's last observed style-IR dialect.
+pub fn reset_last_parse_ir_dialect() {
+    LAST_PARSE_IR_DIALECT.with(|dialect| dialect.set(None));
 }
 
 /// Current `build_string` invocation count on the calling thread. Test-only
@@ -536,6 +549,7 @@ fn parse_ir(
     stage: StyleRewriteStage,
 ) -> Result<ParsedStyleIr, StyleRewriteFailure> {
     PARSE_IR_INVOCATIONS.with(|count| count.set(count.get() + 1));
+    LAST_PARSE_IR_DIALECT.with(|observed| observed.set(Some(dialect)));
     let source = CssSource::new(Arc::from(code), 0).map_err(|_| {
         StyleRewriteFailure::new(StyleRewriteFailureClass::ParseFailure, stage, dialect, None)
     })?;
