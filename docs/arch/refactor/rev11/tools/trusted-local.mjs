@@ -348,6 +348,19 @@ function completeReviewSet(anchor, round, lease) {
     && JSON.stringify(reviews.map((review) => review.lens).sort()) === JSON.stringify([...lease.review_lenses].sort());
 }
 
+function architectEscalationForCompletedRound(anchor, roundId) {
+  const round = anchor.rounds[roundId];
+  if (!round?.review_cycle_complete) return false;
+  const reviews = roundReviews(anchor, roundId);
+  const critical = reviews.some((review) => review.findings.some((finding) => finding.severity === "P0" || finding.severity === "P1"));
+  const latestPriorDecision = Object.values(anchor.rounds)
+    .filter((candidate) => candidate.node_id === round.node_id && candidate.review_cycle_ordinal < round.review_cycle_ordinal && candidate.architect_decision)
+    .sort((left, right) => right.review_cycle_ordinal - left.review_cycle_ordinal)[0];
+  const exhaustedPriorCap = latestPriorDecision
+    && round.review_cycle_ordinal >= latestPriorDecision.review_cycle_ordinal + latestPriorDecision.architect_decision.additional_round_cap;
+  return (round.review_cycle_ordinal >= 2 && critical && (!latestPriorDecision || exhaustedPriorCap)) || round.review_cycle_ordinal === 5;
+}
+
 function packetForLease(lease) {
   return exactJson({
     schema: 1,
@@ -526,14 +539,17 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
         const reviews = roundReviews(anchor, lease.round_id);
         if (!reviews.some((review) => review.verdict === "FAIL")) throw new Error("FIX_REQUIRED requires at least one current-round FAIL report");
         round.review_cycle_complete = true;
-        const critical = reviews.some((review) => review.findings.some((finding) => finding.severity === "P0" || finding.severity === "P1"));
-        const priorArchitectDecision = Object.values(anchor.rounds).some((candidateRound) => candidateRound.node_id === lease.node_id && candidateRound.architect_decision);
-        if ((round.review_cycle_ordinal >= 2 && critical && !priorArchitectDecision) || round.review_cycle_ordinal === 5) {
+        const latestArchitectRound = Object.values(anchor.rounds)
+          .filter((candidateRound) => candidateRound.node_id === lease.node_id && candidateRound.architect_decision)
+          .sort((left, right) => right.review_cycle_ordinal - left.review_cycle_ordinal)[0];
+        if (architectEscalationForCompletedRound(anchor, lease.round_id)) {
           round.architect_escalation_required = true;
-          const promptType = round.review_cycle_ordinal === 5 ? "over-five-decomposition" : "round-two-cap";
-          const reason = round.review_cycle_ordinal === 5
+          const promptType = round.review_cycle_ordinal >= 5 ? "over-five-decomposition" : "round-two-cap";
+          const reason = round.review_cycle_ordinal >= 5
             ? "Five complete review/fix cycles require a decomposition ruling before cycle six"
-            : "P0/P1 remains after the soft two-cycle limit";
+            : latestArchitectRound
+              ? "P0/P1 remains after the latest Architect-authorized additional-round cap"
+              : "P0/P1 remains after the soft two-cycle limit";
           const architectPrompt = exactJson({ ...architectPromptFor({ type: promptType, nodeId: lease.node_id, roundId: lease.round_id, roundOrdinal: round.review_cycle_ordinal }), reason, requested_decision: "continue_or_stop_with_explicit_additional_round_cap" });
           round.pending_architect_prompt = architectPrompt;
         }
@@ -738,7 +754,12 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
     };
     return lockedMutation(resolvedRuntime, validate, (anchor) => {
       validate(); const round = anchor.rounds[roundId];
-      if (!round?.architect_escalation_required || round.architect_decision) throw new Error("Architect decision is not required or is already recorded");
+      const latestCompleted = Object.entries(anchor.rounds)
+        .filter(([, candidate]) => candidate.node_id === round?.node_id && candidate.review_cycle_complete)
+        .sort(([, left], [, right]) => right.review_cycle_ordinal - left.review_cycle_ordinal)[0]?.[0];
+      const required = round?.architect_escalation_required || (latestCompleted === roundId && round.status === "FIX_REQUIRED" && architectEscalationForCompletedRound(anchor, roundId));
+      if (!required || round.architect_decision) throw new Error("Architect decision is not required or is already recorded");
+      round.architect_escalation_required = true;
       if (round.review_cycle_ordinal >= 5 && !["SPLIT", "CONTINUE_WHOLE", "OTHER"].includes(report.decomposition_decision)) throw new Error("Architect decision after five review cycles must explicitly decide decomposition");
       const decision = { schema: 1, type: "trusted-local-architect-decision", round_id: roundId, node_id: round.node_id, review_cycle_ordinal: round.review_cycle_ordinal, recorded_by: operator, report_sha256: sha256(reportBytes), ...report };
       round.architect_decision = decision; anchor.next_event_ordinal += 1;

@@ -18,18 +18,19 @@ function prepare(temp) {
   if (git(repo, "status", "--porcelain=v1", "--", "docs/arch/refactor/rev11")) git(repo, "commit", "-m", "test: install exact authority package");
   return { repo, packageRoot, runtimeRoot: path.join(temp, "external runtime"), programctl: path.join(packageRoot, "tools/programctl.mjs") };
 }
-function createCandidate(env) {
-  const worktree = path.join(path.dirname(env.repo), "candidate"); git(env.repo, "worktree", "add", "-b", "codex/orc0-test", worktree, "HEAD");
-  const file = path.join(worktree, "docs/arch/refactor/rev11/fixtures/orc0-trusted-local.txt"); fs.writeFileSync(file, "trusted-local candidate\n");
-  git(worktree, "add", "docs/arch/refactor/rev11/fixtures/orc0-trusted-local.txt"); git(worktree, "commit", "-m", "test: trusted-local ORC0 candidate");
-  return { worktree, ref: "refs/heads/codex/orc0-test" };
+function createCandidate(env, { nodeId = "ORC0", branch = "codex/orc0-test", directory = "candidate" } = {}) {
+  const worktree = path.join(path.dirname(env.repo), directory); git(env.repo, "worktree", "add", "-b", branch, worktree, "HEAD");
+  const relative = `docs/arch/refactor/rev11/fixtures/${nodeId.toLowerCase()}-trusted-local.txt`;
+  const file = path.join(worktree, relative); fs.writeFileSync(file, nodeId === "ORC0" ? "trusted-local candidate\n" : `trusted-local ${nodeId} candidate\n`);
+  git(worktree, "add", relative); git(worktree, "commit", "-m", `test: trusted-local ${nodeId} candidate`);
+  return { worktree, ref: `refs/heads/${branch}` };
 }
 function harnessFiles(temp, name) {
   const prompt = path.join(temp, `${name}.prompt.txt`); const report = path.join(temp, `${name}.report.json`);
   fs.writeFileSync(prompt, `fresh harness task ${name}\n`); fs.writeFileSync(report, '{"verdict":"PASS","findings":[]}\n'); return { prompt, report };
 }
 
-test("programctl drives J1 grandfathering through trusted-local ORC0 activation", { timeout: 180_000 }, () => {
+test("programctl drives J1 grandfathering through trusted-local ORC0 activation and successor landing", { timeout: 240_000 }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rev11-trusted-cli-"));
   try {
     const env = prepare(temp); const activationFile = path.join(env.packageRoot, "authority/state/activation.toml"); const dormantActivation = fs.readFileSync(activationFile);
@@ -70,5 +71,69 @@ test("programctl drives J1 grandfathering through trusted-local ORC0 activation"
     const activated = JSON.parse(cli(env, ["activate", "--activated-by", "maintainer"])); assert.equal(activated.phase, "ACTIVE"); assert.match(cli(env, ["phase"]), /phase=ACTIVE/);
     assert.equal(git(env.repo, "status", "--porcelain=v1", "--untracked-files=all"), "", "activation must not mutate tracked authority after review");
     git(env.repo, "worktree", "remove", candidate.worktree);
+    assert.match(cli(env, ["frontier"]), /(?:^|\n)CCA0(?:\n|$)/, "landed ORC0 acceptance must unlock CCA0");
+
+    const successor = createCandidate(env, { nodeId: "CCA0", branch: "codex/cca0-test", directory: "cca0-candidate" });
+    const successorAdmission = JSON.parse(cli(env, ["admit", "CCA0", "--holder", "compiler-maintainer", "--candidate-ref", successor.ref]));
+    const successorPacket = JSON.parse(cli(env, ["dispatch", "CCA0", "--holder", "compiler-maintainer", "--lease-id", successorAdmission.lease_id]));
+    cli(env, ["candidate-finalize", "CCA0", "--holder", "compiler-maintainer", "--lease-id", successorAdmission.lease_id]);
+    for (const lens of successorPacket.review_policy.review_lenses) {
+      const files = harnessFiles(temp, `cca0-${lens}`);
+      cli(env, ["harness-record", "--role", "review", "--round-id", successorAdmission.round_id, "--lease-id", successorAdmission.lease_id, "--holder", "compiler-maintainer", "--lens", lens, "--task", `/root/cca0-${lens}`, "--agent", `cca0-reviewer-${lens}`, "--provider", "openai", "--model", "gpt-5.6-sol", "--effort", "high", "--prompt", files.prompt, "--report", files.report]);
+    }
+    for (const role of ["verification", "confirmation"]) {
+      const files = harnessFiles(temp, `cca0-${role}`);
+      cli(env, ["harness-record", "--role", role, "--round-id", successorAdmission.round_id, "--lease-id", successorAdmission.lease_id, "--holder", "compiler-maintainer", "--task", `/root/cca0-${role}`, "--agent", `cca0-${role}-agent`, "--provider", "openai", "--model", "gpt-5.6-sol", "--effort", "high", "--prompt", files.prompt, "--report", files.report]);
+    }
+    const successorAccepted = JSON.parse(cli(env, ["round-accept", successorAdmission.round_id, "--holder", "compiler-maintainer"])); assert.equal(successorAccepted.node_id, "CCA0");
+    git(env.repo, "merge", "--ff-only", successor.ref);
+    const successorLanding = JSON.parse(cli(env, ["landing-record", "--round-id", successorAdmission.round_id, "--holder", "compiler-maintainer"])); assert.equal(successorLanding.node_id, "CCA0");
+    assert.equal(successorLanding.canonical_sha, successorAccepted.candidate_sha, "successor landing must bind the exact fast-forwarded candidate");
+    assert.match(cli(env, ["phase"]), /phase=ACTIVE/, "ACTIVE must survive canonical successor advance");
+    assert.match(cli(env, ["frontier"]), /(?:^|\n)CCA1(?:\n|$)/, "landed CCA0 acceptance must unlock its descendant");
+
+    const authority = lib.loadAuthority(env.packageRoot);
+    const anchorFile = path.join(lib.trustedLocalControlRoot(authority), "anchor.json");
+    const acceptanceFile = path.join(env.runtimeRoot, "trusted-local", "acceptances", `${successorAdmission.round_id}.json`);
+    const landingFile = path.join(env.runtimeRoot, "trusted-local", "landings", `${successorAdmission.round_id}.json`);
+    const exactAnchor = fs.readFileSync(anchorFile); const exactAcceptance = fs.readFileSync(acceptanceFile); const exactLanding = fs.readFileSync(landingFile);
+    const claimCases = [
+      { name: "no anchor claim ignores orphan artifacts", anchor: (row) => { row.rounds[successorAdmission.round_id].status = "FIX_REQUIRED"; delete row.landings[successorAdmission.round_id]; }, acceptance: "exact", landing: "exact", error: null, ready: false },
+      { name: "accepted claim without landing is valid but not projected", anchor: (row) => { delete row.landings[successorAdmission.round_id]; }, acceptance: "exact", landing: "exact", error: null, ready: false },
+      { name: "landing claim without accepted claim fails closed", anchor: (row) => { row.rounds[successorAdmission.round_id].status = "FIX_REQUIRED"; }, acceptance: "exact", landing: "exact", error: /landing claim .* no ACCEPTED round claim/, ready: false },
+      { name: "exact accepted and landing claims project", anchor: () => {}, acceptance: "exact", landing: "exact", error: null, ready: true },
+      { name: "missing acceptance artifact fails closed", anchor: () => {}, acceptance: "missing", landing: "exact", error: /accepted claim .* artifact is missing/, ready: false },
+      { name: "malformed acceptance artifact fails closed", anchor: () => {}, acceptance: "malformed", landing: "exact", error: /accepted claim .* artifact is malformed/, ready: false },
+      { name: "mismatched acceptance artifact fails closed", anchor: () => {}, acceptance: "mismatch", landing: "exact", error: /accepted claim .* artifact mismatches/, ready: false },
+      { name: "missing landing artifact fails closed", anchor: () => {}, acceptance: "exact", landing: "missing", error: /landing claim .* artifact is missing/, ready: false },
+      { name: "malformed landing artifact fails closed", anchor: () => {}, acceptance: "exact", landing: "malformed", error: /landing claim .* artifact is malformed/, ready: false },
+      { name: "mismatched landing artifact fails closed", anchor: () => {}, acceptance: "exact", landing: "mismatch", error: /landing claim .* artifact mismatches/, ready: false },
+    ];
+    const installArtifact = (file, exact, mode, field) => {
+      if (mode === "missing") fs.rmSync(file, { force: true });
+      else if (mode === "malformed") fs.writeFileSync(file, "{\n");
+      else if (mode === "mismatch") { const row = JSON.parse(exact); row[field] = "mismatched-operator"; fs.writeFileSync(file, `${JSON.stringify(row, null, 2)}\n`); }
+      else fs.writeFileSync(file, exact);
+    };
+    for (const claimCase of claimCases) {
+      const anchor = JSON.parse(exactAnchor); claimCase.anchor(anchor);
+      fs.writeFileSync(anchorFile, `${JSON.stringify(anchor, null, 2)}\n`);
+      installArtifact(acceptanceFile, exactAcceptance, claimCase.acceptance, "accepted_by");
+      installArtifact(landingFile, exactLanding, claimCase.landing, "landed_by");
+      const claimState = lib.deriveState(authority, { runtimeRoot: env.runtimeRoot });
+      const custodyErrors = claimState.errors.filter((error) => /trusted-local (?:accepted|landing) claim/.test(error));
+      if (claimCase.error) assert.match(custodyErrors.join("\n"), claimCase.error, claimCase.name);
+      else assert.deepEqual(custodyErrors, [], claimCase.name);
+      assert.equal(claimState.states.get("CCA1").status === "READY", claimCase.ready, claimCase.name);
+      if (claimCase.name === "mismatched acceptance artifact fails closed") {
+        assert.throws(() => cli(env, ["admit", "CCA0", "--holder", "other-maintainer", "--candidate-ref", successor.ref]), /state invalid.*accepted claim/is, "invalid claimed custody must prevent re-admission");
+      }
+    }
+    fs.writeFileSync(anchorFile, exactAnchor); fs.writeFileSync(acceptanceFile, exactAcceptance); fs.writeFileSync(landingFile, exactLanding);
+    git(env.repo, "reset", "--hard", landing.canonical_sha);
+    const rewritten = lib.deriveState(authority, { runtimeRoot: env.runtimeRoot });
+    assert.match(rewritten.errors.join("\n"), /trusted-local landing .* not .* retained by the current canonical history/);
+    assert.notEqual(rewritten.states.get("CCA1").status, "READY", "a rewritten canonical branch must not retain descendant readiness from the removed CCA0 landing");
+    git(env.repo, "worktree", "remove", successor.worktree);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 });

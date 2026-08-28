@@ -1041,27 +1041,98 @@ export function trustedLocalControlRoot(authority) {
   return path.join(commonRoot, "verter-unified-trusted-local");
 }
 
-function trustedLocalAcceptance(authority, runtimeRoot, nodeId = "ORC0") {
+function trustedLocalAcceptances(authority, runtimeRoot) {
+  const acceptances = new Map(); const errors = [];
+  const resolvedRuntime = path.resolve(runtimeRoot);
+  let anchor;
   try {
     const controlRoot = trustedLocalControlRoot(authority);
-    const anchor = readLocalAnchor({ controlRoot });
-    const accepted = Object.entries(anchor.rounds).filter(([, round]) => round.node_id === nodeId && round.status === "ACCEPTED").sort((a, b) => b[1].ordinal - a[1].ordinal)[0];
-    if (!accepted) return null;
-    const [roundId, round] = accepted;
+    const anchorFile = path.join(controlRoot, "anchor.json");
+    if (!fs.existsSync(anchorFile)) return { acceptances, errors };
+    anchor = readLocalAnchor({ controlRoot });
+  } catch (error) {
+    errors.push(`trusted-local custody anchor is unreadable or malformed: ${error.message}`);
+    return { acceptances, errors };
+  }
+
+  const readClaim = (file, label, claimErrors) => {
+    if (!fs.existsSync(file)) { claimErrors.push(`${label} runtime artifact is missing: ${file}`); return null; }
+    try { const bytes = fs.readFileSync(file); return { bytes, parsed: JSON.parse(bytes) }; }
+    catch (error) { claimErrors.push(`${label} runtime artifact is malformed: ${error.message}`); return null; }
+  };
+  const acceptedByRound = new Map(); const acceptedByNode = new Map();
+  for (const [roundId, round] of Object.entries(anchor.rounds).filter(([, row]) => row.status === "ACCEPTED")) {
     const lease = anchor.leases[round.lease_id];
-    if (!lease || lease.runtime_root !== path.resolve(runtimeRoot) || lease.status !== "ACCEPTED") return null;
-    const file = path.join(path.resolve(runtimeRoot), "trusted-local", "acceptances", `${roundId}.json`);
-    if (!fs.existsSync(file)) return null;
-    const bytes = fs.readFileSync(file); const receipt = JSON.parse(bytes);
-    if (receipt.type !== "trusted-local-acceptance" || receipt.round_id !== roundId || receipt.lease_id !== lease.lease_id || receipt.node_id !== nodeId || receipt.accepted_by !== lease.holder || receipt.candidate_sha !== lease.finalization?.candidate.sha || receipt.candidate_tree !== lease.finalization?.candidate.tree || receipt.candidate_ref !== lease.finalization?.candidate.ref || receipt.review_target_sha256 !== lease.finalization?.review_target_sha256) return null;
-    const landingFile = path.join(path.resolve(runtimeRoot), "trusted-local", "landings", `${roundId}.json`);
-    let landing = null;
-    if (anchor.landings?.[roundId] && fs.existsSync(landingFile)) {
-      const landingBytes = fs.readFileSync(landingFile); const parsed = JSON.parse(landingBytes);
-      if (JSON.stringify(parsed) === JSON.stringify(anchor.landings[roundId]) && parsed.type === "trusted-local-candidate-landing" && parsed.round_id === roundId && parsed.lease_id === lease.lease_id && parsed.candidate_sha === receipt.candidate_sha && parsed.candidate_tree === receipt.candidate_tree) landing = { ...parsed, file: landingFile, digest: sha256(landingBytes), reference: `${nodeId}-LANDING:${sha256(landingBytes)}` };
+    if (lease && lease.runtime_root !== resolvedRuntime) continue;
+    const claimErrors = []; const label = `trusted-local accepted claim ${roundId}`;
+    if (!lease) claimErrors.push(`${label} has no exact anchor lease`);
+    else {
+      if (lease.lease_id !== round.lease_id || lease.node_id !== round.node_id || lease.status !== "ACCEPTED") claimErrors.push(`${label} round/lease identity or status mismatches`);
+      if (!lease.finalization?.candidate || !lease.finalization?.review_target_sha256) claimErrors.push(`${label} has no exact finalized candidate custody`);
     }
-    return { roundId, round, lease, receipt, landing, file, digest: sha256(bytes), reference: `${nodeId}:${sha256(bytes)}` };
-  } catch { return null; }
+    const file = path.join(resolvedRuntime, "trusted-local", "acceptances", `${roundId}.json`);
+    const artifact = readClaim(file, label, claimErrors);
+    const expected = lease?.finalization?.candidate && {
+      schema: 1, type: "trusted-local-acceptance", assurance: "operator-attested-local-consistency",
+      round_id: roundId, lease_id: lease.lease_id, node_id: round.node_id, accepted_by: lease.holder,
+      candidate_sha: lease.finalization.candidate.sha, candidate_tree: lease.finalization.candidate.tree,
+      candidate_ref: lease.finalization.candidate.ref, review_target_sha256: lease.finalization.review_target_sha256,
+    };
+    if (artifact && (!expected || JSON.stringify(artifact.parsed) !== JSON.stringify(expected))) claimErrors.push(`${label} runtime artifact mismatches the anchor claim`);
+    if (claimErrors.length) { errors.push(...claimErrors); continue; }
+    const receipt = artifact.parsed; const digest = sha256(artifact.bytes);
+    const trusted = { roundId, round, lease, receipt, landing: null, file, digest, reference: `${round.node_id}:${digest}` };
+    acceptedByRound.set(roundId, trusted);
+    const claims = acceptedByNode.get(round.node_id) || []; claims.push(trusted); acceptedByNode.set(round.node_id, claims);
+  }
+
+  for (const [roundId, landingClaim] of Object.entries(anchor.landings || {})) {
+    const round = anchor.rounds[roundId]; const lease = round && anchor.leases[round.lease_id];
+    if (lease && lease.runtime_root !== resolvedRuntime) continue;
+    const claimErrors = []; const label = `trusted-local landing claim ${roundId}`;
+    const trusted = acceptedByRound.get(roundId);
+    if (!round || round.status !== "ACCEPTED") claimErrors.push(`${label} has no ACCEPTED round claim`);
+    if (!lease || lease.status !== "ACCEPTED" || lease.runtime_root !== resolvedRuntime) claimErrors.push(`${label} has no exact accepted anchor lease in this runtime`);
+    if (!trusted) claimErrors.push(`${label} has no valid accepted-round custody`);
+    const file = path.join(resolvedRuntime, "trusted-local", "landings", `${roundId}.json`);
+    const artifact = readClaim(file, label, claimErrors);
+    if (artifact && JSON.stringify(artifact.parsed) !== JSON.stringify(landingClaim)) claimErrors.push(`${label} runtime artifact mismatches the anchor claim`);
+    if (trusted && (landingClaim.type !== "trusted-local-candidate-landing" || landingClaim.round_id !== roundId || landingClaim.lease_id !== trusted.lease.lease_id || landingClaim.node_id !== trusted.receipt.node_id || landingClaim.landed_by !== trusted.lease.holder || landingClaim.candidate_sha !== trusted.receipt.candidate_sha || landingClaim.candidate_tree !== trusted.receipt.candidate_tree || landingClaim.candidate_ref !== trusted.receipt.candidate_ref || landingClaim.canonical_sha !== trusted.receipt.candidate_sha || landingClaim.canonical_tree !== trusted.receipt.candidate_tree)) claimErrors.push(`${label} identity mismatches its accepted candidate custody`);
+    if (claimErrors.length) { errors.push(...claimErrors); continue; }
+    const digest = sha256(artifact.bytes);
+    trusted.landing = { ...artifact.parsed, file, digest, reference: `${trusted.receipt.node_id}-LANDING:${digest}` };
+  }
+
+  for (const [nodeId, claims] of acceptedByNode) {
+    if (claims.length !== 1) errors.push(`trusted-local accepted claims for ${nodeId} are ambiguous: ${claims.map((row) => row.roundId).join(", ")}`);
+    else acceptances.set(nodeId, claims[0]);
+  }
+  return { acceptances, errors };
+}
+
+function trustedSuccessorReceipt(authority, trusted) {
+  if (!trusted?.landing) return { receipt: null, error: "" };
+  const repository = gitRoot(authority.packageRoot);
+  const canonicalRef = `refs/heads/${authority.metadata.canonical_integration_branch}`;
+  const canonicalSha = repository && validGitRef(canonicalRef, repository);
+  const candidateTree = repository && gitTree(trusted.receipt.candidate_sha, repository);
+  const landingTree = repository && gitTree(trusted.landing.canonical_sha, repository);
+  if (!repository || candidateTree !== trusted.receipt.candidate_tree || landingTree !== trusted.landing.canonical_tree
+    || trusted.landing.canonical_ref !== canonicalRef || !canonicalSha || !gitIsAncestor(trusted.landing.canonical_sha, canonicalSha, repository)) {
+    return { receipt: null, error: `trusted-local landing ${trusted.roundId} is not an exact candidate/landing Git identity retained by the current canonical history` };
+  }
+  return { receipt: {
+    receipt_id: trusted.receipt.node_id,
+    node_id: trusted.receipt.node_id,
+    digest: trusted.digest,
+    file: trusted.file,
+    candidate_sha: trusted.receipt.candidate_sha,
+    candidate_tree: trusted.receipt.candidate_tree,
+    candidate_ref: trusted.receipt.candidate_ref,
+    integration_sha: trusted.landing.canonical_sha,
+    integration_tree: trusted.landing.canonical_tree,
+    trusted_local_acceptance: trusted,
+  }, error: "" };
 }
 
 function gitWorktrees(repository) {
@@ -1834,9 +1905,15 @@ function validateReceiptContext(receipt, node, context, file) {
     expectedActivation = orc ? reference("ORC0", orc) : trustedOrc?.reference || "ORC0:MISSING";
     if (trustedOrc) {
       const canonicalRef = `refs/heads/${context.authority.metadata.canonical_integration_branch}`;
-      const canonicalSha = repository && validGitRef(canonicalRef, repository); const canonicalTree = canonicalSha && gitTree(canonicalSha, repository);
+      const canonicalSha = repository && validGitRef(canonicalRef, repository);
       const transition = [...context.activationTransitions.values()].find((row) => row.orc0_receipt === trustedOrc.reference && row.orc0_landing === trustedOrc.landing?.reference);
-      if (!transition || !trustedOrc.landing || transition.candidate_sha !== trustedOrc.receipt.candidate_sha || transition.candidate_tree !== trustedOrc.receipt.candidate_tree || transition.canonical_ref !== canonicalRef || transition.canonical_sha !== canonicalSha || transition.canonical_tree !== canonicalTree || canonicalSha !== trustedOrc.receipt.candidate_sha || canonicalTree !== trustedOrc.receipt.candidate_tree || Date.parse(receipt.accepted_at) < Date.parse(transition.activated_at)) errors.push(`receipt ${node.id} bypasses trusted-local ACTIVE/ORC0 lifecycle prerequisite`);
+      const landing = trustedOrc.landing;
+      if (!transition || !landing
+        || transition.candidate_sha !== trustedOrc.receipt.candidate_sha || transition.candidate_tree !== trustedOrc.receipt.candidate_tree || transition.candidate_ref !== trustedOrc.receipt.candidate_ref
+        || landing.candidate_sha !== trustedOrc.receipt.candidate_sha || landing.candidate_tree !== trustedOrc.receipt.candidate_tree || landing.candidate_ref !== trustedOrc.receipt.candidate_ref
+        || transition.canonical_ref !== canonicalRef || landing.canonical_ref !== canonicalRef || transition.canonical_sha !== landing.canonical_sha || transition.canonical_tree !== landing.canonical_tree
+        || !canonicalSha || !gitIsAncestor(landing.canonical_sha, canonicalSha, repository)
+        || Date.parse(receipt.accepted_at) < Date.parse(transition.activated_at)) errors.push(`receipt ${node.id} bypasses trusted-local ACTIVE/ORC0 lifecycle prerequisite`);
     } else {
     const transition = artifactReference(activation.activation_transition, context.activationTransitions, `receipt ${node.id} activation transition`);
     const authorization = context.authorizations.get(`ORC0:${activation.required_external_authorization}`);
@@ -1952,7 +2029,7 @@ function loadLandedReceipts(authority, runtimeRoot) {
 }
 
 function loadReceipts(authority, runtimeRoot, context) {
-  const { byId } = graphMaps(authority.nodes); const receipts = new Map(); const errors = [];
+  const { byId } = graphMaps(authority.nodes); const receipts = new Map(context.receipts); const errors = [];
   const manifest = readToml(confinedFile(authority.packageRoot, "authority/state/legacy-receipts.toml", "legacy receipt manifest"));
   const manifestRows = new Map();
   for (const row of manifest.receipt || []) {
@@ -2002,12 +2079,20 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
   const gateState = loadGateEvidence(authority, runtimeRoot, externalState.authorizations);
   const reviewState = loadReviewEvidence(authority, runtimeRoot, externalState.authorizations, now);
   const landedState = loadLandedReceipts(authority, runtimeRoot);
-  const trustedOrc = trustedLocalAcceptance(authority, runtimeRoot);
+  const trustedCustody = trustedLocalAcceptances(authority, runtimeRoot);
+  const trustedAcceptances = trustedCustody.acceptances;
+  const trustedOrc = trustedAcceptances.get("ORC0") || null;
+  const trustedReceipts = new Map(); const trustedReceiptErrors = [];
+  for (const [nodeId, trusted] of trustedAcceptances) {
+    const projected = trustedSuccessorReceipt(authority, trusted);
+    if (projected.error) trustedReceiptErrors.push(projected.error);
+    else if (projected.receipt) trustedReceipts.set(nodeId, projected.receipt);
+  }
   const context = {
     authority,
     authorityDigest: computeAuthorityDigest(authority.packageRoot),
-    receipts: new Map(),
-    predecessorReceipts: new Map(landedState.receipts),
+    receipts: new Map(trustedReceipts),
+    predecessorReceipts: new Map([...landedState.receipts, ...trustedReceipts]),
     landedReceipts: landedState.receipts,
     authorizations: externalState.authorizations,
     leases: leaseState.all,
@@ -2023,9 +2108,10 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
     amendments: amendmentState.rows,
     invalidatedReceipts: new Set(amendmentState.rows.flatMap((row) => row.invalidated_receipts)),
     trustedLocalOrc: trustedOrc,
+    trustedLocalAcceptances: trustedAcceptances,
   };
   const receiptState = loadReceipts(authority, runtimeRoot, context);
-  const errors = [...amendmentErrors, ...amendmentState.errors, ...externalState.errors, ...transitionState.errors, ...gateState.errors, ...reviewState.errors, ...leaseState.errors, ...dispatchState.errors, ...finalizationState.errors, ...landedState.errors, ...receiptState.errors];
+  const errors = [...amendmentErrors, ...amendmentState.errors, ...externalState.errors, ...transitionState.errors, ...gateState.errors, ...reviewState.errors, ...leaseState.errors, ...dispatchState.errors, ...finalizationState.errors, ...landedState.errors, ...trustedCustody.errors, ...trustedReceiptErrors, ...receiptState.errors];
   const j1 = landedState.receipts.get("J1");
   const j1Reference = j1 ? reference(j1.receipt_id, j1) : "";
   const j1Bound = Boolean(j1) && activation.j1_state === "LANDED_GRANDFATHERED" && activation.j1_receipt === j1Reference;
@@ -2057,7 +2143,7 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
   else if (transitionState.transitions.size) {
     const transitions = [...transitionState.transitions.values()]; const transition = transitions[0];
     const repository = gitRoot(authority.packageRoot); const canonicalRef = `refs/heads/${authority.metadata.canonical_integration_branch}`;
-    const canonicalSha = repository && validGitRef(canonicalRef, repository); const canonicalTree = canonicalSha && gitTree(canonicalSha, repository);
+    const canonicalSha = repository && validGitRef(canonicalRef, repository);
     const directive = confinedFile(authority.packageRoot, "sources/maintainer-directive-2026-08-28-trusted-local-orc0.md", "trusted-local activation directive");
     const trustedAuthorization = `${activation.required_external_authorization}:${sha256(fs.readFileSync(directive))}`;
     const landing = trustedOrc?.landing;
@@ -2065,9 +2151,11 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
       && transition.j1_receipt === j1Reference
       && transition.orc0_receipt === trustedOrc.reference && transition.orc0_landing === landing.reference
       && transition.candidate_sha === trustedOrc.receipt.candidate_sha && transition.candidate_tree === trustedOrc.receipt.candidate_tree && transition.candidate_ref === trustedOrc.receipt.candidate_ref
-      && transition.canonical_ref === canonicalRef && transition.canonical_sha === canonicalSha && transition.canonical_tree === canonicalTree
-      && landing.canonical_ref === canonicalRef && landing.canonical_sha === canonicalSha && landing.canonical_tree === canonicalTree
-      && canonicalSha === trustedOrc.receipt.candidate_sha && canonicalTree === trustedOrc.receipt.candidate_tree
+      && landing.candidate_sha === trustedOrc.receipt.candidate_sha && landing.candidate_tree === trustedOrc.receipt.candidate_tree && landing.candidate_ref === trustedOrc.receipt.candidate_ref
+      && transition.canonical_ref === canonicalRef && landing.canonical_ref === canonicalRef
+      && transition.canonical_sha === landing.canonical_sha && transition.canonical_tree === landing.canonical_tree
+      && landing.canonical_sha === trustedOrc.receipt.candidate_sha && landing.canonical_tree === trustedOrc.receipt.candidate_tree
+      && canonicalSha && gitIsAncestor(landing.canonical_sha, canonicalSha, repository)
       && transition.activation_authorization === trustedAuthorization && transition.authority_sha256 === context.authorityDigest && transition.activated_by === trustedOrc.lease.holder;
     if (!activeBound) errors.push("premature activation: trusted-local transition is not bound to the exact accepted landing, canonical Git identity, authorization, and authority digest");
     else phase = "ACTIVE";
@@ -2077,7 +2165,8 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
   for (const node of topological(authority.nodes).order) {
     const blockers = []; const receipt = receiptState.receipts.get(node.id); const ownLease = leaseState.active.find((lease) => lease.node_id === node.id);
     const landed = landedState.receipts.get(node.id);
-    if (node.id === "ORC0" && trustedOrc) states.set(node.id, { status: "ACCEPTED", blockers, trusted_local_acceptance: trustedOrc });
+    const trusted = trustedAcceptances.get(node.id);
+    if (trusted) states.set(node.id, { status: "ACCEPTED", blockers, trusted_local_acceptance: trusted });
     else if (landed && j1Bound) states.set(node.id, { status: "LANDED_GRANDFATHERED", blockers, landed_receipt: landed });
     else if (receipt) states.set(node.id, { status: "ACCEPTED", blockers, receipt });
     else if (ownLease) states.set(node.id, { status: "IN_FLIGHT", blockers: [], lease: ownLease });
@@ -2103,7 +2192,7 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
     leases: leaseState.active, allLeases: leaseState.all, gates: gateState.evidence, reviews: reviewState.evidence,
     dispatches: dispatchState.dispatches, finalizations: finalizationState.finalizations,
     activationTransitions: transitionState.transitions,
-    errors, active, phase, runtimeRoot: path.resolve(runtimeRoot), authorityDigest: context.authorityDigest,
+    errors, active, phase, runtimeRoot: path.resolve(runtimeRoot), authorityDigest: context.authorityDigest, trustedLocalAcceptances: trustedAcceptances,
   };
 }
 
@@ -2363,7 +2452,7 @@ export function activateTrustedProgram(authority, { runtimeRoot = defaultRuntime
   mutationAuthority(authority, runtimeRoot); assertIdentity(activatedBy, "activation identity");
   const before = deriveState(authority, { runtimeRoot, now });
   if (before.errors.length) throw new Error(`state invalid before trusted-local activation: ${before.errors.join("; ")}`);
-  const activation = readToml(path.join(authority.packageRoot, "authority/state/activation.toml")); const trustedOrc = trustedLocalAcceptance(authority, runtimeRoot); const j1 = before.landedReceipts.get("J1");
+  const activation = readToml(path.join(authority.packageRoot, "authority/state/activation.toml")); const trustedOrc = before.trustedLocalAcceptances.get("ORC0"); const j1 = before.landedReceipts.get("J1");
   if (authority.metadata.state !== "DORMANT" || activation.package_state !== "DORMANT" || before.phase !== "ORC0") throw new Error("trusted-local activation requires exact DORMANT/ORC0 pre-state");
   if (!j1 || activation.j1_state !== "LANDED_GRANDFATHERED" || activation.j1_receipt !== reference(j1.receipt_id, j1)) throw new Error("trusted-local activation requires an exact external grandfathered J1 landing matching the tracked expected-reference pin");
   if (!trustedOrc || !trustedOrc.landing || trustedOrc.lease.holder !== activatedBy) throw new Error("trusted-local activation requires the current accepted ORC0 round, exact candidate landing, and its operator");
@@ -2525,7 +2614,9 @@ export function acceptTrustedRound(authority, options = {}) {
 
 export function recordTrustedLanding(authority, { runtimeRoot = defaultRuntimeRoot(authority.packageRoot), roundId, holder } = {}) {
   mutationAuthority(authority, runtimeRoot);
-  const trusted = trustedLocalAcceptance(authority, runtimeRoot);
+  const current = deriveState(authority, { runtimeRoot });
+  if (current.errors.length) throw new Error(`state invalid before trusted-local landing: ${current.errors.join("; ")}`);
+  const trusted = [...current.trustedLocalAcceptances.values()].find((row) => row.roundId === roundId);
   if (!trusted || trusted.roundId !== roundId || trusted.lease.holder !== holder) throw new Error("landing requires the exact accepted trusted-local round and holder");
   const repository = gitRoot(authority.packageRoot); const canonicalRef = `refs/heads/${authority.metadata.canonical_integration_branch}`;
   const canonicalSha = validGitRef(canonicalRef, repository); const canonicalTree = canonicalSha && gitTree(canonicalSha, repository);

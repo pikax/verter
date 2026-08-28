@@ -49,7 +49,7 @@ node tools/programctl.mjs landing-record --round-id ROUND --holder NAME --runtim
 node tools/programctl.mjs activate --activated-by NAME --runtime-root PATH
 ```
 
-Landing requires canonical tip equality with the reviewed candidate SHA/tree, not ancestry alone. Activation publishes the exact transition through the repo-global trusted-local journal and does not edit tracked authority or regenerate projections. Any partial/interrupted transition remains strictly refused. ORC0 may verify receipts, bind the authority digest, and activate the external lifecycle only. It may not alter DAG semantics.
+Each landing requires canonical tip equality with that round's reviewed candidate SHA/tree at record time. Every validated accepted-and-landed trusted-local round is then projected as a stable successor receipt using its acceptance digest plus exact candidate and integration identities, so it can satisfy descendant prerequisites. Activation publishes the exact ORC0 transition through the repo-global trusted-local journal and does not edit tracked authority or regenerate projections. After activation, the exact ORC0 acceptance, landing, and transition remain immutable while the canonical tip may advance only as their Git descendant. Any partial, mismatched, or non-descendant transition remains strictly refused. ORC0 may verify receipts, bind the authority digest, and activate the external lifecycle only. It may not alter DAG semantics.
 
 ## Atomic admission and round handles
 

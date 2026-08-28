@@ -254,7 +254,30 @@ test("second completed P1 review/fix cycle requires the fixed neutral Architect 
     assert.throws(() => lifecycle.admit({ runtimeRoot: runtimeA, node: highNode, candidate, holder: "author" }), /Architect decision/);
     const decision = path.join(root, "architect.json"); fs.writeFileSync(decision, '{"provider":"openai","tool":"codex","model":"gpt-5.6-sol","reasoning_effort":"xhigh","decision":"CONTINUE","additional_round_cap":1}\n');
     lifecycle.recordArchitectDecision({ runtimeRoot: runtimeA, roundId: r2.round_id, operator: "maintainer", reportFile: decision });
-    assert.equal(lifecycle.admit({ runtimeRoot: runtimeA, node: highNode, candidate, holder: "author" }).round_id, "ORC0-R3");
+    const r3 = lifecycle.admit({ runtimeRoot: runtimeA, node: highNode, candidate, holder: "author" });
+    assert.equal(r3.round_id, "ORC0-R3"); lifecycle.finalize({ runtimeRoot: runtimeA, leaseId: r3.lease_id, holder: "author", candidate });
+    recordHighReviewSet({ lifecycle, runtimeA, root, admitted: r3, suffix: "cap-r3" });
+    lifecycle.close({ runtimeRoot: runtimeA, leaseId: r3.lease_id, holder: "author", outcome: "FIX_REQUIRED" });
+    assert.equal(fs.existsSync(path.join(runtimeA, "trusted-local", "architect-prompts", `${r3.round_id}.json`)), true, "a critical round that exhausts the prior cap must become eligible for a fresh ruling");
+    assert.throws(() => lifecycle.recordArchitectDecision({ runtimeRoot: runtimeA, roundId: r2.round_id, operator: "maintainer", reportFile: decision }), /already recorded/i);
+    const legacyAnchor = JSON.parse(fs.readFileSync(lifecycle.anchorPath)); delete legacyAnchor.rounds[r3.round_id].architect_escalation_required;
+    fs.writeFileSync(lifecycle.anchorPath, `${JSON.stringify(legacyAnchor, null, 2)}\n`);
+    lifecycle.recordArchitectDecision({ runtimeRoot: runtimeA, roundId: r3.round_id, operator: "maintainer", reportFile: decision });
+    assert.equal(lifecycle.admit({ runtimeRoot: runtimeA, node: highNode, candidate, holder: "author" }).round_id, "ORC0-R4");
+  });
+});
+
+test("an exact neutral Architect STOP decision remains terminal", () => {
+  fixture(({ runtimeA, lifecycle, root }) => {
+    for (let cycle = 1; cycle <= 2; cycle += 1) {
+      const admitted = lifecycle.admit({ runtimeRoot: runtimeA, node: highNode, candidate, holder: "author" });
+      lifecycle.finalize({ runtimeRoot: runtimeA, leaseId: admitted.lease_id, holder: "author", candidate });
+      recordHighReviewSet({ lifecycle, runtimeA, root, admitted, suffix: `stop-r${cycle}` });
+      lifecycle.close({ runtimeRoot: runtimeA, leaseId: admitted.lease_id, holder: "author", outcome: "FIX_REQUIRED" });
+    }
+    const stop = path.join(root, "architect-stop.json"); fs.writeFileSync(stop, '{"provider":"openai","tool":"codex","model":"gpt-5.6-sol","reasoning_effort":"xhigh","decision":"STOP","additional_round_cap":0}\n');
+    lifecycle.recordArchitectDecision({ runtimeRoot: runtimeA, roundId: "ORC0-R2", operator: "maintainer", reportFile: stop });
+    assert.throws(() => lifecycle.admit({ runtimeRoot: runtimeA, node: highNode, candidate, holder: "author" }), /stopped by the neutral Architect/i);
   });
 });
 
