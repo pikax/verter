@@ -20,6 +20,9 @@ export class InvalidIssueNumberError extends GitHubAdapterError {}
 export class IssueSyncError extends GitHubAdapterError {}
 export class SelectionError extends IssueSyncError {}
 export class MissingAncestorError extends IssueSyncError {}
+export class MissingProjectIdentityError extends GitHubAdapterError {}
+export class MissingIssueMappingError extends GitHubAdapterError {}
+export class NonReadyNodeError extends GitHubAdapterError {}
 
 export function mutationIdentity(row) {
   if (!row || typeof row !== "object") return null;

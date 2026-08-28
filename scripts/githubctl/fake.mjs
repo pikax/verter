@@ -3,16 +3,22 @@ import {
   assertIssueNumber,
   bindOwnerRepo,
   capabilityRecord,
+  planAddIssueToProject,
   planCreateIssue,
   planCreatePullRequest,
+  planSetIssueMilestone,
   planUpdateIssue,
+  prepareAddIssueToProject,
   prepareCreateIssue,
   prepareCreatePullRequest,
+  prepareSetIssueMilestone,
   prepareUpdateIssue,
+  PROJECT_NUMBER,
 } from "./adapter.mjs";
 import {
   DuplicateError,
   GitHubAdapterError,
+  MissingProjectIdentityError,
   NotFoundError,
   PermissionDeniedError,
   ProtectedMappingError,
@@ -28,6 +34,7 @@ function cloneIssue(issue) {
     title: issue.title,
     body: issue.body,
     comments: cloneComments(issue.comments),
+    milestone: issue.milestone ?? null,
   };
 }
 
@@ -47,24 +54,41 @@ export class FakeGitHubAdapter {
   #pulls;
   #heads;
   #applyAttempts;
+  #projectMissing;
+  #projectItems;
+  #milestones;
 
   constructor(options = {}) {
     bindOwnerRepo(this, options, "FakeGitHubAdapter");
+    if (options.projectNumber != null && options.projectNumber !== PROJECT_NUMBER) {
+      throw new GitHubAdapterError("refusing to create a project other than Project 3");
+    }
     this.authenticated = options.authenticated !== false;
     this.login = typeof options.login === "string" && options.login ? options.login : "fake-user";
     this.repositoryAccess = options.repositoryAccess !== false;
     this.permissions = {
       issues: options.permissions?.issues !== false,
       pullRequests: options.permissions?.pullRequests !== false,
+      projects: options.permissions?.projects !== false,
     };
     this.failOnApply = options.failOnApply;
     this.failOnApplyError = options.failOnApplyError;
     this.refusals = [];
     this.reads = [];
+    this.milestoneWrites = [];
     this.#issues = new Map();
     this.#pulls = new Map();
     this.#heads = new Set();
     this.#applyAttempts = 0;
+    this.#projectMissing = options.missing === true;
+    this.#projectItems = new Set();
+    this.#milestones = new Map();
+    for (const number of options.projectItems ?? []) {
+      this.#projectItems.add(assertIssueNumber(number));
+    }
+    for (const row of options.milestones ?? []) {
+      this.#milestones.set(row.title, row);
+    }
     for (const issue of options.issues ?? []) {
       const number = assertIssueNumber(issue.number);
       this.#claimNumber(number, `issue #${number} already exists`);
@@ -73,6 +97,7 @@ export class FakeGitHubAdapter {
         title: issue.title,
         body: issue.body,
         comments: cloneComments(issue.comments),
+        milestone: issue.milestone ?? null,
       });
     }
     for (const pull of options.pullRequests ?? []) {
@@ -116,6 +141,7 @@ export class FakeGitHubAdapter {
       repository: { owner: this.owner, repo: this.repo },
       issues: this.permissions.issues,
       pullRequests: this.permissions.pullRequests,
+      projects: this.permissions.projects && !this.#projectMissing,
     });
   }
 
@@ -149,6 +175,7 @@ export class FakeGitHubAdapter {
       title: request.title,
       body: request.body,
       comments: [],
+      milestone: null,
     });
     return {
       kind: "create-issue",
@@ -257,6 +284,64 @@ export class FakeGitHubAdapter {
         number: row.number,
         mapping: { ...row.mapping },
       })),
+      projectItems: this.getProjectItems(PROJECT_NUMBER),
+      milestoneWrites: this.milestoneWrites.map((row) => ({
+        issueNumber: row.issueNumber,
+        title: row.title,
+      })),
     };
+  }
+
+  getProject(number = PROJECT_NUMBER) {
+    if (number !== PROJECT_NUMBER) {
+      throw new GitHubAdapterError(`scheduling overlay uses GitHub Project ${PROJECT_NUMBER} only`);
+    }
+    if (this.#projectMissing) {
+      throw new MissingProjectIdentityError(`GitHub Project ${PROJECT_NUMBER} is missing`);
+    }
+    return { id: "fake-project-3", number: PROJECT_NUMBER };
+  }
+
+  getProjectItems(number = PROJECT_NUMBER) {
+    if (number !== PROJECT_NUMBER) {
+      throw new GitHubAdapterError(`scheduling overlay uses GitHub Project ${PROJECT_NUMBER} only`);
+    }
+    return [...this.#projectItems].sort((left, right) => left - right);
+  }
+
+  addIssueToProject(request) {
+    const { mode, issueNumber } = prepareAddIssueToProject(this, request);
+    this.getProject(PROJECT_NUMBER);
+    if (mode === "check") return planAddIssueToProject(issueNumber);
+    this.#beginApply();
+    if (!this.permissions.projects) throw new PermissionDeniedError("projects permission denied");
+    if (!this.#issues.has(issueNumber)) {
+      throw new NotFoundError(`issue #${issueNumber} is missing`);
+    }
+    const alreadyMember = this.#projectItems.has(issueNumber);
+    this.#projectItems.add(issueNumber);
+    return {
+      kind: "add-project-item",
+      number: PROJECT_NUMBER,
+      issueNumber,
+      applied: true,
+      already_member: alreadyMember,
+    };
+  }
+
+  setIssueMilestone(request) {
+    const { mode, issueNumber, title } = prepareSetIssueMilestone(this, request);
+    if (this.#pulls.has(issueNumber)) {
+      throw new GitHubAdapterError("ReleaseTarget is set on the issue, never on a PR");
+    }
+    if (mode === "check") return planSetIssueMilestone(issueNumber, title);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    if (!this.#milestones.has(title)) throw new NotFoundError(`milestone ${title} is missing`);
+    const issue = this.#issues.get(issueNumber);
+    if (!issue) throw new NotFoundError(`issue #${issueNumber} is not in the fake`);
+    issue.milestone = title;
+    this.milestoneWrites.push({ issueNumber, title });
+    return { kind: "set-milestone", issueNumber, title, applied: true };
   }
 }

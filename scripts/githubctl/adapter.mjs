@@ -8,6 +8,7 @@ import {
   InvalidIssueNumberError,
   LiveGitHubForbiddenInTestsError,
   MappingMismatchError,
+  MissingProjectIdentityError,
   MutationModeRequiredError,
   NotFoundError,
   PartialFailureError,
@@ -16,6 +17,28 @@ import {
   UnstructuredGitHubOutputError,
   WrongRepositoryError,
 } from "./errors.mjs";
+
+export const PROJECT_NUMBER = 3;
+export const PROJECT_VIEWS = Object.freeze([
+  "execution",
+  "READY",
+  "triage",
+  "review/gate",
+  "train",
+  "milestone",
+  "roadmap",
+]);
+
+const PROJECT_LOOKUP_QUERY =
+  "query($login:String!,$number:Int!){organization(login:$login){projectV2(number:$number){id number}}user(login:$login){projectV2(number:$number){id number}}}";
+const ISSUE_ID_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id projectsV2(first:100){nodes{id number}}} pullRequest(number:$number){id}}}";
+const ADD_ITEM_MUTATION =
+  "mutation($projectId:ID!,$contentId:ID!){addProjectV2ItemById(input:{projectId:$projectId,contentId:$contentId}){item{id}}}";
+const MILESTONE_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id} pullRequest(number:$number){id} milestones(first:100,states:[OPEN,CLOSED]){nodes{id title}}}}";
+const SET_MILESTONE_MUTATION =
+  "mutation($id:ID!,$milestoneId:ID){updateIssue(input:{id:$id,milestoneId:$milestoneId}){issue{number}}}";
 
 const MINTED_CLEARANCES = new WeakMap();
 const OWNER_REPO = /^[A-Za-z0-9_.-]+$/;
@@ -33,12 +56,20 @@ export function bindOwnerRepo(target, options, label) {
   Object.defineProperty(target, "repo", { get: () => repo, enumerable: true });
 }
 
-export function capabilityRecord({ authenticated, login, repository, issues, pullRequests }) {
+export function capabilityRecord({
+  authenticated,
+  login,
+  repository,
+  issues,
+  pullRequests,
+  projects,
+}) {
   const record = {
     authenticated: authenticated === true,
     repository: repository ?? null,
     issues: issues === true,
     pullRequests: pullRequests === true,
+    projects: projects === true,
   };
   if (typeof login === "string" && login.length > 0) record.login = login;
   return record;
@@ -105,7 +136,12 @@ export function parseIssuePayload(payload, expectedNumber) {
   if (typeof body !== "string") {
     throw new UnstructuredGitHubOutputError("GitHub issue body is not a string");
   }
-  return { number, title: payload.title, body };
+  const result = { number, title: payload.title, body };
+  const milestone = payload.milestone;
+  if (milestone && typeof milestone === "object" && typeof milestone.title === "string") {
+    result.milestone = milestone.title;
+  }
+  return result;
 }
 
 export function assertIssueNumber(value, label = "issue number") {
@@ -207,6 +243,102 @@ export function prepareUpdateIssue(adapter, request) {
   }
   assertApplyClearance(mode, request.clearance, "issues", adapter);
   return { mode, number };
+}
+
+export function assertProjectNumber(number) {
+  if (number !== PROJECT_NUMBER) {
+    throw new GitHubAdapterError(`scheduling overlay uses GitHub Project ${PROJECT_NUMBER} only`);
+  }
+  return number;
+}
+
+export function parseGraphqlResult(payload, createError) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub GraphQL response is not a JSON object");
+  }
+  const fail = () => {
+    const error =
+      typeof createError === "function"
+        ? createError(payload)
+        : new GitHubAdapterError("GitHub GraphQL request failed");
+    throw error;
+  };
+  if (Array.isArray(payload.errors) && payload.errors.length > 0) fail();
+  const data = payload.data;
+  if (data === null || typeof data !== "object" || Array.isArray(data)) fail();
+  return data;
+}
+
+function missingProjectError(number) {
+  return () => new MissingProjectIdentityError(`GitHub Project ${number} is missing`);
+}
+
+function projectFromGraphqlData(data, number) {
+  const project = data.organization?.projectV2 ?? data.user?.projectV2 ?? null;
+  if (
+    project === null ||
+    typeof project !== "object" ||
+    Array.isArray(project) ||
+    project.number !== number ||
+    typeof project.id !== "string" ||
+    project.id.length === 0
+  ) {
+    throw new MissingProjectIdentityError(`GitHub Project ${number} is missing`);
+  }
+  return { id: project.id, number };
+}
+
+export function parseGraphqlProject(payload, number = PROJECT_NUMBER) {
+  return projectFromGraphqlData(parseGraphqlResult(payload, missingProjectError(number)), number);
+}
+
+function issueIdFromGraphql(data, issueNumber) {
+  const contentId = data?.repository?.issue?.id;
+  if (typeof contentId !== "string" || contentId.length === 0) {
+    throw new NotFoundError(`issue #${issueNumber} is missing`);
+  }
+  return contentId;
+}
+
+function projectMembership(issue, project) {
+  const nodes = issue?.projectsV2?.nodes;
+  if (!Array.isArray(nodes)) return undefined;
+  return nodes.some(
+    (row) =>
+      row &&
+      typeof row === "object" &&
+      !Array.isArray(row) &&
+      (row.id === project.id || row.number === project.number),
+  );
+}
+
+export function planAddIssueToProject(issueNumber) {
+  return {
+    kind: "add-project-item",
+    number: PROJECT_NUMBER,
+    issueNumber,
+    applied: false,
+  };
+}
+
+export function planSetIssueMilestone(issueNumber, title) {
+  return { kind: "set-milestone", issueNumber, title, applied: false };
+}
+
+export function prepareAddIssueToProject(adapter, request) {
+  assertProjectNumber(request.number);
+  const mode = assertMutationMode(request.mode);
+  const issueNumber = assertIssueNumber(request.issueNumber);
+  assertApplyClearance(mode, request.clearance, "projects", adapter);
+  return { mode, issueNumber };
+}
+
+export function prepareSetIssueMilestone(adapter, request) {
+  const mode = assertMutationMode(request.mode);
+  const issueNumber = assertIssueNumber(request.issueNumber);
+  assertRequiredText(request.title, "milestone title");
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, issueNumber, title: request.title };
 }
 
 export function prepareCreatePullRequest(adapter, request) {
@@ -408,12 +540,22 @@ export class GitHubAdapter {
       permissions.triage === true;
     const pullWrite =
       permissions.admin === true || permissions.maintain === true || permissions.push === true;
+    let projects = false;
+    try {
+      this.getProject(PROJECT_NUMBER);
+      projects = true;
+    } catch (error) {
+      if (!(error instanceof MissingProjectIdentityError) && !expectedCapabilityMiss(error)) {
+        throw error;
+      }
+    }
     return capabilityRecord({
       authenticated: true,
       login: user.login,
       repository: { owner: this.owner, repo: this.repo },
       issues: repo.has_issues === true && issueWrite,
       pullRequests: pullWrite,
+      projects,
     });
   }
 
@@ -493,5 +635,97 @@ export class GitHubAdapter {
       path: `/repos/${this.owner}/${this.repo}/issues/${expected}`,
     });
     return parseIssuePayload(payload, expected);
+  }
+
+  #graphql(query, variables, createError) {
+    return parseGraphqlResult(
+      this.#transport.request({
+        method: "POST",
+        path: "graphql",
+        body: { query, variables },
+      }),
+      createError,
+    );
+  }
+
+  getProject(number = PROJECT_NUMBER) {
+    assertProjectNumber(number);
+    return projectFromGraphqlData(
+      this.#graphql(
+        PROJECT_LOOKUP_QUERY,
+        { login: this.owner, number },
+        missingProjectError(number),
+      ),
+      number,
+    );
+  }
+
+  addIssueToProject(request) {
+    const { mode, issueNumber } = prepareAddIssueToProject(this, request);
+    const project = this.getProject(PROJECT_NUMBER);
+    if (mode === "check") return planAddIssueToProject(issueNumber);
+    const missingIssue = () => new NotFoundError(`issue #${issueNumber} is missing`);
+    const data = this.#graphql(
+      ISSUE_ID_QUERY,
+      { owner: this.owner, name: this.repo, number: issueNumber },
+      missingIssue,
+    );
+    const contentId = issueIdFromGraphql(data, issueNumber);
+    const alreadyMember = projectMembership(data.repository?.issue, project);
+    const mutation = this.#graphql(
+      ADD_ITEM_MUTATION,
+      { projectId: project.id, contentId },
+      () => new GitHubAdapterError("addProjectV2ItemById failed"),
+    );
+    const itemId = mutation.addProjectV2ItemById?.item?.id;
+    if (typeof itemId !== "string" || itemId.length === 0) {
+      if (alreadyMember !== true) {
+        throw new GitHubAdapterError("addProjectV2ItemById did not return an item id");
+      }
+    }
+    const added = {
+      kind: "add-project-item",
+      number: PROJECT_NUMBER,
+      issueNumber,
+      applied: true,
+    };
+    if (typeof alreadyMember === "boolean") added.already_member = alreadyMember;
+    return added;
+  }
+
+  setIssueMilestone(request) {
+    const { mode, issueNumber, title } = prepareSetIssueMilestone(this, request);
+    if (mode === "check") return planSetIssueMilestone(issueNumber, title);
+    const missingIssue = () => new NotFoundError(`issue #${issueNumber} is missing`);
+    const data = this.#graphql(
+      MILESTONE_QUERY,
+      { owner: this.owner, name: this.repo, number: issueNumber },
+      missingIssue,
+    );
+    const repository = data.repository;
+    if (repository?.pullRequest?.id && !repository?.issue?.id) {
+      throw new GitHubAdapterError("ReleaseTarget is set on the issue, never on a PR");
+    }
+    const issueId = repository?.issue?.id;
+    if (typeof issueId !== "string" || issueId.length === 0) {
+      throw new NotFoundError(`issue #${issueNumber} is missing`);
+    }
+    const nodes = repository?.milestones?.nodes;
+    const found = Array.isArray(nodes)
+      ? nodes.find((row) => row && row.title === title && typeof row.id === "string")
+      : null;
+    if (!found) throw new NotFoundError(`milestone ${title} is missing`);
+    const mutation = this.#graphql(
+      SET_MILESTONE_MUTATION,
+      { id: issueId, milestoneId: found.id },
+      () => new GitHubAdapterError("updateIssue milestone failed"),
+    );
+    const returned = mutation.updateIssue?.issue?.number;
+    if (returned !== issueNumber) {
+      throw new GitHubAdapterError(
+        `GitHub milestone update returned issue ${returned}, expected ${issueNumber}`,
+      );
+    }
+    return { kind: "set-milestone", issueNumber, title, applied: true };
   }
 }

@@ -1,17 +1,43 @@
 import { mintDoctorClearance } from "./adapter.mjs";
+import { GitHubAdapterError } from "./errors.mjs";
+
+export const DOCTOR_ALL_CAPABILITIES = Object.freeze(["issues", "pullRequests", "projects"]);
+export const SYNC_ISSUES_CAPABILITIES = Object.freeze(["issues"]);
+export const SCHEDULE_CAPABILITIES = Object.freeze(["issues", "projects"]);
+
+const CAPABILITY_ERRORS = Object.freeze({
+  issues: "issues",
+  pullRequests: "pull-requests",
+  projects: "projects",
+});
+
+function requiredCapabilities(require) {
+  if (require == null) return DOCTOR_ALL_CAPABILITIES;
+  if (!Array.isArray(require) || require.length === 0) {
+    throw new GitHubAdapterError("doctor require must be a non-empty capability list");
+  }
+  for (const name of require) {
+    if (!(name in CAPABILITY_ERRORS)) {
+      throw new GitHubAdapterError(`unknown doctor capability ${name}`);
+    }
+  }
+  return require;
+}
 
 export class GitHubDoctor {
   constructor(adapter) {
     this.adapter = adapter;
   }
 
-  check() {
+  check(options = {}) {
     const capabilities = this.adapter.inspectCapabilities();
+    const required = requiredCapabilities(options.require);
     const errors = [];
     if (!capabilities.authenticated) errors.push("unauthenticated");
     if (!capabilities.repository) errors.push("repository");
-    if (!capabilities.issues) errors.push("issues");
-    if (!capabilities.pullRequests) errors.push("pull-requests");
+    for (const name of required) {
+      if (capabilities[name] !== true) errors.push(CAPABILITY_ERRORS[name]);
+    }
     const ok = errors.length === 0;
     return {
       ok,
@@ -24,8 +50,9 @@ export class GitHubDoctor {
               kind: "github-doctor-clearance",
               owner: this.adapter.owner,
               repo: this.adapter.repo,
-              issues: true,
-              pullRequests: true,
+              issues: capabilities.issues === true,
+              pullRequests: capabilities.pullRequests === true,
+              projects: capabilities.projects === true,
             }),
           )
         : null,

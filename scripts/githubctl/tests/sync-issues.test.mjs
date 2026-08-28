@@ -88,11 +88,20 @@ const WRITABLE_REPO = {
 
 function liveTransport(routes) {
   const calls = [];
+  const withProject = {
+    "POST graphql": {
+      data: {
+        organization: { projectV2: { id: "PVT_test", number: 3 } },
+        user: { projectV2: null },
+      },
+    },
+    ...routes,
+  };
   return {
     calls,
     request(req) {
       calls.push(req);
-      const hit = routes[`${req.method} ${req.path}`];
+      const hit = withProject[`${req.method} ${req.path}`];
       if (hit instanceof Error) throw hit;
       if (hit) return hit;
       throw new Error(`unexpected ${req.method} ${req.path}`);
@@ -153,6 +162,30 @@ test("GH2-AC1 protected mapping is skipped without updateIssue and body is uncha
   );
   assert.equal(adapter.refusals.length, 1);
   assert.equal(adapter.getIssue(7).body, originalBody);
+});
+
+test("GH2-AC2 sync-issues apply requires issues clearance, not Project 3", () => {
+  const adapter = fake({ missing: true, nextIssueNumber: 40 });
+  assert.equal(adapter.inspectCapabilities().projects, false);
+  const full = new GitHubDoctor(adapter).check();
+  assert.equal(full.ok, false);
+  assert.equal(full.errors.includes("projects"), true);
+  assert.equal(full.clearance, null);
+  const issuesOnly = new GitHubDoctor(adapter).check({ require: ["issues"] });
+  assert.equal(issuesOnly.ok, true);
+  assert.equal(issuesOnly.capabilities.projects, false);
+  const ledgerPath = writeLedger();
+  const report = syncIssues({
+    adapter,
+    mode: "apply",
+    nodes: ["GH0"],
+    model: MODEL,
+    ledgerPath,
+    clearance: issuesOnly.clearance,
+  });
+  assert.equal(report.ok, true);
+  assert.equal(report.created[0].gh_issue, 40);
+  assert.deepEqual(adapter.getProjectItems(3), []);
 });
 
 test("GH2-AC1 apply never writes an implemented row", () => {
@@ -885,5 +918,4 @@ test("GH2 apply in tests refuses the live ledger path", () => {
     /tests must pass --ledger/i,
   );
   assert.equal(fs.readFileSync(LIVE_LEDGER, "utf8"), before);
-  assert.equal(listGitHubIssues(readLedger(LIVE_LEDGER)).length, 0);
 });

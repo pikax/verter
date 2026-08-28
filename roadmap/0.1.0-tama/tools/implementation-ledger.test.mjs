@@ -105,6 +105,11 @@ test("the live ledger records J1, ORC0, GH0, GH1, and GH2 with message/date loca
     commit_message: "feat(ci): add one-way GitHub issue sync from the local ledger",
     commit_date: "2026-08-29T00:05:33+01:00",
   });
+  assert.deepEqual(byId.get("REL0"), {
+    node_id: "REL0",
+    commit_message: "feat(ci): overlay READY work onto GitHub Project 3",
+    commit_date: "2026-08-29T01:22:51+01:00",
+  });
   const state = deriveState(authority);
   assert.equal(state.states.get("GH0").status, "COMPLETE");
   assert.equal(state.states.get("ORC0").status, "COMPLETE");
@@ -290,11 +295,15 @@ test("githubIssueByNumber rejects non-integers as a type error, not as unmapped"
   );
 });
 
-test("programctl github-issue fails closed on the live empty mapping table", () => {
+test("programctl github-issue fails closed on an unmapped number", () => {
   const programctl = path.join(PACKAGE_ROOT, "tools", "programctl.mjs");
   const listed = spawnSync(process.execPath, [programctl, "github-issues"], { encoding: "utf8" });
   assert.equal(listed.status, 0, listed.stderr);
-  assert.deepEqual(JSON.parse(listed.stdout), []);
+  const rows = JSON.parse(listed.stdout);
+  assert.equal(Array.isArray(rows), true);
+  for (const row of rows) {
+    assert.deepEqual(Object.keys(row).sort(), ["gh_issue", "node_id", "sync_to_github"]);
+  }
   const missing = spawnSync(process.execPath, [programctl, "github-issue", "999"], {
     encoding: "utf8",
   });
@@ -315,6 +324,9 @@ test("github control plane contract names the mapping boundaries", () => {
     "GitHubAdapter",
     "GitHubDoctor",
     "FakeGitHubAdapter",
+    "ReadySchedulingPlan",
+    "MilestoneOverlay",
+    "ReleaseTarget",
   ]) {
     assert.match(text, new RegExp(`^## ${name}$`, "mu"), `missing heading ${name}`);
   }

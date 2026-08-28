@@ -28,8 +28,18 @@ function transportMap(routes) {
   };
 }
 
+const PROJECT_GRAPHQL_OK = {
+  data: {
+    organization: { projectV2: { id: "PVT_test", number: 3 } },
+    user: { projectV2: null },
+  },
+};
+
 function live(routes) {
-  const transport = transportMap(routes);
+  const transport = transportMap({
+    "POST graphql": PROJECT_GRAPHQL_OK,
+    ...routes,
+  });
   const adapter = new GitHubAdapter({ owner: "pikax", repo: "verter", transport });
   return { adapter, transport };
 }
@@ -43,7 +53,9 @@ function ghApiSpawn(byKey) {
     assert.equal(command, "gh");
     assert.equal(args.includes("--include"), true);
     const method = args[args.indexOf("-X") + 1];
-    const apiPath = args.find((arg) => typeof arg === "string" && arg.startsWith("/"));
+    const apiPath =
+      args.find((arg) => typeof arg === "string" && arg.startsWith("/")) ??
+      (args.includes("graphql") ? "graphql" : undefined);
     const spec = byKey[`${method} ${apiPath}`];
     if (!spec) {
       return { status: 1, stdout: "", stderr: `unexpected ${method} ${apiPath}` };
@@ -61,7 +73,12 @@ function liveFromSpawn(byKey) {
   return new GitHubAdapter({
     owner: "pikax",
     repo: "verter",
-    transport: createGhApiTransport({ spawn: ghApiSpawn(byKey) }),
+    transport: createGhApiTransport({
+      spawn: ghApiSpawn({
+        "POST graphql": { body: PROJECT_GRAPHQL_OK },
+        ...byKey,
+      }),
+    }),
   });
 }
 
@@ -457,6 +474,7 @@ test("adapter.transport is not a request port", () => {
   const transport = transportMap({
     "GET /user": { login: "alice" },
     "GET /repos/pikax/verter": writableRepo,
+    "POST graphql": PROJECT_GRAPHQL_OK,
   });
   const adapter = new GitHubAdapter({ owner: "pikax", repo: "verter", transport });
   assert.equal(Object.hasOwn(adapter, "transport"), false);
