@@ -61,9 +61,9 @@ test("GitHub mappings are unique and never mark implementation complete", () => 
   assert.ok(errors.includes("GitHub issue ledger: duplicate node GH0"));
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 123"));
 
-  authority.ledger.github_issue = [{ node_id: "GH2", gh_issue: 123, sync_to_github: false }];
-  assert.equal(deriveState(authority).states.get("GH2").status, "READY");
-  assert.notEqual(deriveState(authority).states.get("GH2").status, "COMPLETE");
+  authority.ledger.github_issue = [{ node_id: "GH3", gh_issue: 123, sync_to_github: false }];
+  assert.equal(deriveState(authority).states.get("GH3").status, "READY");
+  assert.notEqual(deriveState(authority).states.get("GH3").status, "COMPLETE");
 });
 
 test("same node and issue with opposite sync_to_github is a duplicate pair", () => {
@@ -77,7 +77,7 @@ test("same node and issue with opposite sync_to_github is a duplicate pair", () 
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 99"), errors.join("; "));
 });
 
-test("the live ledger records J1, ORC0, GH0, and GH1 with message/date locators", () => {
+test("the live ledger records J1, ORC0, GH0, GH1, and GH2 with message/date locators", () => {
   const authority = loadAuthority();
   const byId = new Map(authority.ledger.implemented.map((row) => [row.node_id, row]));
   assert.deepEqual(byId.get("J1"), {
@@ -100,11 +100,17 @@ test("the live ledger records J1, ORC0, GH0, and GH1 with message/date locators"
     commit_message: "feat(ci): add a structured GitHub adapter and deterministic fake",
     commit_date: "2026-08-28T23:08:16+01:00",
   });
+  assert.deepEqual(byId.get("GH2"), {
+    node_id: "GH2",
+    commit_message: "feat(ci): add one-way GitHub issue sync from the local ledger",
+    commit_date: "2026-08-29T00:05:33+01:00",
+  });
   const state = deriveState(authority);
   assert.equal(state.states.get("GH0").status, "COMPLETE");
   assert.equal(state.states.get("ORC0").status, "COMPLETE");
   assert.equal(state.states.get("GH1").status, "COMPLETE");
-  assert.equal(state.states.get("GH2").status, "READY");
+  assert.equal(state.states.get("GH2").status, "COMPLETE");
+  assert.equal(state.states.get("GH3").status, "READY");
   assert.equal(explainNode(authority, state, "ORC0").commit.pull_request, null);
 });
 

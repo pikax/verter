@@ -88,6 +88,26 @@ export function parseGitHubResourceNumber(payload) {
   return number;
 }
 
+export function parseIssuePayload(payload, expectedNumber) {
+  const number = parseGitHubResourceNumber(payload);
+  if (number !== expectedNumber) {
+    throw new UnstructuredGitHubOutputError(
+      `GitHub issue read returned number ${number}, expected ${expectedNumber}`,
+    );
+  }
+  if (payload.pull_request != null) {
+    throw new UnstructuredGitHubOutputError(`mapped issue #${number} cannot be read unambiguously`);
+  }
+  if (typeof payload.title !== "string") {
+    throw new UnstructuredGitHubOutputError("GitHub issue title is not a string");
+  }
+  const body = payload.body == null ? "" : payload.body;
+  if (typeof body !== "string") {
+    throw new UnstructuredGitHubOutputError("GitHub issue body is not a string");
+  }
+  return { number, title: payload.title, body };
+}
+
 export function assertIssueNumber(value, label = "issue number") {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new InvalidIssueNumberError(`${label} must be a positive safe integer`);
@@ -464,5 +484,14 @@ export class GitHubAdapter {
 
   applyOperations(operations) {
     return applyOperations(this, operations);
+  }
+
+  getIssue(number) {
+    const expected = assertIssueNumber(number);
+    const payload = this.#transport.request({
+      method: "GET",
+      path: `/repos/${this.owner}/${this.repo}/issues/${expected}`,
+    });
+    return parseIssuePayload(payload, expected);
   }
 }

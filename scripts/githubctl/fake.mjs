@@ -60,6 +60,7 @@ export class FakeGitHubAdapter {
     this.failOnApply = options.failOnApply;
     this.failOnApplyError = options.failOnApplyError;
     this.refusals = [];
+    this.reads = [];
     this.#issues = new Map();
     this.#pulls = new Map();
     this.#heads = new Set();
@@ -218,15 +219,21 @@ export class FakeGitHubAdapter {
     return applyOperations(this, operations);
   }
 
-  getIssue(number) {
+  #cloneIssue(number) {
     const issue = this.#issues.get(number);
     return issue ? cloneIssue(issue) : null;
+  }
+
+  getIssue(number) {
+    const expected = assertIssueNumber(number);
+    this.reads.push({ kind: "get-issue", number: expected });
+    return this.#cloneIssue(expected);
   }
 
   getIssues() {
     return [...this.#issues.keys()]
       .sort((left, right) => left - right)
-      .map((number) => this.getIssue(number));
+      .map((number) => this.#cloneIssue(number));
   }
 
   getPullRequest(number) {

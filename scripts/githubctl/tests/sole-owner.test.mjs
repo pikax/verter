@@ -170,13 +170,11 @@ test("apply-mode mutation without doctor clearance is refused", () => {
   assert.equal(adapter.getIssues().length, 0);
 });
 
-test("unknown commands including sync-issues fail closed", () => {
-  const unknown = spawnSync(process.execPath, [CLI, "sync-issues"], { encoding: "utf8" });
-  assert.notEqual(unknown.status, 0);
-  assert.match(unknown.stderr, /unknown command/u);
-  assert.doesNotMatch(unknown.stdout, /created issue/iu);
+test("unknown commands fail closed", () => {
   const bogus = spawnSync(process.execPath, [CLI, "not-a-command"], { encoding: "utf8" });
   assert.notEqual(bogus.status, 0);
+  assert.match(bogus.stderr, /unknown command/u);
+  assert.doesNotMatch(bogus.stdout, /created issue/iu);
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /doctor/u);
@@ -208,7 +206,13 @@ test("owner and repo assignment cannot rebind the adapter", () => {
 });
 
 test("GitHubAdapter and FakeGitHubAdapter share the mutation surface", () => {
-  for (const name of ["inspectCapabilities", "createIssue", "updateIssue", "createPullRequest"]) {
+  for (const name of [
+    "inspectCapabilities",
+    "createIssue",
+    "updateIssue",
+    "createPullRequest",
+    "getIssue",
+  ]) {
     assert.equal(typeof GitHubAdapter.prototype[name], "function", name);
     assert.equal(typeof FakeGitHubAdapter.prototype[name], "function", name);
   }

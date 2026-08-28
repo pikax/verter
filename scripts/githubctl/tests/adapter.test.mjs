@@ -270,7 +270,7 @@ test("githubctl doctor --fake and check stay offline", () => {
   const check = spawnSync(process.execPath, [CLI, "check"], { encoding: "utf8" });
   assert.equal(check.status, 0, check.stderr);
   assert.match(check.stdout, /createIssue/u);
-  assert.match(check.stdout, /sync-issues is not/u);
+  assert.match(check.stdout, /sync-issues --check/u);
 });
 
 test("expected capability misses do not throw from inspectCapabilities", () => {

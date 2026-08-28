@@ -149,6 +149,11 @@ commit_message = "feat(ci): add a structured GitHub adapter and deterministic fa
 commit_date = "2026-08-28T23:08:16+01:00"
 
 [[implemented]]
+node_id = "GH2"
+commit_message = "feat(ci): add one-way GitHub issue sync from the local ledger"
+commit_date = "2026-08-29T00:05:33+01:00"
+
+[[implemented]]
 node_id = "J1"
 commit_message = "refactor(core): cut CSS public routes over to StyleSyntaxIr"
 commit_date = "2026-08-28T16:41:34+01:00"
