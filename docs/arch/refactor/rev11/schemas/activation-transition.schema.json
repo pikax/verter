@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Immutable DORMANT to ACTIVE transition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "type", "transition_id", "from_state", "to_state", "j1_receipt", "orc0_receipt", "activation_authorization", "authority_sha256", "activated_by", "activated_at", "payload_sha256"],
+  "properties": {
+    "schema": { "const": 2 },
+    "type": { "const": "activation-transition" },
+    "transition_id": { "type": "string", "pattern": "^ACT-[A-Z0-9-]+$" },
+    "from_state": { "const": "DORMANT" },
+    "to_state": { "const": "ACTIVE" },
+    "j1_receipt": { "type": "string", "pattern": "^J1-LANDED-GRANDFATHERED:[0-9a-f]{64}$" },
+    "orc0_receipt": { "type": "string", "pattern": "^ORC0:[0-9a-f]{64}$" },
+    "orc0_landing": { "type": "string", "pattern": "^ORC0-LANDING:[0-9a-f]{64}$" },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidate_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "candidate_ref": { "type": "string", "pattern": "^refs/heads/.+$" },
+    "canonical_ref": { "type": "string", "pattern": "^refs/heads/.+$" },
+    "canonical_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "canonical_tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "activation_authorization": { "type": "string", "pattern": "^maintainer_unified_v2_activation:[0-9a-f]{64}$" },
+    "authority_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "activated_by": { "type": "string", "minLength": 1 },
+    "activated_at": { "type": "string", "format": "date-time" },
+    "payload_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

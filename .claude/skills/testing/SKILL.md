@@ -64,7 +64,7 @@ const map = s.generateMap({ source: "test.vue" });
 
 **Type testing best practices** (`packages/types/`):
 
-- Always include both a positive assertion and a `@ts-expect-error` negative assertion — prevents `any`/`unknown`/`never` types from silently passing.
+- Use a positive assertion for the changed inference contract. Add a `@ts-expect-error` negative assertion when it discriminates a plausible widening to `any`/`unknown`/`never` or another public type-boundary regression that existing coverage does not already catch.
 
 ```typescript
 it("type is correctly inferred", () => {
@@ -106,10 +106,25 @@ Extracted file contains module contents directly — `use super::*;`, helpers, a
 
 ### TDD Workflow
 
-1. Write failing tests first
-2. Implement minimum code to pass
-3. Run relevant tests, verify pass
-4. Refactor while keeping tests green
+Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
+
+1. Name the plausible regression or contract boundary and confirm existing coverage does not already discriminate it
+2. Write or extend the smallest test and observe it fail before the production change
+3. Implement minimum code to pass
+4. Run relevant tests, verify pass
+5. Refactor while keeping tests green
+
+### Test Economy
+
+Tests are evidence, not a quota. At preflight, map each changed contract to the smallest sufficient proof before proposing new tests:
+
+- Prefer an existing test, then extending or table-driving one existing test, before creating a new test or file.
+- Every proposed new test must name a plausible regression or contract boundary not already discriminated by the current suite.
+- Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid evidence when appropriate; record a terse rationale.
+- Do not add prose or formatting assertions unless those exact bytes are a public contract. Do not add implementation mirrors, duplicate permutations, or tests that merely restate the implementation.
+- Negative and mutation tests are reserved for plausible critical fail-closed/correctness boundaries or reproduced defects. They are not universal companions to positive tests.
+- Incremental, cancellation, stale-publication, counter, allocation, soak, and performance evidence applies only when the change touches the corresponding authority or hot path. Otherwise record it as not applicable with a terse boundary-based rationale.
+- New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
 ### Pinned Vue Macro Runtime Oracle
 
@@ -165,7 +180,7 @@ libdir metadata fails setup; no suite is skipped or tolerated.
 
 The canonical full verification pass:
 
-1. `node scripts/gate.mjs` — CANONICAL local Rust gate. It builds/lists the SINGLE TEST UNIVERSE once, settles every post-list precondition, then runs archive-backed Surface 1. The shipped-cfg lane is currently SKIPPED (temporary; `SHIPPED_CFG_LANE_ENABLED` in `scripts/gate-internals.mjs`) — a PASS is Surface 1 only and is disclosed on every run. The lane stays implemented in pairwise-disjoint runner-owned target/work/extract roots; flip the flag to restore concurrent/serial overlap, local fail-fast cancellation of a live shipped step, and a PASS that also requires successful shipped check, complete contract analysis, and expected-count parity. Use `node scripts/gate.mjs --exhaustive` for CI, release, complete failure diagnostics, and comparable benchmarks: Surface 1 receives `--no-fail-fast` (the skipped lane is skipped in this mode too). Surface 1 remains the one archive-backed workspace run with per-test process isolation, including `verter_session/tests/cases/shared_process_contract.rs`. The shipped lane remains the exact `cargo check --workspace --all-targets --profile no-debug-assertions` followed only on success by package-scoped `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions`, with its independent expected-test-count check; it is never a second whole-workspace archive. One supervisor owns the absolute deadline, aggregate stall vector, same-snapshot aggregate RSS ceiling, cancellation, and teardown for both lanes. Raw output is buffered and replayed once in Surface/check/contract order. The freshness-tooling preflight and its verdict-gated `cases::typeinfo_proto_ts_freshness::*` tolerance are unchanged: present/installed buf+oxfmt makes freshness failures hard, neither pnpm nor buf resolving makes the Rust pair skip, oxfmt absence alone never grants tolerance, and deterministic install failure is a loud setup failure. Run with `node_modules` present. See `docs/arch/gate-performance.md` and `docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`.
+1. `node scripts/gate.mjs` — CANONICAL local Rust gate. It builds/lists the SINGLE TEST UNIVERSE once, settles every post-list precondition, then runs archive-backed Surface 1. The shipped-cfg lane is currently SKIPPED (temporary; `SHIPPED_CFG_LANE_ENABLED` in `scripts/gate-internals.mjs`) — a PASS is Surface 1 only and is disclosed on every run. The lane stays implemented in pairwise-disjoint runner-owned target/work/extract roots; flip the flag to restore concurrent/serial overlap, local fail-fast cancellation of a live shipped step, and a PASS that also requires successful shipped check, complete contract analysis, and expected-count parity. Use `node scripts/gate.mjs --exhaustive` for CI, release, complete failure diagnostics, and comparable benchmarks: Surface 1 receives `--no-fail-fast` (the skipped lane is skipped in this mode too). Surface 1 remains the one archive-backed workspace run with per-test process isolation, including `verter_session/tests/cases/shared_process_contract.rs`. The shipped lane remains the exact `cargo check --workspace --all-targets --profile no-debug-assertions` followed only on success by package-scoped `cargo nextest run -p verter_shipped_cfg_contract --cargo-profile no-debug-assertions`, with its independent expected-test-count check; it is never a second whole-workspace archive. One supervisor owns the absolute deadline, aggregate stall vector, same-snapshot aggregate RSS ceiling, cancellation, and teardown for both lanes. Raw output is buffered and replayed once in Surface/check/contract order. The freshness-tooling preflight and its verdict-gated `cases::typeinfo_proto_ts_freshness::*` tolerance are unchanged: present/installed buf+oxfmt makes freshness failures hard, neither pnpm nor buf resolving makes the Rust pair skip, oxfmt absence alone never grants tolerance, and deterministic install failure is a loud setup failure. Run with `node_modules` present. See `docs/arch/gate-performance.md`.
 2. `cargo clippy --workspace --all-targets -- -D warnings`
 3. `cargo check --workspace --release` — the only thing in the loop that compiles the REAL release profile (opt-level 3 + fat LTO); surface 1 is debug, and the shipped-cfg lane (cheap `no-debug-assertions` profile) is currently skipped. `debug_assert!` gates on `cfg!`, a RUNTIME constant, so its body still name-resolves in release: a `#[cfg(debug_assertions)]` helper called inside one is an E0425 in every release build (napi and wasm artifacts included) while compiling clean in debug. It is a CHECK and RUNS NO TESTS, so it cannot observe the runtime half of that class — a state mutation written inside a `debug_assert!` argument compiles fine and silently never executes in a shipped build. `verter_shipped_cfg_contract` under `no-debug-assertions` is what covers that half — the ONLY tests in the repo that execute with `debug_assertions` off — and the gate currently skips that lane. Mirrored in CI by the `rust-build-configs` job.
 4. `cargo clippy --target wasm32-unknown-unknown -p verter_wasm -- -D warnings` — host clippy cannot see target-gated code, and the `wasm32-wasip1`/`wasip2` clippy jobs cover the SEPARATE `extensions/lapce` + `extensions/zed` manifests, not this one. Same `rust-build-configs` job in CI.
@@ -368,7 +383,7 @@ Do not run bare `cargo test --workspace` (no `--tests`) by default — it also r
 
 ### §1a Mutation Recipes
 
-For every NEW or CHANGED correctness-bearing test, guard, or refusal, record a reversible mutation recipe: verify the starting SHA; plant the mutation; run the named guarding test and require the expected failure (RED); restore; verify a clean original SHA; run the green test; run an unplanted control that stays GREEN. Persist commands and results. Read every new test body; reject stubs, always-true assertions, and non-discriminating characterization. The independent confirmer executes each recipe again; sampling is forbidden.
+Use a reversible mutation recipe only when preflight identifies a plausible critical fail-closed/correctness boundary or reproduced defect for which the mutation materially proves discrimination. Verify the starting SHA; prove the plant applied; run the named guard and require RED; restore; verify a clean original SHA; run GREEN; and run an unplanted control. Persist commands and results. Read every new test body; reject stubs, always-true assertions, implementation mirrors, duplicate permutations, and non-discriminating characterization. When a mutation recipe is selected as gate-bearing evidence, the independent confirmer replays it; do not sample within that selected recipe set.
 
 Canonical in-tree examples of fully self-contained recipes (in-memory plant → expected verdict → trivial restore + GREEN control): the Vue structural-conformance discriminator `crates/verter_vue_conformance/tests/cases/conformance_discriminator.rs` (cosmetic-PASS vs behavioral-FAIL mutations on committed goldens, each plant proven applied) and the Svelte oracle discriminator in `crates/verter_compiler/tests/cases/svelte_client_emit_topology.rs`.
 

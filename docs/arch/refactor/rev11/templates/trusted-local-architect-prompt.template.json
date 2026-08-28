@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "type": "trusted-local-architect-round-two-cap-prompt",
+  "node_id": "NODE",
+  "round_id": "NODE-R2",
+  "round_ordinal": 2,
+  "provider": "openai",
+  "tool": "codex",
+  "model": "gpt-5.6-sol",
+  "reasoning_effort": "xhigh",
+  "neutrality": "evaluate the verified evidence without presuming the listed choices exhaust the sound options",
+  "options_non_exhaustive": true,
+  "mandate": "best-of-the-best durable design — no shortcuts, no compromises, no \"good enough\"; breaking changes are ALLOWED and expected where they yield the correct long-term design; performance is a first-class concern (allocation, cache, warm-state, hot-path cost, not just correctness).",
+  "scope_guardrail": "Only ratified contract requirements may block acceptance; optional debt remains explicitly non-blocking unless separately ratified.",
+  "question": "Should review/fix work continue, and if so what exact additional-round cap applies?"
+}

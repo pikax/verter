@@ -1,0 +1,6 @@
+schema = 2
+baseline_authority_sha256 = "5e1e7730533a245443e8ad084c18fce7b3a9c09bbac3e3fd248b22e374636859"
+current_authority_sha256 = "5e1e7730533a245443e8ad084c18fce7b3a9c09bbac3e3fd248b22e374636859"
+generation = 0
+last_amendment_id = ""
+last_amendment_sha256 = ""

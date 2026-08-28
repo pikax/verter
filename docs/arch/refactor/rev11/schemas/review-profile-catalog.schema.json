@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review profile catalog",
+  "type": "object", "additionalProperties": false, "required": ["schema", "profile", "architecture_cli"],
+  "properties": { "schema": { "const": 3 }, "profile": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["id", "reviewers", "independent", "lenses", "dispatch", "provider_policy", "minimum_effort", "risk_band", "confirmation_policy"], "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" }, "reviewers": { "type": "integer", "minimum": 0 }, "independent": { "type": "boolean" },
+    "lenses": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "dispatch": { "enum": ["fresh-distinct-harness-task", "audit-only"] },
+    "provider_policy": { "enum": ["provider-neutral", "historical"] },
+    "minimum_effort": { "enum": ["low", "medium", "high"] },
+    "risk_band": { "enum": ["low", "medium", "high", "audit-only"] },
+    "confirmation_policy": { "enum": ["not-required", "targeted", "independent-full"] }
+  } } }, "architecture_cli": { "type": "array", "minItems": 1, "maxItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["id", "provider", "tool", "model", "reasoning_effort"], "properties": {
+    "id": { "const": "neutral-architecture-consult" }, "provider": { "const": "openai" }, "tool": { "const": "codex" }, "model": { "const": "gpt-5.6-sol" }, "reasoning_effort": { "const": "xhigh" }
+  } } } }
+}

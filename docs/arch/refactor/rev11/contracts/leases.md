@@ -1,0 +1,7 @@
+# Legacy round-handle compatibility contract
+
+The existing `lease_id` field and `trusted-local/leases/` path are retained only as opaque round-handle wire compatibility for the lifecycle evidence graph. They grant no ownership, exclusion, capacity, conflict-domain, scheduling, or landing authority and never block another admission. Conflict domains and resource classes remain descriptive scope/planning metadata; the maintainer coordinates concurrent work.
+
+One repo-global trusted-local lock protects atomic writes to the local evidence anchor across registered runtime roots. It is a transaction mutex, not a work lease. Admission binds the node, holder, candidate start SHA/tree/ref/worktree, computed effort policy, and ready task briefs. It validates the complete packet before publishing the round handle, then journals exact intended bytes; retry recovers exactly the committed marker. The anchor is mutable local audit state, not an anti-rollback trust root.
+
+Every public mutation performs a read-only preflight before acquiring the transaction mutex and recomputes under that mutex before writing. Legacy renewal is accepted only for compatibility and does not extend or acquire scheduling rights. `FIX_REQUIRED`, `ABORTED`, and `RELEASED` explicitly close a round. Only the current acceptance-eligible round may accept. Local anchor loss blocks mutation until explicit operator reinitialization creates a new visible lineage with continuity `unknown/lost`.

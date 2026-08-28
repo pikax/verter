@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trusted-local harness report",
+  "type": "object", "additionalProperties": false, "required": ["verdict", "findings"],
+  "properties": {
+    "verdict": { "enum": ["PASS", "FAIL"] },
+    "findings": { "type": "array", "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["severity", "fingerprint", "owner", "status"],
+      "properties": {
+        "severity": { "enum": ["P0", "P1", "P2", "P3"] },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "owner": { "type": "string", "minLength": 1 },
+        "status": { "const": "OPEN" }
+      }
+    } }
+  },
+  "allOf": [
+    { "if": { "properties": { "verdict": { "const": "PASS" } } }, "then": { "properties": { "findings": { "maxItems": 0 } } } },
+    { "if": { "properties": { "verdict": { "const": "FAIL" } } }, "then": { "properties": { "findings": { "minItems": 1 } } } }
+  ]
+}

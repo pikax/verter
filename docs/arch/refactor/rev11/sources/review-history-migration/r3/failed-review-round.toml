@@ -1,0 +1,17 @@
+schema = 1
+type = "maintainer-ratified-failed-harness-review-round"
+node_id = "ORC0"
+candidate_sha = "f8c10845af7f7df80b281483c297c139ec958c73"
+candidate_tree = "929cb3f942c498993c520881e05067560f934d4a"
+provider = "openai"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+timestamp_source = "harness-unavailable"
+recorded_at = "2026-08-27T23:41:33.000Z"
+ratified_by = "maintainer-task-thread-2026-08-27"
+ratification_binding = "preactivation-correction:cb0bf9c8b5f6698e4ab997f7cbe8b96590c41458d6ae1186f6fa3f79ed14d43b"
+review_order = ["wire-public", "compatibility", "adversarial"]
+task_identities = ["/root/orc0_wire_public_review", "/root/orc0_compatibility_review", "/root/orc0_adversarial_review"]
+prompt_sha256 = ["848b296f117c1ab7890009f9f036deb314b7b73f53483788a653c0286e6491e3", "871f13b248081676ea2c03c6d81fb131d64902b9a55ca3e74226b64fee72affb", "2e38ca31f192eee9b3dacc1fa5e7d815e51ce7821dd48f81e3b634225cf8d4ef"]
+report_sha256 = ["2d394c562134b496f8366e4b597d2c4ba90cfa1ba1e4bb688a64541c2405dfc1", "2653c346ab477b1914529af65a8c87b3c017b04f518177a4c8a3af6ebcada05f", "9e0fa6f991e873fa45b2a20f5fefc38f53d955b214ba1870c955b65878941a5a"]
+verdicts = ["FAIL", "FAIL", "FAIL"]

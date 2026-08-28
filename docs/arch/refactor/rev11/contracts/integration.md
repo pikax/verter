@@ -1,0 +1,3 @@
+# Integration contract
+
+Each block is built in an isolated branch/worktree. The main orchestrator owns the integration branch. Rebase onto the current integration tip and squash the complete candidate to one conventional commit before finalization. Freeze that squashed SHA/tree, run the gate, obtain the required independent reviews, then land the exact reviewed commit by fast-forward. Candidate and integration identities are distinct fields. Any post-freeze squash, rebase, conflict resolution, regeneration, or content change invalidates review/gate evidence and requires a successor round. Conflict domains and resource classes are planning metadata only; the maintainer coordinates concurrent ownership and landing order.
