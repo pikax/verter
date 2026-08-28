@@ -144,6 +144,11 @@ commit_message = "docs(ci): ratify local GitHub issue mapping"
 commit_date = "2026-08-28T21:45:48+01:00"
 
 [[implemented]]
+node_id = "GH1"
+commit_message = "feat(ci): add a structured GitHub adapter and deterministic fake"
+commit_date = "2026-08-28T23:08:16+01:00"
+
+[[implemented]]
 node_id = "J1"
 commit_message = "refactor(core): cut CSS public routes over to StyleSyntaxIr"
 commit_date = "2026-08-28T16:41:34+01:00"

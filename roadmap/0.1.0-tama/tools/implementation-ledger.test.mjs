@@ -61,8 +61,9 @@ test("GitHub mappings are unique and never mark implementation complete", () => 
   assert.ok(errors.includes("GitHub issue ledger: duplicate node GH0"));
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 123"));
 
-  authority.ledger.github_issue = [{ node_id: "GH1", gh_issue: 123, sync_to_github: false }];
-  assert.equal(deriveState(authority).states.get("GH1").status, "READY");
+  authority.ledger.github_issue = [{ node_id: "GH2", gh_issue: 123, sync_to_github: false }];
+  assert.equal(deriveState(authority).states.get("GH2").status, "READY");
+  assert.notEqual(deriveState(authority).states.get("GH2").status, "COMPLETE");
 });
 
 test("same node and issue with opposite sync_to_github is a duplicate pair", () => {
@@ -76,7 +77,7 @@ test("same node and issue with opposite sync_to_github is a duplicate pair", () 
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 99"), errors.join("; "));
 });
 
-test("the live ledger records J1, ORC0, and GH0 with message/date locators", () => {
+test("the live ledger records J1, ORC0, GH0, and GH1 with message/date locators", () => {
   const authority = loadAuthority();
   const byId = new Map(authority.ledger.implemented.map((row) => [row.node_id, row]));
   assert.deepEqual(byId.get("J1"), {
@@ -94,10 +95,16 @@ test("the live ledger records J1, ORC0, and GH0 with message/date locators", () 
     commit_message: "docs(ci): ratify local GitHub issue mapping",
     commit_date: "2026-08-28T21:45:48+01:00",
   });
+  assert.deepEqual(byId.get("GH1"), {
+    node_id: "GH1",
+    commit_message: "feat(ci): add a structured GitHub adapter and deterministic fake",
+    commit_date: "2026-08-28T23:08:16+01:00",
+  });
   const state = deriveState(authority);
   assert.equal(state.states.get("GH0").status, "COMPLETE");
   assert.equal(state.states.get("ORC0").status, "COMPLETE");
-  assert.equal(state.states.get("GH1").status, "READY");
+  assert.equal(state.states.get("GH1").status, "COMPLETE");
+  assert.equal(state.states.get("GH2").status, "READY");
   assert.equal(explainNode(authority, state, "ORC0").commit.pull_request, null);
 });
 
@@ -299,6 +306,9 @@ test("github control plane contract names the mapping boundaries", () => {
     "GitHubIssueDescription",
     "ExpectedPullRequestTitle",
     "GitHubIssueSync",
+    "GitHubAdapter",
+    "GitHubDoctor",
+    "FakeGitHubAdapter",
   ]) {
     assert.match(text, new RegExp(`^## ${name}$`, "mu"), `missing heading ${name}`);
   }
