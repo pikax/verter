@@ -674,6 +674,7 @@ export function validateAuthority(authority, options = {}) {
   }
   const mappedNodes = new Set();
   const mappedIssues = new Set();
+  // Identity is {node_id, gh_issue} unique both ways; sync_to_github is not a key.
   for (const row of authority.ledger.github_issue || []) {
     if (!knownNodes.has(row.node_id))
       errors.push(`GitHub issue ledger: unknown node ${row.node_id}`);
@@ -688,6 +689,24 @@ export function validateAuthority(authority, options = {}) {
   errors.push(...validateGraphModel(authority.nodes, { packageRoot: authority.packageRoot }));
   errors.push(...validateCatalogReferences(authority));
   return errors;
+}
+
+export function listGitHubIssues(ledger) {
+  return [...(ledger?.github_issue || [])]
+    .map((row) => ({
+      node_id: row.node_id,
+      gh_issue: row.gh_issue,
+      sync_to_github: row.sync_to_github,
+    }))
+    .sort((left, right) => left.node_id.localeCompare(right.node_id));
+}
+
+export function githubIssueByNumber(ledger, issue) {
+  if (!Number.isSafeInteger(issue) || issue < 1)
+    throw new Error("GitHub issue lookup requires a positive safe integer");
+  const row = listGitHubIssues(ledger).find((candidate) => candidate.gh_issue === issue);
+  if (!row) throw new Error(`GitHub issue #${issue} is not mapped`);
+  return row;
 }
 
 export function deriveState(authority, options = {}) {

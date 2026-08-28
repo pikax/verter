@@ -1,5 +1,13 @@
 #!/usr/bin/env node
-import { deriveState, explainNode, loadAuthority, packetFor, validateAuthority } from "./lib.mjs";
+import {
+  deriveState,
+  explainNode,
+  githubIssueByNumber,
+  listGitHubIssues,
+  loadAuthority,
+  packetFor,
+  validateAuthority,
+} from "./lib.mjs";
 
 const args = process.argv.slice(2);
 const command = args[0] || "frontier";
@@ -39,19 +47,12 @@ try {
       .sort((left, right) => left.node_id.localeCompare(right.node_id));
     console.log(JSON.stringify(rows, null, 2));
   } else if (command === "github-issues") {
-    const rows = [...(authority.ledger.github_issue || [])].sort((left, right) =>
-      left.node_id.localeCompare(right.node_id),
-    );
-    console.log(JSON.stringify(rows, null, 2));
+    console.log(JSON.stringify(listGitHubIssues(authority.ledger), null, 2));
   } else if (command === "github-issue") {
     const issue = Number(positional(1, "GitHub issue number"));
     if (!Number.isSafeInteger(issue) || issue < 1)
       throw new Error("GitHub issue number must be positive");
-    const row = (authority.ledger.github_issue || []).find(
-      (candidate) => candidate.gh_issue === issue,
-    );
-    if (!row) throw new Error(`GitHub issue #${issue} is not mapped`);
-    console.log(JSON.stringify(row, null, 2));
+    console.log(JSON.stringify(githubIssueByNumber(authority.ledger, issue), null, 2));
   } else {
     throw new Error(
       `unknown command ${command}; supported commands: frontier, explain, packet, implemented, github-issues, github-issue`,
