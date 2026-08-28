@@ -994,16 +994,15 @@ export function computeAuthorityDigest(packageRoot = PACKAGE_ROOT) {
   const hash = crypto.createHash("sha256");
   for (const [relative, absolute] of files.sort(([left], [right]) => left.localeCompare(right))) {
     let bytes = fs.readFileSync(absolute);
-    // Lifecycle transitions are separately receipt-bound. Canonicalizing only
-    // these state-machine fields makes the control/authority digest stable from
-    // DORMANT through ORC0 and ACTIVE without excluding either control file.
+    // Runtime lifecycle outputs are separately receipt-bound. Canonicalizing
+    // only those mutable outputs keeps the authority digest stable through
+    // activation while preserving immutable J1 expectations in its identity.
     if (relative === "authority/root.toml") {
       bytes = Buffer.from(bytes.toString("utf8").replace(/^state = "(?:DORMANT|ACTIVE)"$/m, 'state = "<lifecycle-state>"'));
     } else if (relative === "authority/state/activation.toml") {
       let text = bytes.toString("utf8");
       text = text.replace(/^package_state = "(?:DORMANT|ACTIVE)"$/m, 'package_state = "<lifecycle-state>"');
-      text = text.replace(/^j1_state = "(?:IN_FLIGHT|LANDED_GRANDFATHERED)"$/m, 'j1_state = "<lifecycle-state>"');
-      for (const key of ["j1_receipt", "orc0_receipt", "activation_authorization", "active_authority_sha256", "activation_transition"]) text = text.replace(new RegExp(`^${key} = ".*"$`, "m"), `${key} = "<lifecycle-binding>"`);
+      for (const key of ["orc0_receipt", "activation_authorization", "active_authority_sha256", "activation_transition"]) text = text.replace(new RegExp(`^${key} = ".*"$`, "m"), `${key} = "<lifecycle-binding>"`);
       bytes = Buffer.from(text);
     }
     hash.update(relative);
@@ -2028,23 +2027,26 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
   const receiptState = loadReceipts(authority, runtimeRoot, context);
   const errors = [...amendmentErrors, ...amendmentState.errors, ...externalState.errors, ...transitionState.errors, ...gateState.errors, ...reviewState.errors, ...leaseState.errors, ...dispatchState.errors, ...finalizationState.errors, ...landedState.errors, ...receiptState.errors];
   const j1 = landedState.receipts.get("J1");
-  const j1Bound = activation.j1_state === "LANDED_GRANDFATHERED" && j1 && activation.j1_receipt === reference(j1.receipt_id, j1);
+  const j1Reference = j1 ? reference(j1.receipt_id, j1) : "";
+  const j1Bound = Boolean(j1) && activation.j1_state === "LANDED_GRANDFATHERED" && activation.j1_receipt === j1Reference;
   const directiveSlots = new Set((readToml(confinedFile(authority.packageRoot, "authority/state/external-authorizations.toml", "external directive slots")).authorization || []).map((row) => `${row.node_id}:${row.authorization}`));
   const orcAuthorization = externalState.authorizations.get(`ORC0:${activation.required_external_authorization}`);
   const orc = receiptState.receipts.get("ORC0");
   let phase = j1Bound && directiveSlots.has(`ORC0:${activation.required_external_authorization}`) ? "ORC0" : "DORMANT";
-  if (activation.j1_state === "LANDED_GRANDFATHERED" && !j1Bound) errors.push("activation J1 state is not bound to the exact validated grandfathered landing receipt");
+  if (j1 && !j1Bound) errors.push("external J1 landing receipt does not match the tracked expected-reference pin");
   if (activation.package_state === "ACTIVE" || authority.metadata.state === "ACTIVE") {
     const transition = artifactReference(activation.activation_transition, transitionState.transitions, "ACTIVE transition");
-    const oldAcceptanceBound = orc && activation.orc0_receipt === reference("ORC0", orc)
+    const oldAcceptanceBound = j1 && activation.j1_state === "LANDED_GRANDFATHERED" && activation.j1_receipt === j1Reference
+      && orc && activation.orc0_receipt === reference("ORC0", orc)
       && orcAuthorization && activation.activation_authorization === reference(activation.required_external_authorization, orcAuthorization);
     const trustedDirective = confinedFile(authority.packageRoot, "sources/maintainer-directive-2026-08-28-trusted-local-orc0.md", "trusted-local activation directive");
     const trustedAuthorization = `${activation.required_external_authorization}:${sha256(fs.readFileSync(trustedDirective))}`;
-    const trustedAcceptanceBound = trustedOrc && activation.orc0_receipt === trustedOrc.reference
+    const trustedAcceptanceBound = j1 && activation.j1_state === "LANDED_GRANDFATHERED" && activation.j1_receipt === j1Reference
+      && trustedOrc && activation.orc0_receipt === trustedOrc.reference
       && activation.activation_authorization === trustedAuthorization;
     const activeBound = activation.package_state === "ACTIVE" && authority.metadata.state === "ACTIVE" && (oldAcceptanceBound || trustedAcceptanceBound)
       && activation.active_authority_sha256 === context.authorityDigest
-      && !transition.error && transition.row.j1_receipt === activation.j1_receipt
+      && !transition.error && transition.row.j1_receipt === j1Reference
       && transition.row.orc0_receipt === activation.orc0_receipt
       && transition.row.activation_authorization === activation.activation_authorization
       && transition.row.authority_sha256 === context.authorityDigest
@@ -2060,7 +2062,7 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
     const trustedAuthorization = `${activation.required_external_authorization}:${sha256(fs.readFileSync(directive))}`;
     const landing = trustedOrc?.landing;
     const activeBound = transitions.length === 1 && trustedOrc && landing
-      && transition.j1_receipt === activation.j1_receipt
+      && transition.j1_receipt === j1Reference
       && transition.orc0_receipt === trustedOrc.reference && transition.orc0_landing === landing.reference
       && transition.candidate_sha === trustedOrc.receipt.candidate_sha && transition.candidate_tree === trustedOrc.receipt.candidate_tree && transition.candidate_ref === trustedOrc.receipt.candidate_ref
       && transition.canonical_ref === canonicalRef && transition.canonical_sha === canonicalSha && transition.canonical_tree === canonicalTree
@@ -2245,35 +2247,15 @@ export function importRuntimeArtifact(authority, { runtimeRoot = defaultRuntimeR
   if (!id || !/^[A-Za-z0-9._-]+$/.test(id)) throw new Error(`${kind} import has an unsafe artifact id`);
   const directory = runtimeDirectory(authority, runtimeRoot, contract.directory, { create: true });
   const destination = path.join(directory, `${id}.toml`);
-  const originalActivation = kind === "landed" && row.node_id === "J1"
-    ? fs.readFileSync(path.join(authority.packageRoot, "authority/state/activation.toml"), "utf8")
-    : null;
-  const install = (activationLock = null) => {
-    atomicCreate(destination, fs.readFileSync(source));
-    try {
-    let current = deriveState(authority, { runtimeRoot, now });
+  atomicCreate(destination, fs.readFileSync(source));
+  try {
+    const current = deriveState(authority, { runtimeRoot, now });
     if (current.errors.length || !current[contract.map]?.has(contract.key(row))) throw new Error(`import postcondition failed: ${current.errors.join("; ") || `${kind} was not accepted`}`);
-    if (kind === "landed" && row.node_id === "J1") {
-      const activationFile = path.join(authority.packageRoot, "authority/state/activation.toml");
-      const activation = readToml(activationFile);
-      if (!activationLock || activation.package_state !== "DORMANT" || activation.j1_state !== "IN_FLIGHT" || activation.j1_receipt !== "") throw new Error("J1 lifecycle binding is not in its exact DORMANT/IN_FLIGHT state");
-      const landed = current.landedReceipts.get("J1");
-      const staged = stageReplacements([[activationFile, flatToml({ ...activation, j1_state: "LANDED_GRANDFATHERED", j1_receipt: reference(landed.receipt_id, landed) })]], activationLock);
-      try {
-        commitReplacements(staged);
-        current = deriveState(authority, { runtimeRoot, now });
-        const rebound = current.landedReceipts.get("J1");
-        if (current.errors.length || !rebound || !["ORC0", "DORMANT"].includes(current.phase)) throw new Error(`J1 binding postcondition failed: ${current.errors.join("; ")}`);
-        finishReplacements(staged);
-      } catch (error) { rollbackReplacements(staged); throw error; }
-    }
     return { artifact: current[contract.map].get(contract.key(row)), state: current, destination };
   } catch (error) {
     if (fs.existsSync(destination)) fs.unlinkSync(destination);
     throw error;
-    }
-  };
-  return originalActivation !== null ? withActivationLock(authority, install) : install();
+  }
 }
 
 export function importAcceptanceReceipt(authority, options = {}) {
@@ -2326,7 +2308,7 @@ export function activateProgram(authority, { runtimeRoot = defaultRuntimeRoot(au
   const auth = before.authorizations.get(`ORC0:${activation.required_external_authorization}`);
   const expectedOrc = orc && reference("ORC0", orc);
   const expectedAuth = auth && reference(activation.required_external_authorization, auth);
-  if (!j1 || activation.j1_state !== "LANDED_GRANDFATHERED" || activation.j1_receipt !== reference(j1.receipt_id, j1)) throw new Error("activation requires exact bound grandfathered J1 landing");
+  if (!j1 || activation.j1_state !== "LANDED_GRANDFATHERED" || activation.j1_receipt !== reference(j1.receipt_id, j1)) throw new Error("activation requires an exact external grandfathered J1 landing matching the tracked expected-reference pin");
   if (!orc || orc0Receipt !== expectedOrc) throw new Error("activation ORC0 receipt does not match the exact validated receipt");
   if (!auth || authorization !== expectedAuth || activatedBy !== auth.granted_by) throw new Error("activation authorization/identity does not match the exact trusted candidate-bound grant");
   const authorityDigest = computeAuthorityDigest(authority.packageRoot);
@@ -2348,6 +2330,8 @@ export function activateProgram(authority, { runtimeRoot = defaultRuntimeRoot(au
     const activeActivation = {
       ...activation,
       package_state: "ACTIVE",
+      j1_state: "LANDED_GRANDFATHERED",
+      j1_receipt: reference(j1.receipt_id, j1),
       orc0_receipt: expectedOrc,
       activation_authorization: expectedAuth,
       active_authority_sha256: authorityDigest,
@@ -2381,7 +2365,7 @@ export function activateTrustedProgram(authority, { runtimeRoot = defaultRuntime
   if (before.errors.length) throw new Error(`state invalid before trusted-local activation: ${before.errors.join("; ")}`);
   const activation = readToml(path.join(authority.packageRoot, "authority/state/activation.toml")); const trustedOrc = trustedLocalAcceptance(authority, runtimeRoot); const j1 = before.landedReceipts.get("J1");
   if (authority.metadata.state !== "DORMANT" || activation.package_state !== "DORMANT" || before.phase !== "ORC0") throw new Error("trusted-local activation requires exact DORMANT/ORC0 pre-state");
-  if (!j1 || activation.j1_state !== "LANDED_GRANDFATHERED" || activation.j1_receipt !== reference(j1.receipt_id, j1)) throw new Error("trusted-local activation requires exact bound grandfathered J1 landing");
+  if (!j1 || activation.j1_state !== "LANDED_GRANDFATHERED" || activation.j1_receipt !== reference(j1.receipt_id, j1)) throw new Error("trusted-local activation requires an exact external grandfathered J1 landing matching the tracked expected-reference pin");
   if (!trustedOrc || !trustedOrc.landing || trustedOrc.lease.holder !== activatedBy) throw new Error("trusted-local activation requires the current accepted ORC0 round, exact candidate landing, and its operator");
   assertTrustedFrozenCandidate(authority, { runtimeRoot, leaseId: trustedOrc.lease.lease_id });
   const repository = gitRoot(authority.packageRoot); const canonicalRef = `refs/heads/${authority.metadata.canonical_integration_branch}`;

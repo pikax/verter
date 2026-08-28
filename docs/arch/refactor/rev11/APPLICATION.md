@@ -24,7 +24,7 @@ Import the exact immutable J1 landing evidence without restamping it:
 node tools/programctl.mjs landed-receipt-import J1-LANDED-RECEIPT.toml --runtime-root PATH
 ```
 
-The import verifies the commit, tree, parent, branch containment, landed live-charter bytes, evidence tree, and context packet before atomically binding `j1_state`. It keeps J1 out of the accepted-receipt map. Admit and dispatch ORC0, advance the implementation branch if required, then rebase and squash it to one conventional commit before freezing its exact candidate. The retained `lease-id` option is an opaque round handle, not a work lease:
+The import verifies the commit, tree, parent, branch containment, landed live-charter bytes, evidence tree, and context packet before atomically installing the external runtime binding. It does not mutate the tracked J1 expected-reference pin, and it keeps J1 out of the accepted-receipt map. Without the external receipt the package remains validly `DORMANT`; only an exact match to the tracked pin unlocks ORC0, while a mismatch fails closed. Admit and dispatch ORC0, advance the implementation branch if required, then rebase and squash it to one conventional commit before freezing its exact candidate. The retained `lease-id` option is an opaque round handle, not a work lease:
 
 ```text
 node tools/programctl.mjs admit ORC0 --holder NAME --candidate-ref refs/heads/BRANCH --runtime-root PATH

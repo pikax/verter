@@ -52,3 +52,17 @@ test("the control digest is stable across exact lifecycle-only bindings", () => 
     assert.equal(lib.computeAuthorityDigest(packageRoot), before);
   });
 });
+
+test("immutable J1 expectations participate in authority identity and invalidate an unchanged lock", () => {
+  const mutations = [
+    ["j1_state", (text) => text.replace('j1_state = "LANDED_GRANDFATHERED"', 'j1_state = "IN_FLIGHT"')],
+    ["j1_receipt", (text) => text.replace(/^j1_receipt = ".*"$/m, `j1_receipt = "J1-LANDED-GRANDFATHERED:${"0".repeat(64)}"`)],
+  ];
+  for (const [field, mutate] of mutations) withPackageCopy((packageRoot) => {
+    const before = lib.computeAuthorityDigest(packageRoot);
+    const activationFile = path.join(packageRoot, "authority/state/activation.toml");
+    fs.writeFileSync(activationFile, mutate(fs.readFileSync(activationFile, "utf8")));
+    assert.notEqual(lib.computeAuthorityDigest(packageRoot), before, `${field} must change authority identity`);
+    assert.match(lib.validateAmendments(lib.loadAuthority(packageRoot)).join("\n"), /authority lock current digest .* does not match/, `${field} must invalidate the unchanged authority lock`);
+  });
+});

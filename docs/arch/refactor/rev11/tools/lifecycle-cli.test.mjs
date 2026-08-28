@@ -32,9 +32,14 @@ function harnessFiles(temp, name) {
 test("programctl drives J1 grandfathering through trusted-local ORC0 activation", { timeout: 180_000 }, () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "rev11-trusted-cli-"));
   try {
-    const env = prepare(temp); assert.match(cli(env, ["phase"]), /phase=DORMANT/);
+    const env = prepare(temp); const activationFile = path.join(env.packageRoot, "authority/state/activation.toml"); const dormantActivation = fs.readFileSync(activationFile);
+    assert.match(cli(env, ["phase"]), /phase=DORMANT/);
+    fs.writeFileSync(activationFile, dormantActivation.toString("utf8").replace(/^j1_receipt = ".*"$/m, `j1_receipt = "J1-LANDED-GRANDFATHERED:${"0".repeat(64)}"`));
+    assert.throws(() => cli(env, ["landed-receipt-import", path.join(env.packageRoot, "templates/landed-receipt.template.toml")]), /authority lock current digest .* does not match/);
+    fs.writeFileSync(activationFile, dormantActivation);
     cli(env, ["landed-receipt-import", path.join(env.packageRoot, "templates/landed-receipt.template.toml")]); assert.match(cli(env, ["phase"]), /phase=ORC0/);
-    git(env.repo, "add", "docs/arch/refactor/rev11/authority/state/activation.toml"); git(env.repo, "commit", "-m", "test: bind J1 grandfathered landing");
+    assert.deepEqual(fs.readFileSync(activationFile), dormantActivation, "J1 import must remain external and leave tracked activation authority unchanged");
+    assert.equal(git(env.repo, "status", "--porcelain=v1", "--untracked-files=all"), "", "J1 import must not dirty the reviewed authority worktree");
     const candidate = createCandidate(env); const admission = JSON.parse(cli(env, ["admit", "ORC0", "--holder", "maintainer", "--candidate-ref", candidate.ref]));
     assert.equal(admission.round_id, "ORC0-R2", "rejected preactivation R1 is reconciled append-only"); assert.equal(admission.effort_policy.effective.review, "high");
     const packet = JSON.parse(cli(env, ["dispatch", "ORC0", "--holder", "maintainer", "--lease-id", admission.lease_id])); assert.equal(packet.round_id, admission.round_id); assert.equal(packet.effort_policy.effective.review, "high");
