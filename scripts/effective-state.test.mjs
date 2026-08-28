@@ -614,20 +614,8 @@ test("output is deterministic across repeated runs against the same input", () =
 
 // -- Integration: the real program tree
 
-test("real program tree: generator runs to completion and reports the known B6 -> C2 gap", () => {
+test("real program tree defaults fail closed after the live Rev11 authority cutover", () => {
   const res = spawnSync(process.execPath, [GENERATOR, "--json"], { encoding: "utf8" });
-  assert.ok(res.stdout, "generator produced no stdout against the real tree");
-  const json = JSON.parse(res.stdout);
-  assert.ok(
-    json.blocks.length > 0,
-    "zero blocks derived from the real ledger — non-vacuous work check",
-  );
-  assert.ok(json.rulings.length > 0, "zero rulings derived from the real corpus");
-  const missingEdge = findingsOfType(json, "MISSING_DAG_EDGE_IMPLIED_BY_RULING").find(
-    (f) => f.from === "B6" && f.to === "C2",
-  );
-  assert.ok(
-    missingEdge,
-    "expected the known missing B6 -> C2 DAG edge to be detected against the real corpus",
-  );
+  assert.equal(res.status, 2);
+  assert.match(res.stderr, /legacy defaults are retired.*programctl/i);
 });

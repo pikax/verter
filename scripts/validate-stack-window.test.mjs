@@ -20,7 +20,6 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 
 const VALIDATOR = join(dirname(fileURLToPath(import.meta.url)), "validate-stack-window.mjs");
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 let dir;
 before(() => {
@@ -114,10 +113,23 @@ function window({ mode = "LANDABLE", acceptanceBlockId = "", status = "ACTIVE", 
 }
 
 // -- Basic template-mode acceptance against the real repository template.
-test("template mode accepts the real repository stack-window template", () => {
+test("template mode accepts a self-contained stack-window fixture", () => {
+  const template = write("stack-window.template.toml", window({ status: "TEMPLATE", overrides: {
+    stack_id: "REQUIRED_STACK_ID",
+    authority_package_digest: "REQUIRED_PACKAGE_SHA256",
+    implementation_lock_digest: "REQUIRED_A6_LOCK_SHA256",
+    program_state_basis_digest: "REQUIRED_PRE_STACK_PROGRAM_STATE_SHA256",
+    root_branch: "REQUIRED_ROOT_BRANCH",
+    root_base_sha: "REQUIRED_FULL_SHA",
+    root_base_tree: "REQUIRED_TREE_OID",
+    stack_tool: "REQUIRED_STACK_TOOL",
+    stack_tool_version: "REQUIRED_STACK_TOOL_VERSION",
+    owner: "REQUIRED_ORCHESTRATOR_OR_STACK_OWNER",
+    evidence_root: "REQUIRED_REPOSITORY_RELATIVE_PATH",
+  } }));
   const r = run([
     "--window",
-    join(REPO_ROOT, "docs/arch/refactor/rev11/templates/stack-window.template.toml"),
+    template,
     "--mode",
     "template",
   ]);

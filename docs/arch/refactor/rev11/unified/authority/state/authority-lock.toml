@@ -1,6 +1,0 @@
-schema = 2
-baseline_authority_sha256 = "55cd9e6fe9e12f0f28356d57f0c7547b7a3072bf52ca654e4a2c321c4b0d02d0"
-current_authority_sha256 = "55cd9e6fe9e12f0f28356d57f0c7547b7a3072bf52ca654e4a2c321c4b0d02d0"
-generation = 0
-last_amendment_id = ""
-last_amendment_sha256 = ""

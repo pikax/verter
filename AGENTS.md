@@ -21,7 +21,7 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - `.claude/skills/audit-infrastructure/SKILL.md` — audit substrate (`verter_audit`), `HostAuditRuntime`, audited entry-points, footprint miner, structured events.
 - `.claude/skills/scheduler/SKILL.md` — scheduler submission/admission APIs, CPU/I-O pool routing, batch atomic admission.
 - `.claude/skills/debug-tooling/SKILL.md` — backtrace watchdog, LLDB attach wrapper, release-dbg profile for hang/slow-path diagnosis.
-- `.claude/skills/agent-prompts/SKILL.md` — copy-pasteable implementation/continuation/review/fix prompts for driving separate sessions.
+- `.claude/skills/multi-agent-orchestration/SKILL.md` — staged orchestration policy plus implementation/review/fix/verification/confirmation and Architect prompt templates.
 - `.claude/skills/wsl-e2e-testing.md` — WSL E2E tests reproducing Linux/CI failures, fixture matrix.
 - `docs/` — user-facing and contributor-facing documentation.
 
@@ -66,6 +66,6 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - Audit records, per-request observability, footprint capture: `/audit-infrastructure`.
 - Scheduler submission, batching, CPU-pool coordination: `/scheduler`.
 - Hangs, unexpectedly slow paths, stack snapshots: `/debug-tooling`.
-- Generating prompts for separate implementation/review sessions: `/agent-prompts`.
+- Generating prompts for separate implementation/review sessions: `/multi-agent-orchestration` → `references/templates.md`.
 - Reproducing Linux/CI-only failures: `/wsl-e2e-testing`.
-- Driving a large multi-block plan, refactor, migration, or cutover autonomously (orchestrator + sub-agents + dual review): `/multi-agent-orchestration`.
+- Driving a large multi-block plan, refactor, migration, or cutover autonomously (orchestrator + risk-scaled fresh reviews): `/multi-agent-orchestration`.

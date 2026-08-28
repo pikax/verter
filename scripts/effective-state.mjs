@@ -605,6 +605,12 @@ function printHuman(view) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
+  const explicitFixtureInputs = ["dag", "state", "rulings-dir", "amendments-dir", "authority-registry"].every((key) => typeof opts[key] === "string");
+  if (!explicitFixtureInputs) {
+    process.stderr.write("effective-state legacy defaults are retired; use docs/arch/refactor/rev11/tools/programctl.mjs, or provide every explicit fixture input\n");
+    process.exitCode = 2;
+    return;
+  }
   const dagPath = resolveOpt(opts.dag, DEFAULT_DAG);
   const statePath = resolveOpt(opts.state, DEFAULT_STATE);
   const rulingsDir = resolveOpt(opts["rulings-dir"], DEFAULT_RULINGS_DIR);
