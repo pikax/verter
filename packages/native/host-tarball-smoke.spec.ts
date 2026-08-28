@@ -17,7 +17,7 @@
  *      via the optional-dependency fallback — the main package has no
  *      `.node`, so the only way `VerterHost` exists is the fallback — and
  *      that a real call works end-to-end (`new VerterHost()` constructs and
- *      `processStyle` returns a real result).
+ *      `transformVueStyle` returns a real result).
  *
  * Platform-general: the host triple is DERIVED at runtime from
  * `process.platform`/`process.arch`/musl via `currentHostEntry()` (the same
@@ -169,14 +169,17 @@ const mainEntry = ${JSON.stringify(mainPkgDir)};
 const native = require(mainEntry);
 const out = { ok: true };
 out.hasVerterHost = typeof native.VerterHost === "function";
-out.hasProcessStyle = typeof native.processStyle === "function";
+out.hasProcessStyle = typeof native.processStyle === "undefined";
+out.hasTransformVueStyle = typeof native.transformVueStyle === "function";
+out.hasPrepareStyleForPreprocessor = typeof native.prepareStyleForPreprocessor === "function";
+out.hasAnalyzeStyle = typeof native.analyzeStyle === "function";
 // Real construction + a real call through the wrapper (string -> Buffer).
 const host = new native.VerterHost();
 out.constructed = host != null;
 if (typeof host.close === "function") host.close();
-const styled = native.processStyle("body { color: red }", { scopeId: "smoke1" });
-out.styledHasCode = typeof styled.code === "string";
-out.styledCodeNonEmpty = (styled.code || "").length > 0;
+const transformed = native.transformVueStyle("body { color: red }", { scopeId: "smoke1" });
+out.transformedHasCode = typeof transformed.code === "string";
+out.transformedCodeNonEmpty = (transformed.code || "").length > 0;
 process.stdout.write(JSON.stringify(out));
 `,
         );
@@ -192,10 +195,13 @@ process.stdout.write(JSON.stringify(out));
         // the optional-dependency fallback, since main ships no .node).
         expect(result.hasVerterHost).toBe(true);
         expect(result.hasProcessStyle).toBe(true);
+        expect(result.hasTransformVueStyle).toBe(true);
+        expect(result.hasPrepareStyleForPreprocessor).toBe(true);
+        expect(result.hasAnalyzeStyle).toBe(true);
         // A real native call worked end-to-end.
         expect(result.constructed).toBe(true);
-        expect(result.styledHasCode).toBe(true);
-        expect(result.styledCodeNonEmpty).toBe(true);
+        expect(result.transformedHasCode).toBe(true);
+        expect(result.transformedCodeNonEmpty).toBe(true);
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }

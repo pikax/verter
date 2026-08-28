@@ -376,6 +376,157 @@ mod tests {
         );
     }
 
+    /// Build the diagnostic + context a real `unused-css-selector` fix runs
+    /// against, over a caller-supplied (possibly perturbed) analysis.
+    fn actions_for(
+        source: &str,
+        selector_text: &str,
+        style_block: &StyleBlockAnalysis,
+    ) -> Vec<CodeAction> {
+        let start = source
+            .find(selector_text)
+            .expect("selector present in source");
+        let diag = LintDiagnostic {
+            rule: "unused-css-selector".to_string(),
+            category: "css".to_string(),
+            severity: Severity::Hint,
+            message: format!("Unused CSS selector `{selector_text}`"),
+            span: verter_span::Span::new(start as u32, (start + selector_text.len()) as u32),
+            tags: vec![],
+            span_kind: DiagnosticSpanKind::CssSelector,
+            certainty: verter_diagnostics::Certainty::Definite,
+            evidence: Vec::new(),
+            related_files: Vec::new(),
+        };
+        let set = DiagnosticSet::new();
+        let ctx = ActionContext {
+            source,
+            file_id: "/src/App.vue",
+            diagnostics: &set,
+            template: None,
+            script: None,
+            styles: std::slice::from_ref(style_block),
+            blocks: &[],
+        };
+        RemoveUnusedCss.fixes_for_diagnostic(&diag, &ctx)
+    }
+
+    /// The provider's declared identity is part of the contract this fix is
+    /// registered and dispatched under — never asserted anywhere before.
+    #[test]
+    fn provider_name_is_stable() {
+        assert_eq!(RemoveUnusedCss.name(), "remove-unused-css");
+    }
+
+    // ── dataflow witnesses ──
+    //
+    // Output-parity fixtures alone cannot tell "the edit was read off
+    // `CssAnalysis`" from "the edit was recomputed, correctly, by some other
+    // means" — a relocated brace scanner, or a fresh re-parse of the rule,
+    // agrees with the analysis on every well-formed fixture. Each witness
+    // below therefore INJECTS a value into the analysis that no computation
+    // over `source` would ever produce, and requires the emitted edit to
+    // carry that injected value through. Only an implementation whose output
+    // dataflows from `CssAnalysis` can satisfy them.
+
+    /// The solo whole-rule deletion's END boundary is `rule_body_span.end`
+    /// read off the analysis — not a brace scan, not a re-parse.
+    #[test]
+    fn solo_rule_extent_dataflows_from_rule_body_span() {
+        let source = ".unused { color: blue; }###";
+        let mut style_block = analyze(source);
+        let css = style_block.css.as_mut().expect("css analysis");
+        let real_end = css.selectors[0]
+            .rule_body_span
+            .expect("a closed rule body")
+            .end;
+        assert_eq!(real_end as usize, source.find("###").unwrap());
+
+        // An end NO scan of `source` can produce: three bytes past the real
+        // closing brace, inside the trailing sentinel.
+        let injected_end = real_end + 3;
+        let body = css.selectors[0].rule_body_span.as_mut().unwrap();
+        *body = verter_span::Span::new(body.start, injected_end);
+
+        let actions = actions_for(source, ".unused", &style_block);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].edits[0].span.end, injected_end,
+            "the deletion end must be the analysis's `rule_body_span.end`; a \
+             brace scan or a re-parse of the source would have produced {real_end}"
+        );
+    }
+
+    /// A grouped sibling's removal boundary is the PREVIOUS
+    /// `AnalyzedSelector.span.end` read off the analysis.
+    #[test]
+    fn grouped_sibling_boundary_dataflows_from_selector_span() {
+        let source = ".used, .unused { color: blue; }\n";
+        let mut style_block = analyze(source);
+        let css = style_block.css.as_mut().expect("css analysis");
+        let real_prev_end = css.selectors[0].span.end;
+        assert_eq!(real_prev_end as usize, source.find(',').unwrap());
+
+        // Shift the PREVIOUS sibling's recorded end one byte earlier — a
+        // boundary no comma scan would ever choose.
+        let injected_prev_end = real_prev_end - 1;
+        css.selectors[0].span =
+            verter_span::Span::new(css.selectors[0].span.start, injected_prev_end);
+
+        let actions = actions_for(source, ".unused", &style_block);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].edits[0].span.start, injected_prev_end,
+            "the removal start must be the analysis's previous-sibling \
+             `span.end`; a comma rescan would have produced {real_prev_end}"
+        );
+    }
+
+    /// Comma-sibling GROUPING itself is decided by shared-`rule_body_span`
+    /// equality on the analysis — not by finding a comma in the source. Break
+    /// the shared body span and the same comma-joined source must take the
+    /// solo whole-rule path instead.
+    #[test]
+    fn sibling_grouping_dataflows_from_shared_rule_body_span() {
+        let source = ".used, .unused { color: blue; }\n";
+
+        // Control: unperturbed, this IS a group — only `, .unused` goes.
+        let grouped = actions_for(source, ".unused", &analyze(source));
+        assert_eq!(grouped.len(), 1);
+        let grouped_removed =
+            &source[grouped[0].edits[0].span.start as usize..grouped[0].edits[0].span.end as usize];
+        assert!(
+            !grouped_removed.contains(".used {") && grouped_removed.contains(".unused"),
+            "control: a real group removes only the sibling, got {grouped_removed:?}"
+        );
+
+        // Perturbed: give `.used` a DIFFERENT rule body span, so the two
+        // selectors no longer share one enclosing rule on the analysis. The
+        // source text is byte-identical — the comma is still right there.
+        let mut style_block = analyze(source);
+        let css = style_block.css.as_mut().expect("css analysis");
+        let shared = css.selectors[0].rule_body_span.expect("a closed rule body");
+        css.selectors[0].rule_body_span =
+            Some(verter_span::Span::new(shared.start + 1, shared.end));
+
+        let solo = actions_for(source, ".unused", &style_block);
+        assert_eq!(solo.len(), 1);
+        let solo_edit = &solo[0].edits[0];
+        assert_eq!(
+            solo_edit.span.end,
+            shared.end + 1,
+            "with the shared body span broken, the sibling must take the SOLO \
+             whole-rule path (deleting through `rule_body_span.end` plus the \
+             trailing newline); a source comma rescan would still have grouped it"
+        );
+        let solo_removed = &source[solo_edit.span.start as usize..solo_edit.span.end as usize];
+        assert!(
+            solo_removed.contains("color: blue"),
+            "the solo path deletes the declaration block too, unlike the grouped \
+             path's sibling-only removal: {solo_removed:?}"
+        );
+    }
+
     #[test]
     fn ignores_unrelated_diagnostics() {
         let source = ".foo { color: red; }";

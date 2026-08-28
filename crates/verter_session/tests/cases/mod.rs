@@ -10,6 +10,7 @@
 //! from this manifest.
 
 mod architecture_guards;
+mod capability_matrix_css_family_rows_ratified;
 mod carrier_byte_parity;
 mod carrier_coordinator_route_guard;
 mod carrier_encapsulation_guards;
@@ -18,6 +19,7 @@ mod client_framework_manifest_ts_freshness;
 mod component_meta_audit;
 mod component_meta_audit_corpus;
 mod corpus_audit_tests;
+mod css_attribution_chargeable;
 mod defect_b_corpus_prevention_gate;
 mod exposed_binding_regression;
 mod fact_matrix;
@@ -45,11 +47,16 @@ mod host_preset_policy;
 mod integration_test_layout_guard;
 mod native_content_handoff;
 mod nextest_slow_timeout_matches_advertised_budget;
+mod one_parse_per_style_block;
 mod oracle_driver;
 mod oracle_query_specs_shared;
 mod oracle_tsgo_forbidden;
+mod preprocessor_boundary_contract;
+mod preprocessor_round_trip_parse_count;
 mod runtime_constructor_matrix;
 mod shared_process_contract;
+mod style_dialect_admission;
+mod style_native_analysis_preprocessor_boundary;
 mod svelte_compiler_block1;
 mod svelte_compiler_block1_guards;
 mod svelte_jsx_shim_freshness;
@@ -61,3 +68,4 @@ mod typeinfo_manifest_freshness;
 mod virtual_file_naming_characterization;
 mod virtual_file_naming_ts_freshness;
 mod vue_macro_tsc_typecheck_gate;
+mod warm_style_parse_reuse;

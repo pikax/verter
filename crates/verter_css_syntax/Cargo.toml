@@ -21,10 +21,15 @@ publish = false
 test-support = []
 
 [dependencies]
+verter_audit = { path = "../verter_audit" }
 verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span" }
+bumpalo = { version = "3.20.3", features = ["collections"] }
 memchr = "2.8.0"
 smallvec = "1.15"
+
+[dev-dependencies]
+trybuild = "1.0"
 
 [[test]]
 name = "main"

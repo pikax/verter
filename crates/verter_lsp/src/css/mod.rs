@@ -964,6 +964,106 @@ mod tests {
         );
     }
 
+    // ── dataflow witnesses ──
+    //
+    // Every classifier fixture in this module observes an outcome a
+    // correctly-written scanner over `source` would also reach — including
+    // the quoted-`;` discriminator, which a FORWARD, string-aware scan gets
+    // right. The review negative excludes the OLD backward punctuation scan
+    // by name, which does not exclude a relocated or reshaped one. These two
+    // witnesses INJECT spans into `CssAnalysis` that contradict the bytes and
+    // require the classification to follow the INJECTED value, so only an
+    // implementation reading `rule_body_span` / `name_span` / `value_span`
+    // passes.
+
+    /// The "is this a rule's declaration block at all" gate is
+    /// `selectors[i].rule_body_span`, read off the analysis. Shrink it so a
+    /// genuine value offset falls outside, and the classifier must refuse —
+    /// even though the bytes at that offset are unchanged.
+    #[test]
+    fn value_position_gate_dataflows_from_rule_body_span() {
+        let source = "<style>\n.foo { color: red; }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+        let value_offset = source.find("red").unwrap();
+        let pos = line_index.offset_to_position(value_offset as u32).unwrap();
+
+        // Control: unperturbed, this IS a value position (no property items).
+        let control = FileAnalysisSnapshot {
+            styles: (vec![build_style(source, &blocks)]).into(),
+            ..Default::default()
+        };
+        assert!(
+            css_completions(&pos, source, &blocks, Some(&control), &line_index).is_none(),
+            "control: the offset must be a genuine value position"
+        );
+
+        // Perturbed: the enclosing rule's body span now ends BEFORE the
+        // value. No scan of `source` would ever place the rule's block there.
+        let mut style = build_style(source, &blocks);
+        let css = style.css.as_mut().expect("css analysis");
+        let body = css.selectors[0].rule_body_span.expect("a closed rule body");
+        css.selectors[0].rule_body_span =
+            Some(verter_span::Span::new(body.start, value_offset as u32 - 1));
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![style]).into(),
+            ..Default::default()
+        };
+
+        let items = css_completions(&pos, source, &blocks, Some(&analysis), &line_index);
+        let items = items.expect("a non-value position offers property completions");
+        assert!(
+            items.iter().any(|i| i.label == "display"),
+            "with the offset outside every `rule_body_span`, the classifier must \
+             refuse the value classification; a scan of the source would still \
+             have confirmed it: {items:?}"
+        );
+    }
+
+    /// The value EXTENT is `declarations[i].name_span.end ..= value_span.end`,
+    /// read off the analysis. Widen that range backwards over the property
+    /// NAME and the classifier must confirm a value position at an offset the
+    /// bytes say is a property name — the direction no scanner can fake.
+    #[test]
+    fn value_extent_dataflows_from_declaration_name_and_value_spans() {
+        let source = "<style>\n.foo { color: red; }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        // An offset squarely inside the PROPERTY NAME — never a value
+        // position by any reading of the bytes.
+        let name_offset = source.find("color").unwrap() + 2;
+        let pos = line_index.offset_to_position(name_offset as u32).unwrap();
+
+        // Control: unperturbed, property completions are offered here.
+        let control = FileAnalysisSnapshot {
+            styles: (vec![build_style(source, &blocks)]).into(),
+            ..Default::default()
+        };
+        let control_items = css_completions(&pos, source, &blocks, Some(&control), &line_index)
+            .expect("control: a property-name offset offers property completions");
+        assert!(control_items.iter().any(|i| i.label == "display"));
+
+        // Perturbed: this declaration's recorded name now ends at the very
+        // start of the property, so the analysis places `name_offset` inside
+        // the value extent.
+        let mut style = build_style(source, &blocks);
+        let css = style.css.as_mut().expect("css analysis");
+        let declaration = &mut css.declarations[0];
+        declaration.name_span =
+            verter_span::Span::new(declaration.name_span.start, declaration.name_span.start);
+        let analysis = FileAnalysisSnapshot {
+            styles: (vec![style]).into(),
+            ..Default::default()
+        };
+
+        assert!(
+            css_completions(&pos, source, &blocks, Some(&analysis), &line_index).is_none(),
+            "the classifier must take its value extent from `name_span`/`value_span`; \
+             any reading of the source bytes at this offset says property name"
+        );
+    }
+
     /// Fail-closed (A23): `analysis: None` at a value-position offset must
     /// still offer property-name completions — never an empty/guessed set.
     #[test]

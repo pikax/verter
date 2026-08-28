@@ -27,7 +27,7 @@ use crate::compile::types::{
 };
 use crate::compile::{
     compile_from_parsed, compile_from_parsed_legacy, parse_script_block, parse_sfc,
-    parse_template_block, template_unit_used_vars,
+    parse_template_block, style_dialect, template_unit_used_vars,
 };
 use crate::compile_request::CompileRequestError;
 use crate::framework_common::carrier_compiler::{
@@ -41,7 +41,8 @@ use crate::framework_common::generated_chunk::{
 };
 use crate::framework_common::FrameworkParseArtifact;
 use crate::style_planner::{
-    run_vue_style_cascade, run_vue_style_cascade_post_preprocess, AuthoredStyleInput, PlainCssInput,
+    prepared_style_for_sealed_slot, run_vue_style_cascade, transform_vue_style, AuthoredStyleInput,
+    VerifiedPlainCss,
 };
 use verter_language::ParseOptions;
 
@@ -925,6 +926,13 @@ impl CarrierCompiler for VueCarrierCompiler {
             template_used_vars: None,
             runtime_template_hole: supplied_inline_template,
             runtime_inline_template_chunk: false,
+            prepared_styles: if opts.prepared_styles.is_empty() {
+                extras
+                    .map(|facts| facts.prepared_styles.clone())
+                    .unwrap_or_default()
+            } else {
+                opts.prepared_styles.clone()
+            },
         };
 
         // Vue uses `VerterCompileResult` INTERNALLY here; the returned bundle
@@ -1198,29 +1206,22 @@ impl CarrierCompiler for VueCarrierCompiler {
             .strip_prefix("data-v-")
             .unwrap_or(&bundle.scope_id)
             .to_string();
-        for ((slot, selected), node) in opts
+        for (style_index, ((slot, selected), node)) in opts
             .block_content
             .styles
             .iter()
             .zip(bundle.styles.iter_mut())
             .zip(parsed.style_nodes())
+            .enumerate()
         {
             if let Some(input) = slot {
-                let authored_dialect = match node.lang {
-                    None | Some(crate::parser::types::StyleLang::Css) => Some(CssDialect::Css),
-                    Some(crate::parser::types::StyleLang::Scss) => Some(CssDialect::Scss),
-                    Some(crate::parser::types::StyleLang::Sass) => Some(CssDialect::Sass),
-                    Some(crate::parser::types::StyleLang::Less) => Some(CssDialect::Less),
-                    Some(crate::parser::types::StyleLang::Stylus) => Some(CssDialect::Stylus),
-                    Some(crate::parser::types::StyleLang::Unknown) => None,
-                };
+                let authored_dialect = style_dialect(node.lang);
                 let selected_dialect = match input.lang.as_str() {
                     "css" => CssDialect::Css,
                     "scss" => CssDialect::Scss,
                     "sass" => CssDialect::Sass,
                     "less" => CssDialect::Less,
                     "stylus" | "styl" => CssDialect::Stylus,
-                    _ if authored_dialect.is_none() => CssDialect::Css,
                     _ => {
                         return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
@@ -1252,16 +1253,29 @@ impl CarrierCompiler for VueCarrierCompiler {
                     // output, so all 3 stages apply in one cascade — a stage
                     // that produces no edits hands its retained IR to the next
                     // instead of forcing a re-parse (A10i).
-                    let authored = AuthoredStyleInput::new(
+                    let mut authored = AuthoredStyleInput::new(
                         &current,
                         selected_dialect,
                         &input.source_space_token,
                         &input.source_space_token,
                         &input.content_artifact_token,
                     );
+                    if let Some(prepared) = prepared_style_for_sealed_slot(
+                        input.parsed.as_ref(),
+                        &opts.prepared_styles,
+                        style_index,
+                        current.as_str(),
+                    ) {
+                        authored = authored.with_prepared(prepared.ir());
+                    }
                     let cascade_module = node.module && selected_dialect == CssDialect::Css;
-                    let outcome =
-                        run_vue_style_cascade(authored, &style_scope, cascade_module, node.scoped);
+                    let outcome = run_vue_style_cascade(
+                        authored,
+                        &style_scope,
+                        cascade_module,
+                        node.scoped,
+                        opts.source_map,
+                    );
                     if !outcome.stage_failures.is_empty() {
                         return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
                             adapter_id: self.adapter_id(),
@@ -1281,7 +1295,10 @@ impl CarrierCompiler for VueCarrierCompiler {
                     .count();
                     if stage_count > 0 {
                         current = outcome.code;
-                        current_map = opts.source_map.then_some(outcome.source_map);
+                        current_map = opts
+                            .source_map
+                            .then_some(outcome.source_map)
+                            .filter(|map| !map.is_empty());
                         descriptor = RuntimeOutputDescriptor::generated(
                             &current,
                             current_map.as_deref(),
@@ -1295,30 +1312,35 @@ impl CarrierCompiler for VueCarrierCompiler {
                             applied_rewrite_stages.saturating_add(stage_count as u8);
                     }
                 } else {
-                    // Already-preprocessed CSS output: the authored v-bind
-                    // stage does not apply (its content is upstream of the
-                    // supplied bytes), so this branch starts the cascade at
-                    // the modules stage instead — an unchanged modules stage
-                    // still hands its retained IR into the scoped-selector
-                    // stage rather than forcing a second parse (A10i).
-                    let plain = PlainCssInput::try_new(
-                        &current,
-                        selected_dialect,
+                    // A completed external-preprocessor result is parsed once
+                    // at host admission. The retained IR is required here —
+                    // raw bytes are not a transform fallback.
+                    let prepared = prepared_style_for_sealed_slot(
+                        input.parsed.as_ref(),
+                        &opts.prepared_styles,
+                        style_index,
+                        current.as_str(),
+                    )
+                    .ok_or(
+                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                            adapter_id: self.adapter_id(),
+                        },
+                    )?;
+                    let verified = VerifiedPlainCss::from_parsed_native_css(prepared.ir()).ok_or(
+                        CompileUnsupported::BlockContentRuntimeUnavailable {
+                            adapter_id: self.adapter_id(),
+                        },
+                    )?;
+                    let cascade_module = node.module && selected_dialect == CssDialect::Css;
+                    let outcome = transform_vue_style(
+                        verified,
                         &input.source_space_token,
                         &input.source_space_token,
                         &input.content_artifact_token,
-                    )
-                    .map_err(|_| {
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        }
-                    })?;
-                    let cascade_module = node.module && selected_dialect == CssDialect::Css;
-                    let outcome = run_vue_style_cascade_post_preprocess(
-                        plain,
                         &style_scope,
                         cascade_module,
                         node.scoped,
+                        opts.source_map,
                     );
                     if !outcome.stage_failures.is_empty() {
                         return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
@@ -1326,6 +1348,7 @@ impl CarrierCompiler for VueCarrierCompiler {
                         });
                     }
                     let stage_count = [
+                        outcome.facts.rewrites.v_bind,
                         outcome.facts.rewrites.css_modules,
                         outcome.facts.rewrites.scoped_selector
                             || outcome.facts.rewrites.keyframes
@@ -1338,7 +1361,10 @@ impl CarrierCompiler for VueCarrierCompiler {
                     .count();
                     if stage_count > 0 {
                         current = outcome.code;
-                        current_map = opts.source_map.then_some(outcome.source_map);
+                        current_map = opts
+                            .source_map
+                            .then_some(outcome.source_map)
+                            .filter(|map| !map.is_empty());
                         descriptor = RuntimeOutputDescriptor::generated(
                             &current,
                             current_map.as_deref(),
@@ -1868,6 +1894,7 @@ mod tests {
             lang: lang.to_string(),
             content_artifact_token: format!("content:{lang}"),
             source_space_token: format!("space:{lang}"),
+            parsed: None,
         }
     }
 
@@ -2396,6 +2423,7 @@ mod tests {
                             lang: "css".to_string(),
                             content_artifact_token: "artifact:theme-css".to_string(),
                             source_space_token: "space:theme-css".to_string(),
+                            parsed: None,
                         })],
                         ..Default::default()
                     },
@@ -2416,6 +2444,48 @@ mod tests {
             style.output_descriptor.source_space.token,
             "space:theme-css"
         );
+    }
+
+    /// @ai-generated - Unknown selected style lang must refuse, not rewrite as CSS.
+    #[test]
+    fn unknown_selected_style_lang_refuses_css_cascade_rewrite() {
+        let source = concat!(
+            "<template><div class=\"a\"/></template>",
+            "<style lang=\"postcss\" scoped>.a { color: red; }</style>"
+        );
+        let prepared = crate::style_planner::prepare_supplied_plain_css(".a { color: red; }")
+            .expect("css parses");
+        let compiler = VueCarrierCompiler;
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compiler.compile_bundle(
+            source,
+            &artifact_for(source),
+            &RuntimeCompileOptions {
+                filename: Some("UnknownDialect.vue".to_string()),
+                component_id: Some("scope123".to_string()),
+                block_content: RuntimeBlockContentInputs {
+                    styles: vec![Some(RuntimeBlockContentInput {
+                        code: Arc::from(".a { color: red; }"),
+                        source_map: None,
+                        lang: "postcss".to_string(),
+                        content_artifact_token: "artifact:postcss".to_string(),
+                        source_space_token: "space:postcss".to_string(),
+                        parsed: Some(prepared),
+                    })],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &alloc,
+        );
+        match result {
+            Err(CompileUnsupported::BlockContentRuntimeUnavailable { .. }) => {}
+            Ok(CarrierCompileOutcome::Produced(output)) => panic!(
+                "unknown selected lang must not produce a CSS cascade rewrite: {}",
+                output.styles[0].code
+            ),
+            other => panic!("expected BlockContentRuntimeUnavailable, got {other:?}"),
+        }
     }
 
     /// @ai-generated - Sequential style stages must not claim an uncomposed exact map.
@@ -2440,6 +2510,7 @@ mod tests {
                             lang: "css".to_string(),
                             content_artifact_token: "artifact:theme-css".to_string(),
                             source_space_token: "space:theme-css".to_string(),
+                            parsed: None,
                         })],
                         ..Default::default()
                     },
@@ -2474,7 +2545,7 @@ mod tests {
     fn supplied_preprocessor_output_reuses_parsed_ir_across_modules_and_scoped() {
         use crate::style_planner::{
             parse_ir_invocation_count, reset_parse_ir_invocation_count, transform_vue_css_modules,
-            transform_vue_scoped_css, StyleRewriteOutcome,
+            transform_vue_scoped_css, PlainCssInput, StyleRewriteOutcome,
         };
 
         let plain_input = || {
@@ -2524,6 +2595,8 @@ mod tests {
         let compiler = VueCarrierCompiler;
         let alloc = oxc_allocator::Allocator::new();
         reset_parse_ir_invocation_count();
+        let prepared = crate::style_planner::prepare_supplied_plain_css("body { color: red; }")
+            .expect("supplied css parses");
         let output = compiler
             .compile_bundle_expect_produced(
                 source,
@@ -2539,6 +2612,7 @@ mod tests {
                             lang: "css".to_string(),
                             content_artifact_token: "artifact:theme-scss".to_string(),
                             source_space_token: "space:theme-scss".to_string(),
+                            parsed: Some(prepared),
                         })],
                         ..Default::default()
                     },
@@ -2558,6 +2632,60 @@ mod tests {
             style.code.contains("body[data-v-scope123]"),
             "{}",
             style.code
+        );
+    }
+
+    #[test]
+    fn prepared_ir_does_not_join_by_source_text() {
+        let source = concat!(
+            "<template><div/></template>",
+            "<style module scoped lang=\"scss\" src=\"./a.scss\"></style>",
+            "<style module scoped lang=\"scss\" src=\"./b.scss\"></style>",
+        );
+        let css = ".card { color: red; }";
+        let prepared = crate::style_planner::prepare_supplied_plain_css(css).expect("css parses");
+        let compiler = VueCarrierCompiler;
+        let alloc = oxc_allocator::Allocator::new();
+        let err = compiler
+            .compile_bundle(
+                source,
+                &artifact_for(source),
+                &RuntimeCompileOptions {
+                    filename: Some("Two.vue".to_string()),
+                    component_id: Some("scope123".to_string()),
+                    block_content: RuntimeBlockContentInputs {
+                        styles: vec![
+                            Some(RuntimeBlockContentInput {
+                                code: Arc::from(css),
+                                source_map: None,
+                                lang: "css".to_string(),
+                                content_artifact_token: "artifact:a".to_string(),
+                                source_space_token: "space:a".to_string(),
+                                parsed: None,
+                            }),
+                            Some(RuntimeBlockContentInput {
+                                code: Arc::from(css),
+                                source_map: None,
+                                lang: "css".to_string(),
+                                content_artifact_token: "artifact:b".to_string(),
+                                source_space_token: "space:b".to_string(),
+                                parsed: None,
+                            }),
+                        ],
+                        ..Default::default()
+                    },
+                    prepared_styles: vec![Some(prepared), None],
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect_err("second block must fail closed, not steal the first IR by text");
+        assert!(
+            matches!(
+                err,
+                CompileUnsupported::BlockContentRuntimeUnavailable { .. }
+            ),
+            "{err:?}"
         );
     }
 

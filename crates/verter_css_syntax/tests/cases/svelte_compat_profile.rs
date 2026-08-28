@@ -11,8 +11,9 @@
 //! `verter_compiler`'s own test suite (`svelte_parse_defect_exact_codes.rs`) — it needs the
 //! compiler's parser + gate, which this crate does not and must not depend on.
 
-use verter_css_syntax::style_body_reject_code;
 use verter_span::Span;
+
+use crate::svelte_compat::style_body_reject_code;
 
 /// The parser-minted CSS body span of the FIRST `<style>` in `source`.
 fn first_style_content_span(source: &str) -> Span {

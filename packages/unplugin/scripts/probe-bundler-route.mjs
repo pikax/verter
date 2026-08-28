@@ -151,6 +151,9 @@ function hook(plugin, name) {
   return callable;
 }
 
+const nativeRequire = createRequire(entry);
+const nativeModule = nativeRequire("@verter/native");
+
 const results = {
   loaded: true,
   fresh: true,
@@ -160,6 +163,13 @@ const results = {
   // rather than asserted from source: without this the export could only be
   // classified out of scope on a claim.
   defaultIsVerterVue: module_.default === module_.VerterVue,
+  nativeEntry: nativeRequire.resolve("@verter/native").split(path.sep).join("/"),
+  // Presence of the live native style op. Live bundler lanes call
+  // `transformVueStyle`; `processStyle` is gone.
+  nativeStyleOps: {
+    processStyle: typeof nativeModule.processStyle,
+    transformVueStyle: typeof nativeModule.transformVueStyle,
+  },
   cases: {},
 };
 
@@ -457,7 +467,7 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
 // the non-Vite CSS scoping lane
 //
 // A Rollup-shaped plugin (no resolved Vite config) routes a style sub-request
-// through the native `processStyle` rather than through `compileStyleAsync`.
+// through the native `transformVueStyle` rather than through `compileStyleAsync`.
 // Its include gate additionally requires a NON-`css` lang there, so the request
 // carries `lang.scss`; it carries `&scoped` because an unscoped request returns
 // its input byte-for-byte and would prove nothing.
@@ -468,6 +478,12 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
   const id = "/probe/Plug.vue";
   const styleId = "/probe/Plug.vue?vue&type=style&index=0&scoped&lang.scss";
   const unregisteredStyleId = "/probe/Unregistered.vue?vue&type=style&index=0&scoped&lang.scss";
+  const publishedTransformVueStyle = nativeModule.transformVueStyle;
+  const styleNativeOpsCalled = [];
+  nativeModule.transformVueStyle = function observedTransformVueStyle(...args) {
+    styleNativeOpsCalled.push("transformVueStyle");
+    return publishedTransformVueStyle.apply(this, args);
+  };
   let plugin;
   try {
     plugin = module_.VerterVue.rollup({});
@@ -498,6 +514,7 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
       scopedMap: scoped?.map ?? null,
       unregisteredId: unregisteredStyleId,
       unregisteredCode: unscoped?.code ?? null,
+      styleNativeOpsCalled,
     };
   } catch (error) {
     results.cases[label] = {
@@ -506,8 +523,10 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
       id,
       message: String(error?.message ?? error),
       errors,
+      styleNativeOpsCalled,
     };
   } finally {
+    nativeModule.transformVueStyle = publishedTransformVueStyle;
     if (typeof plugin?.closeBundle === "function") await plugin.closeBundle.call(context);
   }
 }
@@ -550,8 +569,6 @@ for (const { label, publicFactory, entryObject, id, source, queryMarker } of [
 // the published module carries the marker is the write itself: the recompiled
 // value either reached the cache the load hook serves from, or it did not.
 const RECOMPILE_RETURN_MARKER = "\n/* verter-probe: recompile-return */\n";
-const nativeRequire = createRequire(entry);
-results.nativeEntry = nativeRequire.resolve("@verter/native").split(path.sep).join("/");
 {
   const native = nativeRequire("@verter/native");
   const publishedVirtualFile = native.VerterHost.prototype.getVirtualFile;

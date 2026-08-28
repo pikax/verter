@@ -355,15 +355,16 @@ function renderProfile({ ssr, sourceMap }) {
 
 // STANDALONE CSS: option conversion + artifact shape
 {
-  const processed = binding.processStyle(".x{color:red}", {
+  const transformed = binding.transformVueStyle(".x{color:red}", {
     scopeId: "probe1234",
     scoped: true,
     sourcemap: true,
   });
-  results.cases.processStyle = {
-    code: processed.code,
-    hasMap: processed.sourceMap !== null && processed.sourceMap !== undefined,
-    moduleClasses: processed.moduleClasses,
+  results.cases.transformVueStyle = {
+    code: transformed.code,
+    hasMap: transformed.sourceMap !== null && transformed.sourceMap !== undefined,
+    moduleClasses: transformed.moduleClasses,
+    refusals: transformed.refusals,
   };
 }
 

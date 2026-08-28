@@ -10,13 +10,10 @@
 //! A4/A11a's path-absence requirement is a TWO-SLICE gate: this file's
 //! `crate_root()`-relative path covers ONLY the Svelte side (row 5, this
 //! block). The Vue side (row 3 — `crates/verter_compiler/src/css/` — and
-//! the `lightningcss` dependency it pulls in) is a SEPARATE landing unit
-//! whose source has not been removed yet, and is deliberately NOT asserted
-//! here: asserting its absence against a tree that still contains it
-//! would make this test permanently red on a correct, in-progress tree. The
-//! retained-vs-deleted grammar-type-name list in Svelte's own `types.rs`
-//! stays review-enforced (per A4/A11a's own text) rather than a second
-//! landed name-scanner here.
+//! the `lightningcss` dependency it pulled in) is asserted in
+//! `no_lightningcss_dependency.rs`. The retained-vs-deleted grammar-type-name
+//! list in Svelte's own `types.rs` stays review-enforced (per A4/A11a's own
+//! text) rather than a second landed name-scanner here.
 
 use std::path::PathBuf;
 

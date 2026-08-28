@@ -1311,6 +1311,7 @@ impl VerterHost {
                 framework_parse: efs.framework_parse,
                 style_v_bind_vars,
                 style_v_bind_usage_complete: style_content.usage_complete,
+                prepared_styles: parse.prepared_styles.clone(),
             }
         };
         drop(block_content_capture_fence);
@@ -1632,6 +1633,7 @@ impl VerterHost {
                     // source-located facts fail closed for another space.
                     style_v_bind_vars: style_content.v_bind_vars,
                     style_v_bind_usage_complete: style_content.usage_complete,
+                    prepared_styles: parse.prepared_styles.clone(),
                 };
 
                 // Classify EXACTLY ONCE per compile, here under the read
@@ -3172,6 +3174,7 @@ impl VerterHost {
             template_used_vars: None,
             runtime_template_hole: false,
             runtime_inline_template_chunk: false,
+            prepared_styles: snapshot.prepared_styles.clone(),
         };
 
         // The RUNTIME products are requested when the profile target
@@ -3219,6 +3222,7 @@ impl VerterHost {
             profile,
             snapshot.block_content_inputs.clone(),
             Some(vue_facts),
+            snapshot.prepared_styles.clone(),
         );
 
         // Route the runtime compile through the carrier registry, selected
@@ -3684,6 +3688,7 @@ impl VerterHost {
             template_used_vars: None,
             runtime_template_hole: false,
             runtime_inline_template_chunk: false,
+            prepared_styles: snapshot.prepared_styles.clone(),
         };
 
         // The render lane's whole subject is the runtime `Main` module, so
@@ -3730,6 +3735,7 @@ impl VerterHost {
             profile,
             snapshot.block_content_inputs.clone(),
             Some(vue_facts),
+            snapshot.prepared_styles.clone(),
         );
 
         // Route through the carrier registry (the single dispatch authority)

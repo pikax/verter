@@ -1,4 +1,4 @@
-use memchr::memchr;
+use memchr::{memchr, memchr2, memchr3};
 
 use crate::dialect::{css, less, sass, scss, stylus, CssDialect};
 use crate::parser::CssSource;
@@ -7,7 +7,7 @@ use crate::token::{css_identifier_eq_ignore_ascii_case, SyntaxToken, TokenFlags,
 /// Whitespace classification profile a scan uses. `Css` is the CSS Syntax Module Level 3 ASCII
 /// set ([`is_css_whitespace`]); `JsUnicode` is JS `\s` (that ASCII core, plus vertical tab, plus a
 /// run of Unicode space codepoints) — the profile the Svelte compat validation reader
-/// ([`crate::svelte_compat`]) needs so its scans match upstream `svelte@5.56.3`'s own
+/// ([`crate::svelte_compat`]) needs so its scans match upstream `svelte@5.56.10`'s own
 /// Unicode-aware `\s` regexes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WhitespaceProfile {
@@ -17,7 +17,7 @@ pub(crate) enum WhitespaceProfile {
 
 /// Identifier name-start/name-continue codepoint profile. `Css` treats any codepoint `>= 128` as
 /// an identifier char (the general CSS Syntax Module rule this lexer otherwise applies);
-/// `SvelteCompat` narrows that threshold to `>= 160`, matching upstream `svelte@5.56.3`'s own
+/// `SvelteCompat` narrows that threshold to `>= 160`, matching upstream `svelte@5.56.10`'s own
 /// identifier-char test (which excludes the U+0080..U+009F block the general rule admits).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum IdentifierProfile {
@@ -53,7 +53,7 @@ pub(crate) fn is_whitespace_codepoint(cp: u32, profile: WhitespaceProfile) -> bo
 
 /// JS `\s` (`WhiteSpace` ∪ `LineTerminator`): the [`is_css_whitespace`] ASCII core, plus vertical
 /// tab `\x0B` (which CSS does not treat as whitespace), plus the Unicode space run. Used by the
-/// Svelte compat profile ([`crate::svelte_compat`]) to match upstream `svelte@5.56.3`'s
+/// Svelte compat profile ([`crate::svelte_compat`]) to match upstream `svelte@5.56.10`'s
 /// Unicode-aware `\s` regexes — genuinely wider than the general CSS Syntax Module ASCII set.
 #[inline]
 pub(crate) fn is_js_whitespace_codepoint(cp: u32) -> bool {
@@ -69,7 +69,7 @@ pub(crate) fn is_js_whitespace_codepoint(cp: u32) -> bool {
 
 /// Whether `byte` (an ASCII byte `< 0x80`) is an identifier name char under `profile`. `Css`
 /// delegates to the general [`is_name`] rule (alphanumeric, `_`, `-`, plus the CSS Syntax Module's
-/// NUL-substitution allowance); `SvelteCompat` is upstream `svelte@5.56.3`'s own narrower
+/// NUL-substitution allowance); `SvelteCompat` is upstream `svelte@5.56.10`'s own narrower
 /// `REGEX_VALID_IDENTIFIER_CHAR = /[a-zA-Z0-9_-]/` (no NUL allowance).
 #[inline]
 fn is_ascii_name_char(byte: u8, profile: IdentifierProfile) -> bool {
@@ -112,12 +112,10 @@ impl<'a> Lexer<'a> {
         self.absolute(self.cursor)
     }
 
+    #[inline]
     fn absolute(&self, local: usize) -> u32 {
-        let local = u32::try_from(local).expect("CssSource validates its local span domain");
-        self.source
-            .origin()
-            .checked_add(local)
-            .expect("CssSource validates origin plus source length")
+        // CssSource construction already proved origin+len fits u32.
+        self.source.origin() + local as u32
     }
 
     #[inline]
@@ -129,16 +127,28 @@ impl<'a> Lexer<'a> {
         self.consume_whitespace_profiled(WhitespaceProfile::Css)
     }
 
-    /// Consume a run of whitespace under `profile` — [`WhitespaceProfile::JsUnicode`]
-    /// additionally recognizes vertical tab and the Unicode space run, decoding codepoints where
-    /// the ASCII fast path doesn't apply. For [`WhitespaceProfile::Css`] this behaves identically
-    /// to the byte-stepping loop it replaces (the CSS ASCII whitespace set is single-byte only).
+    /// Consume a run of whitespace under `profile`. [`WhitespaceProfile::Css`]
+    /// uses a byte loop over the Syntax Module ASCII set; [`WhitespaceProfile::JsUnicode`]
+    /// additionally recognizes vertical tab and the Unicode space run.
     pub(crate) fn consume_whitespace_profiled(
         &mut self,
         profile: WhitespaceProfile,
     ) -> SyntaxToken {
         let start = self.cursor;
         let mut flags = TokenFlags::TRIVIA;
+        if profile == WhitespaceProfile::Css {
+            while self.cursor < self.bytes.len() {
+                let byte = self.bytes[self.cursor];
+                if !is_css_whitespace(byte) {
+                    break;
+                }
+                if matches!(byte, b'\n' | b'\r' | b'\x0c') {
+                    flags |= TokenFlags::CONTAINS_NEWLINE;
+                }
+                self.cursor += 1;
+            }
+            return self.make(TokenKind::Whitespace, flags, start, self.cursor);
+        }
         while let Some((cp, len)) = codepoint_at(self.bytes, self.cursor) {
             if !is_whitespace_codepoint(cp, profile) {
                 break;
@@ -156,29 +166,32 @@ impl<'a> Lexer<'a> {
         self.cursor += 2;
         let mut flags = TokenFlags::TRIVIA;
         loop {
-            let Some(relative) = memchr(b'*', &self.bytes[self.cursor..]) else {
-                if self.bytes[self.cursor..]
-                    .iter()
-                    .any(|byte| matches!(byte, b'\n' | b'\r' | b'\x0c'))
-                {
-                    flags |= TokenFlags::CONTAINS_NEWLINE;
-                }
+            let rest = &self.bytes[self.cursor..];
+            let Some(relative) =
+                earliest_offset(memchr3(b'*', b'\n', b'\r', rest), memchr(b'\x0c', rest))
+            else {
                 self.cursor = self.bytes.len();
                 flags |= TokenFlags::UNTERMINATED;
                 break;
             };
-            if self.bytes[self.cursor..self.cursor + relative]
-                .iter()
-                .any(|byte| matches!(byte, b'\n' | b'\r' | b'\x0c'))
-            {
-                flags |= TokenFlags::CONTAINS_NEWLINE;
+            match rest[relative] {
+                b'*' => {
+                    self.cursor += relative;
+                    if self.bytes.get(self.cursor + 1) == Some(&b'/') {
+                        self.cursor += 2;
+                        break;
+                    }
+                    self.cursor += 1;
+                }
+                b'\n' | b'\r' | b'\x0c' => {
+                    flags |= TokenFlags::CONTAINS_NEWLINE;
+                    self.cursor += relative + 1;
+                    if rest[relative] == b'\r' && self.bytes.get(self.cursor) == Some(&b'\n') {
+                        self.cursor += 1;
+                    }
+                }
+                _ => self.cursor += relative + 1,
             }
-            self.cursor += relative;
-            if self.bytes.get(self.cursor + 1) == Some(&b'/') {
-                self.cursor += 2;
-                break;
-            }
-            self.cursor += 1;
         }
         self.make(TokenKind::Comment, flags, start, self.cursor)
     }
@@ -186,10 +199,10 @@ impl<'a> Lexer<'a> {
     fn consume_line_comment(&mut self) -> SyntaxToken {
         let start = self.cursor;
         self.cursor += 2;
-        while self.cursor < self.bytes.len()
-            && !matches!(self.bytes[self.cursor], b'\n' | b'\r' | b'\x0c')
-        {
-            self.cursor += char_width(self.bytes, self.cursor);
+        if let Some(relative) = memchr3(b'\n', b'\r', b'\x0c', &self.bytes[self.cursor..]) {
+            self.cursor += relative;
+        } else {
+            self.cursor = self.bytes.len();
         }
         self.make(
             TokenKind::LineComment,
@@ -209,6 +222,16 @@ impl<'a> Lexer<'a> {
         self.cursor += 1;
         let mut flags = extra_flags;
         while self.cursor < self.bytes.len() {
+            let rest = &self.bytes[self.cursor..];
+            let Some(relative) = earliest_offset(
+                memchr3(quote, b'\\', b'\n', rest),
+                memchr2(b'\r', b'\x0c', rest),
+            ) else {
+                flags |= TokenFlags::UNTERMINATED;
+                self.cursor = self.bytes.len();
+                return self.make(kind, flags, start, self.cursor);
+            };
+            self.cursor += relative;
             match self.bytes[self.cursor] {
                 byte if byte == quote => {
                     self.cursor += 1;
@@ -267,6 +290,10 @@ impl<'a> Lexer<'a> {
     ) -> u16 {
         let mut flags = 0u16;
         while self.cursor < self.bytes.len() {
+            self.cursor = skip_ascii_name_continue(self.bytes, self.cursor);
+            if self.cursor >= self.bytes.len() {
+                break;
+            }
             let byte = self.bytes[self.cursor];
             if byte < 0x80 {
                 if is_ascii_name_char(byte, identifier_profile) {
@@ -479,7 +506,7 @@ impl<'a> Lexer<'a> {
 
     /// Consume one escape sequence (the `\` this method is called on, plus its hex numeral or
     /// single escaped char) under `whitespace_profile` for the hex form's optional trailing
-    /// separator — [`WhitespaceProfile::JsUnicode`] matches upstream `svelte@5.56.3`'s
+    /// separator — [`WhitespaceProfile::JsUnicode`] matches upstream `svelte@5.56.10`'s
     /// `REGEX_UNICODE_SEQUENCE` (`\r\n`, or any single JS-`\s` codepoint including multi-byte
     /// Unicode spaces), narrower [`WhitespaceProfile::Css`] only ever closes on a single ASCII
     /// whitespace byte.
@@ -572,168 +599,202 @@ impl<'a> Lexer<'a> {
 }
 
 impl Lexer<'_> {
+    #[inline]
+    fn consume_ascii_punct(&mut self, start: usize, kind: TokenKind) -> SyntaxToken {
+        self.cursor = start + 1;
+        self.make(kind, 0, start, self.cursor)
+    }
+
+    #[inline]
+    fn consume_delim_at(&mut self, start: usize) -> SyntaxToken {
+        self.cursor = start + char_width(self.bytes, start);
+        self.make(TokenKind::Delim, 0, start, self.cursor)
+    }
+
     fn next_token(&mut self) -> Option<SyntaxToken> {
         if self.cursor >= self.bytes.len() {
             return None;
         }
         let start = self.cursor;
         let byte = self.bytes[start];
-        if is_css_whitespace(byte) {
-            return Some(self.consume_whitespace());
-        }
-        if self.bytes[start..].starts_with(b"/*") {
-            return Some(self.consume_comment());
-        }
-        if self.dialect.allows_line_comments() && self.bytes[start..].starts_with(b"//") {
-            return Some(self.consume_line_comment());
-        }
-        if self.bytes[start..].starts_with(css::CDO) {
-            self.cursor += css::CDO.len();
-            return Some(self.make(TokenKind::Cdo, 0, start, self.cursor));
-        }
-        if self.bytes[start..].starts_with(css::CDC) {
-            self.cursor += css::CDC.len();
-            return Some(self.make(TokenKind::Cdc, 0, start, self.cursor));
-        }
-        if self.unicode_ranges_allowed
-            && matches!(byte, b'u' | b'U')
-            && self.bytes.get(start + 1) == Some(&b'+')
-            && self
-                .bytes
-                .get(start + 2)
-                .is_some_and(|next| next.is_ascii_hexdigit() || *next == b'?')
-        {
-            return Some(self.consume_unicode_range());
-        }
-        if matches!(self.dialect, CssDialect::Scss | CssDialect::Sass)
-            && byte
-                == if self.dialect == CssDialect::Sass {
+        match byte {
+            b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' => Some(self.consume_whitespace()),
+            b'/' => match self.bytes.get(start + 1).copied() {
+                Some(b'*') => Some(self.consume_comment()),
+                Some(b'/') if self.dialect.allows_line_comments() => {
+                    Some(self.consume_line_comment())
+                }
+                _ => Some(self.consume_delim_at(start)),
+            },
+            b'<' => {
+                if self.bytes[start..].starts_with(css::CDO) {
+                    self.cursor += css::CDO.len();
+                    Some(self.make(TokenKind::Cdo, 0, start, self.cursor))
+                } else {
+                    Some(self.consume_delim_at(start))
+                }
+            }
+            b'-' => {
+                if self.bytes[start..].starts_with(css::CDC) {
+                    self.cursor += css::CDC.len();
+                    Some(self.make(TokenKind::Cdc, 0, start, self.cursor))
+                } else if starts_number(self.bytes, start) {
+                    Some(self.consume_number())
+                } else if starts_identifier(self.bytes, start) {
+                    Some(self.consume_ident_like())
+                } else {
+                    Some(self.consume_delim_at(start))
+                }
+            }
+            b'u' | b'U' => {
+                if self.unicode_ranges_allowed
+                    && self.bytes.get(start + 1) == Some(&b'+')
+                    && self
+                        .bytes
+                        .get(start + 2)
+                        .is_some_and(|next| next.is_ascii_hexdigit() || *next == b'?')
+                {
+                    Some(self.consume_unicode_range())
+                } else {
+                    Some(self.consume_ident_like())
+                }
+            }
+            b'$' => {
+                let variable_prefix = if self.dialect == CssDialect::Sass {
                     sass::VARIABLE_PREFIX
                 } else {
                     scss::VARIABLE_PREFIX
+                };
+                if matches!(self.dialect, CssDialect::Scss | CssDialect::Sass)
+                    && byte == variable_prefix
+                    && starts_identifier(self.bytes, start + 1)
+                {
+                    Some(self.consume_prefixed_name(TokenKind::ScssVariable))
+                } else if self.dialect == CssDialect::Stylus
+                    && self.bytes[start..].starts_with(stylus::DOLLAR_INTERPOLATION_PREFIX)
+                {
+                    self.cursor += stylus::DOLLAR_INTERPOLATION_PREFIX.len();
+                    Some(self.make(
+                        TokenKind::StylusInterpolationStart,
+                        TokenFlags::DIALECT_EXTENSION,
+                        start,
+                        self.cursor,
+                    ))
+                } else {
+                    Some(self.consume_delim_at(start))
                 }
-            && starts_identifier(self.bytes, start + 1)
-        {
-            return Some(self.consume_prefixed_name(TokenKind::ScssVariable));
-        }
-        if matches!(self.dialect, CssDialect::Scss | CssDialect::Sass)
-            && self.bytes[start..].starts_with(if self.dialect == CssDialect::Sass {
-                sass::INTERPOLATION_PREFIX
-            } else {
-                scss::INTERPOLATION_PREFIX
-            })
-        {
-            self.cursor += 2;
-            return Some(self.make(
-                TokenKind::ScssInterpolationStart,
-                TokenFlags::DIALECT_EXTENSION,
-                start,
-                self.cursor,
-            ));
-        }
-        if self.dialect == CssDialect::Stylus
-            && self.bytes[start..].starts_with(stylus::DOLLAR_INTERPOLATION_PREFIX)
-        {
-            self.cursor += stylus::DOLLAR_INTERPOLATION_PREFIX.len();
-            return Some(self.make(
-                TokenKind::StylusInterpolationStart,
-                TokenFlags::DIALECT_EXTENSION,
-                start,
-                self.cursor,
-            ));
-        }
-        if self.dialect == CssDialect::Less
-            && self.bytes[start..].starts_with(less::INTERPOLATION_PREFIX)
-        {
-            self.cursor += 2;
-            return Some(self.make(
-                TokenKind::LessInterpolationStart,
-                TokenFlags::DIALECT_EXTENSION,
-                start,
-                self.cursor,
-            ));
-        }
-        if self.dialect == CssDialect::Less
-            && byte == b'~'
-            && self
-                .bytes
-                .get(start + 1)
-                .is_some_and(|next| matches!(next, b'"' | b'\''))
-        {
-            self.cursor += 1;
-            let quote = self.bytes[self.cursor];
-            return Some(self.consume_string(
-                start,
-                quote,
-                TokenKind::LessEscapedString,
-                TokenFlags::DIALECT_EXTENSION,
-            ));
-        }
-        if starts_number(self.bytes, start) {
-            return Some(self.consume_number());
-        }
-        if starts_identifier(self.bytes, start) {
-            return Some(self.consume_ident_like());
-        }
-
-        match byte {
+            }
+            b'#' => {
+                let interpolation_prefix = if self.dialect == CssDialect::Sass {
+                    sass::INTERPOLATION_PREFIX.as_slice()
+                } else {
+                    scss::INTERPOLATION_PREFIX.as_slice()
+                };
+                if matches!(self.dialect, CssDialect::Scss | CssDialect::Sass)
+                    && self.bytes[start..].starts_with(interpolation_prefix)
+                {
+                    self.cursor += interpolation_prefix.len();
+                    Some(self.make(
+                        TokenKind::ScssInterpolationStart,
+                        TokenFlags::DIALECT_EXTENSION,
+                        start,
+                        self.cursor,
+                    ))
+                } else if starts_name_sequence(self.bytes, start + 1) {
+                    self.cursor += 1;
+                    let mut flags = self.consume_name();
+                    if starts_identifier(self.bytes, start + 1) {
+                        flags |= TokenFlags::ID_HASH;
+                    }
+                    Some(self.make(TokenKind::Hash, flags, start, self.cursor))
+                } else {
+                    Some(self.consume_delim_at(start))
+                }
+            }
+            b'@' => {
+                if self.dialect == CssDialect::Less
+                    && self.bytes[start..].starts_with(less::INTERPOLATION_PREFIX)
+                {
+                    self.cursor += less::INTERPOLATION_PREFIX.len();
+                    Some(self.make(
+                        TokenKind::LessInterpolationStart,
+                        TokenFlags::DIALECT_EXTENSION,
+                        start,
+                        self.cursor,
+                    ))
+                } else if byte == less::VARIABLE_PREFIX
+                    && self.dialect == CssDialect::Less
+                    && starts_identifier(self.bytes, start + 1)
+                    && (self.less_variable_declaration_follows(start)
+                        || !self.at_statement_boundary)
+                {
+                    Some(self.consume_prefixed_name(TokenKind::LessVariable))
+                } else if starts_identifier(self.bytes, start + 1) {
+                    self.cursor += 1;
+                    let flags = self.consume_name();
+                    Some(self.make(TokenKind::AtKeyword, flags, start, self.cursor))
+                } else {
+                    Some(self.consume_delim_at(start))
+                }
+            }
+            b'~' => {
+                if self.dialect == CssDialect::Less
+                    && self
+                        .bytes
+                        .get(start + 1)
+                        .is_some_and(|next| matches!(next, b'"' | b'\''))
+                {
+                    self.cursor += 1;
+                    let quote = self.bytes[self.cursor];
+                    Some(self.consume_string(
+                        start,
+                        quote,
+                        TokenKind::LessEscapedString,
+                        TokenFlags::DIALECT_EXTENSION,
+                    ))
+                } else {
+                    Some(self.consume_delim_at(start))
+                }
+            }
+            b'+' | b'.' => {
+                if starts_number(self.bytes, start) {
+                    Some(self.consume_number())
+                } else {
+                    Some(self.consume_delim_at(start))
+                }
+            }
+            b'0'..=b'9' => Some(self.consume_number()),
             b'"' | b'\'' => Some(self.consume_string(start, byte, TokenKind::String, 0)),
-            b'#' if starts_name_sequence(self.bytes, start + 1) => {
-                self.cursor += 1;
-                let mut flags = self.consume_name();
-                if starts_identifier(self.bytes, start + 1) {
-                    flags |= TokenFlags::ID_HASH;
+            b'\\' => {
+                if starts_identifier(self.bytes, start) {
+                    Some(self.consume_ident_like())
+                } else {
+                    Some(self.consume_delim_at(start))
                 }
-                Some(self.make(TokenKind::Hash, flags, start, self.cursor))
             }
-            byte if byte == less::VARIABLE_PREFIX
-                && self.dialect == CssDialect::Less
-                && starts_identifier(self.bytes, start + 1)
-                && (self.less_variable_declaration_follows(start)
-                    || !self.at_statement_boundary) =>
-            {
-                Some(self.consume_prefixed_name(TokenKind::LessVariable))
-            }
-            b'@' if starts_identifier(self.bytes, start + 1) => {
-                self.cursor += 1;
-                let flags = self.consume_name();
-                Some(self.make(TokenKind::AtKeyword, flags, start, self.cursor))
-            }
-            b':' => {
-                self.cursor += 1;
-                Some(self.make(TokenKind::Colon, 0, start, self.cursor))
-            }
-            b';' => {
-                self.cursor += 1;
-                Some(self.make(TokenKind::Semicolon, 0, start, self.cursor))
-            }
-            b',' => {
-                self.cursor += 1;
-                Some(self.make(TokenKind::Comma, 0, start, self.cursor))
-            }
-            b'(' => {
-                self.cursor += 1;
-                Some(self.make(TokenKind::LeftParen, 0, start, self.cursor))
-            }
-            b')' => {
-                self.cursor += 1;
-                Some(self.make(TokenKind::RightParen, 0, start, self.cursor))
-            }
-            b'[' => {
-                self.cursor += 1;
-                Some(self.make(TokenKind::LeftBracket, 0, start, self.cursor))
-            }
-            b']' => {
-                self.cursor += 1;
-                Some(self.make(TokenKind::RightBracket, 0, start, self.cursor))
-            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x00 => Some(self.consume_ident_like()),
+            b':' => Some(self.consume_ascii_punct(start, TokenKind::Colon)),
+            b';' => Some(self.consume_ascii_punct(start, TokenKind::Semicolon)),
+            b',' => Some(self.consume_ascii_punct(start, TokenKind::Comma)),
+            b'(' => Some(self.consume_ascii_punct(start, TokenKind::LeftParen)),
+            b')' => Some(self.consume_ascii_punct(start, TokenKind::RightParen)),
+            b'[' => Some(self.consume_ascii_punct(start, TokenKind::LeftBracket)),
+            b']' => Some(self.consume_ascii_punct(start, TokenKind::RightBracket)),
             b'{' => {
                 self.cursor += 1;
                 let adjacent_fragment = start > 0
                     && !is_css_whitespace(self.bytes[start - 1])
                     && matches!(
                         self.bytes[start - 1],
-                        b'-' | b'_' | b')' | b']' | b'#' | b'.' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
+                        b'-'
+                            | b'_'
+                            | b')'
+                            | b']'
+                            | b'#'
+                            | b'.'
+                            | b'0'..=b'9'
+                            | b'a'..=b'z'
+                            | b'A'..=b'Z'
                     );
                 if self.dialect == CssDialect::Stylus
                     && adjacent_fragment
@@ -749,14 +810,9 @@ impl Lexer<'_> {
                     Some(self.make(TokenKind::LeftBrace, 0, start, self.cursor))
                 }
             }
-            b'}' => {
-                self.cursor += 1;
-                Some(self.make(TokenKind::RightBrace, 0, start, self.cursor))
-            }
-            _ => {
-                self.cursor += char_width(self.bytes, self.cursor);
-                Some(self.make(TokenKind::Delim, 0, start, self.cursor))
-            }
+            b'}' => Some(self.consume_ascii_punct(start, TokenKind::RightBrace)),
+            _ if byte >= 0x80 => Some(self.consume_ident_like()),
+            _ => Some(self.consume_delim_at(start)),
         }
     }
 
@@ -823,7 +879,7 @@ impl Iterator for Lexer<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let token = self.next_token()?;
-        if !token.kind().is_trivia() {
+        if !token.is_trivia() {
             self.at_statement_boundary = matches!(
                 token.kind(),
                 TokenKind::Cdo
@@ -845,6 +901,28 @@ impl Iterator for Lexer<'_> {
 #[inline]
 pub(crate) fn is_css_whitespace(byte: u8) -> bool {
     matches!(byte, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ')
+}
+
+#[inline]
+fn earliest_offset(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    match (a, b) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(pos), None) | (None, Some(pos)) => Some(pos),
+        (None, None) => None,
+    }
+}
+
+#[inline]
+fn skip_ascii_name_continue(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' {
+            index += 1;
+        } else {
+            break;
+        }
+    }
+    index
 }
 
 /// The byte length of a run of ASCII digits (`[0-9]*`) starting at `bytes[at]` — `0` when `at` is

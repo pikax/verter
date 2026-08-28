@@ -815,6 +815,14 @@ pub enum DomQueryKind {
 }
 
 impl DomQueryKind {
+    /// Closed universe of independently selectable DOM-query routes.
+    pub const ALL: [Self; 4] = [
+        Self::QuerySelector,
+        Self::QuerySelectorAll,
+        Self::GetElementById,
+        Self::GetElementsByClassName,
+    ];
+
     /// Get the JavaScript method name.
     pub const fn display_name(&self) -> &'static str {
         match self {

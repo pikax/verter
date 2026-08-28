@@ -1,0 +1,14 @@
+error[E0603]: function `parse_selector_structure` is private
+ --> tests/compile-fail/parse_selector_structure_module_path.rs:1:34
+  |
+1 | use verter_css_syntax::selector::parse_selector_structure;
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `parse_selector_structure` is defined here
+ --> src/selector.rs
+  |
+  | / pub(crate) fn parse_selector_structure(
+  | |     source: &CssSource,
+  | |     dialect: CssDialect,
+  | | ) -> Result<SelectorStructure, CssParseFailure> {
+  | |_______________________________________________^

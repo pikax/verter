@@ -49,6 +49,7 @@ pub(super) fn parse_domain_gate(
     source: &str,
     parsed: &ParsedSvelte,
     opts: &SvelteRuntimeOptions,
+    admitted: &mut super::css::AdmittedStyleIrs,
 ) -> Result<Option<PreparedComponentStyle>, UnsupportedSvelteRuntimeSurface> {
     // NOTE: a template-element `attribute_duplicate` and a duplicate `<svelte:options>` are
     // official EXACT-CODE parse errors minted by the parser (the encounter-ordered
@@ -84,7 +85,9 @@ pub(super) fn parse_domain_gate(
     // mode or a failed analysis refuses here; an unprovable matcher outcome
     // refuses downstream.
     let prepared_style = match parsed.styles.first() {
-        Some(style) => Some(prepare_style_surface(source, style, parsed, opts)?),
+        Some(style) => Some(prepare_style_surface(
+            source, style, parsed, opts, admitted,
+        )?),
         None => None,
     };
     // The `<svelte:options>` element itself needs no refusal here: every MALFORMED
@@ -125,6 +128,7 @@ fn prepare_style_surface(
     style: &SvelteStyle,
     parsed: &ParsedSvelte,
     opts: &SvelteRuntimeOptions,
+    admitted: &mut super::css::AdmittedStyleIrs,
 ) -> Result<PreparedComponentStyle, UnsupportedSvelteRuntimeSurface> {
     // An absent content span (a defensive case — a content-less `<style>` is
     // an official reject caught before this gate) plans an EMPTY body at the
@@ -156,12 +160,13 @@ fn prepare_style_surface(
     // The css-domain half of the plan build: parse + analyze the css body. A
     // body-parse or scoping-analysis failure threads its PRECISE official
     // css code + span unchanged into the refusal.
-    let analyzed = super::css::analyze_style_body(source, content).map_err(|err| {
-        UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
-            code: err.code,
-            span: err.span,
-        }
-    })?;
+    let analyzed =
+        super::css::analyze_style_body_admitted(source, content, admitted).map_err(|err| {
+            UnsupportedSvelteRuntimeSurface::StyleCssAnalysis {
+                code: err.code,
+                span: err.span,
+            }
+        })?;
 
     Ok(PreparedComponentStyle { mode, analyzed })
 }

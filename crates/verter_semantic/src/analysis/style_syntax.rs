@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
 use verter_css_syntax::{
-    parse_component_value_tree, parse_selector_structure, parse_style_ir, AttributeMatcher,
-    CombinatorKind, ComplexSelector, ComplexSelectorPart, ComponentValue, ComponentValueTree,
-    CssDialect, CssParseMode, CssSource, PseudoFunctionKind, SelectorCompleteness,
-    SelectorComponent, SelectorComponentKind, SelectorTrust, StyleCompleteness, StyleStatement,
-    TokenKind,
+    parse_component_value_tree, parse_style_ir, AttributeMatcher, CombinatorKind, ComplexSelector,
+    ComplexSelectorPart, ComponentValue, ComponentValueTree, CssDialect, CssParseMode, CssSource,
+    PseudoFunctionKind, SelectorCompleteness, SelectorComponent, SelectorComponentKind,
+    SelectorTrust, SpecialSelectorListPseudo, StyleCompleteness, StyleStatement, TokenKind,
 };
 use verter_span::Span;
 
@@ -17,20 +16,25 @@ use super::style::{
     SelectorCombinator, SelectorPseudoClass, SpecialPseudoKind, StructuredSelector,
 };
 
-pub(super) fn project_style(
+pub(super) fn parse_style_block(
     css_content: &str,
     content_offset: u32,
     dialect: CssDialect,
-) -> Option<(CssAnalysis, Vec<AnalyzedSpecialPseudo>)> {
+) -> Option<verter_css_syntax::StyleSyntaxIr> {
     let source = CssSource::new(Arc::from(css_content), content_offset).ok()?;
-    let ir = parse_style_ir(source.clone(), dialect, CssParseMode::Recover).ok()?;
+    parse_style_ir(source, dialect, CssParseMode::Recover).ok()
+}
+
+pub(super) fn project_style_from_ir(
+    ir: &verter_css_syntax::StyleSyntaxIr,
+) -> (CssAnalysis, Vec<AnalyzedSpecialPseudo>) {
     let mut projection = Projection {
-        source: &source,
+        source: ir.source(),
         analysis: CssAnalysis::default(),
         special_pseudos: Vec::new(),
     };
     projection.statements(ir.statements(), None, false);
-    Some((projection.analysis, projection.special_pseudos))
+    (projection.analysis, projection.special_pseudos)
 }
 
 pub(super) fn parse_selector_authority(selector_text: &str) -> Option<StructuredSelector> {
@@ -220,16 +224,17 @@ impl Projection<'_> {
     fn collect_special_pseudo(
         &mut self,
         component: &SelectorComponent,
-        selector_index: Option<u32>,
+        _selector_index: Option<u32>,
     ) {
         let Some(name_span) = component.name_span() else {
             return;
         };
-        let kind = match self.source.slice(name_span).trim_start_matches(':') {
-            name if name.eq_ignore_ascii_case("deep") => SpecialPseudoKind::Deep,
-            name if name.eq_ignore_ascii_case("global") => SpecialPseudoKind::Global,
-            name if name.eq_ignore_ascii_case("slotted") => SpecialPseudoKind::Slotted,
-            _ => return,
+        let ident = self.source.slice(name_span).trim_start_matches(':');
+        let kind = match SpecialSelectorListPseudo::from_ident(ident) {
+            Some(SpecialSelectorListPseudo::Deep) => SpecialPseudoKind::Deep,
+            Some(SpecialSelectorListPseudo::Global) => SpecialPseudoKind::Global,
+            Some(SpecialSelectorListPseudo::Slotted) => SpecialPseudoKind::Slotted,
+            None => return,
         };
         let inner_span = component
             .pseudo()
@@ -243,21 +248,6 @@ impl Projection<'_> {
             end: component.span().end,
             inner,
         });
-        let has_typed_selector_list = component
-            .pseudo()
-            .and_then(|pseudo| pseudo.selector_list())
-            .is_some();
-        if !has_typed_selector_list {
-            if let Some(span) = inner_span.filter(|span| span.start < span.end) {
-                if let Ok(source) = CssSource::new(Arc::from(self.source.slice(span)), span.start) {
-                    if let Ok(structure) = parse_selector_structure(&source, CssDialect::Css) {
-                        for nested in structure.list().selectors() {
-                            self.collect_selector_facts(nested, selector_index);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     fn declaration(

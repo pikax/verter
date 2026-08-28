@@ -316,13 +316,16 @@ const result = await compile(bytes, { filename: "App.vue" });
 
 ## Differences from @verter/native
 
-| Feature                | @verter/native                   | @verter/wasm                     |
-| ---------------------- | -------------------------------- | -------------------------------- |
-| Environment            | Node.js                          | Browser / Web Worker             |
-| Binary format          | Platform-specific `.node`        | WebAssembly `.wasm`              |
-| `compile()`            | Not available (use `VerterHost`) | Available (standalone)           |
-| `compileSync()`        | Not available                    | Available (after `initialize()`) |
-| `processStyle()`       | Available                        | Not available (use `compile()`)  |
-| `VerterHost`           | Synchronous constructor          | Async via `createHost()`         |
-| `getAnalysis()` return | JSON `string`                    | Native JS `object`               |
-| `source` accepts       | `string \| Buffer`               | `string`                         |
+| Feature                         | @verter/native                   | @verter/wasm                     |
+| ------------------------------- | -------------------------------- | -------------------------------- |
+| Environment                     | Node.js                          | Browser / Web Worker             |
+| Binary format                   | Platform-specific `.node`        | WebAssembly `.wasm`              |
+| `compile()`                     | Not available (use `VerterHost`) | Available (standalone)           |
+| `compileSync()`                 | Not available                    | Available (after `initialize()`) |
+| `processStyle()`                | Available                        | Not available (use `compile()`)  |
+| `transformVueStyle()`           | Available                        | Not available (use `compile()`)  |
+| `prepareStyleForPreprocessor()` | Available                        | Not available (use `compile()`)  |
+| `analyzeStyle()`                | Available                        | Not available (use `compile()`)  |
+| `VerterHost`                    | Synchronous constructor          | Async via `createHost()`         |
+| `getAnalysis()` return          | JSON `string`                    | Native JS `object`               |
+| `source` accepts                | `string \| Buffer`               | `string`                         |

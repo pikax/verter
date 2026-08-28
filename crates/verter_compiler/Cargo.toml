@@ -105,7 +105,6 @@ oxc_sourcemap = "7.0.0"
 base64 = "0.22.1"
 sha2 = { workspace = true }
 hex = "0.4.3"
-lightningcss = { workspace = true }
 # Regular dependency, not dev-dependency: `assert_not_impl_any!` guards the
 # single-owner prepared-carrier types in library code (`standalone.rs`), so
 # the compile-time check runs on every build, not only `cargo test`.

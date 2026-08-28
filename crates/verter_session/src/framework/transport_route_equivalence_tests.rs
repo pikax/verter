@@ -720,30 +720,35 @@ fn the_napi_transport_matches_the_in_process_host_route() {
     );
     assert_transport_matches_the_host_route("napi", &record);
 
-    // Standalone CSS product; `sourcemap` axis is inert here too.
-    let css = &record["cases"]["processStyle"];
-    // Equality against the in-process compiler, not a substring search.
-    let expected_css = verter_compiler::css::process_style(
+    let transformed = &record["cases"]["transformVueStyle"];
+    let parsed = verter_compiler::style_planner::parse_plain_css_for_verification(
         ".x{color:red}",
-        &verter_compiler::css::ProcessStyleOptions {
-            scope_id: "probe1234",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: true,
-        },
+        verter_compiler::style_planner::StyleRewriteStage::AuthoredVBind,
     )
-    .expect("the in-process CSS route processes the same block");
+    .expect("the in-process CSS verification parse accepts the probe block");
+    let verified =
+        verter_compiler::style_planner::VerifiedPlainCss::from_parsed_native_css(&parsed)
+            .expect("the verification parser produced native CSS syntax IR");
+    let expected_transform = verter_compiler::style_planner::transform_vue_style(
+        verified,
+        "style.css",
+        "style.css",
+        "style.css",
+        "probe1234",
+        false,
+        true,
+        true,
+    );
+    assert!(expected_transform.stage_failures.is_empty());
     assert_eq!(
-        css["code"].as_str(),
-        Some(expected_css.code.as_ref()),
-        "napi/processStyle: the transported CSS differs from the in-process route's"
+        transformed["code"].as_str(),
+        Some(expected_transform.code.as_str()),
+        "napi/transformVueStyle: the transported CSS differs from the in-process route's"
     );
     assert_eq!(
-        css["hasMap"], false,
-        "napi/processStyle: the `sourcemap` axis has become live at the transport; the recorded \
-         route description must be updated"
+        transformed["hasMap"], true,
+        "napi/transformVueStyle: the `sourcemap` axis is a live product — the transport \
+         must publish a map when one is requested"
     );
 }
 
@@ -980,9 +985,20 @@ fn every_exported_napi_spelling_is_executed_or_classified_out_of_scope() {
         })
         .collect();
     assert!(
-        module_exports.contains(&"processStyle".to_string()),
-        "the standalone CSS spelling is absent from the built artifact: {module_exports:?}"
+        !module_exports.contains(&"processStyle".to_string()),
+        "the retired processStyle spelling is still on the built artifact: {module_exports:?}"
     );
+    for spelling in [
+        "analyzeStyle",
+        "prepareStyleForPreprocessor",
+        "transformVueStyle",
+    ] {
+        assert!(
+            module_exports.contains(&spelling.to_string()),
+            "the standalone CSS spelling `{spelling}` is absent from the built artifact: \
+             {module_exports:?}"
+        );
+    }
     assert!(
         module_exports.contains(&"VerterHost".to_string()),
         "the host class is absent from the built artifact: {module_exports:?}"
@@ -3097,21 +3113,28 @@ fn the_non_vite_style_lane_scopes_through_the_shared_css_processor() {
 
     // ROUTE IDENTITY: the same shared CSS processor the free-function transport
     // spelling calls, on the same input and scope id.
-    let processed = verter_compiler::css::process_style(
+    let parsed = verter_compiler::style_planner::parse_plain_css_for_verification(
         NON_VITE_STYLE_SOURCE,
-        &verter_compiler::css::ProcessStyleOptions {
-            scope_id: &component_id,
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: None,
-            sourcemap: false,
-        },
+        verter_compiler::style_planner::StyleRewriteStage::AuthoredVBind,
     )
     .expect("the shared CSS processor accepts this input");
+    let verified =
+        verter_compiler::style_planner::VerifiedPlainCss::from_parsed_native_css(&parsed)
+            .expect("the verification parser produced native CSS syntax IR");
+    let processed = verter_compiler::style_planner::transform_vue_style(
+        verified,
+        "style.css",
+        "style.css",
+        "style.css",
+        &component_id,
+        false,
+        true,
+        false,
+    );
+    assert!(processed.stage_failures.is_empty());
     assert_eq!(
         scoped,
-        processed.code.as_ref(),
+        processed.code.as_str(),
         "the non-Vite style lane's product is not the shared CSS processor's product for the same \
          bytes and scope id"
     );

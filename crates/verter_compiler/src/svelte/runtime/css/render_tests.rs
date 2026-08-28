@@ -973,3 +973,245 @@ fn comment_close_inside_an_unused_rule_selector_prelude_is_escaped() {
         "the prelude comment's close must be escaped: {code}"
     );
 }
+
+// ─── J1-A12: further stage-local `CodeTransform` map-coverage proof ──────────
+//
+// `css_source_map_ast_boundary_mappings_are_all_exact` above already proves exact
+// coordinate mapping through the scope-class INSERTION (a byte-length-GROWING edit) and that
+// its inserted bytes stay unmapped; `source_map_is_produced_only_on_demand_with_identical_code`
+// above already proves the `want_source_map` option-off path produces no map and does not
+// change the rendered bytes. These three tests close the remaining categories: a
+// byte-length-SHRINKING edit (a `:global(...)` removal), UTF-16/non-ASCII columns, and an edit
+// whose OWN span crosses multiple source lines.
+
+#[test]
+fn css_source_map_trailing_declaration_maps_correctly_after_byte_shrinking_global_removal() {
+    // `:global(.x)` unwraps via TWO `remove()`s (`:global(` and the closing `)`) — bytes are
+    // REMOVED, shrinking the generated output relative to the source. The declaration text
+    // AFTER the removal must still map to its correct, UNSHIFTED original source position even
+    // though its generated position moved backward.
+    let source =
+        "<div class=\"x\">y</div>\n<style>\n:global(.x) { color: red; width: 1px; }\n</style>";
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    let ir = lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
+    let plan = build_style_scope_plan(
+        source,
+        body_span(source),
+        Some("App.svelte"),
+        CssMode::External,
+        &ir,
+        true,
+    )
+    .expect("a clean body plans");
+    let code = &plan.css_code;
+    assert!(
+        code.trim().len()
+            < source[body_span(source).start as usize..body_span(source).end as usize]
+                .trim()
+                .len(),
+        "fixture sanity: the `:global(...)` removal must shrink the rendered byte length"
+    );
+    assert_eq!(code.trim(), ".x { color: red; width: 1px; }");
+
+    let map = oxc_sourcemap::OwnedSourceMap::from_json_string(
+        plan.source_map.as_deref().expect("demanded css map"),
+    )
+    .expect("valid css source map");
+    let helpers = crate::framework_common::sourcemap_e2e_helpers::build_lookup_table(&map);
+
+    // A `Token` anchors an EXACT generated position — query right at the trailing Original
+    // chunk's own start (the space immediately after the REMOVED closing `)`), not mid-segment
+    // (e.g. inside the word `width`), so the assertion needs no intra-segment offset arithmetic.
+    let trailing = " { color: red; width: 1px; }";
+    let gen_pos = code.find(trailing).expect("trailing declaration survives");
+    let (gen_line, gen_col) =
+        crate::framework_common::sourcemap_e2e_helpers::byte_offset_to_line_col(code, gen_pos);
+    let src_pos = source
+        .find(trailing)
+        .expect("trailing declaration exists in source");
+    let (expected_line, expected_col) =
+        crate::framework_common::sourcemap_e2e_helpers::byte_offset_to_line_col(source, src_pos);
+
+    let token = map
+        .lookup_token(&helpers, gen_line, gen_col)
+        .expect("a token covers the trailing declaration");
+    // `lookup_token` returns the GREATEST-LOWER-BOUND token for the queried position, not
+    // necessarily one anchored EXACTLY there — confirm we found the token we meant to find (not
+    // an earlier, unrelated one whose source coordinates merely look plausible).
+    assert_eq!(
+        (token.get_dst_line(), token.get_dst_col()),
+        (gen_line, gen_col),
+        "lookup_token returned a GLB token not anchored at the queried generated position"
+    );
+    assert_eq!(token.get_source_id(), Some(0));
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col()),
+        (expected_line, expected_col),
+        "trailing text after a byte-shrinking `:global(...)` removal must map to its correct, \
+         UNSHIFTED original position"
+    );
+}
+
+#[test]
+fn css_source_map_keyframes_rename_anchor_uses_utf16_columns_not_byte_offsets() {
+    // The `content` value's astral-plus-combining-accent string sits BEFORE `animation: spin`
+    // on the SAME source line the keyframes-rename `prepend_right` anchors against — a
+    // byte-offset-as-column bug and correct UTF-16-code-unit columns disagree at that anchor
+    // (UTF-8 byte width 6 vs UTF-16 width 3 for `😀é`), discriminating a regression in the
+    // shared `PositionResolver`'s column tracking.
+    let source =
+        "<div class=\"card\">x</div>\n<style>.card{content:\"\u{1f600}\u{e9}\";animation:spin 1s}@keyframes spin{}</style>";
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    let ir = lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
+    let plan = build_style_scope_plan(
+        source,
+        body_span(source),
+        Some("App.svelte"),
+        CssMode::External,
+        &ir,
+        true,
+    )
+    .expect("a clean body plans");
+    let code = &plan.css_code;
+    let hash = &plan.hash;
+    let renamed = format!("{hash}-spin");
+    assert!(code.contains(&format!("animation:{renamed}")), "{code}");
+
+    let map = oxc_sourcemap::OwnedSourceMap::from_json_string(
+        plan.source_map.as_deref().expect("demanded css map"),
+    )
+    .expect("valid css source map");
+    let helpers = crate::framework_common::sourcemap_e2e_helpers::build_lookup_table(&map);
+
+    // Independent oracle: the UTF-16 column of `spin` (the animation value's rename anchor) on
+    // its own source line.
+    let src_spin_offset = source.find("animation:spin").expect("value token") + "animation:".len();
+    let expected @ (expected_line, expected_col) =
+        crate::framework_common::sourcemap_e2e_helpers::byte_offset_to_line_col(
+            source,
+            src_spin_offset,
+        );
+    assert_eq!(
+        expected_line, 1,
+        "fixture sanity: the rule sits on source line 1"
+    );
+    let byte_col =
+        (src_spin_offset - source[..src_spin_offset].rfind('\n').map_or(0, |i| i + 1)) as u32;
+    assert_ne!(
+        byte_col, expected_col,
+        "fixture sanity: the byte column and UTF-16 column must actually differ here, or this \
+         test cannot discriminate a byte-vs-UTF-16 regression"
+    );
+
+    let gen_spin_offset = code
+        .find(&format!("animation:{renamed}"))
+        .expect("renamed token")
+        + format!("animation:{hash}-").len();
+    let (gen_line, gen_col) =
+        crate::framework_common::sourcemap_e2e_helpers::byte_offset_to_line_col(
+            code,
+            gen_spin_offset,
+        );
+    let token = map
+        .lookup_token(&helpers, gen_line, gen_col)
+        .expect("a token covers the surviving `spin` text after the rename prefix");
+    // `lookup_token` returns the GREATEST-LOWER-BOUND token for the queried position, not
+    // necessarily one anchored EXACTLY there — confirm we found the token we meant to find.
+    assert_eq!(
+        (token.get_dst_line(), token.get_dst_col()),
+        (gen_line, gen_col),
+        "lookup_token returned a GLB token not anchored at the queried generated position"
+    );
+    assert_eq!(token.get_source_id(), Some(0));
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col()),
+        expected,
+        "the keyframes-rename anchor must use UTF-16 code-unit columns, not UTF-8 byte offsets"
+    );
+}
+
+#[test]
+fn css_source_map_selector_list_prune_overwrite_spans_multiple_source_lines() {
+    // `.old` is unused and sits ALONE on its own source line between two used selectors — its
+    // pruning `overwrite` (the comma-to-comma unused-run replacement) spans the newlines on
+    // BOTH sides, collapsing two source lines into the single generated `/* (unused) ` run. The
+    // LATER selector (`.title`, after the collapsed lines) must still map to its correct,
+    // un-shifted ORIGINAL line.
+    let source = "<div class=\"card\"><p class=\"title\">x</p></div>\n<style>\n.card,\n.old,\n.title { color: red; }\n</style>";
+    let alloc = Allocator::default();
+    let parsed = parse_svelte(source);
+    let opts = SvelteRuntimeOptions {
+        filename: Some("App.svelte".to_string()),
+        ..Default::default()
+    };
+    let ir = lower_parsed_svelte_to_ir(source, &parsed, &opts, &alloc).expect("lowering succeeds");
+    let plan = build_style_scope_plan(
+        source,
+        body_span(source),
+        Some("App.svelte"),
+        CssMode::External,
+        &ir,
+        true,
+    )
+    .expect("a clean body plans");
+    let code = &plan.css_code;
+    assert!(code.contains("(unused)"), "{code}");
+    assert!(
+        code.lines().count() < source.lines().count(),
+        "fixture sanity: the prune overwrite must collapse the `.old`-only line into a shorter \
+         generated run (no standalone `.old` line survives)"
+    );
+
+    let map = oxc_sourcemap::OwnedSourceMap::from_json_string(
+        plan.source_map.as_deref().expect("demanded css map"),
+    )
+    .expect("valid css source map");
+    let helpers = crate::framework_common::sourcemap_e2e_helpers::build_lookup_table(&map);
+
+    let src_title_offset = source.find(".title").expect(".title selector exists");
+    let expected @ (expected_line, _) =
+        crate::framework_common::sourcemap_e2e_helpers::byte_offset_to_line_col(
+            source,
+            src_title_offset,
+        );
+    assert_eq!(
+        expected_line, 4,
+        "fixture sanity: `.title` sits on source line 4"
+    );
+
+    let gen_title_offset = code
+        .find(".title")
+        .expect(".title survives in the rendered css");
+    let (gen_line, gen_col) =
+        crate::framework_common::sourcemap_e2e_helpers::byte_offset_to_line_col(
+            code,
+            gen_title_offset,
+        );
+    let token = map
+        .lookup_token(&helpers, gen_line, gen_col)
+        .expect("a token covers the surviving `.title` selector");
+    // `lookup_token` returns the GREATEST-LOWER-BOUND token for the queried position, not
+    // necessarily one anchored EXACTLY there — confirm we found the token we meant to find.
+    assert_eq!(
+        (token.get_dst_line(), token.get_dst_col()),
+        (gen_line, gen_col),
+        "lookup_token returned a GLB token not anchored at the queried generated position"
+    );
+    assert_eq!(token.get_source_id(), Some(0));
+    assert_eq!(
+        (token.get_src_line(), token.get_src_col()),
+        expected,
+        "the selector following a multi-line-spanning prune overwrite must still map to its \
+         correct, un-shifted original LINE"
+    );
+}

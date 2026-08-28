@@ -32,7 +32,9 @@ function toBuffer(v) {
 }
 
 const {
-  processStyle: _processStyle,
+  prepareStyleForPreprocessor: _prepareStyleForPreprocessor,
+  transformVueStyle: _transformVueStyle,
+  analyzeStyle: _analyzeStyle,
   VerterHost,
   Workspace,
   MetaProject,
@@ -41,13 +43,22 @@ const {
   memoryAuditSnapshot,
   memoryAuditResetHighWater,
   memoryAuditSites,
+  parseSelectorThreadInvocations,
 } = nativeBinding;
 
 const ComponentMetaHost = MetaProject;
 const ComponentMetaSession = MetaSession;
 
-function processStyle(css, options) {
-  return _processStyle(toBuffer(css), options);
+function prepareStyleForPreprocessor(css, options) {
+  return _prepareStyleForPreprocessor(toBuffer(css), options);
+}
+
+function transformVueStyle(css, options) {
+  return _transformVueStyle(toBuffer(css), options);
+}
+
+function analyzeStyle(css, options) {
+  return _analyzeStyle(toBuffer(css), options);
 }
 
 const _upsert = VerterHost.prototype.upsert;
@@ -96,7 +107,9 @@ if (MetaSession) {
   };
 }
 
-module.exports.processStyle = processStyle;
+module.exports.prepareStyleForPreprocessor = prepareStyleForPreprocessor;
+module.exports.transformVueStyle = transformVueStyle;
+module.exports.analyzeStyle = analyzeStyle;
 module.exports.VerterHost = VerterHost;
 module.exports.Workspace = Workspace;
 module.exports.ComponentMetaHost = ComponentMetaHost;
@@ -110,3 +123,4 @@ module.exports.memoryAuditEnable = memoryAuditEnable;
 module.exports.memoryAuditSnapshot = memoryAuditSnapshot;
 module.exports.memoryAuditResetHighWater = memoryAuditResetHighWater;
 module.exports.memoryAuditSites = memoryAuditSites;
+module.exports.parseSelectorThreadInvocations = parseSelectorThreadInvocations;

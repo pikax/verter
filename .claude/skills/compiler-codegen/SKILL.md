@@ -395,7 +395,7 @@ Guard: `crates/verter_compiler/tests/cases/ide_script_recovery_guard.rs` (scans 
 
 ## Style Rewrite Stages
 
-Framework style rewrites use `verter_css_syntax::StyleSyntaxIr` and are deliberately split:
+Framework style rewrites use `verter_css_syntax::StyleSyntaxIr` and are deliberately split. Public bump-backed CSS syntax nodes (`StyleBlock`, `StyleRule`, `SelectorCompound`, …) are borrowed from that IR and are not independently `Clone`/`Copy`; clone the IR (`Arc`) when an owned handle is needed.
 
 1. `transform_vue_v_bind(AuthoredStyleInput)` runs on authored CSS, SCSS, indented Sass, Less, or Stylus and returns the same dialect. It never preprocesses or evaluates.
 2. `transform_vue_css_modules(PlainCssInput)` hashes CSS class selectors and publishes the original-to-hashed mapping from typed selector spans.

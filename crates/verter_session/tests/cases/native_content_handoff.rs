@@ -40,7 +40,11 @@ fn supplied_entry(request: &verter_session::PreprocessorRequest, code: &str) -> 
         code_hash: hash_block_content(code),
         source_map: None,
         source_map_hash: None,
-        supplied_provenance: Some("test-provider".to_string()),
+        dependencies: Vec::new(),
+        diagnostics: Vec::new(),
+        processor_identity: "test-provider".to_string(),
+        processor_version: "0.0.0-test".to_string(),
+        config_fingerprint: None,
     }
 }
 

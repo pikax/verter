@@ -4,12 +4,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::selector::parse_selector_structure;
 use verter_css_syntax::{
-    decode_css_identifier, parse_lossless, parse_selector_structure, parse_style_ir,
-    parse_with_sink, CssDialect, CssEntryPoint, CssParseMode, CssSource, Lexer, NodeFlags,
-    ParseEvent, ParseEventSink, SelectorComponentKind, StyleCompleteness, StyleStatement,
-    SyntaxKind, SyntaxToken, TokenFlags, TokenKind,
+    decode_css_identifier, parse_style_ir, parse_with_sink, CssDialect, CssEntryPoint,
+    CssParseMode, CssSource, Lexer, NodeFlags, ParseEvent, ParseEventSink, SelectorComponentKind,
+    StyleCompleteness, StyleStatement, SyntaxKind, SyntaxToken, TokenFlags, TokenKind,
 };
+
+use crate::cst::parse_lossless;
 
 fn tokens(source: &CssSource, dialect: CssDialect) -> Vec<(TokenKind, u16, u32, u32)> {
     Lexer::new(source, dialect)
@@ -587,6 +589,72 @@ fn less_variable_declaration_comments_have_exact_tokens_events_and_cst() {
     );
     assert!(controls_cst.diagnostics().is_empty());
     assert_eq!(controls_cst.reconstruct(), controls);
+}
+
+#[test]
+fn first_byte_dispatch_keeps_cdo_cdc_ident_and_left_angle_boundaries() {
+    let source = CssSource::new(Arc::from("<!-- --> --foo < !"), 0).unwrap();
+    let kinds: Vec<_> = tokens(&source, CssDialect::Css)
+        .into_iter()
+        .map(|token| token.0)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            TokenKind::Cdo,
+            TokenKind::Whitespace,
+            TokenKind::Cdc,
+            TokenKind::Whitespace,
+            TokenKind::Ident,
+            TokenKind::Whitespace,
+            TokenKind::Delim,
+            TokenKind::Whitespace,
+            TokenKind::Delim,
+        ]
+    );
+    assert_eq!(
+        source.slice_tokens(Lexer::new(&source, CssDialect::Css)),
+        source.text()
+    );
+}
+
+#[test]
+fn unescaped_cr_or_form_feed_in_a_string_is_a_bad_string() {
+    for input in ["\"x\ry\"", "\"x\u{c}y\""] {
+        let source = CssSource::new(Arc::from(input), 0).unwrap();
+        let kinds: Vec<_> = tokens(&source, CssDialect::Css)
+            .into_iter()
+            .map(|token| token.0)
+            .collect();
+        assert_eq!(
+            kinds.first().copied(),
+            Some(TokenKind::BadString),
+            "{input:?}"
+        );
+        assert_ne!(
+            kinds,
+            vec![TokenKind::String],
+            "an unescaped CSS newline must not stay inside a string: {input:?}"
+        );
+    }
+}
+
+#[test]
+fn comment_form_feed_sets_contains_newline_and_keeps_the_closer() {
+    let input = "/*a\x0cb*/";
+    let source = CssSource::new(Arc::from(input), 0).unwrap();
+    let actual = tokens(&source, CssDialect::Css);
+    assert_eq!(actual.len(), 1, "{actual:?}");
+    assert_eq!(actual[0].0, TokenKind::Comment);
+    assert_ne!(
+        actual[0].1 & TokenFlags::CONTAINS_NEWLINE,
+        0,
+        "form feed is a CSS newline"
+    );
+    assert_eq!(
+        source.slice_tokens(Lexer::new(&source, CssDialect::Css)),
+        source.text()
+    );
 }
 
 fn discover_css_files(root: &Path, current: &Path, out: &mut BTreeSet<String>) {

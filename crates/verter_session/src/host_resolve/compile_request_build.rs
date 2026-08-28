@@ -226,6 +226,7 @@ pub(crate) fn derive_runtime_compile_options(
     profile: &CompileProfile,
     block_content: verter_compiler::framework_common::RuntimeBlockContentInputs,
     vue_facts: Option<verter_compiler::compile::types::VueExecutionInputs>,
+    prepared_styles: Vec<Option<verter_compiler::style_planner::PreparedStyleIr>>,
 ) -> RuntimeCompileOptions {
     use verter_compiler::compile_request::{CompileProduct, VueBackendRequest};
 
@@ -248,6 +249,16 @@ pub(crate) fn derive_runtime_compile_options(
 
     let vue = request.vue();
     let svelte = request.svelte();
+
+    let mut prepared_styles = prepared_styles;
+    for (index, slot) in block_content.styles.iter().enumerate() {
+        if let Some(parsed) = slot.as_ref().and_then(|input| input.parsed.clone()) {
+            if prepared_styles.len() <= index {
+                prepared_styles.resize(index + 1, None);
+            }
+            prepared_styles[index] = Some(parsed);
+        }
+    }
 
     RuntimeCompileOptions {
         filename: request.filename().map(str::to_string),
@@ -286,6 +297,7 @@ pub(crate) fn derive_runtime_compile_options(
         svelte_disclose_version: svelte.and_then(|s| s.disclose_version),
         block_content,
         vue_facts,
+        prepared_styles,
     }
 }
 

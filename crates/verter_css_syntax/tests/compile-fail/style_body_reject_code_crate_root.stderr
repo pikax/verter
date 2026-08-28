@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `verter_css_syntax::style_body_reject_code`
+ --> tests/compile-fail/style_body_reject_code_crate_root.rs:1:5
+  |
+1 | use verter_css_syntax::style_body_reject_code;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `style_body_reject_code` in the root

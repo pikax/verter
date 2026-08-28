@@ -1,0 +1,11 @@
+error[E0432]: unresolved import `verter_css_syntax::StyleSyntaxIrSink`
+ --> tests/cases/compile-fail/verified_plain_css_sink_unreachable.rs:1:5
+  |
+1 | use verter_css_syntax::StyleSyntaxIrSink;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `StyleSyntaxIrSink` in the root
+  |
+help: a similar name exists in the module
+  |
+1 - use verter_css_syntax::StyleSyntaxIrSink;
+1 + use verter_css_syntax::StyleSyntaxIr;
+  |

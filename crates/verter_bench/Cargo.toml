@@ -22,9 +22,9 @@ hotpath-alloc = ["verter_compiler/hotpath-alloc", "hotpath", "hotpath/hotpath-al
 # per-site wall-clock/call-count timers on the currency chokepoints.
 currency_probe = ["verter_session/currency_probe", "verter_workspace/currency_probe"]
 # Measurement-only rail for `examples/attribution_baseline.rs`. Turns on the
-# work-attribution counter table and its reader. This is the ONLY edge in the
-# workspace that requests `verter_audit/attribution`; no production binary
-# does, which is what keeps the counters unreadable in a shipped build.
+# work-attribution counter table and its reader. Production binaries never
+# request `verter_audit/attribution`. The `verter_session` test self-edge also
+# forwards it so CSS-domain chargeability tests can read counters.
 attribution = ["verter_audit/attribution"]
 
 [dependencies]
@@ -71,6 +71,10 @@ hotpath = { version = "0.23", optional = true }
 verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 smallvec = "1.15"
+
+[[bin]]
+name = "css_latency_gate"
+path = "src/bin/css_latency_gate.rs"
 
 [[bench]]
 name = "bindings_bench"

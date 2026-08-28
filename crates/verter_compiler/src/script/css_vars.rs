@@ -8,7 +8,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashMap;
 
-use crate::css::types::VBindVar;
+use crate::style_planner::VBindVar;
 use crate::template::code_gen::binding::{is_simple_ident, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::bindings::{extract_bindings_from_expression, BindingContext};

@@ -323,6 +323,8 @@ pub(crate) struct ResolvedVueCompileOptions {
     pub runtime_template_hole: bool,
     /// Lower a standalone template as the setup-returned inline chunk.
     pub runtime_inline_template_chunk: bool,
+    /// Host-retained parsed style IRs in inventory order.
+    pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
 }
 
 /// Ephemeral, non-identity execution inputs for a Vue compile — resolved
@@ -352,6 +354,7 @@ pub struct VueExecutionInputs {
     pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
     pub runtime_template_hole: bool,
     pub runtime_inline_template_chunk: bool,
+    pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
 }
 
 /// Owned script semantics needed by a separately compiled template unit.

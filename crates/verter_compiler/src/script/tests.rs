@@ -699,7 +699,7 @@ fn css_v_binds_inject_use_css_vars() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let v_binds = vec![crate::css::types::VBindVar {
+    let v_binds = vec![crate::style_planner::VBindVar {
         expression: "count".to_string(),
         var_name: "abc-count".to_string(),
         expr_start: 0,
@@ -1352,7 +1352,7 @@ fn e2e_complex_sfc_valid_js() {
     let (setup, full) = make_script(content, "<script setup>", true);
     let mut ct = CodeTransform::new(&full, &alloc);
 
-    let v_binds = vec![crate::css::types::VBindVar {
+    let v_binds = vec![crate::style_planner::VBindVar {
         expression: "count".to_string(),
         var_name: "abc-count".to_string(),
         expr_start: 0,

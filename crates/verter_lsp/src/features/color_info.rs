@@ -421,6 +421,125 @@ mod tests {
         }
     }
 
+    /// `build_analysis`, with a hook to PERTURB the built style entries
+    /// before they are sealed into the snapshot — the injection point the
+    /// dataflow witnesses below use.
+    fn build_analysis_with(
+        source: &str,
+        blocks: &[CarrierBlockView],
+        perturb: impl FnOnce(&mut Vec<verter_semantic::analysis::style::StyleBlockAnalysis>),
+    ) -> FileAnalysisSnapshot {
+        let mut styles = Vec::new();
+        for block in blocks.iter().filter(|b| b.tag_name == "style") {
+            if block.attr("src").is_some() {
+                continue;
+            }
+            let (content_start, content_end) = block.content_range();
+            let css_content = &source[content_start as usize..content_end as usize];
+            let mut analysis = verter_semantic::analysis::style::build_css_style_analysis(
+                css_content,
+                verter_semantic::analysis::style::VueStyleInput::default(),
+                false,
+                false,
+                None,
+                content_start,
+            );
+            analysis.block_ref = Some(block.block_ref.artifact_block_ref().clone());
+            styles.push(analysis);
+        }
+        perturb(&mut styles);
+        FileAnalysisSnapshot {
+            styles: styles.into(),
+            ..Default::default()
+        }
+    }
+
+    // ── dataflow witnesses ──
+    //
+    // Every behavioral fixture in this module observes a chip that a
+    // correctly-written independent scanner over `source` would also produce.
+    // A relocated or renamed comment/string-masking hex+function scanner
+    // therefore passes all of them. These two witnesses INJECT values into
+    // `CssAnalysis.declarations[i].color_candidates` that no scan of `source`
+    // could produce, and require the emitted chip to carry them through — so
+    // only an implementation whose output dataflows from the analysis passes.
+
+    /// The chip's RANGE is the candidate's own `span`, read off the analysis.
+    #[test]
+    fn chip_range_dataflows_from_the_candidates_analysis_span() {
+        // The source has TWO hex-shaped byte runs: a real value (`#ff0000`)
+        // and a decoy AFTER the recorded value (`#00ff00`), which no scan
+        // bounded by the recorded value extent could reach.
+        let source = "<style>\n.foo { color: #ff0000 /* #00ff00 */; }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let commented_start = source.find("#00ff00").unwrap() as u32;
+        let commented_span =
+            verter_span::Span::new(commented_start, commented_start + "#00ff00".len() as u32);
+
+        let analysis = build_analysis_with(source, &blocks, |styles| {
+            let css = styles[0].css.as_mut().expect("css analysis");
+            let declaration = css
+                .declarations
+                .iter_mut()
+                .find(|declaration| !declaration.color_candidates.is_empty())
+                .expect("the real value produced a candidate");
+            assert_eq!(declaration.color_candidates.len(), 1);
+            declaration.color_candidates[0].span = commented_span;
+        });
+
+        let colors = document_colors(source, &blocks, Some(&analysis), &line_index);
+        assert_eq!(colors.len(), 1, "got {colors:?}");
+        let start = line_index
+            .position_to_offset(&colors[0].range.start)
+            .unwrap();
+        let end = line_index.position_to_offset(&colors[0].range.end).unwrap();
+        assert_eq!(
+            (start, end),
+            (commented_span.start, commented_span.end),
+            "the chip range must be the analysis's candidate span; a scan of the \
+             source would have chipped the real `#ff0000` value instead"
+        );
+        assert!(
+            (colors[0].color.green - 1.0).abs() < 0.01 && colors[0].color.red.abs() < 0.01,
+            "and its color must be read from that same injected span: {:?}",
+            colors[0].color
+        );
+    }
+
+    /// A color function's CHANNELS are the candidate's own `numeric_args`,
+    /// read off the analysis — never re-parsed out of the value's bytes.
+    #[test]
+    fn chip_color_dataflows_from_the_candidates_analysis_numeric_args() {
+        use verter_semantic::analysis::style::NumericArg;
+
+        let source = "<style>\n.foo { color: rgb(255, 0, 0); }\n</style>";
+        let blocks = test_carrier_blocks(source);
+        let line_index = LineIndex::new_utf16(source);
+
+        let analysis = build_analysis_with(source, &blocks, |styles| {
+            let css = styles[0].css.as_mut().expect("css analysis");
+            let candidate = &mut css.declarations[0].color_candidates[0];
+            assert_eq!(candidate.function_name.as_deref(), Some("rgb"));
+            // Blue, where the bytes say red.
+            candidate.numeric_args = vec![
+                NumericArg::Number(0.0),
+                NumericArg::Number(0.0),
+                NumericArg::Number(255.0),
+            ];
+        });
+
+        let colors = document_colors(source, &blocks, Some(&analysis), &line_index);
+        assert_eq!(colors.len(), 1, "got {colors:?}");
+        assert!(
+            (colors[0].color.blue - 1.0).abs() < 0.01 && colors[0].color.red.abs() < 0.01,
+            "the chip color must come from the analysis's `numeric_args`; re-parsing \
+             the value's bytes would have produced red: {:?}",
+            colors[0].color
+        );
+    }
+
     #[test]
     fn test_hex_color_detection() {
         let source = "<style>\n.foo { color: #ff0000; }\n</style>";

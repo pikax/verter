@@ -4,15 +4,20 @@
 //! # verter_napi — Node.js bindings for Verter
 //!
 //! NAPI-RS binding layer that exposes [`verter_session::VerterHost`] and
-//! `processStyle` to Node.js.
+//! the standalone CSS style-processing entry points to Node.js.
 //!
 //! ## API parity
 //!
 //! This crate exposes the same `VerterHost` API as [`verter_wasm`] with
-//! one addition that requires a Node.js runtime:
+//! CSS entry points that require a Node.js runtime:
 //!
-//! - **`processStyle`** — applies scoped CSS, CSS Modules, and `v-bind()`
-//!   replacement to preprocessed CSS (SCSS/Less/Stylus output).
+//! - **`prepareStyleForPreprocessor`** — rewrites `v-bind()` in AUTHORED
+//!   style content before it is handed to an external SCSS/Less/Stylus
+//!   preprocessor.
+//! - **`transformVueStyle`** — applies the v-bind + CSS-Modules +
+//!   scoped-selector cascade to CSS the caller already treats as plain.
+//! - **`analyzeStyle`** — read-only style fact extraction (static + CSS
+//!   Modules class names), no rewrite.
 //!
 //! ## Performance
 //!
@@ -104,11 +109,108 @@ fn host_error(err: host::HostError) -> Error {
 //
 // Available in NAPI but not WASM because CSS preprocessing (LESS/SCSS/Stylus)
 // requires Node.js. The WASM host processes styles inline during compilation.
+//
+// Three-way explicit-boundary CSS API:
+// - `prepareStyleForPreprocessor` — AUTHORED-dialect v-bind rewrite, before
+//   an external SCSS/Less/Stylus preprocessor.
+// - `transformVueStyle` — v-bind + CSS-Modules + scoped-selector cascade
+//   over CSS the caller already treats as plain.
+// - `analyzeStyle` — read-only fact extraction, no rewrite.
 // =============================================================================
+
+fn css_dialect(value: Option<&str>) -> Result<verter_css_syntax::CssDialect> {
+    match value {
+        None => Ok(verter_css_syntax::CssDialect::Css),
+        Some(lang) => verter_css_syntax::CssDialect::from_lang(lang).ok_or_else(|| {
+            Error::new(
+                Status::InvalidArg,
+                format!("unknown CSS dialect {lang:?}; expected css, scss, sass, less, or stylus"),
+            )
+        }),
+    }
+}
+
+fn style_rewrite_failure_error(
+    failure: verter_compiler::style_planner::StyleRewriteFailure,
+) -> Error {
+    Error::new(Status::GenericFailure, failure.to_string())
+}
+
+#[napi(object)]
+pub struct VueStyleVBind {
+    /// The original expression text (e.g., "color" or "theme.color")
+    pub expression: String,
+    /// The generated CSS variable name (e.g., "--a4f2eed6-color")
+    pub varName: String,
+}
+
+fn to_napi_v_bind_vars(vars: Vec<verter_compiler::style_planner::VBindVar>) -> Vec<VueStyleVBind> {
+    vars.into_iter()
+        .map(|var| VueStyleVBind {
+            expression: var.expression,
+            varName: var.var_name,
+        })
+        .collect()
+}
 
 #[napi(object)]
 #[derive(Default)]
-pub struct ProcessStyleOptions {
+pub struct PrepareStyleForPreprocessorOptions {
+    /// Scope ID string (e.g., "a4f2eed6")
+    pub scopeId: String,
+    /// Authored dialect: "css" (default) | "scss" | "sass" | "less" | "stylus".
+    pub dialect: Option<String>,
+    pub filename: Option<String>,
+}
+
+#[napi(object)]
+pub struct PrepareStyleForPreprocessorResult {
+    /// Authored code with `v-bind()` rewritten to `var(--scope-hash)`.
+    pub code: String,
+    /// v-bind() expressions found and replaced.
+    pub vBindVars: Vec<VueStyleVBind>,
+}
+
+/// Rewrite `v-bind()` in AUTHORED (possibly non-CSS) style content, before
+/// handing it to an external SCSS/Less/Stylus preprocessor.
+#[napi]
+pub fn prepare_style_for_preprocessor(
+    css: Buffer,
+    options: PrepareStyleForPreprocessorOptions,
+) -> Result<PrepareStyleForPreprocessorResult> {
+    let css = buffer_to_string(css)?;
+    catch_panic(std::panic::AssertUnwindSafe(|| {
+        let filename = options.filename.as_deref().unwrap_or("style");
+        let input = verter_compiler::style_planner::AuthoredStyleInput::new(
+            &css,
+            css_dialect(options.dialect.as_deref())?,
+            filename,
+            filename,
+            filename,
+        )
+        .without_source_map();
+        verter_compiler::style_planner::transform_vue_v_bind(input, &options.scopeId)
+            .map_err(style_rewrite_failure_error)
+    }))?
+    .map(|outcome| match outcome {
+        verter_compiler::style_planner::StyleRewriteOutcome::Rewritten { code, facts, .. } => {
+            PrepareStyleForPreprocessorResult {
+                code,
+                vBindVars: to_napi_v_bind_vars(facts.v_bind_vars),
+            }
+        }
+        verter_compiler::style_planner::StyleRewriteOutcome::Unchanged { facts } => {
+            PrepareStyleForPreprocessorResult {
+                code: css,
+                vBindVars: to_napi_v_bind_vars(facts.v_bind_vars),
+            }
+        }
+    })
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct TransformVueStyleOptions {
     /// Scope ID string (e.g., "a4f2eed6")
     pub scopeId: String,
     /// Whether this style block is scoped
@@ -119,74 +221,165 @@ pub struct ProcessStyleOptions {
     pub moduleName: Option<String>,
     /// Source filename for source map generation
     pub filename: Option<String>,
-    /// Whether to generate source maps
+    /// Whether to generate a source map
     pub sourcemap: Option<bool>,
 }
 
 #[napi(object)]
-pub struct ProcessStyleVBind {
-    /// The original expression text (e.g., "color" or "theme.color")
-    pub expression: String,
-    /// The generated CSS variable name (e.g., "--a4f2eed6-color")
-    pub varName: String,
-}
-
-#[napi(object)]
-pub struct ProcessStyleResult {
+pub struct TransformVueStyleResult {
     /// Transformed CSS code
     pub code: String,
-    /// Source map as JSON string (if sourcemap was requested)
+    /// Source map as JSON string (only when `sourcemap: true` was requested).
     pub sourceMap: Option<String>,
     /// CSS module class mappings (original → hashed), each entry is [original, hashed]
     pub moduleClasses: Vec<Vec<String>>,
     /// CSS module variable name (e.g. "$style" or custom name from `<style module="...">`)
     pub moduleName: Option<String>,
     /// v-bind() expressions found and replaced
-    pub vBindVars: Vec<ProcessStyleVBind>,
+    pub vBindVars: Vec<VueStyleVBind>,
+    /// Per-selector soft refusals the cascade tolerated (`code` still
+    /// published, minus the untrustworthy rule each entry names) — a
+    /// caller-visible signal for exactly the case
+    /// `cascade_output_is_publishable` deliberately does NOT refuse the
+    /// whole call over. Empty on every ordinary successful transform.
+    pub refusals: Vec<String>,
 }
 
-/// Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
-///
-/// Called by the Vite plugin after preprocessing SCSS/Less/Stylus to valid CSS.
-/// For plain CSS blocks, the Rust compiler handles this inline during compileForVite().
-///
-/// @param css - Valid CSS string (already preprocessed if originally SCSS/Less/etc.)
-/// @param options - Processing options (scope ID, scoped, modules, etc.)
-/// @returns Processed CSS with scoping/modules applied, plus v-bind metadata
+/// Run Vue's v-bind + CSS-Modules + scoped-selector cascade over CSS the
+/// caller already treats as plain (already preprocessed, if it originated as
+/// SCSS/Less/Stylus).
 #[napi]
-pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<ProcessStyleResult> {
+pub fn transform_vue_style(
+    css: Buffer,
+    options: TransformVueStyleOptions,
+) -> Result<TransformVueStyleResult> {
     let css = buffer_to_string(css)?;
     catch_panic(std::panic::AssertUnwindSafe(|| {
-        let core_options = verter_compiler::css::ProcessStyleOptions {
-            scope_id: &options.scopeId,
-            scoped: options.scoped.unwrap_or(false),
-            is_module: options.isModule.unwrap_or(false),
-            module_name: options.moduleName.as_deref(),
-            filename: options.filename.as_deref(),
-            sourcemap: options.sourcemap.unwrap_or(false),
+        let filename = options.filename.as_deref().unwrap_or("style.css");
+        // `transform_vue_style` never trusts a bare caller-asserted "this
+        // is CSS" label — it parses the received bytes as native CSS
+        // through the shared verification entry and builds the
+        // `VerifiedPlainCss` witness from that parse (call-site
+        // discipline, not a compiler-enforced proof that every witness
+        // anywhere was built this way).
+        let parsed = verter_compiler::style_planner::parse_plain_css_for_verification(
+            &css,
+            verter_compiler::style_planner::StyleRewriteStage::AuthoredVBind,
+        )
+        .map_err(style_rewrite_failure_error)?;
+        let verified =
+            verter_compiler::style_planner::VerifiedPlainCss::from_parsed_native_css(&parsed)
+                .ok_or_else(|| {
+                    Error::new(
+                        Status::GenericFailure,
+                        "verification parser did not produce native CSS syntax IR",
+                    )
+                })?;
+        let module = options.isModule.unwrap_or(false);
+        let want_source_map = options.sourcemap.unwrap_or(false);
+        let outcome = verter_compiler::style_planner::transform_vue_style(
+            verified,
+            filename,
+            filename,
+            filename,
+            &options.scopeId,
+            module,
+            options.scoped.unwrap_or(false),
+            want_source_map,
+        );
+        if !verter_compiler::style_planner::cascade_output_is_publishable(&outcome, &css) {
+            return Err(Error::new(
+                Status::GenericFailure,
+                outcome
+                    .stage_failures
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+        let source_map = if want_source_map {
+            verter_compiler::style_planner::cascade_requested_source_map(&outcome, &css, filename)
+        } else {
+            None
         };
-
-        verter_compiler::css::process_style(&css, &core_options)
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+        let module_name = if module {
+            Some(options.moduleName.unwrap_or_else(|| "$style".to_string()))
+        } else {
+            None
+        };
+        let refusals = outcome
+            .facts
+            .refusals
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        Ok(TransformVueStyleResult {
+            code: outcome.code,
+            sourceMap: source_map,
+            moduleClasses: outcome
+                .facts
+                .module_classes
+                .into_iter()
+                .map(|(name, hashed)| vec![name, hashed])
+                .collect(),
+            moduleName: module_name,
+            vBindVars: to_napi_v_bind_vars(outcome.facts.v_bind_vars),
+            refusals,
+        })
     }))?
-    .map(|result| ProcessStyleResult {
-        code: result.code.into_owned(),
-        sourceMap: result.source_map,
-        moduleClasses: result
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct AnalyzeStyleOptions {
+    pub scopeId: String,
+    /// Authored dialect: "css" (default) | "scss" | "sass" | "less" | "stylus".
+    pub dialect: Option<String>,
+    pub filename: Option<String>,
+}
+
+#[napi(object)]
+pub struct AnalyzeStyleResult {
+    /// Every complete static class selector, in first-occurrence order.
+    pub staticClasses: Vec<String>,
+    /// CSS-Modules would-be hashed name for each, each entry is [original, hashed]
+    pub moduleClasses: Vec<Vec<String>>,
+}
+
+/// Read-only style facts — NO rewrite. Drives IDE-style completions/analysis
+/// callers that need to know what a style block declares without paying for
+/// (or risking) a rewrite.
+#[napi]
+pub fn analyze_style(css: Buffer, options: AnalyzeStyleOptions) -> Result<AnalyzeStyleResult> {
+    let css = buffer_to_string(css)?;
+    catch_panic(std::panic::AssertUnwindSafe(|| {
+        let filename = options.filename.as_deref().unwrap_or("style");
+        let input = verter_compiler::style_planner::AuthoredStyleInput::new(
+            &css,
+            css_dialect(options.dialect.as_deref())?,
+            filename,
+            filename,
+            filename,
+        );
+        verter_compiler::style_planner::analyze_style(input, &options.scopeId)
+            .map_err(style_rewrite_failure_error)
+    }))?
+    .map(|analysis| AnalyzeStyleResult {
+        staticClasses: analysis.static_classes,
+        moduleClasses: analysis
             .module_classes
             .into_iter()
-            .map(|(k, v)| vec![k, v])
-            .collect(),
-        moduleName: result.module_name,
-        vBindVars: result
-            .v_bind_vars
-            .into_iter()
-            .map(|v| ProcessStyleVBind {
-                expression: v.expression,
-                varName: v.var_name,
-            })
+            .map(|(name, hashed)| vec![name, hashed])
             .collect(),
     })
+}
+
+/// Per-thread count of `parse_selector` executions.
+/// `matchCssSelectors` must not increment this.
+#[napi]
+pub fn parse_selector_thread_invocations() -> f64 {
+    verter_semantic::analysis::parse_selector_thread_invocations() as f64
 }
 
 // =============================================================================
@@ -562,6 +755,15 @@ pub struct NapiPreprocessorRequest {
 }
 
 #[napi(object)]
+pub struct NapiPreprocessorDiagnostic {
+    /// `"error"`, `"warning"`, or `"info"`.
+    pub severity: String,
+    pub message: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+#[napi(object)]
 pub struct NapiBlockOverrideEntry {
     pub correlationToken: String,
     pub blockToken: String,
@@ -577,6 +779,17 @@ pub struct NapiBlockOverrideEntry {
     /// Source map from the preprocessor, if available.
     pub sourceMap: Option<String>,
     pub sourceMapHash: Option<String>,
+    pub dependencies: Option<Vec<String>>,
+    pub diagnostics: Option<Vec<NapiPreprocessorDiagnostic>>,
+    pub processorIdentity: Option<String>,
+    pub processorVersion: Option<String>,
+    pub configFingerprint: Option<String>,
+    /// Superseded wire field, replaced by `dependencies`/`diagnostics`/
+    /// `processorIdentity`/`processorVersion`/`configFingerprint` above.
+    /// Accepted so an un-migrated caller's object literal (still typed with
+    /// this property) keeps matching this struct's published surface instead
+    /// of silently drifting from it; never read below. Remove once every
+    /// caller migrates to the new fields.
     pub suppliedProvenance: Option<String>,
 }
 
@@ -1378,7 +1591,8 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
 //         getVirtualFile, listVirtualFiles, remove, setImportDependencies,
 //         getAnalysis, getTsx, lint, getCodeActions, getLintRuleMetadata,
 //         getDocumentSymbols, matchCssSelectors, computeCrossFileOptimizations
-// - NAPI-only: processStyle (requires Node.js), getTsc, compileMany, getMetrics
+// - NAPI-only: prepareStyleForPreprocessor / transformVueStyle / analyzeStyle
+//   (CSS entry points), getTsc, compileMany, getMetrics
 // =============================================================================
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1749,6 +1963,27 @@ impl NapiVerterHost {
                     code_hash: e.codeHash,
                     source_map: e.sourceMap,
                     source_map_hash: e.sourceMapHash,
+                    dependencies: e.dependencies.unwrap_or_default(),
+                    diagnostics: e
+                        .diagnostics
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|d| FfiPreprocessorDiagnostic {
+                            severity: d.severity,
+                            message: d.message,
+                            line: d.line,
+                            column: d.column,
+                        })
+                        .collect(),
+                    processor_identity: e.processorIdentity,
+                    processor_version: e.processorVersion,
+                    config_fingerprint: e.configFingerprint,
+                    // Superseded field, forwarded for parity with the
+                    // JSON/WASM path's `FfiBlockOverrideEntry` (never read
+                    // downstream by `ffi_block_override_to_host`) rather
+                    // than discarded here — an un-migrated caller's value
+                    // is preserved on the wire even though nothing
+                    // interprets it yet.
                     supplied_provenance: e.suppliedProvenance,
                 })
             })
@@ -3229,10 +3464,7 @@ fn build_selector_match_results(
         for selector in &css.selectors {
             let parsed = match &selector.structure {
                 Some(s) => s.clone(),
-                None => match verter_semantic::analysis::style::parse_selector(&selector.text) {
-                    Some(s) => s,
-                    None => continue,
-                },
+                None => continue,
             };
 
             let mut matches = Vec::new();
