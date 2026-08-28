@@ -699,7 +699,7 @@ impl VerterMcpServer {
     #[tool(
         description = "Get CSS analysis for all style blocks: selectors, classes, IDs, specificity, v-bind(), scoped/module flags."
     )]
-    async fn analyze_css(
+    pub async fn analyze_css(
         &self,
         Parameters(params): Parameters<FilePathParams>,
     ) -> Result<CallToolResult, ErrorData> {

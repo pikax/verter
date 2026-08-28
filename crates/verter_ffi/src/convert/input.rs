@@ -206,6 +206,28 @@ pub fn ffi_public_api_mode_to_host(
     }
 }
 
+/// Convert a wire preprocessor diagnostic to the host's typed record.
+fn ffi_preprocessor_diagnostic_to_host(
+    diagnostic: FfiPreprocessorDiagnostic,
+) -> Result<host::PreprocessorDiagnostic, FfiConversionError> {
+    let severity = match diagnostic.severity.to_ascii_lowercase().as_str() {
+        "error" => host::HostSeverity::Error,
+        "warning" => host::HostSeverity::Warning,
+        "info" => host::HostSeverity::Info,
+        other => {
+            return Err(FfiConversionError::InvalidPreprocessorDiagnosticSeverity(
+                other.to_string(),
+            ))
+        }
+    };
+    Ok(host::PreprocessorDiagnostic {
+        severity,
+        message: diagnostic.message,
+        line: diagnostic.line,
+        column: diagnostic.column,
+    })
+}
+
 /// Convert a target string to `CompileTarget` bitflags.
 pub(super) fn ffi_target_to_compile_target(
     target: &str,
@@ -412,7 +434,22 @@ pub fn ffi_block_override_to_host(
                             )
                         })
                         .transpose()?,
-                    supplied_provenance: entry.supplied_provenance,
+                    dependencies: entry.dependencies,
+                    diagnostics: entry
+                        .diagnostics
+                        .into_iter()
+                        .map(ffi_preprocessor_diagnostic_to_host)
+                        .collect::<Result<Vec<_>, FfiConversionError>>()?,
+                    processor_identity: entry.processor_identity.unwrap_or_default(),
+                    processor_version: entry.processor_version.unwrap_or_default(),
+                    config_fingerprint: entry
+                        .config_fingerprint
+                        .map(|value| {
+                            host::BlockContentHashToken::parse_untrusted(value).ok_or(
+                                FfiConversionError::InvalidBlockContentToken("configFingerprint"),
+                            )
+                        })
+                        .transpose()?,
                 })
             })
             .collect::<Result<Vec<_>, FfiConversionError>>()?,

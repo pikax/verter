@@ -134,3 +134,7 @@ rationale = "layer-2 vector-inventory reproduction (#[cfg(test)]) — reads the 
 [[entries]]
 path = "crates/verter_session/src/compile/map_equality_tests/nested_v_for_runtime_proof.rs"
 rationale = "nested v-for/v-if runtime-execution proof (#[cfg(test, feature = \"bf2-authoritative\")]) — writes the compiled module's own generated code to a scratch temp file so an EXTERNAL Node/jsdom subprocess can read it off real disk (a subprocess cannot read Verter's in-memory VFS), then removes it; sibling of the `oracle_gen_spike.rs`/`vue_assets.rs` external-tool-scaffolding category. Never workspace/semantic state."
+
+[[entries]]
+path = "crates/verter_bench/src/css_gate.rs"
+rationale = "measurement-runner provenance probe (dev/CI-only bench crate, never published) — the SOLE std::fs call reads `/proc/loadavg` on Linux to stamp system load into a captured measurement record, mirroring the macOS branch which shells out to `sysctl -n vm.loadavg`. A kernel-synthesised pseudo-file describing the machine, not workspace, semantic, overlay or VFS state; routing it through the workspace boundary would key a path cache on a file whose contents change every read. The record's artifact I/O routes through `NativeFs` and is deliberately NOT covered by this entry."

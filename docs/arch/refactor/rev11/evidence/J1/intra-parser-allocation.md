@@ -38,11 +38,14 @@ call whose requested size is the source length plus the `Arc` header.
 
 `sink_new` is the one parse-wide `Vec` reservation for IR tokens and top-level
 statements. `parse_emit` is `StyleSyntaxIrSink` + `SelectorSink` construction.
-**list transfer** brackets both selector-list ownership transfers: a rule's own
-list (a move — zero allocations) and every functional pseudo's nested argument
-list (exactly one `Box<SelectorList>` — 40 bytes — per occurrence, which is why
-only the `:deep` / `:slotted` / `:global` / `mixed_vue` categories are non-zero).
-The columns must sum to the total, and the harness asserts they do.
+**list transfer** (`selector_clone` in the canary) brackets selector-list
+ownership transfers. A rule's own list is a move (zero allocations). Nested
+functional-pseudo argument lists are bump-sliced in the same arena — they must
+not heap-clone (`selector_clone.calls == 0` / `bytes == 0` in
+`admission_copy_cannot_explain_parse_initial`). Table rows that still show
+non-zero list-transfer counts are a pre-arena recapture; the live canary is
+the authority. The columns must sum to the total, and the harness asserts they
+do.
 
 ## Per-rule cost is constant in stylesheet size
 

@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `verter_css_syntax::parse_selector_structure`
+ --> tests/compile-fail/parse_selector_structure_crate_root.rs:1:5
+  |
+1 | use verter_css_syntax::parse_selector_structure;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `parse_selector_structure` in the root

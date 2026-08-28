@@ -46,6 +46,37 @@ fn inventory() -> serde_json::Value {
     serde_json::from_str(INVENTORY).expect("the committed product-surface inventory is JSON")
 }
 
+fn workspace_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .parent()
+        .expect("repo root")
+        .to_path_buf()
+}
+
+fn alias_entry_path(entry: &str) -> &str {
+    match entry.rsplit_once(':') {
+        Some((path, rest)) if rest.chars().all(|c| c.is_ascii_digit()) => path,
+        _ => entry,
+    }
+}
+
+fn camel_to_snake(ident: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in ident.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Every product id the inventory names, across all of its semantic cases.
 /// The inventory's `tsc-declaration` product is the one
 /// [`the_tsc_product_is_published_only_when_its_target_bit_is_requested`]
@@ -298,6 +329,28 @@ fn the_inventory_is_internally_well_formed() {
                     "{id}: a route alias is missing `{field}`"
                 );
             }
+            let entry = alias["entryPoint"].as_str().expect("entryPoint string");
+            let rel = alias_entry_path(entry);
+            let path = workspace_root().join(rel);
+            assert!(
+                path.is_file(),
+                "{id}: route alias entryPoint {entry} is not a file at {}",
+                path.display()
+            );
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("{id}: read {}: {err}", path.display()));
+            let spelling = alias["spelling"].as_str().expect("spelling string");
+            let ident: String = spelling
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !ident.is_empty() {
+                let snake = camel_to_snake(&ident);
+                assert!(
+                    src.contains(&ident) || src.contains(&snake),
+                    "{id}: {rel} does not contain spelling token {ident:?} or {snake:?}"
+                );
+            }
         }
     }
 
@@ -307,14 +360,67 @@ fn the_inventory_is_internally_well_formed() {
         "the inventory names no `{TSC_PRODUCT_ID}` product, but the TSC target bit publishes one"
     );
 
+    for (id, spelling) in [
+        (
+            "css.prepare-style-for-preprocessor",
+            "prepareStyleForPreprocessor (free function, not a host method)",
+        ),
+        (
+            "css.analyze-style",
+            "analyzeStyle (free function, not a host method)",
+        ),
+    ] {
+        let case = cases
+            .iter()
+            .find(|case| case["id"] == id)
+            .unwrap_or_else(|| panic!("the inventory does not classify `{id}`"));
+        assert!(case["hostEntryPoint"].is_null(), "{id} gained a host route");
+        let aliases = case["routeAliases"]
+            .as_array()
+            .expect("style cases carry route aliases");
+        assert_eq!(
+            aliases.len(),
+            1,
+            "{id} must classify one NAPI free function and no bundler alias"
+        );
+        assert_eq!(aliases[0]["transport"], "napi");
+        assert_eq!(aliases[0]["spelling"], spelling);
+        assert!(
+            aliases[0]["spelling"]
+                .as_str()
+                .is_some_and(|value| value.contains("free function, not a host method")),
+            "{id} must be a NAPI module export unused by bundlers"
+        );
+    }
+
+    assert!(
+        cases.iter().all(|case| case["id"] != "css.process-style"),
+        "the retired processStyle spelling must not remain in the inventory"
+    );
     let css = cases
         .iter()
-        .find(|case| case["id"] == "css.process-style")
+        .find(|case| case["id"] == "css.transform-vue-style")
         .expect("the inventory names the standalone CSS spelling");
     assert!(
         css["hostEntryPoint"].is_null(),
         "the standalone CSS spelling gained a host route; the inventory's claim that it \
          bypasses the host is stale"
+    );
+    let live_aliases = css["routeAliases"]
+        .as_array()
+        .expect("the live style route carries aliases");
+    assert!(
+        live_aliases.iter().any(|alias| {
+            alias["transport"] == "napi"
+                && alias["spelling"] == "transformVueStyle (free function, not a host method)"
+        }),
+        "the live transformVueStyle NAPI export must remain classified as reachable"
+    );
+    assert!(
+        live_aliases
+            .iter()
+            .any(|alias| alias["transport"] == "bundler"),
+        "the retained bundler route must remain represented"
     );
 }
 
@@ -1088,109 +1194,97 @@ fn the_audited_compile_entry_publishes_these_exact_blocks_for_both_frameworks() 
     }
 }
 
-/// Standalone CSS via `process_style` (no host). Product carries the
-/// requested scope id. The `sourcemap` axis is inert (`source_map: None`
-/// hard-coded) — fails if the axis becomes live.
+fn standalone_vue_style(
+    css: &str,
+    filename: &str,
+    scope_id: &str,
+    scoped: bool,
+    want_source_map: bool,
+) -> verter_compiler::style_planner::VueStyleCascadeOutcome {
+    let parsed = verter_compiler::style_planner::parse_plain_css_for_verification(
+        css,
+        verter_compiler::style_planner::StyleRewriteStage::AuthoredVBind,
+    )
+    .expect("the standalone CSS verification parse accepts a valid block");
+    let verified =
+        verter_compiler::style_planner::VerifiedPlainCss::from_parsed_native_css(&parsed)
+            .expect("the verification parser produced native CSS syntax IR");
+    verter_compiler::style_planner::transform_vue_style(
+        verified,
+        filename,
+        filename,
+        filename,
+        scope_id,
+        false,
+        scoped,
+        want_source_map,
+    )
+}
+
+/// Standalone CSS via `transform_vue_style` (no host). Product carries the
+/// requested scope id as a surgical selector edit. Bytes a Vue-owned
+/// transform does not touch stay identical to the authored input. A
+/// requested source map is published only when the cascade actually rewrote.
 #[test]
-fn the_standalone_css_spelling_publishes_css_and_ignores_its_source_map_axis() {
-    let options = verter_compiler::css::ProcessStyleOptions {
-        scope_id: "probe1234",
-        scoped: true,
-        is_module: false,
-        module_name: None,
-        filename: Some("/probe/Styled.vue"),
-        sourcemap: true,
-    };
-    let requested = verter_compiler::css::process_style(".x{color:red}", &options)
-        .expect("the standalone CSS route processes a valid block");
-    // TYPED result fields plus an EXACT byte pin of the emitted CSS — not a
-    // substring search for the scope id inside generated output.
-    assert!(
-        requested.scoped,
-        "the standalone CSS route no longer reports the block as scoped"
-    );
-    assert!(
-        requested.normalization_needed,
-        "the standalone CSS route no longer normalizes a scoped block"
-    );
+fn the_standalone_css_spelling_publishes_css_and_honours_its_source_map_axis() {
+    let source = ".x{color:red}";
+    let requested = standalone_vue_style(source, "/probe/Styled.vue", "probe1234", true, true);
     assert_eq!(
-        requested.code.as_ref(),
-        ".x[data-v-probe1234]{\n  color: red;\n}\n",
+        requested.code.as_str(),
+        ".x[data-v-probe1234]{color:red}",
         "the standalone CSS route's emitted bytes moved"
     );
     assert!(
-        requested.source_map.is_none(),
-        "the standalone CSS route's `sourcemap` axis has become live; it was inert when this \
-         inventory was taken and the recorded route description must be updated"
+        !requested.source_map.is_empty(),
+        "a requested source map on a rewritten block must publish"
     );
 
-    let unrequested = verter_compiler::css::process_style(
-        ".x{color:red}",
-        &verter_compiler::css::ProcessStyleOptions {
-            sourcemap: false,
-            ..options
-        },
-    )
-    .expect("the standalone CSS route processes a valid block");
+    let unrequested = standalone_vue_style(source, "/probe/Styled.vue", "probe1234", true, false);
     assert!(
-        unrequested.source_map.is_none(),
+        unrequested.source_map.is_empty(),
         "the standalone CSS route published a source map that was never requested"
     );
     assert_eq!(
         requested.code, unrequested.code,
         "the `sourcemap` axis changed the emitted CSS bytes"
     );
+
+    let passthrough =
+        standalone_vue_style(source, "/probe/Passthrough.css", "probe1234", false, true);
+    assert_eq!(
+        passthrough.code.as_str(),
+        source,
+        "untouched CSS must stay byte-identical to the authored input"
+    );
 }
 
-/// A requested standalone CSS map is a real product on both the passthrough
-/// and transformed branches. Each map must be valid, retain the authored
-/// source, and contain at least one mapping rather than being a placeholder.
+/// A requested standalone CSS map is a real product on the transformed
+/// branch. The map must be valid, retain the authored source, and contain
+/// at least one mapping rather than being a placeholder.
 #[test]
-#[ignore = "standalone CSS still drops requested source maps on both processing branches"]
-fn the_standalone_css_route_publishes_valid_requested_maps_for_passthrough_and_transformed_css() {
+fn the_standalone_css_route_publishes_valid_requested_maps_for_transformed_css() {
     let source = ".x{color:red}";
-    let passthrough = verter_compiler::css::process_style(
-        source,
-        &verter_compiler::css::ProcessStyleOptions {
-            scope_id: "probe1234",
-            scoped: false,
-            is_module: false,
-            module_name: None,
-            filename: Some("/probe/Passthrough.css"),
-            sourcemap: true,
-        },
-    )
-    .expect("valid passthrough CSS is processed");
-    let transformed = verter_compiler::css::process_style(
-        source,
-        &verter_compiler::css::ProcessStyleOptions {
-            scope_id: "probe1234",
-            scoped: true,
-            is_module: false,
-            module_name: None,
-            filename: Some("/probe/Transformed.css"),
-            sourcemap: true,
-        },
-    )
-    .expect("valid scoped CSS is processed");
-
-    for (label, result) in [("passthrough", passthrough), ("transformed", transformed)] {
-        let json = result.source_map.unwrap_or_else(|| {
-            panic!("the {label} branch published CSS without its requested source map")
-        });
-        let map = verter_compiler::oxc_sourcemap::OwnedSourceMap::from_json_string(&json)
-            .unwrap_or_else(|error| panic!("the {label} branch published an invalid map: {error}"));
-        assert_eq!(
-            map.get_source_content(0),
-            Some(source),
-            "the {label} map does not retain the authored CSS source"
-        );
-        assert!(
-            map.get_tokens()
-                .any(|token| token.get_source_id().is_some()),
-            "the {label} map contains no authored-to-generated mappings"
-        );
-    }
+    let transformed =
+        standalone_vue_style(source, "/probe/Transformed.css", "probe1234", true, true);
+    assert!(
+        !transformed.source_map.is_empty(),
+        "the transformed branch published CSS without its requested source map"
+    );
+    let map =
+        verter_compiler::oxc_sourcemap::OwnedSourceMap::from_json_string(&transformed.source_map)
+            .unwrap_or_else(|error| {
+                panic!("the transformed branch published an invalid map: {error}")
+            });
+    assert_eq!(
+        map.get_source_content(0),
+        Some(source),
+        "the transformed map does not retain the authored CSS source"
+    );
+    assert!(
+        map.get_tokens()
+            .any(|token| token.get_source_id().is_some()),
+        "the transformed map contains no authored-to-generated mappings"
+    );
 }
 
 // The remaining enumerated products

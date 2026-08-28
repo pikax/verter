@@ -16,9 +16,10 @@ pub enum RecoveryKind {
     CloseAtEndOfInput,
 }
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CssDiagnosticKind {
-    UnexpectedClosingDelimiter,
+    UnexpectedClosingDelimiter = 0,
     MismatchedDelimiter,
     UnterminatedBlock,
     ExpectedAtRuleTerminator,
@@ -33,6 +34,31 @@ pub enum CssDiagnosticKind {
     UnexpectedIndentation,
     AmbiguousStatement,
     UnterminatedInterpolation,
+}
+
+impl CssDiagnosticKind {
+    /// Discriminant walk, matching [`crate::SyntaxKind::from_raw`]. An unknown
+    /// raw value returns variant 0 so `kind as u8 != raw` terminates the walk.
+    pub const fn from_raw(raw: u8) -> Self {
+        match raw {
+            0 => Self::UnexpectedClosingDelimiter,
+            1 => Self::MismatchedDelimiter,
+            2 => Self::UnterminatedBlock,
+            3 => Self::ExpectedAtRuleTerminator,
+            4 => Self::ExpectedRuleBlock,
+            5 => Self::ExpectedDeclarationColon,
+            6 => Self::UnterminatedComment,
+            7 => Self::UnterminatedString,
+            8 => Self::BadString,
+            9 => Self::UnterminatedUrl,
+            10 => Self::BadUrl,
+            11 => Self::InconsistentIndentation,
+            12 => Self::UnexpectedIndentation,
+            13 => Self::AmbiguousStatement,
+            14 => Self::UnterminatedInterpolation,
+            _ => Self::UnexpectedClosingDelimiter,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

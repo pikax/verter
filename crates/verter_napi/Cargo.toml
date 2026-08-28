@@ -14,6 +14,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 verter_audit = { path = "../verter_audit" }
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
+verter_css_syntax = { workspace = true }
 verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_workspace = { path = "../verter_workspace", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
@@ -36,6 +37,11 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 oxc_allocator = { workspace = true }
 tokio = { version = "1.52", features = ["io-util", "process", "sync", "time", "rt", "macros"] }
+
+[dev-dependencies]
+verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
+verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
+verter_session = { path = "../verter_session", features = ["test-support"] }
 
 [build-dependencies]
 napi-build = "2.3"

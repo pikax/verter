@@ -101,6 +101,7 @@ paste = "1.0.15"
 # Activates only test seams used by this crate's tests: cache-admission force
 # controls (`test-support`) and project-binding constructors (`test-util`).
 verter_session = { path = "../verter_session", features = ["test-support", "test-util"] }
+verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 # Structural `[features]`-table parse for the `test-support` default-off
 # architecture guard (tests/cases/test_support_feature_off_in_default_build.rs),
 # mirroring verter_session's dev-dependency of the same purpose.

@@ -72,7 +72,12 @@ pub(crate) struct SuppliedContentArtifact {
     code_hash: BlockContentHashToken,
     source_map: Option<Arc<str>>,
     source_map_hash: Option<BlockContentHashToken>,
-    provenance: Option<String>,
+    dependencies: Vec<String>,
+    diagnostics: Vec<PreprocessorDiagnostic>,
+    processor_identity: String,
+    processor_version: String,
+    config_fingerprint: Option<BlockContentHashToken>,
+    parsed: Option<verter_compiler::style_planner::PreparedStyleIr>,
 }
 
 impl SuppliedContentArtifact {
@@ -80,7 +85,15 @@ impl SuppliedContentArtifact {
         self.code
             .len()
             .saturating_add(self.source_map.as_deref().map_or(0, str::len))
-            .saturating_add(self.provenance.as_deref().map_or(0, str::len))
+            .saturating_add(self.processor_identity.len())
+            .saturating_add(self.processor_version.len())
+            .saturating_add(self.dependencies.iter().map(String::len).sum::<usize>())
+            .saturating_add(
+                self.diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.message.len())
+                    .sum::<usize>(),
+            )
     }
 }
 
@@ -482,12 +495,13 @@ fn pre_capture_outcome(
     availability: BlockContentAvailability,
 ) -> Result<(), BlockContentPreCaptureTerminal> {
     match availability {
-        BlockContentAvailability::ProcessedContentRequired => Ok(()),
+        BlockContentAvailability::ProcessedContentRequired
+        | BlockContentAvailability::NativeAvailable => Ok(()),
         BlockContentAvailability::Stale => Err(BlockContentPreCaptureTerminal::Stale),
         BlockContentAvailability::Conflict => Err(BlockContentPreCaptureTerminal::Failed),
-        BlockContentAvailability::NativeAvailable
-        | BlockContentAvailability::SuppliedAvailable
-        | BlockContentAvailability::Missing => Err(BlockContentPreCaptureTerminal::Unavailable),
+        BlockContentAvailability::SuppliedAvailable | BlockContentAvailability::Missing => {
+            Err(BlockContentPreCaptureTerminal::Unavailable)
+        }
     }
 }
 
@@ -575,6 +589,19 @@ pub(crate) fn native_language(content_class: BlockContentClass, lang: &str) -> b
         BlockContentClass::Style => matches!(lang, "css" | "scss" | "sass" | "less" | "stylus"),
         BlockContentClass::Custom => false,
     }
+}
+
+/// Inline SCSS/Sass/Less/Stylus is analyzed natively, but a bundler may still
+/// admit a byte-changing CSS result over the sealed override channel.
+pub(crate) fn optional_native_style_preprocessor(
+    inventory: &verter_language::CarrierBlockInventory,
+    role: &SectionRole,
+    syntax: &TaggedSyntax,
+    lang: &str,
+) -> bool {
+    matches!(role, SectionRole::Style { .. })
+        && matches!(lang, "scss" | "sass" | "less" | "stylus")
+        && named_attr(inventory, syntax, "src").is_none()
 }
 
 /// Single authority for whether selected authored bytes can flow directly
@@ -914,6 +941,7 @@ impl VerterHost {
                 final_output_space: selected.source_descriptor.clone(),
                 immediate_maps: Vec::new(),
                 composed_map: identity_qualified_map(&selected.source_space_token),
+                parsed_style: None,
             });
         }
 
@@ -935,7 +963,11 @@ impl VerterHost {
                 return Ok(BlockContentSnapshot {
                     availability: BlockContentAvailability::SuppliedAvailable,
                     origin: Some(BlockContentOrigin::SuppliedValidated {
-                        provenance: supplied.provenance,
+                        dependencies: supplied.dependencies,
+                        diagnostics: supplied.diagnostics,
+                        processor_identity: supplied.processor_identity,
+                        processor_version: supplied.processor_version,
+                        config_fingerprint: supplied.config_fingerprint,
                     }),
                     content: Some(supplied.code),
                     content_class: selected.content_class,
@@ -962,6 +994,7 @@ impl VerterHost {
                         .into_iter()
                         .collect(),
                     composed_map: supplied.qualified_source_map,
+                    parsed_style: supplied.parsed.clone(),
                 });
             }
         }
@@ -985,6 +1018,7 @@ impl VerterHost {
             final_output_space: selected.source_descriptor.clone(),
             immediate_maps: Vec::new(),
             composed_map: identity_qualified_map(&selected.source_space_token),
+            parsed_style: None,
         })
     }
 
@@ -1090,12 +1124,14 @@ impl VerterHost {
             } else {
                 snapshot.lang.clone()
             };
+            let parsed = snapshot.parsed_style.clone();
             let input = RuntimeBlockContentInput {
                 code,
                 source_map: snapshot.source_map,
                 lang: output_lang,
                 content_artifact_token: snapshot.content_artifact_token.to_string(),
                 source_space_token: snapshot.source_space_token.to_string(),
+                parsed,
             };
             match role {
                 SectionRole::TemplateHost => projection.template = Some(input),
@@ -1206,12 +1242,52 @@ impl VerterHost {
                 usage_complete = false;
                 continue;
             };
+            let already_analyzed_inline = snapshot.availability
+                == BlockContentAvailability::NativeAvailable
+                && style.content_is_available()
+                && style
+                    .source_space_token
+                    .as_deref()
+                    .is_none_or(|token| token == snapshot.source_space_token.as_str());
+            if already_analyzed_inline {
+                for binding in &style.v_binds {
+                    v_bind_vars.extend(binding.expr_roots.iter().cloned());
+                    usage_complete &= binding.roots_complete;
+                }
+                continue;
+            }
             if matches!(
                 snapshot.availability,
                 BlockContentAvailability::NativeAvailable
                     | BlockContentAvailability::SuppliedAvailable
             ) {
-                if let Some(content) = snapshot.content.as_deref() {
+                if let Some(prepared) = snapshot.parsed_style.as_ref() {
+                    let input = verter_compiler::style_planner::AuthoredStyleInput::new(
+                        prepared.ir().source().text(),
+                        prepared.ir().dialect(),
+                        "style-usage",
+                        "style-usage",
+                        "style-usage",
+                    )
+                    .with_prepared(prepared.ir())
+                    .without_source_map();
+                    match verter_compiler::style_planner::transform_vue_v_bind(input, "usage") {
+                        Ok(
+                            verter_compiler::style_planner::StyleRewriteOutcome::Unchanged {
+                                facts,
+                            }
+                            | verter_compiler::style_planner::StyleRewriteOutcome::Rewritten {
+                                facts,
+                                ..
+                            },
+                        ) => {
+                            for binding in facts.v_bind_vars {
+                                v_bind_vars.push(binding.expression);
+                            }
+                        }
+                        Err(_) => usage_complete = false,
+                    }
+                } else if let Some(content) = snapshot.content.as_deref() {
                     let usage_lang = if snapshot.availability
                         == BlockContentAvailability::SuppliedAvailable
                         && snapshot.content_class == BlockContentClass::Style
@@ -1467,15 +1543,24 @@ impl VerterHost {
             {
                 return Err(terminal_on_error(BlockContentRefusal::MalformedToken));
             }
+            let supplied_provenance_bytes = entry
+                .processor_identity
+                .len()
+                .saturating_add(entry.processor_version.len())
+                .saturating_add(entry.dependencies.iter().map(String::len).sum::<usize>())
+                .saturating_add(
+                    entry
+                        .diagnostics
+                        .iter()
+                        .map(|diagnostic| diagnostic.message.len())
+                        .sum::<usize>(),
+                );
             if entry.code.len() > MAX_SUPPLIED_CODE_BYTES
                 || entry
                     .source_map
                     .as_deref()
                     .is_some_and(|map| map.len() > MAX_SUPPLIED_MAP_BYTES)
-                || entry
-                    .supplied_provenance
-                    .as_deref()
-                    .is_some_and(|value| value.len() > MAX_SUPPLIED_PROVENANCE_BYTES)
+                || supplied_provenance_bytes > MAX_SUPPLIED_PROVENANCE_BYTES
             {
                 return Err(terminal_on_error(BlockContentRefusal::PayloadTooLarge));
             }
@@ -1517,12 +1602,12 @@ impl VerterHost {
                 return Err(terminal_on_error(BlockContentRefusal::Stale));
             }
             match current.availability {
-                BlockContentAvailability::ProcessedContentRequired => {}
+                BlockContentAvailability::ProcessedContentRequired
+                | BlockContentAvailability::NativeAvailable => {}
                 BlockContentAvailability::Conflict => {
                     return Err(terminal_on_error(BlockContentRefusal::Conflict));
                 }
-                availability @ (BlockContentAvailability::NativeAvailable
-                | BlockContentAvailability::SuppliedAvailable
+                availability @ (BlockContentAvailability::SuppliedAvailable
                 | BlockContentAvailability::Missing
                 | BlockContentAvailability::Stale) => {
                     return Err(terminal_on_error(BlockContentRefusal::Unavailable {
@@ -1590,6 +1675,9 @@ impl VerterHost {
                 content_hash: entry.code_hash.clone(),
                 utf8_byte_len: entry.code.len() as u64,
             };
+            let parsed = (current.content_class == BlockContentClass::Style)
+                .then(|| verter_compiler::style_planner::prepare_supplied_plain_css(&entry.code))
+                .flatten();
             #[cfg(test)]
             {
                 let hook = self.block_content.admission_seam_hook.lock().clone();
@@ -1614,7 +1702,12 @@ impl VerterHost {
                     code_hash: entry.code_hash,
                     source_map: entry.source_map,
                     source_map_hash: entry.source_map_hash,
-                    provenance: entry.supplied_provenance,
+                    dependencies: entry.dependencies,
+                    diagnostics: entry.diagnostics,
+                    processor_identity: entry.processor_identity,
+                    processor_version: entry.processor_version,
+                    config_fingerprint: entry.config_fingerprint,
+                    parsed,
                 },
             ));
         }
@@ -1783,7 +1876,12 @@ mod tests {
             code_hash,
             source_map: None,
             source_map_hash: None,
-            provenance: None,
+            dependencies: Vec::new(),
+            diagnostics: Vec::new(),
+            processor_identity: String::new(),
+            processor_version: String::new(),
+            config_fingerprint: None,
+            parsed: None,
         }
     }
 
@@ -1883,7 +1981,7 @@ mod tests {
         let provenance_request = provenance_update.preprocessor_requests[0].clone();
         let mut provenance_entry =
             BlockOverrideEntry::supplied_for_test(&provenance_request, "<p>supplied</p>");
-        provenance_entry.supplied_provenance = Some("x".repeat(MAX_SUPPLIED_PROVENANCE_BYTES + 1));
+        provenance_entry.processor_identity = "x".repeat(MAX_SUPPLIED_PROVENANCE_BYTES + 1);
         let error = provenance_host
             .apply_block_overrides(BlockOverrideRequest {
                 canonical_id: provenance_update.canonical_id,

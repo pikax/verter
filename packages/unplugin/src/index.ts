@@ -24,7 +24,7 @@ import {
   getWorkspace,
   generateComponentId,
   peekHost,
-  processStyle,
+  transformVueStyle,
   resetHost,
 } from "./core/compiler";
 import { collectResolvableModuleReferenceSpecifiers } from "./core/dependency-resolution";
@@ -467,6 +467,60 @@ function isClientComponent(filename: string): boolean {
   return filename.endsWith(".client.vue");
 }
 
+/**
+ * Publish a native Vue style transform only when every rule was trusted.
+ * Soft refusals delete untrusted rules from `code`; publishing that
+ * truncated CSS with no signal is forbidden.
+ */
+function publishTransformedVueStyle(
+  code: string,
+  options: Parameters<typeof transformVueStyle>[1],
+): ReturnType<typeof transformVueStyle> {
+  const result = transformVueStyle(code, options);
+  if (result.refusals.length > 0) {
+    throw new Error(
+      `transformVueStyle refused untrusted style rules and will not publish deleted CSS: ${result.refusals.join("; ")}`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Vite style post-process. Live authority is native `transformVueStyle`
+ * (scoping + v-bind). Vite's CSS pipeline has already preprocessed
+ * SCSS/SASS/Less before this lane runs.
+ */
+function applyViteStyleLane(
+  code: string,
+  filename: string,
+  scopeId: string,
+  scoped: boolean,
+): { code: string; map: unknown } {
+  const result = publishTransformedVueStyle(code, {
+    scopeId,
+    scoped,
+    filename,
+    sourcemap: true,
+  });
+  let map: unknown = null;
+  if (result.sourceMap) {
+    try {
+      map = JSON.parse(result.sourceMap);
+    } catch {
+      map = null;
+    }
+  }
+  return { code: result.code, map };
+}
+
+/**
+ * Non-Vite style post-process. Live authority is native `transformVueStyle`
+ * (CSS scoping + v-bind).
+ */
+function applyNonViteStyleLane(css: string, scopeId: string, scoped: boolean): string {
+  return publishTransformedVueStyle(css, { scopeId, scoped }).code;
+}
+
 interface StyleBlockEntry {
   blockToken: string;
   content: string;
@@ -545,7 +599,6 @@ function createFrameworkFactory(
     const opts = options ?? {};
     const frameworkSelection = pinnedFramework ?? opts.lang ?? "auto";
     let viteConfig: ResolvedConfig | null = null;
-    let compiler: any = null;
     const hmrStrategy = getHmrStrategy(meta.framework);
     const filter = createFilter(opts.include, frameworkSelection);
     let isNuxt = false;
@@ -569,7 +622,7 @@ function createFrameworkFactory(
 
     // Cache raw style block content for Vite mode.
     // In Vite mode, load() serves raw style source (e.g., SCSS) and lets Vite's
-    // CSS pipeline handle preprocessing. transform() then runs compileStyleAsync()
+    // CSS pipeline handle preprocessing. transform() then runs transformVueStyle()
     // for Vue-specific post-processing (scoping + CSS v-bind() rewriting).
     const styleBlockCache = new Map<string, StyleBlockEntry[]>();
     const compiledStyleCache = new Map<string, CompiledStyleArtifact[]>();
@@ -634,7 +687,7 @@ function createFrameworkFactory(
 
         // Vite mode: return raw style source from cache.
         // Vite's CSS pipeline preprocesses (SCSS/SASS/Less), then our transform()
-        // runs compileStyleAsync() for Vue-specific scoping + CSS v-bind() rewriting.
+        // runs transformVueStyle() for Vue-specific scoping + CSS v-bind() rewriting.
         if (viteConfig && query.type === "style") {
           const styles = styleBlockCache.get(filename);
           const entry = styles?.[query.index ?? 0];
@@ -689,7 +742,7 @@ function createFrameworkFactory(
         // Main carrier files for compilation.
         if (filter(filename) && !query.vue && !query.verter) return true;
         // Style virtual files need a transform pass.
-        // Vite mode: ALL styles need compileStyleAsync (scoping + CSS v-bind rewriting).
+        // Vite mode: ALL styles need transformVueStyle (scoping + CSS v-bind rewriting).
         // Non-Vite: only preprocessed (non-CSS) styles need the scoping pass.
         if (query.vue && query.type === "style" && filter(filename)) {
           if (viteConfig) return true;
@@ -824,11 +877,12 @@ function createFrameworkFactory(
         const carrierFramework = frameworkForFilename(filename, frameworkSelection);
 
         // Style virtual module transform:
-        // - Vite mode: run compileStyleAsync() for scoping + CSS v-bind() rewriting.
-        //   Vite's CSS pipeline has already preprocessed SCSS/SASS/Less before this.
-        // - Non-Vite: use Rust processStyle for CSS scoping only.
+        // - Vite mode: applyViteStyleLane → transformVueStyle() for scoping
+        //   + CSS v-bind() rewriting. Vite's CSS pipeline has already
+        //   preprocessed SCSS/SASS/Less before this.
+        // - Non-Vite: applyNonViteStyleLane → transformVueStyle for CSS scoping.
         if (query.vue && query.type === "style") {
-          if (viteConfig && compiler) {
+          if (viteConfig) {
             const profile = profileCache.get(filename);
             const styleIndex = query.index ?? 0;
             const styles = styleBlockCache.get(filename);
@@ -836,35 +890,17 @@ function createFrameworkFactory(
             const scopedFlags = styleScopedCache.get(filename);
             const isScoped = query.scoped || entry?.scoped || (scopedFlags?.[styleIndex] ?? false);
 
-            const result = await compiler.compileStyleAsync({
-              source: code,
-              filename,
-              id: `data-v-${profile?.componentId ?? ""}`,
-              scoped: isScoped,
-              isProd: profile?.isProduction ?? false,
-            });
-
-            if (result.errors.length) {
-              for (const err of result.errors) {
-                this.error(typeof err === "string" ? err : err.message);
-              }
-            }
-
-            return { code: result.code, map: result.map ?? null };
+            return applyViteStyleLane(code, filename, profile?.componentId ?? "", isScoped);
           }
 
-          // Non-Vite: use Rust processStyle for CSS scoping only.
+          // Non-Vite: use Rust transformVueStyle for CSS scoping.
           let css = code;
           const profile = profileCache.get(filename);
           if (profile) {
             const styleIndex = query.index ?? 0;
             const scopedFlags = styleScopedCache.get(filename);
             const isScoped = query.scoped || (scopedFlags?.[styleIndex] ?? false);
-            const processed = processStyle(css, {
-              scopeId: profile.componentId ?? "",
-              scoped: isScoped,
-            });
-            css = processed.code;
+            css = applyNonViteStyleLane(css, profile.componentId ?? "", isScoped);
           }
           return { code: css, map: null };
         }
@@ -1217,18 +1253,6 @@ function createFrameworkFactory(
           viteConfig = resolvedConfig;
           projectRoot = resolvedConfig.root;
           isNuxt = await detectNuxt(projectRoot);
-          // Resolve vue/compiler-sfc from the project root for compileStyleAsync().
-          // This handles scoping + CSS v-bind() rewriting after Vite preprocesses styles.
-          if (!compiler && frameworkSelection !== "sveltejs") {
-            try {
-              const { createRequire } = require("node:module");
-              const { join } = require("node:path");
-              const _require = createRequire(join(resolvedConfig.root, "package.json"));
-              compiler = _require("vue/compiler-sfc");
-            } catch {
-              // compiler-sfc not available — style post-processing will be skipped
-            }
-          }
         },
 
         handleHotUpdate({ file, server, modules }) {

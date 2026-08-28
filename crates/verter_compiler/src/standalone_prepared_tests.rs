@@ -82,6 +82,7 @@ static LEAKED_VUE_EXECUTION_INPUTS: &VueExecutionInputs = &VueExecutionInputs {
     template_used_vars: None,
     runtime_template_hole: false,
     runtime_inline_template_chunk: false,
+    prepared_styles: Vec::new(),
 };
 static LEAKED_VUE_MACROS: &VueMacroSemanticInput = &VueMacroSemanticInput::Unavailable;
 

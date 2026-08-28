@@ -1,0 +1,16 @@
+error[E0603]: function `parse_lossless` is private
+ --> tests/compile-fail/parse_lossless_module_path.rs:1:29
+  |
+1 | use verter_css_syntax::cst::parse_lossless;
+  |                             ^^^^^^^^^^^^^^ private function
+  |
+note: the function `parse_lossless` is defined here
+ --> src/cst.rs
+  |
+  | / pub(crate) fn parse_lossless(
+  | |     source: CssSource,
+  | |     dialect: CssDialect,
+  | |     entry: CssEntryPoint,
+  | |     mode: CssParseMode,
+  | | ) -> Result<LosslessCst, CssParseFailure> {
+  | |_________________________________________^

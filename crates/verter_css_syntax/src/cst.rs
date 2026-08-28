@@ -246,7 +246,8 @@ impl LosslessCst {
     }
 }
 
-pub fn parse_lossless(
+#[allow(dead_code)]
+pub(crate) fn parse_lossless(
     source: CssSource,
     dialect: CssDialect,
     entry: CssEntryPoint,

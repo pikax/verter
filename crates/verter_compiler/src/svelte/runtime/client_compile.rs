@@ -139,9 +139,14 @@ pub fn compile_client<'a>(
     // `$foo` / `$$foo` reference, an invalid HTML placement) FIRST, so a genuinely
     // malformed component is rejected for being malformed — not later mis-attributed
     // to an unsupported feature, and never accepted as a divergent `Main`.
-    if let Some(rejection) =
-        official_reject::official_reject_gate_with_runes(source, parsed, opts.runes)
-    {
+    let mut admitted = super::css::AdmittedStyleIrs::default();
+    super::css::seed_admitted_from_prepared(source, parsed, &opts.prepared_styles, &mut admitted);
+    if let Some(rejection) = official_reject::official_reject_gate_with_admitted(
+        source,
+        parsed,
+        opts.runes,
+        &mut admitted,
+    ) {
         return Err(ClientCompileError::OfficialReject(rejection));
     }
     // (1b) Resolve the compile options ONCE — the SOLE fold point of the compile-option
@@ -164,8 +169,8 @@ pub fn compile_client<'a>(
     // descriptor); only its invalid forms remain rejected — as exact-code
     // official rejects by the gate above, never here. An ACCEPTED `<style>`
     // hands its parsed + analyzed body forward as the pre-lowering style stage.
-    let prepared_style =
-        parse_domain_gate(source, parsed, opts).map_err(ClientCompileError::Unsupported)?;
+    let prepared_style = parse_domain_gate(source, parsed, opts, &mut admitted)
+        .map_err(ClientCompileError::Unsupported)?;
     // (3) Lower to the BROAD runtime IR (the shared substrate). The broad IR may
     // exist; it just never reaches emission.
     let mut ir = lower_parsed_svelte_to_ir(source, parsed, opts, alloc)

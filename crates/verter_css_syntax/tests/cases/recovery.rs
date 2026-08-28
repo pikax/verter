@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use verter_css_syntax::{
-    parse_lossless, CssDiagnosticKind, CssDialect, CssEntryPoint, CssParseFailure, CssParseMode,
-    CssSource, CssSourceTooLarge, RecoveryKind, SourceSize, StructureOverflowKind, SyntaxKind,
+    CssDiagnosticKind, CssDialect, CssEntryPoint, CssParseFailure, CssParseMode, CssSource,
+    CssSourceTooLarge, RecoveryKind, SourceSize, StructureOverflowKind, SyntaxKind,
 };
+
+use crate::cst::parse_lossless;
 
 #[test]
 fn strict_fails_where_recover_emits_explicit_nodes() {
@@ -622,6 +624,332 @@ fn sass_and_stylus_recovery_coverage_parity_with_css_and_less() {
         CssDialect::Sass,
         CssDialect::Stylus,
     ];
+
+    // ── the CLOSED recovery outcome set ──
+    //
+    // Everything below this block is a hand-selected fixture, i.e. a SAMPLE:
+    // a failure mode nobody wrote a fixture for — or one whose Sass/Stylus
+    // typing silently diverges from Css/Less outside the sampled shapes —
+    // coexists with a green run. This block replaces the sample with the
+    // ENUMERATED universe. `CssDiagnosticKind`, `RecoveryKind` and
+    // `StructureOverflowKind` are the closed sets of recovery outcomes the
+    // parser can report, and each `disposition` function below matches over
+    // its enum EXHAUSTIVELY, so a new variant is a compile error (`E0004`)
+    // until dispositioned here.
+    //
+    // Three dispositions:
+    //
+    //   `Symmetric`   — every dialect must report the SAME diagnostic kind
+    //                   and the SAME recovery kind from one fixture.
+    //   `PerDialect`  — the failure is typed differently by the direct parser
+    //                   and the indentation-aware layout parser (or exists
+    //                   only in one of them). Every dialect that reports it
+    //                   names its own fixture, AND every dialect NOT named
+    //                   must NOT report it from those fixtures — so this
+    //                   cannot wave an asymmetry through, it pins its shape.
+    //   `Unreachable` — no input this suite can express reaches the outcome.
+    //                   The reason is recorded, and the whole inventory is
+    //                   re-checked to confirm nothing produces it, so the
+    //                   disposition cannot silently rot once it becomes
+    //                   reachable.
+
+    type DiagCase = (CssDialect, &'static str, CssEntryPoint);
+
+    enum Disposition {
+        Symmetric(&'static str, CssEntryPoint, RecoveryKind),
+        PerDialect(&'static str, RecoveryKind, &'static [DiagCase]),
+        Unreachable(&'static str),
+    }
+
+    const UNTERMINATED_BLOCK: &str = ".a { color: red;";
+    const NO_RULE_BLOCK: &str = ".a";
+    const STRAY_AT_RULE: &str = ".a { @import \"x\" }";
+    const INCONSISTENT_INDENT: &str = ".a\n\tcolor: red\n  x: y\n";
+    const LEADING_INDENT: &str = "  .a\n";
+    const SASS_AMBIGUOUS: &str = "$tone junk: red;";
+    const STYLUS_AMBIGUOUS: &str = "foo bar baz\n";
+    const UNTERMINATED_INTERP_HASH: &str = ".a-#{$x\n  color: red\n";
+    const UNTERMINATED_INTERP_AT: &str = ".a-@{x\n  color: red\n";
+    const UNTERMINATED_INTERP_DOLLAR: &str = ".a-${x\n  color: red\n";
+
+    // Exhaustive over `CssDiagnosticKind`.
+    fn disposition(kind: CssDiagnosticKind) -> Disposition {
+        use CssDialect::{Css, Less, Sass, Scss, Stylus};
+        use CssEntryPoint::{ComponentValueList, Stylesheet};
+
+        match kind {
+            CssDiagnosticKind::UnexpectedClosingDelimiter => {
+                Disposition::Symmetric(")", ComponentValueList, RecoveryKind::AdvanceOneToken)
+            }
+            CssDiagnosticKind::MismatchedDelimiter => {
+                Disposition::Symmetric("(]", ComponentValueList, RecoveryKind::AdvanceOneToken)
+            }
+            CssDiagnosticKind::UnterminatedBlock => Disposition::Symmetric(
+                UNTERMINATED_BLOCK,
+                Stylesheet,
+                RecoveryKind::CloseAtEndOfInput,
+            ),
+            CssDiagnosticKind::UnterminatedComment => {
+                Disposition::Symmetric("/*", ComponentValueList, RecoveryKind::AdvanceOneToken)
+            }
+            CssDiagnosticKind::UnterminatedString => {
+                Disposition::Symmetric("\"x", ComponentValueList, RecoveryKind::AdvanceOneToken)
+            }
+            CssDiagnosticKind::BadString => {
+                Disposition::Symmetric("\"x\n", ComponentValueList, RecoveryKind::AdvanceOneToken)
+            }
+            CssDiagnosticKind::UnterminatedUrl => {
+                Disposition::Symmetric("url(foo", ComponentValueList, RecoveryKind::AdvanceOneToken)
+            }
+            CssDiagnosticKind::BadUrl => Disposition::Symmetric(
+                "url(a b)",
+                ComponentValueList,
+                RecoveryKind::AdvanceOneToken,
+            ),
+
+            CssDiagnosticKind::ExpectedRuleBlock => Disposition::PerDialect(
+                "a headless prelude is the DIRECT parser's failure; the layout parser types \
+                 the same bytes as its own ambiguous statement",
+                RecoveryKind::AdvanceToBoundary,
+                &[
+                    (Css, NO_RULE_BLOCK, Stylesheet),
+                    (Scss, NO_RULE_BLOCK, Stylesheet),
+                    (Less, NO_RULE_BLOCK, Stylesheet),
+                ],
+            ),
+            CssDiagnosticKind::ExpectedAtRuleTerminator => Disposition::PerDialect(
+                "an unterminated at-rule statement is the DIRECT parser's failure; the layout \
+                 parser ends the statement at its own line boundary instead",
+                RecoveryKind::AdvanceToBoundary,
+                &[
+                    (Css, STRAY_AT_RULE, Stylesheet),
+                    (Scss, STRAY_AT_RULE, Stylesheet),
+                    (Less, STRAY_AT_RULE, Stylesheet),
+                ],
+            ),
+            CssDiagnosticKind::AmbiguousStatement => Disposition::PerDialect(
+                "`AmbiguousStatement` is the LAYOUT parser's own vocabulary for a statement it \
+                 cannot classify; the direct parser has no notion of it",
+                RecoveryKind::None,
+                &[
+                    (Sass, SASS_AMBIGUOUS, Stylesheet),
+                    (Stylus, STYLUS_AMBIGUOUS, Stylesheet),
+                ],
+            ),
+            CssDiagnosticKind::InconsistentIndentation => Disposition::PerDialect(
+                "indentation diagnostics belong to the layout parser, which plain CSS never \
+                 reaches; the other four dialects all route brace-free indented input to it",
+                RecoveryKind::AdvanceToBoundary,
+                &[
+                    (Scss, INCONSISTENT_INDENT, Stylesheet),
+                    (Less, INCONSISTENT_INDENT, Stylesheet),
+                    (Sass, INCONSISTENT_INDENT, Stylesheet),
+                    (Stylus, INCONSISTENT_INDENT, Stylesheet),
+                ],
+            ),
+            CssDiagnosticKind::UnexpectedIndentation => Disposition::PerDialect(
+                "indentation diagnostics belong to the layout parser, which plain CSS never \
+                 reaches; Sass and Stylus reach it for any input, Scss and Less for brace-free \
+                 indented input",
+                RecoveryKind::AdvanceToBoundary,
+                &[
+                    (Sass, LEADING_INDENT, Stylesheet),
+                    (Stylus, LEADING_INDENT, Stylesheet),
+                    (Scss, INCONSISTENT_INDENT, Stylesheet),
+                    (Less, INCONSISTENT_INDENT, Stylesheet),
+                ],
+            ),
+            CssDiagnosticKind::UnterminatedInterpolation => Disposition::PerDialect(
+                "each preprocessor spells interpolation differently, and plain CSS has none",
+                RecoveryKind::AdvanceToBoundary,
+                &[
+                    (Scss, UNTERMINATED_INTERP_HASH, Stylesheet),
+                    (Sass, UNTERMINATED_INTERP_HASH, Stylesheet),
+                    (Less, UNTERMINATED_INTERP_AT, Stylesheet),
+                    (Stylus, UNTERMINATED_INTERP_DOLLAR, Stylesheet),
+                ],
+            ),
+
+            CssDiagnosticKind::ExpectedDeclarationColon => Disposition::Unreachable(
+                "both rule-body classifiers require the declaration colon BEFORE committing to \
+                 a declaration (`looks_like_declaration` scans for it, the layout parser's \
+                 boundary classifier keys on it), so the colon-missing arms inside \
+                 `parse_declaration` are defensive and no input reaches them",
+            ),
+        }
+    }
+
+    fn diagnostics(
+        input: &str,
+        dialect: CssDialect,
+        entry: CssEntryPoint,
+    ) -> Vec<(CssDiagnosticKind, RecoveryKind)> {
+        let Ok(source) = CssSource::new(Arc::from(input), 0) else {
+            return Vec::new();
+        };
+        parse_lossless(source, dialect, entry, CssParseMode::Recover).map_or_else(
+            |_| Vec::new(),
+            |cst| {
+                cst.diagnostics()
+                    .iter()
+                    .map(|diagnostic| (diagnostic.kind, diagnostic.recovery))
+                    .collect()
+            },
+        )
+    }
+
+    // Walk `CssDiagnosticKind`'s discriminants the same way the CST suite
+    // walks `SyntaxKind`'s. A hand-maintained array would silently omit a
+    // new variant; `from_raw` + `kind as u8 != raw` is the derived walk,
+    // and the exhaustive `disposition` match forces a new variant to be
+    // dispositioned.
+    let every_diagnostic: Vec<CssDiagnosticKind> = {
+        let mut kinds = Vec::new();
+        for raw in 0u8.. {
+            let kind = CssDiagnosticKind::from_raw(raw);
+            if kind as u8 != raw {
+                break;
+            }
+            kinds.push(kind);
+        }
+        kinds
+    };
+    assert!(
+        every_diagnostic.len() >= 15,
+        "the discriminant walk must have found the real variant set, got {}",
+        every_diagnostic.len()
+    );
+
+    // Every fixture named anywhere in the inventory, so `Unreachable` can be
+    // checked against the whole inventory rather than trusted.
+    let mut every_fixture: Vec<(&'static str, CssEntryPoint)> = Vec::new();
+    let mut observed_recoveries: Vec<RecoveryKind> = Vec::new();
+
+    for kind in every_diagnostic.iter().copied() {
+        match disposition(kind) {
+            Disposition::Symmetric(source, entry, recovery) => {
+                every_fixture.push((source, entry));
+                observed_recoveries.push(recovery);
+                for dialect in DIALECTS {
+                    let found = diagnostics(source, dialect, entry);
+                    assert!(
+                        found.contains(&(kind, recovery)),
+                        "{kind:?} is dispositioned Symmetric with recovery {recovery:?}, but \
+                         {dialect:?} reports {found:?} for {source:?}"
+                    );
+                }
+            }
+            Disposition::PerDialect(reason, recovery, cases) => {
+                assert!(!reason.is_empty() && !cases.is_empty(), "{kind:?}");
+                observed_recoveries.push(recovery);
+                let reporting: Vec<CssDialect> =
+                    cases.iter().map(|(dialect, ..)| *dialect).collect();
+                for (dialect, source, entry) in cases.iter().copied() {
+                    every_fixture.push((source, entry));
+                    let found = diagnostics(source, dialect, entry);
+                    assert!(
+                        found.contains(&(kind, recovery)),
+                        "{kind:?} is dispositioned PerDialect with a {dialect:?} fixture \
+                         {source:?} that does not report it with recovery {recovery:?}: {found:?}"
+                    );
+                    for other in DIALECTS.into_iter().filter(|d| !reporting.contains(d)) {
+                        assert!(
+                            !diagnostics(source, other, entry)
+                                .iter()
+                                .any(|(found, _)| *found == kind),
+                            "{other:?} is not listed as reporting {kind:?}, yet it reports one \
+                             for {source:?} — the disposition is stale"
+                        );
+                    }
+                }
+            }
+            Disposition::Unreachable(reason) => {
+                assert!(!reason.is_empty(), "{kind:?}");
+            }
+        }
+    }
+
+    // `Unreachable` is checked against the WHOLE inventory, not trusted.
+    for kind in every_diagnostic.iter().copied() {
+        if !matches!(disposition(kind), Disposition::Unreachable(_)) {
+            continue;
+        }
+        for (source, entry) in every_fixture.iter().copied() {
+            for dialect in DIALECTS {
+                assert!(
+                    !diagnostics(source, dialect, entry)
+                        .iter()
+                        .any(|(found, _)| *found == kind),
+                    "{kind:?} is dispositioned Unreachable, yet {dialect:?} reports one for \
+                     {source:?} — the disposition is stale"
+                );
+            }
+        }
+    }
+
+    // `RecoveryKind` is its own closed set: every variant must actually be
+    // exercised by the inventory above, so a recovery strategy cannot be
+    // added (or silently stop being produced) without a fixture reaching it.
+    for recovery in [
+        RecoveryKind::None,
+        RecoveryKind::AdvanceOneToken,
+        RecoveryKind::AdvanceToBoundary,
+        RecoveryKind::CloseAtEndOfInput,
+    ] {
+        // Exhaustive: a new variant fails to compile here until dispositioned.
+        let must_be_observed = match recovery {
+            RecoveryKind::None
+            | RecoveryKind::AdvanceOneToken
+            | RecoveryKind::AdvanceToBoundary
+            | RecoveryKind::CloseAtEndOfInput => true,
+        };
+        assert_eq!(
+            must_be_observed,
+            observed_recoveries.contains(&recovery),
+            "{recovery:?} is not exercised by the diagnostic inventory"
+        );
+    }
+
+    // `StructureOverflowKind` closes the third recovery surface.
+    for overflow in [
+        StructureOverflowKind::TokenIndex,
+        StructureOverflowKind::NodeIndex,
+        StructureOverflowKind::ElementIndex,
+        StructureOverflowKind::ChildRange,
+        StructureOverflowKind::NestingDepth,
+    ] {
+        // Exhaustive: a new variant fails to compile here until dispositioned.
+        let fixture: Option<&str> = match overflow {
+            StructureOverflowKind::NestingDepth => Some("nesting"),
+            // The index/range overflows need a source with more than `u32`
+            // tokens, nodes, elements or children — orders of magnitude
+            // beyond anything a unit test can allocate. Recorded as a known
+            // hole rather than left unstated.
+            StructureOverflowKind::TokenIndex
+            | StructureOverflowKind::NodeIndex
+            | StructureOverflowKind::ElementIndex
+            | StructureOverflowKind::ChildRange => None,
+        };
+        if fixture.is_none() {
+            continue;
+        }
+        let deep = format!("{}x{}", "(".repeat(129), ")".repeat(129));
+        for dialect in DIALECTS {
+            let source = CssSource::new(Arc::from(deep.as_str()), 0).unwrap();
+            assert!(
+                matches!(
+                    parse_lossless(
+                        source,
+                        dialect,
+                        CssEntryPoint::ComponentValueList,
+                        CssParseMode::Strict,
+                    ),
+                    Err(CssParseFailure::Structure(error)) if error.kind == overflow
+                ),
+                "{dialect:?} must report {overflow:?}"
+            );
+        }
+    }
 
     // Lexical corruption (unterminated comment/string/url) is typed identically in strict mode
     // and explicit identically in recover mode for every dialect.

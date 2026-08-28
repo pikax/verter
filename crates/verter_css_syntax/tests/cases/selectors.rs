@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use crate::selector::parse_selector_structure;
 use verter_css_syntax::{
-    parse_lossless, parse_selector_structure, AttributeMatcher, CombinatorKind, CssDialect,
-    CssEntryPoint, CssParseMode, CssSource, NthExpression, PseudoFunctionKind,
-    SelectorComponentKind, SelectorTrust, TokenFlags, TokenKind,
+    AttributeMatcher, CombinatorKind, CssDialect, CssEntryPoint, CssParseMode, CssSource,
+    NthExpression, PseudoFunctionKind, SelectorComponentKind, SelectorTrust, TokenFlags, TokenKind,
 };
+
+use crate::cst::parse_lossless;
 
 #[test]
 fn wpt_selector_structure_and_spans() {
@@ -728,7 +730,7 @@ fn dialect_interpolations_balance_in_selector_grammar() {
         (CssDialect::Less, ".item-@{name}", "@{name}"),
     ] {
         let source = CssSource::new(Arc::from(input), 31).unwrap();
-        let cst = verter_css_syntax::parse_lossless(
+        let cst = parse_lossless(
             source.clone(),
             dialect,
             verter_css_syntax::CssEntryPoint::SelectorList,
@@ -826,6 +828,230 @@ fn sass_and_stylus_selector_coverage_parity_with_css_and_less() {
         CssDialect::Sass,
         CssDialect::Stylus,
     ];
+
+    // ── the CLOSED selector classification set ──
+    //
+    // Everything below this block is a hand-selected fixture, i.e. a SAMPLE:
+    // a selector construct nobody wrote a fixture for — or one whose
+    // Sass/Stylus classification silently diverges from Css/Less outside the
+    // sampled shapes — coexists with a green run. This block replaces the
+    // sample with the ENUMERATED universe. `SelectorComponentKind`,
+    // `CombinatorKind`, `AttributeMatcher` and `PseudoFunctionKind` are the
+    // closed classification vocabularies `parse_selector_structure` can
+    // produce; every variant of each is dispositioned by an EXHAUSTIVE match
+    // below, so adding one is a compile error (`E0004`) until it is covered.
+    //
+    // Two dispositions: `Symmetric` (all five dialects classify one fixture
+    // identically) and `PerDialect` (each preprocessor's own interpolation
+    // spelling — every dialect that produces the kind names its own fixture,
+    // and every dialect NOT named must not produce it from those fixtures).
+
+    // One rich selector carrying every carrier-neutral construct at once:
+    // a type and namespace selector, an id, classes, all six attribute
+    // matchers, a plain pseudo-class and pseudo-element, every functional
+    // pseudo the classifier names, all five combinators, and a nesting
+    // selector.
+    const RICH: &str = concat!(
+        "p svg|div#i.c[x=\"y\"][a~=b][c|=d][e^=f][g$=h][i*=j]",
+        ":hover::before:is(.x):where(.y):not(.z):has(.w)",
+        ":nth-child(2n):nth-last-child(1):unk(q)",
+        " > .d + .e ~ .f || .g &",
+    );
+
+    enum Coverage {
+        Symmetric(&'static str),
+        PerDialect(&'static str, &'static [(CssDialect, &'static str)]),
+    }
+
+    const INTERPOLATED: &[(CssDialect, &str)] = &[
+        (CssDialect::Scss, ".a-#{$x}"),
+        (CssDialect::Sass, ".a-#{$x}"),
+        (CssDialect::Less, ".a-@{x}"),
+        (CssDialect::Stylus, ".a-${x}"),
+    ];
+    const INTERPOLATION_REASON: &str =
+        "each preprocessor spells interpolation differently, and plain CSS has none — so a \
+         selector component can only be dynamic under a preprocessor dialect";
+
+    fn component_coverage(kind: SelectorComponentKind) -> Coverage {
+        match kind {
+            SelectorComponentKind::Type
+            | SelectorComponentKind::Class
+            | SelectorComponentKind::Id
+            | SelectorComponentKind::Namespace
+            | SelectorComponentKind::Attribute
+            | SelectorComponentKind::Nesting
+            | SelectorComponentKind::PseudoClass
+            | SelectorComponentKind::PseudoElement
+            | SelectorComponentKind::FunctionalPseudo => Coverage::Symmetric(RICH),
+            SelectorComponentKind::DynamicClass | SelectorComponentKind::Interpolation => {
+                Coverage::PerDialect(INTERPOLATION_REASON, INTERPOLATED)
+            }
+        }
+    }
+
+    fn combinator_coverage(kind: CombinatorKind) -> Coverage {
+        match kind {
+            CombinatorKind::Descendant
+            | CombinatorKind::Child
+            | CombinatorKind::NextSibling
+            | CombinatorKind::LaterSibling
+            | CombinatorKind::Column => Coverage::Symmetric(RICH),
+        }
+    }
+
+    fn matcher_coverage(kind: AttributeMatcher) -> Coverage {
+        match kind {
+            AttributeMatcher::Exact
+            | AttributeMatcher::Includes
+            | AttributeMatcher::DashMatch
+            | AttributeMatcher::Prefix
+            | AttributeMatcher::Suffix
+            | AttributeMatcher::Substring => Coverage::Symmetric(RICH),
+        }
+    }
+
+    fn pseudo_coverage(kind: PseudoFunctionKind) -> Coverage {
+        match kind {
+            PseudoFunctionKind::Is
+            | PseudoFunctionKind::Where
+            | PseudoFunctionKind::Not
+            | PseudoFunctionKind::Has
+            | PseudoFunctionKind::NthChild
+            | PseudoFunctionKind::NthLastChild
+            | PseudoFunctionKind::Unknown => Coverage::Symmetric(RICH),
+        }
+    }
+
+    /// Runs one closed vocabulary: for each variant, resolve its disposition
+    /// and check it. `extract` pulls that vocabulary's classifications out of
+    /// a parsed structure.
+    fn check_vocabulary<K: Copy + PartialEq + std::fmt::Debug>(
+        variants: &[K],
+        coverage: impl Fn(K) -> Coverage,
+        extract: impl Fn(&str, CssDialect) -> Option<Vec<K>>,
+        dialects: [CssDialect; 5],
+    ) {
+        for variant in variants.iter().copied() {
+            match coverage(variant) {
+                Coverage::Symmetric(source) => {
+                    let reference = extract(source, CssDialect::Css)
+                        .unwrap_or_else(|| panic!("Css failed to parse {source:?}"));
+                    assert!(
+                        reference.contains(&variant),
+                        "{variant:?} is dispositioned Symmetric over {source:?}, but that \
+                         fixture does not produce it: {reference:?}"
+                    );
+                    for dialect in dialects {
+                        let found = extract(source, dialect)
+                            .unwrap_or_else(|| panic!("{dialect:?} failed to parse {source:?}"));
+                        assert_eq!(
+                            found, reference,
+                            "{dialect:?} diverges from Css on {source:?} — the fixture \
+                             covering {variant:?} is not symmetric"
+                        );
+                    }
+                }
+                Coverage::PerDialect(reason, cases) => {
+                    assert!(!reason.is_empty() && !cases.is_empty(), "{variant:?}");
+                    let producing: Vec<CssDialect> =
+                        cases.iter().map(|(dialect, _)| *dialect).collect();
+                    for (dialect, source) in cases.iter().copied() {
+                        assert!(
+                            extract(source, dialect).is_some_and(|found| found.contains(&variant)),
+                            "{variant:?} is dispositioned PerDialect with a {dialect:?} \
+                             fixture {source:?} that does not produce it"
+                        );
+                        for other in dialects.into_iter().filter(|d| !producing.contains(d)) {
+                            assert!(
+                                !extract(source, other)
+                                    .is_some_and(|found| found.contains(&variant)),
+                                "{other:?} is not listed as producing {variant:?}, yet it \
+                                 produces one from {source:?} — the disposition is stale"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn structure_of(
+        source: &str,
+        dialect: CssDialect,
+    ) -> Option<verter_css_syntax::SelectorStructure> {
+        let css = CssSource::new(Arc::from(source), 0).ok()?;
+        parse_selector_structure(&css, dialect).ok()
+    }
+
+    check_vocabulary(
+        &[
+            SelectorComponentKind::Type,
+            SelectorComponentKind::Class,
+            SelectorComponentKind::DynamicClass,
+            SelectorComponentKind::Id,
+            SelectorComponentKind::Namespace,
+            SelectorComponentKind::Attribute,
+            SelectorComponentKind::Nesting,
+            SelectorComponentKind::PseudoClass,
+            SelectorComponentKind::PseudoElement,
+            SelectorComponentKind::FunctionalPseudo,
+            SelectorComponentKind::Interpolation,
+        ],
+        component_coverage,
+        |source, dialect| {
+            structure_of(source, dialect)
+                .map(|st| st.components().iter().map(|c| c.kind()).collect())
+        },
+        DIALECTS,
+    );
+    check_vocabulary(
+        &[
+            CombinatorKind::Descendant,
+            CombinatorKind::Child,
+            CombinatorKind::NextSibling,
+            CombinatorKind::LaterSibling,
+            CombinatorKind::Column,
+        ],
+        combinator_coverage,
+        |source, dialect| {
+            structure_of(source, dialect)
+                .map(|st| st.combinators().iter().map(|c| c.kind()).collect())
+        },
+        DIALECTS,
+    );
+    check_vocabulary(
+        &[
+            AttributeMatcher::Exact,
+            AttributeMatcher::Includes,
+            AttributeMatcher::DashMatch,
+            AttributeMatcher::Prefix,
+            AttributeMatcher::Suffix,
+            AttributeMatcher::Substring,
+        ],
+        matcher_coverage,
+        |source, dialect| {
+            structure_of(source, dialect)
+                .map(|st| st.attributes().iter().filter_map(|a| a.matcher()).collect())
+        },
+        DIALECTS,
+    );
+    check_vocabulary(
+        &[
+            PseudoFunctionKind::Is,
+            PseudoFunctionKind::Where,
+            PseudoFunctionKind::Not,
+            PseudoFunctionKind::Has,
+            PseudoFunctionKind::NthChild,
+            PseudoFunctionKind::NthLastChild,
+            PseudoFunctionKind::Unknown,
+        ],
+        pseudo_coverage,
+        |source, dialect| {
+            structure_of(source, dialect).map(|st| st.pseudos().iter().map(|p| p.kind()).collect())
+        },
+        DIALECTS,
+    );
 
     // Dialect-specific interpolation syntax parses to the same generic `Interpolation` node
     // that Scss/Less already exercise (verter_css_syntax::SyntaxKind imported below).

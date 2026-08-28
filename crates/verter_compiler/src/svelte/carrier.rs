@@ -563,6 +563,7 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             immutable: None,
             hmr: None,
             compatibility_component_api: None,
+            prepared_styles: opts.prepared_styles.clone(),
         };
         // `opts.source_map` is the neutral OUTPUT-axis map demand: it reaches
         // the css RENDER through `compile_client`'s `want_source_map` (never

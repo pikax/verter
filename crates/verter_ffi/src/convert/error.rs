@@ -37,6 +37,8 @@ pub enum FfiConversionError {
     InvalidPublicApiMode(String),
     /// An opaque block-content token failed its bounded wire-envelope check.
     InvalidBlockContentToken(&'static str),
+    /// Invalid preprocessor-diagnostic `severity` string.
+    InvalidPreprocessorDiagnosticSeverity(String),
 }
 
 impl std::fmt::Display for FfiConversionError {
@@ -98,6 +100,10 @@ impl std::fmt::Display for FfiConversionError {
             Self::InvalidBlockContentToken(field) => {
                 write!(f, "invalid sealed block-content token in '{field}'")
             }
+            Self::InvalidPreprocessorDiagnosticSeverity(v) => write!(
+                f,
+                "invalid preprocessor diagnostic severity '{v}' (expected 'error', 'warning', or 'info')"
+            ),
         }
     }
 }

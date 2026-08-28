@@ -107,6 +107,72 @@ const result = processStyle(css, {
 
 **Returns:** `ProcessStyleResult`
 
+### `transformVueStyle(css, options)`
+
+Runs Vue's v-bind + CSS-Modules + scoped-selector cascade over CSS the caller already treats as plain (already preprocessed, if it originated as SCSS/Less/Stylus).
+
+```ts
+import { transformVueStyle } from "@verter/native";
+
+const result = transformVueStyle(css, {
+  scopeId: "a4f2eed6",
+  scoped: true,
+});
+// result.code — transformed CSS
+// result.sourceMap — JSON source map (only when `sourcemap: true` was requested)
+// result.moduleClasses — CSS module mappings
+// result.vBindVars — replaced v-bind() expressions
+// result.refusals — per-selector soft refusals (empty on ordinary success)
+```
+
+**Parameters:**
+
+- `css` (`string | Buffer`) -- Valid CSS as a string or Buffer (UTF-8 bytes)
+- `options` (`TransformVueStyleOptions`) -- Processing options
+
+**Returns:** `TransformVueStyleResult`
+
+### `prepareStyleForPreprocessor(css, options)`
+
+Rewrites `v-bind()` in AUTHORED (possibly non-CSS) style content, before handing it to an external SCSS/Less/Stylus preprocessor.
+
+```ts
+import { prepareStyleForPreprocessor } from "@verter/native";
+
+const result = prepareStyleForPreprocessor(css, {
+  scopeId: "a4f2eed6",
+  dialect: "scss",
+});
+// result.code — authored code with v-bind() rewritten to var(--scope-hash)
+// result.vBindVars — replaced v-bind() expressions
+```
+
+**Parameters:**
+
+- `css` (`string | Buffer`) -- Authored style content as a string or Buffer (UTF-8 bytes)
+- `options` (`PrepareStyleForPreprocessorOptions`) -- Processing options
+
+**Returns:** `PrepareStyleForPreprocessorResult`
+
+### `analyzeStyle(css, options)`
+
+Read-only style facts — no rewrite. Static class names and CSS-Modules would-be hashed names.
+
+```ts
+import { analyzeStyle } from "@verter/native";
+
+const result = analyzeStyle(css, { scopeId: "a4f2eed6" });
+// result.staticClasses — every complete static class selector
+// result.moduleClasses — CSS-Modules would-be hashed name for each
+```
+
+**Parameters:**
+
+- `css` (`string | Buffer`) -- Valid CSS as a string or Buffer (UTF-8 bytes)
+- `options` (`AnalyzeStyleOptions`) -- Analysis options
+
+**Returns:** `AnalyzeStyleResult`
+
 ### `VerterHost`
 
 In-memory virtual file host for multi-file compilation with caching and dependency tracking. This is the primary API for build tools that need to compile multiple `.vue` files with cross-file awareness.

@@ -151,6 +151,13 @@ impl SyntaxToken {
     }
 
     #[inline]
+    pub const fn is_trivia(self) -> bool {
+        self.kind == TokenKind::Whitespace as u16
+            || self.kind == TokenKind::Comment as u16
+            || self.kind == TokenKind::LineComment as u16
+    }
+
+    #[inline]
     pub const fn contains_escape(self) -> bool {
         self.flags & TokenFlags::CONTAINS_ESCAPE != 0
     }

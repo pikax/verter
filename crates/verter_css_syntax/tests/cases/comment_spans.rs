@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use verter_css_syntax::{CssDialect, CssParseMode, CssSource};
+use verter_css_syntax::{CombinatorKind, CssDialect, CssParseMode, CssSource, StyleStatement};
 use verter_span::Span;
 
 fn parse(css: &str) -> verter_css_syntax::StyleSyntaxIr {
@@ -132,4 +132,53 @@ fn unpaired_cdo_span_reports_a_cdo_opened_inside_a_selector_prelude() {
         .unpaired_cdo_span()
         .expect("an unclosed `<!--` in a selector prelude is still an unpaired CDO");
     assert_eq!(ir.source().slice(span), "<!--");
+}
+
+#[test]
+fn style_ir_keeps_descendant_combinator_distinct_from_compound_classes() {
+    let descendant = parse(".a .b { color: red; }");
+    let compound = parse(".a.b { color: red; }");
+
+    let StyleStatement::Rule(descendant_rule) = &descendant.statements()[0] else {
+        panic!("descendant stylesheet must start with a rule");
+    };
+    let StyleStatement::Rule(compound_rule) = &compound.statements()[0] else {
+        panic!("compound stylesheet must start with a rule");
+    };
+    let descendant_selector = &descendant_rule.selector_list().selectors()[0];
+    let compound_selector = &compound_rule.selector_list().selectors()[0];
+
+    assert_eq!(descendant_selector.compounds().len(), 2);
+    assert_eq!(descendant_selector.combinators().len(), 1);
+    assert_eq!(
+        descendant_selector.combinators()[0].kind(),
+        CombinatorKind::Descendant
+    );
+    assert_eq!(
+        descendant
+            .source()
+            .slice(descendant_selector.combinators()[0].span()),
+        " "
+    );
+
+    assert_eq!(compound_selector.compounds().len(), 1);
+    assert!(
+        compound_selector.combinators().is_empty(),
+        "`.a.b` is one compound, not a descendant pair: {:?}",
+        compound_selector
+            .combinators()
+            .iter()
+            .map(|c| c.kind())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn style_ir_keeps_comment_spans_when_whitespace_is_not_an_ir_token() {
+    let ir = parse("/* a */ .x { color: red; /* b */ }");
+    let texts: Vec<&str> = ir
+        .comment_spans_in(Span::new(0, ir.source().text().len() as u32))
+        .map(|span| ir.source().slice(span))
+        .collect();
+    assert_eq!(texts, vec!["/* a */", "/* b */"]);
 }

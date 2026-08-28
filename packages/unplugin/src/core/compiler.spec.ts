@@ -71,6 +71,52 @@ describe("generateComponentId", () => {
   });
 });
 
+describe("style wrappers", () => {
+  const SOURCE = ".foo { color: red }";
+  // Minimal surgical edit: the scoped-selector rewrite inserts the scope
+  // attribute right after the compound, touching NOTHING else — an exact
+  // byte pin, not a substring search, so a stray reformat/normalization
+  // (e.g. a re-introduced full AST reprint) fails this test.
+  const EXPECTED = ".foo[data-v-abc123] { color: red }";
+
+  it("does not export processStyle", async () => {
+    const mod = await import("./compiler");
+    expect(typeof (mod as { processStyle?: unknown }).processStyle).toBe("undefined");
+  });
+
+  it("exports transformVueStyle as the live native wrapper", async () => {
+    const mod = await import("./compiler");
+    expect(typeof mod.transformVueStyle).toBe("function");
+  });
+
+  it("transformVueStyle scopes with a surgical selector edit", async () => {
+    const mod = await import("./compiler");
+    const result = mod.transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: true,
+    });
+    expect(result.code).toBe(EXPECTED);
+  });
+
+  it("leaves bytes a Vue-owned transform does not touch identical to the authored input", async () => {
+    const mod = await import("./compiler");
+    const result = mod.transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: false,
+    });
+    expect(result.code).toBe(SOURCE);
+  });
+
+  it("transformVueStyle reports an empty refusals list on an ordinary successful transform", async () => {
+    const mod = await import("./compiler");
+    const result = mod.transformVueStyle(SOURCE, {
+      scopeId: "abc123",
+      scoped: true,
+    });
+    expect(result.refusals).toEqual([]);
+  });
+});
+
 describe("host: upsert + getVirtualFile", () => {
   beforeEach(() => {
     resetHost();

@@ -756,11 +756,98 @@ pub fn build_scanned_style_analysis(
         }
     };
 
-    let (css, scanned_pseudos) =
-        match super::style_syntax::project_style(css_content, content_offset, dialect) {
-            Some((css, pseudos)) => (Some(css), pseudos),
-            None => (None, Vec::new()),
-        };
+    match super::style_syntax::parse_style_block(css_content, content_offset, dialect) {
+        Some(ir) => build_scanned_style_analysis_from_ir(
+            lang,
+            &ir,
+            vue_input,
+            scoped,
+            is_module,
+            module_name,
+            content_offset,
+        ),
+        None => build_incomplete_style_analysis(
+            lang,
+            vue_input,
+            scoped,
+            is_module,
+            module_name,
+            content_offset,
+        ),
+    }
+}
+
+/// Parse a native style block once. The caller retains the IR and projects
+/// facts through [`build_scanned_style_analysis_from_ir`].
+pub fn parse_style_ir_for_analysis(
+    css_content: &str,
+    content_offset: u32,
+    lang: StyleAnalysisLang,
+) -> Option<verter_css_syntax::StyleSyntaxIr> {
+    let dialect = match lang {
+        StyleAnalysisLang::Css => verter_css_syntax::CssDialect::Css,
+        StyleAnalysisLang::Scss => verter_css_syntax::CssDialect::Scss,
+        StyleAnalysisLang::Sass => verter_css_syntax::CssDialect::Sass,
+        StyleAnalysisLang::Less => verter_css_syntax::CssDialect::Less,
+        StyleAnalysisLang::Stylus => verter_css_syntax::CssDialect::Stylus,
+        StyleAnalysisLang::Unknown => return None,
+    };
+    super::style_syntax::parse_style_block(css_content, content_offset, dialect)
+}
+
+/// Typed incomplete/uncertain style facts: no IR and no second parse.
+/// Unknown dialects stay `ProcessedContentRequired`; a known dialect whose
+/// parse produced no IR stays native with `css: None`.
+pub fn build_incomplete_style_analysis(
+    lang: StyleAnalysisLang,
+    vue_input: VueStyleInput,
+    scoped: bool,
+    is_module: bool,
+    module_name: Option<&str>,
+    content_offset: u32,
+) -> StyleBlockAnalysis {
+    if lang == StyleAnalysisLang::Unknown {
+        return build_preprocessor_style_analysis(
+            lang,
+            vue_input,
+            scoped,
+            is_module,
+            module_name,
+            content_offset,
+        );
+    }
+    let v_binds = convert_v_binds(&vue_input);
+    let special_pseudos = convert_special_pseudos(&vue_input);
+    let flags = derive_flags(scoped, is_module, &v_binds, &special_pseudos, None);
+    StyleBlockAnalysis {
+        lang,
+        scoped,
+        is_module,
+        module_name: module_name.map(|s| s.to_string()),
+        block_ref: None,
+        block_token: None,
+        source_space_token: None,
+        content_offset,
+        v_binds,
+        special_pseudos,
+        css: None,
+        content_availability: BlockContentAvailability::NativeAvailable,
+        flags: flags.bits(),
+    }
+}
+
+/// Project semantic style facts from an already-parsed syntax IR.
+pub fn build_scanned_style_analysis_from_ir(
+    lang: StyleAnalysisLang,
+    ir: &verter_css_syntax::StyleSyntaxIr,
+    vue_input: VueStyleInput,
+    scoped: bool,
+    is_module: bool,
+    module_name: Option<&str>,
+    content_offset: u32,
+) -> StyleBlockAnalysis {
+    let (css, scanned_pseudos) = super::style_syntax::project_style_from_ir(ir);
+    let css = Some(css);
 
     let v_binds = convert_v_binds(&vue_input);
     let mut special_pseudos = convert_special_pseudos(&vue_input);
@@ -957,8 +1044,21 @@ pub fn extract_var_references(
 /// Parse a complete static CSS selector into the legacy semantic matcher shape.
 /// Dynamic, recovered, and evaluation-dependent selectors fail closed.
 pub fn parse_selector(selector_text: &str) -> Option<StructuredSelector> {
+    PARSE_SELECTOR_INVOCATIONS.with(|count| count.set(count.get() + 1));
     super::style_syntax::parse_selector_authority(selector_text)
 }
+
+thread_local! {
+    static PARSE_SELECTOR_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Per-thread count of [`parse_selector`] executions.
+/// The CSS selector-match boundary must not increment this.
+#[must_use]
+pub fn parse_selector_thread_invocations() -> u64 {
+    PARSE_SELECTOR_INVOCATIONS.with(std::cell::Cell::get)
+}
+
 /// Compute specificity from a `StructuredSelector`.
 pub fn compute_structured_specificity(selector: &StructuredSelector) -> (u32, u32, u32) {
     let mut a: u32 = 0; // IDs

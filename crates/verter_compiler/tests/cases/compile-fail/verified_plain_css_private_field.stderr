@@ -1,0 +1,5 @@
+error[E0451]: field `ir` of struct `VerifiedPlainCss` is private
+ --> tests/cases/compile-fail/verified_plain_css_private_field.rs:5:24
+  |
+5 |     VerifiedPlainCss { ir }
+  |                        ^^ private field

@@ -465,10 +465,10 @@ trace, not by reading.
 - **What it asserts:** over the sealed round-trip, a byte-changing preprocessor
   result is a distinct content identity adding exactly one further parse, and the
   worst case — a non-CSS dialect with all three Vue stages present and rewriting
-  — totals exactly five (`J1.md:335`).
+  — totals exactly four (`J1.md:335`).
 - **Why an existing gate does not reach it:** A14 proves the boundary's shape and
   type-state, not a count; A10i counts only the Vue cascade.
-- **Applied mutations:** parse the preprocessed result twice; and add a fourth
+- **Applied mutations:** parse the preprocessed result twice; and add a fifth
   parse to the worst-case path. Each must redden.
 
 ### 3.1 What building the gates corrected in this contract

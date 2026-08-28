@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `verter_css_syntax::parse_lossless`
+ --> tests/compile-fail/parse_lossless_crate_root.rs:1:5
+  |
+1 | use verter_css_syntax::parse_lossless;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `parse_lossless` in the root

@@ -43,7 +43,8 @@ use crate::parser::Syntax;
 use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
-    analyze_css_module_classes, run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
+    analyze_css_module_classes, complete_static_class_names, prepared_style_for_sealed_slot,
+    run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -58,7 +59,7 @@ use helpers::{empty_sfc_script_block, extract_attrs, extract_block_ranges};
 use macro_scope_check::collect_invalid_options_scope_diagnostics;
 use macro_semantic_diagnostics::{collect_macro_semantic_diagnostics, tsc_generation_diagnostic};
 
-fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
+pub(crate) fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
     match lang {
         None | Some(StyleLang::Css) => Some(CssDialect::Css),
         Some(StyleLang::Scss) => Some(CssDialect::Scss),
@@ -67,6 +68,20 @@ fn style_dialect(lang: Option<StyleLang>) -> Option<CssDialect> {
         Some(StyleLang::Stylus) => Some(CssDialect::Stylus),
         Some(StyleLang::Unknown) => None,
     }
+}
+
+/// Dialect used to read class names for editor completions.
+///
+/// Deliberately more tolerant than [`style_dialect`]: an unrecognised `lang`
+/// still yields class-name completions, read under the base CSS grammar,
+/// because the completion surface is advisory and a class selector is spelled
+/// the same way in every dialect this compiler accepts. `style_dialect`
+/// returns `None` for an unrecognised `lang` so that the rewriting pipeline
+/// refuses content whose grammar it cannot claim to understand; extraction
+/// carries no such risk, and returning `None` here would silently drop every
+/// completion for a block the editor can still usefully complete.
+fn class_extraction_dialect(lang: Option<StyleLang>) -> CssDialect {
+    style_dialect(lang).unwrap_or(CssDialect::Css)
 }
 
 fn push_style_rewrite_diagnostic(
@@ -769,6 +784,7 @@ fn derive_legacy_vue_options(
         template_used_vars: execution_inputs.template_used_vars.clone(),
         runtime_template_hole: execution_inputs.runtime_template_hole,
         runtime_inline_template_chunk: execution_inputs.runtime_inline_template_chunk,
+        prepared_styles: execution_inputs.prepared_styles.clone(),
     };
 
     (codegen_options, resolved_flags)
@@ -883,65 +899,87 @@ fn compile_inner(
     let mut total_style_duration_ms: f64 = 0.0;
 
     if options.target.needs_style() {
-        for style in parsed.style_nodes() {
+        for (style_index, style) in parsed.style_nodes().iter().enumerate() {
             let style_start = Instant::now();
             let mut style_module_classes = Vec::new();
             let style_code = if let Some(content) = &style.content {
                 let style_source = &input[content.start as usize..content.end as usize];
-                let dialect = style_dialect(style.lang);
-                let source_name = options.filename.as_deref().unwrap_or("<style>");
-                let authored_dialect = dialect.unwrap_or(CssDialect::Css);
+                match style_dialect(style.lang) {
+                    None => {
+                        // Rewrite must refuse an unrecognized lang rather
+                        // than parse the bytes as CSS.
+                        all_diagnostics.push(Diagnostic::error_with_message(
+                            "style-planner",
+                            CompilerErrorCode::XCssParseError,
+                            "style rewrite refused unknown dialect; expected css, scss, sass, less, or stylus",
+                            *content,
+                        ));
+                        style_source.to_string()
+                    }
+                    Some(authored_dialect) => {
+                        let source_name = options.filename.as_deref().unwrap_or("<style>");
 
-                // The CSS-Modules byte-level class-name *rewrite* stays
-                // CSS-only (row 19, `css/modules.rs`, untouched); only that
-                // one stage is conditioned on the resolved dialect.
-                let cascade_module = style.module && dialect == Some(CssDialect::Css);
-                let cascade_input = AuthoredStyleInput::new(
-                    style_source,
-                    authored_dialect,
-                    source_name,
-                    "standalone:carrier",
-                    "standalone:carrier-bytes",
-                );
-
-                let outcome = run_vue_style_cascade(
-                    cascade_input,
-                    scope_id_str,
-                    cascade_module,
-                    style.scoped,
-                );
-                all_v_bind_vars.extend(outcome.facts.v_bind_vars);
-                for refusal in outcome
-                    .facts
-                    .refusals
-                    .iter()
-                    .chain(outcome.stage_failures.iter())
-                {
-                    push_style_rewrite_diagnostic(&mut all_diagnostics, *content, refusal);
-                }
-                style_module_classes = outcome.facts.module_classes;
-                let rewritten = outcome.code;
-
-                // CSS-Modules class *analysis* is dialect-unconditional
-                // (A10a): for the 4 RECOGNIZED non-CSS dialects the
-                // byte-level rewrite above never runs against (SCSS/Sass/
-                // Less/Stylus), still analyze the authored `$style` class
-                // surface so IDE/consumer metadata is populated even though
-                // the emitted CSS text itself is left for external
-                // preprocessing to rewrite. `dialect == None` (an
-                // unrecognized `lang` attribute) is intentionally excluded —
-                // that case has no native-dialect analysis to run, matching
-                // its pre-existing "no module handling at all" behavior.
-                if style.module && dialect.is_some_and(|d| d != CssDialect::Css) {
-                    match analyze_css_module_classes(cascade_input, scope_id_str) {
-                        Ok(classes) => style_module_classes = classes,
-                        Err(error) => {
-                            push_style_rewrite_diagnostic(&mut all_diagnostics, *content, &error);
+                        // The CSS-Modules byte-level class-name rewrite stays
+                        // CSS-only; only that one stage is conditioned on the
+                        // resolved dialect.
+                        let cascade_module = style.module && authored_dialect == CssDialect::Css;
+                        let mut cascade_input = AuthoredStyleInput::new(
+                            style_source,
+                            authored_dialect,
+                            source_name,
+                            "standalone:carrier",
+                            "standalone:carrier-bytes",
+                        );
+                        if let Some(prepared) = prepared_style_for_sealed_slot(
+                            None,
+                            &verter_options.prepared_styles,
+                            style_index,
+                            style_source,
+                        ) {
+                            cascade_input = cascade_input.with_prepared(prepared.ir());
                         }
+
+                        let outcome = run_vue_style_cascade(
+                            cascade_input,
+                            scope_id_str,
+                            cascade_module,
+                            style.scoped,
+                            verter_options.source_map,
+                        );
+                        all_v_bind_vars.extend(outcome.facts.v_bind_vars);
+                        for refusal in outcome
+                            .facts
+                            .refusals
+                            .iter()
+                            .chain(outcome.stage_failures.iter())
+                        {
+                            push_style_rewrite_diagnostic(&mut all_diagnostics, *content, refusal);
+                        }
+                        style_module_classes = outcome.facts.module_classes;
+
+                        // CSS-Modules class *analysis* is dialect-unconditional
+                        // (A10a): for the 4 RECOGNIZED non-CSS dialects the
+                        // byte-level rewrite above never runs against (SCSS/Sass/
+                        // Less/Stylus), still analyze the authored `$style` class
+                        // surface so IDE/consumer metadata is populated even though
+                        // the emitted CSS text itself is left for external
+                        // preprocessing to rewrite.
+                        if style.module && authored_dialect != CssDialect::Css {
+                            match analyze_css_module_classes(cascade_input, scope_id_str) {
+                                Ok(classes) => style_module_classes = classes,
+                                Err(error) => {
+                                    push_style_rewrite_diagnostic(
+                                        &mut all_diagnostics,
+                                        *content,
+                                        &error,
+                                    );
+                                }
+                            }
+                        }
+
+                        outcome.code
                     }
                 }
-
-                rewritten
             } else {
                 String::new()
             };
@@ -1744,8 +1782,9 @@ fn compile_inner(
             .filter(|s| s.module)
             .filter_map(|s| {
                 let content_span = s.content.as_ref()?;
+                let dialect = class_extraction_dialect(s.lang);
                 let css_content = &input[content_span.start as usize..content_span.end as usize];
-                let class_names = crate::css::extract_css_class_names(css_content);
+                let class_names = complete_static_class_names(css_content, dialect);
                 if class_names.is_empty() {
                     return None;
                 }
@@ -2425,6 +2464,7 @@ pub(crate) mod legacy_test_support {
             template_used_vars: verter_options.template_used_vars.clone(),
             runtime_template_hole: verter_options.runtime_template_hole,
             runtime_inline_template_chunk: verter_options.runtime_inline_template_chunk,
+            prepared_styles: Vec::new(),
         }
     }
 

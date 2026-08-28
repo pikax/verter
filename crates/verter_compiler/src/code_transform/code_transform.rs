@@ -7,6 +7,32 @@ use super::chunk::Chunk;
 use crate::cursor::position::PositionResolver;
 use oxc_allocator::Allocator;
 
+#[cfg(test)]
+thread_local! {
+    static CODE_TRANSFORM_CONSTRUCTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CODE_TRANSFORM_BUILD_STRING_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn code_transform_construction_count() -> usize {
+    CODE_TRANSFORM_CONSTRUCTIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_code_transform_construction_count() {
+    CODE_TRANSFORM_CONSTRUCTIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn code_transform_build_string_call_count() -> usize {
+    CODE_TRANSFORM_BUILD_STRING_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_code_transform_build_string_call_count() {
+    CODE_TRANSFORM_BUILD_STRING_CALLS.with(|count| count.set(0));
+}
+
 /// Result of scanning chunks for a target position.
 #[allow(dead_code)] // Used by move_slice() which is test/API only for now
 enum SplitResult {
@@ -189,16 +215,25 @@ fn push_preserved_source_ranges(
 impl<'a> CodeTransform<'a> {
     /// Create a new CodeTransform from source text and an allocator
     pub fn new(source: &'a str, allocator: &'a Allocator) -> Self {
-        let len = source.len() as u32;
-
-        // Pre-allocate chunks capacity based on source size.
+        let len = source.len();
         // Empirically, kitchen-sink.vue (27370 bytes) produces ~2098 final chunks.
         // Using /13 avoids a Vec reallocation for typical large files.
-        let estimated_chunks = if len > 0 {
-            (len as usize / 13).max(64)
-        } else {
-            0
-        };
+        let estimated_chunks = if len > 0 { (len / 13).max(64) } else { 0 };
+        Self::with_chunk_capacity(source, allocator, estimated_chunks)
+    }
+
+    /// Like [`new`](Self::new) but with an explicit chunk-buffer size. Style
+    /// rewrites know their edit count and would otherwise pay the template-sized
+    /// 64-slot floor on a one-insert rule.
+    pub(crate) fn with_chunk_capacity(
+        source: &'a str,
+        allocator: &'a Allocator,
+        estimated_chunks: usize,
+    ) -> Self {
+        #[cfg(test)]
+        CODE_TRANSFORM_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
+
+        let len = source.len() as u32;
         let mut chunks = Vec::with_capacity(estimated_chunks);
         if len > 0 {
             chunks.push(Chunk::from_source(0, len));
@@ -1406,6 +1441,9 @@ impl<'a> CodeTransform<'a> {
     #[must_use]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn build_string(&self) -> String {
+        #[cfg(test)]
+        CODE_TRANSFORM_BUILD_STRING_CALLS.with(|count| count.set(count.get() + 1));
+
         // Capacity from tracked delta — avoids a full scan of all chunks.
         let capacity = (self.original.len() as i64 + self.output_delta) as usize
             + self.intro.len()

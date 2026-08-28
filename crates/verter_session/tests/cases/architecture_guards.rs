@@ -9194,6 +9194,10 @@ pub(crate) mod foundations_guards {
     /// `WorkspaceAccess` (or a deletion of the callsite).
     pub const D14_ALLOW_LIST: &[(&str, &str)] = &[
         (
+            "crates/verter_bench/src/css_gate.rs",
+            "Measurement-runner provenance probe (dev/CI-only bench crate, never published). The SOLE `std::fs::` call reads `/proc/loadavg` on Linux to stamp system load into a captured measurement record, mirroring the macOS branch that shells out to `sysctl -n vm.loadavg`. A kernel-synthesised pseudo-file describing the MACHINE, not workspace, semantic, overlay or VFS state — and routing it through the disk boundary would key a path cache on a file whose contents differ on every read. The runner's own artifact I/O (reading a committed baseline, writing a captured record) routes through `NativeFs` and is deliberately NOT covered by this entry.",
+        ),
+        (
             "crates/verter_session/src/typeinfo/oracle_core/driver.rs",
             "TS7 oracle harness consumption driver (`#[cfg(test)] mod typeinfo_tests`) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime `std::fs::read`, the mechanism the locked design (docs/arch/u0-oracle-harness-design.md §Q1) mandates and the `snapshot_loading_is_runtime_fs` guard pins. Not a NativeFs/VFS disk-boundary bypass — it reads in-repo test fixtures, never workspace/semantic state.",
         ),

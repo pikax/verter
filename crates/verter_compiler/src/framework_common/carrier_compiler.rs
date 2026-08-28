@@ -217,6 +217,41 @@ impl RuntimeOutputDescriptor {
         }
     }
 
+    /// Provenance for a rewrite whose caller did not request a source map.
+    ///
+    /// Skips SHA-256 of the rewritten bytes and of the map payload. Isolated
+    /// style stages use this when `want_source_map` is false so a caller that
+    /// only observes rewritten code or facts does not pay identity hashing.
+    #[must_use]
+    pub fn generated_without_map(
+        utf8_byte_len: u64,
+        source_space_token: &str,
+        content_artifact_token: &str,
+    ) -> Self {
+        Self {
+            source_space: OutputSourceSpaceDescriptor {
+                token: source_space_token.to_string(),
+                kind: OutputSourceSpaceKind::DerivedTransform,
+                source_token: content_artifact_token.to_string(),
+                content_hash: String::new(),
+                utf8_byte_len,
+            },
+            content_artifact: OutputContentArtifactDescriptor {
+                token: String::new(),
+                source_space_token: source_space_token.to_string(),
+                content_hash: String::new(),
+                utf8_byte_len,
+            },
+            source_map: QualifiedOutputSourceMap {
+                map_hash: String::new(),
+                destination_space_token: source_space_token.to_string(),
+                declared_space_tokens: vec![source_space_token.to_string()],
+                raw_map: None,
+                fidelity: SourceMapFidelity::Exact,
+            },
+        }
+    }
+
     /// Describe byte-identical output that remains in an admitted input space.
     #[must_use]
     pub fn identity(code: &str, source_space_token: &str, content_artifact_token: &str) -> Self {
@@ -423,6 +458,9 @@ pub struct RuntimeCompileOptions {
     /// execution-input carrier: excluded from `CompileRequest` identity,
     /// but no longer erased — a Svelte carrier simply ignores it.
     pub vue_facts: Option<crate::compile::types::VueExecutionInputs>,
+    /// Host-retained parsed style IRs, one slot per style block in inventory
+    /// order. Excluded from request/cache identity.
+    pub prepared_styles: Vec<Option<crate::style_planner::PreparedStyleIr>>,
 }
 
 impl Default for RuntimeCompileOptions {
@@ -466,6 +504,7 @@ impl Default for RuntimeCompileOptions {
             block_content: RuntimeBlockContentInputs::default(),
             inline: None,
             vue_facts: None,
+            prepared_styles: Vec::new(),
         }
     }
 }
@@ -482,6 +521,8 @@ pub struct RuntimeBlockContentInput {
     pub content_artifact_token: String,
     /// Host-minted source space containing `code`.
     pub source_space_token: String,
+    /// Parsed IR for these exact bytes, when the host admitted one.
+    pub parsed: Option<crate::style_planner::PreparedStyleIr>,
 }
 
 /// Parser-local projection of validated block content. Ordering exists only at

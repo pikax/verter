@@ -5,7 +5,7 @@ xtask = "run --package xtask --"
 # getrandom 0.3.4+ accepts the `getrandom_backend="wasm_js"` cfg form
 # for selecting the wasm32-unknown-unknown random backend. The
 # previous `getrandom_wasm_js` cfg was specific to a much older
-# getrandom 0.3 release. Lightningcss → ahash → getrandom 0.3
+# getrandom 0.3 release. `verter_wasm`'s own `getrandom` dependency
 # requires this for wasm builds.
 rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
 
