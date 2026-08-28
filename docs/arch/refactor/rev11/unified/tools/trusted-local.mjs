@@ -14,6 +14,7 @@ const EFFORTS = ["low", "medium", "high"];
 const ROLES = ["implementation", "review", "verification", "confirmation"];
 const POLICY_VERSION = "trusted-local-effort/v1";
 const ANCHOR_SCHEMA = 1;
+export const ARCHITECT_MANDATE = 'best-of-the-best durable design — no shortcuts, no compromises, no "good enough"; breaking changes are ALLOWED and expected where they yield the correct long-term design; performance is a first-class concern (allocation, cache, warm-state, hot-path cost, not just correctness).';
 
 function sha256(bytes) {
   return crypto.createHash("sha256").update(bytes).digest("hex");
@@ -59,6 +60,52 @@ function nodeSignalTier(node) {
     rules.push(node.risk === "medium" ? "risk:medium:medium" : `kind:${node.kind}:medium`);
   }
   return { tier, rules: rules.sort() };
+}
+
+export function reviewPolicyForNode(node) {
+  assertObject(node, "node");
+  const riskBand = nodeSignalTier(node).tier;
+  const defaults = riskBand === "high"
+    ? ["adversarial", "conformance", node.specialist_review_lens || "context-specific"]
+    : riskBand === "medium" ? ["adversarial", "conformance"] : ["adversarial"];
+  const reviewLenses = node.review_lenses ? [...node.review_lenses] : defaults;
+  if (new Set(reviewLenses).size !== reviewLenses.length || reviewLenses.some((lens) => typeof lens !== "string" || !lens)) throw new Error("review lenses must be distinct non-empty strings");
+  if (reviewLenses[0] !== "adversarial") throw new Error("every review policy must lead with the adversarial lens");
+  if (riskBand === "high" && (reviewLenses.length !== 3 || reviewLenses[1] !== "conformance")) throw new Error("high-risk review requires adversarial, conformance, and one specialist lens");
+  if (riskBand === "medium" && (reviewLenses.length < 1 || reviewLenses.length > 2)) throw new Error("medium-risk review requires one or two lenses");
+  if (riskBand === "low" && reviewLenses.length !== 1) throw new Error("low-risk review requires one adversarial lens");
+  return {
+    risk_band: riskBand,
+    review_lenses: reviewLenses,
+    confirmation: riskBand === "high" ? "independent-full" : riskBand === "medium" ? "targeted" : "not-required",
+  };
+}
+
+export function architectPromptFor({ type, nodeId, roundId, roundOrdinal, question = "" }) {
+  const questions = {
+    "pre-block": "What ruling, if any, is needed before this block can proceed?",
+    "round-two-cap": "Should review/fix work continue, and if so what exact additional-round cap applies?",
+    "over-five-decomposition": "Should we break this work into smaller independently reviewable sub-subblocks?",
+    "architecture-ruling-change": "What durable architecture ruling should govern this proposed change?",
+    "conformance-deviation": "Is this potentially beneficial design deviation compatible with the grand design, or should another non-listed course be taken?",
+    "landing-confirmation": "Does the immutable target satisfy the architecture required for landing or confirmation?",
+  };
+  if (!Object.hasOwn(questions, type)) throw new Error(`unknown Architect prompt type ${type}`);
+  return {
+    schema: 1,
+    type: `trusted-local-architect-${type}-prompt`,
+    node_id: nodeId,
+    round_id: roundId,
+    round_ordinal: roundOrdinal,
+    provider: "openai",
+    tool: "codex",
+    model: "gpt-5.6-sol",
+    reasoning_effort: "xhigh",
+    neutrality: "evaluate the verified evidence without presuming the listed choices exhaust the sound options",
+    options_non_exhaustive: true,
+    mandate: ARCHITECT_MANDATE,
+    question: question || questions[type],
+  };
 }
 
 export function assessNodeEffort(node, overrides = {}) {
@@ -247,6 +294,7 @@ function validateNode(node) {
   if (!Array.isArray(node.conflict_domains) || !node.conflict_domains.length) throw new Error("node conflict domains are required");
   for (const domain of node.conflict_domains) assertIdentity(domain, "conflict domain");
   assessNodeEffort(node);
+  reviewPolicyForNode(node);
 }
 
 function packetForLease(lease) {
@@ -260,6 +308,7 @@ function packetForLease(lease) {
     holder: lease.holder,
     candidate: lease.candidate,
     effort_policy: lease.effort_policy,
+    review_policy: lease.review_policy,
     task_briefs: lease.task_briefs,
   });
 }
@@ -268,7 +317,7 @@ function validatePacket(packetBytes, lease) {
   const packet = JSON.parse(packetBytes);
   if (packet.schema !== 1 || packet.type !== "trusted-local-work-packet" || packet.assurance !== "operator-attested-local-consistency") throw new Error("generated work packet is invalid");
   for (const key of ["lease_id", "round_id", "node_id", "holder"]) if (packet[key] !== lease[key]) throw new Error(`generated work packet ${key} mismatch`);
-  if (JSON.stringify(packet.candidate) !== JSON.stringify(lease.candidate) || JSON.stringify(packet.effort_policy) !== JSON.stringify(lease.effort_policy) || JSON.stringify(packet.task_briefs) !== JSON.stringify(lease.task_briefs)) throw new Error("generated work packet binding mismatch");
+  if (JSON.stringify(packet.candidate) !== JSON.stringify(lease.candidate) || JSON.stringify(packet.effort_policy) !== JSON.stringify(lease.effort_policy) || JSON.stringify(packet.review_policy) !== JSON.stringify(lease.review_policy) || JSON.stringify(packet.task_briefs) !== JSON.stringify(lease.task_briefs)) throw new Error("generated work packet binding mismatch");
 }
 
 function brief(role, lease) {
@@ -286,13 +335,19 @@ function brief(role, lease) {
     minimum_effort: lease.effort_policy.minima[role],
     effective_effort: lease.effort_policy.effective[role],
     freshness: "fresh-distinct-task-required",
+    review_policy: lease.review_policy,
+    worktree_policy: role === "review"
+      ? "read-only inspection of the frozen train worktree; a write-enabled reviewer must use a disposable worktree from the frozen SHA"
+      : "write only in the task's assigned worktree and report cleanup when it becomes disposable",
+    external_status: "terse-honest-summary",
   });
 }
 
-function buildLease({ node, candidate, holder, roundOrdinal, runtimeRoot, overrides, lineageGeneration, continuity }) {
+function buildLease({ node, candidate, holder, roundOrdinal, reviewCycleOrdinal, runtimeRoot, overrides, lineageGeneration, continuity }) {
   const roundId = continuity === "unknown/lost" ? `${node.id}-L${lineageGeneration}-R${roundOrdinal}` : `${node.id}-R${roundOrdinal}`;
   const leaseId = `${node.id}-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
   const effortPolicy = effortPolicyFor(node, overrides);
+  const reviewPolicy = reviewPolicyForNode(node);
   const taskBriefs = Object.fromEntries(ROLES.map((role) => [role, `trusted-local/briefs/${roundId}--${role}.json`]));
   return {
     schema: 1,
@@ -301,13 +356,15 @@ function buildLease({ node, candidate, holder, roundOrdinal, runtimeRoot, overri
     lease_id: leaseId,
     round_id: roundId,
     round_ordinal: roundOrdinal,
+    review_cycle_ordinal: reviewCycleOrdinal,
     node_id: node.id,
     conflict_domains: [...node.conflict_domains].sort(),
     holder,
     runtime_root: path.resolve(runtimeRoot),
     candidate: { ...candidate },
     effort_policy: effortPolicy,
-    review_lenses: node.review_lenses || ["adversarial", "compatibility", "wire-public"],
+    review_policy: reviewPolicy,
+    review_lenses: reviewPolicy.review_lenses,
     task_briefs: taskBriefs,
     status: "ACTIVE",
     renewed_from: "",
@@ -375,15 +432,17 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
       const priorRounds = Object.values(anchor.rounds).filter((round) => round.node_id === node.id);
       const unresolvedEscalation = priorRounds.find((round) => round.architect_escalation_required && !round.architect_decision);
       if (unresolvedEscalation) throw new Error(`${node.id} requires the neutral Architect decision after round-two P0/P1 findings`);
-      const architectLimit = priorRounds.filter((round) => round.architect_decision).sort((a, b) => b.ordinal - a.ordinal)[0];
+      const architectLimit = priorRounds.filter((round) => round.architect_decision).sort((a, b) => (b.review_cycle_ordinal || 0) - (a.review_cycle_ordinal || 0))[0];
       if (architectLimit?.architect_decision.decision === "STOP") throw new Error(`${node.id} was stopped by the neutral Architect`);
-      if (architectLimit && (anchor.next_round_by_node[node.id] || 1) > architectLimit.ordinal + architectLimit.architect_decision.additional_round_cap) throw new Error(`${node.id} exceeded the Architect-authorized additional-round cap`);
+      const completedReviewCycles = priorRounds.filter((round) => round.review_recorded === true).length;
+      if (architectLimit && completedReviewCycles >= architectLimit.review_cycle_ordinal + architectLimit.architect_decision.additional_round_cap) throw new Error(`${node.id} exceeded the Architect-authorized additional-round cap`);
       for (const lease of Object.values(anchor.leases)) if (lease.status === "ACTIVE") {
         if (lease.node_id === node.id) throw new Error(`active node ${node.id} already has a lease`);
         if (lease.conflict_domains.some((domain) => node.conflict_domains.includes(domain))) throw new Error(`conflict domain already held: ${lease.conflict_domains.filter((domain) => node.conflict_domains.includes(domain)).join(",")}`);
       }
       const ordinal = anchor.next_round_by_node[node.id] || 1;
-      const lease = buildLease({ node, candidate, holder, roundOrdinal: ordinal, runtimeRoot: resolvedRuntime, overrides: effortOverrides, lineageGeneration: anchor.lineage_generation, continuity: anchor.continuity });
+      const reviewCycleOrdinal = completedReviewCycles + 1;
+      const lease = buildLease({ node, candidate, holder, roundOrdinal: ordinal, reviewCycleOrdinal, runtimeRoot: resolvedRuntime, overrides: effortOverrides, lineageGeneration: anchor.lineage_generation, continuity: anchor.continuity });
       const packet = Buffer.from(packetForLease(lease));
       validatePacket(packet, lease); // Packet validation precedes publication of lease or anchor.
       const writes = [];
@@ -394,7 +453,7 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
       writes.push({ file: breadcrumbPath(resolvedRuntime), mode: "replace", bytes: Buffer.from(exactJson({ schema: 1, lineage_id: anchor.lineage_id, lineage_generation: anchor.lineage_generation })) });
       anchor.runtimes[resolvedRuntime] = { lineage_id: anchor.lineage_id, registered_event: anchor.next_event_ordinal };
       anchor.leases[lease.lease_id] = lease;
-      anchor.rounds[lease.round_id] = { node_id: node.id, ordinal, lease_id: lease.lease_id, status: "ACTIVE" };
+      anchor.rounds[lease.round_id] = { node_id: node.id, ordinal, review_cycle_ordinal: reviewCycleOrdinal, lease_id: lease.lease_id, status: "ACTIVE" };
       anchor.next_round_by_node[node.id] = ordinal + 1;
       anchor.next_event_ordinal += 1;
       return { anchor, writes, result: lease };
@@ -437,10 +496,28 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
       const lease = anchor.leases[leaseId]; const round = lease && anchor.rounds[lease.round_id];
       if (!lease || lease.runtime_root !== resolvedRuntime || lease.holder !== holder || lease.status !== "ACTIVE" || round?.status !== "ACTIVE" || round.lease_id !== leaseId) throw new Error("finalization requires the current exact active lease and holder");
       if (lease.finalization) throw new Error("candidate is already finalized");
-      const finalization = { schema: 1, type: "trusted-local-finalization", assurance: "operator-attested-local-consistency", finalization_id: `${lease.round_id}--final`, round_id: lease.round_id, lease_id: leaseId, node_id: lease.node_id, holder, candidate: { ...candidate }, effort_policy: lease.effort_policy };
+      const reviewTarget = {
+        schema: 1,
+        type: "trusted-local-frozen-review-target",
+        round_id: lease.round_id,
+        lease_id: leaseId,
+        node_id: lease.node_id,
+        candidate_start_sha: lease.candidate.sha,
+        candidate_start_tree: lease.candidate.tree,
+        candidate_sha: candidate.sha,
+        candidate_tree: candidate.tree,
+        candidate_ref: candidate.ref,
+        frozen_worktree: candidate.worktree,
+        mutation_policy: "read-only-until-round-invalidated",
+      };
+      const reviewTargetSha256 = sha256(Buffer.from(exactJson(reviewTarget)));
+      const finalization = { schema: 1, type: "trusted-local-finalization", assurance: "operator-attested-local-consistency", finalization_id: `${lease.round_id}--final`, round_id: lease.round_id, lease_id: leaseId, node_id: lease.node_id, holder, candidate: { ...candidate }, effort_policy: lease.effort_policy, review_target: reviewTarget, review_target_sha256: reviewTargetSha256 };
       lease.finalization = finalization;
       anchor.next_event_ordinal += 1;
-      return { anchor, writes: [{ file: path.join(resolvedRuntime, "trusted-local", "finalizations", `${finalization.finalization_id}.json`), bytes: Buffer.from(exactJson(finalization)) }], result: finalization };
+      return { anchor, writes: [
+        { file: path.join(resolvedRuntime, "trusted-local", "review-targets", `${lease.round_id}.json`), bytes: Buffer.from(exactJson(reviewTarget)) },
+        { file: path.join(resolvedRuntime, "trusted-local", "finalizations", `${finalization.finalization_id}.json`), bytes: Buffer.from(exactJson(finalization)) },
+      ], result: finalization };
     });
   }
 
@@ -456,7 +533,8 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
       if (!lease.finalization) throw new Error("acceptance requires exact candidate finalization");
       const reviews = Object.values(anchor.reviews).filter((review) => review.round_id === roundId && review.verdict === "PASS");
       if (reviews.length !== lease.review_lenses.length || new Set(reviews.map((review) => review.lens)).size !== lease.review_lenses.length || new Set(reviews.map((review) => review.task_identity)).size !== reviews.length) throw new Error("acceptance requires a clean current-round fresh review set");
-      if (!lease.verification || lease.verification.verdict !== "PASS" || !lease.confirmation || lease.confirmation.verdict !== "PASS") throw new Error("acceptance requires current-round verification and confirmation PASS records");
+      if (!lease.verification || lease.verification.verdict !== "PASS") throw new Error("acceptance requires a current-round verification PASS record");
+      if (lease.review_policy.confirmation !== "not-required" && (!lease.confirmation || lease.confirmation.verdict !== "PASS")) throw new Error("acceptance requires the risk-scaled current-round confirmation PASS record");
       round.status = "ACCEPTED"; lease.status = "ACCEPTED"; anchor.next_event_ordinal += 1;
       const receipt = { schema: 1, type: "trusted-local-acceptance", assurance: "operator-attested-local-consistency", round_id: roundId, lease_id: lease.lease_id, node_id: round.node_id, accepted_by: holder };
       return { anchor, writes: [{ file: path.join(resolvedRuntime, "trusted-local", "acceptances", `${roundId}.json`), bytes: Buffer.from(exactJson(receipt)) }], result: receipt };
@@ -496,18 +574,21 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
       const round = anchor.rounds[roundId]; const lease = anchor.leases[leaseId];
       if (!round || round.status !== "ACTIVE" || round.lease_id !== leaseId || !lease || lease.holder !== holder || lease.runtime_root !== resolvedRuntime) throw new Error("review requires the current exact active round and lease");
       if (!lease.review_lenses.includes(lens)) throw new Error("review lens is not assigned");
+      if (!lease.finalization?.review_target || sha256(Buffer.from(exactJson(lease.finalization.review_target))) !== lease.finalization.review_target_sha256) throw new Error("review requires the exact frozen review target manifest");
       if (actualEffort !== lease.effort_policy.effective.review) throw new Error("review actual effort does not exactly match computed effort");
       if (Object.values(anchor.reviews).some((review) => review.round_id === roundId && (review.lens === lens || review.task_identity === taskIdentity))) throw new Error("review lens and task identity must be fresh and distinct");
       const evidenceId = `${roundId}-${lens}-${anchor.next_event_ordinal}`;
-      const evidence = { schema: 1, type: "trusted-local-harness-review", assurance: "operator-attested-separate-harness-task", evidence_id: evidenceId, round_id: roundId, lease_id: leaseId, node_id: lease.node_id, lens, task_identity: taskIdentity, provider, model, effort: actualEffort, prompt_sha256: sha256(promptBytes), report_sha256: sha256(reportBytes), verdict: report.verdict, findings: report.findings };
+      const evidence = { schema: 1, type: "trusted-local-harness-review", assurance: "operator-attested-separate-harness-task", evidence_id: evidenceId, round_id: roundId, lease_id: leaseId, node_id: lease.node_id, lens, task_identity: taskIdentity, provider, model, effort: actualEffort, review_target: lease.finalization.review_target, review_target_sha256: lease.finalization.review_target_sha256, prompt_sha256: sha256(promptBytes), report_sha256: sha256(reportBytes), verdict: report.verdict, findings: report.findings };
       const writes = [
         { file: path.join(resolvedRuntime, "trusted-local", "review-prompts", `${evidenceId}.txt`), bytes: promptBytes },
         { file: path.join(resolvedRuntime, "trusted-local", "review-reports", `${evidenceId}.json`), bytes: reportBytes },
         { file: path.join(resolvedRuntime, "trusted-local", "reviews", `${evidenceId}.json`), bytes: Buffer.from(exactJson(evidence)) },
       ];
-      if (report.verdict === "FAIL" && round.ordinal >= 2 && report.findings.some((finding) => ["P0", "P1"].includes(finding?.severity))) {
+      round.review_recorded = true;
+      if (report.verdict === "FAIL" && round.review_cycle_ordinal >= 2 && report.findings.some((finding) => ["P0", "P1"].includes(finding?.severity))) {
         round.architect_escalation_required = true;
-        const architectPrompt = exactJson({ schema: 1, type: "trusted-local-architect-escalation-prompt", round_id: roundId, node_id: lease.node_id, reason: "P0/P1 remains after second review/fix cycle", provider: "openai", tool: "codex", model: "gpt-5.6-sol", reasoning_effort: "xhigh", requested_decision: "continue_or_stop_with_explicit_additional_round_cap" });
+        const promptType = round.review_cycle_ordinal > 5 ? "over-five-decomposition" : "round-two-cap";
+        const architectPrompt = exactJson({ ...architectPromptFor({ type: promptType, nodeId: lease.node_id, roundId, roundOrdinal: round.review_cycle_ordinal }), reason: "P0/P1 remains after the soft two-cycle limit", requested_decision: "continue_or_stop_with_explicit_additional_round_cap" });
         writes.push({ file: path.join(resolvedRuntime, "trusted-local", "architect-prompts", `${roundId}.json`), bytes: Buffer.from(architectPrompt) });
       }
       anchor.reviews[evidenceId] = evidence; anchor.next_event_ordinal += 1;
@@ -524,7 +605,8 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
     return lockedMutation(resolvedRuntime, validate, (anchor) => {
       validate(); const round = anchor.rounds[roundId];
       if (!round?.architect_escalation_required || round.architect_decision) throw new Error("Architect decision is not required or is already recorded");
-      const decision = { schema: 1, type: "trusted-local-architect-decision", round_id: roundId, node_id: round.node_id, recorded_by: operator, report_sha256: sha256(reportBytes), ...report };
+      if (round.review_cycle_ordinal > 5 && !["SPLIT", "CONTINUE_WHOLE", "OTHER"].includes(report.decomposition_decision)) throw new Error("Architect decision after five review cycles must explicitly decide decomposition");
+      const decision = { schema: 1, type: "trusted-local-architect-decision", round_id: roundId, node_id: round.node_id, review_cycle_ordinal: round.review_cycle_ordinal, recorded_by: operator, report_sha256: sha256(reportBytes), ...report };
       round.architect_decision = decision; anchor.next_event_ordinal += 1;
       return { anchor, writes: [{ file: path.join(resolvedRuntime, "trusted-local", "architect-decisions", `${roundId}.json`), bytes: reportBytes }], result: decision };
     });
@@ -545,7 +627,7 @@ export function createLocalLifecycle({ controlRoot, preactivationHistory = null 
       if (!round || round.status !== "ACTIVE" || round.lease_id !== leaseId || !lease || lease.holder !== holder || lease.runtime_root !== resolvedRuntime || !lease.finalization) throw new Error(`${role} requires the current exact finalized round and lease`);
       if (actualEffort !== lease.effort_policy.effective[role]) throw new Error(`${role} actual effort does not exactly match computed effort`);
       if (lease[role]) throw new Error(`${role} is already recorded for this round`);
-      const evidence = { schema: 1, type: `trusted-local-${role}`, assurance: "operator-attested-separate-harness-task", round_id: roundId, lease_id: leaseId, node_id: lease.node_id, task_identity: taskIdentity, provider, model, effort: actualEffort, prompt_sha256: sha256(promptBytes), report_sha256: sha256(reportBytes), verdict: "PASS", findings: [] };
+      const evidence = { schema: 1, type: `trusted-local-${role}`, assurance: "operator-attested-separate-harness-task", round_id: roundId, lease_id: leaseId, node_id: lease.node_id, task_identity: taskIdentity, provider, model, effort: actualEffort, review_target: lease.finalization.review_target, review_target_sha256: lease.finalization.review_target_sha256, confirmation_policy: lease.review_policy.confirmation, prompt_sha256: sha256(promptBytes), report_sha256: sha256(reportBytes), verdict: "PASS", findings: [] };
       lease[role] = evidence; anchor.next_event_ordinal += 1;
       return { anchor, writes: [
         { file: path.join(resolvedRuntime, "trusted-local", `${role}-prompts`, `${roundId}.txt`), bytes: promptBytes },

@@ -1,6 +1,16 @@
 # Orchestration contract
 
-READY is derived on demand from validated receipts, conditional/external requirements, activation state, and ephemeral leases. A request for a non-READY node stops before mutation and asks the orchestrator for another READY block. Packets contain only one charter, direct predecessor receipt summaries, relevant clauses/profiles, citations, gates and conflict domains. The orchestrator schedules the whole READY frontier subject to conflict/resource leases; there is no giant mutable ledger to babysit.
+READY is derived on demand from validated receipts, conditional/external requirements, activation state, and ephemeral leases. A request for a non-READY node stops before mutation. Packets contain only one charter, direct predecessor receipt summaries, relevant clauses/profiles, citations, gates and conflict domains; there is no giant mutable ledger to babysit.
+
+## Current trusted-local operating policy
+
+The transferred source atoms below remain immutable provenance, but READY-frontier computation is not launch authority. After a train unlocks frontier, the parent reports the frontier and requests maintainer ordering. It must not automatically select or launch another train unless the maintainer's launch prompt explicitly authorized a continuous autonomous order. The train manager owns only its frozen manifest and hands an accepted commit/patch back through the existing Rev11 handoff; the parent alone owns ordering, integration, landing, and confirmation.
+
+Admission freezes the train/block manifest and automatic per-role effort policy. Finalization freezes one exact review-target SHA/tree and worktree. That worktree remains byte-unchanged for the review round. Read-only reviewers may inspect it; a task with write capability uses its own disposable worktree from the frozen SHA. A review-side change transfers only after invalidating the round and freezing a successor target. Remove disposable task worktrees after their result is recorded, and remove the train worktree after landing or abort.
+
+Review is risk-scaled: low uses one adversarial task; medium uses one or two tasks with adversarial mandatory and conformance preferred; high/critical uses three distinct fresh tasks—adversarial, conformance, and a context-specific or ad-hoc specialist. A beneficial conformance deviation may be referred neutrally to the sole Architect for a grand-design ruling. Confirmation follows the same risk policy. Integration confirmation exists only at an explicitly named convergence or dependency-join milestone, never at a periodic count.
+
+Two review/fix cycles are the soft maximum. Consolidate each round once before a comprehensive fix. Round-two residual P0/P1 stops automatic cycling until the sole neutral Architect decides whether to continue and sets an exact additional-round cap. Beyond five total rounds, the Architect is also asked whether to split the work into smaller independently reviewable sub-subblocks. Architect use is read-only Codex CLI, OpenAI `gpt-5.6-sol`, `xhigh`; only the maintainer may waive or substitute when that budget is unavailable. Status reports are honest and terse, and only durable gate-bearing transitions create receipts.
 
 ## Transferred source requirement atoms
 

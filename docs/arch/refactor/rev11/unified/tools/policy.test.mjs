@@ -110,3 +110,22 @@ test("pre-trusted-local r3-r6 review bytes are digest-bound audit-only and never
   const history = JSON.parse(fs.readFileSync(path.join(authority.packageRoot, "authority/state/preactivation-orc0-history.json"), "utf8"));
   assert.equal(history.acceptance_eligible, false); assert.equal(history.disposition, "REJECTED_AUDIT_ONLY"); assert.equal(history.minimum_successor_round_ordinal, 2);
 });
+
+test("review profiles and public orchestration policy encode risk scaling and stop boundaries", () => {
+  const authority = loadAuthority();
+  const catalog = readToml(path.join(authority.packageRoot, "catalogs/review-profiles.toml"));
+  const byId = new Map(catalog.profile.map((profile) => [profile.id, profile]));
+  assert.deepEqual([byId.get("simple-1").risk_band, byId.get("simple-1").reviewers, byId.get("simple-1").lenses], ["low", 1, ["adversarial"]]);
+  assert.deepEqual([byId.get("semantic-3").risk_band, byId.get("semantic-3").reviewers, byId.get("semantic-3").lenses], ["medium", 2, ["adversarial", "conformance"]]);
+  for (const id of ["architecture-3", "public-3", "concurrency-3"]) {
+    const profile = byId.get(id);
+    assert.equal(profile.risk_band, "high"); assert.equal(profile.reviewers, 3);
+    assert.equal(profile.lenses[0], "adversarial"); assert.equal(profile.lenses[1], "conformance");
+  }
+  const skill = fs.readFileSync(path.resolve(authority.packageRoot, "../../../../../.claude/skills/multi-agent-orchestration/SKILL.md"), "utf8");
+  assert.match(skill, /do not automatically select or launch another train/i);
+  assert.match(skill, /frozen.*worktree.*unchanged/i);
+  assert.match(skill, /train manager.*parent/i);
+  assert.doesNotMatch(skill, /five-way scope-admission policy/i);
+  assert.doesNotMatch(skill, /mutation-recipe/i);
+});

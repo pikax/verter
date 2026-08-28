@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Neutral trusted-local Architect prompt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "type", "node_id", "round_id", "round_ordinal", "provider", "tool", "model", "reasoning_effort", "neutrality", "options_non_exhaustive", "mandate", "question"],
+  "properties": {
+    "schema": { "const": 1 },
+    "type": { "enum": ["trusted-local-architect-pre-block-prompt", "trusted-local-architect-round-two-cap-prompt", "trusted-local-architect-over-five-decomposition-prompt", "trusted-local-architect-architecture-ruling-change-prompt", "trusted-local-architect-conformance-deviation-prompt", "trusted-local-architect-landing-confirmation-prompt"] },
+    "node_id": { "type": "string", "minLength": 1 },
+    "round_id": { "type": "string", "minLength": 1 },
+    "round_ordinal": { "type": "integer", "minimum": 1 },
+    "provider": { "const": "openai" },
+    "tool": { "const": "codex" },
+    "model": { "const": "gpt-5.6-sol" },
+    "reasoning_effort": { "const": "xhigh" },
+    "neutrality": { "type": "string", "minLength": 1 },
+    "options_non_exhaustive": { "const": true },
+    "mandate": { "const": "best-of-the-best durable design — no shortcuts, no compromises, no \"good enough\"; breaking changes are ALLOWED and expected where they yield the correct long-term design; performance is a first-class concern (allocation, cache, warm-state, hot-path cost, not just correctness)." },
+    "question": { "type": "string", "minLength": 1 }
+  }
+}

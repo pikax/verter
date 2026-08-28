@@ -38,8 +38,14 @@ test("programctl drives J1 grandfathering through trusted-local ORC0 activation"
     assert.equal(admission.round_id, "ORC0-R2", "rejected preactivation R1 is reconciled append-only"); assert.equal(admission.effort_policy.effective.review, "high");
     const packet = JSON.parse(cli(env, ["dispatch", "ORC0", "--holder", "maintainer", "--lease-id", admission.lease_id])); assert.equal(packet.round_id, admission.round_id); assert.equal(packet.effort_policy.effective.review, "high");
     cli(env, ["candidate-finalize", "ORC0", "--holder", "maintainer", "--lease-id", admission.lease_id]);
-    for (const lens of ["wire-public", "compatibility", "adversarial"]) {
-      const files = harnessFiles(temp, lens); cli(env, ["harness-record", "--role", "review", "--round-id", admission.round_id, "--lease-id", admission.lease_id, "--holder", "maintainer", "--lens", lens, "--task", `/root/orc0-${lens}`, "--provider", lens === "compatibility" ? "openai" : "anthropic", "--model", lens === "compatibility" ? "gpt-5.6-sol" : "claude-fresh", "--effort", "high", "--prompt", files.prompt, "--report", files.report]);
+    assert.deepEqual(packet.review_policy.review_lenses, ["adversarial", "conformance", "wire-public"]);
+    const candidateFile = path.join(candidate.worktree, "docs/arch/refactor/rev11/unified/fixtures/orc0-trusted-local.txt");
+    fs.appendFileSync(candidateFile, "review-side mutation\n");
+    const refusedFiles = harnessFiles(temp, "mutated-target");
+    assert.throws(() => cli(env, ["harness-record", "--role", "review", "--round-id", admission.round_id, "--lease-id", admission.lease_id, "--holder", "maintainer", "--lens", "adversarial", "--task", "/root/orc0-mutated", "--provider", "openai", "--model", "gpt-5.6-sol", "--effort", "high", "--prompt", refusedFiles.prompt, "--report", refusedFiles.report]), /clean|frozen review target/i);
+    fs.writeFileSync(candidateFile, "trusted-local candidate\n");
+    for (const lens of packet.review_policy.review_lenses) {
+      const files = harnessFiles(temp, lens); cli(env, ["harness-record", "--role", "review", "--round-id", admission.round_id, "--lease-id", admission.lease_id, "--holder", "maintainer", "--lens", lens, "--task", `/root/orc0-${lens}`, "--provider", lens === "conformance" ? "openai" : "anthropic", "--model", lens === "conformance" ? "gpt-5.6-sol" : "claude-fresh", "--effort", "high", "--prompt", files.prompt, "--report", files.report]);
     }
     for (const role of ["verification", "confirmation"]) {
       const files = harnessFiles(temp, role); cli(env, ["harness-record", "--role", role, "--round-id", admission.round_id, "--lease-id", admission.lease_id, "--holder", "maintainer", "--task", `/root/orc0-${role}`, "--provider", "openai", "--model", "gpt-5.6-sol", "--effort", "high", "--prompt", files.prompt, "--report", files.report]);

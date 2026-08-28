@@ -547,6 +547,8 @@ function validateSchemasAndTemplates(authority) {
     ["review-evidence.template.toml", "review-evidence.schema.json"],
     ["trusted-local-harness-report.template.json", "trusted-local-harness-report.schema.json"],
     ["trusted-local-architect-decision.template.json", "trusted-local-architect-decision.schema.json"],
+    ["trusted-local-architect-prompt.template.json", "trusted-local-architect-prompt.schema.json"],
+    ["trusted-local-review-target.template.json", "trusted-local-review-target.schema.json"],
   ]);
   const templateDir = path.join(packageRoot, "templates");
   const actualTemplates = fs.readdirSync(templateDir).sort();
@@ -784,8 +786,13 @@ function validateCatalogs(authority) {
   const domains = indexed(domainRows, "conflict domain");
   for (const profile of reviewRows) {
     if (profile.id === "history") {
-      if (profile.reviewers !== 0 || profile.lenses.length !== 1) errors.push("history review profile must remain closed legacy validation");
-    } else if (profile.reviewers !== 3 || profile.independent !== true || profile.lenses.length !== 3 || profile.dispatch !== "fresh-distinct-harness-task" || profile.provider_policy !== "provider-neutral" || !["low", "medium", "high"].includes(profile.minimum_effort)) errors.push(`${profile.id}: final review profile must require three fresh independent provider-neutral harness tasks with an explicit effort floor`);
+      if (profile.reviewers !== 0 || profile.lenses.length !== 1 || profile.risk_band !== "audit-only" || profile.confirmation_policy !== "not-required") errors.push("history review profile must remain closed legacy validation");
+      continue;
+    }
+    const expectedCount = profile.risk_band === "high" ? 3 : profile.risk_band === "medium" ? profile.reviewers : 1;
+    if (profile.independent !== true || profile.reviewers !== expectedCount || profile.lenses.length !== profile.reviewers || profile.lenses[0] !== "adversarial" || (profile.risk_band === "high" && profile.lenses[1] !== "conformance") || (profile.risk_band === "medium" && (profile.reviewers < 1 || profile.reviewers > 2)) || profile.dispatch !== "fresh-distinct-harness-task" || profile.provider_policy !== "provider-neutral" || !["low", "medium", "high"].includes(profile.minimum_effort) || !["not-required", "targeted", "independent-full"].includes(profile.confirmation_policy)) {
+      errors.push(`${profile.id}: review profile violates the risk-scaled fresh provider-neutral harness policy`);
+    }
   }
   for (const profile of gateRows) if (profile.id !== "legacy-receipt" && (!Array.isArray(profile.final) || profile.final.length === 0)) errors.push(`${profile.id}: final gate commands must be nonempty`);
   for (const profile of resourceRows) if (!Number.isSafeInteger(profile.capacity_hint) || profile.capacity_hint < 1) errors.push(`${profile.id}: invalid capacity_hint`);
@@ -2403,7 +2410,7 @@ export function admitTrustedNode(authority, { runtimeRoot = defaultRuntimeRoot(a
   const review = extractProfile(path.join(authority.packageRoot, "catalogs/review-profiles.toml"), evidenceProfiles(node).review);
   const lease = trustedController(authority).admit({
     runtimeRoot,
-    node: { ...node, risk: node.class === "governance" ? "critical" : node.semantic_role === "convergence" ? "high" : "medium", public_api: review?.id === "public-3", concurrency_sensitive: review?.id === "concurrency-3", semantic_authority: node.kind === "activation", review_lenses: review?.lenses },
+    node: { ...node, risk: review?.risk_band || (node.class === "governance" ? "critical" : node.semantic_role === "convergence" ? "high" : "medium"), public_api: review?.id === "public-3", concurrency_sensitive: review?.id === "concurrency-3", semantic_authority: node.kind === "activation", review_lenses: review?.lenses, specialist_review_lens: review?.lenses?.[2] },
     candidate: { sha: candidate.sha, tree: candidate.tree, ref: candidateRef, worktree: candidate.worktree },
     holder,
     effortOverrides,
@@ -2431,13 +2438,28 @@ export function dispatchTrustedNode(authority, { runtimeRoot = defaultRuntimeRoo
   return { lease, packet: fs.readFileSync(packetFile, "utf8"), packetFile, briefPaths: lease.task_briefs };
 }
 
+function assertTrustedFrozenCandidate(authority, { runtimeRoot = defaultRuntimeRoot(authority.packageRoot), leaseId } = {}) {
+  const anchor = readLocalAnchor({ controlRoot: trustedLocalControlRoot(authority) });
+  const lease = anchor.leases[leaseId]; const frozen = lease?.finalization?.candidate;
+  if (!frozen) throw new Error("operation requires an immutable finalized review target");
+  const manifestBytes = Buffer.from(`${JSON.stringify(lease.finalization.review_target, null, 2)}\n`);
+  const manifestFile = path.join(path.resolve(runtimeRoot), "trusted-local", "review-targets", `${lease.round_id}.json`);
+  if (!fs.existsSync(manifestFile) || sha256(fs.readFileSync(manifestFile)) !== lease.finalization.review_target_sha256 || sha256(manifestBytes) !== lease.finalization.review_target_sha256) throw new Error("frozen review target manifest bytes changed; invalidate and restart the review round");
+  const current = admissionCandidate(authority, frozen.ref);
+  if (current.sha !== frozen.sha || current.tree !== frozen.tree || current.worktree !== frozen.worktree) throw new Error("frozen review target changed; invalidate and restart the review round");
+  if (lease.runtime_root !== path.resolve(runtimeRoot)) throw new Error("frozen review target runtime mismatch");
+  return lease;
+}
+
 export function recordTrustedReview(authority, options = {}) {
   mutationAuthority(authority, options.runtimeRoot);
+  assertTrustedFrozenCandidate(authority, options);
   return trustedController(authority).recordReview(options);
 }
 
 export function recordTrustedRole(authority, options = {}) {
   mutationAuthority(authority, options.runtimeRoot);
+  assertTrustedFrozenCandidate(authority, options);
   return trustedController(authority).recordRole(options);
 }
 
@@ -2458,6 +2480,9 @@ export function renewTrustedLease(authority, options = {}) {
 
 export function acceptTrustedRound(authority, options = {}) {
   mutationAuthority(authority, options.runtimeRoot);
+  const anchor = readLocalAnchor({ controlRoot: trustedLocalControlRoot(authority) });
+  const round = anchor.rounds[options.roundId];
+  assertTrustedFrozenCandidate(authority, { ...options, leaseId: round?.lease_id });
   return trustedController(authority).accept(options);
 }
 
@@ -2521,6 +2546,7 @@ function candidateForRef(authority, candidateRef) {
   const worktrees = gitWorktrees(repository);
   const worktree = worktrees.find((entry) => entry.branch === candidateRef && entry.HEAD === sha)?.worktree;
   if (!worktree || !fs.existsSync(worktree) || fs.lstatSync(worktree).isSymbolicLink() || !fs.statSync(worktree).isDirectory()) throw new Error(`candidate-ref must be checked out in one exact non-symlink Git worktree: ${candidateRef}`);
+  if (gitOutput(["status", "--porcelain=v1", "--untracked-files=all"], worktree)) throw new Error(`candidate-ref worktree must be clean: ${candidateRef}`);
   return { sha, tree, worktree: fs.realpathSync(worktree) };
 }
 

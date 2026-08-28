@@ -3,34 +3,62 @@ schema = 3
 id = "architecture-3"
 reviewers = 3
 independent = true
-lenses = ["architecture", "conformance", "adversarial"]
+lenses = ["adversarial", "conformance", "architecture-specialist"]
 dispatch = "fresh-distinct-harness-task"
 provider_policy = "provider-neutral"
 minimum_effort = "high"
+risk_band = "high"
+confirmation_policy = "independent-full"
 [[profile]]
 id = "semantic-3"
-reviewers = 3
+reviewers = 2
 independent = true
-lenses = ["correctness", "tests", "performance"]
+lenses = ["adversarial", "conformance"]
 dispatch = "fresh-distinct-harness-task"
 provider_policy = "provider-neutral"
 minimum_effort = "medium"
+risk_band = "medium"
+confirmation_policy = "targeted"
 [[profile]]
 id = "public-3"
 reviewers = 3
 independent = true
-lenses = ["wire-public", "compatibility", "adversarial"]
+lenses = ["adversarial", "conformance", "wire-public"]
 dispatch = "fresh-distinct-harness-task"
 provider_policy = "provider-neutral"
 minimum_effort = "high"
+risk_band = "high"
+confirmation_policy = "independent-full"
 [[profile]]
 id = "concurrency-3"
 reviewers = 3
 independent = true
-lenses = ["concurrency-lifetime", "correctness", "adversarial"]
+lenses = ["adversarial", "conformance", "concurrency-lifetime"]
 dispatch = "fresh-distinct-harness-task"
 provider_policy = "provider-neutral"
 minimum_effort = "high"
+risk_band = "high"
+confirmation_policy = "independent-full"
+[[profile]]
+id = "simple-1"
+reviewers = 1
+independent = true
+lenses = ["adversarial"]
+dispatch = "fresh-distinct-harness-task"
+provider_policy = "provider-neutral"
+minimum_effort = "low"
+risk_band = "low"
+confirmation_policy = "not-required"
+[[profile]]
+id = "ad-hoc-specialist-3"
+reviewers = 3
+independent = true
+lenses = ["adversarial", "conformance", "context-specific"]
+dispatch = "fresh-distinct-harness-task"
+provider_policy = "provider-neutral"
+minimum_effort = "high"
+risk_band = "high"
+confirmation_policy = "independent-full"
 [[profile]]
 id = "history"
 reviewers = 0
@@ -39,6 +67,8 @@ lenses = ["immutable-receipt-validation"]
 dispatch = "audit-only"
 provider_policy = "historical"
 minimum_effort = "low"
+risk_band = "audit-only"
+confirmation_policy = "not-required"
 
 [[architecture_cli]]
 id = "neutral-architecture-consult"
