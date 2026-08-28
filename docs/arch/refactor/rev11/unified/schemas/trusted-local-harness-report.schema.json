@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trusted-local harness report",
+  "type": "object", "additionalProperties": false, "required": ["verdict", "findings"],
+  "properties": { "verdict": { "enum": ["PASS", "FAIL"] }, "findings": { "type": "array", "items": { "type": "object" } } }
+}

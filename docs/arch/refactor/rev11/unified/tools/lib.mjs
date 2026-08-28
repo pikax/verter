@@ -5,9 +5,10 @@ import childProcess from "node:child_process";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { createAmendment as createAuthorityAmendment, validateAmendments as validateAmendmentChain } from "./amendments.mjs";
+import { assessNodeEffort, createLocalLifecycle, effortPolicyFor, readLocalAnchor, reinitializeLocalLifecycle } from "./trusted-local.mjs";
 
 export const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const NODE_FIELDS = ["id", "name", "predecessors", "conditional_predecessors", "phase", "train", "product", "kind", "semantic_role", "class", "owner", "conflict_domains", "resource_class", "gate_profile", "review_profile", "dispatchable", "optional", "release_gating", "source_refs", "external_requirements", "activation_gate", "charter", "size", "max_production_loc", "max_production_files", "max_related_packages", "rescope_loc", "rescope_files", "rescope_unrelated_packages", "initial_state"];
+export const NODE_FIELDS = ["id", "name", "predecessors", "conditional_predecessors", "phase", "train", "product", "kind", "semantic_role", "class", "owner", "conflict_domains", "resource_class", "gate_profile", "review_profile", "implementation_effort_min", "implementation_effort_default", "review_effort_min", "review_effort_default", "verification_effort_min", "verification_effort_default", "confirmation_effort_min", "confirmation_effort_default", "dispatchable", "optional", "release_gating", "source_refs", "external_requirements", "activation_gate", "charter", "size", "max_production_loc", "max_production_files", "max_related_packages", "rescope_loc", "rescope_files", "rescope_unrelated_packages", "initial_state"];
 const REQUIRED_NODE_FIELDS = NODE_FIELDS.filter((field) => field !== "initial_state");
 const ARRAY_FIELDS = new Set(["predecessors", "conditional_predecessors", "conflict_domains", "source_refs", "external_requirements"]);
 const BOOL_FIELDS = new Set(["dispatchable", "optional"]);
@@ -525,6 +526,8 @@ function validateSchemasAndTemplates(authority) {
     [readToml(confinedFile(packageRoot, "catalogs/gate-profiles.toml", "gate profile catalog")), "gate-profile-catalog.schema.json", "catalog.gate_profiles"],
     [readToml(confinedFile(packageRoot, "catalogs/review-profiles.toml", "review profile catalog")), "review-profile-catalog.schema.json", "catalog.review_profiles"],
     [readToml(confinedFile(packageRoot, "catalogs/resource-profiles.toml", "resource profile catalog")), "resource-profile-catalog.schema.json", "catalog.resource_profiles"],
+    [JSON.parse(fs.readFileSync(confinedFile(packageRoot, "authority/state/preactivation-orc0-history.json", "preactivation ORC0 history"), "utf8")), "trusted-local-preactivation-history.schema.json", "authority.preactivation_orc0_history"],
+    [JSON.parse(fs.readFileSync(confinedFile(packageRoot, "authority/state/historical-review-audit.json", "historical review audit"), "utf8")), "historical-review-audit.schema.json", "authority.historical_review_audit"],
   ];
   for (const { model, relative } of authority.moduleModels) applications.push([model, "dag-module.schema.json", `authority.${relative}`]);
   for (const node of authority.nodes) applications.push([Object.fromEntries(Object.entries(node).filter(([key]) => key !== "_module")), "node.schema.json", `node.${node.id}`]);
@@ -542,6 +545,8 @@ function validateSchemasAndTemplates(authority) {
     ["amendment.template.toml", "amendment.schema.json"],
     ["gate-evidence.template.toml", "gate-evidence.schema.json"],
     ["review-evidence.template.toml", "review-evidence.schema.json"],
+    ["trusted-local-harness-report.template.json", "trusted-local-harness-report.schema.json"],
+    ["trusted-local-architect-decision.template.json", "trusted-local-architect-decision.schema.json"],
   ]);
   const templateDir = path.join(packageRoot, "templates");
   const actualTemplates = fs.readdirSync(templateDir).sort();
@@ -549,7 +554,7 @@ function validateSchemasAndTemplates(authority) {
   for (const [name, schemaName] of templateSchemas) {
     try {
       const file = confinedFile(templateDir, name, `template ${name}`);
-      const model = readToml(file);
+      const model = name.endsWith(".json") ? JSON.parse(fs.readFileSync(file, "utf8")) : readToml(file);
       errors.push(...validateSchemaObject(model, loadSchema(packageRoot, schemaName), `template.${name}`));
     } catch (error) { errors.push(`template validation failure ${name}: ${error.message}`); }
   }
@@ -598,7 +603,7 @@ export function validateCharters(nodes, packageRoot = PACKAGE_ROOT) {
       const predecessorSection = /^## Exact predecessor contracts\n([\s\S]*?)(?=^## )/m.exec(operativeText)?.[1] || "";
       const namedPredecessors = [...predecessorSection.matchAll(/^- \*\*([A-Z][A-Z0-9-]*):\*\*/gm)].map((match) => match[1]);
       if (JSON.stringify(namedPredecessors) !== JSON.stringify(node.predecessors)) errors.push(`${node.id}: charter predecessor section is not exact DAG order/content`);
-      for (const requirement of node.external_requirements) if (!predecessorSection.includes(`External custody ${requirement}:`)) errors.push(`${node.id}: charter omits exact external custody requirement ${requirement}`);
+      for (const requirement of node.external_requirements) if (!predecessorSection.includes(`External custody ${requirement}:`) && !predecessorSection.includes(`Trusted-local activation ${requirement}:`)) errors.push(`${node.id}: charter omits exact external/trusted-local requirement ${requirement}`);
       if (!text.includes(`${node.id}-AC1`) || !text.includes(`${node.id}-AC4`)) errors.push(`${node.id}: missing source-specific acceptance IDs`);
       if ((text.match(/`(?:crates|packages|scripts|docs)\//g) || []).length < 2) errors.push(`${node.id}: charter lacks concrete module/test/command surfaces`);
       if (!text.includes("Delete or structurally reject")) errors.push(`${node.id}: charter lacks exact legacy deletion target`);
@@ -780,7 +785,7 @@ function validateCatalogs(authority) {
   for (const profile of reviewRows) {
     if (profile.id === "history") {
       if (profile.reviewers !== 0 || profile.lenses.length !== 1) errors.push("history review profile must remain closed legacy validation");
-    } else if (profile.reviewers !== 3 || profile.independent !== true || profile.lenses.length !== 3 || profile.model !== "gpt-5.6-sol" || profile.effort !== "ultra") errors.push(`${profile.id}: final review profile must require three independent gpt-5.6-sol/ultra lenses`);
+    } else if (profile.reviewers !== 3 || profile.independent !== true || profile.lenses.length !== 3 || profile.dispatch !== "fresh-distinct-harness-task" || profile.provider_policy !== "provider-neutral" || !["low", "medium", "high"].includes(profile.minimum_effort)) errors.push(`${profile.id}: final review profile must require three fresh independent provider-neutral harness tasks with an explicit effort floor`);
   }
   for (const profile of gateRows) if (profile.id !== "legacy-receipt" && (!Array.isArray(profile.final) || profile.final.length === 0)) errors.push(`${profile.id}: final gate commands must be nonempty`);
   for (const profile of resourceRows) if (!Number.isSafeInteger(profile.capacity_hint) || profile.capacity_hint < 1) errors.push(`${profile.id}: invalid capacity_hint`);
@@ -1006,6 +1011,30 @@ function gitOutput(args, cwd) {
 function gitRoot(packageRoot) {
   try { return gitOutput(["rev-parse", "--show-toplevel"], packageRoot); }
   catch { return null; }
+}
+
+export function trustedLocalControlRoot(authority) {
+  const repository = gitRoot(authority.packageRoot);
+  if (!repository) throw new Error("trusted-local lifecycle requires a Git repository");
+  const common = gitOutput(["rev-parse", "--git-common-dir"], repository);
+  const commonRoot = path.resolve(repository, common);
+  return path.join(commonRoot, "verter-unified-trusted-local");
+}
+
+function trustedLocalAcceptance(authority, runtimeRoot, nodeId = "ORC0") {
+  try {
+    const controlRoot = trustedLocalControlRoot(authority);
+    const anchor = readLocalAnchor({ controlRoot });
+    const accepted = Object.entries(anchor.rounds).filter(([, round]) => round.node_id === nodeId && round.status === "ACCEPTED").sort((a, b) => b[1].ordinal - a[1].ordinal)[0];
+    if (!accepted) return null;
+    const [roundId, round] = accepted;
+    const lease = anchor.leases[round.lease_id];
+    if (!lease || lease.runtime_root !== path.resolve(runtimeRoot) || lease.status !== "ACCEPTED") return null;
+    const file = path.join(path.resolve(runtimeRoot), "trusted-local", "acceptances", `${roundId}.json`);
+    if (!fs.existsSync(file)) return null;
+    const bytes = fs.readFileSync(file);
+    return { roundId, round, lease, file, digest: sha256(bytes), reference: `${nodeId}:${sha256(bytes)}` };
+  } catch { return null; }
 }
 
 function gitWorktrees(repository) {
@@ -1507,7 +1536,7 @@ function loadReviewEvidence(authority, runtimeRoot, authorizations = new Map(), 
     const rowErrors = [];
     if (path.basename(file) !== `${row.evidence_id}.toml`) rowErrors.push(`review evidence filename mismatch ${file}`);
     if (!node || evidenceProfiles(node).review !== row.review_profile || !profile || !profile.lenses.includes(row.lens)) rowErrors.push(`review evidence profile/lens mismatch ${row.evidence_id}`);
-    else if (row.model !== profile.model || row.reasoning_effort !== profile.effort) rowErrors.push(`review evidence model/effort mismatch ${row.evidence_id}`);
+    else if (!row.model || row.reasoning_effort !== assessNodeEffort(node).review) rowErrors.push(`review evidence model/effort mismatch ${row.evidence_id}`);
     rowErrors.push(...validateReviewFindingDispositions(authority, row, { now }));
     rowErrors.push(...reviewCapability(authority, row).errors);
     rowErrors.push(...candidateIdentity(row, authority.packageRoot, `review evidence ${row.evidence_id}`));
@@ -1965,19 +1994,24 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
   const directiveSlots = new Set((readToml(confinedFile(authority.packageRoot, "authority/state/external-authorizations.toml", "external directive slots")).authorization || []).map((row) => `${row.node_id}:${row.authorization}`));
   const orcAuthorization = externalState.authorizations.get(`ORC0:${activation.required_external_authorization}`);
   const orc = receiptState.receipts.get("ORC0");
+  const trustedOrc = trustedLocalAcceptance(authority, runtimeRoot);
   let phase = j1Bound && directiveSlots.has(`ORC0:${activation.required_external_authorization}`) ? "ORC0" : "DORMANT";
   if (activation.j1_state === "LANDED_GRANDFATHERED" && !j1Bound) errors.push("activation J1 state is not bound to the exact validated grandfathered landing receipt");
   if (activation.package_state === "ACTIVE" || authority.metadata.state === "ACTIVE") {
     const transition = artifactReference(activation.activation_transition, transitionState.transitions, "ACTIVE transition");
-    const activeBound = activation.package_state === "ACTIVE" && authority.metadata.state === "ACTIVE" && orc
-      && activation.orc0_receipt === reference("ORC0", orc)
-      && orcAuthorization && activation.activation_authorization === reference(activation.required_external_authorization, orcAuthorization)
+    const oldAcceptanceBound = orc && activation.orc0_receipt === reference("ORC0", orc)
+      && orcAuthorization && activation.activation_authorization === reference(activation.required_external_authorization, orcAuthorization);
+    const trustedDirective = confinedFile(authority.packageRoot, "sources/maintainer-directive-2026-08-28-trusted-local-orc0.md", "trusted-local activation directive");
+    const trustedAuthorization = `${activation.required_external_authorization}:${sha256(fs.readFileSync(trustedDirective))}`;
+    const trustedAcceptanceBound = trustedOrc && activation.orc0_receipt === trustedOrc.reference
+      && activation.activation_authorization === trustedAuthorization;
+    const activeBound = activation.package_state === "ACTIVE" && authority.metadata.state === "ACTIVE" && (oldAcceptanceBound || trustedAcceptanceBound)
       && activation.active_authority_sha256 === context.authorityDigest
       && !transition.error && transition.row.j1_receipt === activation.j1_receipt
       && transition.row.orc0_receipt === activation.orc0_receipt
       && transition.row.activation_authorization === activation.activation_authorization
       && transition.row.authority_sha256 === context.authorityDigest
-      && transition.row.activated_by === orcAuthorization.granted_by;
+      && (oldAcceptanceBound ? transition.row.activated_by === orcAuthorization.granted_by : transition.row.activated_by === trustedOrc.lease.holder);
     if (!activeBound) errors.push("premature activation: ACTIVE is not bound to exact J1/ORC0/authorization receipts and authority digest");
     else phase = "ACTIVE";
   } else if (activation.orc0_receipt || activation.activation_authorization || activation.active_authority_sha256 || activation.activation_transition || transitionState.transitions.size) errors.push("premature activation: DORMANT authority contains ACTIVE-only bindings or transition artifacts");
@@ -1987,7 +2021,8 @@ export function deriveState(authority, { runtimeRoot = defaultRuntimeRoot(author
   for (const node of topological(authority.nodes).order) {
     const blockers = []; const receipt = receiptState.receipts.get(node.id); const ownLease = leaseState.active.find((lease) => lease.node_id === node.id);
     const landed = landedState.receipts.get(node.id);
-    if (landed && j1Bound) states.set(node.id, { status: "LANDED_GRANDFATHERED", blockers, landed_receipt: landed });
+    if (node.id === "ORC0" && trustedOrc) states.set(node.id, { status: "ACCEPTED", blockers, trusted_local_acceptance: trustedOrc });
+    else if (landed && j1Bound) states.set(node.id, { status: "LANDED_GRANDFATHERED", blockers, landed_receipt: landed });
     else if (receipt) states.set(node.id, { status: "ACCEPTED", blockers, receipt });
     else if (ownLease) states.set(node.id, { status: "IN_FLIGHT", blockers: [], lease: ownLease });
     else if (node.initial_state === "IN_FLIGHT") states.set(node.id, { status: "IN_FLIGHT", blockers: ["grandfathered v1 work has no accepted receipt"] });
@@ -2293,6 +2328,38 @@ export function activateProgram(authority, { runtimeRoot = defaultRuntimeRoot(au
   });
 }
 
+export function activateTrustedProgram(authority, { runtimeRoot = defaultRuntimeRoot(authority.packageRoot), activatedBy, now = Date.now() } = {}) {
+  mutationAuthority(authority, runtimeRoot); assertIdentity(activatedBy, "activation identity");
+  const before = deriveState(authority, { runtimeRoot, now });
+  if (before.errors.length) throw new Error(`state invalid before trusted-local activation: ${before.errors.join("; ")}`);
+  const activationFile = path.join(authority.packageRoot, "authority/state/activation.toml"); const rootFile = path.join(authority.packageRoot, "authority/root.toml");
+  const activation = readToml(activationFile); const trustedOrc = trustedLocalAcceptance(authority, runtimeRoot); const j1 = before.landedReceipts.get("J1");
+  if (authority.metadata.state !== "DORMANT" || activation.package_state !== "DORMANT" || before.phase !== "ORC0") throw new Error("trusted-local activation requires exact DORMANT/ORC0 pre-state");
+  if (!j1 || activation.j1_state !== "LANDED_GRANDFATHERED" || activation.j1_receipt !== reference(j1.receipt_id, j1)) throw new Error("trusted-local activation requires exact bound grandfathered J1 landing");
+  if (!trustedOrc || trustedOrc.lease.holder !== activatedBy) throw new Error("trusted-local activation requires the current accepted ORC0 round and its operator");
+  const directive = fs.readFileSync(confinedFile(authority.packageRoot, "sources/maintainer-directive-2026-08-28-trusted-local-orc0.md", "trusted-local activation directive"));
+  const authorization = `${activation.required_external_authorization}:${sha256(directive)}`;
+  const authorityDigest = computeAuthorityDigest(authority.packageRoot); const transitionId = `ACT-${new Date(now).toISOString().replaceAll(/[-:.TZ]/g, "")}-${crypto.randomBytes(8).toString("hex").toUpperCase()}`;
+  const transitionFields = { schema: 2, type: "activation-transition", transition_id: transitionId, from_state: "DORMANT", to_state: "ACTIVE", j1_receipt: reference(j1.receipt_id, j1), orc0_receipt: trustedOrc.reference, activation_authorization: authorization, authority_sha256: authorityDigest, activated_by: activatedBy, activated_at: new Date(now).toISOString() };
+  const transitionText = artifactText(transitionFields); const transitionDigest = digestPayload(artifactBody(transitionFields));
+  const transitionFile = path.join(runtimeDirectory(authority, runtimeRoot, "activations", { create: true }), `${transitionId}.toml`);
+  return withActivationLock(authority, (activationLock) => {
+    const rootText = fs.readFileSync(rootFile, "utf8"); const activeRootText = rootText.replace(/^state = "DORMANT"$/m, 'state = "ACTIVE"');
+    if (activeRootText === rootText) throw new Error("root authority is not in the exact DORMANT state");
+    const activeActivation = { ...activation, package_state: "ACTIVE", orc0_receipt: trustedOrc.reference, activation_authorization: authorization, active_authority_sha256: authorityDigest, activation_transition: `${transitionId}:${transitionDigest}` };
+    const projectedAuthority = { ...authority, metadata: { ...authority.metadata, state: "ACTIVE" } };
+    const replacements = [[rootFile, activeRootText], [activationFile, flatToml(activeActivation)]];
+    for (const [relative, content] of generatedFiles(projectedAuthority)) replacements.push([path.join(authority.packageRoot, relative), content.endsWith("\n") ? content : `${content}\n`]);
+    const staged = stageReplacements(replacements, activationLock); let transitionCreated = false;
+    try {
+      atomicCreate(transitionFile, transitionText); transitionCreated = true; commitReplacements(staged);
+      const activeAuthority = loadAuthority(authority.packageRoot); const staticErrors = validateAuthority(activeAuthority, { strict: true, checkGenerated: true, runtimeRoot }).filter((error) => error !== "activation transaction is incomplete; partial activation is refused"); const activeState = deriveState(activeAuthority, { runtimeRoot, now });
+      if (staticErrors.length || activeState.errors.length || activeState.phase !== "ACTIVE") throw new Error(`trusted-local activation postcondition failed: ${[...staticErrors, ...activeState.errors].join("; ")}`);
+      finishReplacements(staged); return { transition: activeState.activationTransitions.get(transitionId), state: activeState, authority: activeAuthority };
+    } catch (error) { rollbackReplacements(staged); if (transitionCreated && fs.existsSync(transitionFile)) fs.unlinkSync(transitionFile); throw error; }
+  });
+}
+
 function withAdmissionLock(authority, runtimeRoot, run) {
   const leases = runtimeDirectory(authority, runtimeRoot, "leases", { create: true });
   const root = path.dirname(leases);
@@ -2314,6 +2381,84 @@ function withAdmissionLock(authority, runtimeRoot, run) {
 function mutationAuthority(authority, runtimeRoot = defaultRuntimeRoot(authority.packageRoot)) {
   const errors = validateAuthority(authority, { strict: true, checkGenerated: true, runtimeRoot });
   if (errors.length) throw new Error(`static authority invalid: ${errors.join("; ")}`);
+}
+
+function trustedController(authority) {
+  const history = JSON.parse(fs.readFileSync(confinedFile(authority.packageRoot, "authority/state/preactivation-orc0-history.json", "preactivation ORC0 history"), "utf8"));
+  return createLocalLifecycle({ controlRoot: trustedLocalControlRoot(authority), preactivationHistory: history });
+}
+
+export function reinitializeTrustedLocal(authority, { operator, reason } = {}) {
+  return reinitializeLocalLifecycle({ controlRoot: trustedLocalControlRoot(authority), operator, reason });
+}
+
+export function admitTrustedNode(authority, { runtimeRoot = defaultRuntimeRoot(authority.packageRoot), id, holder, candidateRef, effortOverrides = {} } = {}) {
+  mutationAuthority(authority, runtimeRoot);
+  const node = authority.nodes.find((candidateNode) => candidateNode.id === id);
+  if (!node) throw new Error(`unknown node ${id}`);
+  const state = deriveState(authority, { runtimeRoot });
+  if (state.errors.length) throw new Error(`state invalid: ${state.errors.join("; ")}`);
+  if (state.states.get(id)?.status !== "READY") throw new Error(`${id} is not READY: ${state.states.get(id)?.blockers?.join("; ") || state.states.get(id)?.status}`);
+  const candidate = admissionCandidate(authority, candidateRef);
+  const review = extractProfile(path.join(authority.packageRoot, "catalogs/review-profiles.toml"), evidenceProfiles(node).review);
+  const lease = trustedController(authority).admit({
+    runtimeRoot,
+    node: { ...node, risk: node.class === "governance" ? "critical" : node.semantic_role === "convergence" ? "high" : "medium", public_api: review?.id === "public-3", concurrency_sensitive: review?.id === "concurrency-3", semantic_authority: node.kind === "activation", review_lenses: review?.lenses },
+    candidate: { sha: candidate.sha, tree: candidate.tree, ref: candidateRef, worktree: candidate.worktree },
+    holder,
+    effortOverrides,
+  });
+  const packetFile = path.join(path.resolve(runtimeRoot), "trusted-local", "packets", `${lease.round_id}.json`);
+  return { lease, packet: fs.readFileSync(packetFile, "utf8"), packetFile, briefPaths: lease.task_briefs };
+}
+
+export function finalizeTrustedCandidate(authority, { runtimeRoot = defaultRuntimeRoot(authority.packageRoot), leaseId, holder } = {}) {
+  mutationAuthority(authority, runtimeRoot);
+  const anchor = readLocalAnchor({ controlRoot: trustedLocalControlRoot(authority) });
+  const lease = anchor.leases[leaseId];
+  if (!lease) throw new Error(`trusted-local lease is unknown: ${leaseId}`);
+  const candidate = admissionCandidate(authority, lease.candidate.ref);
+  if (!gitIsAncestor(lease.candidate.sha, candidate.sha, gitRoot(authority.packageRoot))) throw new Error("finalized candidate does not descend from its admitted start");
+  return trustedController(authority).finalize({ runtimeRoot, leaseId, holder, candidate: { sha: candidate.sha, tree: candidate.tree, ref: lease.candidate.ref, worktree: candidate.worktree } });
+}
+
+export function dispatchTrustedNode(authority, { runtimeRoot = defaultRuntimeRoot(authority.packageRoot), id, leaseId, holder } = {}) {
+  mutationAuthority(authority, runtimeRoot);
+  const anchor = readLocalAnchor({ controlRoot: trustedLocalControlRoot(authority) });
+  const lease = anchor.leases[leaseId]; const round = lease && anchor.rounds[lease.round_id];
+  if (!lease || lease.node_id !== id || lease.holder !== holder || lease.runtime_root !== path.resolve(runtimeRoot) || lease.status !== "ACTIVE" || round?.status !== "ACTIVE" || round.lease_id !== leaseId) throw new Error("dispatch requires the exact current trusted-local lease, node, runtime, and holder");
+  const packetFile = path.join(path.resolve(runtimeRoot), "trusted-local", "packets", `${lease.round_id}.json`);
+  return { lease, packet: fs.readFileSync(packetFile, "utf8"), packetFile, briefPaths: lease.task_briefs };
+}
+
+export function recordTrustedReview(authority, options = {}) {
+  mutationAuthority(authority, options.runtimeRoot);
+  return trustedController(authority).recordReview(options);
+}
+
+export function recordTrustedRole(authority, options = {}) {
+  mutationAuthority(authority, options.runtimeRoot);
+  return trustedController(authority).recordRole(options);
+}
+
+export function recordTrustedArchitectDecision(authority, options = {}) {
+  mutationAuthority(authority, options.runtimeRoot);
+  return trustedController(authority).recordArchitectDecision(options);
+}
+
+export function closeTrustedRound(authority, options = {}) {
+  mutationAuthority(authority, options.runtimeRoot);
+  return trustedController(authority).close(options);
+}
+
+export function renewTrustedLease(authority, options = {}) {
+  mutationAuthority(authority, options.runtimeRoot);
+  return trustedController(authority).renew(options);
+}
+
+export function acceptTrustedRound(authority, options = {}) {
+  mutationAuthority(authority, options.runtimeRoot);
+  return trustedController(authority).accept(options);
 }
 
 function leaseId(nodeId, now) {
@@ -2602,7 +2747,7 @@ export function packetFor(authority, state, id, options = {}) {
   const reviewerText = lease.reviewer_assignments.map((assignment) => {
     const split = assignment.indexOf("="); const lens = assignment.slice(0, split); const reviewer = assignment.slice(split + 1);
     const destination = lease.review_report_paths.find((value) => value.startsWith(`${lens}=`)).slice(lens.length + 1);
-    return `- lens=\`${lens}\` reviewer=\`${reviewer}\` model=\`${review.model}\` effort=\`${review.effort}\` report=\`${path.join(state.runtimeRoot, destination)}\``;
+    return `- lens=\`${lens}\` reviewer=\`${reviewer}\` provider/model=\`bound by the fresh harness task record\` minimum-effort=\`${review.minimum_effort}\` effective-effort=\`${assessNodeEffort(node).review}\` report=\`${path.join(state.runtimeRoot, destination)}\``;
   }).join("\n");
   const leaseText = fs.readFileSync(lease.file, "utf8");
   return `# Dispatch packet — ${id}
@@ -2829,85 +2974,8 @@ export function runGateEvidence(authority, { runtimeRoot = defaultRuntimeRoot(au
   }
 }
 
-export function runReviewEvidence(authority, { runtimeRoot = defaultRuntimeRoot(authority.packageRoot), id, lens, holder, leaseId: requestedLeaseId, custodyBinding, timeoutMs = 60 * 60 * 1000 } = {}) {
-  mutationAuthority(authority, runtimeRoot); assertIdentity(holder, "review custody holder");
-  const before = deriveState(authority, { runtimeRoot });
-  if (before.errors.length) throw new Error(`state invalid before review-run: ${before.errors.join("; ")}`);
-  const lease = before.allLeases.get(requestedLeaseId);
-  if (!lease || lease.node_id !== id || lease.holder !== holder) throw new Error("review-run requires the exact lease id and holder");
-  const finalization = [...before.finalizations.values()].find((row) => row.node_id === id && row.lease_receipt === reference(lease.lease_id, lease));
-  if (!finalization) throw new Error("review-run requires the exact validated candidate-finalize receipt");
-  const assignment = lease.reviewer_assignments.find((value) => value.startsWith(`${lens}=`));
-  const reportAssignment = lease.review_report_paths.find((value) => value.startsWith(`${lens}=`));
-  if (!assignment || !reportAssignment) throw new Error(`review-run lens ${lens} is not assigned by the immutable lease`);
-  const reviewer = assignment.slice(lens.length + 1);
-  const node = authority.nodes.find((row) => row.id === id);
-  const profileId = evidenceProfiles(node).review;
-  const profile = catalogMap(authority.packageRoot, "review-profiles.toml", "profile").get(profileId);
-  for (const requirement of node.external_requirements) {
-    const authorization = before.authorizations.get(`${id}:${requirement}`);
-    if (!authorization || authorization.candidate_sha !== finalization.candidate_sha || authorization.candidate_tree !== finalization.candidate_tree) throw new Error(`review-run requires finalized-candidate authorization ${requirement}`);
-  }
-  const digest = /^review-capability:([0-9a-f]{64})$/.exec(custodyBinding || "")?.[1];
-  const trusted = readToml(confinedFile(authority.packageRoot, "authority/state/trusted-ratifications.toml", "trusted review capability ledger")).slot || [];
-  const slot = trusted.find((candidate) => candidate.purpose === "review-capability" && candidate.ratified_by === reviewer && candidate.receipt_sha256 === digest);
-  let executableSha256 = "";
-  if (slot) {
-    try { executableSha256 = JSON.parse(fs.readFileSync(confinedFile(authority.packageRoot, slot.receipt_path, `review capability ${reviewer}/${lens}`), "utf8")).executable_sha256 || ""; }
-    catch { /* The canonical capability validator below emits the fail-closed error. */ }
-  }
-  const evidenceId = `${finalization.finalization_id}--review-${lens}`;
-  const capability = reviewCapability(authority, {
-    evidence_id: evidenceId, custody_binding: custodyBinding, reviewer_executable_sha256: executableSha256,
-    reviewer, lens, model: profile.model, reasoning_effort: profile.effort,
-  });
-  if (capability.errors.length || !capability.script) throw new Error(`review-run custody refused: ${capability.errors.join("; ")}`);
-  const startedAt = new Date().toISOString();
-  const request = `${JSON.stringify({
-    schema: 1, type: "review-request", node_id: id, candidate_sha: finalization.candidate_sha,
-    candidate_tree: finalization.candidate_tree, candidate_worktree: finalization.candidate_worktree,
-    reviewer, lens, model: profile.model, reasoning_effort: profile.effort,
-    authority_sha256: finalization.authority_sha256, charter_sha256: sha256(fs.readFileSync(path.join(authority.packageRoot, node.charter))),
-  })}\n`;
-  const child = childProcess.spawnSync(process.execPath, [capability.script], {
-    cwd: finalization.candidate_worktree, input: request, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"],
-    maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs, killSignal: "SIGKILL",
-  });
-  if (child.error || child.status !== 0 || child.signal) throw new Error(`trusted reviewer failed: status=${child.status}; signal=${child.signal || ""}; error=${child.error?.message || ""}`);
-  let report;
-  try { report = JSON.parse(child.stdout); }
-  catch (error) { throw new Error(`trusted reviewer did not emit canonical structured JSON: ${error.message}`); }
-  const reportSchemaErrors = validateSchemaObject(report, loadSchema(authority.packageRoot, "review-report.schema.json"), `trusted reviewer report ${evidenceId}`);
-  if (reportSchemaErrors.length) throw new Error(`trusted reviewer report schema invalid: ${reportSchemaErrors.join("; ")}`);
-  const expectedKeys = ["candidate_sha", "candidate_tree", "findings", "lens", "node_id", "reviewer", "schema", "verdict"].sort();
-  if (JSON.stringify(Object.keys(report).sort()) !== JSON.stringify(expectedKeys) || report.schema !== 1 || report.node_id !== id || report.candidate_sha !== finalization.candidate_sha || report.candidate_tree !== finalization.candidate_tree || report.reviewer !== reviewer || report.lens !== lens || report.verdict !== "PASS" || !Array.isArray(report.findings)) throw new Error("trusted reviewer report does not exactly reconcile the finalized candidate and immutable assignment");
-  const completedAt = new Date().toISOString();
-  const reportText = `${JSON.stringify(report)}\n`;
-  const reportPath = reportAssignment.slice(lens.length + 1);
-  const fields = {
-    schema: 2, type: "review-evidence", execution_custody: "programctl-review-run/v1", custody_binding: custodyBinding,
-    reviewer_executable_sha256: executableSha256, evidence_id: evidenceId, node_id: id, review_profile: profileId,
-    candidate_sha: finalization.candidate_sha, candidate_tree: finalization.candidate_tree, reviewer, lens,
-    model: profile.model, reasoning_effort: profile.effort, verdict: "PASS", report_path: reportPath,
-    report_sha256: sha256(reportText), findings: report.findings, started_at: startedAt, completed_at: completedAt,
-  };
-  const reportName = path.posix.basename(reportPath);
-  if (reportPath !== `review-reports/${reportName}`) throw new Error("review-run report destination is not the exact immutable lease-owned review-reports path");
-  const reportFile = path.join(runtimeDirectory(authority, runtimeRoot, "review-reports", { create: true }), reportName);
-  const evidenceDirectory = runtimeDirectory(authority, runtimeRoot, "reviews", { create: true });
-  const evidenceFile = path.join(evidenceDirectory, `${evidenceId}.toml`);
-  atomicCreate(reportFile, reportText);
-  try { atomicCreate(evidenceFile, artifactText(fields)); }
-  catch (error) { if (fs.existsSync(reportFile)) fs.unlinkSync(reportFile); throw error; }
-  try {
-    const after = deriveState(authority, { runtimeRoot }); const evidence = after.reviews.get(evidenceId);
-    if (after.errors.length || !evidence) throw new Error(`review-run postcondition failed: ${after.errors.join("; ") || "evidence absent"}`);
-    return { evidence, state: after };
-  } catch (error) {
-    if (fs.existsSync(evidenceFile)) fs.unlinkSync(evidenceFile);
-    if (fs.existsSync(reportFile)) fs.unlinkSync(reportFile);
-    throw error;
-  }
+export function runReviewEvidence() {
+  throw new Error("review-run is retired and audit-only under trusted-local ORC0; use fresh harness tasks plus harness-record");
 }
 
 export function metrics(authority) {

@@ -1,5 +1,7 @@
 # Unified Rev11 validation record
 
+The docs gate covers the canonical trusted-local CLI lifecycle, cross-runtime exclusion, exact transaction recovery, effort downgrade refusal, anchor-loss reinitialization, current-round-only acceptance, round-two Architect escalation, and digest validation of audit-only preactivation review history.
+
 This record is updated only from final command output. The final authority is intentionally source-canonical: 326 mechanically split or invented recovery nodes are disposition-mapped into independently acceptable owning nodes or removed. It has 197 nodes, 461 edges, 38 modules, and 197 charters. It carries 2,339 exact source clauses across 203 applicable targets and 50 locked live Rev11 inputs. Unverifiable recovery-count claims are intentionally absent.
 
 Required final checks:

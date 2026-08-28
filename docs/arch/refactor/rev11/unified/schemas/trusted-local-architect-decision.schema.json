@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Neutral Architect continuation decision",
+  "type": "object", "additionalProperties": false, "required": ["provider", "tool", "model", "reasoning_effort", "decision", "additional_round_cap"],
+  "properties": { "provider": { "const": "openai" }, "tool": { "const": "codex" }, "model": { "const": "gpt-5.6-sol" }, "reasoning_effort": { "const": "xhigh" }, "decision": { "enum": ["CONTINUE", "STOP"] }, "additional_round_cap": { "type": "integer", "minimum": 0 } }
+}

@@ -1,36 +1,48 @@
-schema = 2
+schema = 3
 [[profile]]
 id = "architecture-3"
 reviewers = 3
 independent = true
 lenses = ["architecture", "conformance", "adversarial"]
-model = "gpt-5.6-sol"
-effort = "ultra"
+dispatch = "fresh-distinct-harness-task"
+provider_policy = "provider-neutral"
+minimum_effort = "high"
 [[profile]]
 id = "semantic-3"
 reviewers = 3
 independent = true
 lenses = ["correctness", "tests", "performance"]
-model = "gpt-5.6-sol"
-effort = "ultra"
+dispatch = "fresh-distinct-harness-task"
+provider_policy = "provider-neutral"
+minimum_effort = "medium"
 [[profile]]
 id = "public-3"
 reviewers = 3
 independent = true
 lenses = ["wire-public", "compatibility", "adversarial"]
-model = "gpt-5.6-sol"
-effort = "ultra"
+dispatch = "fresh-distinct-harness-task"
+provider_policy = "provider-neutral"
+minimum_effort = "high"
 [[profile]]
 id = "concurrency-3"
 reviewers = 3
 independent = true
 lenses = ["concurrency-lifetime", "correctness", "adversarial"]
-model = "gpt-5.6-sol"
-effort = "ultra"
+dispatch = "fresh-distinct-harness-task"
+provider_policy = "provider-neutral"
+minimum_effort = "high"
 [[profile]]
 id = "history"
 reviewers = 0
 independent = true
 lenses = ["immutable-receipt-validation"]
-model = "legacy"
-effort = "legacy"
+dispatch = "audit-only"
+provider_policy = "historical"
+minimum_effort = "low"
+
+[[architecture_cli]]
+id = "neutral-architecture-consult"
+provider = "openai"
+tool = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"

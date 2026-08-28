@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": { "tier": { "enum": ["low", "medium", "high"] }, "roles": { "type": "object", "additionalProperties": false, "required": ["implementation", "review", "verification", "confirmation"], "properties": { "implementation": { "$ref": "#/$defs/tier" }, "review": { "$ref": "#/$defs/tier" }, "verification": { "$ref": "#/$defs/tier" }, "confirmation": { "$ref": "#/$defs/tier" } } } },
+  "title": "Deterministic trusted-local effort policy",
+  "type": "object", "additionalProperties": false, "required": ["version", "minima", "defaults", "matched_rules", "overrides", "effective"],
+  "properties": { "version": { "const": "trusted-local-effort/v1" }, "minima": { "$ref": "#/$defs/roles" }, "defaults": { "$ref": "#/$defs/roles" }, "matched_rules": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }, "overrides": { "type": "object", "additionalProperties": { "$ref": "#/$defs/tier" } }, "effective": { "$ref": "#/$defs/roles" } }
+}

@@ -2,8 +2,10 @@
 import path from "node:path";
 import {
   PACKAGE_ROOT, admitNode, assertDispatchable, createAmendment, createDirectiveAuthorization, defaultRuntimeRoot,
-  activateProgram, deriveState, dispatchNode, explainNode, finalizeCandidate, importAcceptanceReceipt, importRuntimeArtifact,
+  activateProgram, activateTrustedProgram, deriveState, dispatchNode, explainNode, finalizeCandidate, importAcceptanceReceipt, importRuntimeArtifact,
   loadAuthority, packetFor, releaseLease, renewLease, runGateEvidence, runReviewEvidence,
+  acceptTrustedRound, admitTrustedNode, closeTrustedRound, dispatchTrustedNode, finalizeTrustedCandidate,
+  recordTrustedArchitectDecision, recordTrustedReview, recordTrustedRole, reinitializeTrustedLocal, renewTrustedLease,
   validateAmendments, validateAuthority,
 } from "./lib.mjs";
 
@@ -37,6 +39,14 @@ function positional(index, label) {
 const authority = loadAuthority();
 const runtimeRoot = path.resolve(value("--runtime-root", { fallback: defaultRuntimeRoot(PACKAGE_ROOT) }));
 const openedOptional = values("--opened");
+
+function effortOverrides() {
+  return Object.fromEntries(values("--effort").map((entry) => {
+    const split = entry.indexOf("=");
+    if (split < 1) throw new Error("--effort requires role=low|medium|high");
+    return [entry.slice(0, split), entry.slice(split + 1)];
+  }));
+}
 
 function assertStatic({ amendments = true } = {}) {
   const errors = validateAuthority(authority, { strict: true, checkGenerated: true, checkAmendments: amendments, runtimeRoot });
@@ -87,17 +97,17 @@ try {
         leaseId: value("--lease-id", { required: true }), integrationSha: value("--integration-sha", { required: true }),
       });
       console.log(JSON.stringify({ evidence_id: result.evidence.evidence_id, digest: result.evidence.digest, scope: result.evidence.scope }, null, 2));
-    } else if (command === "review-run") {
-      const result = runReviewEvidence(authority, {
-        runtimeRoot, id: positional(1, "node ID"), lens: value("--lens", { required: true }), holder: value("--holder", { required: true }),
-        leaseId: value("--lease-id", { required: true }), custodyBinding: value("--custody-binding", { required: true }),
-      });
-      console.log(JSON.stringify({ evidence_id: result.evidence.evidence_id, digest: result.evidence.digest, lens: result.evidence.lens }, null, 2));
+    } else if (command === "harness-record") {
+      const role = value("--role", { required: true });
+      const common = { runtimeRoot, roundId: value("--round-id", { required: true }), leaseId: value("--lease-id", { required: true }), holder: value("--holder", { required: true }), taskIdentity: value("--task", { required: true }), provider: value("--provider", { required: true }), model: value("--model", { required: true }), effort: value("--effort", { required: true }), promptFile: path.resolve(value("--prompt", { required: true })), reportFile: path.resolve(value("--report", { required: true })) };
+      const result = role === "review" ? recordTrustedReview(authority, { ...common, lens: value("--lens", { required: true }) }) : recordTrustedRole(authority, { ...common, role });
+      console.log(JSON.stringify(result, null, 2));
+    } else if (command === "trusted-local-reinitialize") {
+      console.log(JSON.stringify(reinitializeTrustedLocal(authority, { operator: value("--operator", { required: true }), reason: value("--reason", { required: true }) }), null, 2));
+    } else if (command === "architect-decision-record") {
+      console.log(JSON.stringify(recordTrustedArchitectDecision(authority, { runtimeRoot, roundId: value("--round-id", { required: true }), operator: value("--operator", { required: true }), reportFile: path.resolve(value("--report", { required: true })) }), null, 2));
     } else if (command === "activate") {
-      const result = activateProgram(authority, {
-        runtimeRoot, orc0Receipt: value("--orc0-receipt", { required: true }),
-        authorization: value("--authorization", { required: true }), activatedBy: value("--activated-by", { required: true }),
-      });
+      const result = activateTrustedProgram(authority, { runtimeRoot, activatedBy: value("--activated-by", { required: true }) });
       console.log(JSON.stringify({ phase: result.state.phase, transition: `${result.transition.transition_id}:${result.transition.digest}`, authority_sha256: result.state.authorityDigest }, null, 2));
     } else if (command === "phase") {
       const current = state();
@@ -110,26 +120,25 @@ try {
     } else if (command === "explain") console.log(JSON.stringify(explainNode(authority, state(), positional(1, "node ID")), null, 2));
     else if (command === "packet") process.stdout.write(packetFor(authority, state(), positional(1, "node ID"), { holder: value("--holder", { required: true }), leaseId: value("--lease-id", { required: true }) }));
     else if (command === "admit") {
-      const result = admitNode(authority, {
+      const result = admitTrustedNode(authority, {
         runtimeRoot, id: positional(1, "node ID"), holder: value("--holder", { required: true }),
-        candidateRef: value("--candidate-ref", { required: true }), gateRunner: value("--gate-runner", { required: true }),
-        reviewers: values("--reviewer"), ttlSeconds: Number(value("--ttl-seconds", { fallback: "3600" })),
+        candidateRef: value("--candidate-ref", { required: true }), effortOverrides: effortOverrides(),
       });
-      process.stdout.write(result.packet);
+      console.log(JSON.stringify({ lease_id: result.lease.lease_id, round_id: result.lease.round_id, packet_path: result.packetFile, brief_paths: result.briefPaths, effort_policy: result.lease.effort_policy }, null, 2));
     } else if (command === "dispatch") {
-      const result = dispatchNode(authority, { runtimeRoot, id: positional(1, "node ID"), holder: value("--holder", { required: true }), leaseId: value("--lease-id", { required: true }) });
+      const result = dispatchTrustedNode(authority, { runtimeRoot, id: positional(1, "node ID"), holder: value("--holder", { required: true }), leaseId: value("--lease-id", { required: true }) });
       process.stdout.write(result.packet);
-      process.stderr.write(`dispatch_receipt=${result.dispatch.dispatch_id}:${result.dispatch.digest}\n`);
     } else if (command === "candidate-finalize") {
-      const result = finalizeCandidate(authority, { runtimeRoot, id: positional(1, "node ID"), holder: value("--holder", { required: true }), leaseId: value("--lease-id", { required: true }) });
-      console.log(JSON.stringify({ node_id: result.finalization.node_id, finalization: `${result.finalization.finalization_id}:${result.finalization.digest}`, candidate_sha: result.finalization.candidate_sha, candidate_tree: result.finalization.candidate_tree, changed_paths: result.finalization.changed_paths }, null, 2));
+      const result = finalizeTrustedCandidate(authority, { runtimeRoot, holder: value("--holder", { required: true }), leaseId: value("--lease-id", { required: true }) });
+      console.log(JSON.stringify(result, null, 2));
     }
     else if (command === "lease-renew") {
-      const result = renewLease(authority, { runtimeRoot, leaseId: positional(1, "lease ID"), holder: value("--holder", { required: true }), ttlSeconds: Number(value("--ttl-seconds", { fallback: "3600" })) });
-      console.log(JSON.stringify({ lease_id: result.lease.lease_id, receipt: `${result.lease.lease_id}:${result.lease.digest}`, expires_at: result.lease.expires_at }, null, 2));
+      const result = renewTrustedLease(authority, { runtimeRoot, leaseId: positional(1, "lease ID"), holder: value("--holder", { required: true }) });
+      console.log(JSON.stringify(result, null, 2));
     } else if (command === "lease-release") {
-      const result = releaseLease(authority, { runtimeRoot, leaseId: positional(1, "lease ID"), holder: value("--holder", { required: true }) });
-      console.log(JSON.stringify({ release_id: result.release.release_id, digest: result.release.digest }, null, 2));
+      console.log(JSON.stringify(closeTrustedRound(authority, { runtimeRoot, leaseId: positional(1, "lease ID"), holder: value("--holder", { required: true }), outcome: value("--outcome", { fallback: "RELEASED" }) }), null, 2));
+    } else if (command === "round-accept") {
+      console.log(JSON.stringify(acceptTrustedRound(authority, { runtimeRoot, roundId: positional(1, "round ID"), holder: value("--holder", { required: true }) }), null, 2));
     } else throw new Error(`unknown command ${command}`);
   }
 } catch (error) {

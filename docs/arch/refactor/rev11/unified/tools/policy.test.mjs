@@ -7,6 +7,9 @@ import path from "node:path";
 import test from "node:test";
 import { loadAuthority, readToml, validateGraphModel, writeGenerated } from "./lib.mjs";
 
+const EFFORT_ROLES = ["implementation", "review", "verification", "confirmation"];
+const EFFORTS = ["low", "medium", "high"];
+
 function cloneNodes(nodes) {
   return nodes.map((node) => structuredClone(node));
 }
@@ -82,4 +85,28 @@ test("two independent output roots are byte-for-byte deterministic", () => {
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+test("every node and charter explicitly publish per-role effort minima and defaults", () => {
+  const authority = loadAuthority();
+  for (const node of authority.nodes) {
+    const charter = fs.readFileSync(path.join(authority.packageRoot, node.charter), "utf8");
+    for (const role of EFFORT_ROLES) {
+      const minimum = node[`${role}_effort_min`];
+      const configuredDefault = node[`${role}_effort_default`];
+      assert.ok(EFFORTS.includes(minimum), `${node.id} ${role} minimum is explicit`);
+      assert.ok(EFFORTS.includes(configuredDefault), `${node.id} ${role} default is explicit`);
+      assert.ok(EFFORTS.indexOf(configuredDefault) >= EFFORTS.indexOf(minimum), `${node.id} ${role} default does not lower its minimum`);
+      assert.match(charter, new RegExp(`^${role}_effort_min=${minimum}$`, "m"));
+      assert.match(charter, new RegExp(`^${role}_effort_default=${configuredDefault}$`, "m"));
+    }
+  }
+});
+
+test("pre-trusted-local r3-r6 review bytes are digest-bound audit-only and never acceptance eligible", () => {
+  const authority = loadAuthority(); const manifest = JSON.parse(fs.readFileSync(path.join(authority.packageRoot, "authority/state/historical-review-audit.json"), "utf8"));
+  assert.equal(manifest.acceptance_eligible, false); assert.equal(manifest.disposition, "AUDIT_ONLY_PRE_TRUSTED_LOCAL"); assert.ok(manifest.files.length >= 22);
+  for (const row of manifest.files) assert.equal(crypto.createHash("sha256").update(fs.readFileSync(path.join(authority.packageRoot, row.path))).digest("hex"), row.sha256, row.path);
+  const history = JSON.parse(fs.readFileSync(path.join(authority.packageRoot, "authority/state/preactivation-orc0-history.json"), "utf8"));
+  assert.equal(history.acceptance_eligible, false); assert.equal(history.disposition, "REJECTED_AUDIT_ONLY"); assert.equal(history.minimum_successor_round_ordinal, 2);
 });

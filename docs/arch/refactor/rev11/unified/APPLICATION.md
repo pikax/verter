@@ -1,16 +1,16 @@
 # Applying and activating the package
 
-## Runtime custody
+## Trusted-local runtime
 
-Choose a dedicated runtime root outside every Git worktree. Receipts, external authorizations, gate/review evidence, amendments-in-progress, and leases are runtime evidence; they are never static authority inputs or committed worktree state. Every operational command takes `--runtime-root PATH` and refuses an unsafe/in-worktree root.
+Choose a dedicated runtime root outside every Git worktree. Runtime evidence remains external. One repo-global lock and mutable local anchor coordinate all registered roots. This is an honest-operator local-consistency and audit model; it does not claim cryptographic harness authenticity, independent anti-rollback, malicious-owner resistance, or protection from intentional toolchain replacement.
 
 ## Phase-aware lifecycle
 
 The canonical lifecycle is tested and fail-closed:
 
 1. `DORMANT`: the exact J1 landing evidence is absent, or ORC0 has not been accepted and activated. No ordinary v2 node is READY.
-2. `ORC0`: exact accepted C1 evidence plus the exact Git-verified J1 `LANDED_GRANDFATHERED` receipt and the immutable, narrowly scoped 2026-08-27 maintainer directive make only ORC0 eligible. The directive is not a J1 acceptance receipt and authorizes neither BR0, TCM0R, review findings, nor amendments. ORC0 is dispatchable while the static package is still dormant.
-3. `ACTIVE`: the active static state binds the exact accepted ORC0 receipt, candidate/integration Git tree, and whole-authority digest. Strict validation rejects every partial or forged transition.
+2. `ORC0`: exact accepted C1 evidence plus the exact Git-verified J1 `LANDED_GRANDFATHERED` receipt and the superseding trusted-local directive make only ORC0 eligible. ORC0 is dispatchable while the static package remains dormant.
+3. `ACTIVE`: the active static state binds the current accepted trusted-local ORC0 round, activation directive, and whole-authority digest. Strict validation rejects every partial transition.
 
 Inspect the derived phase with:
 
@@ -27,25 +27,24 @@ node tools/programctl.mjs landed-receipt-import J1-LANDED-RECEIPT.toml --runtime
 The import verifies the commit, tree, parent, branch containment, landed live-charter bytes, evidence tree, and context packet before atomically binding `j1_state`. It keeps J1 out of the accepted-receipt map. Admit and dispatch ORC0, advance the implementation branch if required, then freeze its exact candidate:
 
 ```text
-node tools/programctl.mjs admit ORC0 --holder NAME --candidate-ref refs/heads/BRANCH --gate-runner NAME --reviewer LENS=NAME --runtime-root PATH
+node tools/programctl.mjs admit ORC0 --holder NAME --candidate-ref refs/heads/BRANCH --runtime-root PATH
 node tools/programctl.mjs dispatch ORC0 --holder NAME --lease-id LEASE_ID --runtime-root PATH
 node tools/programctl.mjs candidate-finalize ORC0 --holder NAME --lease-id LEASE_ID --runtime-root PATH
-node tools/programctl.mjs authorization-create ORC0 --holder NAME --lease-id LEASE_ID --runtime-root PATH
 ```
 
-`authorization-create` derives the candidate-bound ORC0 authorization from the immutable directive slot only after dispatch and finalization; importing a fabricated directive-mode authorization is refused. Gate/review PASS imports are also refused. The canonical runners must create the evidence themselves for the frozen candidate: `gate-run` executes the exact profile/charter command plan with per-child timeouts and records every argv, exit, signal, timeout, elapsed time, stdout/stderr, and digest; `review-run` executes only the exact executable named by a separately ratified immutable reviewer capability and reconciles its schema-valid report.
+Admission automatically computes per-role effort, materializes implementation/review/verification/confirmation briefs, and returns their exact paths. Record each fresh harness task without a provider CLI in the lifecycle tool:
 
 ```text
-node tools/programctl.mjs gate-run ORC0 --scope candidate --integration-sha CANDIDATE_SHA --holder NAME --lease-id LEASE_ID --runtime-root PATH
-node tools/programctl.mjs gate-run ORC0 --scope integration --integration-sha CANONICAL_INTEGRATION_SHA --holder NAME --lease-id LEASE_ID --runtime-root PATH
-node tools/programctl.mjs review-run ORC0 --lens LENS --custody-binding review-capability:SHA256 --holder NAME --lease-id LEASE_ID --runtime-root PATH
+node tools/programctl.mjs harness-record --role review --round-id ROUND --lease-id LEASE --holder NAME --lens LENS --task TASK --provider PROVIDER --model MODEL --effort TIER --prompt PROMPT --report REPORT --runtime-root PATH
+node tools/programctl.mjs harness-record --role verification --round-id ROUND --lease-id LEASE --holder NAME --task TASK --provider PROVIDER --model MODEL --effort TIER --prompt PROMPT --report REPORT --runtime-root PATH
+node tools/programctl.mjs harness-record --role confirmation --round-id ROUND --lease-id LEASE --holder NAME --task TASK --provider PROVIDER --model MODEL --effort TIER --prompt PROMPT --report REPORT --runtime-root PATH
 ```
 
-Repeat `review-run` for every exact assigned lens. The committed trusted-reviewer ledger is intentionally empty because no authentic external reviewer credential can be proven locally. The maintainer directive does not grant reviewer identity: ORC0 therefore remains fail-closed at this boundary until externally ratified capabilities are added through owning authority. Only after both gates and all three custody-proven reviews exist may the validated ORC0 acceptance receipt be imported and the atomic transition performed:
+Only the current round's clean three-of-three reviews plus verification and confirmation can accept and activate:
 
 ```text
-node tools/programctl.mjs receipt-import ORC0-RECEIPT.toml --runtime-root PATH
-node tools/programctl.mjs activate --orc0-receipt ORC0:SHA256 --authorization maintainer_unified_v2_activation:SHA256 --activated-by TRUSTED_GRANTED_BY --runtime-root PATH
+node tools/programctl.mjs round-accept ROUND --holder NAME --runtime-root PATH
+node tools/programctl.mjs activate --activated-by NAME --runtime-root PATH
 ```
 
 The activation transaction uses an exclusive lock, immutable transition journal, staged root/activation bytes, and regenerated projections. Any partial/interrupted transition remains strictly refused. ORC0 may verify receipts, bind the authority digest, retire the selected mutable orchestration path, and flip activation only. It may not alter DAG semantics.
@@ -53,18 +52,18 @@ The activation transaction uses an exclusive lock, immutable transition journal,
 ## Atomic admission and leases
 
 ```text
-node tools/programctl.mjs admit ID --holder NAME --candidate-ref refs/heads/BRANCH --gate-runner NAME --reviewer LENS=NAME --ttl-seconds 3600 --runtime-root PATH
+node tools/programctl.mjs admit ID --holder NAME --candidate-ref refs/heads/BRANCH --runtime-root PATH
 node tools/programctl.mjs dispatch ID --holder NAME --lease-id LEASE_ID --runtime-root PATH
 node tools/programctl.mjs candidate-finalize ID --holder NAME --lease-id LEASE_ID --runtime-root PATH
-node tools/programctl.mjs lease-renew LEASE_ID --holder NAME --ttl-seconds 3600 --runtime-root PATH
-node tools/programctl.mjs lease-release LEASE_ID --holder NAME --runtime-root PATH
+node tools/programctl.mjs lease-renew LEASE_ID --holder NAME --runtime-root PATH
+node tools/programctl.mjs lease-release LEASE_ID --holder NAME --outcome FIX_REQUIRED --runtime-root PATH
 ```
 
-Repeat `--reviewer` in the exact profile-lens order with distinct identities. Admission binds the start SHA/tree, base SHA/tree, checked-out candidate worktree, authority digest, scope, exact epoch/ref/holder/timestamps, gate runner, and reviewers. It derives domains from static authority, excludes a second holder for the same node, and enforces every path/symbol overlap and resource capacity in one atomic operation. Packet construction is part of the transaction; failure rolls the lease back. Dispatch emits immutable packet/dispatch receipts and refuses missing, expired, foreign, stale-ref, or noncanonical leases. Finalization allows the branch to advance after dispatch, preserves the full base-to-candidate delta, and freezes the SHA/tree against which authorization, gates, reviews, and acceptance are validated.
+Admission is low-admin: omitted effort overrides are normal. `--effort ROLE=TIER` may raise but never lower the deterministic tier. Invalid calls refuse before anchor/runtime mutation; every locked operation recomputes before journaling. If the anchor is lost, use `trusted-local-reinitialize --operator NAME --reason TEXT`; the new lineage is visibly `unknown/lost`.
 
 ## Acceptance
 
-Acceptance evidence must bind real base/candidate/integration Git objects and ancestry; exact predecessor receipt ID/digest pairs; current authority/control/charter digests; trusted external authorization digests; the base→candidate changed-path/blob delta and lease receipt; the candidate gate plus the separate touched-domain integration gate; and the exact custody-proven reviewer identities/count/lenses/independence/model/effort/report digests required by the node profile. Final-tree equivalence means that `integration_tree` exactly names the Git tree of `integration_sha` and preserves every reviewed candidate-delta blob; unrelated conflict-free integration changes are allowed, so `candidate_tree` need not equal `integration_tree`. Final acceptance is exact-candidate clean 3/3. P0/P1 block. A deferred P2 requires two separately trusted, schema-applied immutable artifacts: an unexpired one-time disposition bound to node, candidate SHA/tree, profile, lens, severity, fingerprint, owner, bounded sweep, and obligation; and a digest-bound `CLOSED` next-cycle receipt for that exact obligation before expiry. P3 does not consume P2 authorization. A content change invalidates gates and reviews. Accepted state cannot bypass activation, predecessor, release, authorization, admission, or amendment blockers.
+Acceptance binds real candidate Git identity, the current exact lease/round/finalization, the deterministic effort policy, three distinct fresh review task identities and their exact provider/model/effort/prompt/report digests, plus verification and confirmation. These bindings are operator-attested local audit records. Final acceptance is current-round exact-candidate clean 3/3; P0/P1 block, and P2/P3 follow owning policy. A content or effort change invalidates the evidence. A closed or superseded round can never become accepting later.
 
 ## Amendments
 

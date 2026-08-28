@@ -1,10 +1,12 @@
 # Rev11 unified execution DAG
 
+ORC0 uses the superseding 2026-08-28 trusted-local directive: honest-operator local consistency and auditability, one repo-global lifecycle lock/anchor across external runtime roots, deterministic per-node effort tiers, and fresh provider-neutral harness task records. It makes no malicious-owner, cryptographic harness-authenticity, or independent anti-rollback claim. See `APPLICATION.md`.
+
 This additive package remains fail-closed until the J1/ORC0 lifecycle is completed. It does not modify or supersede live Rev11 authority while dormant. C1 is imported from its immutable accepted receipt. J1 is represented separately as `LANDED_GRANDFATHERED` by an exact Git-verified landing receipt for commit `6a6c3c1a83709f7a58918e5b4e3d1eedcbd3ddac`; neither the legacy ledger nor unified v2 falsely calls J1 accepted.
 
 Static authority lives in `authority/`, `charters/`, `contracts/`, `catalogs/`, `schemas/`, `templates/`, and `provenance/`. The three proposal sources remain byte-identical and 2,339 digest-bound context/requirement/acceptance/deletion/forbidden atoms transfer their obligations to real target charters/contracts. Fifty live Rev11 inputs are separately byte/SHA locked. Unverifiable Recovery A/B coverage claims were removed; recovery artifacts are not authority.
 
-State is derived from real Git identities, immutable receipts, custody-bound candidate authorizations, canonical gate/review evidence, the append-only amendment chain, and runtime leases stored outside the worktree. A receipt never overrides a blocker. BR0 is the source-canonical sole successor entry and requires both the repair-freeze lift and a distinct post-L4 successor-genesis custody receipt; every successor and product terminal is downstream of BR0.
+State is derived from real Git identities, immutable receipts, operator-attested harness evidence, the append-only amendment chain, and runtime leases stored outside the worktree. A receipt never overrides a blocker. Historical executable r3-r6 evidence is digest-valid but audit-only and cannot satisfy current acceptance. BR0 remains the source-canonical sole successor entry.
 
 Use an external runtime directory:
 

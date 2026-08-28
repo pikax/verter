@@ -19,6 +19,14 @@
     "resource_class",
     "gate_profile",
     "review_profile",
+    "implementation_effort_min",
+    "implementation_effort_default",
+    "review_effort_min",
+    "review_effort_default",
+    "verification_effort_min",
+    "verification_effort_default",
+    "confirmation_effort_min",
+    "confirmation_effort_default",
     "dispatchable",
     "optional",
     "release_gating",
@@ -95,6 +103,14 @@
     "review_profile": {
       "type": "string"
     },
+    "implementation_effort_min": { "enum": ["low", "medium", "high"] },
+    "implementation_effort_default": { "enum": ["low", "medium", "high"] },
+    "review_effort_min": { "enum": ["low", "medium", "high"] },
+    "review_effort_default": { "enum": ["low", "medium", "high"] },
+    "verification_effort_min": { "enum": ["low", "medium", "high"] },
+    "verification_effort_default": { "enum": ["low", "medium", "high"] },
+    "confirmation_effort_min": { "enum": ["low", "medium", "high"] },
+    "confirmation_effort_default": { "enum": ["low", "medium", "high"] },
     "dispatchable": {
       "type": "boolean"
     },

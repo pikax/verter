@@ -1,6 +1,6 @@
 schema = 2
-baseline_authority_sha256 = "e1dc74e0344427216f7b4694a5cb15ba2fc6852ac833ab3e5a5dad7bff7ab561"
-current_authority_sha256 = "e1dc74e0344427216f7b4694a5cb15ba2fc6852ac833ab3e5a5dad7bff7ab561"
+baseline_authority_sha256 = "755a9f7171d0474cdf48d043a5810c8d6298c80a1fba027be91bd2d8ccc040c7"
+current_authority_sha256 = "755a9f7171d0474cdf48d043a5810c8d6298c80a1fba027be91bd2d8ccc040c7"
 generation = 0
 last_amendment_id = ""
 last_amendment_sha256 = ""
