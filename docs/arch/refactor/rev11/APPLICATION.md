@@ -10,7 +10,8 @@ The canonical lifecycle is tested and fail-closed:
 
 1. `DORMANT`: the exact J1 landing evidence is absent, or ORC0 has not been accepted and activated. No ordinary v2 node is READY.
 2. `ORC0`: exact accepted C1 evidence plus the exact Git-verified J1 `LANDED_GRANDFATHERED` receipt and the superseding trusted-local directive make only ORC0 eligible. ORC0 is dispatchable while the static package remains dormant.
-3. `ACTIVE`: the external trusted-local transition binds the accepted ORC0 candidate, its exact canonical-branch landing receipt, activation directive, and whole-authority digest. The tracked authority stays `DORMANT`, so activation never mutates reviewed source bytes. Strict validation rejects every partial or mismatched transition.
+3. `REACTIVATION_REQUIRED`: ORC0 was activated against an ancestor authority, but a later ratified amendment has advanced the immutable authority lock. Ordinary successor dispatch remains blocked until an exact external ACTIVE-to-ACTIVE transition binds the prior activation head to the amendment and its receipt-backed ratifier.
+4. `ACTIVE`: the external trusted-local transition chain binds the accepted ORC0 candidate, its exact canonical-branch landing receipt, activation directive, every covered authority amendment, and the current whole-authority digest/generation. The tracked authority stays `DORMANT`, so activation and reactivation never mutate reviewed source bytes. Strict validation rejects every partial, forked, skipped, orphaned, or mismatched transition.
 
 Inspect the derived phase with:
 
@@ -78,10 +79,20 @@ node tools/programctl.mjs amendment-check
 An authorized authority change uses:
 
 ```text
-node tools/programctl.mjs amendment-create AMD-ID --before-root PATH --ratified-by ID --ratification-receipt SHA256 --runtime-root PATH
+node tools/programctl.mjs amendment-create AMD-ID --before-root PATH --ratified-by ID --ratification-receipt SHA256 --activation-predecessor-authority SHA256 --runtime-root PATH
 ```
 
-The command computes before/after authority digests, changed paths/nodes, full descendant impact closure, stale receipts, and required revalidation; validates trusted ratification; writes one append-only amendment; and advances the authority lock. Forged authorization, incomplete closure, direct static edits, or attempted history rewrite fail closed.
+The command computes before/after authority digests, changed paths/nodes, full descendant impact closure, stale receipts, and required revalidation; validates the exact receipt-backed `authority-amendment` slot named by the custody boundary; binds the exact prior ACTIVE authority digest that the amendment supersedes; writes one append-only amendment; and advances the authority lock. The same slot and receipt bytes must already exist in the locked before root and candidate. Omit `--activation-predecessor-authority` only when that prior ACTIVE digest is exactly the locked before-authority digest. Unknown-purpose, after-only, forged, placeholder, or digest-mismatched slots or predecessors, incomplete closure, direct static edits, and attempted history rewrite fail closed.
+
+If ORC0 was already ACTIVE when the amendment lands, the program derives `REACTIVATION_REQUIRED`. Preserve the same external runtime root and publish the exact amendment-bound continuation:
+
+```text
+node tools/programctl.mjs amendment-reactivate --runtime-root PATH
+```
+
+The command accepts no caller-selected ratifier or receipt. It derives them from the validated amendment head, requires the clean canonical branch and exact current activation head, then atomically writes one immutable ACTIVE-to-ACTIVE transition through the repo-global journal. The transition must advance exactly one authority generation and cannot fork, skip, roll back, or detach from the amendment chain. Legacy receipt files remain immutable history while reactivation is pending; only the exact covered legacy references return to the active receipt map after reactivation. Invalidated runtime v2 receipts are never revived and require new acceptance. Mutable tracked activation state is not rewritten.
+
+The successor-DAG/legacy-cleanup/GitHub-control-plane candidate is one atomic amendment. Rebasing it after ORC0 lands establishes Git ancestry but does not authorize the authority mutation. Before landing, custody must provide an exact trusted authority-amendment slot that is present unchanged in the before and after roots; then `amendment-create` must bind the 71 added nodes, amended existing owners, 418-path deletion/transfer catalog, descendant impact closure, invalidated receipts, and regenerated authority lock. After landing, the retained ORC0 runtime must publish the exact `amendment-reactivate` transition before any successor node becomes executable. The 13 GH/FB/REL nodes remain non-executable until the current accepted ORC0 receipt and complete activation-transition chain validate. Do not synthesize a local ratification row or bypass the strict gate. The optional EPR2 and EPR3 execution paths separately remain fail-closed until their maintainer-managed acquisition/bundling authorizations exist.
 
 ## Successor authorization split
 

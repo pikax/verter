@@ -8,6 +8,12 @@ bytes = 99950
 sha256 = "4637471d1a125bb238cc1c3c0c15e40466bfe452a2d17418799beb1a894e7a0f"
 
 [[source]]
+id = "c2-program-state-authority"
+path = "sources/c2-program-state-authority.toml"
+bytes = 184386
+sha256 = "2b176c4c15730ff9698c73f677eb239800c1adff3891e4e77493a768ea630dee"
+
+[[source]]
 id = "expansion"
 path = "sources/successor-expansion.md"
 bytes = 186036
@@ -18,3 +24,63 @@ id = "findings"
 path = "sources/orchestration-findings.md"
 bytes = 38157
 sha256 = "043bc2d7df2b6aef49537961922b9988440e1b30ed997ca186db38a8d8d344de"
+
+[[source]]
+id = "legacy-architecture-reconciliation"
+path = "sources/legacy-arch-reconciliation.md"
+bytes = 12245
+sha256 = "69ca218652e8869860b1730abde5a88e3eca0811df0859dc4ba015aaea9e8dc5"
+
+[[source]]
+id = "successor-dag-amendment"
+path = "sources/successor-dag-amendment.md"
+bytes = 8239
+sha256 = "9057e07952f622e16bc1f9856372d2570a440a7d1dd6e82b210fa513e3186f26"
+
+[[source]]
+id = "existing-node-amendments"
+path = "sources/existing-node-amendments.md"
+bytes = 10449
+sha256 = "b5c6c8d46365f2233dd65f2811dffeafd5a6f00e4a7cb288bdcde8e69a1504a7"
+
+[[source]]
+id = "successor-native-checker-dag"
+path = "sources/successor-dag-charter-pack/authority/dag/expansion-native-checker.toml"
+bytes = 11894
+sha256 = "366d01d81838d124132e2f653f139b6d37977ffd49ce837a61e2a3fa53ccc694"
+
+[[source]]
+id = "successor-native-checker-family-dag"
+path = "sources/successor-dag-charter-pack/authority/dag/expansion-native-checker-families.example.toml"
+bytes = 41577
+sha256 = "0ffe58377fe8a1ea2b58090ae5b6e149f09fb4dad9d98463b90ecbf2570c7502"
+
+[[source]]
+id = "successor-language-service-dag"
+path = "sources/successor-dag-charter-pack/authority/dag/expansion-language-service.toml"
+bytes = 14507
+sha256 = "5554f9391f70b79b0628de738b0098bd6f98f96887eba7fc48efb66b4960c7ee"
+
+[[source]]
+id = "successor-engine-provisioning-dag"
+path = "sources/successor-dag-charter-pack/authority/dag/expansion-engine-provisioning.toml"
+bytes = 9464
+sha256 = "7890296943e634a66988e2533225c470fa8af888cb647b62c8ed54402ff76d6a"
+
+[[source]]
+id = "successor-native-checker-family-manifest"
+path = "sources/successor-dag-charter-pack/catalogs/native-checker-family-manifest.toml"
+bytes = 24817
+sha256 = "359eba58173ff7a3e3d931a926ba354ea7cb027f3992799bd841460a7941723c"
+
+[[source]]
+id = "legacy-architecture-transfers"
+path = "sources/legacy-architecture-transfers.md"
+bytes = 58814
+sha256 = "a727ec3204f25121cfd388dca21ac99434019d24d93d7ce9565bc7ceb93b51e0"
+
+[[source]]
+id = "github-control-plane-program"
+path = "sources/github-control-plane-program.md"
+bytes = 23051
+sha256 = "9bb467b0e36fb06d364e3f58e300ee7322ae1c0a459a2047a4b9d6d9299fbf3a"

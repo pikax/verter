@@ -143,7 +143,7 @@
 //! mechanism_ruling: fixed-marker content scanner for the Cross-Platform
 //!   Portability content-residue invariant; accepted by the durable
 //!   architecture-ruling record at
-//!   `docs/arch/portability-fixed-marker-scanner-rulings.md#tracked-paths-no-machine-roots`.
+//!   `docs/contributing/portability-fixed-marker-scanner-rulings.md#tracked-paths-no-machine-roots`.
 //! hardening_rounds: 3
 //! hardening_history: proof entries for hardening_rounds=3 (each a bounded
 //!   marker-set expansion authorized by the durable ruling above; the exact
@@ -292,13 +292,15 @@ const MACHINE_MARKERS: &[&str] = &[
 const SELF_FILE_REPO_PATH: &str =
     "crates/verter_source_policy_gate/tests/cases/tracked_paths_no_machine_roots.rs";
 const EVIDENCE_EXCEPTION_MANIFEST_REPO_PATH: &str =
-    "docs/arch/portability-machine-marker-evidence-exceptions.tsv";
+    "scripts/manifests/portability-machine-marker-evidence-exceptions.tsv";
 const SOURCE_POLICY_RULING_REPO_PATH: &str =
-    "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-26-SOURCE-POLICY-EVIDENCE.md";
+    "docs/contributing/portability-fixed-marker-scanner-rulings.md";
 const EVIDENCE_EXCEPTION_MANIFEST_HEADER: &str =
     "class\tpath\tsha256\tpin_document\towner\tretirement_gate";
-const AUTHORITY_EVIDENCE_ROOT: &str = "docs/arch/refactor/rev11/evidence/";
-const ARCHITECTURE_RULING_ROOT: &str = "docs/arch/refactor/rev11/rulings/";
+const AUTHORITY_EVIDENCE_ROOT: &str = "docs/arch/refactor/rev11/backup/evidence/";
+const ARCHITECTURE_RULING_ROOT: &str = "docs/arch/refactor/rev11/backup/rulings/";
+const HISTORICAL_REVIEW_SOURCE_ROOT: &str =
+    "docs/arch/refactor/rev11/sources/review-history-migration/";
 
 #[derive(Debug, Clone)]
 struct EvidenceException {
@@ -469,6 +471,7 @@ fn validate_evidence_exception_manifest(
         let permitted = match *class {
             "authority-evidence" => path.starts_with(AUTHORITY_EVIDENCE_ROOT),
             "inherited-ruling" => path.starts_with(ARCHITECTURE_RULING_ROOT),
+            "historical-review-source" => path.starts_with(HISTORICAL_REVIEW_SOURCE_ROOT),
             _ => {
                 errors.push(format!(
                     "exception manifest line {line_number} has unknown class `{class}`"
@@ -737,7 +740,7 @@ fn tracked_files_contain_no_machine_specific_path_markers() {
         &paths,
         EVIDENCE_EXCEPTION_MANIFEST_REPO_PATH,
         SOURCE_POLICY_RULING_REPO_PATH,
-        9,
+        15,
     );
     let authority_errors = exceptions.as_ref().err().cloned().unwrap_or_default();
     let empty = BTreeMap::new();
@@ -1141,9 +1144,9 @@ fn machine_marker_matcher_discriminates() {
     );
 }
 
-const TEST_EXCEPTION_PATH: &str = "docs/arch/refactor/rev11/evidence/C1/test-exact.md";
-const TEST_PIN_PATH: &str = "docs/arch/refactor/rev11/rulings/test-pin.md";
-const TEST_MANIFEST_PATH: &str = "docs/arch/portability-machine-marker-evidence-exceptions.tsv";
+const TEST_EXCEPTION_PATH: &str = "docs/arch/refactor/rev11/backup/evidence/C1/test-exact.md";
+const TEST_PIN_PATH: &str = "docs/arch/refactor/rev11/backup/rulings/test-pin.md";
+const TEST_MANIFEST_PATH: &str = "scripts/manifests/portability-machine-marker-evidence-exceptions.tsv";
 const TEST_RULING_PATH: &str =
     "docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-TEST-SOURCE-POLICY.md";
 
@@ -1262,7 +1265,7 @@ fn unlisted_marker_bearing_evidence_is_rejected() {
 #[test]
 fn listed_path_outside_permitted_roots_is_rejected() {
     let (dir, mut tracked) = valid_rail_fixture();
-    let outside = "docs/arch/portable.md";
+    let outside = "docs/contributing/portable.md";
     let bytes = format!("outside {}\n", MACHINE_MARKERS[0]).into_bytes();
     let digest = sha256_hex(&bytes);
     write_fixture(dir.path(), outside, &bytes);

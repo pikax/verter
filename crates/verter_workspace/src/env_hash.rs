@@ -14,7 +14,7 @@
 //!
 //! Every cache layer keys on **only** the dimensions it actually depends on
 //! (R21 scoping rule). A single bundled `project_config_hash` is forbidden.
-//! See `docs/arch/fact-based-cache.md` for the per-field audit table and the
+//! See `.claude/skills/type-cache-architecture/SKILL.md` for the per-field audit table and the
 //! per-cache-layer key composition.
 //!
 //! The hash functions are pure: same inputs → same `Hash16`. Each dimension

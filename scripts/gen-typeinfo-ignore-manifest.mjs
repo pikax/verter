@@ -21,7 +21,7 @@
  * 5. `crates/verter_session/src/typeinfo_guard_registry_lib.rs`
  *    — the lib-test-target mirror of the `GuardId` enum plus the set of
  *    `GuardId`s whose live binding is owed by the lib target.
- * 6. `docs/arch/typeinfo-row-registry-counts.md` — the derived row-registry
+ * 6. `docs/generated/typeinfo-row-registry-counts.md` — the derived row-registry
  *    count documentation (baseline / per-status / per-block).
  *
  * Each `IgnoredTestRow`'s `block_id` AND `status` are COMPUTED here from the
@@ -4800,7 +4800,7 @@ function main(checkOnly = false) {
       "crates/verter_session/tests/cases/manifest_data/typeinfo_guard_registry_lib.rs",
       emitGuardRegistryLib(),
     ],
-    ["docs/arch/typeinfo-row-registry-counts.md", emitCountsDoc(counts)],
+    ["docs/generated/typeinfo-row-registry-counts.md", emitCountsDoc(counts)],
   ]);
 
   if (checkOnly) {

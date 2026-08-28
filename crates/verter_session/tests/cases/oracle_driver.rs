@@ -1,5 +1,5 @@
 //! Source-walk guard for the shared registry driver's snapshot loading
-//! (`docs/arch/u0-oracle-harness-design.md` §Q1 / §4 `snapshot_loading_is_runtime_fs`).
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §Q1 / §4 `snapshot_loading_is_runtime_fs`).
 //!
 //! Snapshots are loaded at test time via runtime `std::fs::read` rooted at the
 //! FULL `CARGO_MANIFEST_DIR`-relative infix — NOT `include_str!` /

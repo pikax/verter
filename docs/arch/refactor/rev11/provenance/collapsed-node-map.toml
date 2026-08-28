@@ -1,7 +1,8 @@
-schema = 2
+schema = 3
 recovery_input_commit = "903f06b80e4416a19f4eeaf2f4ab7f02b09ec096"
 recovery_input_node_count = 523
-current_node_count = 197
+current_node_count = 268
+successor_sources = ["sources/successor-dag-amendment.md", "sources/github-control-plane-program.md"]
 
 [[retained]]
 id = "A0"
@@ -2169,6 +2170,574 @@ original_charter = "charters/compiler-vue-style-query/VST1.md"
 current_charter = "charters/compiler-vue-style-query/VST1.md"
 original_charter_sha256 = "fdca124b1be8956e9b54d48d70967f20e8ecc452ef794d1811d2837111f5e241"
 disposition = "retained_reauthored_under_current_authority"
+
+[[addition]]
+id = "EPR0"
+name = "External engine provisioning policy and trust constitution"
+module = "dag/expansion-engine-provisioning.toml"
+charter = "charters/expansion-engine-provisioning/EPR0.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "EPR1"
+name = "Engine artifact identity, compatibility, integrity, and cache contract"
+module = "dag/expansion-engine-provisioning.toml"
+charter = "charters/expansion-engine-provisioning/EPR1.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "EPR2"
+name = "Managed download and verified atomic installation channel"
+module = "dag/expansion-engine-provisioning.toml"
+charter = "charters/expansion-engine-provisioning/EPR2.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "EPR3"
+name = "Bundled sidecar shipping and distribution channel"
+module = "dag/expansion-engine-provisioning.toml"
+charter = "charters/expansion-engine-provisioning/EPR3.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "EPR4"
+name = "Exact authorized engine candidate resolution and selection"
+module = "dag/expansion-engine-provisioning.toml"
+charter = "charters/expansion-engine-provisioning/EPR4.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "EPR5"
+name = "Engine activation epochs, health, and truthful capability publication"
+module = "dag/expansion-engine-provisioning.toml"
+charter = "charters/expansion-engine-provisioning/EPR5.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "EPR6"
+name = "Offline, enterprise, and supply-chain conformance terminal"
+module = "dag/expansion-engine-provisioning.toml"
+charter = "charters/expansion-engine-provisioning/EPR6.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "FB0"
+name = "Non-DAG issue label state machine and feedback contract"
+module = "dag/governance-feedback-intake.toml"
+charter = "charters/governance-feedback-intake/FB0.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "FB1"
+name = "Non-DAG issue inspection"
+module = "dag/governance-feedback-intake.toml"
+charter = "charters/governance-feedback-intake/FB1.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "FB2"
+name = "Maintainer-authorized issue → DAG promotion"
+module = "dag/governance-feedback-intake.toml"
+charter = "charters/governance-feedback-intake/FB2.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "GH0"
+name = "GitHub control-plane contract and authority matrix"
+module = "dag/governance-github-control-plane.toml"
+charter = "charters/governance-github-control-plane/GH0.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "GH1"
+name = "GitHub adapter, Project discovery and deterministic fixtures"
+module = "dag/governance-github-control-plane.toml"
+charter = "charters/governance-github-control-plane/GH1.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "GH2"
+name = "DAG → GitHub issue projection and reconciliation"
+module = "dag/governance-github-control-plane.toml"
+charter = "charters/governance-github-control-plane/GH2.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "GH3"
+name = "PR-backed dispatch and draft lifecycle"
+module = "dag/governance-github-control-plane.toml"
+charter = "charters/governance-github-control-plane/GH3.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "GH4"
+name = "PR body, review history and immutable evidence bridge"
+module = "dag/governance-github-control-plane.toml"
+charter = "charters/governance-github-control-plane/GH4.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "GH5"
+name = "CI integration gate, safe squash landing and landed proof"
+module = "dag/governance-github-control-plane.toml"
+charter = "charters/governance-github-control-plane/GH5.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "GH6"
+name = "GitHub control-plane convergence and cutover"
+module = "dag/governance-github-control-plane.toml"
+charter = "charters/governance-github-control-plane/GH6.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO0"
+name = "Authored-coordinate semantic operation constitution"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO0.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO1"
+name = "Tolerant carrier recovery and two-rail syntax/semantic diagnostics"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO1.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO10"
+name = "Language-service convergence and legacy route deletion"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO10.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO2"
+name = "Canonical authored target and provenance graph"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO2.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO3"
+name = "Definition, type-definition, implementation, and symbol navigation"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO3.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO4"
+name = "References, hierarchy, and bounded occurrence planning"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO4.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO5"
+name = "Semantic rename planning and conflict analysis"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO5.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO6"
+name = "Completion candidates and provider-neutral resolve intents"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO6.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO7"
+name = "Hover, signature-help, and inlay presentation composition"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO7.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO8"
+name = "Authored edit transaction engine for rename, fixes, and imports"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO8.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "LSO9"
+name = "Vertical language-service conformance and coexistence matrix"
+module = "dag/expansion-language-service.toml"
+charter = "charters/expansion-language-service/LSO9.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-AT-CYCLE"
+name = "Recursive type, instantiation cycle, and complexity diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-AT-CYCLE.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-AT-QUERY"
+name = "Keyof, indexed access, type query, alias, and reference diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-AT-QUERY.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-AT-REDUCE"
+name = "Mapped, conditional, infer, template-literal, and utility-type diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-AT-REDUCE.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-BD-DUP"
+name = "Duplicate and conflicting declaration diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-BD-DUP.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-BD-INIT"
+name = "Use-before-declaration and initialization diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-BD-INIT.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-BD-SCOPE"
+name = "Lexical scope, shadowing, and name binding diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-BD-SCOPE.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-CF-CONTEXT"
+name = "Contextual typing and expression conformance diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-CF-CONTEXT.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-CF-THIS"
+name = "This, super, private environment, and call-context diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-CF-THIS.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-CF-VAR"
+name = "Function variance, predicate, assertion, and effect diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-CF-VAR.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-CO-CALL"
+name = "Call, construct, tag, and invocation applicability diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-CO-CALL.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-CO-INFER"
+name = "Generic inference, constraints, defaults, and instantiation diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-CO-INFER.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-CO-OVER"
+name = "Overload resolution and implementation conformance diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-CO-OVER.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-FD-CFLOW"
+name = "Reachability, return coverage, and control-flow legality diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-FD-CFLOW.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-FD-DEF"
+name = "Definite assignment and initialization coverage diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-FD-DEF.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-FD-NARROW"
+name = "Control-flow narrowing and impossible-condition diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-FD-NARROW.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-JD-DEC"
+name = "Decorator, metadata, and auto-accessor diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-JD-DEC.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-JD-JS"
+name = "JavaScript and CommonJS semantic diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-JD-JS.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-JD-JSDOC"
+name = "JSDoc type, template, import, and tag diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-JD-JSDOC.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-JF-JSX"
+name = "JSX intrinsic/component, props, children, and attribute diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-JF-JSX.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-JF-SVELTE"
+name = "Svelte template, rune, event, slot/snippet, and component-contract diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-JF-SVELTE.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-JF-VUE"
+name = "Vue template and component-contract diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-JF-VUE.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-MP-AUG"
+name = "Module/global augmentation and cross-file declaration diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-MP-AUG.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-MP-MODULE"
+name = "Module resolution, import/export, and package-boundary diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-MP-MODULE.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-MP-PROJECT"
+name = "Project references, configuration, library, and program diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-MP-PROJECT.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-OC-HERIT"
+name = "Heritage, override, abstract, and implementation diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-OC-HERIT.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-OC-MEM"
+name = "Object, class, interface, and member declaration diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-OC-MEM.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-OC-MERGE"
+name = "Enums, namespaces, ambient declarations, and declaration merging diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-OC-MERGE.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-RO-ASSIGN"
+name = "Assignment and return assignability diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-RO-ASSIGN.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-RO-EXCESS"
+name = "Freshness, excess-property, and object conformance diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-RO-EXCESS.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCF-RO-OPER"
+name = "Operator and property/index access diagnostics"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCF-RO-OPER.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK0"
+name = "Native diagnostic authority and parity-certification constitution"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK0.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK1"
+name = "Executable-region and typed semantic-contribution contract"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK1.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK2"
+name = "Incremental diagnostic query and result domain"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK2.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK3"
+name = "Shared-proof semantic diagnostic rule kernel"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK3.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK4"
+name = "Diagnostic-family manifest, hermetic oracle, certification, and node generator"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK4.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK5"
+name = "Framework diagnostic contribution ingress and profile isolation"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK5.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK6"
+name = "Family-scoped diagnostic authority arbitration and atomic publication"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK6.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK7"
+name = "Shared diagnostic service and consumer-surface integration"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK7.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCK8"
+name = "Native checker terminal and displaced-authority deletion"
+module = "dag/expansion-native-checker.toml"
+charter = "charters/expansion-native-checker/NCK8.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "NCKF0"
+name = "Required native checker diagnostic-family convergence"
+module = "dag/expansion-native-checker-families.toml"
+charter = "charters/expansion-native-checker/generated-families/NCKF0.md"
+source = "sources/successor-dag-amendment.md"
+disposition = "source_pack_successor_addition_pending_authority_amendment"
+
+[[addition]]
+id = "REL0"
+name = "Milestone release-planning overlay and DAG scheduling"
+module = "dag/governance-release-control.toml"
+charter = "charters/governance-release-control/REL0.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "REL1"
+name = "Milestone release readiness and release rehearsal"
+module = "dag/governance-release-control.toml"
+charter = "charters/governance-release-control/REL1.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
+
+[[addition]]
+id = "REL2"
+name = "Release PR, tag and publication integration"
+module = "dag/governance-release-control.toml"
+charter = "charters/governance-release-control/REL2.md"
+source = "sources/github-control-plane-program.md"
+disposition = "github_control_plane_addition_pending_authority_amendment"
 
 [[disposition]]
 id = "BR0P"

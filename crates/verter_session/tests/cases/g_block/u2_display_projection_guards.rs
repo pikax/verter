@@ -1,5 +1,5 @@
 //! Discriminating guards for the canonical display policy
-//! (`docs/arch/u2-query-value-domain-design.md` §14): `display()` is a
+//! (`.claude/skills/type-resolution/SKILL.md` §14): `display()` is a
 //! PROJECTION over an already-computed typed `SemanticQueryValue` driven by a
 //! display-only `DisplayNeeds` bitset — NEVER a stored or re-parsed string, and
 //! `display_needs` NEVER drives resolution / enters a typed-value family key.

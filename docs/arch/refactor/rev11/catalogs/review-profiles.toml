@@ -60,6 +60,16 @@ minimum_effort = "high"
 risk_band = "high"
 confirmation_policy = "independent-full"
 [[profile]]
+id = "security-3"
+reviewers = 3
+independent = true
+lenses = ["adversarial", "conformance", "supply-chain-platform"]
+dispatch = "fresh-distinct-harness-task"
+provider_policy = "provider-neutral"
+minimum_effort = "high"
+risk_band = "high"
+confirmation_policy = "independent-full"
+[[profile]]
 id = "history"
 reviewers = 0
 independent = true

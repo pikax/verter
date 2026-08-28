@@ -1,5 +1,5 @@
 //! Snapshot JSON schema + STRICT decode for the TS7 oracle harness
-//! (`docs/arch/u0-oracle-harness-design.md` §Q1).
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §Q1).
 //!
 //! A snapshot is the checked-in, tsgo-free proof artifact a lifted
 //! `TypeExpr`-projection row compares against. This module owns the serde DTOs

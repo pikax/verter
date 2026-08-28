@@ -1,8 +1,0 @@
-warning: verter_tsc v0.0.1-beta.3 (<REPO>-wt-a2\crates\verter_tsc) ignoring invalid dependency `verter_tsc` which is missing a lib target
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.63s
-────────────
- Nextest run ID 68df5468-71b2-4174-b819-2323630043db with nextest profile: default
-    Starting 1 test across 4 binaries (8710 tests skipped)
-        PASS [   0.022s] (1/1) verter_session::main cases::g_misc1::no_lib_rs_growth::lib_rs_stays_under_line_ceiling
-────────────
-     Summary [   0.040s] 1 test run: 1 passed, 8710 skipped

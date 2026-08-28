@@ -1218,7 +1218,7 @@ pub(crate) mod checker_syntax {
 
 /// Crossed capture-write / effect / completion position matrix.
 ///
-/// Axes (`docs/arch/u6-flow-return-gaps-and-target.md`): binding kind ×
+/// Axes (`docs/arch/refactor/rev11/charters/rev11-flow/D8.md`): binding kind ×
 /// write timing × closure depth × expression position × guard kind ×
 /// completion container. One shared program generator; each cell pins
 /// the checker answer ([`ORACLE_STAMP`]) and the current substrate

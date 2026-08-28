@@ -158,3 +158,19 @@ These clauses are operative only for the exact applicability set shown. Cold pac
 **Forbidden:** using repair authority to dispatch successor work, treating a stored ruling as ratified, manually setting `BR0` READY, or using a worktree/branch other than the accepted integration identity.
 **Deletion/abort:** supersede every old proposal premise tied to `323bc7f…`; abort if the freeze is not explicitly lifted for this amendment or Rev11 reaches L4 without activated-TCM soak/performance evidence.
 ~~~~
+
+### SRC-LEGACY-TRANSFER-A57450E4B7D4
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:460-465`
+- Applicability: `BR0`
+- Exact text SHA-256: `18f448b4e290684fb32916db700b07a407f4cfd126b73c9b9aeb101a40b020b7`
+
+~~~~markdown
+### LEGACY-TRANSFER-A57450E4B7D4
+
+- Original path: `docs/arch/release-state.md`; Git blob: `a57450e4b7d4125ad0f11a1cf76d925022bcca23`; exact source SHA-256: `1187d2acf0a99b0447227f8e05c863a3e2630333ac7f1f9c2b18f7430b12a3aa`.
+- Exact retained source: `sources/legacy-architecture-transfers/release-state.md`.
+- Applicable authority: `BR0`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~

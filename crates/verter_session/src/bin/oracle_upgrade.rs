@@ -1,6 +1,6 @@
 //! The deterministic, TSGO-FREE v3→v4 oracle snapshot re-keying
-//! (`docs/arch/u0-oracle-harness-design.md` §Q4 +
-//! `docs/arch/ri0-relation-verdict-oracle-addendum.md`).
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §Q4 +
+//! `docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md`).
 //!
 //! Run with `cargo run -p verter_session --features oracle-gen --bin oracle_upgrade`.
 //! The `[[bin]]` entry declares `required-features = ["oracle-gen"]`, so a default

@@ -58,5 +58,5 @@ default = []
 # compile-fail` (or `cargo test`). It is NOT wired into the default gate
 # (`node scripts/gate.mjs`) or any CI workflow — the seals it asserts are also
 # enforced structurally by the normal build, so a broken seal fails the
-# ordinary compile. Recorded in `docs/arch/gate-integrity-ledger.md`.
+# ordinary compile. Recorded in `docs/contributing/gate-integrity-ledger.md`.
 compile-fail = []

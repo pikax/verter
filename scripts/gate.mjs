@@ -166,7 +166,7 @@
 //      authoritative; the one route from `failures exist in the log` to a green verdict is the
 //      tolerance allowlist, so tolerance is refused outright whenever a failure was superseded by a
 //      pass. Residual, named rather than claimed away: no text-level rule can fully separate runner
-//      output from test output on a shared stream - see GI-19 in docs/arch/gate-integrity-ledger.md.
+//      output from test output on a shared stream - see GI-19 in docs/contributing/gate-integrity-ledger.md.
 //      NAMING, and its honest limit. Failing tests are listed by name with their status, including the
 //      compound (`FAIL + LEAK`) and retried (`TRY 3 FAIL`, `TRY 3 FL+LK`) status fields, with the LAST
 //      status per test deciding — so a flaky test that failed attempt 1 and passed attempt 2 is not a

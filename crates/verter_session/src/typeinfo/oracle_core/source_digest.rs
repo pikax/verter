@@ -1,5 +1,5 @@
 //! The shared, tsgo-free `source_admission_digest` derivation
-//! (`docs/arch/u0-oracle-harness-design.md` §Q1 / §Q2).
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §Q1 / §Q2).
 //!
 //! ONE owner for the source-side admission digest: the `oracle-gen` generator
 //! ASSEMBLES it into the snapshot, and the default-feature consumption guard

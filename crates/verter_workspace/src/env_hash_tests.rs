@@ -10,7 +10,7 @@
 //! per call (via the `EnvHashInputs` builder); the bound assertions exercise
 //! the discrimination invariant on each dimension.
 //!
-//! See `docs/arch/fact-based-cache.md` for the audit table that maps every
+//! See `.claude/skills/type-cache-architecture/SKILL.md` for the audit table that maps every
 //! [`IdeProjectConfig`] field to its env-hash dimension.
 
 use std::sync::OnceLock;

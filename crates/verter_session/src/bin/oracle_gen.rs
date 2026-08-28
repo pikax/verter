@@ -1,5 +1,5 @@
 //! The TS7 `TypeExpr`-projection oracle SNAPSHOT GENERATOR binary
-//! (`docs/arch/u0-oracle-harness-design.md` §4 generator-side table — "generators
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §4 generator-side table — "generators
 //! are scripts, not tests").
 //!
 //! Run with `cargo run -p verter_session --features oracle-gen --bin oracle_gen`

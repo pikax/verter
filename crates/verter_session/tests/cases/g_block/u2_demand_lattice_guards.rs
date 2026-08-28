@@ -1,5 +1,5 @@
 //! Discriminating guards + algebra unit tests for the U2 demand lattice
-//! (`docs/arch/u2-query-value-domain-design.md` Deliverable #3 — the
+//! (`.claude/skills/type-resolution/SKILL.md` Deliverable #3 — the
 //! `ProjectionDemand × EvalPolicy` lattice algebra, §3.1–§3.7).
 //!
 //! Every test here is DISCRIMINATING: it FAILS against a deliberately

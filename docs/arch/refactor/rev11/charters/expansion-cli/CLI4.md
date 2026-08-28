@@ -158,3 +158,21 @@ These clauses are operative only for the exact applicability set shown. Cold pac
 **Forbidden:** CLI-created TS programs, position defaults without a contract, provider handles in JSON, or server semantics inside the shell.
 **Deletion/abort:** old lsp/mcp/type-info shells become wrappers only at `CLI5`; abort on protocol leakage.
 ~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-CLI4
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:222-229`
+- Applicability: `CLI4`
+- Exact text SHA-256: `3f9560f6edb4b733d3c18ae4ad62aa10d5cc8df84d1d4507193f5b87121291fc`
+
+~~~~markdown
+## CLI4 — type-info, lsp, and mcp adapters
+
+When opened:
+
+- expose thin adapters to shared diagnostic, language-service, and engine status services;
+- preserve core request/result identity and outcomes;
+- do not add command-local provider discovery, capability, mapping, or semantic DTOs;
+- engine acquisition commands, if ever exposed, must be explicit EPR2 side-effect requests and never ordinary `lsp` startup behavior.
+~~~~

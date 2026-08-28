@@ -1,5 +1,5 @@
 //! `CheckerDispatchTransaction` — the transient per-obligation-root
-//! cold-compute frame of the ONE resolver (design `docs/arch/u2-relation-infer-design.md`
+//! cold-compute frame of the ONE resolver (design `.claude/skills/type-resolution/SKILL.md`
 //! §2.1), laid out as ONE tagged obligation runtime plus per-domain
 //! runtimes:
 //!

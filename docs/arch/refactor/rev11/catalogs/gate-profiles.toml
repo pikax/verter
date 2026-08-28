@@ -10,7 +10,7 @@ final = ["pnpm -r test"]
 [[profile]]
 id = "docs-domain"
 iteration = true
-final = ["node docs/arch/refactor/rev11/tools/run-docs-gate.mjs"]
+final = ["node docs/arch/refactor/rev11/tools/validate-program-dag.mjs --strict", "pnpm docs:build"]
 [[profile]]
 id = "canonical"
 iteration = true

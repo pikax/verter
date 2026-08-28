@@ -1,5 +1,5 @@
 //! `ProjectionDemand × EvalPolicy` lattice algebra (Deliverable #3 of
-//! `docs/arch/u2-query-value-domain-design.md`, §3.1–§3.7).
+//! `.claude/skills/type-resolution/SKILL.md`, §3.1–§3.7).
 //!
 //! This is the SELF-CONTAINED value-domain foundation: the per-field
 //! lattices, the stratified product order, `meet`/`join`, the §3.4

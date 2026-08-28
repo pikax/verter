@@ -1,6 +1,6 @@
 //! The v4 `relation_verdict` consumption driver — the comparison half of the
 //! relation-tuple-wire capture family
-//! (`docs/arch/ri0-relation-verdict-oracle-addendum.md` §5).
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §5).
 //!
 //! CAPTURE-ONLY posture: this driver consumes the CHECKED-IN relation
 //! snapshots (tsgo NEVER launches in default tests — like the v3 driver, it

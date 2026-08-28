@@ -27,7 +27,7 @@ Extends the existing `syn`-AST scanner used by `architecture_guards.rs` (`render
 
 ## Output location
 
-`docs/arch/debt-closure/13-god-module-split-audit/<module>.md` per Step 0.3.
+`docs/contributing/god-module-audit/<module>.md` per Step 0.3.
 
 ## Smoke gate
 

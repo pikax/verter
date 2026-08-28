@@ -1,6 +1,6 @@
 # Exact operative source-clause attachment — VCP1
 
-Schema: 1. Node: `VCP1`. Clause count: 16. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
+Schema: 1. Node: `VCP1`. Clause count: 17. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
 
 ### SRC-COMP-L1174-5D78E68CE415
 
@@ -128,4 +128,17 @@ Schema: 1. Node: `VCP1`. Clause count: 16. Generated from `provenance/source-cov
 
 ~~~~markdown
 ---
+~~~~
+
+### SRC-LEGACY-TRANSFER-83192FE620CA
+
+- Kind: `requirement`; source: `legacy-architecture-transfers.md:418-423`; target: `node:VCP1`; text SHA-256: `df504d8f9921c43216ca3b582f4e7ed823f29fa37c88baabe21fae88bb6af08a`.
+
+~~~~markdown
+### LEGACY-TRANSFER-83192FE620CA
+
+- Original path: `docs/arch/next/vue-inline-template-runtime.md`; Git blob: `83192fe620ca195fd441a77cdbabdcd154d9ac96`; exact source SHA-256: `72e9326b010bd4069e02141c0bda06c659cdfeeb22db93b42fdc177e0ecc91b7`.
+- Exact retained source: `sources/legacy-architecture-transfers/next/vue-inline-template-runtime.md`.
+- Applicable authority: `VCP1`, `VCP3`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
 ~~~~

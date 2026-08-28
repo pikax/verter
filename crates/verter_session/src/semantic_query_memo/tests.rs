@@ -2808,7 +2808,7 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
 /// both directions: a DECIDED payload publish admits AND warm-serves its
 /// binary outcome; an UNDECIDED payload (`BudgetExceeded`) NEVER enters
 /// the memo through any path (admission rows 3–4 of
-/// `docs/arch/u2-relation-infer-design.md`).
+/// `.claude/skills/type-resolution/SKILL.md`).
 ///
 /// The refusal is RELEASE-ACTIVE: the publish gate returns `false` and
 /// releases the flight rather than relying on a `debug_assert!`, which is

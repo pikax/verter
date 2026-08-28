@@ -158,3 +158,67 @@ These clauses are operative only for the exact applicability set shown. Cold pac
 **Forbidden:** `ComponentContractEnvelope` as another type graph, metadata-owned resolution, type flattening without provenance, or universal required props/events/slots for inapplicable frameworks.
 **Deletion/abort:** delete old resolver/cache/schema authority after cutover; rescope on any consumer that cannot identify whether it needs semantic facts or presentation compatibility.
 ~~~~
+
+### SRC-LEGACY-TRANSFER-C92C98813AE4
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:82-87`
+- Applicability: `TIF1`, `LSO5`, `NCF-JF-VUE`
+- Exact text SHA-256: `104c5cd01f28ca1b72f4d7c8062e96a2f386e138f7cd0142b50266c01c5ed4e1`
+
+~~~~markdown
+### LEGACY-TRANSFER-C92C98813AE4
+
+- Original path: `docs/arch/future/global-components-typing-and-fail-closed-diagnostics.md`; Git blob: `c92c98813ae4ec6b655add8e0b3ea7467eefb048`; exact source SHA-256: `c48fef63c27802968bcc5fc9a4570b15b6d5cb30eeb57b6e31474952c8008698`.
+- Exact retained source: `sources/legacy-architecture-transfers/future/global-components-typing-and-fail-closed-diagnostics.md`.
+- Applicable authority: `TIF1`, `LSO5`, `NCF-JF-VUE`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-LEGACY-TRANSFER-7ABDCA82CF3E
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:201-206`
+- Applicability: `TIF1`, `CM1`
+- Exact text SHA-256: `aa8d18d218cd8f8560e975f35fd04ca2bfbc9052c8805d6a559717a0cf75c9ff`
+
+~~~~markdown
+### LEGACY-TRANSFER-7ABDCA82CF3E
+
+- Original path: `docs/arch/future/unplugin-macro-type-hydration-speed-path.md`; Git blob: `7abdca82cf3e0219d391148303983e12ec30634a`; exact source SHA-256: `684d23a528099ebf0257aae560789bac1ddca1b91109419e96477067aec89a08`.
+- Exact retained source: `sources/legacy-architecture-transfers/future/unplugin-macro-type-hydration-speed-path.md`.
+- Applicable authority: `TIF1`, `CM1`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-LEGACY-TRANSFER-3A55613B2843
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:208-213`
+- Applicability: `TIF1`, `NCF-JF-VUE`
+- Exact text SHA-256: `1e0661a31d1f4ed46194d5c3e85fd973f517c903fa449772c0efa9ab977cbd58`
+
+~~~~markdown
+### LEGACY-TRANSFER-3A55613B2843
+
+- Original path: `docs/arch/future/vue-public-instance-generic-bound-recursion.md`; Git blob: `3a55613b28433503fc4f284bbdbd043b413112a0`; exact source SHA-256: `684abc504366ec8c3c6268c39f3b1a02f29d3698086b26a39f83ab4e52bd1232`.
+- Exact retained source: `sources/legacy-architecture-transfers/future/vue-public-instance-generic-bound-recursion.md`.
+- Applicable authority: `TIF1`, `NCF-JF-VUE`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-LEGACY-TRANSFER-67AD64B1A90E
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:586-591`
+- Applicability: `TIF1`
+- Exact text SHA-256: `2fb81fd8108c3512c04a140ecb92c0a1c1908047dadb86b721e66634e01fc76f`
+
+~~~~markdown
+### LEGACY-TRANSFER-67AD64B1A90E
+
+- Original path: `docs/arch/typeinfo-row-registry-counts.md`; Git blob: `67ad64b1a90e7f9ef4de515cf3933ba85393b211`; exact source SHA-256: `da82271a68bc59e74e499a874fed0901126656d007489357234133125295ea73`.
+- Exact retained source: `sources/legacy-architecture-transfers/typeinfo-row-registry-counts.md`.
+- Applicable authority: `TIF1`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~

@@ -1,6 +1,0 @@
-CMD: cargo fmt --all --check
-CWD: <REPO>-wt-a1
-ENV: default
-DATE: 2026-08-10T07:33:50Z
-EXIT: 0
-END-DATE: 2026-08-10T07:34:04Z

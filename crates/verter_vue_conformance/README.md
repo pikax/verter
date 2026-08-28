@@ -18,7 +18,7 @@ assembled host-style; template-only cells get the bundler-equivalent
 production topology is a different, behaviorally equivalent shape Verter does
 not emit — comparing against it makes every cell fail on assembly topology,
 not real divergence (tracked in
-[`docs/arch/next/vue-inline-template-runtime.md`](../../../docs/arch/next/vue-inline-template-runtime.md)).
+[`.claude/skills/compiler-codegen/SKILL.md`](../../../.claude/skills/compiler-codegen/SKILL.md)).
 Vendored `.map.json` files are the compileTemplate maps re-anchored
 SFC-absolute (the same line offset the bundler applies). **Source maps are
 vendored as reference data only and are NOT a conformance dimension** — a

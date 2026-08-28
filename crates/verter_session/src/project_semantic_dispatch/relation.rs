@@ -1,6 +1,6 @@
 //! Relation engine — the SOLE relation authority, riding
 //! `execute(SemanticQueryKey::Relate)` on the cold-compute frame of the ONE
-//! resolver (design `docs/arch/u2-relation-infer-design.md`).
+//! resolver (design `.claude/skills/type-resolution/SKILL.md`).
 //!
 //! Every relation judgement — top-level consumer asks, conditional branch
 //! selection, `Extract`/`Exclude` per-arm filtering, the oracle adapter,

@@ -1,6 +1,6 @@
 //! Discriminating guards for the v4 relation tuple-wire probe: synthesis /
 //! strict inverse, strict wire decode, and operand canonicalization
-//! (`docs/arch/ri0-relation-verdict-oracle-addendum.md`). tsgo-free — the
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md`). tsgo-free — the
 //! empirical any/never single-`true` behavior is proven by the checked-in
 //! snapshots + the regeneration guard, not here.
 

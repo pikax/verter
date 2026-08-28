@@ -11,7 +11,7 @@
 //! The structural inventories are fail-closed for known rewrite and surface call sites, but a new planner can evade them by copying source or rewritten text into a raw-string plan field.
 //! They are therefore transitional structural enforcement, not proof of a terminal capability boundary.
 //! The terminal type/capability boundary is a backend-wide concern tracked as
-//! D-61 in `docs/arch/svelte-native-compiler-plan.md`.
+//! D-61 in `.claude/skills/compiler-codegen/SKILL.md`.
 //!
 //! RAIL 1 is the TYPE BOUNDARY, enforced by rustc at compile time:
 //! `PreparedTemplateValue` has private fields and `PreparedExpression`

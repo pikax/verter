@@ -1142,7 +1142,7 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
     ),
     // ───────────────── U2 query-value-domain design gate ─────────────────
     // Two CRITICAL rules from the U2 design
-    // (`docs/arch/u2-query-value-domain-design.md`). The design-gate
+    // (`.claude/skills/type-resolution/SKILL.md`). The design-gate
     // guards below are discriminating TODAY; the behavioural
     // guards are named in the owning skill sections (gap tracked per
     // the architecture-guard rule).

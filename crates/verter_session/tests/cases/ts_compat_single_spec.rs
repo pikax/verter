@@ -1,5 +1,5 @@
 //! The two foundational single-spec guards for the ts-compat oracle model
-//! (`docs/arch/ts-compat-two-mode-model.md` §4 / §7.1 / §8 / §12).
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §4 / §7.1 / §8 / §12).
 //!
 //! The model has ONE resolution spec (no `SpecVariant` / bug-for-bug / compat
 //! dimension anywhere in the resolver, cache, or session surface) and asserts

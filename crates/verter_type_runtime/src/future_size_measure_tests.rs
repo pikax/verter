@@ -4,7 +4,7 @@
 //!   cargo test -p verter_type_runtime future_size_measure -- --nocapture --ignored
 //!   cargo test -p verter_type_runtime future_size_measure --release -- --nocapture --ignored
 //!
-//! Not a gate. Numbers are printed and copied into docs/arch/future/* findings.
+//! Not a gate. Numbers are printed and copied into docs/contributing/gate-performance.md* findings.
 
 use std::mem::{size_of, size_of_val};
 use std::sync::Arc;

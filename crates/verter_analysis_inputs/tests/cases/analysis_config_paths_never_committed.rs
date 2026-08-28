@@ -252,8 +252,8 @@ pub fn is_shape_scanned_artifact(path: &str) -> bool {
         return true;
     }
     // The deviation-ledger files (campaign-owned, machine + human).
-    if p == "docs/arch/followups/replacement-deviations.json"
-        || p == "docs/arch/followups/replacement-deviations.md"
+    if p == "scripts/manifests/replacement-deviations.json"
+        || p == "scripts/manifests/replacement-deviations.md"
     {
         return true;
     }
@@ -544,7 +544,7 @@ fn leak_predicate_flags_planted_leaks_and_passes_clean_artifacts() {
     let leaky_ledger = format!(r#"{{"note":"see C:/{dev}/thing/file.ts"}}"#);
     assert!(
         scan_text_artifact(
-            "docs/arch/followups/replacement-deviations.json",
+            "scripts/manifests/replacement-deviations.json",
             &leaky_ledger
         )
         .is_some(),
@@ -618,10 +618,10 @@ fn is_shape_scanned_artifact_discriminates() {
     ));
     assert!(is_shape_scanned_artifact("some/snapshot.snap"));
     assert!(is_shape_scanned_artifact(
-        "docs/arch/followups/replacement-deviations.json"
+        "scripts/manifests/replacement-deviations.json"
     ));
     assert!(is_shape_scanned_artifact(
-        "docs/arch/followups/replacement-deviations.md"
+        "scripts/manifests/replacement-deviations.md"
     ));
     assert!(is_shape_scanned_artifact(&allowed_example_rel()));
     // CHANGELOG.md is machine-generated from commit subjects — a genuine path-leak

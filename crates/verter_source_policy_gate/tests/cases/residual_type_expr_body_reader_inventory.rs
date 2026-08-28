@@ -1164,7 +1164,7 @@ fn inventory_for(files: &[(String, String)]) -> Vec<FnDef> {
 /// partition is the architectural JUDGEMENT (no compiler fact expresses it while
 /// raw `TypeExpr` bodies stay readable) the curated allowlist records — the
 /// design ruling lives in
-/// docs/arch/authored-shape-graph-native-migration-deferral.md.
+/// .claude/skills/component-meta/SKILL.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReaderClass {
     /// MIGRATED onto the shared `decl_body_hot_ref` hot accessor / a graph-native

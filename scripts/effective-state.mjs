@@ -9,8 +9,8 @@
 //     [--rulings-dir <dir>] [--amendments-dir <dir>]
 //     [--authority-registry <path>] [--json]
 //
-// Every argument defaults to the real program-tree location; pass overrides
-// to point the generator at a fixture tree for testing.
+// This retired compatibility reducer accepts only a complete explicit fixture
+// tree. Live authority inspection belongs to the Rev11 `programctl` CLI.
 //
 // This tool DETECTS disagreement between authorities. It never repairs the
 // ledger, the DAG, or a ruling — those are maintainer-owned artifacts and a
@@ -29,12 +29,6 @@ import { TomlError, parseToml } from "./lib/rev11-toml.mjs";
 import { FrontmatterError, parseRulingFrontmatter } from "./lib/ruling-frontmatter.mjs";
 
 const REPO_ROOT = resolvePath(new URL("..", import.meta.url).pathname);
-
-const DEFAULT_DAG = "docs/arch/refactor/rev11/program-dag.toml";
-const DEFAULT_STATE = "docs/arch/architecture-lock/ledger/program-state.toml";
-const DEFAULT_RULINGS_DIR = "docs/arch/refactor/rev11/rulings";
-const DEFAULT_AMENDMENTS_DIR = "docs/arch/refactor/rev11/amendments";
-const DEFAULT_AUTHORITY_REGISTRY = "docs/arch/architecture-lock/ledger/authority-registry.toml";
 
 const DIGEST_RE = /^[0-9a-f]{64}$/;
 
@@ -88,8 +82,7 @@ function parseArgs(argv) {
   return opts;
 }
 
-function resolveOpt(raw, fallback) {
-  const value = raw ?? fallback;
+function resolveOpt(value) {
   return isAbsolute(value) ? value : resolvePath(REPO_ROOT, value);
 }
 
@@ -611,11 +604,11 @@ function main() {
     process.exitCode = 2;
     return;
   }
-  const dagPath = resolveOpt(opts.dag, DEFAULT_DAG);
-  const statePath = resolveOpt(opts.state, DEFAULT_STATE);
-  const rulingsDir = resolveOpt(opts["rulings-dir"], DEFAULT_RULINGS_DIR);
-  const amendmentsDir = resolveOpt(opts["amendments-dir"], DEFAULT_AMENDMENTS_DIR);
-  const authorityRegistryPath = resolveOpt(opts["authority-registry"], DEFAULT_AUTHORITY_REGISTRY);
+  const dagPath = resolveOpt(opts.dag);
+  const statePath = resolveOpt(opts.state);
+  const rulingsDir = resolveOpt(opts["rulings-dir"]);
+  const amendmentsDir = resolveOpt(opts["amendments-dir"]);
+  const authorityRegistryPath = resolveOpt(opts["authority-registry"]);
 
   let dag;
   let state;

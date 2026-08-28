@@ -1,5 +1,5 @@
 //! The `tsgo`-forbidden-at-runtime guards for the TS7 oracle harness
-//! (`docs/arch/u0-oracle-harness-design.md` §3 invariant 1, §4
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §3 invariant 1, §4
 //! `tsgo_not_reachable_from_resolver` / `oracle_consumption_path_has_no_tsgo_spawn`).
 //!
 //! `tsgo` is GENERATION-ONLY: the resolver / query-time path
@@ -19,7 +19,7 @@ const MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 /// `verter_session`'s DEFAULT-build dependency closure excludes
 /// `verter_type_runtime` (the crate that owns the tsgo LSP driver). tsgo is
 /// GENERATION-ONLY; the snapshot generator + the §4 generation SPIKE live behind
-/// the `oracle-gen` feature (`docs/arch/u0-oracle-harness-design.md` §3 inv 1 —
+/// the `oracle-gen` feature (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §3 inv 1 —
 /// "a separate dev-only / feature-gated tool target `#[cfg(feature = "oracle-gen")]`").
 /// So `verter_type_runtime` is allowed in `[dependencies]` ONLY as an OPTIONAL dep
 /// that the `default` feature set does NOT activate and that ONLY the `oracle-gen`

@@ -1455,7 +1455,7 @@ fn relate_result_assignable_carries_infer_bindings_into_conditional() {
 
 /// `Unknown` is NEVER admitted anywhere (memo / fact / reverse index) —
 /// the memoized-`Unknown` arm of the retired relation memo is DELETED
-/// (design `docs/arch/u2-relation-infer-design.md` admission row 3).
+/// (design `.claude/skills/type-resolution/SKILL.md` admission row 3).
 ///
 /// Discriminates on three axes:
 /// - A cold undecidable judgement returns `Unknown` to the caller but

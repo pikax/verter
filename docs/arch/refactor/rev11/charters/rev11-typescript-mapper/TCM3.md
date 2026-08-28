@@ -124,7 +124,47 @@ The packet is incomplete and dispatch must fail unless it embeds: exact candidat
 
 These clauses are operative only for the exact applicability set shown. Cold packets include the exact applicable subset and its source digest.
 
-No clause targets this file directly. Applicable contract clauses are selected by the validated `applicable_nodes` ledger and embedded verbatim in cold packets.
+### SRC-LEGACY-TRANSFER-39DC88E896A4
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:334-339`
+- Applicability: `TCM3`, `TCM4`, `TIF0`, `TIF1`, `PUB0`
+- Exact text SHA-256: `1ce1f4e3213eaf5e0a79e27de9a289863d057100ca4a431542527de72b9dc4f0`
+
+~~~~markdown
+### LEGACY-TRANSFER-39DC88E896A4
+
+- Original path: `docs/arch/native-typeinfo-parity-adapters-final-lift.md`; Git blob: `39dc88e896a462763b1957a68576046517f4f642`; exact source SHA-256: `d4d1092e46eb1f05224f00a96758458ec70860804285a5556cf4835317129ff9`.
+- Exact retained source: `sources/legacy-architecture-transfers/native-typeinfo-parity-adapters-final-lift.md`.
+- Applicable authority: `TCM3`, `TCM4`, `TIF0`, `TIF1`, `PUB0`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-TCM3
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:33-48`
+- Applicability: `TCM3`
+- Exact text SHA-256: `811fbefca12fb771e40a580aaf726ff25674e67cf396534fa9972c5e21ff76ea`
+
+~~~~markdown
+## TCM3 — TypeScript semantic capability closure
+
+Add the single-spec certification model:
+
+- external TypeScript is a pinned observation/oracle and residual runtime owner, not a native-query dependency;
+- native semantic output has one correctness behavior;
+- TypeScript bugs are represented by a review-gated correction overlay in test/certification data;
+- no user-facing compatibility mode, query-key dimension, or alternate resolver branch exists;
+- every provider observation names exact engine artifact, provider epoch, project/profile/source basis, mapper snapshot, and capability;
+- normalized diagnostic/navigation/completion observations must preserve stable identity and provenance rather than only rendered text/ranges.
+
+Acceptance additions:
+
+- `tcm3_no_runtime_compatibility_mode_or_spec_key_dimension`
+- `tcm3_oracle_and_correction_overlay_are_data_not_resolver_behavior`
+- `tcm3_observation_identity_is_exact_across_provider_restart_and_mapping_change`
+~~~~
 
 ## Live authority inputs
 

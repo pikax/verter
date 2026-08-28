@@ -1,2 +1,7 @@
 schema = 2
-slot = []
+
+[[slot]]
+purpose = "authority-amendment"
+ratified_by = "pikax"
+receipt_path = "authority/state/ratification-receipts/post-orc0-successor-program.txt"
+receipt_sha256 = "729c844d1031f80ff26e25b24074b602e3b133ccb2af114b50f9d8e36f428feb"

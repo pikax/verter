@@ -158,7 +158,7 @@ impl From<MaterializationScope> for crate::component_meta_audit::Materialization
 /// R20: never a content-derived key fallback).
 ///
 /// **Rationale (R7 + R8):** see audit doc
-/// `docs/arch/materialize-owner-local-audit.md`. The cached value's sole
+/// `.claude/skills/component-meta/SKILL.md`. The cached value's sole
 /// self-root is the materialise SUBJECT's declaration-origin file (the
 /// `base` node's `NodeScopeId::File` origin for a non-route subject, or
 /// the EXTRACTED ROUTE ROOT's declaration file for a route-shaped

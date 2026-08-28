@@ -527,7 +527,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     }
     // apply the publication policy over (resolved_type_registry,
     // resolved_type_registry_meta) + snapshot.macros (§3.4 structural
-    // classification); see docs/arch/debt-closure/06-step4b-consumer-surface.md.
+    // classification); see .claude/skills/component-meta/SKILL.md.
     crate::component_meta_resolution_policy::apply_component_meta_resolution_policy(
         &mut meta,
         &resolved.resolved_type_registry,

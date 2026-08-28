@@ -1,7 +1,0 @@
-CMD: cargo build -p verter_lsp -p verter_relay_shim
-CWD: <REPO>-wt-a1
-ENV: debug builds consumed by rows 18 and 16
-DATE: 2026-08-10T07:36:41Z
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.69s
-EXIT: 0
-END-DATE: 2026-08-10T07:36:42Z

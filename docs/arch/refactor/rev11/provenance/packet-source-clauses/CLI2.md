@@ -1,6 +1,25 @@
 # Exact operative source-clause attachment — CLI2
 
-Schema: 1. Node: `CLI2`. Clause count: 2. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
+Schema: 1. Node: `CLI2`. Clause count: 3. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
+
+### SRC-EXISTING-NODE-AMENDMENT-CLI2
+
+- Kind: `requirement`; source: `existing-node-amendments.md:209-220`; target: `node:CLI2`; text SHA-256: `0f3b77770cdf6bb1ea123621320f84747548717655a92cf057ef9de97d217be3`.
+
+~~~~markdown
+## CLI2 — Verter-native typecheck
+
+When opened after NCK7:
+
+- consume `DiagnosticService` rather than constructing a checker/provider/project plan;
+- select project/profile scope explicitly;
+- write nothing;
+- return exact provenance/completeness/NeedInputs;
+- exclude lint and formatting unless the command explicitly composes them at a higher application-service layer;
+- avoid aliasing `tsc --noEmit`.
+
+Before NCK7, CLI2 may use external/native existing owners according to its current contract, but must not pre-empt NCK authority.
+~~~~
 
 ### SRC-EXP-L1493-9D8415D01B7E
 

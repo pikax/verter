@@ -17,7 +17,7 @@
 //! [`apply_mask`](super::demand::apply_mask)), so two queries differing only in
 //! their display needs share one cached typed value and differ ONLY in the
 //! string [`display`] projects from it. See
-//! `docs/arch/u2-query-value-domain-design.md` §14.
+//! `.claude/skills/type-resolution/SKILL.md` §14.
 //!
 //! ### Note on [`DisplayFacet::ExpandAliases`]
 //!
@@ -72,7 +72,7 @@ impl From<DisplayString> for String {
     }
 }
 
-/// Display-side recursion cap (`docs/arch/u2-query-value-domain-design.md` §14,
+/// Display-side recursion cap (`.claude/skills/type-resolution/SKILL.md` §14,
 /// termination rule 3). It bounds the structural walk independently of any
 /// resolver-side budget, so even a pathological graph (deep nesting that escaped
 /// a cycle back-reference) terminates with a `…` truncation token.
@@ -83,7 +83,7 @@ pub(crate) const MAX_DISPLAY_DEPTH: usize = 64;
 const UNION_TRUNCATION_THRESHOLD: usize = 8;
 
 /// The truncation / unresolved token
-/// (`docs/arch/u2-query-value-domain-design.md` §14, termination rule 3).
+/// (`.claude/skills/type-resolution/SKILL.md` §14, termination rule 3).
 const TRUNCATION_TOKEN: &str = "…";
 
 /// The single §14.1 projection rule: render an already-computed

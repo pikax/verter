@@ -154,3 +154,32 @@ These clauses are operative only for the exact applicability set shown. Cold pac
 **Forbidden:** Vue-shaped global rule table, format-as-fix, executing third-party rule code, duplicate native/external diagnostics, or actions without exact source/map basis.
 **Deletion/abort:** delete only the named representative rows/adapters migrated here; profile rows belong to their packs and shared registry deletion belongs solely to `LNT3`; abort if a “common” rule requires framework branching instead of a neutral fact contract.
 ~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-LRA0
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:75-93`
+- Applicability: `LRA0`
+- Exact text SHA-256: `9c64d5273ff4a028cb48be82ee6f391dae69b0286869be2dbcc026cbaa326379`
+
+~~~~markdown
+## LRA0 — Profile-scoped diagnostics, lint, fixes, and actions
+
+Add:
+
+- exact diagnostic class/origin/family/slice/rule/subject identity;
+- authority state is separate from rule enablement/severity/suppression;
+- parser, semantic checker, framework semantic, lint, provider, and project/configuration diagnostics remain distinct owners;
+- diagnostic fixes are typed authored edit intents, never raw `TextEdit`/`WorkspaceEdit` payloads;
+- safe/suggested/unsafe status requires complete conflict/precondition analysis;
+- suppression is identity/provenance based, never message text;
+- external/native shadow comparison is non-publishing;
+- duplicate authority is rejected before consumer publication.
+
+Acceptance additions:
+
+- `lra0_diagnostic_identity_is_message_and_range_independent`
+- `lra0_fix_requires_authored_intent_and_exact_basis`
+- `lra0_shadow_observation_is_non_publishing`
+- `lra0_duplicate_family_authority_fails_before_merge`
+~~~~

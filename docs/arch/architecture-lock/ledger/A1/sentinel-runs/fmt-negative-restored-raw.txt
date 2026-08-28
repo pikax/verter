@@ -1,6 +1,0 @@
-CMD: cargo fmt --all --check
-CWD: <REPO>-a1-sentinel
-ENV: RESTORED
-DATE: 2026-08-10T07:46:55Z
-EXIT: 0
-END-DATE: 2026-08-10T07:47:09Z

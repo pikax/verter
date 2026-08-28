@@ -178,3 +178,51 @@ Keep `PER0` as the system-wide identity/cancellation/budget constitution. Add `C
 **Forbidden:** backend-free type caches, sleep/idle completion inference, per-vertical singleflight, unbounded candidate collection, or performance claims without result equivalence.
 **Deletion/abort:** delete only successor-local duplicate cache/coalescer paths proven displaced; never delete or shadow TCM1/G2 authority; abort when candidate/result provenance cannot carry and revalidate the complete observation basis—never enlarge `QueryIdentity` to make its lookup key reconstruct that basis.
 ~~~~
+
+### SRC-LEGACY-TRANSFER-378219ABAB39
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:236-241`
+- Applicability: `PER0`
+- Exact text SHA-256: `0c5cbaa510916dd0abc4092c8fe5aad932b63b13a68ef361ced38a0788ee0722`
+
+~~~~markdown
+### LEGACY-TRANSFER-378219ABAB39
+
+- Original path: `docs/arch/gate-performance.md`; Git blob: `378219abab39b95397cb0dd1358c4461db504c50`; exact source SHA-256: `000922b676b45543d777bb9483c4ea7d2867463e0fcb53a47650cee841210514`.
+- Exact retained source: `sources/legacy-architecture-transfers/gate-performance.md`.
+- Applicable authority: `PER0`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-PER0
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:164-185`
+- Applicability: `PER0`
+- Exact text SHA-256: `24f560671dc7056738fa9a61290297c8518d41964e4bce2018f1f77bc1653825`
+
+~~~~markdown
+## PER0 — Cache/backend identity, cancellation, budgets, and zero work
+
+Add work counters for:
+
+- diagnostic query/rule/fact/proof reads;
+- oracle comparison and correction-overlay certification (offline/test only);
+- target nodes/edges, index candidates, occurrence validation, provider calls, mappings;
+- rename conflict checks and edit intents;
+- edit mappings/anchors/conflicts/staged bytes/files;
+- engine source adapters, stats/hashes/network bytes, validation, selection comparisons;
+- spawn/handshake/restart/swap/health/orphan processes;
+- retained regions/results/targets/cursors/resolve keys/transactions/provider epochs.
+
+Required scenarios:
+
+- cold, first warm, repeated warm, incremental edit, edit-revert, provider/profile/config change;
+- cancellation before and during production;
+- project open/close and long churn;
+- disabled/inapplicable/unopened channel zero-work;
+- equivalent fresh-versus-incremental result and work evidence.
+
+Do not impose blanket “0.0% wall-time regression” where the successor adds new required work. Use ratified equivalent-work thresholds and explicit replacement SLOs.
+~~~~

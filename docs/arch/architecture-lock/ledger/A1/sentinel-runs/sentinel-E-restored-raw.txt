@@ -1,9 +1,0 @@
-CMD: cargo check --workspace --release
-CWD: <REPO>-a1-sentinel
-ENV: RESTORED
-DATE: 2026-08-10T07:48:14Z
-    Checking verter_mcp_server v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_mcp_server)
-    Checking verter_lsp v0.0.1-beta.3 (<REPO>-a1-sentinel\crates\verter_lsp)
-    Finished `release` profile [optimized] target(s) in 1.40s
-EXIT: 0
-END-DATE: 2026-08-10T07:48:16Z

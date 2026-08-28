@@ -263,3 +263,38 @@ Add explicit consumption of:
 **Forbidden:** global parser family authority, “HTML-like” as a cache key, shared recovery semantics without proof, or parser selection from an unresolved framework name.
 **Deletion/abort:** delete any central grammar match made obsolete by owner-local registration; rescope a vertical when its closest parser fails the pinned grammar/recovery corpus.
 ~~~~
+
+### SRC-LEGACY-TRANSFER-D73EB9761394
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:425-430`
+- Applicability: `PAR0`, `B2`
+- Exact text SHA-256: `97fe7a1605b4252e31096dff095bce6fa0ea41018e94a7c0d4d5048cda77eaa1`
+
+~~~~markdown
+### LEGACY-TRANSFER-D73EB9761394
+
+- Original path: `docs/arch/parselower-design.md`; Git blob: `d73eb9761394d60a8dc81b3ce334d9aa7bf0c5c3`; exact source SHA-256: `9f4c0dacfa4aa3c7d9b7a25944eacca964d1968324f4c12d33288c574e8da3d4`.
+- Exact retained source: `sources/legacy-architecture-transfers/parselower-design.md`.
+- Applicable authority: `PAR0`, `B2`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-PAR0
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:23-31`
+- Applicability: `PAR0`
+- Exact text SHA-256: `72c9e48ef14e7ada2a1424e02ecc03aff1e69cc287b841541b7729ca8f2b95c8`
+
+~~~~markdown
+## PAR0 — Parser ownership, reuse, and lineage contract
+
+Add:
+
+- `RecoverySnapshot` and per-region `RecoveryParticipation` are parser/lowering products, not resolver state.
+- executable-region discovery is performed during the one parse/shallow pass per content hash;
+- no checker or language-service operation may reparse source to recover semantic facts;
+- JSDoc is the only approved dedicated type-text parse path, scoped to its parser owner;
+- parser errors carry exact extracted-region-to-authored-source lineage.
+~~~~

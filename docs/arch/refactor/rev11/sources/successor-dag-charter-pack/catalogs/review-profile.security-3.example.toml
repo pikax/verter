@@ -1,0 +1,27 @@
+# Merge only if the live review profile catalog has no equivalent security profile.
+schema = 1
+profile = "security-3"
+minimum_reviewers = 3
+require_distinct_harnesses = true
+require_exact_candidate_tree = true
+invalidate_on_content_change = true
+
+[[lens]]
+id = "supply-chain"
+focus = ["origin", "integrity", "signature", "provenance", "dependency", "license", "revocation"]
+minimum_effort = "high"
+
+[[lens]]
+id = "platform-adversarial"
+focus = ["path", "symlink", "reparse", "permissions", "archive", "TOCTOU", "process", "proxy", "offline"]
+minimum_effort = "high"
+
+[[lens]]
+id = "architecture-lifecycle"
+focus = ["authority", "policy", "selection", "activation", "epochs", "capabilities", "cancellation", "teardown", "performance"]
+minimum_effort = "high"
+
+[acceptance]
+block_on = ["P0", "P1", "undispositioned-P2"]
+require_clean_negative_controls = true
+require_security_receipt = true

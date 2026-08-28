@@ -212,3 +212,46 @@ The manifest must reject a tooling vertical that implicitly claims compiler supp
 **Forbidden:** manifest-owned implementation logic, dynamic plugins, prose-only capability rows, or self-selected performance gates.
 **Deletion/abort:** generated artifacts become consumers, not co-authorities; rescope schema when a representative geometry needs an untyped escape hatch.
 ~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-VIM0
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:130-162`
+- Applicability: `VIM0`
+- Exact text SHA-256: `a6696461a1b4e7a72a36026a94f3a4e66401b356398150701ecf8d785febd987`
+
+~~~~markdown
+## VIM0 / VIM1 — Vertical conformance manifest and generator
+
+Extend the manifest generator with two new row families:
+
+1. `native_checker_slice`
+2. `language_service_operation`
+
+A checker row includes:
+
+- family/slice/profile/applicability;
+- semantic input and expected authored diagnostics;
+- oracle/correction-overlay identity;
+- exact fact/proof demand;
+- incremental/cancellation/admission expectations;
+- authority promotion and provider-zero-work expectations;
+- equivalent-work/allocation/latency/RSS thresholds.
+
+A language-service row includes:
+
+- operation/profile/provider/recovery/coexistence/encoding/consumer applicability;
+- expected target, occurrence, presentation fragment, rename intent, or transaction identity;
+- exact authored anchors and provenance;
+- typed outcome/completeness;
+- zero-work requirements for disabled/inapplicable topologies.
+
+The generator must produce:
+
+- DAG nodes and charters where requested;
+- hermetic test cases;
+- gated provider/platform canaries;
+- capability/maturity inputs;
+- receipt validators;
+- stable generated indexes.
+~~~~

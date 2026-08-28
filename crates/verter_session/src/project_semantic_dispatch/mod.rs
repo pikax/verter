@@ -379,7 +379,7 @@ pub struct ProjectSemanticDispatch<'a> {
     /// rootless apparent demand then fails closed (`Miss`).
     pub(super) lexical_demand_scope: std::cell::RefCell<smallvec::SmallVec<[Arc<str>; 2]>>,
     /// The transient per-obligation-root cold-compute frame (design
-    /// `docs/arch/u2-relation-infer-design.md` §2.1): the ONE shared
+    /// `.claude/skills/type-resolution/SKILL.md` §2.1): the ONE shared
     /// tagged re-entry / cycle-id space with its generic frame /
     /// lowlink machinery, the tagged pending ledger, the inference
     /// session stack, and the deferred-admission ledger. TRANSIENT, never
@@ -2455,7 +2455,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return self.build_classify_materialization_cycle_gate(key);
             }
             // The SOLE relation authority (design
-            // `docs/arch/u2-relation-infer-design.md`): `execute(Relate)`
+            // `.claude/skills/type-resolution/SKILL.md`): `execute(Relate)`
             // is a LIVE producer — decided binary judgements admit into
             // the `Relate` family slot, `BudgetExceeded` returns-but-
             // never-admits, undecided judgements surface `Miss`. The

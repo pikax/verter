@@ -1,6 +1,6 @@
 //! Relation storage — the payload read/write path over the family memo's
 //! `Relate` family, plus the payload-side relation-proof interners
-//! (design `docs/arch/u2-relation-infer-design.md` Decision 4).
+//! (design `.claude/skills/type-resolution/SKILL.md` Decision 4).
 //!
 //! Writes land through the batched SCC member publish in
 //! [`super::scc_publish`] — the one store-owned admission path both

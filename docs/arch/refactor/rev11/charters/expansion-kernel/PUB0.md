@@ -157,3 +157,47 @@ These clauses are operative only for the exact applicability set shown. Cold pac
 **Forbidden:** surface-specific semantic DTOs, boolean capability lies, implicit encoding, provider handles, or CLI presentation fields in core results.
 **Deletion/abort:** delete duplicate public envelopes only after generated consumer parity; rescope when a surface cannot supply required inputs and mark the capability accordingly.
 ~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-PUB0
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:95-128`
+- Applicability: `PUB0`
+- Exact text SHA-256: `487fd1382b9bcd0e90e07ea0ac7338b93d782b7d972da8ec27aa6856213dbcf4`
+
+~~~~markdown
+## PUB0 — Versioned public request/result and capability truth
+
+Add public-neutral forms for:
+
+```text
+DiagnosticRequest / DiagnosticBatch
+SemanticOperationRequest / SemanticOperationOutcome
+AuthoredTarget / SemanticOccurrence / PresentationFragment
+RenamePlan / AuthoredEditIntent / AuthoredEditTransaction
+EngineProvisioningPolicySummary / EngineResolutionReport / EngineActivationStatus
+```
+
+Mandatory outcome vocabulary:
+
+```text
+Complete
+Ambiguous
+NeedInputs
+Unsupported
+NotApplicable
+Cancelled
+Stale
+Superseded
+BudgetExceeded
+Partial
+OperationalFailure
+```
+
+Rules:
+
+- no LSP positions, generated TSX paths, provider JSON handles, CLI formatting, or filesystem write fields in core results;
+- WASM/MCP/FFI consumers report missing inputs truthfully;
+- capabilities derive from accepted conformance/active receipts, never booleans maintained by clients;
+- schema epochs and reserved-field policy apply to every new result domain.
+~~~~

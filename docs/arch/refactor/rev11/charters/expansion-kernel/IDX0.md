@@ -158,3 +158,60 @@ These clauses are operative only for the exact applicability set shown. Cold pac
 **Forbidden:** checker APIs in index storage, global eager workspace crawling, negative admission after budget exhaustion, or opaque unversioned payloads.
 **Deletion/abort:** consolidate displaced framework indexes only with query/result parity; abort if a stored fact cannot name its authority and invalidation basis.
 ~~~~
+
+### SRC-LEGACY-TRANSFER-ECAADB1B854E
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:243-248`
+- Applicability: `IDX0`, `VIM0`, `VIM1`, `LSO2`, `LSO5`, `LSO9`, `NCF-JF-VUE`
+- Exact text SHA-256: `c2db7c1b4ca376ed2a6d9ddb96840536a370594a539841365fa8d343435c98a6`
+
+~~~~markdown
+### LEGACY-TRANSFER-ECAADB1B854E
+
+- Original path: `docs/arch/global-components-ide-typing.md`; Git blob: `ecaadb1b854e9b78d3190fbc134b28aa4afc1d3b`; exact source SHA-256: `91e2b3a92b783d36a858bea63e96f40ac0b4bf2ec9285d511275aa64c0d70208`.
+- Exact retained source: `sources/legacy-architecture-transfers/global-components-ide-typing.md`.
+- Applicable authority: `IDX0`, `VIM0`, `VIM1`, `LSO2`, `LSO5`, `LSO9`, `NCF-JF-VUE`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-LEGACY-TRANSFER-5D71514A73D7
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:467-472`
+- Applicability: `IDX0`, `LSO2`
+- Exact text SHA-256: `146111eddec45ce0d2c17db3d5e0bd55996c8fccde9c44c9e4b999fea7ec8c74`
+
+~~~~markdown
+### LEGACY-TRANSFER-5D71514A73D7
+
+- Original path: `docs/arch/relocation-severs-reachability.md`; Git blob: `5d71514a73d7a0744c504ef7c1be7e98a78f04f1`; exact source SHA-256: `00502de7b7cf9a6ba07df3159a85098f634699894489c5f039a8672f42a6c672`.
+- Exact retained source: `sources/legacy-architecture-transfers/relocation-severs-reachability.md`.
+- Applicable authority: `IDX0`, `LSO2`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-IDX0
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:59-73`
+- Applicability: `IDX0`
+- Exact text SHA-256: `2825fccb2c5b9dc900820f9700b5523397f818c7e9da35a21c2b194190328045`
+
+~~~~markdown
+## IDX0 — Atomic semantic contributions and workspace index
+
+Add:
+
+- index entries may store target/contribution/occurrence candidates, typed memberships, dependency read sets, and authored source bases;
+- indexes may not store checker verdicts, final navigation targets, rename plans, or public operation answers;
+- incomplete/budget-exhausted enumeration cannot admit a negative complete result;
+- framework global registrations, component links, aliases/reexports, and project memberships are set-valued, profile-qualified, and atomically versioned;
+- target and occurrence planners must validate candidates downstream against the semantic owner.
+
+Acceptance additions:
+
+- `idx0_candidates_are_not_authoritative_targets_or_diagnostics`
+- `idx0_partial_enumeration_never_negative_admits`
+- `idx0_profile_qualified_registrations_do_not_alias`
+~~~~

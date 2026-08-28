@@ -1,6 +1,0 @@
-CMD: node scripts/gen-svelte-goldens.mjs --conformance --check  (ci.yml 'Conformance goldens in sync with pinned compiler', Svelte CSS Conformance job)
-CWD: <REPO>-wt-a1
-DATE: 2026-08-10T04:52:42Z
----
-gen-svelte-goldens --conformance --check: 1218 golden(s) in sync with the emit-plan (manifest fnv1a64-8faa9143878b8848) and svelte@5.56.3.
-EXIT: 0

@@ -6,6 +6,10 @@ ORC0 provides honest-operator local consistency and auditability: one repo-globa
 
 Static authority lives in `authority/`, `charters/`, `contracts/`, `catalogs/`, `schemas/`, `templates/`, and `provenance/`. Historical preactivation r3-r6 review bytes remain digest-valid but audit-only. The rejected preactivation ORC0 R1 is preserved append-only and does not consume a live review/fix cycle.
 
+The successor amendment candidate adds the native-checker, language-service-operation, and engine-provisioning trains, 30 manifest-generated native-checker family slices, and the post-ORC0 GitHub control-plane, feedback-intake, and release-control trains: 268 nodes in 45 modules. The 92-file successor pack remains byte-for-byte immutable under `sources/successor-dag-charter-pack/`; the 58 pack nodes admit only the exact normalized source references and seven path-owner conflict-domain reconciliations enforced by the validator. The 13 GitHub nodes are separately bound to `sources/github-control-plane-program.md`, all depend directly or transitively on ORC0, and keep immutable Rev11 receipts—not mutable GitHub state—as lifecycle authority. `catalogs/legacy-arch-disposition.toml` binds the same candidate to the exact 418-path pre-cutover `docs/arch/**` inventory: 326 immutable audit-ledger records are historical evidence, while all 92 substantive files are retained byte-for-byte as Rev11 sources with exact target atoms and replacement digests. No live architecture document remains outside this authority root; contributor/product records live under their owning `docs/contributing`, `docs/generated`, or `docs/guide` homes.
+
+This tree is an amendment candidate, not a ratification receipt. `validate-successor-candidate.mjs` proves its static content while deliberately omitting amendment-chain custody. After ORC0 lands, rebase this exact candidate, obtain the required trusted authority-amendment slot, create the append-only amendment/impact receipt, regenerate the authority lock, and run the bounded `docs-domain` final proof before landing.
+
 Core commands, from the repository root:
 
 ```text

@@ -4,7 +4,7 @@
 //! result to a cache-admission disposition. It gates the [`Warm`](Admission::Warm)
 //! arm on the **presence of the rooting FACT in the result's
 //! [`ReadSetSignature`]** — NOT on the taint enum class as a proxy
-//! (`docs/arch/u2-query-value-domain-design.md` §18.2):
+//! (`.claude/skills/type-resolution/SKILL.md` §18.2):
 //!
 //! - A `Clean` result over a soundly self-version-rooted carrier publishes
 //!   warm. `taint` is currently always `Clean`; non-`Clean` taint is produced

@@ -158,3 +158,25 @@ These clauses are operative only for the exact applicability set shown. Cold pac
 **Forbidden:** emit, CLI-owned diagnostics, creating a second TS program, silently selecting the first project, or collapsing partiality to success.
 **Deletion/abort:** replace only the old typecheck shell after service parity; abort if any diagnostic lacks an exact owner/basis.
 ~~~~
+
+### SRC-EXISTING-NODE-AMENDMENT-CLI2
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:209-220`
+- Applicability: `CLI2`
+- Exact text SHA-256: `0f3b77770cdf6bb1ea123621320f84747548717655a92cf057ef9de97d217be3`
+
+~~~~markdown
+## CLI2 — Verter-native typecheck
+
+When opened after NCK7:
+
+- consume `DiagnosticService` rather than constructing a checker/provider/project plan;
+- select project/profile scope explicitly;
+- write nothing;
+- return exact provenance/completeness/NeedInputs;
+- exclude lint and formatting unless the command explicitly composes them at a higher application-service layer;
+- avoid aliasing `tsc --noEmit`.
+
+Before NCK7, CLI2 may use external/native existing owners according to its current contract, but must not pre-empt NCK authority.
+~~~~

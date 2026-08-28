@@ -37,7 +37,7 @@ use super::{ConstFoldRefuse, EvalValue};
 /// ambiguous boundary (an operand of EXACTLY `2^30` bits, result `2^30`-vs-`2^30 + 1`) refuses.
 /// TODO(follow-up): that exact-`2^30`-bit boundary is conservatively REFUSED because deciding it
 /// needs the ~134 MB allocation the guard exists to avoid (a forward-progress hazard) — the
-/// known divergence ledgered as D-15 in `docs/arch/svelte-native-compiler-plan.md`. A future
+/// known divergence ledgered as D-15 in `.claude/skills/compiler-codegen/SKILL.md`. A future
 /// arbitrary-precision exact path (or bounded interval analyzer) could disambiguate it without
 /// materializing the value; the case is absurd-input-only (a 100 MB+ BigInt template constant).
 const BIGINT_MAX_BITS: u64 = 1 << 30; // 1_073_741_824

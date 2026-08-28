@@ -1,6 +1,32 @@
 # Exact operative source-clause attachment — LRA0
 
-Schema: 1. Node: `LRA0`. Clause count: 2. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
+Schema: 1. Node: `LRA0`. Clause count: 3. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
+
+### SRC-EXISTING-NODE-AMENDMENT-LRA0
+
+- Kind: `requirement`; source: `existing-node-amendments.md:75-93`; target: `node:LRA0`; text SHA-256: `9c64d5273ff4a028cb48be82ee6f391dae69b0286869be2dbcc026cbaa326379`.
+
+~~~~markdown
+## LRA0 — Profile-scoped diagnostics, lint, fixes, and actions
+
+Add:
+
+- exact diagnostic class/origin/family/slice/rule/subject identity;
+- authority state is separate from rule enablement/severity/suppression;
+- parser, semantic checker, framework semantic, lint, provider, and project/configuration diagnostics remain distinct owners;
+- diagnostic fixes are typed authored edit intents, never raw `TextEdit`/`WorkspaceEdit` payloads;
+- safe/suggested/unsafe status requires complete conflict/precondition analysis;
+- suppression is identity/provenance based, never message text;
+- external/native shadow comparison is non-publishing;
+- duplicate authority is rejected before consumer publication.
+
+Acceptance additions:
+
+- `lra0_diagnostic_identity_is_message_and_range_independent`
+- `lra0_fix_requires_authored_intent_and_exact_basis`
+- `lra0_shadow_observation_is_non_publishing`
+- `lra0_duplicate_family_authority_fails_before_merge`
+~~~~
 
 ### SRC-EXP-L950-737741E0B762
 

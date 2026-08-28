@@ -127,7 +127,23 @@ The packet is incomplete and dispatch must fail unless it embeds: exact candidat
 
 These clauses are operative only for the exact applicability set shown. Cold packets include the exact applicable subset and its source digest.
 
-No clause targets this file directly. Applicable contract clauses are selected by the validated `applicable_nodes` ledger and embedded verbatim in cold packets.
+### SRC-EXISTING-NODE-AMENDMENT-TCM4
+
+- Kind: `requirement`
+- Source: `existing-node-amendments.md:50-57`
+- Applicability: `TCM4`
+- Exact text SHA-256: `deff610a13c5c2a3dc98eba214dcac598655b3d2832f8c03cfc7561eef166c87`
+
+~~~~markdown
+## TCM4 — Atomic activation and deletion
+
+Add:
+
+- generated/provider ranges are consumable only when their mapper snapshot exactly matches the provider observation snapshot;
+- provider handles and resolve keys are epoch-scoped and fail closed after swap;
+- activation completion means successfully applied healthy binding, not discovered path or spawned process;
+- EPR4/EPR5 may replace discovery/activation mechanics, but TCM4 remains the semantic observation/certification boundary.
+~~~~
 
 ## Live authority inputs
 

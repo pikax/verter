@@ -138,7 +138,7 @@ const B4_RUST_GUARD_COMMANDS = [
 // Files later phases depend on. A missing prerequisite fails HERE with its
 // name instead of surfacing as an unrelated read error inside a phase.
 const B4_PREREQUISITES = [
-  "docs/arch/scanners-replacement-capability-ledger.json",
+  "scripts/manifests/scanners-replacement-capability-ledger.json",
   "schemas/scanners-replacement-v1.schema.json",
   "packages/vue-vscode/package.json",
   "packages/playground/scripts/generate-vue-language.ts",
@@ -243,7 +243,7 @@ export function verifyScannerFreeBoundary(root = DEFAULT_ROOT, files = trackedFi
 }
 
 export function verifyLedger(root = DEFAULT_ROOT) {
-  const ledger = readJson(root, "docs/arch/scanners-replacement-capability-ledger.json");
+  const ledger = readJson(root, "scripts/manifests/scanners-replacement-capability-ledger.json");
   const rows = ledger.rows;
   invariant(Array.isArray(rows) && rows.length > 0, "capability ledger has no rows");
   const rowKeys = new Set(ledger.row_schema);

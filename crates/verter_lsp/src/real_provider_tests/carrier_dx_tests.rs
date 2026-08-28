@@ -3,7 +3,7 @@
 //!
 //! For a carrier-source file (`.vue`/`.svelte`) imported from a PLAIN `.ts`/`.js`
 //! file, the imported symbol gets the full enhanced type experience — the same
-//! cross-engine/cross-framework contract `docs/arch/external-ts-engine-architecture.md`
+//! cross-engine/cross-framework contract `docs/arch/refactor/rev11/charters/expansion-engine-provisioning/EPR5.md`
 //! §2.9 specifies — delivered on TS<7 by the in-process `@verter/typescript-plugin`
 //! loaded into production tsserver. A plain script's enhanced `.vue`/`.svelte` DX
 //! is served by the plugin making tsserver itself resolve the bare carrier import

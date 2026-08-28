@@ -7,7 +7,7 @@
 //! rows assert the engine's live answer against the registry PIN instead, so a
 //! future engine fix flips loudly. This family is NOT M=0: the honest state is
 //! captured-records-with-known-mismatch-ledger
-//! (`docs/arch/ri0-relation-verdict-oracle-addendum.md` §5).
+//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §5).
 
 use super::oracle::identity;
 use super::oracle::query_specs::{RelationQuerySpec, RELATION_QUERY_SPECS};

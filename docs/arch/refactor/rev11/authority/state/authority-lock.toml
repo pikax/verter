@@ -1,6 +1,6 @@
 schema = 2
-baseline_authority_sha256 = "25c267518902bad33b8cf70baa15a560f20769a9608a7699a6b9b321b9282c02"
-current_authority_sha256 = "25c267518902bad33b8cf70baa15a560f20769a9608a7699a6b9b321b9282c02"
-generation = 0
-last_amendment_id = ""
-last_amendment_sha256 = ""
+baseline_authority_sha256 = "783ef20df6b7b78802d119ab69eba966dcd6fc3740cb8f9a4cdc2bc2e567a2e8"
+current_authority_sha256 = "aee2406181beea8ee44cad76677efb7a32bfb28cd55883f95db653aff226cb24"
+generation = 1
+last_amendment_id = "AMD-POST-ORC0-SUCCESSOR-DAG"
+last_amendment_sha256 = "98e10731d0abb32e638ae38cd72cd7c86543148c8d7acb04f0380575bad78136"

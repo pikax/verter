@@ -389,7 +389,7 @@ impl VerterHost {
         //
         // TODO(follow-up): route `compile_with_audit` through the carrier
         // registry (`compile_bundle`) so the audit path compiles every
-        // registered carrier — see docs/arch/svelte-native-compiler-plan.md §11
+        // registered carrier — see .claude/skills/compiler-codegen/SKILL.md §11
         // (the audit/helper compile-caller carrier migration follow-up).
         let language = self.language_classifier().classify(canonical_id);
         if language.is_framework_carrier() && !language.is_vue() {

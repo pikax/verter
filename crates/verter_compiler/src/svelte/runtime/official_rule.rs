@@ -34,7 +34,7 @@ pub enum CoreOfficialValidationRule {
     ///
     /// SCOPE: this is the `read_style` PARSE-ENTRY family only; the post-parse CSS validation /
     /// scoping family (`css_global_*`, nesting placement, …) is a deferred CSS-scoping vertical
-    /// (`docs/arch/svelte-native-compiler-plan.md` debt ledger), never surfaced by Verter today.
+    /// (`.claude/skills/compiler-codegen/SKILL.md` debt ledger), never surfaced by Verter today.
     ///
     /// [`StyleBodyProbe`]: crate::svelte::parser::StyleBodyProbe
     StyleBodyParse,

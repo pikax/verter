@@ -1,7 +1,7 @@
 # synthetic-15k — the hermetic perf corpus
 
 A committed, version-pinned synthetic corpus of TypeScript-typed Vue SFCs
-for the external-TS-engine performance gate (design `docs/arch/external-ts-engine-architecture.md` §2.7).
+for the external-TS-engine performance gate (design `docs/arch/refactor/rev11/charters/expansion-engine-provisioning/EPR5.md` §2.7).
 
 ## Shape
 

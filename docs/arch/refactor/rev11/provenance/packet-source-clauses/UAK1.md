@@ -1,6 +1,6 @@
 # Exact operative source-clause attachment — UAK1
 
-Schema: 1. Node: `UAK1`. Clause count: 116. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
+Schema: 1. Node: `UAK1`. Clause count: 119. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
 
 ### SRC-EXP-L1094-3C0F933AED33
 
@@ -933,4 +933,43 @@ No current kernel/product/vertical terminal waits for this record.
 **Acceptance:** dependency-firewall tests reject imports from kernel into vertical, project, editor-host, CLI presentation, or compiler-backend owners; the DAG validator proves acyclicity and no global release join.
 **Forbidden:** universal framework IR, one parser implementation requirement, project profiles selecting TS programs, or a compiler capability inferred from tooling support.
 **Deletion/abort:** supersede the old 251-block release universe; abort if the constitution needs a named future framework to define a supposedly universal core contract.
+~~~~
+
+### SRC-LEGACY-TRANSFER-044075AC5C5F
+
+- Kind: `requirement`; source: `legacy-architecture-transfers.md:313-318`; target: `node:UAK1`; text SHA-256: `1a99a4d0928becce77446a49c61259d3005fccfe91b759a31351eb6ee194b29c`.
+
+~~~~markdown
+### LEGACY-TRANSFER-044075AC5C5F
+
+- Original path: `docs/arch/multi-framework-adapters-plan.md`; Git blob: `044075ac5c5f1de067b64d9e4ebec0eb2296b58c`; exact source SHA-256: `cddb6100a3cb81973815d0203a332209f0eb192d6e5892d8977c670f7477d2d6`.
+- Exact retained source: `sources/legacy-architecture-transfers/multi-framework-adapters-plan.md`.
+- Applicable authority: `UAK1`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-LEGACY-TRANSFER-53D9193494D1
+
+- Kind: `requirement`; source: `legacy-architecture-transfers.md:103-108`; target: `node:UAK1`; text SHA-256: `b56e8c84e0375c930eec5e65a409792a6e0ab2bc8fae2c93a1cdcc344a9d209e`.
+
+~~~~markdown
+### LEGACY-TRANSFER-53D9193494D1
+
+- Original path: `docs/arch/future/improvements-arch-grok.md`; Git blob: `53d9193494d11f10836b4926b74bcc03e8517814`; exact source SHA-256: `90312c81fa36dd5a160e5e71664d8916d29ad91e1cd77d52cdc51a98be24edfa`.
+- Exact retained source: `sources/legacy-architecture-transfers/future/improvements-arch-grok.md`.
+- Applicable authority: `UAK1`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-LEGACY-TRANSFER-ABC039B18A26
+
+- Kind: `requirement`; source: `legacy-architecture-transfers.md:96-101`; target: `node:UAK1`; text SHA-256: `ee53d9965ac8519119a2b16b2e11d4fa2a428d2d1d66d57a861b8585b4377d47`.
+
+~~~~markdown
+### LEGACY-TRANSFER-ABC039B18A26
+
+- Original path: `docs/arch/future/improvements-arch-codex.md`; Git blob: `abc039b18a268f753bf4d166870e4f2bb0658213`; exact source SHA-256: `f12040f5b325778900bfdcac1cbd7910d35f6a73eef2ef85fae9ffb2e813f070`.
+- Exact retained source: `sources/legacy-architecture-transfers/future/improvements-arch-codex.md`.
+- Applicable authority: `UAK1`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
 ~~~~

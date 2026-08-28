@@ -351,9 +351,8 @@ bytes = 20062
 sha256 = "d5aca4b4b5c42a82bfb77f1cc9a91074004c6876a7532850306622b703ff66c7"
 
 [[source]]
-ref = "live:docs/arch/architecture-lock/ledger/program-state.toml"
-path = "docs/arch/architecture-lock/ledger/program-state.toml"
-commit = "bfe09961869e03f5bf16b12d273ade857f45971d"
+ref = "live:docs/arch/refactor/rev11/sources/c2-program-state-authority.toml"
+path = "docs/arch/refactor/rev11/sources/c2-program-state-authority.toml"
 bytes = 184386
 sha256 = "2b176c4c15730ff9698c73f677eb239800c1adff3891e4e77493a768ea630dee"
 

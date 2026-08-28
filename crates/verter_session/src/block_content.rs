@@ -17,7 +17,7 @@ use crate::VerterHost;
 
 /// Host-owned block-content lane: the admission state, the fence that
 /// serializes validation and atomic admission after asynchronous provider
-/// work (docs/arch/scanners-replacement-preprocessor-interim.md §Sealed
+/// work (.claude/skills/compiler-codegen/SKILL.md §Sealed
 /// handoff), the correlation counter, and the test-only admission seam
 /// hook, grouped so the root `VerterHost` struct stays thin. NOT a cache;
 /// admitted artifacts live in [`BlockContentState`].

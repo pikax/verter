@@ -153,3 +153,51 @@ These clauses are operative only for the exact applicability set shown. Cold pac
 **Forbidden:** field-wise winner merging, native recreation of authoritative TS facts, first-match name search, provider handles in DTOs, or the index acting as checker.
 **Deletion/abort:** supersede broad `TypeProvider`-shaped public requests after all consumers move; abort if an operation lacks exactly one ratified execution owner.
 ~~~~
+
+### SRC-LEGACY-TRANSFER-C22A814BC030
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:33-38`
+- Applicability: `TIF0`, `TCM3`
+- Exact text SHA-256: `9e83775264a7035283aecc867eda7cb16c9950e0154c5054ec36a5befc4f8a3d`
+
+~~~~markdown
+### LEGACY-TRANSFER-C22A814BC030
+
+- Original path: `docs/arch/followups/u0-typeinfo-scratch-fact-validation.md`; Git blob: `c22a814bc0303053f2dc0ba0a98237ee49f60e42`; exact source SHA-256: `93b3ff687a3ad6bcb0944d5a5a45f2c0b811ad2ae444e54fa4d8dbe84fa1f160`.
+- Exact retained source: `sources/legacy-architecture-transfers/followups/u0-typeinfo-scratch-fact-validation.md`.
+- Applicable authority: `TIF0`, `TCM3`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-LEGACY-TRANSFER-B69FCDB81AA0
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:194-199`
+- Applicability: `TIF0`, `H1`
+- Exact text SHA-256: `15ff8b6fd1b28b2666d1c1a79da33f869a1bc58195676457ed3a7b5a3d95e0c1`
+
+~~~~markdown
+### LEGACY-TRANSFER-B69FCDB81AA0
+
+- Original path: `docs/arch/future/typeinfo-inplace-package-edit-supersession.md`; Git blob: `b69fcdb81aa094599f7739b309cb4eef21513052`; exact source SHA-256: `9cc6959d5c9a418d4551a5e8078903b824437fdefcbee85ab1026b6319d7e1d5`.
+- Exact retained source: `sources/legacy-architecture-transfers/future/typeinfo-inplace-package-edit-supersession.md`.
+- Applicable authority: `TIF0`, `H1`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~
+
+### SRC-LEGACY-TRANSFER-5CE6EF3AD364
+
+- Kind: `requirement`
+- Source: `legacy-architecture-transfers.md:579-584`
+- Applicability: `TIF0`, `TIF1`
+- Exact text SHA-256: `876f31646a347665cadfe2d45b1eb20aa06b9e600b09a1fc4f1335f39f727b1c`
+
+~~~~markdown
+### LEGACY-TRANSFER-5CE6EF3AD364
+
+- Original path: `docs/arch/typed-ir-cutover/compat-heuristic-mapping.md`; Git blob: `5ce6ef3ad3646b58b83c924384e9e23959414163`; exact source SHA-256: `0821e46260a13eed33e7419b1dc7fd8c176b72bb151e871f3a4a9efd02532b03`.
+- Exact retained source: `sources/legacy-architecture-transfers/typed-ir-cutover/compat-heuristic-mapping.md`.
+- Applicable authority: `TIF0`, `TIF1`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
+~~~~

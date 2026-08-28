@@ -91,7 +91,7 @@
 //!     SemanticNodeId(vn)`). The scanner is a single-needle direct-shape
 //!     supplement, NOT an exhaustive data-flow analysis.
 //!   mechanism_ruling=binding architecture design ruling
-//!     (see `docs/arch/cache-key-guard-mechanism-rulings.md`): this scanner is
+//!     (see `.claude/skills/type-cache-architecture/SKILL.md`): this scanner is
 //!     NOT structurally impossible today (SemanticNodeId is a public tuple
 //!     struct; SyntheticCarrierKey.value_node is a public u64), so it survives
 //!     as a permitted bounded residual supplement and MUST carry this full

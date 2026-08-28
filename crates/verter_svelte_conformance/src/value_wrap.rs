@@ -6,7 +6,7 @@
 //! coverage over the INVENTORIED authored-value surfaces, NOT a completeness
 //! proof over every authored byte the client backend accepts: the D-61
 //! raw-string authored-emission residual
-//! (`docs/arch/svelte-native-compiler-plan.md`) is the deferred capability
+//! (`.claude/skills/compiler-codegen/SKILL.md`) is the deferred capability
 //! boundary and is NOT covered here.
 //!
 //! The axis is TYPED ROLES only — never fixture paths: [`ValueWrapSurface`]

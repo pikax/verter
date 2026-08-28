@@ -14,7 +14,7 @@
 //! future same-key diagnostics.
 //!
 //! WHY THIS EXISTS (the parity oracle): the perf campaign (see
-//! `docs/arch/host-mode-perf-design.md` §3/§4) will run verter-tsc as a Batch host
+//! `.claude/skills/host-session/SKILL.md` §3/§4) will run verter-tsc as a Batch host
 //! and later swap its checker backend to an in-memory tsgo `--api` client. The
 //! codex ruling requires the diagnostic SET to stay IDENTICAL across those changes
 //! ("Full <-> Batch — SAME tsc-parity diagnostic SET"; Fix 1 lands "only AFTER

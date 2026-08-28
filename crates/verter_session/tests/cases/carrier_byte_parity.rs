@@ -12,7 +12,7 @@
 //!     sibling `.vue` imports against.
 //!
 //! WHY THIS EXISTS (the parity oracle): the perf campaign (see
-//! `docs/arch/host-mode-perf-design.md`) will add a Batch `HostConfig` preset, a
+//! `.claude/skills/host-session/SKILL.md`) will add a Batch `HostConfig` preset, a
 //! stateless `BareCompiler`, and swap verter-tsc's checker backend to an
 //! in-memory tsgo `--api` client. The codex ruling (§3, "Full <-> Batch — SAME
 //! carrier bytes") requires every one of those changes to be PROVABLY

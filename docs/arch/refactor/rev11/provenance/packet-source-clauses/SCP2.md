@@ -1,6 +1,6 @@
 # Exact operative source-clause attachment — SCP2
 
-Schema: 1. Node: `SCP2`. Clause count: 18. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
+Schema: 1. Node: `SCP2`. Clause count: 19. Generated from `provenance/source-coverage.toml`; every clause below is exact, operative, and applicable to this node.
 
 ### SRC-COMP-L1480-C6525ABC0FCE
 
@@ -153,4 +153,17 @@ Schema: 1. Node: `SCP2`. Clause count: 18. Generated from `provenance/source-cov
 
 ~~~~markdown
 ---
+~~~~
+
+### SRC-LEGACY-TRANSFER-1B11EAEACCFE
+
+- Kind: `requirement`; source: `legacy-architecture-transfers.md:558-563`; target: `node:SCP0`; text SHA-256: `196151f1cc3d11ad89808f4d1c20e806d32733cbfefc5ae47875e2d2aded0d98`.
+
+~~~~markdown
+### LEGACY-TRANSFER-1B11EAEACCFE
+
+- Original path: `docs/arch/svelte-native-compiler-plan.md`; Git blob: `1b11eaeaccfea6baaad3684710026923b734bb88`; exact source SHA-256: `e96ca99c36787fbb0d9d29300601c3a58d653a0fb57f89a560a24080662dd7ad`.
+- Exact retained source: `sources/legacy-architecture-transfers/svelte-native-compiler-plan.md`.
+- Applicable authority: `SCP0`, `SCP1`, `SCP2`, `SCP3`, `SCP4`, `SCP5`, `SCP6`, `SCP7`.
+- Binding: every durable requirement in the exact retained source remains operative for the applicable authority. Text that explicitly records implementation archaeology, a rejected alternative, or a superseded observation is non-operative.
 ~~~~

@@ -32,7 +32,7 @@
 //!     not a private type/module/field/accessor; retired-symbol absence is
 //!     expressible only as a name-spelling source scan.
 //!   mechanism_ruling=binding architecture design ruling
-//!     (see `docs/arch/cache-key-guard-mechanism-rulings.md`): a source scanner
+//!     (see `.claude/skills/type-cache-architecture/SKILL.md`): a source scanner
 //!     is the justified mechanism for R22 retired-symbol absence (Rust cannot
 //!     prove "identifier absent from the whole codebase / never reintroduced").
 //!   hardening_rounds=0

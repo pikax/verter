@@ -1,9 +1,0 @@
-SENTINEL C driver log — plant file: crates/verter_vue_conformance/corpus/goldens/3.6.0-rc.1/vdom-inline/built-ins/keep-alive.js
-BEFORE: clone occurrences=0, worktree occurrences=0
-PLANT-PROOF token=A1_SENTINEL_PLANT_GOLDEN_R2_77aa02 file=crates/verter_vue_conformance/corpus/goldens/3.6.0-rc.1/vdom-inline/built-ins/keep-alive.js
-  occurrences(clone tree, files): 1+0
-  occurrences(candidate worktree, files): 0+0
-  git -C clone diff --stat:
- .../corpus/goldens/3.6.0-rc.1/vdom-inline/built-ins/keep-alive.js        | 1 +
- 1 file changed, 1 insertion(+)
-AFTER RESTORE: clone occurrences=0

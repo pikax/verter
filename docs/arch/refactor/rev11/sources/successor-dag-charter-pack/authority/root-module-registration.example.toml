@@ -1,0 +1,14 @@
+# Example amendment fragment. Exact root schema and module ordering must be derived
+# from the live authority root by the canonical generator.
+[[module]]
+path = "authority/dag/expansion-native-checker.toml"
+
+[[module]]
+path = "authority/dag/expansion-native-checker-families.example.toml"
+generated_by = "NCK4"
+
+[[module]]
+path = "authority/dag/expansion-language-service.toml"
+
+[[module]]
+path = "authority/dag/expansion-engine-provisioning.toml"
