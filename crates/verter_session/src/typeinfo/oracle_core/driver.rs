@@ -1,6 +1,6 @@
 //! The shared registry driver — the consumption-side orchestrator the
 //! `#[oracle_row]` attribute proc-macro synthesizes a call to
-//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §2 "Consumption" + §Q4).
+//! (the TS7 oracle contract §2 "Consumption" + §Q4).
 //!
 //! A lifted `TypeExpr`-projection row body is replaced by
 //! `oracle::run_row(file!(), "<fn>")`. The driver:

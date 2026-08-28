@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   svelteManifest,
   SVELTE_CASE_ID_SALT,
-} from "../../../docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs";
+} from "../../../packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs";
 
 let root;
 

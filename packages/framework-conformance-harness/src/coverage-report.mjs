@@ -13,7 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 
 import { EVIDENCE_ROOT } from "./paths.mjs";
-import { svelteManifest } from "../../../docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs";
+import { svelteManifest } from "../evidence/generate-official-case-manifests.mjs";
 
 const VALID_DISPOSITIONS = new Set([
   "imported",

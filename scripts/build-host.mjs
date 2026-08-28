@@ -3,9 +3,7 @@
 // together under the same explicit --target and --profile, with NAPI
 // packaging (binding generation, platform-suffix rename, .d.ts, Windows
 // artefact copy) run as a SEPARATE step afterward. This is the "one Cargo
-// host invocation" + "NAPI packaging separated from its compilation" rule
-// in
-// docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-BUILD-LANE-SEPARATION.md:
+// host invocation" + "NAPI packaging separated from its compilation" rule:
 // every shared dependency (oxc_allocator, tokio, serde, verter_compiler,
 // verter_session, ...) compiles ONCE under target/<target>/<profile>/deps/
 // instead of two separate invocations landing in different target

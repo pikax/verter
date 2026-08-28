@@ -1,5 +1,5 @@
 //! Hover-extraction grammar — extracts the `<RHS>` of `type <probe_name> =
-//! <RHS>` from tsgo's hover (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md`
+//! <RHS>` from tsgo's hover (the TS7 oracle contract
 //! §Q2 "hover-extraction grammar", §4 `hover_extraction_grammar_is_versioned`).
 //!
 //! PURE + offline (tsgo-free): so BOTH the generator AND the offline

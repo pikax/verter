@@ -31,9 +31,9 @@
 // PURPOSE
 //   Builds the whole workspace test universe ONCE via `cargo nextest archive` (dev profile) and runs it
 //   with `cargo nextest run` (per-test PROCESS ISOLATION) — ONE full build, ONE full run, per the
-//   maintainer's SINGLE-TEST-UNIVERSE directive
-//   (docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md, refining
-//   ONE-BUILD-ONE-RUN). That is SURFACE 1. Deliberate shared-process coverage — the class the former
+//   maintainer's SINGLE-TEST-UNIVERSE directive, refining ONE-BUILD-ONE-RUN.
+//   See docs/contributing/gate-performance.md. That is SURFACE 1. Deliberate
+//   shared-process coverage — the class the former
 //   Surface 2 existed for — now lives INSIDE that one universe as
 //   `verter_session/tests/cases/shared_process_contract.rs`: ordinary `#[test]` functions that perform
 //   many operations sequentially (create/use/drop/recreate; multiple hosts alive at once; repeated edits;
@@ -1921,7 +1921,9 @@ async function runShippedCfgLane(opts, ctx, { allSuites, commandPlan }) {
 function replayGateLaneTranscript(receipts, ctx, allSuites) {
   const segments = SHIPPED_CFG_LANE_ENABLED
     ? canonicalGateLaneTranscriptSegments(receipts)
-    : canonicalGateLaneTranscriptSegments(receipts).filter((segment) => segment.phaseId === "surface-1");
+    : canonicalGateLaneTranscriptSegments(receipts).filter(
+        (segment) => segment.phaseId === "surface-1",
+      );
   for (const segment of segments) {
     log(segment.header);
     if (segment.output) {

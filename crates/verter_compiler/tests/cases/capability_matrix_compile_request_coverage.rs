@@ -1,4 +1,4 @@
-//! Drives `docs/arch/refactor/rev11/evidence/framework-conformance/
+//! Drives `packages/framework-conformance-harness/evidence/
 //! capability-matrix.tsv` directly: every row's `cell_id` must have a
 //! registered verification closure below, exercised against the ONE
 //! canonical `CompileRequest` construction/resolution authority.
@@ -55,7 +55,7 @@ struct MatrixRow {
 
 fn read_matrix_rows() -> Vec<MatrixRow> {
     let path = workspace_root()
-        .join("docs/arch/refactor/rev11/evidence/framework-conformance/capability-matrix.tsv");
+        .join("packages/framework-conformance-harness/evidence/capability-matrix.tsv");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("capability-matrix.tsv must be readable at {path:?}: {e}"));
     let mut lines = raw.lines();

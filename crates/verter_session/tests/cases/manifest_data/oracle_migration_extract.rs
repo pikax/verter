@@ -1,5 +1,5 @@
 //! The closed `syn` migration-fidelity extractor + canonical fingerprint
-//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §Q4 — `migration_fingerprint` /
+//! (the TS7 oracle contract §Q4 — `migration_fingerprint` /
 //! `original_body_tokens`).
 //!
 //! This is the SOLE migration-fidelity authority for a lifted TS7

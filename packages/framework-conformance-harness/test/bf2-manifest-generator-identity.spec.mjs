@@ -27,12 +27,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { VUE_DOMAIN } from "../src/domain-pin.mjs";
-import { EXPECTED_VUE } from "../../../docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs";
+import { EXPECTED_VUE } from "../../../packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(TEST_DIR, "..", "..", "..");
 const GENERATOR_REL_PATH =
-  "docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs";
+  "packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs";
 const GENERATOR_PATH = join(REPO_ROOT, GENERATOR_REL_PATH);
 const GATES_PATH = join(REPO_ROOT, "performance-gates.toml");
 

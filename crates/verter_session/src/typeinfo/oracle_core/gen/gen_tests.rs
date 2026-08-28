@@ -1,5 +1,5 @@
 //! Discriminating guard for the snapshot GENERATOR (`oracle_gen_is_idempotent`,
-//! `docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §4). It drives the per-spec pipeline
+//! the TS7 oracle contract §4). It drives the per-spec pipeline
 //! end-to-end against the PINNED tsgo over a SYNTHETIC spec + a temp vendored
 //! corpus, and asserts:
 //!

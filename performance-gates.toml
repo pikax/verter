@@ -17,9 +17,7 @@
 # digest and the same independent review class. Adding a cell never licenses
 # weakening, reweighting, subsetting or reinterpreting an existing one.
 #
-# Every value traces to
-# docs/arch/refactor/rev11/evidence/A6/baseline-measurement.md and
-# docs/arch/refactor/rev11/evidence/A6/counter-reproduction.md.
+# Every value is retained as part of this locked gate definition.
 #
 # Vocabulary note, stated once. Several template fields presuppose Revision 11
 # types that do not exist at lock time (product-request kinds, output/presentation/
@@ -32,9 +30,8 @@ schema = 1
 revision = 11
 status = "LOCKED"
 
-# Recomputable aggregate over the landed Revision 11 authority tree, per
-# docs/arch/refactor/rev11/PROVENANCE.md ("Aggregate digest of the landed
-# split-package tree"), computed at the A6 candidate tree. The canonical 85-file
+# Recomputable aggregate over the landed Revision 11 authority tree, computed
+# at the A6 candidate tree. The canonical 85-file
 # package digest does not exist: package validation is WAIVED by maintainer
 # ruling R-2. This file lives at the repository root, OUTSIDE that aggregate's
 # input set, so the digest stays recomputable rather than self-referential.
@@ -367,7 +364,7 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 # What DOES exist, right now, unrelated to any BF2 candidate, is the BF1
 # evidence-preparation tool that already produced the committed
 # vue-official-cases.tsv (2003 rows) and svelte-official-cases.tsv (3475
-# rows): docs/arch/refactor/rev11/evidence/framework-conformance/
+# rows): packages/framework-conformance-harness/evidence/
 # generate-official-case-manifests.mjs. Its behavior is fully deterministic
 # and it is not BF2's harness — it is the BF1-owned tool that seeds BF2's
 # input manifest. Measuring its real, already-authored, already-run behavior
@@ -384,7 +381,7 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 # each cell's own output digest and per-language work counters, which ARE
 # independently real and independently gated. Full raw session, sandbox
 # profile, and derivation arithmetic:
-# docs/arch/refactor/rev11/evidence/framework-conformance/command-proofs/
+# packages/framework-conformance-harness/evidence/command-proofs/
 # bf2-oracle-manifest-generate/.
 #
 # MACHINE. Measured on this file's OWN locked runner class (verified
@@ -407,7 +404,7 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 #
 # ZERO NETWORK. Every measured run executed under a macOS sandbox-exec
 # profile denying all network* operations for the whole process tree
-# (docs/arch/refactor/rev11/evidence/framework-conformance/command-proofs/
+# (packages/framework-conformance-harness/evidence/command-proofs/
 # bf2-oracle-manifest-generate/deny-network.sb), verified operationally (a
 # `curl` to a live host fails DNS resolution under the identical profile,
 # while all 10 script invocations completed and produced byte-identical
@@ -434,7 +431,7 @@ owner = "BF2"
 # wider "invoke the official compilers + produce golden output" workload is
 # a separate, not-yet-measurable BF2 workload — see the deliberately open
 # BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE row in
-# docs/arch/refactor/rev11/evidence/framework-conformance/performance-impact.md's
+# packages/framework-conformance-harness/evidence/performance-impact.md's
 # "Required new cells" table.
 operation = "official_case_enumeration_and_classification; target_manifest=vue-official-cases.tsv"
 # Harness IS the workload definition (no fixture directory — same pattern as
@@ -442,7 +439,7 @@ operation = "official_case_enumeration_and_classification; target_manifest=vue-o
 # pinned framework source commits it asserts via EXPECTED_VUE/
 # EXPECTED_SVELTE, and the oracle npm closure that supplies its one runtime
 # dependency (@babel/parser, resolved via --vue-modules).
-corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
+corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
 # No Revision 11 normalized product-request type exists for this offline
 # evidence-preparation tool (same gap A6 names for its own request digest).
 # SHA-256 over the literal pinned invocation description string below (no
@@ -604,7 +601,7 @@ owner = "BF2"
 # source tree and assigns a disposition per suite. Makes ZERO calls to the
 # Svelte compiler and writes no golden/compiled output.
 operation = "official_case_enumeration_and_classification; target_manifest=svelte-official-cases.tsv"
-corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
+corpus_fingerprint = "git-blob:c0bbd7d146137a5cb1ffbf8a5cc8748f6c7ed295 (packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs); vue-source-head:3adb225775c9b28223a56e07f7a2f874b6fbb138; svelte-source-head:56a036f4ce873a24ee6631a06d03d372523d7a9b; vue-modules-lock:git-blob:0dd0269c4caff6f449315e1f70e44f7f23e20944 (oracles/vue/package-lock.json)"
 # SHA-256 over the literal pinned invocation description string below (no
 # trailing newline) — see the sibling BF2_VUE_ORACLE_MANIFEST_GENERATE
 # cell's identical-shape comment for the shared rationale.
@@ -731,26 +728,22 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 # ─────────────────────────────────────────────────────────────────────────────
 # BF2_OFFICIAL_COMPILER_INVOCATION_GOLDEN_GENERATE — OPEN / NOT YET LOCKED.
 #
-# `docs/arch/refactor/rev11/evidence/framework-conformance/performance-impact.md`
+# `packages/framework-conformance-harness/evidence/performance-impact.md`
 # originally left this row deliberately open pending BF2's own harness
 # existing. BF2 (2026-08-12) froze a cell here from a 10-run measurement of
 # its OWN just-built `generate-goldens.mjs` — the candidate choosing its own
-# pass criteria, forbidden by this file's SCOPE header and by
-# `docs/arch/refactor/rev11/governance.md`'s Gate authority rule. A Codex
+# pass criteria, forbidden by this file's SCOPE header. A Codex
 # Sol xhigh architecture consult confirmed the violation and the maintainer
 # ruled FALLBACK: withhold the freeze rather than pursue the consult's
 # proposed bootstrap-gate protocol. The prior cell, its numeric thresholds,
 # and the 10-run session that produced them are INVALID and are NOT carried
 # forward here (retained only as invalidated evidence at
-# docs/arch/refactor/rev11/evidence/framework-conformance/command-proofs/
+# packages/framework-conformance-harness/evidence/command-proofs/
 # bf2-official-compiler-invocation-golden-generate/ for audit).
 #
 # This row stays explicitly OPEN — no cell is defined below for this id.
 # BF2 does not claim this performance exit passed. Resolution is tracked
-# debt: see
-# docs/arch/refactor/rev11/evidence/BF2/debt-BF2-perf-gate-deferred.md
-# for the durable owner, resolution gate, acceptance ID, and ruling
-# references. That block must freeze this cell (or a successor id covering
+# debt. The owning block must freeze this cell (or a successor id covering
 # the same workload) through an independent gate-authority process before
 # its own performance-lock exit, per this file's ordinary EXTENSION rules —
 # not by reusing BF2's invalidated numbers.
@@ -762,8 +755,7 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 # close the route-overhead performance lock that BF1's exit #6 owned, that a
 # later accepted disposition deferred to B6's own landing, and that B6's charter
 # still imports as an acceptance condition. The contradiction and its resolution
-# are recorded in
-# docs/arch/refactor/rev11/rulings/ARCHITECT-RULING-2026-08-23-B6-ROUTE-OVERHEAD-CELL-LOCK.md.
+# are recorded in the B6 history in docs/contributing/gate-performance.md.
 # This does not touch any A6 or BF2 cell, the primary_suite, or any field above
 # this marker, and it does not accept B6.
 #
@@ -776,17 +768,14 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 #     LOCKED A6 cell above — 8 x A6's 2.5 ms/component cold budget for wall, and
 #     half A6's 41-file host RSS catastrophe stop for memory. Neither is a
 #     multiple of any observed route-overhead figure;
-#   * the two RELATIVE bounds instantiate a formula frozen in
-#     docs/arch/refactor/rev11/evidence/B6/cell-lock/pre-measure-registration.md
-#     section 7 BEFORE the calibration session ran, applied to the B5 DIRECT
+#   * the two RELATIVE bounds instantiate a formula frozen before the
+#     calibration session ran, applied to the B5 DIRECT
 #     leg — the pre-existing one-shot StandaloneCompiler path that B6 will
 #     replace, not B6's own arms.
 # B6's existing timing/RSS results are contaminated audit evidence (they failed
 # the idle-machine protocol) and were not read when this cell was written.
 #
-# MEASUREMENT PROTOCOL. The bootstrap shape of
-# docs/arch/refactor/rev11/evidence/BF2/debt-BF2-perf-gate-deferred.md:
-# digest-addressed pre-measure registration, then a 30-cold-invocation
+# MEASUREMENT PROTOCOL. Digest-addressed pre-measure registration, then a 30-cold-invocation
 # calibration session ([statistics].short_min_samples) whose ONLY output is the
 # CV that instantiates the frozen formula, then a DISJOINT 30-cold-invocation
 # holdout session that is the pass/fail evidence. Calibration numbers never
@@ -794,10 +783,7 @@ max_positive_slope_bytes_per_hour = "not_applicable"
 # protocol (1-minute load average < 2.00, zero foreign cargo/rustc/nextest
 # processes, low-power mode off) with runner.control_benchmark executed at the
 # start AND end of each session; a session was void if control medians drifted
-# by more than runner.max_control_drift_percent. Raw per-invocation samples,
-# control readings and derivations:
-#   docs/arch/refactor/rev11/evidence/B6/cell-lock/calibration/
-#   docs/arch/refactor/rev11/evidence/B6/cell-lock/holdout/
+# by more than runner.max_control_drift_percent.
 #
 # THREE ARMS DO NOT EXIST YET, AND THE HARNESS SAYS SO. prepared-first,
 # prepared-repeat and batch are part of this cell's identity because they are

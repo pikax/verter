@@ -30,6 +30,7 @@ jobs:
       svelte_client_smokes: ${{ steps.filter.outputs.svelte_client_smokes }}
       svelte_perf: ${{ steps.filter.outputs.svelte_perf }}
       editors: ${{ steps.filter.outputs.editors }}
+      tama: ${{ steps.filter.outputs.tama }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -57,12 +58,6 @@ jobs:
               - 'scripts/sccache-env.mjs'
               - 'scripts/sccache-env.test.mjs'
               - 'scripts/svelte-golden-lib.mjs'
-              - 'scripts/validate-program-state.mjs'
-              - 'scripts/validate-program-state.test.mjs'
-              - 'scripts/validate-stack-window.mjs'
-              - 'scripts/validate-stack-window.test.mjs'
-              - 'scripts/lib/rev11-toml.mjs'
-              - 'scripts/lib/stack-window-lib.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
               - '.github/workflows/ci.yml'
             wasm:
@@ -232,7 +227,25 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+            tama:
+              - 'roadmap/0.1.0-tama/**'
+              - '.claude/skills/multi-agent-orchestration/**'
+              - 'CLAUDE.md'
+              - '.github/workflows/ci.yml'
 
+
+  tama-roadmap:
+    name: Tama Roadmap
+    needs: detect-changes
+    if: needs.detect-changes.outputs.tama == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate DAG-managed files
+        run: |
+          node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict
+          node --test roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs
 
   # ---------------------------------------------------------------------------
   # `dtolnay/rust-toolchain@1.97.1` (not `@stable`) in every job below, and in
@@ -1591,6 +1604,7 @@ jobs:
     timeout-minutes: 5
     needs:
       - detect-changes
+      - tama-roadmap
       - rust-fmt
       - rust-clippy
       - rust-build-configs

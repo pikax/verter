@@ -165,7 +165,7 @@ impl DeclBindingKey {
 /// `props:` runtime-argument position. Producer-owned: emitted by the
 /// analyzer's `RootBindingIndex`-gated extraction (`verter_semantic`), never
 /// recomputed downstream. See
-/// `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`.
+/// the binding-index design.
 #[derive(
     Debug,
     Clone,

@@ -1,8 +1,7 @@
 // validate-performance-gates.test.mjs — node:test suite for the performance-gate
 // validator.
 //
-// Discipline (docs/arch/refactor/rev11/verification.md, "Verification Must Prove
-// Execution"): every negative control below must FAIL against the validator, and
+// Every negative control below must FAIL against the validator, and
 // every one must also fail against a validator stubbed to accept everything —
 // otherwise the test proves nothing. `accepts_everything_fails_every_negative_control`
 // is that meta-check: it runs the whole negative corpus through a stub and asserts

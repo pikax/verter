@@ -1,5 +1,5 @@
 //! The two-sided positive-allowlist admission gate for the TS7
-//! `TypeExpr`-projection oracle (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §Q2).
+//! `TypeExpr`-projection oracle (the TS7 oracle contract §Q2).
 //!
 //! A `(row, query)` is admissible for a hover-lowered snapshot ONLY when EVERY
 //! construct in BOTH its TS7 hover answer AND its real fixture SOURCE

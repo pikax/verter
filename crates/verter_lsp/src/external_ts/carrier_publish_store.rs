@@ -2,7 +2,7 @@
 //! Rust publish authority the Node `@verter/typescript-plugin` reads SYNCHRONOUSLY
 //! (the two processes share NO memory).
 //!
-//! ## Why this exists (§2.2 of `docs/arch/refactor/rev11/charters/expansion-engine-provisioning/EPR5.md`)
+//! ## Why this exists (§2.2 of the external TypeScript engine contract)
 //!
 //! The plugin's host APIs are SYNCHRONOUS and tsserver caches their results —
 //! including NEGATIVE results. So a companion must never be advertised before its

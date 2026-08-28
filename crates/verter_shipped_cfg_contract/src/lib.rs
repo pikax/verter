@@ -7,7 +7,7 @@
 //! `--cargo-profile no-debug-assertions` — never as part of a whole-workspace
 //! archive and never under the default `dev` profile. See the workspace
 //! `Cargo.toml`'s `[profile.no-debug-assertions]` doc comment and
-//! `docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`.
+//! `docs/contributing/gate-performance.md`.
 //!
 //! What belongs here: behaviour that can differ ONLY because
 //! `debug_assertions` / `overflow-checks` are off, or because a

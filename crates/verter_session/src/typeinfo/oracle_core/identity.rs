@@ -1,5 +1,5 @@
 //! Snapshot identity model + `snapshot_id` derivation + canonical content
-//! hashing for the TS7 oracle harness (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md`
+//! hashing for the TS7 oracle harness (the TS7 oracle contract
 //! §Q1 / §Q4).
 //!
 //! `snapshot_id` is the deterministic, REGISTRY-DERIVABLE filename stem of an

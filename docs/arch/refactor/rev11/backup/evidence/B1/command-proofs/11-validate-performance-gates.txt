@@ -1,2 +1,0 @@
-PASS performance-gates.toml: 1 cell(s), 15 metric(s), no placeholders
-EXIT: 0

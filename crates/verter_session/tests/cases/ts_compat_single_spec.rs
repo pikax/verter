@@ -1,5 +1,5 @@
 //! The two foundational single-spec guards for the ts-compat oracle model
-//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §4 / §7.1 / §8 / §12).
+//! (the TS7 oracle contract §4 / §7.1 / §8 / §12).
 //!
 //! The model has ONE resolution spec (no `SpecVariant` / bug-for-bug / compat
 //! dimension anywhere in the resolver, cache, or session surface) and asserts
@@ -146,7 +146,8 @@ fn scan_source_for_deny_tokens(src: &str) -> Vec<(usize, &'static str)> {
 /// Whether a production `.rs` path is EXEMPT from the deny-token scan: the
 /// oracle-harness / correction-metadata code + tests are the only places allowed
 /// to NAME the tokens (§4). Excludes the oracle core, the pure-data registry, the
-/// generator binary, and any `*_tests.rs` / `tests.rs` test module file.
+/// generator binary, and any `*_tests.rs` / `tests.rs` / `test_cases.rs` test
+/// module file.
 fn is_token_scan_exempt(rel: &str) -> bool {
     rel.contains("/typeinfo/oracle_core/")
         || rel.contains("/typeinfo_tests/")
@@ -154,6 +155,7 @@ fn is_token_scan_exempt(rel: &str) -> bool {
         || rel.contains("oracle_query_specs")
         || rel.ends_with("_tests.rs")
         || rel.ends_with("/tests.rs")
+        || rel.ends_with("/test_cases.rs")
 }
 
 /// Enumerate every production `.rs` file under `crates/*/src/` (excluding

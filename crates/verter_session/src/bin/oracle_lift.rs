@@ -1,5 +1,5 @@
 //! The AUDITED LIFT COMMAND for TS7 `TypeExpr`-projection parity rows
-//! (`docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §Q4) — the SOLE writer of
+//! (the TS7 oracle contract §Q4) — the SOLE writer of
 //! `LIFTED_ROW_MIGRATIONS`.
 //!
 //! Run with

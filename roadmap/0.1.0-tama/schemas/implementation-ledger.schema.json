@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tama trusted implementation ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "implemented"],
+  "properties": {
+    "schema": { "const": 1 },
+    "implemented": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "commit_message", "commit_date"],
+        "properties": {
+          "node_id": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" },
+          "commit_message": { "type": "string", "minLength": 1 },
+          "commit_date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:Z|[+-]\\d{2}:\\d{2})$"
+          },
+          "pull_request": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "github_issue": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "gh_issue", "sync_to_github"],
+        "properties": {
+          "node_id": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" },
+          "gh_issue": { "type": "integer", "minimum": 1 },
+          "sync_to_github": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

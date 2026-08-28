@@ -26,7 +26,7 @@
 //     would revive the instability the parity block was built to replace.
 // codex-ratified (xhigh): drive `ExtensionTsService` directly + lean on the
 // shared-Rust-path tsserver parity for the rest. See
-// `docs/arch/refactor/rev11/charters/expansion-language-service/LSO6.md`.
+// the language-service contract.
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

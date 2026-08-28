@@ -17,7 +17,7 @@
 //! the gate's `no-debug-assertions` shipped-cfg profile). If `cond` performs
 //! a state transition — a mutation, a counter bump, anything beyond a pure
 //! predicate — that transition silently never runs in a shipped build. See
-//! `docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`.
+//! `docs/contributing/gate-performance.md`.
 //!
 //! Unlike the std macros they replace, these macros **force-evaluate their
 //! argument(s) into a typed local binding BEFORE branching on

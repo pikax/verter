@@ -21,28 +21,16 @@ otherwise non-UTF-8 blob. File reads and tracked-path decoding fail closed. This
 of arbitrary tracked content; no compiler type, capability boundary, or dependency edge can express the
 same property, so a fixed-content scanner is the structurally appropriate mechanism.
 
-### Two portability rails
+### No exception rail
 
-The operative invariant distinguishes portable repository content from exact authority evidence:
+Build inputs, test inputs, generated output, source, fixtures, and documentation must not contain a
+known machine marker. A hit fails. The scanner source itself is the sole intrinsic exception because it
+must spell the marker set that it enforces; the exception is an exact repository path, not a directory,
+suffix, basename, or documentation exemption.
 
-1. Build inputs, test inputs, runtime behavior, generated output, source, fixtures, and portable
-   documentation must not contain a known machine marker. A hit fails.
-2. Exact architecture evidence may preserve the environment where it was produced only through
-   `scripts/manifests/portability-machine-marker-evidence-exceptions.tsv`. The file remains scanned and a hit is
-   admitted only by exact repository path, exact worktree SHA-256, an existing pin document containing
-   that digest, a permitted authority-evidence or ruling root, and a manifest digest pinned by
-   this mechanism record. Exception manifest SHA-256: `17ac6be4c2db353105ba96832e005fbf99fed7f8687336ba84af8a7ebb8077e1`.
-
-There is no exemption for `docs/`, `evidence/`, rulings generally, suffixes, basenames, or
-"non-production" content. Wildcards, duplicate rows, malformed digests, missing pins, and targets outside
-the class-specific roots are invalid. The audit-only review-history class is confined to
-`docs/arch/refactor/rev11/sources/review-history-migration/` and each row is pinned by
-`authority/state/historical-review-audit.json`. Liveness is bidirectional: a marker with no row fails, and a row whose
-marker is gone is stale and fails until the owning authority retires it.
-
-Future machine-bound raw logs default to external digest-bound bundles. The in-tree exception rail exists
-for the exact registered audit-backup evidence and inherited ruling inputs; it is not
-the default storage policy for new logs.
+Machine-bound raw logs and historical evidence stay outside the tracked repository. This replaces the
+former digest-pinned evidence exception manifest, which existed only for retired roadmap backup and
+source trees.
 
 ### Marker-set provenance and bound
 
@@ -60,4 +48,4 @@ is fixed or local tool state is ignored rather than silently widening the scanne
 
 This scanner does not claim to detect every absolute path. Broad home, temporary-directory, drive, or
 checkout-prefix detection would reject legitimate cross-platform path and URI fixtures. It is a tombstone
-for known leaked roots, paired with exact integrity admission for the narrow authority-evidence set.
+for known leaked roots with no tracked-content exception rail.

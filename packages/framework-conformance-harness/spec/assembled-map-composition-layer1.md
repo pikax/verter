@@ -2,12 +2,10 @@
 
 **Artifact:** `assembled-map-composition-layer1`
 **Revision:** 8 (revisions 1–7 revised under successive independent review rounds; revision 7 was
-adopted as frozen at blob `0ea47424acfbd4913e11f16156baa597216c84fb` — see
-`docs/arch/refactor/rev11/evidence/BV0A/layer1-freeze-adoption.md`. Revision 8 is a POST-FREEZE
+adopted as frozen at blob `0ea47424acfbd4913e11f16156baa597216c84fb`. Revision 8 is a POST-FREEZE
 amendment — see §12 — closing one narrow gap found while writing the independent reference and
 production implementations against the frozen revision 7 text; revision 8 was itself independently
-re-adopted at blob `085139c5267136ed0c2fa39d78ad48168c6e0e76` — see
-`docs/arch/refactor/rev11/evidence/BV0A/layer1-d8-adoption.md`.)
+re-adopted at blob `085139c5267136ed0c2fa39d78ad48168c6e0e76`.)
 **Status:** **REVISIONS 1–8 ARE ADOPTED.** Revision 8's sole change (§4.3 step 2.1's `fragment`
 attribution for `U8.1`, registered as `DECISION` D-8) closed its own independent review (two rounds:
 conformance FAIL → PASS, adversarial PASS_WITH_NOTES → PASS, converging on the same scoping
@@ -24,10 +22,7 @@ that tree. §11.5 states what happens when a cited implementation later changes.
 ### 1.1 What this document is
 
 This is **layer 1** of the two-layer normative specification of the assembled Vue main-module
-source-map composition algebra mandated by
-[`AMD-008 §2 item 1`](../../../docs/arch/refactor/rev11/amendments/AMD-008-bv0a-assembly-neutral-exit.md)
-(AMD-008:150-164) and
-[`BV0A.md`](../../../docs/arch/refactor/rev11/charters/BV0A.md) (BV0A.md:26-39).
+source-map composition algebra.
 
 Layer 1 fixes:
 
@@ -45,9 +40,8 @@ Layer 1 fixes:
   remapping, and the canonical `mappings` encoding (§7),
 - **provenance** bookkeeping (§8).
 
-§10 maps each requirement of AMD-008's umbrella description, of the resolution gate at
-[`debt-layer1-gate-authority.md`](../../../docs/arch/refactor/rev11/evidence/BV0A/debt-layer1-gate-authority.md),
-and of the layer-2 seed artifact's own `knownGaps` list, to the section that answers it.
+§10 maps each requirement of AMD-008's umbrella description and the layer-2 seed artifact's own
+`knownGaps` list to the section that answers it.
 
 ### 1.2 Relationship to layer 2 and to the charter
 
@@ -1932,8 +1926,7 @@ instance validity (now §11.4).
 ## 12. Revision history
 
 **Revision 8 — POST-FREEZE amendment, not a pre-freeze review round.** Revision 7 was adopted as
-frozen (blob `0ea47424acfbd4913e11f16156baa597216c84fb`,
-`docs/arch/refactor/rev11/evidence/BV0A/layer1-freeze-adoption.md`). Per AMD-008, changing frozen
+frozen (blob `0ea47424acfbd4913e11f16156baa597216c84fb`). Per AMD-008, changing frozen
 layer-1 semantics after that point requires its own amendment, not a silent edit and not an
 implementation's own judgment call — this revision is that amendment, prompted by exactly the
 failure mode the freeze exists to prevent: the independent JavaScript reference and the production

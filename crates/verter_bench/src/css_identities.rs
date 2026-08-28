@@ -160,7 +160,7 @@ pub fn allocation_category_universe() -> Vec<(&'static str, String)> {
 
 /// The exact measured pipeline call behind one benchmark identity.
 ///
-/// Variant names keep the pre-cutover identity strings (`process_style/...`)
+/// Variant names keep the existing identity strings (`process_style/...`)
 /// so the A31 exact-set comparison against the committed legacy baseline
 /// stays the same set. Bodies drive `style_planner`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

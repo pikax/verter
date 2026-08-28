@@ -1,7 +1,7 @@
 # Perf-gate baselines — refresh governance
 
 `block6.json` is the committed baseline manifest for the external-TS-engine
-self-referential perf gate (design `docs/arch/refactor/rev11/charters/expansion-engine-provisioning/EPR5.md`
+self-referential perf gate (design the external TypeScript engine contract
 §2.7). It holds the methodology version, the pinned-baseline git ref, the
 corpus content hash, the tsgo engine pin, the thread-count policy, and the
 per-workload gated metrics + thresholds.

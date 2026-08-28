@@ -1,5 +1,0 @@
-# Receipt identity contract
-
-Receipts are append-only files. Their digest covers every field except `payload_sha256`. A v2 acceptance receipt must bind the immutable admission lease, dispatch packet receipt, and candidate-finalization receipt. The finalization freezes the exact base→candidate changed-path set; later candidate-ref or worktree movement invalidates state. Gate and review evidence must name that same finalized candidate SHA/tree. Integration evidence must prove candidate ancestry and final tree equivalence. Every predecessor receipt ID/digest is copied into the child receipt. Legacy receipt mode is closed to the enumerated pre-v2 set; no new node may claim it.
-
-J1 is neither a legacy nor a v2 acceptance. Its dedicated `landed-grandfathered` receipt binds the exact landed commit, tree, parent, canonical-branch containment, live charter lock, complete evidence-tree object, and context packet. Only the exact validated `LANDED_GRANDFATHERED` binding satisfies J1 as a predecessor; state must never report it as `ACCEPTED`.

@@ -1,6 +1,0 @@
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Audit-only historical review byte inventory",
-  "type": "object", "additionalProperties": false, "required": ["schema", "type", "acceptance_eligible", "disposition", "files"],
-  "properties": { "schema": { "const": 1 }, "type": { "const": "historical-review-audit" }, "acceptance_eligible": { "const": false }, "disposition": { "const": "AUDIT_ONLY_PRE_TRUSTED_LOCAL" }, "files": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": { "path": { "type": "string", "minLength": 1 }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } } } } }
-}

@@ -376,8 +376,8 @@ pub fn compare_records(
     }
     // Same-pipeline records must have been captured against the same
     // css_bench.rs / css_identities.rs blobs. A declared cross-pipeline
-    // transition is allowed to rewrite those files (the identity SET is
-    // still checked in stage 4).
+    // transition is allowed to rewrite those files (the identity set is
+    // still checked below).
     if policy.allowed_pipeline_transition.is_none() {
         if b.css_bench_blob != c.css_bench_blob {
             failures.push(format!(
@@ -396,8 +396,8 @@ pub fn compare_records(
         return Err(failures);
     }
 
-    // Stage 4: exact-set rule over three sets — the compiled-in universe, the
-    // baseline's identities, the candidate's identities.
+    // Exact-set rule over three sets: the compiled-in universe, the baseline's
+    // identities, and the candidate's identities.
     for (label, record) in [("baseline", baseline), ("candidate", candidate)] {
         let ids: BTreeSet<&str> = record
             .identities
@@ -422,8 +422,8 @@ pub fn compare_records(
         return Err(failures);
     }
 
-    // Stage 4b: immutable per-identity workload (inputs/ops) against the
-    // compiled-in universe and across the two records. Identity names matching
+    // Immutable per-identity workload (inputs/ops) against the compiled-in
+    // universe and across the two records. Identity names matching
     // is not enough — a transition that rewrites generators could keep names
     // while changing the bytes or the measured op.
     let universe_cases = universe();
@@ -1297,7 +1297,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     const MIRROR_TABLE_JSON: &str =
-        include_str!("../../../docs/arch/refactor/rev11/evidence/J1/generator-mirror-digests.json");
+        include_str!("../../../test-corpora/style-ir/generator-mirror-digests.json");
 
     fn copy_b_digest_table() -> std::collections::BTreeMap<String, String> {
         let mut table = std::collections::BTreeMap::new();
@@ -1378,7 +1378,7 @@ mod tests {
     }
 
     const COMMITTED_BASELINE_JSON: &str =
-        include_str!("../../../docs/arch/refactor/rev11/evidence/J1/css-baseline-legacy.json");
+        include_str!("../../../test-corpora/style-ir/css-baseline-legacy.json");
 
     fn committed_baseline() -> CssBaselineRecord {
         serde_json::from_str(COMMITTED_BASELINE_JSON).expect("committed baseline parses")

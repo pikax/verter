@@ -374,7 +374,7 @@ fn build_script_analysis_inner(
     // `props:` walk reached via `try_extract_options_from_expression`) —
     // never rebuilt per call site. See
     // `crate::analysis::root_binding_index` and
-    // `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`.
+    // the binding-index design.
     let binding_index =
         crate::analysis::root_binding_index::RootBindingIndex::build(program, owners, parse_errors);
 

@@ -2,9 +2,9 @@
 
 > **SUPERSEDED WHERE IT CONFLICTS — an architecture program is in flight.**
 >
-> The ratified Revision 11 architecture program lives at [`docs/arch/refactor/rev11/`](docs/arch/refactor/rev11/); its normative entry point is [`APPLICATION.md`](docs/arch/refactor/rev11/APPLICATION.md).
+> The live Tama roadmap for Verter 0.1.0 lives at [`roadmap/0.1.0-tama/`](roadmap/0.1.0-tama/); its normative entry point is [`APPLICATION.md`](roadmap/0.1.0-tama/APPLICATION.md).
 >
-> **Precedence:** where this file and the Revision 11 authority disagree, **the live Revision 11 authority wins**. Historical pre-cutover material under `docs/arch/refactor/rev11/backup/` is audit-only and non-authoritative.
+> **Precedence:** where this file and the Tama authority disagree, **the live Tama authority wins**.
 >
 > **How to read this file while the program runs:** treat it as an accurate description of how the code behaves **today**, and as authority for day-to-day operational matters — build and test commands, commit conventions, testing requirements, review discipline. Do **not** treat its architecture sections as authority over the program's target design; several describe structures the plan intends to change or remove. A rule here is not grounds to refuse a change the plan mandates.
 >
@@ -569,11 +569,11 @@ Execute approved plans fully in one pass, end-to-end, without intermediate check
 
 ### Orchestrating Large Plans
 
-For a large multi-block plan, refactor, migration, or staged cutover executed autonomously, drive it via the `/multi-agent-orchestration` skill: the parent owns ordering and landing, train managers own bounded implementation, and immutable candidates receive the risk-scaled fresh review set declared by their profile.
+For a large multi-block plan, refactor, migration, or staged cutover executed autonomously, drive it via the `/multi-agent-orchestration` skill: the parent owns ordering and landing, train managers own bounded implementation, and stable candidate patches receive the risk-scaled fresh review set declared by their profile.
 
-Rev11 unified orchestration uses the superseding trusted-local ORC0 directive: explicit per-node low/medium/high role minima/defaults, automatic upward-only risk escalation at admission, provider-neutral fresh harness tasks, a soft two-cycle review/fix cap with neutral Codex `gpt-5.6-sol`/`xhigh` Architect escalation for remaining P0/P1, and prompt/worktree cleanup reporting. See `docs/arch/refactor/rev11/APPLICATION.md` and `/multi-agent-orchestration`.
+Tama orchestration derives readiness from one trusted implementation ledger: a node is implemented when `roadmap/0.1.0-tama/authority/state/implemented.toml` contains its row, and a dispatchable node is READY when every transitive DAG ancestor has a row. Each row's commit message, approximate timezone-bearing date, and optional PR number are locator hints only and are never resolved or validated. The implementation patch adds its row before squash and review. Review remains risk-scaled and provider-neutral, with a soft two-cycle review/fix cap and neutral Architect escalation only for real unresolved ambiguity. See `roadmap/0.1.0-tama/APPLICATION.md` and `/multi-agent-orchestration`.
 
-When a block runs in a dedicated `git worktree`, run `pnpm install --frozen-lockfile` in the worktree root once at creation time, before any JS/TS test or workspace-importing Node script — fresh worktrees do not get the gitignored `node_modules/`, and a missing install makes JS/TS tests fail spuriously and read as a false regression. See the skill's "Worktree hygiene & environmental discipline" section.
+When a block runs in a dedicated `git worktree`, run `pnpm install --frozen-lockfile` in the worktree root once at creation time, before any JS/TS test or workspace-importing Node script — fresh worktrees do not get the gitignored `node_modules/`, and a missing install makes JS/TS tests fail spuriously and read as a false regression. See the skill's "Implementation and worktrees" section.
 
 ### Self-Review
 
@@ -689,6 +689,6 @@ Detailed reference material is available as on-demand skills (loaded automatical
 | `/e2e-vscode-testing`    | VS Code E2E test fixtures, helpers API, adding new tests                                         |
 | `/wsl-e2e-testing`       | WSL E2E tests to reproduce Linux/CI failures, fixture matrix                                     |
 | `/rust-performance`      | Rust optimization patterns, allocation hierarchy, CodeTransform API                              |
-| `/multi-agent-orchestration` | Driving a large multi-block plan, refactor, migration, or staged cutover with frozen manifests, automatic effort tiers, risk-scaled fresh review, Architect escalation, and cleanup |
+| `/multi-agent-orchestration` | Driving a large multi-block plan, refactor, migration, or staged cutover with trusted ledger-row readiness, risk-scaled fresh review, Architect escalation, and cleanup |
 | `/scheduler`             | Scheduler submission/admission APIs (`submit_request`/`submit_batch`/`submit_batch_atomic`), CPU vs I/O pool routing, host CPU-pool coordination |
 | `/debug-tooling`         | Hangs, unexpectedly slow paths, stack snapshots: backtrace watchdog, LLDB attach wrapper, release-dbg profile |

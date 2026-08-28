@@ -1,8 +1,0 @@
-{
-  "provider": "openai",
-  "tool": "codex",
-  "model": "gpt-5.6-sol",
-  "reasoning_effort": "xhigh",
-  "decision": "CONTINUE",
-  "additional_round_cap": 1
-}

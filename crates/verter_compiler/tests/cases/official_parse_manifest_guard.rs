@@ -335,7 +335,7 @@ fn assert_manifest_hash(path: &Path, expected: &str) {
 
 #[test]
 fn every_owned_official_case_has_passing_or_bounded_unverifiable_parse_evidence() {
-    let root = repository_root().join("docs/arch/refactor/rev11/evidence/framework-conformance");
+    let root = repository_root().join("packages/framework-conformance-harness/evidence");
     let vue_path = root.join("vue-official-cases.tsv");
     let svelte_path = root.join("svelte-official-cases.tsv");
     assert_manifest_hash(&vue_path, EXPECTED_VUE_SHA256);

@@ -9,7 +9,7 @@ export const REPO_ROOT = resolve(HARNESS_ROOT, "..", "..");
 // operation.
 export const EVIDENCE_ROOT = process.env.BF2_EVIDENCE_ROOT
   ? resolve(process.env.BF2_EVIDENCE_ROOT)
-  : resolve(REPO_ROOT, "docs/arch/refactor/rev11/evidence/framework-conformance");
+  : resolve(HARNESS_ROOT, "evidence");
 export const VUE_EVIDENCE_LOCK = resolve(EVIDENCE_ROOT, "oracles/vue/package-lock.json");
 export const SVELTE_EVIDENCE_LOCK = resolve(EVIDENCE_ROOT, "oracles/svelte/package-lock.json");
 export const VUE_EVIDENCE_CLOSURE = resolve(EVIDENCE_ROOT, "oracles/vue/closure.tsv");

@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Content-addressed cache wrapper around `wasm-opt`.
 //
-// Per docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-BUILD-LANE-SEPARATION.md:
-// key on the actual optimization inputs — the post-wasm-bindgen `.wasm` bytes
+// Key on the actual optimization inputs — the post-wasm-bindgen `.wasm` bytes
 // (NOT the raw Cargo/wasm32 artifact: binding generation changes the binary,
 // and its output is what wasm-opt actually receives), the `wasm-opt` version,
 // the actual optimizer binary's own content, its exact arguments, and a cache

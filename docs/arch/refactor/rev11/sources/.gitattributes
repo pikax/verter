@@ -1,2 +1,0 @@
-# Normative source copies retain exact upstream bytes, including trailing spaces.
-*.md -whitespace

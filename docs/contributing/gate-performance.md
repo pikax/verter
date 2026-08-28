@@ -1,10 +1,8 @@
 # Gate performance
 
-Working notes for `node scripts/gate.mjs`, the canonical Rust gate. See
-[`MAINTAINER-DIRECTIVE-GATE-PERFORMANCE-BLOCK.md`](https://github.com/pikax/verter/blob/main/docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-GATE-PERFORMANCE-BLOCK.md),
-[`MAINTAINER-DIRECTIVE-ONE-BUILD-ONE-RUN.md`](https://github.com/pikax/verter/blob/main/docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-ONE-BUILD-ONE-RUN.md),
-and [`MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`](https://github.com/pikax/verter/blob/main/docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md)
-for the ratified plan this document reports evidence against.
+Working notes and durable rationale for `node scripts/gate.mjs`, the canonical Rust gate. This document
+owns the retained one-build/one-run and single-test-universe rules after the historical roadmap ruling
+bundle was retired.
 
 ## Local and exhaustive execution policies
 

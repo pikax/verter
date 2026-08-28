@@ -4,7 +4,7 @@
 // and Svelte git source domains.
 //
 // Mirrors `assertCheckout()` in
-// `docs/arch/refactor/rev11/evidence/framework-conformance/generate-official-case-manifests.mjs`,
+// `packages/framework-conformance-harness/evidence/generate-official-case-manifests.mjs`,
 // factored out so self-tests can exercise it against a mutated checkout.
 
 import { execFileSync } from "node:child_process";

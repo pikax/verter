@@ -7,9 +7,8 @@
 # shipped-cfg profile). A condition or argument expression that performs a
 # state transition (a mutation, a counter bump, anything beyond a pure
 # predicate) silently never runs in a shipped build if it lives inside one
-# of these macros. See
-# docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md
-# ("Caveats that bind step 6") for the measured clippy behavior this config
+# of these macros. See docs/contributing/gate-performance.md for the measured
+# clippy behavior this config
 # depends on: `std::debug_assert` also catches the bare `debug_assert!` and
 # `core::debug_assert!` spellings (same resolved path), but `debug_assert_eq`
 # and `debug_assert_ne` are distinct paths that need their own entries.

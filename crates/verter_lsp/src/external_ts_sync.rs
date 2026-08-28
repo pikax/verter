@@ -1,5 +1,5 @@
 //! VFS-driven project-bound sync seam for the external-TypeScript-engine path
-//! (§2.5 / §2.7 / C12 of `docs/arch/refactor/rev11/charters/expansion-engine-provisioning/EPR5.md`).
+//! (§2.5 / §2.7 / C12 of the external TypeScript engine contract).
 //!
 //! This seam migrates path-centric provider sync to **project-bound snapshot
 //! publishing**. It is a PURE planning/gating layer (no live engine — unit-testable

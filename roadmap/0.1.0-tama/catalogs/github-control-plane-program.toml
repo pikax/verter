@@ -1,0 +1,80 @@
+schema = 1
+modules = ["authority/dag/governance-github-control-plane.toml", "authority/dag/governance-feedback-intake.toml", "authority/dag/governance-release-control.toml"]
+
+[[node]]
+id = "GH0"
+name = "Minimal GitHub workflow and local issue mapping"
+train = "governance.github-control-plane"
+predecessors = ["ORC0"]
+
+[[node]]
+id = "GH1"
+name = "GitHub adapter and deterministic fixtures"
+train = "governance.github-control-plane"
+predecessors = ["GH0"]
+
+[[node]]
+id = "GH2"
+name = "Occasional issue-sync command and local mapping"
+train = "governance.github-control-plane"
+predecessors = ["GH1"]
+
+[[node]]
+id = "GH3"
+name = "Final-title PR creation and issue description"
+train = "governance.github-control-plane"
+predecessors = ["GH2"]
+
+[[node]]
+id = "GH4"
+name = "Human review history and model attribution"
+train = "governance.github-control-plane"
+predecessors = ["GH3"]
+
+[[node]]
+id = "GH5"
+name = "CI, ledger finalization and squash landing"
+train = "governance.github-control-plane"
+predecessors = ["GH4"]
+
+[[node]]
+id = "FB0"
+name = "Non-DAG issue label state machine and feedback contract"
+train = "governance.feedback-intake"
+predecessors = ["GH0"]
+
+[[node]]
+id = "FB1"
+name = "Non-DAG issue inspection"
+train = "governance.feedback-intake"
+predecessors = ["GH1", "FB0"]
+
+[[node]]
+id = "FB2"
+name = "Maintainer-authored DAG block and issue mapping"
+train = "governance.feedback-intake"
+predecessors = ["FB1", "GH2"]
+
+[[node]]
+id = "REL0"
+name = "Milestone release-planning overlay and DAG scheduling"
+train = "governance.release-control"
+predecessors = ["GH2"]
+
+[[node]]
+id = "REL1"
+name = "Milestone release readiness and release rehearsal"
+train = "governance.release-control"
+predecessors = ["REL0", "GH5"]
+
+[[node]]
+id = "REL2"
+name = "Release PR, tag and publication integration"
+train = "governance.release-control"
+predecessors = ["REL1"]
+
+[[node]]
+id = "GH6"
+name = "Minimal GitHub workflow convergence and cutover"
+train = "governance.github-control-plane"
+predecessors = ["GH2", "GH5", "FB2", "REL2"]

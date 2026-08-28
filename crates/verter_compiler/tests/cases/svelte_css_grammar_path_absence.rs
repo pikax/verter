@@ -1,8 +1,8 @@
 //! Architecture guard: the Svelte-owned duplicate CSS grammar file is
 //! physically absent from the source tree.
 //!
-//! J1 row 5 (`docs/arch/refactor/rev11/charters/J1.md`, acceptance IDs A4 /
-//! A11a) requires `svelte/runtime/css/parse.rs` — Svelte's own hand-rolled
+//! The shared CSS grammar contract requires `svelte/runtime/css/parse.rs` —
+//! Svelte's own hand-rolled
 //! CSS grammar, superseded by the shared `verter_css_syntax` authority — to
 //! be deleted. This is the EXECUTABLE half of that gate for the Svelte
 //! side: a durable regression test, not a one-off shell check.

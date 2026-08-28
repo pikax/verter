@@ -703,7 +703,7 @@ fn record_carrier_companion_surface_with_source(
     // have no live producer yet, so nothing sets those columns downstream — wiring
     // them is a tracked cross-crate §2.7 producer-wiring follow-on (the surface-store
     // carrier-ownership deferral recorded in
-    // docs/arch/refactor/rev11/charters/expansion-engine-provisioning/EPR5.md).
+    // the external TypeScript engine contract).
     surface.map_hash = map_hash;
     // `record` returns the immutable snapshot it linearized under the lifecycle
     // lock — `stamp.generation` is the authoritative version for THIS capture.

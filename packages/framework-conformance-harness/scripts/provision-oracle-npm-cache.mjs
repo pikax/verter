@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ONE-TIME, OFFLINE-AFTERWARDS provisioning of a local npm cache holding
 // exactly the tarballs the committed oracle lockfiles
-// (docs/arch/refactor/rev11/evidence/framework-conformance/oracles/{vue,svelte}/package-lock.json)
+// (packages/framework-conformance-harness/evidence/oracles/{vue,svelte}/package-lock.json)
 // resolve. Like scripts/provision-oracle-checkouts.mjs, this is the ONLY
 // network-touching step for its consumers and is NEVER invoked from a test:
 // once it has run, the disposable-install closure self-test

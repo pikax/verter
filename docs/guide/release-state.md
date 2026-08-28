@@ -16,7 +16,7 @@ The obsolete TypeScript package `@verter/core` has been removed. It was not a
 dependency of the production compiler or editor path, and retaining it made
 the documented architecture materially misleading. The continuing sole-owner
 boundary is enforced by the Rev11
-[direct compiler-core closure charter](https://github.com/pikax/verter/blob/main/docs/arch/refactor/rev11/charters/rev11-compiler-foundation/B6.md).
+[direct compiler-core closure charter](https://github.com/pikax/verter/blob/main/roadmap/0.1.0-tama/charters/rev11-compiler-foundation/B6.md).
 
 ## Supported product surfaces
 
@@ -41,7 +41,7 @@ boundary is enforced by the Rev11
   status). Unsupported runtime features and unavailable server output fail
   closed with typed diagnostics; they do not return successful placeholder
   modules. See the [unplugin API](../api/unplugin.md) and the forward-looking
-  [Svelte compiler product charter](https://github.com/pikax/verter/blob/main/docs/arch/refactor/rev11/charters/compiler-svelte-compiler/SCP7.md).
+  [Svelte compiler product charter](https://github.com/pikax/verter/blob/main/roadmap/0.1.0-tama/charters/compiler-svelte-compiler/SCP7.md).
 
 Verter remains beta software. The public [guide](../guide/index.md) is the
 authority for user-facing maturity and installation expectations.
@@ -130,13 +130,13 @@ the external LSP branch**: LSP-owned architecture-guard cleanup,
 provider-surface-store naming/wiring, relay-shim signal coverage on the owning
 runner, and removal of deprecated workspace/LSP graph routes. Those boundaries
 now belong to the Rev11
-[language-service convergence charter](https://github.com/pikax/verter/blob/main/docs/arch/refactor/rev11/charters/expansion-language-service/LSO10.md),
-[engine-activation charter](https://github.com/pikax/verter/blob/main/docs/arch/refactor/rev11/charters/expansion-engine-provisioning/EPR5.md),
+[language-service convergence charter](https://github.com/pikax/verter/blob/main/roadmap/0.1.0-tama/charters/expansion-language-service/LSO10.md),
+[engine-activation charter](https://github.com/pikax/verter/blob/main/roadmap/0.1.0-tama/charters/expansion-engine-provisioning/EPR5.md),
 and [testing skill](https://github.com/pikax/verter/blob/main/.claude/skills/testing/SKILL.md).
 
 The forward-looking program backlog executed **after** this release train is
 owned by the Rev11
-[native-checker constitution](https://github.com/pikax/verter/blob/main/docs/arch/refactor/rev11/charters/expansion-native-checker/NCK0.md),
+[native-checker constitution](https://github.com/pikax/verter/blob/main/roadmap/0.1.0-tama/charters/expansion-native-checker/NCK0.md),
 the [testing skill](https://github.com/pikax/verter/blob/main/.claude/skills/testing/SKILL.md),
 and the
 [type-cache architecture skill](https://github.com/pikax/verter/blob/main/.claude/skills/type-cache-architecture/SKILL.md).

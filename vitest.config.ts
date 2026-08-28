@@ -22,7 +22,6 @@ export default defineConfig({
       // files under scripts/ (5 vitest suites, plus 5 node:test files that fail
       // root collection the same way this one does); the single-file exclude
       // leaves every one of them collected exactly as before.
-      "scripts/validate-program-state.test.mjs",
       "scripts/validate-performance-gates.test.mjs",
       "scripts/probe-bundler-route-isolation.test.mjs",
       ".integration-tests/**",

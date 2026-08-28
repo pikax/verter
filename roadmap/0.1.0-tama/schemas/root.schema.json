@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tama roadmap authority root",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "revision",
+    "package",
+    "implementation_state",
+    "commit_locator_fields",
+    "implemented_ledger",
+    "final_rev11_gate",
+    "successor_promotion_gate",
+    "modules",
+    "authority_rule"
+  ],
+  "properties": {
+    "schema": { "const": 5 },
+    "revision": { "const": 11 },
+    "package": { "const": "tama-roadmap" },
+    "implementation_state": { "const": "ledger_presence" },
+    "commit_locator_fields": {
+      "const": ["commit_message", "commit_date", "pull_request"]
+    },
+    "implemented_ledger": { "const": "state/implemented.toml" },
+    "final_rev11_gate": { "const": "L4" },
+    "successor_promotion_gate": { "const": "BR0" },
+    "modules": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^dag/[a-z0-9-]+\\.toml$" }
+    },
+    "authority_rule": { "type": "string", "minLength": 1 }
+  }
+}

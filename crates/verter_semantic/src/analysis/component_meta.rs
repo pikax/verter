@@ -2084,7 +2084,7 @@ fn resolve_prop_type(
 
 /// Fold a runtime-constructor position's owner-aware binding-resolution
 /// outcomes (`RootBindingIndex`-gated, see
-/// `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`) into a
+/// the binding-index design) into a
 /// [`SourcePosition`]. Shared by the macro path (`resolve_prop_type`) and
 /// the Options-API path (`extract_props_from_options`) — the ONLY place
 /// either path applies the runtime-constructor closed-fact fold or resolves

@@ -1,5 +1,4 @@
-//! Surface 2 replacement (see
-//! `docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md`).
+//! Surface 2 replacement (see `docs/contributing/gate-performance.md`).
 //!
 //! nextest isolates every test in its OWN process, so process-global
 //! contamination — a leaked static, TLS that survives a test, a global cache

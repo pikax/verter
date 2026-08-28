@@ -82,7 +82,7 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 /// Input generators mirrored 1:1 from `verter_bench::css_identities`.
 /// `verter_compiler` tests cannot depend on `verter_bench`; byte-identity of
 /// the generated CSS is the contract recorded in
-/// `docs/arch/refactor/rev11/evidence/J1/generator-mirror-equivalence.md`.
+/// `test-corpora/style-ir/generator-mirror-equivalence.md`.
 mod style_planner_gen {
     pub fn generate_class_rules(n: usize) -> String {
         (0..n)
@@ -463,8 +463,7 @@ mod allocation_ceiling {
 
     #[test]
     fn retained_legacy_alloc_matches_committed_baseline_json() {
-        let json =
-            include_str!("../../../docs/arch/refactor/rev11/evidence/J1/css-baseline-legacy.json");
+        let json = include_str!("../../../test-corpora/style-ir/css-baseline-legacy.json");
         let start = json
             .find("\"allocation_by_category\"")
             .expect("allocation_by_category");
@@ -617,7 +616,7 @@ mod generator_mirror {
     };
 
     const MIRROR_TABLE_JSON: &str =
-        include_str!("../../../docs/arch/refactor/rev11/evidence/J1/generator-mirror-digests.json");
+        include_str!("../../../test-corpora/style-ir/generator-mirror-digests.json");
 
     fn sha256_hex(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();

@@ -310,7 +310,7 @@ export function validateGates(text) {
   }
 
   // [statistics]
-  // Bounds come from docs/arch/refactor/rev11/verification.md 8.3.
+  // These bounds are part of the checked-in performance-gate contract.
   const stats = root.statistics;
   if (!stats) {
     fail("missing `[statistics]` table");

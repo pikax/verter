@@ -45,7 +45,7 @@ test-support = []
 test-util = []
 # Opt-in: the TS7 oracle harness GENERATION side (the §4 generation spike + the
 # snapshot generator), which drives the pinned tsgo via `verter_type_runtime`.
-# `docs/arch/refactor/rev11/charters/expansion-native-checker/NCK4.md` §3 invariant 1: tsgo is GENERATION-ONLY
+# the TS7 oracle contract §3 invariant 1: tsgo is GENERATION-ONLY
 # and lives behind this feature, NEVER in the default resolver/production build.
 # The default gate (`cargo nextest run --workspace`, `cargo test -p verter_session`)
 # does NOT enable it, so tsgo stays out of the default dependency closure — pinned
