@@ -376,7 +376,7 @@ async function compileInlineCell({ caseId, source }) {
  * shipped runtime Main — the official `inlineTemplate: true` topology (setup
  * returns the render closure) is a DIFFERENT, behaviorally equivalent shape
  * that is not what Verter emits (tracked as a future feature in
- * `docs/arch/next/vue-inline-template-runtime.md`).
+ * `.claude/skills/compiler-codegen/SKILL.md`).
  *
  * MODULE-ITEM ORDER. Authority, read verbatim from the installed package:
  * `@vitejs/plugin-vue@6.0.7`, `dist/index.mjs:1319`, `transformMain`:

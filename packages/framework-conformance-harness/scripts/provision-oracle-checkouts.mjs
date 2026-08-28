@@ -7,7 +7,7 @@
 // fully offline against the local checkouts. It is the reproducible replacement
 // for "a contributor happens to have a clone lying around": it materializes the
 // exact commits recorded in src/domain-pin.mjs (which mirrors
-// docs/arch/refactor/rev11/evidence/framework-conformance/version-domain.md) and
+// packages/framework-conformance-harness/evidence/version-domain.md) and
 // then verifies them with the harness's own drift-refusal module, so a wrong or
 // tampered fetch fails closed here rather than silently weakening a self-test.
 //

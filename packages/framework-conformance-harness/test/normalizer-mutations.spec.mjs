@@ -4,9 +4,8 @@
 // text — and to be genuinely NEW relative to the pre-mutation source — before
 // the pass/fail result is trusted).
 //
-// The forbidden-mutation categories are derived DIRECTLY from
-// docs/arch/refactor/rev11/contracts/conformance-normalizer.md ("Forbidden
-// normalization" + "Required discrimination"), one labelled test per
+// The forbidden-mutation categories are a closed harness contract, with one
+// labelled test per
 // category, each planting a mutation genuinely REPRESENTATIVE of that
 // category — a literal substitution never stands in for a prop/attribute
 // test, swapped constants never stand in for an effect-order test, and a

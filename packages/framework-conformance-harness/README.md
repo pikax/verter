@@ -4,10 +4,7 @@ Hermetic, **test-only** official-core compiler conformance harness for the
 exact pinned Vue `3.6.0-rc.5` and Svelte `5.56.10` compatibility domains
 (AMD-005 / BF1 / BF2). This package proves Verter's compiler output can be
 falsified against the exact official compilers and runtimes. It never
-implements, patches, or ships production compiler behavior — see
-`docs/arch/refactor/rev11/charters/BF2.md` and the contracts under
-`docs/arch/refactor/rev11/contracts/` for the normative rules this package
-follows.
+implements, patches, or ships production compiler behavior.
 
 ## What this package does
 

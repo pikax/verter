@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Builds the verter_lsp binary under an explicit host --target, matching
-// NAPI's target layout instead of Cargo's implicit host target — see
-// docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-BUILD-LANE-SEPARATION.md
-// ("one explicit host target"). Backs the standalone `build:lsp` /
+// NAPI's target layout instead of Cargo's implicit host target. Backs the
+// standalone `build:lsp` /
 // `build:lsp:release` scripts (used directly by `dev-extension` and
 // contributors doing a quick LSP-only rebuild) — `pnpm build`'s combined
 // NAPI+LSP invocation goes through `scripts/build-host.mjs` instead.

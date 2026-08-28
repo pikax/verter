@@ -1,5 +1,5 @@
 //! Parse-time `RawSourceSurface` raw-fact capture for the TS7
-//! `TypeExpr`-projection oracle harness (`docs/arch/u0-oracle-harness-design.md`
+//! `TypeExpr`-projection oracle harness (the TS7 oracle contract
 //! §Q2).
 //!
 //! When a canonical file is parsed, OXC's `lower_ts_type` SILENTLY ERASES a

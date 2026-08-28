@@ -852,7 +852,7 @@ fn materialization_cache_key_is_content_free_and_env_discriminating() {
 //     A bounded source scan over the key struct/enum bodies is the
 //     justified expression.
 //   mechanism_ruling=binding architecture design ruling
-//     (see `docs/arch/cache-key-guard-mechanism-rulings.md`): classify this
+//     (see `.claude/skills/type-cache-architecture/SKILL.md`): classify this
 //     guard as a recorded scanner, NOT structural enforcement, because the raw
 //     Hash16/HashValue aliases cannot distinguish resolve_env_hash from
 //     whole_hash by type without an out-of-scope key-safety newtype substrate.
@@ -889,7 +889,7 @@ fn materialization_cache_key_is_content_free_and_env_discriminating() {
 //     ONLY design that dominates scanner-chasing (broadening a text scanner
 //     into receiver/chained/binding data-flow spends effort without improving
 //     the real guarantee, because structural confinement is the primary
-//     cache-safety mechanism). Tracked: `docs/arch/key-safety-newtype-substrate-debt.md`.
+//     cache-safety mechanism). Tracked: `.claude/skills/type-cache-architecture/SKILL.md`.
 //
 // This scanner does NOT and CANNOT prove field-type identity through the
 // type system; it is a bounded name-spelling scan over the key bodies. It

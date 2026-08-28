@@ -1,5 +1,5 @@
 //! `#[oracle_row]` — the self-keyed attribute proc-macro for lifted TS7
-//! `TypeExpr`-projection rows (`docs/arch/u0-oracle-harness-design.md` §Q4).
+//! `TypeExpr`-projection rows (the TS7 oracle contract §Q4).
 //!
 //! A lifted row body must call the shared registry driver keyed by the row's
 //! OWN `(file, function)`. A hand-typed key string is FORBIDDEN: if a `foo_test`

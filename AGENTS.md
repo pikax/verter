@@ -21,7 +21,7 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - `.claude/skills/audit-infrastructure/SKILL.md` — audit substrate (`verter_audit`), `HostAuditRuntime`, audited entry-points, footprint miner, structured events.
 - `.claude/skills/scheduler/SKILL.md` — scheduler submission/admission APIs, CPU/I-O pool routing, batch atomic admission.
 - `.claude/skills/debug-tooling/SKILL.md` — backtrace watchdog, LLDB attach wrapper, release-dbg profile for hang/slow-path diagnosis.
-- `.claude/skills/agent-prompts/SKILL.md` — copy-pasteable implementation/continuation/review/fix prompts for driving separate sessions.
+- `.claude/skills/multi-agent-orchestration/SKILL.md` — staged orchestration policy plus implementation/review/fix/verification/confirmation and Architect prompt templates.
 - `.claude/skills/wsl-e2e-testing.md` — WSL E2E tests reproducing Linux/CI failures, fixture matrix.
 - `docs/` — user-facing and contributor-facing documentation.
 
@@ -35,7 +35,7 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 
 ## Working Rules
 
-- Follow TDD for code changes: failing tests first, minimum fix, rerun, then refactor.
+- Follow TDD for behavioral code changes: name an uncovered regression boundary, observe the smallest discriminating test fail, implement the minimum fix, rerun, then refactor. Tests are evidence, not quota; use `/testing` for proportionate proof selection.
 - Default local Rust verification is `node scripts/gate.mjs` (see `CLAUDE.md` → Testing / `/testing`). It builds/lists the test universe once, then runs archive-backed Surface 1. The shipped-`cfg(debug_assertions)` check/contract lane is currently skipped (temporary; a PASS is Surface 1 only and is disclosed every run). CI, release, complete diagnostics, and comparable benchmarks use `node scripts/gate.mjs --exhaustive`, which changes failure collection only (`--no-fail-fast` on Surface 1). A contributor without Node, or debugging Surface 1 in isolation, runs `cargo nextest run --workspace` directly. Bare `cargo test --workspace --tests` is not the canonical gate.
 - Do not run bare `cargo test --workspace` (no `--tests`) unless the user explicitly asks for doctests or you changed rustdoc examples — it also runs doctests and example builds, substantially slower than the normal agent verification loop.
 - Do not provide time estimates unless the user explicitly asks. Plans are executed fully in one pass; do not use estimated effort or duration as a reason to skip, defer, or partially implement approved work.
@@ -66,6 +66,6 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - Audit records, per-request observability, footprint capture: `/audit-infrastructure`.
 - Scheduler submission, batching, CPU-pool coordination: `/scheduler`.
 - Hangs, unexpectedly slow paths, stack snapshots: `/debug-tooling`.
-- Generating prompts for separate implementation/review sessions: `/agent-prompts`.
+- Generating prompts for separate implementation/review sessions: `/multi-agent-orchestration` → `references/templates.md`.
 - Reproducing Linux/CI-only failures: `/wsl-e2e-testing`.
-- Driving a large multi-block plan, refactor, migration, or cutover autonomously (orchestrator + sub-agents + dual review): `/multi-agent-orchestration`.
+- Driving a large multi-block plan, refactor, migration, or cutover autonomously (orchestrator + risk-scaled fresh reviews): `/multi-agent-orchestration`.

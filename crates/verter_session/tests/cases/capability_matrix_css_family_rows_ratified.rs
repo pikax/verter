@@ -1,6 +1,6 @@
 //! J1-A9: capability-matrix CSS-family product×dialect×operation closure.
 //!
-//! `docs/arch/refactor/rev11/contracts/capability-matrix.md` §2.2 replaces the
+//! The checked-in CSS capability matrix replaces the
 //! single aggregate `CSS | parse/format/index/transform` seed row with an
 //! exact, closed 2 (product) × 5 (dialect) × 4 (operation) = 40-row table
 //! carrying the original §1 row schema plus the two columns A9 adds
@@ -28,8 +28,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
 
-const CAPABILITY_MATRIX_RELATIVE_PATH: &str =
-    "docs/arch/refactor/rev11/contracts/capability-matrix.md";
+const CAPABILITY_MATRIX_RELATIVE_PATH: &str = "test-corpora/style-ir/capability-matrix.md";
 
 const SECTION_HEADING: &str = "## 2.2 CSS-family capability matrix (J1-A9 closure)";
 const NEXT_SECTION_PREFIX: &str = "# 3. Rules";

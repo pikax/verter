@@ -12,7 +12,7 @@ description: "Verter fact-based cache architecture — env hash split, FileArtif
 
 Reference for the cache architecture in `verter_session`. Every architectural
 rule referenced by tests, plans, and code comments resolves here. See
-`docs/arch/fact-based-cache.md` for the per-cache-layer key composition table.
+`.claude/skills/type-cache-architecture/SKILL.md` for the per-cache-layer key composition table.
 
 ## Why this architecture exists
 
@@ -97,7 +97,7 @@ the cache-runtime overhaul and any feature admitting cache entries.
     those dimensions is not an architecture signal.
 
 The existing `Cache Architecture` guard cluster covers the current production
-subset. The plan in `docs/arch/cache-runtime-overhaul-plan.md` names the
+subset. The plan in `.claude/skills/type-cache-architecture/SKILL.md` names the
 additional guards and discriminating tests that must land with each implementation
 block before the corresponding rule becomes executable policy.
 
@@ -288,7 +288,7 @@ CONTENT-domain per-canonical stamp read only by
 `artifact_only_candidate_is_fresh`. The `Route` derived fact is a pure
 parse-domain digest; the resolve-domain half of a route answer rides the
 path-precise import-route resolution witness. See
-`docs/arch/path-precise-resolution-currency.md`.
+`docs/contributing/path-precise-resolution-currency.md`.
 
 The integration guard at `crates/verter_session/tests/cases/g_misc3/import_route_writer_guard.rs`
 enforces both halves statically: no direct `import_routes` mutation outside the
@@ -892,7 +892,7 @@ under the `Typed SignatureAdmission gate` entry.
 ## Error-Tolerance Non-Admission + §22 Absorption (CRITICAL)
 
 The error-tolerant admission decision and the type-lattice absorption are a
-closed, fact-rooted contract (`docs/arch/u2-query-value-domain-design.md`
+closed, fact-rooted contract (`.claude/skills/type-resolution/SKILL.md`
 §18.2–18.3, §22). Three invariants:
 
 1. **Admission keys on the rooting FACT, not the taint enum class (§18.2).**
@@ -1041,7 +1041,7 @@ Concrete contract:
   classification used by the U0 resolution-matrix walker — it is NOT an
   env-hash input. The matrix walker and the broken-input taint producers live
   in U0 `verter_session::resolver_core` (see
-  `docs/arch/native-typeinfo-parity-u2-reducers.md` →
+  `.claude/skills/type-resolution/SKILL.md` →
   `U0.RESOLVER_CORE_FOUNDATIONS`); this rule owns only the keying contract.
 
 Guards (`crates/verter_workspace/src/env_hash_tests.rs`):
@@ -1474,7 +1474,7 @@ The other named versions are intentionally unchanged:
 
 ## Cache layer key composition
 
-See `docs/arch/fact-based-cache.md` for the canonical per-cache-layer key
+See `.claude/skills/type-cache-architecture/SKILL.md` for the canonical per-cache-layer key
 composition table. Summary:
 
 | Layer | Family | Key dimensions |
@@ -1531,7 +1531,7 @@ bounded residual supplement). Only the TWO `SemanticNodeId`-keyed scanners
 `synthetic_carrier_explicit_deepen_routes_through_shape_cache_key`) become structural
 and are DELETED once the key-safety newtype substrate lands (newtype the env/content
 hashes + seal the `SemanticNodeId`/`value_node` tuple fields), see
-`docs/arch/key-safety-newtype-substrate-debt.md`. The third scanner
+`.claude/skills/type-cache-architecture/SKILL.md`. The third scanner
 `no_carrier_verdict_db` (retired-symbol absence) is NOT closed by that substrate —
 newtyping hashes / sealing `SemanticNodeId` does not prevent reintroducing a private
 `CarrierVerdictDb` / `carrier_verdicts` symbol — so it REMAINS a recorded scanner (or
@@ -1796,7 +1796,7 @@ source comments referencing plan blocks.
 
 ### U2 Value-Domain Key Identity (CRITICAL)
 
-The U2 query-value-domain design (`docs/arch/u2-query-value-domain-design.md`)
+The U2 query-value-domain design (`.claude/skills/type-resolution/SKILL.md`)
 locks how env dimensions attach to semantic-query keys. The cache-key
 composition is two-tier, env stays on the key, and no env-less uniform envelope
 is permitted.

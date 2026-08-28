@@ -3669,7 +3669,7 @@ impl Scheduler {
         // readable binding and the leading underscore only suppresses an
         // unused-variable lint. Deleting the field outright is the structural
         // fix, and that work is owned by
-        // `docs/arch/scheduler-lifecycle-unification-plan.md`.
+        // `.claude/skills/scheduler/SKILL.md`.
         let mut node: Arc<FileNode>;
         match self.nodes.get(&file_id) {
             Some(live) if live.incarnation_id() == prepared_incarnation => {

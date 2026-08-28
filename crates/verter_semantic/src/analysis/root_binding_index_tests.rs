@@ -5,7 +5,7 @@
 //! Options-API extraction consumers), not a synthetic unit-level harness.
 //!
 //! Each test is one row of the discriminating matrix in
-//! `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`. Every
+//! the binding-index design. Every
 //! test asserts the CORRECT outcome; several carry a comment naming the
 //! WRONG outcome the pre-index unconditional-by-name fold used to produce,
 //! so the discriminating property (this test fails on the pre-index tree,

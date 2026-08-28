@@ -1,7 +1,7 @@
 //! §22 type-lattice absorption — the reducers' FIRST fast-reject.
 //!
 //! Each `absorb_*` helper is a SEPARABLE entry hook a reducer calls before
-//! any structural work (`docs/arch/u2-query-value-domain-design.md` §22.2):
+//! any structural work (`.claude/skills/type-resolution/SKILL.md` §22.2):
 //! when an operand is one of the lattice extremes (`any` / `never` /
 //! `unknown` / `error`), the absorption rule short-circuits the whole
 //! operator to its absorbed result, removing the structural recursion. The

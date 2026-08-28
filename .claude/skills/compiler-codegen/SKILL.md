@@ -371,7 +371,7 @@ The conditional types live in `@verter/types` — five synchronized copies: `pac
 
 **Declaration-surface parity.** Hand-maintained copies drift: the `runCustomDirective` fix that carried the directive's `Arg` type parameter (`Directive<HostElement, Value, Modifiers, Arg>`) into `arg` landed in the two `type_constructs.rs` constants and stayed missing from the three copies a real editor actually serves. `verterTypesStub.spec.ts` → `declaration-surface parity` now compiles ONE contract against every copy a TypeScript test can read as a whole artifact (`VERTER_TYPES_STUB`, `crates/verter_lsp/src/verter_types_stub.d.ts`, `packages/types/index.d.ts`) plus a deliberately reverted pre-fix copy, all in a single program: the TypeScript compiler is the oracle, so formatting and `Directive` vs `import("vue").Directive` spelling differences are invisible and only BEHAVIOURAL divergence fails. The published `@verter/types` source is covered by its own type test (`packages/types/src/directives/directives.spec.ts`); the two `type_constructs.rs` constants keep `verter_types_surface_carries_the_directive_arg_type_parameter`. Generating all copies from one source of truth would delete the drift class outright and remains the durable fix.
 
-Design + deferred-debt rows: [`docs/arch/global-components-ide-typing.md`](../../../docs/arch/global-components-ide-typing.md).
+Design + deferred-debt rows: [`roadmap/0.1.0-tama/charters/expansion-language-service/LSO5.md`](../../../roadmap/0.1.0-tama/charters/expansion-language-service/LSO5.md).
 
 ## IDE Script Error Recovery
 

@@ -21,7 +21,7 @@
 //! fail to compile until classified, but CLASSIFICATION ≠ OPAQUE
 //! ENCAPSULATION: a future named-struct carrier could compile while exposing a
 //! bindable `type_args` field, re-opening the anti-tail bind, until the
-//! enum-wide guard (recorded debt, `docs/arch/parselower-design.md`) exists.
+//! enum-wide guard (recorded debt, `.claude/skills/type-resolution/SKILL.md`) exists.
 //!
 //! These small, LOCAL tripwires do NOT re-derive that compiler guarantee; they
 //! only FREEZE the shape of the one trusted module so a future IN-FILE edit

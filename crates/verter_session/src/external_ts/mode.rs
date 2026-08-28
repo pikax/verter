@@ -5,7 +5,7 @@
 //! baseline; SHARED — attaching to the editor's already-running engine — is
 //! an optional optimization chosen only when every precondition holds for
 //! every project in the decision unit
-//! (`docs/arch/external-ts-engine-architecture.md` §2.10).
+//! (the external TypeScript engine contract §2.10).
 //!
 //! ## The decision unit: the redirect-ON reference component
 //!

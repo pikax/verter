@@ -1,5 +1,5 @@
 //! Design-gate architecture guards for the U2 query-value-domain
-//! design (`docs/arch/u2-query-value-domain-design.md`).
+//! design (`.claude/skills/type-resolution/SKILL.md`).
 //!
 //! These guards land AT the design gate — ahead of the
 //! implementation — and are discriminating TODAY (each can FAIL if

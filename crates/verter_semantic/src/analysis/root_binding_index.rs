@@ -12,7 +12,7 @@
 //! `SemanticQueryKey` dispatch. Construction and querying live ONLY in the
 //! shallow/macro-analysis producer path (`build_script_analysis_inner` and
 //! its two consumers). See
-//! `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md` (v3 plus
+//! the binding-index design (v3 plus
 //! the OXC-boundary addendum) for the full ratified design this module
 //! implements.
 //!
@@ -785,7 +785,7 @@ const fn _assert_source_type_is_copy(_: SourceType) {}
 /// a constructor array) against `index`, always from
 /// [`StartScope::ProgramRoot`] — the shared gate every consumer runs before
 /// applying the ten-spelling runtime-constructor mapping. See "Consumer
-/// wiring" in `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`.
+/// wiring" in the binding-index design.
 #[must_use]
 pub(crate) fn resolve_constructor_binding(
     index: &RootBindingIndex,

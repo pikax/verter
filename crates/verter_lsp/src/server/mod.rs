@@ -1646,7 +1646,7 @@ impl LanguageServer for VerterLanguageServer {
 #[path = "../server_tests.rs"]
 mod server_tests;
 
-/// Throwaway future-size instrumentation (ignored tests). See docs/arch/future/.
+/// Throwaway future-size instrumentation (ignored tests). See docs/contributing/gate-performance.md.
 #[cfg(test)]
 #[path = "../future_size_measure_tests.rs"]
 mod future_size_measure_tests;

@@ -1,8 +1,0 @@
-test resolver_store::store_view_marginal_admit_tests::marginal_admit_reopens_no_routing_regardless_of_host_size ... ok
-test resolver_store::store_view_o1_build_tests::store_view_build_resolves_zero_canonicals_at_any_host_size ... ok
-test resolver_store::store_view_marginal_admit_tests::recompile_existing_is_free_at_any_host_size ... ok
-test resolver_store::store_view_marginal_admit_tests::admission_cold_work_is_n_independent_but_not_zero ... ok
-test resolver_store::store_view_o1_build_tests::store_view_build_wall_cost_is_flat_across_host_sizes ... ok
-
-test result: ok. 5655 passed; 0 failed; 533 ignored; 0 measured; 0 filtered out; finished in 48.63s
-

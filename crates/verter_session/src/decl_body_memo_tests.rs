@@ -561,7 +561,7 @@ type FileScope = { f: 1 };
     // sibling `const`. This is NOT a claim that augmentation members
     // lower per-declaration; tightening the locator granularity to
     // per-declaration / per-declarator is tracked as deferred debt in
-    // `docs/arch/semantic-db-overhaul-unified-remaining-plan.md` (the
+    // `.claude/skills/type-resolution/SKILL.md` (the
     // decl-body locator granularity item).
     assert_eq!(bodies(&provenance), 2);
     assert!(

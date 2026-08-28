@@ -1,5 +1,5 @@
 //! The LIVE source-side walk for the TS7 `TypeExpr`-projection oracle
-//! (`docs/arch/u0-oracle-harness-design.md` §Q2 — "The source-side walk's
+//! (the TS7 oracle contract §Q2 — "The source-side walk's
 //! concrete entry API + return shape").
 //!
 //! [`resolve_source_declarations`] is the generator-side helper the two-sided

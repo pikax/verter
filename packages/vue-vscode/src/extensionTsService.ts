@@ -668,7 +668,7 @@ export class ExtensionTsService {
             // type-only-alias wrappers) are a DIFFERENT action class this
             // resolve path deliberately does not route as imports. See
             // `crates/verter_type_runtime/src/protocol.rs` (`is_actionable`) and
-            // `docs/arch/provider-completion-resolve-design.md`.
+            // the language-service contract.
             source: e.source,
             data: e.data,
             labelDetails: e.labelDetails,

@@ -1,8 +1,9 @@
 /**
  * Discriminating validator for the replacement-validation deviation ledger.
  *
- * The ledger's machine source of truth is `docs/arch/followups/
- * replacement-deviations.json` (schema `verter.replacement-deviations.v1`). This
+ * The ledger's machine source of truth is
+ * `scripts/manifests/replacement-deviations.json` (schema
+ * `verter.replacement-deviations.v1`). This
  * test loads the committed schema + sidecar and validates them with a small
  * hand-written conditional validator (no `ajv` dependency — adding one would drift
  * the lockfile). It is DISCRIMINATING: it accepts the empty sidecar, a good
@@ -20,7 +21,7 @@ import { canonicalizePath, joinCanonical } from "../src/paths.js";
 
 /** Workspace root, derived from this test file's location. */
 const REPO_ROOT = canonicalizePath(fileURLToPath(new URL("../../..", import.meta.url)));
-const LEDGER_DIR = joinCanonical(REPO_ROOT, "docs", "arch", "followups");
+const LEDGER_DIR = joinCanonical(REPO_ROOT, "scripts", "manifests");
 
 const SCHEMA_CONST = "verter.replacement-deviations.v1";
 const CLASSES = [

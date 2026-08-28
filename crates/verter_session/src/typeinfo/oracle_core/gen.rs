@@ -1,6 +1,6 @@
 //! The TS7 `TypeExpr`-projection oracle SNAPSHOT GENERATOR — the build/test-time
 //! tool that drives the pinned tsgo and writes the checked-in snapshots
-//! (`docs/arch/u0-oracle-harness-design.md` §2 "Generation", §4 generator-side
+//! (the TS7 oracle contract §2 "Generation", §4 generator-side
 //! table). Behind the `oracle-gen` feature ONLY, so the default resolver build
 //! and the default test gate stay tsgo-free (§3 inv 1,
 //! `oracle_tsgo_forbidden::tsgo_not_reachable_from_resolver`). It is NEVER on the
@@ -219,7 +219,7 @@ pub fn run_oracle_gen() -> Result<usize, GenError> {
 }
 
 /// Deterministic, TSGO-FREE v3→v4 snapshot re-keying (§Q4 +
-/// `docs/arch/ri0-relation-verdict-oracle-addendum.md`). The v4 schema change
+/// the TS7 oracle contract). The v4 schema change
 /// ADDS the closed `relation_verdict` value kind; for the EXISTING
 /// `structured_type_expr` snapshots the ONLY change is `oracle_schema_version`
 /// 3→4 flowing into `snapshot_id` through `PinnedEnv` (the v3-family hash-input
@@ -731,7 +731,7 @@ async fn drive_hover_over_files(
 }
 
 /// The per-spec v4 relation generation pipeline
-/// (`docs/arch/ri0-relation-verdict-oracle-addendum.md`): a relation-specific
+/// (the TS7 oracle contract): a relation-specific
 /// capture path BESIDE the TypeExpr pipeline — NOT through the two-sided
 /// admission (which correctly rejects the Conditional/Infer the probe embodies)
 /// and with NO reducer preflight (a capture-only relation row asserts nothing
@@ -1048,7 +1048,7 @@ fn cross_check_probe_strategy(
     }
 }
 
-/// The reducer PREFLIGHT (`docs/arch/u0-oracle-harness-design.md` §Q2 —
+/// The reducer PREFLIGHT (the TS7 oracle contract §Q2 —
 /// "reducer-preflight before writing carve-out snapshots"). Before a snapshot is
 /// assembled, run the SPEC'S query through Verter's ONE shared resolver in the
 /// declared projection mode and require the projected result is CLEAN: NO opaque

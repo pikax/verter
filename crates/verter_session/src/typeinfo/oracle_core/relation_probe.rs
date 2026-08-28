@@ -1,6 +1,6 @@
 //! The v4 `relation_verdict` tuple-wire probe: synthesis, strict wire decode,
 //! and operand canonicalization
-//! (`docs/arch/ri0-relation-verdict-oracle-addendum.md`).
+//! (the TS7 oracle contract).
 //!
 //! PURE + tsgo-free: builds source text and decodes hover RHS text only. The
 //! `oracle-gen` generator drives tsgo over the synthesized probe file; the

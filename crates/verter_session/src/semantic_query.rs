@@ -51,7 +51,7 @@ pub use crate::locator_identity::{ParseEnvHash, SlotEnvIdentity};
 pub use crate::resolver_core::shallow_file_state::BudgetExceededFailure;
 
 /// The `ProjectionDemand × EvalPolicy` lattice algebra (Deliverable #3 of
-/// `docs/arch/u2-query-value-domain-design.md`). The five [`ProjectionMode`]
+/// `.claude/skills/type-resolution/SKILL.md`). The five [`ProjectionMode`]
 /// presets are points in this lattice; `meet`/`join`, satisfaction, and the
 /// §3.4 materialised-record carrier types live here.
 pub mod demand;
@@ -60,7 +60,7 @@ pub mod demand;
 /// already-computed [`SemanticQueryValue`] under a display-only
 /// [`DisplayNeeds`](demand::DisplayNeeds) bitset. Display is NEVER a stored or
 /// re-parsed string and never re-resolves
-/// (`docs/arch/u2-query-value-domain-design.md` §14).
+/// (`.claude/skills/type-resolution/SKILL.md` §14).
 pub mod display;
 
 /// The `SemanticQueryKeySpec` table: one authoritative, hand-encoded row per
@@ -1180,7 +1180,7 @@ pub type DeclPartFingerprint = HashValue;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedDeclSlotIdentity {
     /// Canonical id of the declaring file. NOT the consumer scope —
-    /// see audit doc `docs/arch/materialize-owner-local-audit.md`
+    /// see audit doc `.claude/skills/component-meta/SKILL.md`
     /// (a) for the `local_fence_seed` derivation rationale.
     pub defining_canonical: Arc<str>,
     /// Exact authored top-level owner inside `defining_canonical`.

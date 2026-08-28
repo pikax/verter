@@ -1,5 +1,5 @@
 # Flake-prevention lint (see crates/verter_test_support and
-# docs/arch/... flake-prevention report). `3bf93df59` fixed 13 test call
+# docs/contributing/... flake-prevention report). `3bf93df59` fixed 13 test call
 # sites that used `std::env::temp_dir()` with no per-process component,
 # so two concurrent invocations of the suite on the same machine (e.g. two
 # git worktrees) raced each other's `remove_dir_all` + rewrite of the SAME

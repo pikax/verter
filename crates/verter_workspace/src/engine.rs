@@ -4791,7 +4791,7 @@ const WORKSPACE_AMBIENT_FINGERPRINT: u64 = 0xC0DE_BABE_0000_0001;
 /// composer feeds until the published project payload carries the project's
 /// own `moduleResolution` / conditions (the full per-project resolution
 /// matrix is a `verter_session::resolver_core` concern — see
-/// `docs/arch/native-typeinfo-parity-u2-reducers.md`). The default mirrors the
+/// `.claude/skills/type-resolution/SKILL.md`). The default mirrors the
 /// TS provider-graph condition order so the composed `resolve_env_hash` is
 /// deterministic.
 fn workspace_default_export_conditions() -> ConditionSet {

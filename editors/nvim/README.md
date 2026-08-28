@@ -18,7 +18,7 @@ Requires **Neovim ≥ 0.11** (for `vim.lsp.config` / `vim.lsp.enable`).
   launcher on the project's `node_modules/.bin`, and prints the native binary
   path via `npx verter-lsp --print-server-path`), or build it with
   `cargo build -p verter_lsp --release`. A mason.nvim registry entry is a planned follow-up
-  (see the [Roadmap in the Neovim support design](../../docs/arch/neovim-support-design.md#91-roadmap-out-of-v0-scope)).
+  (see the [Roadmap in the Neovim support design](../../editors/nvim/README.md#91-roadmap-out-of-v0-scope)).
 - For full type features, the project should have **TypeScript 7 (`typescript@7`)**
   installed (the normal case for a typed Vue/Svelte project). The default type
   provider is `tsgo`, which discovers the native
@@ -76,7 +76,7 @@ Point lazy.nvim at this directory (or a published mirror) and call `setup` in
 The in-repo module supersedes nvim-lspconfig for Verter today. An upstream
 `lsp/verter.lua` for `neovim/nvim-lspconfig` is a tracked follow-up, gated on
 published per-platform `verter-lsp` release assets
-(see the [Roadmap in the Neovim support design](../../docs/arch/neovim-support-design.md#91-roadmap-out-of-v0-scope)). Until then use recipe 1 or 2.
+(see the [Roadmap in the Neovim support design](../../editors/nvim/README.md#91-roadmap-out-of-v0-scope)). Until then use recipe 1 or 2.
 
 ## Completion engine
 

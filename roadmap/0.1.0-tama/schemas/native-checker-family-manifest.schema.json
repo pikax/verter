@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Native checker family manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "product", "generator_owner", "promotion_owner", "family_convergence_owner", "terminal_owner", "required_default", "slice"],
+  "properties": {
+    "schema": { "const": 1 },
+    "product": { "const": "native_checker" },
+    "generator_owner": { "const": "NCK4" },
+    "promotion_owner": { "const": "NCK6" },
+    "family_convergence_owner": { "const": "NCKF0" },
+    "terminal_owner": { "const": "NCK8" },
+    "required_default": { "const": true },
+    "slice": {
+      "type": "array",
+      "minItems": 30,
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "family", "name", "required", "predecessors", "scope", "fact_sources", "example_obligations", "oracle", "correction_overlay", "max_production_loc", "max_production_files", "max_related_packages"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^NCF-[A-Z]{2}-[A-Z]+$" },
+          "family": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "required": { "const": true },
+          "predecessors": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" } },
+          "scope": { "type": "string", "minLength": 1 },
+          "fact_sources": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "example_obligations": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+          "oracle": { "const": "pinned-tsgo-diagnostic-oracle" },
+          "correction_overlay": { "const": "review-gated-single-spec-overlay" },
+          "max_production_loc": { "const": 800 },
+          "max_production_files": { "const": 8 },
+          "max_related_packages": { "const": 2 }
+        }
+      }
+    }
+  }
+}

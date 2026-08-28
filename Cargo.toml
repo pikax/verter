@@ -122,8 +122,7 @@ overflow-checks = false
 debug = false
 
 # Host developer artifact profile — what `pnpm build` compiles NAPI and the
-# LSP under (see docs/arch/refactor/rev11/rulings/
-# MAINTAINER-DIRECTIVE-BUILD-LANE-SEPARATION.md). Plain `dev` (opt-level 0)
+# LSP under. Plain `dev` (opt-level 0)
 # is fast to compile but often too slow at runtime for interactive NAPI/LSP
 # testing; `release` (opt-level 3, fat LTO, one codegen unit) is far too slow
 # to compile for routine iteration. `artifact-dev` opts in to real

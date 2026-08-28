@@ -1,6 +1,6 @@
 // Exact, immutable official-core compatibility domains this harness may
 // invoke. Mirrors
-// `docs/arch/refactor/rev11/evidence/framework-conformance/version-domain.md`
+// `packages/framework-conformance-harness/evidence/version-domain.md`
 // byte-for-byte. Sole authority other harness modules read pin identities
 // from; nothing here is fetched at runtime, and nothing here may be
 // widened to a range or dist-tag (official-core-oracles.md).

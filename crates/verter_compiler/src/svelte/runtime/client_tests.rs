@@ -7871,7 +7871,7 @@ fn regular_element_uppercase_dynamic_class_pins_divergent_emission() {
     // lowercases at emission, but the routing decision already missed `$.set_class`).
     // This is a TEMPORARY non-parity divergence owned by the general typed-setter/parser
     // class/style attribute-identity + emission-routing layer and tracked as
-    // debt-ledger row D-37 (docs/arch/svelte-native-compiler-plan.md). This test pins
+    // debt-ledger row D-37 (.claude/skills/compiler-codegen/SKILL.md). This test pins
     // the current divergent shape and MUST fail (go RED) when that convergence lands.
     let js = emit(
         "<script>let k = $state('x');</script>\n<div CLASS={k}>hi</div>\n",
@@ -7919,7 +7919,7 @@ fn regular_element_uppercase_static_lone_class_pins_fail_closed() {
     // dynamic-attr classifier and FAILS CLOSED as the `DynamicAttribute` surface with
     // the authored name. This fail-close is a TEMPORARY non-parity divergence owned
     // by the general typed-setter/parser static-attribute identity/serializer layer and tracked
-    // as debt-ledger row D-37 (docs/arch/svelte-native-compiler-plan.md). This test
+    // as debt-ledger row D-37 (.claude/skills/compiler-codegen/SKILL.md). This test
     // pins the current refusal and MUST fail (go RED — start accepting) when that
     // convergence lands. (The fixture carries a rune so mode inference lands on runes
     // mode; a script-less carrier is legacy mode, whose per-surface dispatch owns it.)
@@ -7991,7 +7991,7 @@ fn uppercase_style_directive_prefix_is_not_a_style_directive() {
     // emission). This fail-close is a TEMPORARY non-parity divergence — official accepts
     // the generic-attribute fold, Verter refuses — owned by the general typed-setter/parser
     // attribute-name case-normalization follow-up and tracked as debt-ledger row D-37
-    // (docs/arch/svelte-native-compiler-plan.md). It is NOT official parity. The
+    // (.claude/skills/compiler-codegen/SKILL.md). It is NOT official parity. The
     // conservative refusal is fail-close-safe until that convergence lands.
     match emit_result(
         "<script>let tag = $state('div');let c = $state('red');</script>\n<svelte:element this={tag} STYLE:color={c}>hi</svelte:element>\n",
@@ -24831,7 +24831,7 @@ fn nonconst_store_source_declaration_kind_is_supported() {
     // (mis-emitted) subscription. `assert_fail_closed` panics on ANY emitted module, so it
     // doubles as the negative "no subscription mis-emitted" assertion. This declaration-KIND
     // completeness gap fails closed; the follow-up is tracked in
-    // `docs/arch/svelte-native-compiler-plan.md`.
+    // `.claude/skills/compiler-codegen/SKILL.md`.
     let js = emit(
         "<script>import { writable } from 'svelte/store'; let c = writable(0);</script>\n<p>{$c}</p>\n",
         "App.svelte",

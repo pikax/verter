@@ -12189,7 +12189,7 @@ fn authority_scopes_no_unsafe_self_test_discriminates() {
 // materialized `TypeExpr` remains on hot inputs for a macro body to hide), and
 // the Unknown control-flow fence's typed-degradation end-state LANDED with
 // the fence itself deleted; the residual-deferral doc that tracked them
-// (`docs/arch/hot-materialize-tripwire-residual-deferral.md`) is deleted.
+// (`.claude/skills/type-cache-architecture/SKILL.md`) is deleted.
 //
 // SC-first record (structured, machine-greppable):
 //   scanner_invariant: hot_materialize_syntactic_tripwire_residual_backstop

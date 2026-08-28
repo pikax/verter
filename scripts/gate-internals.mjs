@@ -1215,7 +1215,7 @@ export const BUILD_PREREQUISITE_PROBE_SOURCE =
 //
 // That matters here more than the milliseconds suggest: this probe is the gate's FIRST step and it runs
 // with the single-flight mutex HELD, so an unbounded block does not stall one run — it holds the lock,
-// the stale-heavy-gate-lock hazard already tracked as GI-12 in docs/arch/gate-integrity-ledger.md.
+// the stale-heavy-gate-lock hazard already tracked as GI-12 in docs/contributing/gate-integrity-ledger.md.
 //
 // SIGKILL with NO graceful phase is deliberate, not a shortcut. The child's entire job is one
 // `require()`: it owns no transaction, buffers nothing a reader depends on, and has no cleanup that a

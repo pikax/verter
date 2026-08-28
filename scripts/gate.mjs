@@ -31,9 +31,9 @@
 // PURPOSE
 //   Builds the whole workspace test universe ONCE via `cargo nextest archive` (dev profile) and runs it
 //   with `cargo nextest run` (per-test PROCESS ISOLATION) — ONE full build, ONE full run, per the
-//   maintainer's SINGLE-TEST-UNIVERSE directive
-//   (docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-SINGLE-TEST-UNIVERSE.md, refining
-//   ONE-BUILD-ONE-RUN). That is SURFACE 1. Deliberate shared-process coverage — the class the former
+//   maintainer's SINGLE-TEST-UNIVERSE directive, refining ONE-BUILD-ONE-RUN.
+//   See docs/contributing/gate-performance.md. That is SURFACE 1. Deliberate
+//   shared-process coverage — the class the former
 //   Surface 2 existed for — now lives INSIDE that one universe as
 //   `verter_session/tests/cases/shared_process_contract.rs`: ordinary `#[test]` functions that perform
 //   many operations sequentially (create/use/drop/recreate; multiple hosts alive at once; repeated edits;
@@ -166,7 +166,7 @@
 //      authoritative; the one route from `failures exist in the log` to a green verdict is the
 //      tolerance allowlist, so tolerance is refused outright whenever a failure was superseded by a
 //      pass. Residual, named rather than claimed away: no text-level rule can fully separate runner
-//      output from test output on a shared stream - see GI-19 in docs/arch/gate-integrity-ledger.md.
+//      output from test output on a shared stream - see GI-19 in docs/contributing/gate-integrity-ledger.md.
 //      NAMING, and its honest limit. Failing tests are listed by name with their status, including the
 //      compound (`FAIL + LEAK`) and retried (`TRY 3 FAIL`, `TRY 3 FL+LK`) status fields, with the LAST
 //      status per test deciding — so a flaky test that failed attempt 1 and passed attempt 2 is not a
@@ -1921,7 +1921,9 @@ async function runShippedCfgLane(opts, ctx, { allSuites, commandPlan }) {
 function replayGateLaneTranscript(receipts, ctx, allSuites) {
   const segments = SHIPPED_CFG_LANE_ENABLED
     ? canonicalGateLaneTranscriptSegments(receipts)
-    : canonicalGateLaneTranscriptSegments(receipts).filter((segment) => segment.phaseId === "surface-1");
+    : canonicalGateLaneTranscriptSegments(receipts).filter(
+        (segment) => segment.phaseId === "surface-1",
+      );
   for (const segment of segments) {
     log(segment.header);
     if (segment.output) {

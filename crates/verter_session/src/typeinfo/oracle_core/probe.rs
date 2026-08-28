@@ -1,6 +1,6 @@
 //! Probe SYNTHESIS — the FIXED, VERSIONED probe the generator appends to the
 //! query's resolution environment so tsgo's `textDocument/hover` prints the
-//! resolved type (`docs/arch/u0-oracle-harness-design.md` §Q2 "Probe-driven
+//! resolved type (the TS7 oracle contract §Q2 "Probe-driven
 //! generation", §4 `probe_form_is_deterministic_and_versioned` /
 //! `parameterized_probe_rhs_synthesis`).
 //!

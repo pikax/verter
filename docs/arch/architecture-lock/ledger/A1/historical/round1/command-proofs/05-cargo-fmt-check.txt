@@ -1,6 +1,0 @@
-CMD: cargo fmt --all --check
-CWD: <REPO>-wt-a1
-ENV: default; toolchain pinned by rust-toolchain.toml (1.97.1)
-DATE: 2026-08-10T04:58:13Z
----
-EXIT: 0

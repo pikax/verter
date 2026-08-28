@@ -1,5 +1,5 @@
 //! The REGISTRY-side half of the migration-fidelity projection
-//! (`docs/arch/u0-oracle-harness-design.md` §Q4).
+//! (the TS7 oracle contract §Q4).
 //!
 //! One copy, two consumers. `registry_payload_matches_migration_fingerprint`
 //! validates the live registry payload against each lifted row's retained

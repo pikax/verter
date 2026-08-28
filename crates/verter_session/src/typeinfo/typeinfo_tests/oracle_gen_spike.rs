@@ -1,6 +1,6 @@
 //! The §4 GENERATION SPIKE — empirically validates, against the PINNED tsgo
 //! `7.0.0-dev.20260526.1`, the BLOCKING assumptions the harness's generation
-//! side rests on (`docs/arch/u0-oracle-harness-design.md` §4 "Spike").
+//! side rests on (the TS7 oracle contract §4 "Spike").
 //!
 //! FEATURE-GATED (`oracle-gen`) and `#[cfg(test)]`: it drives tsgo via
 //! `verter_type_runtime`'s `TsgoTypeProvider` (Q3 — the adopted LSP driver) and

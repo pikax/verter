@@ -1,7 +1,0 @@
-CMD: node scripts/gen-svelte-name-parity-corpus.mjs --check
-CWD: <REPO>-wt-a1
-ENV: none
-DATE: 2026-08-10T07:36:26Z
-gen-svelte-name-parity-corpus --check: 80 row(s) in sync with svelte@5.56.3.
-EXIT: 0
-END-DATE: 2026-08-10T07:36:27Z

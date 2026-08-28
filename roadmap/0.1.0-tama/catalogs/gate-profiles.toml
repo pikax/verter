@@ -1,0 +1,21 @@
+schema = 2
+[[profile]]
+id = "targeted-domain"
+iteration = true
+final = ["node scripts/gate.mjs"]
+[[profile]]
+id = "ts-domain"
+iteration = true
+final = ["pnpm -r test"]
+[[profile]]
+id = "docs-domain"
+iteration = true
+final = ["node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict", "pnpm docs:build"]
+[[profile]]
+id = "canonical"
+iteration = true
+final = ["node scripts/gate.mjs", "cargo clippy --workspace --all-targets -- -D warnings", "node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict", "node --test roadmap/0.1.0-tama/tools/implementation-ledger.test.mjs"]
+[[profile]]
+id = "historical-implemented"
+iteration = false
+final = []

@@ -1,4 +1,4 @@
-#![doc = include_str!("../../../docs/arch/path-precise-resolution-currency.md")]
+#![doc = include_str!("../../../docs/contributing/path-precise-resolution-currency.md")]
 
 //! Compile-checked model of the path-precise resolution-currency contract.
 //!

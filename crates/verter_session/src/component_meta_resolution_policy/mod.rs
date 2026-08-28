@@ -7,7 +7,7 @@
 //!
 //! The pass operates on a dispatch-resolved [`ComponentMetaAnalysis`] and
 //! rewrites the public type SOURCES in place per the rules derived in
-//! `docs/arch/debt-closure/06-step4b-consumer-surface.md`: every decision
+//! `.claude/skills/component-meta/SKILL.md`: every decision
 //! raises the published source to a semantic-graph node through the ONE
 //! shared dispatch bridge and classifies node-domain; a fired rule
 //! publishes a replacement content-free source (materialized `TypeExpr`
@@ -71,7 +71,7 @@ const TYPE_ROLE_MACRO_KINDS: &[AnalyzedMacroKind] = &[
 
 /// Apply the publication policy to `analysis`, rewriting public type
 /// SOURCES in place per the rules in
-/// `docs/arch/debt-closure/06-step4b-consumer-surface.md`.
+/// `.claude/skills/component-meta/SKILL.md`.
 ///
 /// `host` is consulted for cross-file declaration lookup of transitively-
 /// referenced types not seeded into the BFS root set of the resolved type

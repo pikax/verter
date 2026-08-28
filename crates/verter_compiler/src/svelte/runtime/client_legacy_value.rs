@@ -17,7 +17,7 @@
 //! caller argument). This routing is a fail-closed invariant over the
 //! inventoried surfaces, NOT a backend-wide type guarantee: the narrow plan
 //! still flattens some authored expressions into raw `String` fields — the
-//! D-61 residual tracked in `docs/arch/svelte-native-compiler-plan.md`.
+//! D-61 residual tracked in `.claude/skills/compiler-codegen/SKILL.md`.
 //!
 //! In a DEFINITELY-legacy component (non-runes AND not the official
 //! `maybe_runes` in-between mode), a `BuildExpression`-classified value whose

@@ -1,5 +1,5 @@
 //! Discriminating guards for the two-sided positive-allowlist admission gate
-//! (`docs/arch/u0-oracle-harness-design.md` §Q2 / §5). Each guard ADMITs a
+//! (the TS7 oracle contract §Q2 / §5). Each guard ADMITs a
 //! genuinely-clean input AND REJECTs the specific construct it names — a guard
 //! that cannot fail against the wrong behaviour is a stub, so every assertion
 //! discriminates.

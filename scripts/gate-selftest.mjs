@@ -35,7 +35,7 @@
 //   substring search finds it, but its argv[0] basename is `bash`, not `sleep_…`).
 //
 // A RED RUN HERE MAY NOT BE A REGRESSION — check which scenario failed first. Two distinct environment
-// sensitivities are known and tracked as GI-18 in docs/arch/gate-integrity-ledger.md:
+// sensitivities are known and tracked as GI-18 in docs/contributing/gate-integrity-ledger.md:
 //   (a) `(viii)` asserts a whole-gate budget against an ABSOLUTE ~6s window and IS load-sensitive.
 //       Measured on this 8-core host: green at load 2-27, fails at load 67-102 (12x oversubscription)
 //       with `took 11s ... did NOT bound the sequence near 6s`.

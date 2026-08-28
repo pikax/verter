@@ -19,7 +19,7 @@
 // `AsRef<str>` fail the ordinary compile at any violating call site), so this
 // fixture is a belt-and-braces assertion, not the sole rail. The
 // out-of-default-gate status is recorded in
-// `docs/arch/gate-integrity-ledger.md`.
+// `docs/contributing/gate-integrity-ledger.md`.
 
 /// Widening the seal — a `pub` inner field, a derived `Deserialize`, an added
 /// `Deref`/`AsRef<str>`, or a forgeable witness — makes a fixture COMPILE and

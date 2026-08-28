@@ -40,7 +40,7 @@
 //! above before assuming it can address a given position. The call-site
 //! inventory and the API surface a wider structural reach would need are
 //! recorded in
-//! `docs/arch/future/real-provider-harness-template-position-locators.md`.
+//! the language-service contract.
 
 use tower_lsp_server::ls_types::*;
 use verter_compiler::ast::types::{AstNodeKind, ElementNode, TemplateAst};

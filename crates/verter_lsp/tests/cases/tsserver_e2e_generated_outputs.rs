@@ -408,10 +408,10 @@ const outerLabel = 'outer'
 // multi-file-sync fragility (this test was dead `__lsp_tests` code that never
 // ran). It is unrelated to completion-resolve / auto-import; un-ignore once the
 // in-memory child-API project setup is made deterministic.
-// Tracked: docs/arch/provider-completion-resolve-design.md → "Deferred test
+// Tracked: the language-service contract → "Deferred test
 // ledger (#[ignore] tracking)" (un-ignore when the in-memory child-API project
 // setup is deterministic).
-#[ignore = "tsserver in-memory child-API project setup returns 'No content available' (pre-existing multi-file-sync fragility); tracked in docs/arch/provider-completion-resolve-design.md → Deferred test ledger"]
+#[ignore = "tsserver in-memory child-API project setup returns 'No content available' (pre-existing multi-file-sync fragility); tracked in the language-service contract → Deferred test ledger"]
 #[tokio::test]
 async fn test_e2e_tsserver_scoped_slot_types_with_in_memory_child_api() {
     let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {
@@ -557,10 +557,10 @@ const outerLabel = 'outer'
 // `"No content available."` against a cold inferred project. Dead `__lsp_tests`
 // code that never ran; unrelated to completion-resolve. Un-ignore once the
 // child-IDE project setup is deterministic.
-// Tracked: docs/arch/provider-completion-resolve-design.md → "Deferred test
+// Tracked: the language-service contract → "Deferred test
 // ledger (#[ignore] tracking)" (un-ignore when the child-IDE project setup is
 // deterministic).
-#[ignore = "tsserver plugin + open-child-IDE project setup returns 'No content available' (pre-existing multi-file-sync fragility); tracked in docs/arch/provider-completion-resolve-design.md → Deferred test ledger"]
+#[ignore = "tsserver plugin + open-child-IDE project setup returns 'No content available' (pre-existing multi-file-sync fragility); tracked in the language-service contract → Deferred test ledger"]
 #[tokio::test]
 async fn test_e2e_tsserver_scoped_slot_types_with_plugin_and_open_child_ide() {
     let Some((node_path, tsserver_path)) = tsserver_assets_or_skip() else {

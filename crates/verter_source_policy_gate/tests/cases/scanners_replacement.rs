@@ -854,7 +854,7 @@ fn stamped_block_content_schema_is_additive_and_capture_complete() {
 
 #[test]
 fn scanners_replacement_capability_ledger_is_total() {
-    let ledger = read_json("docs/arch/scanners-replacement-capability-ledger.json");
+    let ledger = read_json("scripts/manifests/scanners-replacement-capability-ledger.json");
     assert_eq!(
         ledger["schema"],
         "verter.scanners-replacement-capability-ledger.v1"
@@ -975,7 +975,7 @@ fn scanners_replacement_capability_ledger_is_total() {
 
 #[test]
 fn scanners_replacement_b_78_names_exactly_five_inspection_rows() {
-    let ledger = read_json("docs/arch/scanners-replacement-capability-ledger.json");
+    let ledger = read_json("scripts/manifests/scanners-replacement-capability-ledger.json");
     let targets = ledger["rows"]
         .as_array()
         .expect("ledger rows")

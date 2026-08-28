@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub control-plane program catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "modules", "node"],
+  "properties": {
+    "schema": { "const": 1 },
+    "modules": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^authority/dag/governance-[a-z0-9-]+\\.toml$" }
+    },
+    "node": {
+      "type": "array",
+      "minItems": 13,
+      "maxItems": 13,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "train", "predecessors"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^(?:GH[0-6]|FB[0-2]|REL[0-2])$" },
+          "name": { "type": "string", "minLength": 1 },
+          "train": { "enum": ["governance.github-control-plane", "governance.feedback-intake", "governance.release-control"] },
+          "predecessors": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9-]*$" }
+          }
+        }
+      }
+    }
+  }
+}

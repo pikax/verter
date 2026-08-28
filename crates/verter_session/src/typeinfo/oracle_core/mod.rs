@@ -1,7 +1,7 @@
 //! TS7 `TypeExpr`-projection oracle harness (consumption + comparison side).
 //!
 //! This module is the in-repo, tsgo-free half of the oracle harness defined in
-//! `docs/arch/u0-oracle-harness-design.md`: the normalization + canonical
+//! the TS7 oracle contract: the normalization + canonical
 //! comparison engine that `TypeExpr`-projection oracle rows use to assert
 //! parity against checked-in TS7 snapshots. It declares no oracle rows itself —
 //! it is the shared foundation the lifted `TypeExpr`-projection rows build on.

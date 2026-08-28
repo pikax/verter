@@ -78,15 +78,15 @@ rationale = "tsserver subprocess IPC — pnpm virtual store walk + scratch-dir s
 
 [[entries]]
 path = "crates/verter_session/src/typeinfo/oracle_core/driver.rs"
-rationale = "TS7 oracle harness consumption driver (#[cfg(test)] in oracle_core) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime std::fs::read, the mechanism the locked design (docs/arch/u0-oracle-harness-design.md §Q1) mandates and the snapshot_loading_is_runtime_fs guard pins. Not semantic/VFS state."
+rationale = "TS7 oracle harness consumption driver (#[cfg(test)] in oracle_core) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime std::fs::read, the mechanism the locked design (the TS7 oracle contract §Q1) mandates and the snapshot_loading_is_runtime_fs guard pins. Not semantic/VFS state."
 
 [[entries]]
 path = "crates/verter_session/src/bin/oracle_lift.rs"
-rationale = "TS7 oracle harness AUDITED LIFT COMMAND (`#[bin]` behind `required-features = [\"oracle-lift\"]`, excluded from the default build and the default gate). Reads the ORIGINAL `#[ignore]`d row body and the checked-in snapshot TEST FIXTURES, and rewrites the row source + the retained `LIFTED_ROW_MIGRATIONS` provenance table via `std::fs` — the build/test-time lift step the locked design (docs/arch/u0-oracle-harness-design.md §Q4) mandates. Repository tooling over in-repo source + test fixtures, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state."
+rationale = "TS7 oracle harness AUDITED LIFT COMMAND (`#[bin]` behind `required-features = [\"oracle-lift\"]`, excluded from the default build and the default gate). Reads the ORIGINAL `#[ignore]`d row body and the checked-in snapshot TEST FIXTURES, and rewrites the row source + the retained `LIFTED_ROW_MIGRATIONS` provenance table via `std::fs` — the build/test-time lift step the locked design (the TS7 oracle contract §Q4) mandates. Repository tooling over in-repo source + test fixtures, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state."
 
 [[entries]]
 path = "crates/verter_session/src/typeinfo/oracle_core/gen.rs"
-rationale = "TS7 oracle harness snapshot GENERATOR (#[cfg(feature = \"oracle-gen\")], excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via std::fs — the build/test-time generation step the locked design (docs/arch/u0-oracle-harness-design.md §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not semantic/VFS state — the same category as the consumption driver + tsgo IPC scratch-dir entries."
+rationale = "TS7 oracle harness snapshot GENERATOR (#[cfg(feature = \"oracle-gen\")], excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via std::fs — the build/test-time generation step the locked design (the TS7 oracle contract §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not semantic/VFS state — the same category as the consumption driver + tsgo IPC scratch-dir entries."
 
 [[entries]]
 path = "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs"
@@ -109,7 +109,7 @@ path = "crates/verter_tsgo_api/src/fake_engine.rs"
 rationale = "fake `--api` engine test double — writes a process-id rendezvous file and manages the local IPC pipe/socket file lifecycle so the harness can drive the API protocol off real IPC; real-FS IPC by nature (sibling of `control/advertisement.rs`), never workspace/semantic state"
 [[entries]]
 path = "crates/verter_session/src/typeinfo/oracle_core/relation_driver.rs"
-rationale = "TS7 oracle harness v4 relation_verdict consumption driver (#[cfg(test)] in oracle_core) — loads the checked-in relation snapshot TEST FIXTURES via runtime std::fs::read, the same design-mandated mechanism (docs/arch/u0-oracle-harness-design.md §Q1) the v3 consumption driver above is allowlisted for. Not semantic/VFS state."
+rationale = "TS7 oracle harness v4 relation_verdict consumption driver (#[cfg(test)] in oracle_core) — loads the checked-in relation snapshot TEST FIXTURES via runtime std::fs::read, the same design-mandated mechanism (the TS7 oracle contract §Q1) the v3 consumption driver above is allowlisted for. Not semantic/VFS state."
 
 [[entries]]
 path = "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs"

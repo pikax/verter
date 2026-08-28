@@ -5,7 +5,7 @@
 //! **content-free shape** — no resolver, no walker, no condition-evaluation
 //! semantics. The resolution-matrix walker that consumes them, and the
 //! broken-input taint producers, live in `verter_session::resolver_core`
-//! (see `docs/arch/native-typeinfo-parity-u2-reducers.md`).
+//! (see `.claude/skills/type-resolution/SKILL.md`).
 //!
 //! Two of these types ([`ModuleResolutionMode`] and [`ConditionSet`]) are
 //! resolve-domain ENV inputs: they ride in [`crate::env_hash::EnvHashInputs`]

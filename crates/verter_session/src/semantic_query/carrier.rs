@@ -19,7 +19,7 @@
 //! fences force a new variant to be CLASSIFIED (it fails to compile until
 //! classified), but classification is NOT encapsulation: a future named-struct
 //! carrier with a public `type_args` field could compile and re-open the bind.
-//! Closing that enum-wide is recorded debt (see `docs/arch/parselower-design.md`).
+//! Closing that enum-wide is recorded debt (see `.claude/skills/type-resolution/SKILL.md`).
 //!
 //! STRUCTURAL CONFINEMENT. The sanctioned
 //! crate-visible accessor surface lives INSIDE this module, in the

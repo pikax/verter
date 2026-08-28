@@ -64,7 +64,7 @@ pub fn collect_requested_binding_demands(
 /// PROVEN local by the owner-aware `RootBindingIndex`
 /// (`verter_semantic::analysis::root_binding_index`) — no second
 /// name-visibility re-derivation applies to them (see
-/// `docs/arch/refactor/rev11/evidence/CM1/binding-index-design.md`,
+/// the binding-index design,
 /// "Consumer wiring"). The caller feeds the result directly into
 /// `expand_macro_types_impl_with_expander`'s `binding_entries` — the same
 /// shared local-value-type-expansion primitive `defineExpose` bindings

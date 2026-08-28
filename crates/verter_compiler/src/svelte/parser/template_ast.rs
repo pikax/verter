@@ -305,7 +305,7 @@ pub enum ScriptBodyGrammar {
 /// compiler and Verter reject it with `attribute_duplicate` regardless of which grammar the scan
 /// would pick (behavioral parity is met; the divergent grammar choice never reaches a body parse).
 /// The quoted-`>` lang corner is OUTSIDE the finite lower-case raw-block / lang contract and is
-/// ledgered (owner `svelte-native-parser-parity`, `docs/arch/svelte-native-compiler-plan.md`).
+/// ledgered (owner `svelte-native-parser-parity`, `.claude/skills/compiler-codegen/SKILL.md`).
 #[must_use]
 pub fn script_body_grammar_for_source(source: &str) -> ScriptBodyGrammar {
     if first_script_lang_is_ts(source.as_bytes()) {

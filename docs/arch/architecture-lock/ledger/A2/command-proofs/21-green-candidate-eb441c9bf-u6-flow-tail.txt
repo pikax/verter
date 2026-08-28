@@ -1,2 +1,0 @@
-────────────
-     Summary [   1.935s] 40 tests run: 40 passed, 8664 skipped

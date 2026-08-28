@@ -106,7 +106,7 @@ rather than held.
 Do NOT close this with another per-window gate at an admission site —
 four review rounds of evidence say that closes one instant and reveals
 the next. It closes at the lifecycle-unification cutover:
-[`docs/arch/scheduler-lifecycle-unification-plan.md`](../../../docs/arch/scheduler-lifecycle-unification-plan.md),
+[`.claude/skills/scheduler/SKILL.md`](../../../.claude/skills/scheduler/SKILL.md),
 debt row `SCHED-UNIFY-LIFECYCLE-ATOMICITY`, ruling
 `GB4-S0-DEFER-2026-07-26`, acceptance `SCHED-UNIFY-A1`. The generating
 condition is that `Scheduler.nodes` and `SchedulerDag` are two
@@ -231,7 +231,7 @@ backpressure), and the wiring of `CpuConcurrencySemaphore` onto DAG
 node dispatch. Every section describing those un-landed surfaces carries
 an explicit "Not yet implemented" banner.
 
-Binding implementation spec: `docs/arch/cache-runtime-overhaul-plan.md`
+Binding implementation spec: `.claude/skills/type-cache-architecture/SKILL.md`
 (Blocks 6 and 7). When in doubt, the plan wins; this skill derives from
 the plan body.
 
@@ -350,7 +350,7 @@ UNWIRED — no submission path or work node carries one yet.
 > **Not yet implemented — cache-runtime DAG design.** The `KeyedJob` /
 > `DedupKey` / `CacheNodeDagNode` / `CacheNodeDag` / `submit_dag` types
 > and the whole lifecycle here are the un-landed design target from
-> `docs/arch/cache-runtime-overhaul-plan.md`; none are on the current
+> `.claude/skills/type-cache-architecture/SKILL.md`; none are on the current
 > tree. Live submission surface: `Scheduler::submit_request` /
 > `submit_batch` (returning a `BatchHandle`) over the live `TaskKind` set
 > `Source` / `Analysis` / `Artifact`, dispatched onto the scheduler-owned
@@ -395,7 +395,7 @@ lives on `CacheNodeDagNode.task_kind` only — one source of truth.
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
 > `submit_dag` / `CacheNodeDag` / `SchedulerCpuPool` / per-task
 > `cpu_concurrency_semaphore` lifecycle below is the Block 7 design
-> target from `docs/arch/cache-runtime-overhaul-plan.md`; NOT on the
+> target from `.claude/skills/type-cache-architecture/SKILL.md`; NOT on the
 > current tree. On the current tree the scheduler exposes `submit_request`
 > (no `submit_dag`), the live `TaskKind` set is `Source` / `Analysis` /
 > `Artifact`, and CPU stage work dispatches via the scheduler-owned
@@ -573,7 +573,7 @@ semaphore handle yet.
 > `SchedulerCpuPool` admissions (the `CpuConcurrencySemaphore` handle
 > propagated through `CacheNodeDagNode.cpu_concurrency_semaphore`) are
 > part of the un-landed cache-runtime DAG design target in
-> `docs/arch/cache-runtime-overhaul-plan.md`. The rest of this section
+> `.claude/skills/type-cache-architecture/SKILL.md`. The rest of this section
 > describes that intended design. Once it lands, callers attach the
 > handle to every `CacheNodeDagNode.cpu_concurrency_semaphore` in the
 > batch DAG:
@@ -636,7 +636,7 @@ concurrently.
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
 > expanded `TaskKind` shape below (`Load` / `Parse` / `CacheNode`
 > variants) and the `SchedulerCpuPool::submit` dispatch form are the
-> Block 7 design target from `docs/arch/cache-runtime-overhaul-plan.md`;
+> Block 7 design target from `.claude/skills/type-cache-architecture/SKILL.md`;
 > NOT on the current tree. Wherever a routing bullet below says
 > `SchedulerCpuPool::submit`, the current tree dispatches the equivalent
 > stage work onto `cpu_pool` via `cpu_pool.spawn(...)`. The bullets
@@ -697,7 +697,7 @@ envelope.
 > five-method dispatch surface, the `CacheNodeDispatchCtx` /
 > `execute_cache_node` machinery, and the `Parse` / `CacheNode` / `Load`
 > rows below are the Block 7 design target from
-> `docs/arch/cache-runtime-overhaul-plan.md`; NOT on the current tree. On
+> `.claude/skills/type-cache-architecture/SKILL.md`; NOT on the current tree. On
 > the current tree the `StageExecutor` dispatches the live
 > `TaskKind::Source` / `Analysis` / `Artifact` stages. The surface below
 > describes the intended Block 7 dispatch.
@@ -735,7 +735,7 @@ adapters before writing it on `node.completion`.
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
 > `submit_dag` / `CacheNodeDag` / `submit_batch`-as-DAG-shim surface in
 > this whole section is the Block 7 design target from
-> `docs/arch/cache-runtime-overhaul-plan.md`; NOT on the current tree. On
+> `.claude/skills/type-cache-architecture/SKILL.md`; NOT on the current tree. On
 > the current tree the scheduler exposes `submit_request` (no `submit_dag`
 > and no `CacheNodeDag` envelope), and the live `TaskKind` set is
 > `Source` / `Analysis` / `Artifact` dispatched onto the scheduler-owned
@@ -887,13 +887,13 @@ Contract tests: `crates/verter_scheduler/src/source_root_tests.rs`
 (as-of sealing, atomic publication, lease-gated reclamation, O(1)
 capture) and `crates/verter_session/src/source_root_retention_tests.rs`
 (the `HostStoreView` lease at the host boundary). Normative text:
-`docs/arch/path-precise-resolution-currency.md` → "An immutable root is
+`docs/contributing/path-precise-resolution-currency.md` → "An immutable root is
 also a retention lease".
 
 ## Scheduler surface (current → Block 7 planned)
 
 The right column is the Block 7 cache-runtime design target from
-`docs/arch/cache-runtime-overhaul-plan.md`; NOT on the current tree. The
+`.claude/skills/type-cache-architecture/SKILL.md`; NOT on the current tree. The
 left column is the live surface.
 
 | Method | Current | Block 7 (planned) |
@@ -943,7 +943,7 @@ routing rules.)
 > `last_dispatched_task`, `LastDispatchedTaskRecorder`, the `KeyedJob` /
 > `CacheNodeDagNode` / `DedupKey` / `SchedulerCacheId` stubs, etc. — is
 > the Block 7 design target from
-> `docs/arch/cache-runtime-overhaul-plan.md` and is NOT on the current
+> `.claude/skills/type-cache-architecture/SKILL.md` and is NOT on the current
 > tree. The helpers below describe the intended Block 7 test surface.
 
 The crate gates a small set of fixture helpers behind
@@ -983,5 +983,5 @@ See also:
 - `.claude/skills/host-session/SKILL.md` — host-side ownership.
 - `.claude/skills/type-cache-architecture/SKILL.md` — the substrate
   the scheduler dispatches into; defines `DedupeHook` consumers.
-- `docs/arch/cache-runtime-overhaul-plan.md` — the plan that landed
+- `.claude/skills/type-cache-architecture/SKILL.md` — the plan that landed
   the cache-runtime + scheduler integration (Blocks 6, 7).

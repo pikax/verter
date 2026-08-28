@@ -1,7 +1,7 @@
 # tsgo `--api` capability gate
 
 This is the **reproducible capability gate** for the external-TS-engine architecture
-(`docs/arch/external-ts-engine-architecture.md`, "Block 0"). It proves that an
+(the external TypeScript engine contract, "Block 0"). It proves that an
 **off-disk generated TSX "carrier"** — served only through the tsgo `--api` FS-overlay
 callbacks, **never written to disk** — becomes a real member of a configured TypeScript
 project driven by the **user-installed** TS≥7 distribution, so the real `tsconfig.json`

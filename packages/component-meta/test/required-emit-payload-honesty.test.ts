@@ -34,7 +34,7 @@ describe("required emit payload honesty (native)", () => {
     const checker = await getChecker();
     // The imported `ImportedEmits { save: [id: number] }` payload is the
     // faithful normalized closed tuple — the emit payload authority (see
-    // docs/arch/stage10-b6-p4b-debt-rows.md DEBT ROW #1, CLOSED — not
+    // .claude/skills/component-meta/SKILL.md DEBT ROW #1, CLOSED — not
     // carried on this branch). The native query completes and the payload
     // is the REAL `[id: number]` tuple, never a typed failure and never a
     // fabricated `unknown`.

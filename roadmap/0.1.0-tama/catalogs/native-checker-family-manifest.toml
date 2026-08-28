@@ -1,0 +1,457 @@
+schema = 1
+product = "native_checker"
+generator_owner = "NCK4"
+promotion_owner = "NCK6"
+family_convergence_owner = "NCKF0"
+terminal_owner = "NCK8"
+required_default = true
+
+[[slice]]
+id = "NCF-BD-SCOPE"
+family = "binding-and-declarations"
+name = "Lexical scope, shadowing, and name binding diagnostics"
+required = true
+predecessors = ["NCK6", "IDX0"]
+scope = "lexical/module/function/class/block/catch/parameter scope construction, shadowing, unresolved names, temporal visibility, and namespace selection"
+fact_sources = ["canonical symbol/declaration identity", "scope and binding tables", "source-order/region identity", "module/global environment facts"]
+example_obligations = ["unresolved identifier", "illegal shadowing/capture", "wrong value/type namespace", "scope leakage across regions"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-BD-DUP"
+family = "binding-and-declarations"
+name = "Duplicate and conflicting declaration diagnostics"
+required = true
+predecessors = ["NCK6", "IDX0", "D8"]
+scope = "duplicate declarations, conflicting symbol kinds, incompatible merged declarations, duplicate parameters/members, and declaration-order conflicts"
+fact_sources = ["merged declaration authority", "symbol namespace/kind facts", "relation proofs for compatibility", "module/global augmentation facts"]
+example_obligations = ["duplicate block binding", "conflicting interface/property merge", "duplicate private name", "illegal value/type merge"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-BD-INIT"
+family = "binding-and-declarations"
+name = "Use-before-declaration and initialization diagnostics"
+required = true
+predecessors = ["NCK6", "D8", "IDX0"]
+scope = "temporal dead zones, use before assignment, initialization ordering, parameter/property initializer visibility, and module initialization hazards"
+fact_sources = ["executable-region graph", "declaration/initialization facts", "flow reachability and definite-assignment facts", "module dependency order"]
+example_obligations = ["block-scoped use before declaration", "property used before initialization", "parameter initializer forward reference", "module cycle initialization hazard"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-RO-ASSIGN"
+family = "relations-and-operators"
+name = "Assignment and return assignability diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "assignment, variable initialization, return/yield/awaited return, destructuring, argument/result relation sites, and satisfies assertions"
+fact_sources = ["Relate outcomes and proofs", "contextual target types", "FlowReturn/awaited/generator facts", "source semantic subjects"]
+example_obligations = ["incompatible initializer", "wrong return type", "invalid destructuring target", "failed satisfies relation"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-RO-OPER"
+family = "relations-and-operators"
+name = "Operator and property/index access diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "unary/binary/logical/comparison/operator applicability, property access, element access, optional chaining, delete/in/instanceof/typeof semantics"
+fact_sources = ["resolved operand types", "operator applicability relation proofs", "object/member/index signatures", "flow narrowing and optionality facts"]
+example_obligations = ["operator on incompatible operands", "missing property", "invalid index type", "possibly null/undefined access"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-RO-EXCESS"
+family = "relations-and-operators"
+name = "Freshness, excess-property, and object conformance diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "fresh object literal checks, excess properties, weak targets, exactness/freshness, spread interactions, discriminated object conformance, and contextual object sites"
+fact_sources = ["object projection facts", "freshness/contextual typing state", "Relate proofs", "spread/correlation evidence"]
+example_obligations = ["unknown object literal property", "weak target no common properties", "spread-induced excess behavior", "discriminant mismatch"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-CO-CALL"
+family = "calls-overloads-inference"
+name = "Call, construct, tag, and invocation applicability diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "function/method/constructor/tagged-template/new/call signatures, arity, optional/rest parameters, this argument, and callable/constructable checks"
+fact_sources = ["ResolveCall result", "signature/this/parameter facts", "argument contextual types", "relation proofs"]
+example_obligations = ["not callable/constructable", "wrong arity", "argument mismatch", "invalid this context"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-CO-OVER"
+family = "calls-overloads-inference"
+name = "Overload resolution and implementation conformance diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "overload candidate applicability, ambiguity, best-signature selection, implementation signature compatibility, and overload declaration ordering"
+fact_sources = ["ResolveOverloadSet/ResolveCall proofs", "signature identity/effects", "relation and inference sessions", "declaration merge/order facts"]
+example_obligations = ["no overload matches", "ambiguous call", "implementation incompatible with overload", "invalid overload ordering"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-CO-INFER"
+family = "calls-overloads-inference"
+name = "Generic inference, constraints, defaults, and instantiation diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "type argument count, constraint satisfaction, inference failure, NoInfer/const/default parameters, partial inference, and generic instantiation depth/budget"
+fact_sources = ["inference session result/evidence", "type parameter constraints/defaults/variance", "Relate proofs", "instantiation cycle/budget facts"]
+example_obligations = ["type argument violates constraint", "cannot infer type parameter", "wrong type argument count", "excessive instantiation"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-CF-CONTEXT"
+family = "contextual-functions-this"
+name = "Contextual typing and expression conformance diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "contextual object/array/function/JSX expression typing, best common type, contextual return/parameter typing, and context loss or mismatch"
+fact_sources = ["ContextualTypeAt", "expression observed types", "Relate proofs", "inference/call context"]
+example_obligations = ["contextual callback mismatch", "array/object contextual incompatibility", "implicit any due missing context", "context-sensitive union failure"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-CF-VAR"
+family = "contextual-functions-this"
+name = "Function variance, predicate, assertion, and effect diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "parameter/return variance, strictFunctionTypes behavior, predicates, assertion signatures, async/generator effects, and override callable compatibility"
+fact_sources = ["signature effects and variance", "Relate proofs", "FlowReturn", "override/implementation edges"]
+example_obligations = ["unsafe parameter variance", "invalid predicate target/type", "assertion signature misuse", "async/generator return mismatch"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-CF-THIS"
+family = "contextual-functions-this"
+name = "This, super, private environment, and call-context diagnostics"
+required = true
+predecessors = ["NCK6", "D8", "IDX0"]
+scope = "this parameter/context, super call/property ordering, derived constructor initialization, static/instance context, private fields, and lexical this"
+fact_sources = ["This/call context facts", "class/heritage/private environment", "flow initialization/reachability", "relation/member facts"]
+example_obligations = ["this before super", "super outside derived class", "private field access violation", "wrong this argument"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-FD-NARROW"
+family = "flow-and-definite-assignment"
+name = "Control-flow narrowing and impossible-condition diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "typeof/instanceof/in/equality/truthiness/discriminant/user-predicate narrowing, unreachable branches from impossible conditions, and narrowing invalidation"
+fact_sources = ["FlowNarrowingAt and ProgramAnalysisGraph", "relation/comparability proofs", "assignment/capture effects", "flow graph edges"]
+example_obligations = ["condition always true/false", "unreachable narrowed branch", "invalid discriminant comparison", "stale narrowing after assignment/call"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-FD-DEF"
+family = "flow-and-definite-assignment"
+name = "Definite assignment and initialization coverage diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "local/class property definite assignment, constructor paths, loop/try/finally assignment, captured writes, and use-before-assigned checks"
+fact_sources = ["flow fixed points/completion algebra", "assignment facts", "constructor/field initialization regions", "capture freshness/effects"]
+example_obligations = ["variable used before assigned", "strict property initialization failure", "assignment missing on one path", "finally invalidates coverage"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-FD-CFLOW"
+family = "flow-and-definite-assignment"
+name = "Reachability, return coverage, and control-flow legality diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "unreachable code, missing returns, not-all-paths-return, break/continue/labels, switch exhaustiveness/fallthrough, try/finally completion, and async/generator completion"
+fact_sources = ["Function/ExecutableRegion flow graph", "FlowReturn", "completion algebra", "loop/switch/label region facts"]
+example_obligations = ["not all paths return", "unreachable statement", "illegal break/continue", "non-exhaustive discriminated switch"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-OC-MEM"
+family = "objects-classes-merging"
+name = "Object, class, interface, and member declaration diagnostics"
+required = true
+predecessors = ["NCK6", "IDX0", "D8"]
+scope = "member duplicates, accessor/property/method compatibility, optional/readonly/static/private rules, index signatures, computed names, and constructor/member declarations"
+fact_sources = ["class/object/member surfaces", "symbol/declaration merge facts", "Relate proofs", "private environment and computed-name facts"]
+example_obligations = ["duplicate member", "getter/setter type mismatch", "invalid index signature/member", "private/static modifier misuse"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-OC-HERIT"
+family = "objects-classes-merging"
+name = "Heritage, override, abstract, and implementation diagnostics"
+required = true
+predecessors = ["NCK6", "IDX0", "D8"]
+scope = "extends/implements constraints, override compatibility, abstract members/classes, constructor/base compatibility, cyclic heritage, mixins, and protected/private nominal restrictions"
+fact_sources = ["heritage/override target edges", "class/interface surfaces", "Relate/variance proofs", "cycle facts"]
+example_obligations = ["incorrectly implements interface", "override incompatible/missing override", "non-abstract class missing member", "cyclic base type"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-OC-MERGE"
+family = "objects-classes-merging"
+name = "Enums, namespaces, ambient declarations, and declaration merging diagnostics"
+required = true
+predecessors = ["NCK6", "IDX0", "D8"]
+scope = "enum value/type rules, namespace/value/type merging, ambient/module/global declarations, augmentation legality, merge ordering, and duplicate exported surfaces"
+fact_sources = ["merged declarations", "enum value/type facts", "ambient/module/global augmentation authority", "module/export index facts"]
+example_obligations = ["invalid enum initializer/member access", "illegal namespace merge", "ambient initializer error", "invalid augmentation target"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-MP-MODULE"
+family = "modules-and-projects"
+name = "Module resolution, import/export, and package-boundary diagnostics"
+required = true
+predecessors = ["NCK6", "IDX0", "TCM4"]
+scope = "module specifier resolution, import/export forms, missing exports, type-only/value usage, CommonJS/ESM interop, package exports/imports, and resolution-mode compatibility"
+fact_sources = ["ModuleResolverCore results and proofs", "canonical paths/source lineage", "export graph/index", "project/compiler option environment"]
+example_obligations = ["cannot find module", "module has no exported member", "type-only import used as value", "ESM/CommonJS mode violation"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-MP-AUG"
+family = "modules-and-projects"
+name = "Module/global augmentation and cross-file declaration diagnostics"
+required = true
+predecessors = ["NCK6", "IDX0", "TCM4", "D8"]
+scope = "augmentation target existence, external-module context, duplicate/incompatible augmented members, global augmentation placement, and cross-file merge visibility"
+fact_sources = ["module/global augmentation facts", "merged declaration authority", "project membership/index", "Relate proofs"]
+example_obligations = ["invalid module augmentation name", "global augmentation outside module", "incompatible augmented property", "augmentation not visible in project"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-MP-PROJECT"
+family = "modules-and-projects"
+name = "Project references, configuration, library, and program diagnostics"
+required = true
+predecessors = ["NCK6", "IDX0", "TCM4", "PUB0"]
+scope = "project/reference graph, root/include/exclude membership, declaration/output/config compatibility, lib/type acquisition inputs, duplicate source inclusion, and project-cycle diagnostics"
+fact_sources = ["project graph/membership indexes", "captured configuration and environment", "source identity/outputs", "provider/native capability requirements"]
+example_obligations = ["project reference cycle", "file outside root/include", "incompatible composite/declaration settings", "missing lib/type inputs"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-AT-QUERY"
+family = "advanced-types"
+name = "Keyof, indexed access, type query, alias, and reference diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "invalid type/value queries, key/index constraints, alias/type parameter use, qualified names, unique symbols, and type argument application at type sites"
+fact_sources = ["KeyOf/IndexedAccess/TypeOf/ProjectPath reducers", "symbol/type namespace facts", "relation constraints", "alias/reference identity"]
+example_obligations = ["value used as type/type used as value", "invalid indexed access key", "generic type requires arguments", "unique symbol misuse"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-AT-REDUCE"
+family = "advanced-types"
+name = "Mapped, conditional, infer, template-literal, and utility-type diagnostics"
+required = true
+predecessors = ["NCK6", "D8"]
+scope = "mapped/conditional/template reduction legality, infer placement, modifier/name remapping, distributivity, utility constraints, and reduction budget/degradation"
+fact_sources = ["mapped/conditional/template reducers", "inference/relation proofs", "type parameter and key domains", "cycle/budget evidence"]
+example_obligations = ["infer outside conditional", "invalid mapped key remap", "utility constraint failure", "excessive reduction depth"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-AT-CYCLE"
+family = "advanced-types"
+name = "Recursive type, instantiation cycle, and complexity diagnostics"
+required = true
+predecessors = ["NCK6", "D8", "G2"]
+scope = "recursive aliases, circular base/constraint/default/reference relationships, excessive instantiation, query depth, union/intersection complexity, and cycle-safe degradation"
+fact_sources = ["CheckerReentryGraph/cycle IDs", "instantiation/query budgets", "type dependency graph", "complete/partial admission evidence"]
+example_obligations = ["type alias circularly references itself", "base/constraint cycle", "excessively deep instantiation", "complex union representation limit"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-JF-JSX"
+family = "jsx-and-frameworks"
+name = "JSX intrinsic/component, props, children, and attribute diagnostics"
+required = true
+predecessors = ["NCK6", "NCK5", "IDX0", "D8"]
+scope = "JSX element/tag resolution, intrinsic/component callability, props/attributes/spreads, children, refs/events, namespaces, and JSX runtime/configuration"
+fact_sources = ["JSX semantic surfaces and call resolution", "component/intrinsic contracts", "Relate/contextual proofs", "module/config/runtime facts"]
+example_obligations = ["unknown intrinsic/component", "missing/invalid prop", "invalid children/ref/event", "wrong JSX runtime namespace"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-JF-VUE"
+family = "jsx-and-frameworks"
+name = "Vue template and component-contract diagnostics"
+required = true
+predecessors = ["NCK6", "NCK5", "IDX0", "D8"]
+scope = "Vue template regions, local/global components, directives, props/emits/events/slots/models/refs, template narrowing, and custom-element exclusions"
+fact_sources = ["Vue SemanticContributionBatch", "component contracts/global registrations", "template executable regions/contextual/narrowing facts", "shared relation/call proofs"]
+example_obligations = ["unknown/missing/wrong prop", "unknown event/slot/directive/component", "template expression type error", "global component/custom element resolution"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-JF-SVELTE"
+family = "jsx-and-frameworks"
+name = "Svelte template, rune, event, slot/snippet, and component-contract diagnostics"
+required = true
+predecessors = ["NCK6", "NCK5", "IDX0", "D8"]
+scope = "Svelte template regions, runes/reactivity, props/events/bindings/actions/transitions/snippets/slots, await/each/control narrowing, and component contracts"
+fact_sources = ["Svelte SemanticContributionBatch", "component contracts and template regions", "reactivity/flow/contextual facts", "shared relation/call proofs"]
+example_obligations = ["invalid binding/event/action/transition", "rune misuse", "snippet/slot/component contract mismatch", "template expression/narrowing error"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-JD-JS"
+family = "javascript-jsdoc-decorators"
+name = "JavaScript and CommonJS semantic diagnostics"
+required = true
+predecessors = ["NCK6", "PAR0", "IDX0", "D8"]
+scope = "checkJs JavaScript semantics, CommonJS imports/exports, constructor/prototype patterns, property inference, implicit any, and JS-specific assignment/call behavior"
+fact_sources = ["JS parser/lowering facts", "CommonJS module/export graph", "shared relation/call/flow facts", "captured checkJs/config environment"]
+example_obligations = ["implicit any in checked JS", "invalid prototype/property use", "CommonJS export/import mismatch", "constructor/call mismatch"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-JD-JSDOC"
+family = "javascript-jsdoc-decorators"
+name = "JSDoc type, template, import, and tag diagnostics"
+required = true
+predecessors = ["NCK6", "PAR0", "IDX0", "D8"]
+scope = "JSDoc type parsing/resolution, @template/@param/@returns/@type/@typedef/@import tags, tag placement, duplicate/missing tags, and JS declaration conformance"
+fact_sources = ["dedicated JSDoc parse path", "symbol/type/module resolution", "signature/declaration facts", "Relate proofs"]
+example_obligations = ["unresolved/invalid JSDoc type", "tag/parameter mismatch", "invalid template constraint/default", "JSDoc import/typedef conflict"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2
+
+[[slice]]
+id = "NCF-JD-DEC"
+family = "javascript-jsdoc-decorators"
+name = "Decorator, metadata, and auto-accessor diagnostics"
+required = true
+predecessors = ["NCK6", "PAR0", "D8"]
+scope = "legacy/standard decorator applicability, decorator call signatures/return types/context, emit metadata constraints, parameter/property/class decorators, and auto-accessor semantics"
+fact_sources = ["decorator executable regions and resolved calls", "class/member surfaces", "configuration/emit metadata environment", "Relate/contextual proofs"]
+example_obligations = ["decorator not callable", "wrong decorator return/context", "invalid parameter decorator location", "auto-accessor/decorator incompatibility"]
+oracle = "pinned-tsgo-diagnostic-oracle"
+correction_overlay = "review-gated-single-spec-overlay"
+max_production_loc = 800
+max_production_files = 8
+max_related_packages = 2

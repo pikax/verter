@@ -211,7 +211,7 @@ pub fn resolve_custom_element_expr(
 /// into the comment, so no closing `}` is found and the span runs to true EOF. The required
 /// `eat('}', true)` is therefore missing → `expected_token` (the upstream compiler reaches its
 /// `js_parse_error` along a different path; both REJECT, and the exact-code divergence is recorded
-/// in the parser-parity debt ledger — see `docs/arch/svelte-native-compiler-plan.md`).
+/// in the parser-parity debt ledger — see `.claude/skills/compiler-codegen/SKILL.md`).
 ///
 /// [`find_matching_brace_in`]: super::tokenizer_scan::find_matching_brace_in
 pub(super) fn is_only_expression_trivia(rest: &str) -> bool {

@@ -1,5 +1,5 @@
 //! `oracle_query_specs_is_pure_data` + `registry_in_src_carries_oracle_family`
-//! (tests-side half), `docs/arch/u0-oracle-harness-design.md` §Q4 / §4.
+//! (tests-side half), the TS7 oracle contract §Q4 / §4.
 //!
 //! The oracle-query-spec registry lives in `src/typeinfo/typeinfo_tests/` so the
 //! lifted UNIT tests reach it; this `tests/` integration guard reaches the SAME

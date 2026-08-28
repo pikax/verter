@@ -4,7 +4,7 @@
 //! `typeinfo_additional_proof_rows.rs`, `typeinfo_parity_blocks.rs`,
 //! `typeinfo_guard_registry.rs`, `typeinfo_guard_registry_lib.rs` under
 //! `crates/verter_session/tests/cases/manifest_data/`, plus
-//! `docs/arch/typeinfo-row-registry-counts.md`) is produced from
+//! `docs/generated/typeinfo-row-registry-counts.md`) is produced from
 //! `scripts/gen-typeinfo-ignore-manifest.mjs`
 //! (`pnpm gen:typeinfo-manifest`) — the SOLE writer of all of them.
 //! The authoritative append-only row registry at

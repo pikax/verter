@@ -6,8 +6,8 @@
       "block": "U0.MANIFEST_SUBSTRATE",
       "status": "landing_unverified",
       "evidence": [
-        "doc:docs/arch/native-typeinfo-parity.md#10.3 (LANDED SHAPE (U0-FINISH-B))",
-        "doc:docs/arch/native-typeinfo-parity-u2-reducers.md (STATUS: (1) landed under U0-FINISH-B)"
+        "doc:.claude/skills/type-resolution/SKILL.md#10.3 (LANDED SHAPE (U0-FINISH-B))",
+        "doc:.claude/skills/type-resolution/SKILL.md (STATUS: (1) landed under U0-FINISH-B)"
       ]
     },
     {
@@ -79,7 +79,7 @@
       "block": "U2.MODULE_AUGMENTATION",
       "status": "landing_unverified",
       "evidence": [
-        "doc:docs/arch/next/semantic-db-overhaul-unified-remaining-plan.md (codex STEP-0 ruling SPINEMODAUG: what U2.MODULE_AUGMENTATION actually landed, branch mom/u2-module-aug)"
+        "doc:.claude/skills/type-resolution/SKILL.md (codex STEP-0 ruling SPINEMODAUG: what U2.MODULE_AUGMENTATION actually landed, branch mom/u2-module-aug)"
       ]
     },
     {
@@ -189,7 +189,7 @@
       "block": "U3.ADAPTIVE_FAMILY_RETENTION",
       "status": "landing_unverified",
       "evidence": [
-        "doc:docs/arch/next/semantic-db-overhaul-unified-remaining-plan.md (Landed bridge block — U3.ADAPTIVE_FAMILY_RETENTION (LANDED))",
+        "doc:.claude/skills/type-resolution/SKILL.md (Landed bridge block — U3.ADAPTIVE_FAMILY_RETENTION (LANDED))",
         "guards:crates/verter_session/tests/cases/g_family/family_slots_multi_candidate.rs"
       ]
     },

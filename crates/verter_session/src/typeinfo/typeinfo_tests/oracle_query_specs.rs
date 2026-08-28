@@ -1,6 +1,6 @@
 // The oracle-query-spec registry: the machine-readable, checked-in source of
 // truth for the executable query payloads a lifted `TypeExpr`-projection row
-// issues (`docs/arch/u0-oracle-harness-design.md` §Q4).
+// issues (the TS7 oracle contract §Q4).
 //
 // The manifest is a CLOSED ROW LEDGER and carries no executable query payload;
 // one row can issue N queries. This registry moves the payloads OFF the test
@@ -1184,7 +1184,7 @@ const fn value_inference_spec(row_function: &'static str, symbol: &'static str) 
 /// `this`-receiver rows, the `U6.FLOW_RETURN_SUBSTRATE` block-callback
 /// `ComputedBlockValue` value-inference lift, and the seven sibling
 /// call-site lifts in `function_advanced.rs` / `const_type_param.rs`)
-/// (`docs/arch/ts-compat-two-mode-model.md`, `docs/arch/u0-oracle-harness-design.md`).
+/// (the TS7 oracle contract, the TS7 oracle contract).
 #[allow(dead_code)]
 pub(crate) const ORACLE_QUERY_SPECS: &[QuerySpec] = &[
     index_signature_publication_spec(
@@ -2471,7 +2471,7 @@ pub(crate) const LIFTED_ROW_MIGRATIONS: &[LiftMigrationProvenance] = &[
 
 // ---------------------------------------------------------------------------
 // The v4 `relation_verdict` query-spec registry (the relation-tuple-wire
-// capture family — `docs/arch/ri0-relation-verdict-oracle-addendum.md` §4)
+// capture family — the TS7 oracle contract §4)
 // ---------------------------------------------------------------------------
 //
 // The SECOND closed value family's registry. Relation rows are CAPTURE-ONLY NEW

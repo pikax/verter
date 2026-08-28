@@ -8137,7 +8137,7 @@ pub(crate) mod foundations_guards {
         // the case-insensitive cited `tracked as row <id>` form, and the
         // case-sensitive bare `ROW <id>` scan.
         // Real-form citation — all three signals fire on this line.
-        "// stamping a fresh generation is deferred (tracked as ROW F3 in `docs/arch/external-ts-engine-architecture.md`).",
+        "// stamping a fresh generation is deferred (tracked as ROW F3 in the external TypeScript engine contract).",
         // Cited uppercase form without the `deferred` prefix — fires (b1) + (b2).
         "// (tracked as ROW E5): making the prune waiter-aware is a follow-up.",
         // Bare standalone id, no citation verb — pins the case-sensitive (b2) scan.
@@ -9199,7 +9199,7 @@ pub(crate) mod foundations_guards {
         ),
         (
             "crates/verter_session/src/typeinfo/oracle_core/driver.rs",
-            "TS7 oracle harness consumption driver (`#[cfg(test)] mod typeinfo_tests`) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime `std::fs::read`, the mechanism the locked design (docs/arch/u0-oracle-harness-design.md §Q1) mandates and the `snapshot_loading_is_runtime_fs` guard pins. Not a NativeFs/VFS disk-boundary bypass — it reads in-repo test fixtures, never workspace/semantic state.",
+            "TS7 oracle harness consumption driver (`#[cfg(test)] mod typeinfo_tests`) — loads checked-in snapshot TEST FIXTURES + re-enumerates the vendored env corpus via runtime `std::fs::read`, the mechanism the locked design (the TS7 oracle contract §Q1) mandates and the `snapshot_loading_is_runtime_fs` guard pins. Not a NativeFs/VFS disk-boundary bypass — it reads in-repo test fixtures, never workspace/semantic state.",
         ),
         (
             "crates/verter_session/src/typeinfo/typeinfo_tests/oracle_gen_spike.rs",
@@ -9207,15 +9207,15 @@ pub(crate) mod foundations_guards {
         ),
         (
             "crates/verter_session/src/bin/oracle_lift.rs",
-            "TS7 oracle harness AUDITED LIFT COMMAND (`#[bin]` behind `required-features = [\"oracle-lift\"]`, excluded from the default build and the default gate). Reads the ORIGINAL `#[ignore]`d row body and the checked-in snapshot TEST FIXTURES, and rewrites the row source + the retained `LIFTED_ROW_MIGRATIONS` provenance table via `std::fs` — the build/test-time lift step the locked design (docs/arch/u0-oracle-harness-design.md §Q4) mandates. Repository tooling over in-repo source + test fixtures, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+            "TS7 oracle harness AUDITED LIFT COMMAND (`#[bin]` behind `required-features = [\"oracle-lift\"]`, excluded from the default build and the default gate). Reads the ORIGINAL `#[ignore]`d row body and the checked-in snapshot TEST FIXTURES, and rewrites the row source + the retained `LIFTED_ROW_MIGRATIONS` provenance table via `std::fs` — the build/test-time lift step the locked design (the TS7 oracle contract §Q4) mandates. Repository tooling over in-repo source + test fixtures, not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
         (
             "crates/verter_session/src/typeinfo/oracle_core/gen.rs",
-            "TS7 oracle harness snapshot GENERATOR (`#[cfg(feature = \"oracle-gen\")]`, excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via `std::fs` — the build/test-time generation step the locked design (docs/arch/u0-oracle-harness-design.md §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
+            "TS7 oracle harness snapshot GENERATOR (`#[cfg(feature = \"oracle-gen\")]`, excluded from the default gate). Seeds a hermetic temp tsgo sandbox + WRITES the checked-in snapshot TEST FIXTURES + enumerates/copies the vendored env corpus via `std::fs` — the build/test-time generation step the locked design (the TS7 oracle contract §2, §4) mandates. External-tool scaffolding (tsgo cannot read Verter's in-memory VFS), not a NativeFs/VFS disk-boundary bypass — never workspace/semantic state.",
         ),
         (
             "crates/verter_session/src/typeinfo/oracle_core/relation_driver.rs",
-            "TS7 oracle harness v4 `relation_verdict` consumption driver (`#[cfg(test)]` in oracle_core) — loads the checked-in relation snapshot TEST FIXTURES via runtime `std::fs::read`, the same design-mandated mechanism (docs/arch/u0-oracle-harness-design.md §Q1) the v3 consumption driver above is listed for. Not a NativeFs/VFS disk-boundary bypass — in-repo test fixtures, never workspace/semantic state.",
+            "TS7 oracle harness v4 `relation_verdict` consumption driver (`#[cfg(test)]` in oracle_core) — loads the checked-in relation snapshot TEST FIXTURES via runtime `std::fs::read`, the same design-mandated mechanism (the TS7 oracle contract §Q1) the v3 consumption driver above is listed for. Not a NativeFs/VFS disk-boundary bypass — in-repo test fixtures, never workspace/semantic state.",
         ),
         (
             "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs",
@@ -22597,7 +22597,7 @@ fn trait_impl_is_allowlisted(trait_path: &syn::Path, self_name: Option<&str>) ->
 /// `clone::Clone`/`fmt::Debug` module shape AND an inline `mod std` placed inside the
 /// trusted private producer module, far beyond an accidental contributor duplication. It
 /// is accepted as relying on review rather than escalating the source scanner further
-/// (the producer-confinement record lives in `docs/arch/parselower-design.md`).
+/// (the producer-confinement record lives in `.claude/skills/type-resolution/SKILL.md`).
 fn macro_arg_producer_trait_exposure_violations(src: &str) -> Vec<String> {
     let file = match syn::parse_file(src) {
         Ok(f) => f,
@@ -24122,7 +24122,7 @@ mod component_meta_scope_shadowing_memo {
 /// Universal confinement of ALL THREE classes belongs to the tracked structural
 /// end-state, NOT this scanner: the shared-`ResolverContext` per-scope memo that
 /// lets the constructors seal to `pub(in crate::resolver_core)`, recorded in
-/// `docs/arch/scope-shadowing-memo-structural-deferral.md`. An OBSERVED such
+/// `.claude/skills/type-resolution/SKILL.md`. An OBSERVED such
 /// evasion is a laundering escape that freezes the scanner per
 /// Structural-Confinement-First and makes that structural migration the required
 /// fix.

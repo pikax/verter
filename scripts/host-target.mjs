@@ -3,9 +3,8 @@
 //
 // Used so every host-artifact build command (NAPI, LSP) passes the SAME
 // explicit `--target` instead of some passing it implicitly (napi build)
-// and others omitting it (a bare `cargo build`) — see the "one explicit
-// host target" rule in
-// docs/arch/refactor/rev11/rulings/MAINTAINER-DIRECTIVE-BUILD-LANE-SEPARATION.md.
+// and others omitting it (a bare `cargo build`) — the "one explicit host
+// target" rule.
 //
 // Node stdlib only, no hardcoded per-OS triple table: the triple comes from
 // the toolchain actually installed, so it is correct on any platform/arch
