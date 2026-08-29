@@ -888,6 +888,10 @@ pub struct ObligationRuntime {
     flow_obligations: Vec<flow_obligation_state::FlowObligationRecord>,
     #[cfg(any(test, feature = "test-support"))]
     flow_convergence: Option<flow_obligation_state::FlowConvergenceObservation>,
+    /// The one-shot lifecycle phase of the installed flow demand
+    /// (Discharging → ExpansionClosed → Converging → Converged → Sealed).
+    #[cfg(any(test, feature = "test-support"))]
+    flow_phase: flow_obligation_state::FlowDemandPhase,
 }
 
 impl ObligationRuntime {
@@ -972,19 +976,30 @@ impl ObligationRuntime {
 /// The typed flow-solve obligation state of the ONE obligation runtime:
 /// the completeness-proof layer's state machine and evidence carriers —
 /// records ON [`ObligationRuntime`] itself, never a peer ledger.
+///
+/// Every installed demand runs the one-shot lifecycle
+/// `Discharging → ExpansionClosed → Converging → Converged → Sealed`:
+/// obligations transition only before convergence begins, convergence may
+/// be observed only once the expansion frontier is closed AND every
+/// required obligation is Discharged, a dependent obligation discharges
+/// only after its exact dependencies are themselves Discharged, sealing
+/// takes `&mut self` and mints the ONE artifact (a repeat is
+/// `AlreadySealed`), and every post-seal transition fails.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod flow_obligation_state {
     use std::sync::Arc;
 
     use verter_identity::identity::{InputBasisId, ResultContractId};
     use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
-    use verter_semantic::analysis::flow::{SkeletonBindingId, SkeletonBindingKind};
+    use verter_semantic::analysis::flow::{
+        SkeletonBindingId, SkeletonBindingKind, SkeletonExprSiteId, SkeletonRegionId,
+    };
     use verter_semantic::analysis::function_program::FlowBindingIdentity;
 
     use super::super::flow_solve::{
-        flow_operation_contract, require_registered_flow_requirement, FlowConvergencePolicy,
-        FlowDemandBasis, FlowDemandPlan, FlowDemandSubject, FlowExpansionRule, FlowFailure,
-        FlowOperationRole, FlowRequirement,
+        flow_family_route, flow_operation_contract, require_registered_flow_requirement,
+        FlowConvergencePolicy, FlowDemandBasis, FlowDemandPlan, FlowDemandSubject,
+        FlowExpansionRule, FlowFactFamily, FlowFailure, FlowOperationRole, FlowRequirement,
     };
     use crate::semantic_query::{FlowGap, FlowReturnResult, SemanticQueryKeyTag};
 
@@ -1008,19 +1023,24 @@ pub(crate) mod flow_obligation_state {
     /// The mandatory closed semantic identity of one planned obligation:
     /// every obligation names exactly the semantic subject it proves
     /// something about — the demand root and its derived program point,
-    /// one graph site, one binding hub, or one full selected edge.
-    /// `UnmodeledBinding` is the fail-closed arm: the graph identity is
-    /// real, but the binding's kind has no cross-frame identity (a local
-    /// class / enum / namespace / catch / type-only or destructured
-    /// binding), so the obligation installs directly in `Gap` — never
-    /// with a fabricated slot.
+    /// a family-coverage enumeration, one graph site, one binding hub,
+    /// one call occurrence, one guard, one dynamic fact of a call
+    /// expansion event, one capture subject, or one full selected edge.
+    /// `UnmodeledBinding` and `Capture` are fail-closed arms: they install
+    /// directly in `Gap` — never with a fabricated identity, never an
+    /// omission.
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FlowObligationBasis {
         /// Anchored at the demand root: the program point derived from
         /// the query's own demand axis.
         DemandRoot { subject: FlowDemandSubject },
-        /// A graph site node (expression site, return site, region).
+        /// The family-coverage obligation of one required fact family:
+        /// discharging it asserts the family's subject enumeration was
+        /// EXHAUSTIVE — "proved empty" when the family has no concrete
+        /// instances, never "planner forgot the family".
+        FamilyCoverage { family: FlowFactFamily },
+        /// A graph site node (a return site).
         Site { node: FlowNodeId, kind: FlowNodeKind },
         /// A binding hub: the graph node plus the real slot identity.
         Binding { node: FlowNodeId, slot: FlowBindingBasis },
@@ -1028,6 +1048,22 @@ pub(crate) mod flow_obligation_state {
         UnmodeledBinding { node: FlowNodeId, binding: SkeletonBindingId, kind: SkeletonBindingKind },
         /// One full selected edge: endpoints, class, and source ordinal.
         Edge { from: FlowNodeId, to: FlowNodeId, class: FlowEdgeClass, ordinal: u32 },
+        /// ONE call occurrence: the expression site plus the call ordinal
+        /// within it — every concrete occurrence has its own identity.
+        CallSite { node: FlowNodeId, site: SkeletonExprSiteId, call_ordinal: u32 },
+        /// A guard predicate anchored on exactly (region, control input).
+        Guard { node: FlowNodeId, region: SkeletonRegionId, control_input: SkeletonExprSiteId },
+        /// The contextual target of one expression site.
+        ContextualTarget { node: FlowNodeId, site: SkeletonExprSiteId },
+        /// A dynamic semantic relation anchored on the registered
+        /// call-expansion event that produced it (the call occurrence).
+        SemanticRelation { node: FlowNodeId, site: SkeletonExprSiteId, call_ordinal: u32 },
+        /// A capture subject anchored on the nested function's binding
+        /// identity. The capture SET of a nested body is beyond this
+        /// skeleton's authority (nested bodies carry no reads here), so
+        /// the obligation installs directly in the family's accepted
+        /// typed gap.
+        Capture { node: FlowNodeId, binding: SkeletonBindingId, identity: Option<FlowBindingIdentity> },
     }
     /// Evidence that one live semantic suboperation was consumed. This is
     /// a discharge INPUT: the runtime validates it against the specific
@@ -1086,6 +1122,33 @@ pub(crate) mod flow_obligation_state {
         pub(super) iterations: u32,
         pub(super) stable: bool,
     }
+
+    /// The one-shot lifecycle phase of the installed flow demand:
+    /// `Discharging` (obligation transitions allowed; the expansion
+    /// frontier is open) → `ExpansionClosed` (every obligation terminal)
+    /// → `Converging` (the runtime observed at least one fixed-point
+    /// iteration) → `Converged` (the stable point was observed) →
+    /// `Sealed` (the completion artifact was minted — the demand is
+    /// frozen). Phases advance only forward.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub(super) enum FlowDemandPhase {
+        /// No demand installed.
+        #[default]
+        Idle,
+        /// Installed; obligations may start / discharge / gap / fail.
+        Discharging,
+        /// Every obligation is terminal; the expansion frontier is closed.
+        ExpansionClosed,
+        /// At least one fixed-point iteration observed; no obligation
+        /// transition is legal from here on.
+        Converging,
+        /// The stable point was observed; sealing is now legal.
+        Converged,
+        /// The ONE completion artifact was minted; every further
+        /// transition fails.
+        Sealed,
+    }
+
     /// The typed state of one flow-solve obligation.
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1094,13 +1157,44 @@ pub(crate) mod flow_obligation_state {
     /// closed semantic basis, and the EXACT evidence contract a discharge
     /// must satisfy — the declared dependencies and suboperations this
     /// specific obligation requires (per-spec, never a global subset).
+    ///
+    /// SEALED: every field is private and the sole constructor is visible
+    /// only inside the planner/runtime boundary (the
+    /// `project_semantic_dispatch` module tree) — no external struct
+    /// literal, no setters, immutable views only.
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FlowObligationSpec {
-        pub id: FlowObligationId, pub requirement: FlowRequirement,
-        pub origin: FlowObligationOrigin, pub basis: FlowObligationBasis,
-        pub expected_dependencies: Arc<[FlowObligationId]>,
-        pub expected_suboperations: Arc<[SemanticQueryKeyTag]>,
+        id: FlowObligationId, requirement: FlowRequirement,
+        origin: FlowObligationOrigin, basis: FlowObligationBasis,
+        expected_dependencies: Arc<[FlowObligationId]>,
+        expected_suboperations: Arc<[SemanticQueryKeyTag]>,
+    }
+
+    #[rustfmt::skip]
+    impl FlowObligationSpec {
+        /// The sole constructor — restricted to the planner/runtime
+        /// boundary (the `project_semantic_dispatch` module tree).
+        pub(in crate::project_semantic_dispatch) fn new(
+            id: FlowObligationId, requirement: FlowRequirement,
+            origin: FlowObligationOrigin, basis: FlowObligationBasis,
+            expected_dependencies: Arc<[FlowObligationId]>,
+            expected_suboperations: Arc<[SemanticQueryKeyTag]>,
+        ) -> Self {
+            Self { id, requirement, origin, basis, expected_dependencies, expected_suboperations }
+        }
+        /// The plan-local identity of this obligation (work order).
+        pub fn id(&self) -> FlowObligationId { self.id }
+        /// The requirement this obligation proves.
+        pub fn requirement(&self) -> &FlowRequirement { &self.requirement }
+        /// Where this obligation came from.
+        pub fn origin(&self) -> &FlowObligationOrigin { &self.origin }
+        /// The closed semantic identity of this obligation's subject.
+        pub fn basis(&self) -> &FlowObligationBasis { &self.basis }
+        /// The EXACT declared dependencies a discharge must present.
+        pub fn expected_dependencies(&self) -> &[FlowObligationId] { &self.expected_dependencies }
+        /// The EXACT declared suboperations a discharge must present.
+        pub fn expected_suboperations(&self) -> &[SemanticQueryKeyTag] { &self.expected_suboperations }
     }
     /// One installed obligation: its spec plus its current state.
     #[rustfmt::skip]
@@ -1111,24 +1205,24 @@ pub(crate) mod flow_obligation_state {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FlowTransitionError {
         DemandAlreadyInstalled, NoDemandInstalled, UnknownObligation, IllegalTransition,
-        UnplannedDependency, NonSuboperationEvidence, ConvergenceBudget,
+        UnplannedDependency, UndischargedDependency, NonSuboperationEvidence, ConvergenceBudget,
     }
-    /// Why the runtime refuses to seal a completion artifact: no
-    /// installed demand, obligations still undischarged, no observed
-    /// fixed point, or a degraded value payload.
+    /// Why the runtime refuses to seal a completion artifact: the demand
+    /// was already sealed (the artifact is one-shot), no demand is
+    /// installed, obligations are still undischarged, no fixed point was
+    /// observed, or the value payload is degraded.
     #[rustfmt::skip]
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum FlowSealError { NoDemandInstalled, UndischargedObligations, NonConverged, DegradedValue }
+    pub enum FlowSealError { AlreadySealed, NoDemandInstalled, UndischargedObligations, NonConverged, DegradedValue }
     /// The ONE sealed completion artifact of a flow solve: the
     /// solve-derived value, the exact installed basis, the per-spec
     /// discharge proofs (a snapshot of the runtime's records at seal
-    /// time), and the runtime-observed convergence. Fields are private
-    /// and the only construction is inside
-    /// [`super::ObligationRuntime::seal_flow_completion`], which mints it
-    /// only when every installed obligation is `Discharged` with
-    /// spec-validated evidence and the runtime observed convergence —
-    /// the finalizer consumes this artifact and nothing else.
-    #[derive(Debug, Clone)]
+    /// time), and the runtime-observed convergence. Fields are private,
+    /// the type is deliberately NOT `Clone`, and the only construction is
+    /// inside [`super::ObligationRuntime::seal_flow_completion`], which
+    /// mints it exactly once per demand (Converged → Sealed) — the
+    /// finalizer consumes this artifact and nothing else.
+    #[derive(Debug)]
     pub struct SealedFlowCompletion {
         basis: FlowDemandBasis,
         value: FlowReturnResult,
@@ -1163,24 +1257,38 @@ pub(crate) mod flow_obligation_state {
     impl super::ObligationRuntime {
         /// Install one demand plan: its basis, its convergence policy, and
         /// one record per planned spec (an undeclared requirement — or a
-        /// binding the cross-frame vocabulary cannot name — installs
-        /// directly in `Gap`).
+        /// subject the structural authority cannot name — installs
+        /// directly in `Gap`). The demand enters the `Discharging` phase;
+        /// when every obligation already installed terminal, the expansion
+        /// frontier is closed at install.
         pub fn install_flow_demand(&mut self, plan: &FlowDemandPlan) -> Result<(), FlowTransitionError> {
             if self.flow_basis.is_some() { return Err(FlowTransitionError::DemandAlreadyInstalled); }
             let mut records = Vec::with_capacity(plan.obligation_specs().len());
             for spec in plan.obligation_specs() {
-                let unmodeled = matches!(spec.basis, FlowObligationBasis::UnmodeledBinding { .. });
-                let registered = require_registered_flow_requirement(spec.requirement.operation, &spec.requirement.requirement).is_ok();
-                let state = if registered && !unmodeled {
-                    ObligationState::Pending
-                } else {
-                    ObligationState::Gap(FlowGap::UnmodeledExpression)
+                let gap = match spec.basis() {
+                    FlowObligationBasis::UnmodeledBinding { .. } => Some(FlowGap::UnmodeledExpression),
+                    // A capture subject's identity is real but its capture
+                    // set is beyond the structural authority: the family's
+                    // registered accepted gap, never a fabricated discharge.
+                    FlowObligationBasis::Capture { .. } => Some(flow_family_route(&FlowFactFamily::Capture).accepted_gap),
+                    _ => None,
+                };
+                let registered = require_registered_flow_requirement(spec.requirement().operation, &spec.requirement().requirement).is_ok();
+                let state = match gap {
+                    Some(gap) => ObligationState::Gap(gap),
+                    None if registered => ObligationState::Pending,
+                    None => ObligationState::Gap(FlowGap::UnmodeledExpression),
                 };
                 records.push(FlowObligationRecord { spec: spec.clone(), state });
             }
-            self.flow_basis = Some(plan.basis.clone());
+            self.flow_basis = Some(plan.basis().clone());
             self.flow_obligations = records;
-            self.flow_convergence = Some(FlowConvergenceObservation { policy: plan.convergence, iterations: 0, stable: false });
+            self.flow_convergence = Some(FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false });
+            self.flow_phase = if !self.flow_obligations.is_empty() && self.flow_obligations.iter().all(|record| !matches!(record.state, ObligationState::Pending | ObligationState::Running)) {
+                FlowDemandPhase::ExpansionClosed
+            } else {
+                FlowDemandPhase::Discharging
+            };
             Ok(())
         }
 
@@ -1192,17 +1300,18 @@ pub(crate) mod flow_obligation_state {
         /// Transition Running → Discharged, minting the SEALED evidence:
         /// the presented claims are validated against THIS obligation's
         /// spec — the exact declared dependencies (each planned, none
-        /// self) and the exact declared same-contract suboperations —
-        /// and the basis fields are taken from the installed demand,
-        /// never from the caller. Empty claims cannot discharge a spec
-        /// that declares required evidence, and a refused mint leaves
-        /// the obligation Running.
+        /// self, and each itself already DISCHARGED) and the exact
+        /// declared same-contract suboperations — and the basis fields are
+        /// taken from the installed demand, never from the caller. Empty
+        /// claims cannot discharge a spec that declares required evidence,
+        /// and a refused mint leaves the obligation Running.
         pub fn discharge_flow_obligation(
             &mut self,
             id: FlowObligationId,
             dependencies: Arc<[FlowObligationId]>,
             suboperations: Arc<[FlowSuboperationEvidence]>,
         ) -> Result<(), FlowTransitionError> {
+            self.ensure_obligations_mutable()?;
             let Some(basis) = self.flow_basis.clone() else { return Err(FlowTransitionError::NoDemandInstalled) };
             let record = self.record(id)?;
             if !matches!(record.state, ObligationState::Running) {
@@ -1220,11 +1329,21 @@ pub(crate) mod flow_obligation_state {
             if !subs_exact {
                 return Err(FlowTransitionError::NonSuboperationEvidence);
             }
+
+            // Dependency readiness: a dependent obligation discharges only
+            // after EVERY exact dependency is itself Discharged.
+            for dependency in dependencies.iter() {
+                let dependency_record = self.record(*dependency)?;
+                if !matches!(dependency_record.state, ObligationState::Discharged(_)) {
+                    return Err(FlowTransitionError::UndischargedDependency);
+                }
+            }
             let evidence = DischargeEvidence {
                 input_basis: basis.input_basis, result_contract: basis.result_contract,
                 dependencies, suboperations,
             };
             self.record_mut(id)?.state = ObligationState::Discharged(evidence);
+            self.refresh_expansion_closure();
             Ok(())
         }
         /// Transition Pending|Running → Gap.
@@ -1237,38 +1356,57 @@ pub(crate) mod flow_obligation_state {
         }
 
         /// Record one fixed-point iteration the solve ran: `changed` is
-        /// whether the iteration observed a fact-set change. The first
-        /// iteration observed with `changed == false` closes convergence;
-        /// observing past the stable point is an illegal transition, and
-        /// an iteration beyond the installed policy's cap is refused as
-        /// budget exhaustion. Convergence enters the sealed artifact ONLY
-        /// from this log — it is runtime-observed, never caller-authored.
+        /// whether the iteration observed a fact-set change. The FIRST
+        /// observation is gated: the expansion frontier must be closed AND
+        /// every required obligation Discharged — convergence is never
+        /// observed over an open or partially discharged universe. The
+        /// first iteration observed with `changed == false` closes
+        /// convergence (`Converged`); observing past the stable point or
+        /// past the seal is an illegal transition, and an iteration beyond
+        /// the installed policy's cap is refused as budget exhaustion.
+        /// Convergence enters the sealed artifact ONLY from this log — it
+        /// is runtime-observed, never caller-authored.
         pub fn observe_flow_iteration(&mut self, changed: bool) -> Result<(), FlowTransitionError> {
+            match self.flow_phase {
+                FlowDemandPhase::Idle => return Err(FlowTransitionError::NoDemandInstalled),
+                FlowDemandPhase::Converged | FlowDemandPhase::Sealed => return Err(FlowTransitionError::IllegalTransition),
+                FlowDemandPhase::Discharging | FlowDemandPhase::ExpansionClosed => {
+                    if !self.flow_obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_))) {
+                        return Err(FlowTransitionError::IllegalTransition);
+                    }
+                }
+                FlowDemandPhase::Converging => {}
+            }
             let Some(observation) = self.flow_convergence.as_mut() else { return Err(FlowTransitionError::NoDemandInstalled) };
-            if observation.stable { return Err(FlowTransitionError::IllegalTransition); }
             if observation.iterations >= observation.policy.max_iterations { return Err(FlowTransitionError::ConvergenceBudget); }
             observation.iterations += 1;
             if !changed { observation.stable = true; }
+            self.flow_phase = if observation.stable { FlowDemandPhase::Converged } else { FlowDemandPhase::Converging };
             Ok(())
         }
 
-        /// Mint the ONE sealed completion artifact of this solve. Mints
-        /// ONLY when every installed obligation is `Discharged` (each
-        /// with spec-validated evidence), the runtime observed
-        /// convergence, and the value payload carries no degradation.
-        /// The artifact binds the installed basis, the value, the
-        /// per-spec discharge proofs (a record snapshot), and the
-        /// observed convergence into one unforgeable carrier.
-        pub fn seal_flow_completion(&self, value: FlowReturnResult) -> Result<SealedFlowCompletion, FlowSealError> {
-            let Some(basis) = self.flow_basis.as_ref() else { return Err(FlowSealError::NoDemandInstalled) };
+        /// Mint the ONE sealed completion artifact of this solve
+        /// (Converged → Sealed). Mints ONLY when every installed
+        /// obligation is `Discharged` (each with spec-validated evidence),
+        /// the runtime observed convergence, and the value payload carries
+        /// no degradation. The artifact binds the installed basis, the
+        /// value, the per-spec discharge proofs (a record snapshot), and
+        /// the observed convergence into one unforgeable carrier. Sealing
+        /// takes `&mut self` and is ONE-SHOT: a repeated seal is
+        /// `AlreadySealed`, and the sealed demand rejects every further
+        /// transition.
+        pub fn seal_flow_completion(&mut self, value: FlowReturnResult) -> Result<SealedFlowCompletion, FlowSealError> {
+            if self.flow_phase == FlowDemandPhase::Sealed { return Err(FlowSealError::AlreadySealed); }
+            let Some(basis) = self.flow_basis.clone() else { return Err(FlowSealError::NoDemandInstalled) };
             if !self.flow_obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_))) {
                 return Err(FlowSealError::UndischargedObligations);
             }
             let Some(observation) = self.flow_convergence else { return Err(FlowSealError::NonConverged) };
             if !observation.stable { return Err(FlowSealError::NonConverged); }
             if value.degradation().is_some() { return Err(FlowSealError::DegradedValue); }
+            self.flow_phase = FlowDemandPhase::Sealed;
             Ok(SealedFlowCompletion {
-                basis: basis.clone(),
+                basis,
                 value,
                 convergence: FlowConvergenceEvidence {
                     policy: observation.policy, iterations: observation.iterations, stable: observation.stable,
@@ -1287,6 +1425,27 @@ pub(crate) mod flow_obligation_state {
         /// no-reservation probe for a runtime that never served a demand.
         pub fn flow_obligation_storage_capacity(&self) -> usize { self.flow_obligations.capacity() }
 
+        /// The phase gate for obligation transitions: once convergence has
+        /// begun (or the demand is sealed), no obligation expansion or
+        /// transition is legal.
+        fn ensure_obligations_mutable(&self) -> Result<(), FlowTransitionError> {
+            match self.flow_phase {
+                FlowDemandPhase::Converging | FlowDemandPhase::Converged | FlowDemandPhase::Sealed => Err(FlowTransitionError::IllegalTransition),
+                FlowDemandPhase::Idle | FlowDemandPhase::Discharging | FlowDemandPhase::ExpansionClosed => Ok(()),
+            }
+        }
+
+        /// Advance `Discharging` → `ExpansionClosed` once every obligation
+        /// is terminal (the expansion frontier is closed).
+        fn refresh_expansion_closure(&mut self) {
+            if self.flow_phase == FlowDemandPhase::Discharging
+                && !self.flow_obligations.is_empty()
+                && self.flow_obligations.iter().all(|record| !matches!(record.state, ObligationState::Pending | ObligationState::Running))
+            {
+                self.flow_phase = FlowDemandPhase::ExpansionClosed;
+            }
+        }
+
         fn record(&self, id: FlowObligationId) -> Result<&FlowObligationRecord, FlowTransitionError> {
             self.flow_obligations.iter().find(|r| r.spec.id == id).ok_or(FlowTransitionError::UnknownObligation)
         }
@@ -1294,9 +1453,11 @@ pub(crate) mod flow_obligation_state {
             self.flow_obligations.iter_mut().find(|r| r.spec.id == id).ok_or(FlowTransitionError::UnknownObligation)
         }
         fn transition(&mut self, id: FlowObligationId, next: impl FnOnce(&ObligationState) -> Option<ObligationState>) -> Result<(), FlowTransitionError> {
+            self.ensure_obligations_mutable()?;
             let record = self.record_mut(id)?;
             let Some(state) = next(&record.state) else { return Err(FlowTransitionError::IllegalTransition) };
             record.state = state;
+            self.refresh_expansion_closure();
             Ok(())
         }
     }

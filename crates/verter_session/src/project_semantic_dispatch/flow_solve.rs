@@ -9,19 +9,31 @@
 //! - The flow-operation contract registry projects the flow-contract
 //!   columns over the closed query tags; an undeclared requirement is NEVER
 //!   a wildcard fallthrough — it installs as a `Gap(FlowGap)` obligation
-//!   that retains the offending requirement.
+//!   that retains the offending requirement. The requirement universe is
+//!   the CLOSED domain → fact-family mapping ([`FlowDomainClosure`]): each
+//!   family's expansion rule, fixed-point requirement, and accepted typed
+//!   gap come from the total [`flow_family_route`] mapping, and every
+//!   required family gets exactly ONE family-coverage obligation — "proved
+//!   empty" is discharged, "planner forgot the family" is unrepresentable.
 //! - [`FlowDemandPlan`] is the demand/completeness authority over one
 //!   store-bound graph — NOT an alias of `ReturnSlicePlan` (graph
 //!   reachability selection only, stored here as the structural selection).
-//!   The basis takes its body identity from the bound graph's key and the
-//!   subject from the query's own demand axis; every obligation spec
-//!   carries a closed semantic identity (demand root, graph site, real
-//!   binding slot, or full edge) plus its exact evidence contract.
+//!   It is SEALED: every field is private, immutable getters only, and it
+//!   carries its own registry closure. The basis takes its body identity
+//!   from the bound graph's key and the subject from the query's own
+//!   demand axis; every obligation spec carries a closed semantic identity
+//!   (demand root, family coverage, graph site, real binding slot, guard,
+//!   call occurrence, dynamic relation, capture subject, or full edge)
+//!   plus its exact evidence contract.
 //! - The obligation runtime seals discharge evidence at mint time
-//!   (validated against the specific spec), observes convergence itself,
-//!   and mints the ONE sealed completion artifact;
-//!   [`finalize_flow_solve`] consumes ONLY that artifact and is the ONLY
-//!   minter of [`CompleteFlowResult`] (its constructor is private).
+//!   (validated against the specific spec, with dependency readiness —
+//!   a dependent discharges only after its exact dependencies), observes
+//!   convergence itself (only over a closed, fully discharged frontier),
+//!   and mints the ONE sealed completion artifact (`Converged → Sealed`,
+//!   one-shot: `AlreadySealed` on repetition, every post-seal transition
+//!   refused); [`finalize_flow_solve`] consumes ONLY that artifact and is
+//!   the ONLY minter of [`CompleteFlowResult`] (its constructor is
+//!   private).
 
 use std::sync::Arc;
 
@@ -88,10 +100,60 @@ pub enum FlowRequirementKind { Domain(FlowDomain), FactFamily(FlowFactFamily) }
 pub struct FlowRequirement { pub operation: SemanticQueryKeyTag, pub requirement: FlowRequirementKind }
 
 /// The registered rules a structural selection expands through — the ONLY
-/// expansion channel.
+/// expansion channel. Every fact family has exactly ONE registered rule
+/// (see [`flow_family_route`]); the dispatcher is an exhaustive,
+/// wildcard-free match over the family vocabulary.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlowExpansionRule { BindingSlotFacts, ReturnSiteFacts, SelectedEdgeFacts, CallSiteFacts }
+pub enum FlowExpansionRule {
+    BindingSlotFacts, ReturnSiteFacts, SelectedEdgeFacts, CallSiteFacts,
+    GuardPredicateFacts, ContextualTargetFacts, CaptureFacts, SemanticRelationFacts,
+}
+
+/// Whether a family route's facts participate in the solve's fixed point
+/// (re-observed to stability) or are a single structural enumeration that
+/// is stable at plan time.
+#[rustfmt::skip]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowFixedPointRequirement { FixedPoint, SinglePass }
+
+/// The ONE closed route of a fact family: its registered expansion rule,
+/// its fixed-point requirement, and the typed gap a required-but-unnameable
+/// subject of this family installs. Total over the [`FlowFactFamily`]
+/// vocabulary by construction (a wildcard-free `match`).
+#[rustfmt::skip]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlowFamilyRoute {
+    pub rule: FlowExpansionRule, pub fixed_point: FlowFixedPointRequirement, pub accepted_gap: FlowGap,
+}
+
+/// The closed route of `family` — TOTAL over the family vocabulary: every
+/// variant (and every edge class of `GraphEdge`) resolves to exactly one
+/// registered expansion rule, one fixed-point requirement, and one
+/// accepted typed gap. There is no wildcard arm and no `Option`.
+#[rustfmt::skip]
+pub const fn flow_family_route(family: &FlowFactFamily) -> FlowFamilyRoute {
+    match family {
+        FlowFactFamily::GraphEdge(_) => FlowFamilyRoute { rule: FlowExpansionRule::SelectedEdgeFacts, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::UnmodeledExpression },
+        FlowFactFamily::BindingSlot => FlowFamilyRoute { rule: FlowExpansionRule::BindingSlotFacts, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::UnmodeledExpression },
+        FlowFactFamily::ReturnSite => FlowFamilyRoute { rule: FlowExpansionRule::ReturnSiteFacts, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::AbruptCompletion },
+        FlowFactFamily::GuardPredicate => FlowFamilyRoute { rule: FlowExpansionRule::GuardPredicateFacts, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::GuardNarrowing },
+        FlowFactFamily::CallSite => FlowFamilyRoute { rule: FlowExpansionRule::CallSiteFacts, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::UnmodeledExpression },
+        FlowFactFamily::ContextualTarget => FlowFamilyRoute { rule: FlowExpansionRule::ContextualTargetFacts, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::UnmodeledExpression },
+        FlowFactFamily::Capture => FlowFamilyRoute { rule: FlowExpansionRule::CaptureFacts, fixed_point: FlowFixedPointRequirement::SinglePass, accepted_gap: FlowGap::ClosureCapture },
+        FlowFactFamily::SemanticRelation => FlowFamilyRoute { rule: FlowExpansionRule::SemanticRelationFacts, fixed_point: FlowFixedPointRequirement::FixedPoint, accepted_gap: FlowGap::NominalRelation },
+    }
+}
+
+/// One domain's closure in the closed registry universe: the fact families
+/// the domain requires. Each family's expansion rule, fixed-point
+/// requirement, and accepted typed gap come from the TOTAL
+/// [`flow_family_route`] mapping — the registry can never declare a family
+/// without a registered route, and two domains naming one family can never
+/// disagree about its route.
+#[rustfmt::skip]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowDomainClosure { pub domain: FlowDomain, pub families: &'static [FlowFactFamily] }
 
 /// Whether an operation is a demand root or a semantic suboperation.
 #[rustfmt::skip]
@@ -115,24 +177,82 @@ pub enum FlowFinalizerKind { CompletenessProof, TypedGapOnly, Suboperation }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowResultContractDescriptor { pub finalizer: FlowFinalizerKind, pub accepted_gaps: &'static [FlowGap] }
 
-/// One row of the flow-operation contract registry.
+/// One row of the flow-operation contract registry. The requirement
+/// universe is the CLOSED domain→family mapping `closures` (never two
+/// unrelated flat lists): the contract's required domains are the closure
+/// domains in declaration order, and its required fact families are the
+/// closures' families deduplicated in first-declaration order. Each
+/// family's expansion rule, fixed-point requirement, and accepted typed
+/// gap come from the total [`flow_family_route`] mapping.
 #[rustfmt::skip]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowOperationContract {
     pub tag: SemanticQueryKeyTag, pub role: FlowOperationRole, pub status: FlowOperationStatus,
-    pub required_domains: &'static [FlowDomain], pub required_fact_families: &'static [FlowFactFamily],
+    pub closures: &'static [FlowDomainClosure],
     pub result: FlowResultContractDescriptor,
 }
 
+impl FlowOperationContract {
+    /// The contract's required domains, in closure declaration order.
+    pub fn required_domains(&self) -> impl Iterator<Item = FlowDomain> + '_ {
+        self.closures.iter().map(|closure| closure.domain)
+    }
+
+    /// The contract's required fact families, deduplicated in
+    /// first-declaration order across the closures.
+    pub fn required_fact_families(&self) -> Vec<FlowFactFamily> {
+        let mut families: Vec<FlowFactFamily> = Vec::new();
+        for closure in self.closures {
+            for family in closure.families {
+                if !families.contains(family) {
+                    families.push(family.clone());
+                }
+            }
+        }
+        families
+    }
+}
+
 #[rustfmt::skip]
-const fn row(tag: SemanticQueryKeyTag, role: R, status: S, domains: &'static [D], families: &'static [F], result: FlowResultContractDescriptor) -> FlowOperationContract {
-    FlowOperationContract { tag, role, status, required_domains: domains, required_fact_families: families, result }
+const fn row(tag: SemanticQueryKeyTag, role: R, status: S, closures: &'static [FlowDomainClosure], result: FlowResultContractDescriptor) -> FlowOperationContract {
+    FlowOperationContract { tag, role, status, closures, result }
 }
 
 #[rustfmt::skip]
 const fn desc(finalizer: K, accepted_gaps: &'static [FlowGap]) -> FlowResultContractDescriptor {
     FlowResultContractDescriptor { finalizer, accepted_gaps }
 }
+
+#[rustfmt::skip]
+const fn closure(domain: D, families: &'static [F]) -> FlowDomainClosure {
+    FlowDomainClosure { domain, families }
+}
+
+// Shared family slices of the closed domain→family mapping. A family
+// appears in every domain that consumes it; the planner dedups in
+// first-declaration order.
+#[rustfmt::skip]
+const REACHING_VALUE_FAMILIES: &[F] = &[F::GraphEdge(FlowEdgeClass::ValueDef), F::GraphEdge(FlowEdgeClass::PathWrite), F::BindingSlot];
+#[rustfmt::skip]
+const REACHING_TYPE_FAMILIES: &[F] = &[F::GraphEdge(FlowEdgeClass::ValueDef), F::BindingSlot];
+#[rustfmt::skip]
+const NARROWING_FAMILIES: &[F] = &[F::GuardPredicate, F::GraphEdge(FlowEdgeClass::ControlRegion)];
+#[rustfmt::skip]
+const COMPLETION_FAMILIES: &[F] = &[F::ReturnSite, F::GraphEdge(FlowEdgeClass::ControlRegion)];
+#[rustfmt::skip]
+const CLOSURE_CAPTURE_FAMILIES: &[F] = &[F::Capture];
+#[rustfmt::skip]
+const FRESHNESS_FAMILIES: &[F] = &[F::BindingSlot, F::GraphEdge(FlowEdgeClass::ValueDef)];
+#[rustfmt::skip]
+const EFFECTS_FAMILIES: &[F] = &[F::GraphEdge(FlowEdgeClass::EvalEffect), F::CallSite];
+#[rustfmt::skip]
+const CALL_RESOLUTION_FAMILIES: &[F] = &[F::CallSite, F::ContextualTarget];
+#[rustfmt::skip]
+const RELATION_FAMILIES: &[F] = &[F::SemanticRelation, F::ContextualTarget];
+#[rustfmt::skip]
+const CONTEXTUAL_TYPING_FAMILIES: &[F] = &[F::ContextualTarget];
+#[rustfmt::skip]
+const RELATION_ONLY_FAMILIES: &[F] = &[F::SemanticRelation];
 
 // The closed flow-operation contract registry: exactly the flow-bearing
 // query tags. Lookup is total over `SemanticQueryKeyTag` and returns
@@ -141,24 +261,42 @@ const fn desc(finalizer: K, accepted_gaps: &'static [FlowGap]) -> FlowResultCont
 static FLOW_OPERATION_CONTRACTS: &[FlowOperationContract] = &[
     // The whole-function return producer: the one proof-enabled root.
     row(SemanticQueryKeyTag::FlowReturn, R::Root, S::EnabledHermetic,
-        &[D::ReachingValue, D::ReachingType, D::Narrowing, D::Completion, D::ClosureCapture, D::Freshness, D::Effects, D::CallResolution, D::Relation],
-        &[F::GraphEdge(FlowEdgeClass::ValueDef), F::GraphEdge(FlowEdgeClass::PathWrite), F::GraphEdge(FlowEdgeClass::EvalEffect), F::GraphEdge(FlowEdgeClass::ControlRegion),
-          F::BindingSlot, F::ReturnSite, F::GuardPredicate, F::CallSite, F::ContextualTarget, F::Capture, F::SemanticRelation],
+        &[
+            closure(D::ReachingValue, REACHING_VALUE_FAMILIES),
+            closure(D::ReachingType, REACHING_TYPE_FAMILIES),
+            closure(D::Narrowing, NARROWING_FAMILIES),
+            closure(D::Completion, COMPLETION_FAMILIES),
+            closure(D::ClosureCapture, CLOSURE_CAPTURE_FAMILIES),
+            closure(D::Freshness, FRESHNESS_FAMILIES),
+            closure(D::Effects, EFFECTS_FAMILIES),
+            closure(D::CallResolution, CALL_RESOLUTION_FAMILIES),
+            closure(D::Relation, RELATION_FAMILIES),
+        ],
         desc(K::CompletenessProof, &[FlowGap::GuardNarrowing, FlowGap::NominalRelation, FlowGap::ClosureCapture, FlowGap::AbruptCompletion, FlowGap::UnmodeledExpression])),
     // Roots whose reducers do not exist yet: typed gaps only.
     row(SemanticQueryKeyTag::FlowNarrowingAt, R::Root, S::PendingReducer,
-        &[D::ReachingValue, D::ReachingType, D::Narrowing, D::Relation],
-        &[F::GraphEdge(FlowEdgeClass::ValueDef), F::GraphEdge(FlowEdgeClass::PathWrite), F::GraphEdge(FlowEdgeClass::ControlRegion), F::BindingSlot, F::GuardPredicate, F::SemanticRelation],
+        &[
+            closure(D::ReachingValue, REACHING_VALUE_FAMILIES),
+            closure(D::ReachingType, REACHING_TYPE_FAMILIES),
+            closure(D::Narrowing, NARROWING_FAMILIES),
+            closure(D::Relation, RELATION_ONLY_FAMILIES),
+        ],
         desc(K::TypedGapOnly, &[])),
     row(SemanticQueryKeyTag::ContextualTypeAt, R::Root, S::PendingReducer,
-        &[D::ReachingType, D::ContextualTyping, D::CallResolution, D::Relation],
-        &[F::GraphEdge(FlowEdgeClass::ValueDef), F::BindingSlot, F::CallSite, F::ContextualTarget, F::SemanticRelation],
+        &[
+            closure(D::ReachingType, REACHING_TYPE_FAMILIES),
+            closure(D::ContextualTyping, CONTEXTUAL_TYPING_FAMILIES),
+            closure(D::CallResolution, CALL_RESOLUTION_FAMILIES),
+            closure(D::Relation, RELATION_ONLY_FAMILIES),
+        ],
         desc(K::TypedGapOnly, &[])),
     // Live semantic suboperations.
     row(SemanticQueryKeyTag::ResolveCall, R::SemanticSuboperation, S::Live,
-        &[D::CallResolution, D::Relation], &[F::CallSite, F::SemanticRelation], desc(K::Suboperation, &[])),
+        &[closure(D::CallResolution, CALL_RESOLUTION_FAMILIES), closure(D::Relation, RELATION_ONLY_FAMILIES)],
+        desc(K::Suboperation, &[])),
     row(SemanticQueryKeyTag::Relate, R::SemanticSuboperation, S::Live,
-        &[D::Relation], &[F::SemanticRelation], desc(K::Suboperation, &[])),
+        &[closure(D::Relation, RELATION_ONLY_FAMILIES)],
+        desc(K::Suboperation, &[])),
 ];
 
 /// The registered contract of `tag`, when the tag is flow-bearing.
@@ -185,8 +323,11 @@ pub fn require_registered_flow_requirement(
         requirement: requirement.clone(),
     };
     let registered = flow_operation_contract(operation).is_some_and(|c| match requirement {
-        RK::Domain(domain) => c.required_domains.contains(domain),
-        RK::FactFamily(family) => c.required_fact_families.contains(family),
+        RK::Domain(domain) => c.closures.iter().any(|closure| closure.domain == *domain),
+        RK::FactFamily(family) => c
+            .closures
+            .iter()
+            .any(|closure| closure.families.contains(family)),
     });
     if registered {
         Ok(())
@@ -198,7 +339,8 @@ pub fn require_registered_flow_requirement(
 // ── Planner semantics shared with the result-contract identity ─────────
 
 /// The registered expansion vocabulary the planner expands through, in
-/// registration order — the ONLY expansion channel. The result-contract
+/// registration order — the ONLY expansion channel. Exactly one rule per
+/// fact-family variant (see [`flow_family_route`]). The result-contract
 /// identity encodes this exact list, so a change to the registered
 /// expansion semantics changes every minted contract identity.
 const REGISTERED_EXPANSION_RULES: &[FlowExpansionRule] = &[
@@ -206,6 +348,10 @@ const REGISTERED_EXPANSION_RULES: &[FlowExpansionRule] = &[
     E::ReturnSiteFacts,
     E::SelectedEdgeFacts,
     E::CallSiteFacts,
+    E::GuardPredicateFacts,
+    E::ContextualTargetFacts,
+    E::CaptureFacts,
+    E::SemanticRelationFacts,
 ];
 
 /// The fixed-point iteration cap every plan carries.
@@ -282,6 +428,15 @@ const fn expansion_rule_discriminant(rule: FlowExpansionRule) -> u32 {
     match rule {
         FlowExpansionRule::BindingSlotFacts => 1, FlowExpansionRule::ReturnSiteFacts => 2,
         FlowExpansionRule::SelectedEdgeFacts => 3, FlowExpansionRule::CallSiteFacts => 4,
+        FlowExpansionRule::GuardPredicateFacts => 5, FlowExpansionRule::ContextualTargetFacts => 6,
+        FlowExpansionRule::CaptureFacts => 7, FlowExpansionRule::SemanticRelationFacts => 8,
+    }
+}
+
+#[rustfmt::skip]
+const fn fixed_point_discriminant(requirement: FlowFixedPointRequirement) -> u32 {
+    match requirement {
+        FlowFixedPointRequirement::FixedPoint => 1, FlowFixedPointRequirement::SinglePass => 2,
     }
 }
 
@@ -307,23 +462,35 @@ fn encode_ordered_discriminants(
 }
 
 /// Canonical descriptor backing [`flow_result_contract_id`]: the COMPLETE
-/// closed contract — the tag, the role and status, the ordered required
-/// domains, the ordered required fact families, the registered expansion
-/// and fixed-point semantics the planner runs under, the finalizer kind,
-/// and the accepted gaps — under a versioned domain tag. Any change to
-/// the closed contract's semantics changes the minted identity.
+/// closed contract — the tag, the role and status, the closed
+/// domain→family mapping (each domain with its ordered families AND each
+/// family's registered route: expansion rule, fixed-point requirement,
+/// accepted typed gap), the registered expansion and fixed-point semantics
+/// the planner runs under, the finalizer kind, and the accepted gaps —
+/// under a versioned domain tag. Any change to the closed contract's
+/// semantics changes the minted identity.
 struct ResultContractDescriptor<'a>(&'a FlowOperationContract);
 
 #[rustfmt::skip]
 impl CanonicalEncode for ResultContractDescriptor<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v2";
+    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v3";
     fn encode_fields(&self, e: &mut CanonicalEncoder) {
         let contract = self.0;
         e.field_str(1, contract.tag.name());
         e.field_u32(2, role_discriminant(contract.role));
         e.field_u32(3, status_discriminant(contract.status));
-        encode_ordered_discriminants(e, 4, contract.required_domains.iter().map(|domain| domain_discriminant(*domain)));
-        encode_ordered_discriminants(e, 5, contract.required_fact_families.iter().flat_map(fact_family_discriminants));
+        // The closed mapping, nested: per closure, the domain discriminant
+        // and its family count, then per family the family discriminant
+        // pair plus its registered route (rule, fixed-point, gap).
+        encode_ordered_discriminants(e, 4, contract.closures.iter().flat_map(|closure| {
+            std::iter::once(domain_discriminant(closure.domain))
+                .chain(std::iter::once(closure.families.len() as u32))
+                .chain(closure.families.iter().flat_map(|family| {
+                    let route = flow_family_route(family);
+                    let [family_tag, class_tag] = fact_family_discriminants(family);
+                    [family_tag, class_tag, expansion_rule_discriminant(route.rule), fixed_point_discriminant(route.fixed_point), gap_discriminant(route.accepted_gap)]
+                }))
+        }));
         encode_ordered_discriminants(e, 6, REGISTERED_EXPANSION_RULES.iter().map(|rule| expansion_rule_discriminant(*rule)));
         e.field_u32(7, tie_break_discriminant(FLOW_WORK_ORDER_TIE_BREAK));
         e.field_u32(8, FLOW_FIXED_POINT_MAX_ITERATIONS);
@@ -407,25 +574,72 @@ impl Default for FlowResourcePolicy {
 /// selection only), stored here as the structural selection the obligations
 /// expand from. `obligation_specs` enters a runtime only through
 /// `install_flow_demand`.
+///
+/// SEALED: every field is private and the sole constructor is
+/// [`build_flow_demand_plan`]. Consumers get immutable views only — no
+/// mutable slices, no setters, no `DerefMut`, no public struct literal,
+/// and no caller-supplied work order. The plan carries its own registry
+/// closure (the contract's exact domain→family mapping) and required
+/// fact families, so a solve can never be re-keyed to a different
+/// requirement universe after planning.
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
 pub struct FlowDemandPlan {
-    pub basis: FlowDemandBasis, pub subject: FlowDemandSubject,
+    basis: FlowDemandBasis, subject: FlowDemandSubject,
     /// The structural selection (graph reachability result, planned once).
-    pub structural_selection: ReturnSlicePlan,
+    structural_selection: ReturnSlicePlan,
     /// The contract-required domains, in domain-rank order.
-    pub required_domains: Arc<[FlowDomain]>,
+    required_domains: Arc<[FlowDomain]>,
+    /// The contract's required fact families, deduplicated in
+    /// first-declaration order across the closed domain→family mapping.
+    required_fact_families: Arc<[FlowFactFamily]>,
+    /// The registry closure the plan was built against: the contract's
+    /// exact domain→family mapping snapshot.
+    registry_closure: Arc<[FlowDomainClosure]>,
+    /// The family-coverage obligation ids: exactly ONE per required fact
+    /// family (the family's enumeration obligation — "proved empty" is
+    /// discharged, never "planner forgot the family").
+    coverage_obligations: Arc<[FlowObligationId]>,
     /// The initial (contract-domain and caller-asserted) obligation ids.
-    pub initial_obligations: Arc<[FlowObligationId]>,
+    initial_obligations: Arc<[FlowObligationId]>,
     /// The expanded (structural-selection) obligation ids.
-    pub expanded_obligations: Arc<[FlowObligationId]>,
+    expanded_obligations: Arc<[FlowObligationId]>,
     /// The deterministic work order over all obligations.
-    pub work_order: Arc<[FlowObligationId]>,
-    pub tie_break: FlowTieBreak, pub convergence: FlowConvergencePolicy, pub resources: FlowResourcePolicy,
+    work_order: Arc<[FlowObligationId]>,
+    tie_break: FlowTieBreak, convergence: FlowConvergencePolicy, resources: FlowResourcePolicy,
     obligation_specs: Vec<FlowObligationSpec>,
 }
 
+#[rustfmt::skip]
 impl FlowDemandPlan {
+    /// The exact basis the demand was planned against.
+    pub fn basis(&self) -> &FlowDemandBasis { &self.basis }
+    /// The demand subject derived from the query's own demand axis.
+    pub fn subject(&self) -> &FlowDemandSubject { &self.subject }
+    /// The structural selection the obligations expand from.
+    pub fn structural_selection(&self) -> &ReturnSlicePlan { &self.structural_selection }
+    /// The contract-required domains, in domain-rank order.
+    pub fn required_domains(&self) -> &[FlowDomain] { &self.required_domains }
+    /// The contract's required fact families, deduplicated in
+    /// first-declaration order.
+    pub fn required_fact_families(&self) -> &[FlowFactFamily] { &self.required_fact_families }
+    /// The registry closure the plan was built against.
+    pub fn registry_closure(&self) -> &[FlowDomainClosure] { &self.registry_closure }
+    /// The family-coverage obligation ids: exactly one per required
+    /// family, in family order.
+    pub fn coverage_obligations(&self) -> &[FlowObligationId] { &self.coverage_obligations }
+    /// The initial (contract-domain and caller-asserted) obligation ids.
+    pub fn initial_obligations(&self) -> &[FlowObligationId] { &self.initial_obligations }
+    /// The expanded (structural-selection) obligation ids.
+    pub fn expanded_obligations(&self) -> &[FlowObligationId] { &self.expanded_obligations }
+    /// The deterministic work order over all obligations.
+    pub fn work_order(&self) -> &[FlowObligationId] { &self.work_order }
+    /// The tie-break rule the work order was built with.
+    pub fn tie_break(&self) -> FlowTieBreak { self.tie_break }
+    /// The fixed-point convergence policy of this solve.
+    pub fn convergence(&self) -> FlowConvergencePolicy { self.convergence }
+    /// The resource policy this demand planned under.
+    pub fn resources(&self) -> FlowResourcePolicy { self.resources }
     /// The obligation specifications, in work order.
     pub fn obligation_specs(&self) -> &[FlowObligationSpec] {
         &self.obligation_specs
@@ -581,29 +795,68 @@ pub(crate) fn build_flow_demand_plan(
             });
         }
         let id = FlowObligationId(u32::try_from(specs.len()).unwrap_or(u32::MAX));
-        specs.push(FlowObligationSpec { id, requirement, origin, basis, expected_dependencies, expected_suboperations });
+        specs.push(FlowObligationSpec::new(id, requirement, origin, basis, expected_dependencies, expected_suboperations));
         Ok(id)
     };
 
+    // The closed requirement universe of this demand: the contract's
+    // families deduplicated in first-declaration order across its domain
+    // closures. Every family routes through the TOTAL `flow_family_route`
+    // mapping — one registered expansion rule, one fixed-point
+    // requirement, one accepted typed gap.
+    let families: Vec<FlowFactFamily> = contract.required_fact_families();
+
     // Initial obligations: one per contract-required domain, domain-rank order.
-    let mut domains: Vec<FlowDomain> = contract.required_domains.to_vec();
+    let mut domains: Vec<FlowDomain> = contract.required_domains().collect();
     domains.sort();
     // `additional_requirements` is unbounded caller input: count its
     // non-duplicate contribution BEFORE constructing any obligation for
     // it, so an oversized vector trips the budget without a single spec.
+    // The counted base also includes the family-coverage obligations (one
+    // per required family) — the registry-closure population is part of
+    // the initial budget, planned before any concrete expansion.
     let additional_count = request.additional_requirements.iter()
         .filter(|requirement| !(requirement.operation == tag && matches!(&requirement.requirement, RK::Domain(domain) if domains.contains(domain))))
         .count() as u64;
-    if domains.len() as u64 + additional_count > u64::from(max_obligations) {
+    let counted_base = families.len() as u64 + domains.len() as u64 + additional_count;
+    if counted_base > u64::from(max_obligations) {
         return Err(FlowDemandPlanError::ObligationBudget {
             limit: max_obligations,
-            observed: u32::try_from(domains.len() as u64 + additional_count).unwrap_or(u32::MAX),
+            observed: u32::try_from(counted_base).unwrap_or(u32::MAX),
         });
     }
+
+    // Family-coverage obligations: exactly ONE per required family, in
+    // family order — the family's enumeration obligation. Even a family
+    // with zero concrete instances gets its coverage obligation, so
+    // "proved empty" is a discharged obligation, never a forgotten family.
+    let mut coverage: Vec<FlowObligationId> = Vec::with_capacity(families.len());
+    for family in &families {
+        let route = flow_family_route(family);
+        coverage.push(push(
+            FlowRequirement { operation: tag, requirement: RK::FactFamily(family.clone()) },
+            FlowObligationOrigin::Expansion(route.rule),
+            FlowObligationBasis::FamilyCoverage { family: family.clone() },
+            Arc::from([]), Arc::from([]),
+        )?);
+    }
+
+    // Domain obligations: each domain depends on EXACTLY the coverage
+    // obligations of the families its closure maps it to, so a generic
+    // domain discharge can never bypass a missing family enumeration.
     let mut initial: Vec<FlowObligationId> = Vec::with_capacity(domains.len());
     for domain in domains.iter().copied() {
+        let dependencies: Vec<FlowObligationId> = contract.closures.iter()
+            .filter(|closure| closure.domain == domain)
+            .flat_map(|closure| closure.families.iter())
+            .map(|family| {
+                let index = families.iter().position(|candidate| candidate == family)
+                    .expect("every closure family is a required family");
+                coverage[index]
+            })
+            .collect();
         let basis = FlowObligationBasis::DemandRoot { subject: subject.clone() };
-        initial.push(push(FlowRequirement { operation: tag, requirement: RK::Domain(domain) }, FlowObligationOrigin::ContractDomain, basis, Arc::from([]), Arc::from([]))?);
+        initial.push(push(FlowRequirement { operation: tag, requirement: RK::Domain(domain) }, FlowObligationOrigin::ContractDomain, basis, Arc::from(dependencies.into_boxed_slice()), Arc::from([]))?);
     }
     // Caller-asserted requirements beyond the contract. A duplicate of an
     // already-planned contract domain of this root collapses onto it; every
@@ -620,61 +873,155 @@ pub(crate) fn build_flow_demand_plan(
     // frame's binding inventory (the ONE slot-numbering authority).
     let identities = resolve_binding_identities(&bundle.skeleton, inventory, &bound.key().function);
 
-    // Expanded obligations, through the registered rules only: node-kind
-    // facts in ascending node-index order, then edge facts in (node, edge
-    // class, source ordinal) order.
     let graph = &bundle.graph;
     let mut selected: Vec<_> = structural_selection.value_nodes.iter()
         .chain(structural_selection.effect_only_nodes.iter()).copied().collect();
     selected.sort_by_key(|node| node.index());
     let mut expanded: Vec<FlowObligationId> = Vec::new();
+    // The FIRST obligation planned for a node is its primary obligation —
+    // the dependency anchor of the node's out-edge facts.
     let mut node_obligations: FxHashMap<FlowNodeId, FlowObligationId> = FxHashMap::default();
-    for node in &selected {
-        let kind = graph.node_kind(*node);
-        let (operation, family, rule, basis, suboperations) = match kind {
-            FlowNodeKind::Binding(binding) => {
-                let basis = match &identities[binding.index()] {
-                    Some(identity) => FlowObligationBasis::Binding {
-                        node: *node,
-                        slot: FlowBindingBasis { binding, identity: identity.clone() },
-                    },
-                    None => FlowObligationBasis::UnmodeledBinding {
-                        node: *node, binding, kind: bundle.skeleton.binding(binding).kind,
-                    },
-                };
-                (tag, F::BindingSlot, E::BindingSlotFacts, basis, Vec::new())
+    let note_node_obligation = |node_obligations: &mut FxHashMap<FlowNodeId, FlowObligationId>, node: FlowNodeId, id: FlowObligationId| {
+        node_obligations.entry(node).or_insert(id);
+    };
+    // The call occurrences planned by the `CallSite` route: the dynamic
+    // `SemanticRelation` facts anchor on these registered expansion events.
+    let mut call_obligations: Vec<(FlowNodeId, verter_semantic::analysis::flow::SkeletonExprSiteId, u32, FlowObligationId)> = Vec::new();
+
+    // The exhaustive, wildcard-free expansion dispatcher: EVERY required
+    // family is iterated through its registered route. Node-kind facts
+    // expand first (in family declaration order, ascending node index
+    // inside a family); selected-edge facts expand last because their
+    // dependency contract anchors on the node obligations.
+    for family in &families {
+        match family {
+            F::GraphEdge(_) => {} // edges expand last — they anchor on node obligations
+            F::BindingSlot => {
+                for node in &selected {
+                    let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
+                    let basis = match &identities[binding.index()] {
+                        Some(identity) => FlowObligationBasis::Binding {
+                            node: *node,
+                            slot: FlowBindingBasis { binding, identity: identity.clone() },
+                        },
+                        None => FlowObligationBasis::UnmodeledBinding {
+                            node: *node, binding, kind: bundle.skeleton.binding(binding).kind,
+                        },
+                    };
+                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::BindingSlot) }, FlowObligationOrigin::Expansion(E::BindingSlotFacts), basis, Arc::from([]), Arc::from([]))?;
+                    note_node_obligation(&mut node_obligations, *node, id);
+                    expanded.push(id);
+                }
             }
-            FlowNodeKind::ReturnSite(_) =>
-                (tag, F::ReturnSite, E::ReturnSiteFacts, FlowObligationBasis::Site { node: *node, kind }, Vec::new()),
-            FlowNodeKind::ExprSite(site) if !bundle.skeleton.expr_site(site).calls.is_empty() =>
-                (SemanticQueryKeyTag::ResolveCall, F::CallSite, E::CallSiteFacts,
-                 FlowObligationBasis::Site { node: *node, kind }, vec![SemanticQueryKeyTag::ResolveCall]),
-            FlowNodeKind::ExprSite(_) | FlowNodeKind::Region(_) => continue,
-        };
-        let suboperations: Arc<[SemanticQueryKeyTag]> = Arc::from(suboperations.into_boxed_slice());
-        let id = push(FlowRequirement { operation, requirement: RK::FactFamily(family) }, FlowObligationOrigin::Expansion(rule), basis, Arc::from([]), suboperations)?;
-        node_obligations.insert(*node, id);
-        expanded.push(id);
-    }
-    for node in &selected {
-        let mut edges: Vec<_> = graph.out_edges(*node).iter()
-            .filter(|edge| structural_selection.is_selected(edge.to)).collect();
-        edges.sort_by_key(|edge| (edge.kind.class() as u8, edge.ordinal));
-        for edge in edges {
-            let class = edge.kind.class();
-            let basis = FlowObligationBasis::Edge { from: edge.from, to: edge.to, class, ordinal: edge.ordinal };
-            // The exact dependency contract of an edge-fact obligation:
-            // the obligation planned for the edge's source node, when
-            // that node carries one.
-            let dependencies: Arc<[FlowObligationId]> = match node_obligations.get(&edge.from) {
-                Some(dependency) => Arc::from(vec![*dependency].into_boxed_slice()),
-                None => Arc::from([]),
-            };
-            let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GraphEdge(class)) }, FlowObligationOrigin::Expansion(E::SelectedEdgeFacts), basis, dependencies, Arc::from([]))?;
-            expanded.push(id);
+            F::ReturnSite => {
+                for node in &selected {
+                    let kind @ FlowNodeKind::ReturnSite(_) = graph.node_kind(*node) else { continue };
+                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::ReturnSite) }, FlowObligationOrigin::Expansion(E::ReturnSiteFacts), FlowObligationBasis::Site { node: *node, kind }, Arc::from([]), Arc::from([]))?;
+                    note_node_obligation(&mut node_obligations, *node, id);
+                    expanded.push(id);
+                }
+            }
+            F::GuardPredicate => {
+                // Guards anchor on (region, control input): one obligation
+                // per selected predicated region.
+                for node in &selected {
+                    let FlowNodeKind::Region(region) = graph.node_kind(*node) else { continue };
+                    let Some(control_input) = bundle.skeleton.region(region).control_input else { continue };
+                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GuardPredicate) }, FlowObligationOrigin::Expansion(E::GuardPredicateFacts), FlowObligationBasis::Guard { node: *node, region, control_input }, Arc::from([]), Arc::from([]))?;
+                    note_node_obligation(&mut node_obligations, *node, id);
+                    expanded.push(id);
+                }
+            }
+            F::CallSite => {
+                // Every concrete call occurrence gets its OWN identity:
+                // one call obligation per (expression site, call ordinal),
+                // never one per site.
+                for node in &selected {
+                    let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
+                    let calls = &bundle.skeleton.expr_site(site).calls;
+                    for (call_ordinal, _call) in calls.iter().enumerate() {
+                        let call_ordinal = u32::try_from(call_ordinal).unwrap_or(u32::MAX);
+                        let id = push(
+                            FlowRequirement { operation: SemanticQueryKeyTag::ResolveCall, requirement: RK::FactFamily(F::CallSite) },
+                            FlowObligationOrigin::Expansion(E::CallSiteFacts),
+                            FlowObligationBasis::CallSite { node: *node, site, call_ordinal },
+                            Arc::from([]), Arc::from([SemanticQueryKeyTag::ResolveCall]),
+                        )?;
+                        note_node_obligation(&mut node_obligations, *node, id);
+                        call_obligations.push((*node, site, call_ordinal, id));
+                        expanded.push(id);
+                    }
+                }
+            }
+            F::ContextualTarget => {
+                // One contextual target per selected expression site.
+                for node in &selected {
+                    let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
+                    let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::ContextualTarget) }, FlowObligationOrigin::Expansion(E::ContextualTargetFacts), FlowObligationBasis::ContextualTarget { node: *node, site }, Arc::from([]), Arc::from([]))?;
+                    note_node_obligation(&mut node_obligations, *node, id);
+                    expanded.push(id);
+                }
+            }
+            F::Capture => {
+                // Captures anchor on the nested function's binding
+                // identity. The capture SET of a nested body is beyond
+                // this skeleton's authority (nested bodies carry no reads
+                // here), so each nested-function subject installs as the
+                // family's accepted typed gap — never an omission.
+                for node in &selected {
+                    let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
+                    if bundle.skeleton.binding(binding).kind != SkeletonBindingKind::NestedFunction { continue; }
+                    let id = push(
+                        FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
+                        FlowObligationOrigin::Expansion(E::CaptureFacts),
+                        FlowObligationBasis::Capture { node: *node, binding, identity: identities[binding.index()].clone() },
+                        Arc::from([]), Arc::from([]),
+                    )?;
+                    expanded.push(id);
+                }
+            }
+            F::SemanticRelation => {
+                // Dynamic relations anchor on the registered call-expansion
+                // events: one relation obligation per call occurrence,
+                // depending on EXACTLY its call obligation.
+                for (node, site, call_ordinal, call_id) in &call_obligations {
+                    let id = push(
+                        FlowRequirement { operation: tag, requirement: RK::FactFamily(F::SemanticRelation) },
+                        FlowObligationOrigin::Expansion(E::SemanticRelationFacts),
+                        FlowObligationBasis::SemanticRelation { node: *node, site: *site, call_ordinal: *call_ordinal },
+                        Arc::from(vec![*call_id].into_boxed_slice()),
+                        Arc::from([SemanticQueryKeyTag::Relate]),
+                    )?;
+                    expanded.push(id);
+                }
+            }
         }
     }
-    let mut work_order = initial.clone();
+    // The selected-edge facts expand last, per required `GraphEdge` class
+    // in family declaration order, then (node, source ordinal) order.
+    for family in &families {
+        let F::GraphEdge(class) = family else { continue };
+        for node in &selected {
+            let mut edges: Vec<_> = graph.out_edges(*node).iter()
+                .filter(|edge| structural_selection.is_selected(edge.to) && edge.kind.class() == *class)
+                .collect();
+            edges.sort_by_key(|edge| edge.ordinal);
+            for edge in edges {
+                let basis = FlowObligationBasis::Edge { from: edge.from, to: edge.to, class: *class, ordinal: edge.ordinal };
+                // The exact dependency contract of an edge-fact obligation:
+                // the obligation planned for the edge's source node, when
+                // that node carries one.
+                let dependencies: Arc<[FlowObligationId]> = match node_obligations.get(&edge.from) {
+                    Some(dependency) => Arc::from(vec![*dependency].into_boxed_slice()),
+                    None => Arc::from([]),
+                };
+                let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GraphEdge(*class)) }, FlowObligationOrigin::Expansion(E::SelectedEdgeFacts), basis, dependencies, Arc::from([]))?;
+                expanded.push(id);
+            }
+        }
+    }
+    let mut work_order = coverage.clone();
+    work_order.extend(initial.iter().copied());
     work_order.extend(expanded.iter().copied());
     let basis = FlowDemandBasis {
         graph_body: bound.key().clone(), query: request.query,
@@ -683,6 +1030,9 @@ pub(crate) fn build_flow_demand_plan(
     Ok(FlowDemandPlan {
         basis, subject, structural_selection,
         required_domains: Arc::from(domains.into_boxed_slice()),
+        required_fact_families: Arc::from(families.into_boxed_slice()),
+        registry_closure: Arc::from(contract.closures.to_vec().into_boxed_slice()),
+        coverage_obligations: Arc::from(coverage.into_boxed_slice()),
         initial_obligations: Arc::from(initial.into_boxed_slice()),
         expanded_obligations: Arc::from(expanded.into_boxed_slice()),
         work_order: Arc::from(work_order.into_boxed_slice()),
@@ -775,33 +1125,34 @@ impl FlowSolveOutcome {
     }
 }
 
-/// The sole proof-bearing finalizer. Consumes ONLY the runtime-sealed
-/// completion artifact — never a separate value or caller-authored
-/// convergence evidence — and verifies the three-way binding of artifact,
-/// runtime, and plan: the artifact's basis IS the plan's basis IS the
-/// installed basis, the operation contract is coherent (registered,
-/// proof-enabled root, matching result contract), the artifact's
-/// discharge proofs equal the plan's exact spec set and the runtime's
-/// current records with every obligation `Discharged`, and the
+/// The sole proof-bearing finalizer. CONSUMES the runtime-sealed
+/// completion artifact — the artifact is one-shot and non-cloneable, so
+/// finalization owns it outright — never a separate value or
+/// caller-authored convergence evidence — and verifies the three-way
+/// binding of artifact, runtime, and plan: the artifact's basis IS the
+/// plan's basis IS the installed basis, the operation contract is coherent
+/// (registered, proof-enabled root, matching result contract), the
+/// artifact's discharge proofs equal the plan's exact spec set and the
+/// runtime's current records with every obligation `Discharged`, and the
 /// runtime-observed convergence matches the plan's policy. Every gap,
 /// stale basis, cancellation, budget exhaustion, panic marker, internal
 /// failure, non-convergence, or degraded value is a typed partial.
 #[rustfmt::skip]
 pub fn finalize_flow_solve(
-    runtime: &ObligationRuntime, plan: &FlowDemandPlan, completion: &SealedFlowCompletion,
+    runtime: &ObligationRuntime, plan: &FlowDemandPlan, completion: SealedFlowCompletion,
 ) -> FlowSolveOutcome {
-    let partial = |reason: FlowPartialReason| FlowSolveOutcome::Partial(PartialFlowResult { basis: plan.basis.clone(), reason });
+    let partial = |reason: FlowPartialReason| FlowSolveOutcome::Partial(PartialFlowResult { basis: plan.basis().clone(), reason });
 
     let Some(installed) = runtime.flow_basis() else { return partial(FlowPartialReason::NoDemandInstalled) };
-    if installed != &plan.basis { return partial(FlowPartialReason::StaleBasis); }
-    if completion.basis() != &plan.basis { return partial(FlowPartialReason::StaleBasis); }
-    let Some(contract) = flow_operation_contract(plan.basis.query.tag()) else {
+    if installed != plan.basis() { return partial(FlowPartialReason::StaleBasis); }
+    if completion.basis() != plan.basis() { return partial(FlowPartialReason::StaleBasis); }
+    let Some(contract) = flow_operation_contract(plan.basis().query.tag()) else {
         return partial(FlowPartialReason::OperationNotProvable);
     };
     if contract.role != R::Root || contract.status != S::EnabledHermetic {
         return partial(FlowPartialReason::OperationNotProvable);
     }
-    if plan.basis.result_contract != flow_result_contract_id(contract) {
+    if plan.basis().result_contract != flow_result_contract_id(contract) {
         return partial(FlowPartialReason::ResultContractMismatch);
     }
     let records = runtime.flow_obligations();
@@ -821,13 +1172,13 @@ pub fn finalize_flow_solve(
             }
         }
     }
-    if completion.convergence().policy() != plan.convergence {
+    if completion.convergence().policy() != plan.convergence() {
         return partial(FlowPartialReason::NonConverged);
     }
     if completion.value().degradation().is_some() { return partial(FlowPartialReason::DegradedValue); }
 
     FlowSolveOutcome::Complete(CompleteFlowResult::new(CompleteFlowResultParts {
-        basis: plan.basis.clone(), value: completion.value().clone(),
-        convergence: *completion.convergence(), discharged: Arc::clone(&plan.work_order),
+        basis: plan.basis().clone(), value: completion.value().clone(),
+        convergence: *completion.convergence(), discharged: Arc::from(plan.work_order().to_vec().into_boxed_slice()),
     }))
 }

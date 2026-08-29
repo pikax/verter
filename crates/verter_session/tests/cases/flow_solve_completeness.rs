@@ -7,25 +7,32 @@
 //! gaps — never silently dropped — and no partial, gapped, failed, stale,
 //! or non-converged replay is a warm candidate.
 //!
-//! The finalizer accepts ONLY the runtime-sealed artifact: no
-//! caller-supplied value, no caller-authored convergence evidence, and no
-//! caller-assembled discharge evidence can reach it.
+//! The plan is SEALED (immutable getters only; the requirement universe —
+//! the closed domain→family registry mapping — is fixed at plan time); the
+//! runtime drives a one-shot lifecycle (Discharging → ExpansionClosed →
+//! Converging → Converged → Sealed); and the finalizer accepts ONLY the
+//! runtime-sealed artifact, consuming it: no caller-supplied value, no
+//! caller-authored convergence evidence, and no caller-assembled discharge
+//! evidence can reach it.
 
 use std::sync::Arc;
 
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
+use verter_language::{FileLanguage, ScriptSourceType};
 use verter_semantic::analysis::flow::flow_graph::FlowEdgeClass;
 use verter_session::for_tests::{
-    degraded_flow_return_result_for_tests, finalize_flow_solve, flow_graph_fixture_for_tests,
+    degraded_flow_return_result_for_tests, finalize_flow_solve, flow_family_route,
+    flow_graph_fixture_for_tests, flow_graph_fixture_for_tests_with_language,
     flow_operation_contract, flow_result_contract_id, flow_return_result_for_tests,
     CompleteFlowResult, FlowDemandPlan, FlowDemandPlanError, FlowDemandRequest, FlowDomain,
-    FlowFactFamily, FlowFailure, FlowFailureClass, FlowFinalizerKind, FlowGraphFixtureForTests,
-    FlowObligationBasis, FlowObligationId, FlowObligationSpec, FlowOperationContract,
-    FlowOperationRole, FlowOperationStatus, FlowPartialReason, FlowRequirement,
-    FlowRequirementKind, FlowResourcePolicy, FlowResultContractDescriptor, FlowSealError,
-    FlowSolveOutcome, FlowSuboperationEvidence, FlowTransitionError, ObligationRuntime,
-    ObligationState, SealedFlowCompletion, SemanticGraphStore,
+    FlowDomainClosure, FlowFactFamily, FlowFailure, FlowFailureClass, FlowFinalizerKind,
+    FlowGraphFixtureForTests, FlowObligationBasis, FlowObligationId, FlowObligationOrigin,
+    FlowObligationSpec, FlowOperationContract, FlowOperationRole, FlowOperationStatus,
+    FlowPartialReason, FlowRequirement, FlowRequirementKind, FlowResourcePolicy,
+    FlowResultContractDescriptor, FlowSealError, FlowSolveOutcome, FlowSuboperationEvidence,
+    FlowTransitionError, ObligationRuntime, ObligationState, SealedFlowCompletion,
+    SemanticGraphStore,
 };
 use verter_session::semantic_query::demand::{ProjectionPath, SurfaceFacet, SurfaceFacetSet};
 use verter_session::semantic_query::{
@@ -38,11 +45,36 @@ use verter_session::semantic_query::{
 /// The fixture body: one parameter, one local, one object-literal return
 /// with a call entry, so the demand plan exercises binding-slot, return-site,
 /// edge, and call-site expansion — including TWO binding obligations of the
-/// same family with distinct provenance.
+/// same family with distinct provenance. No control flow and no nested
+/// function: the guard and capture families are PROVED EMPTY through their
+/// coverage obligations.
 const FIXTURE_SOURCE: &str = r#"
 function solve_me(x) {
   const y = x;
   return { value: y, other: side_effect(y) };
+}
+"#;
+
+/// The rich fixture: a predicated region (a guard), one expression site
+/// carrying MULTIPLE call occurrences, a second call site, and two return
+/// sites — so the plan exercises guard, per-ordinal call, relation, and
+/// contextual-target expansion. Still no nested function: captures stay
+/// proved-empty.
+const RICH_FIXTURE_SOURCE: &str = r#"
+function rich(x) {
+  const y = x;
+  if (y) { return { a: side(y) }; }
+  return { value: y, other: pair(first(), second()) };
+}
+"#;
+
+/// The capture fixture: a nested function closing over the parameter — the
+/// capture set is beyond the skeleton's authority, so the capture subject
+/// installs the family's accepted typed gap.
+const CAPTURE_FIXTURE_SOURCE: &str = r#"
+function with_capture(x) {
+  function helper() { return x; }
+  return helper();
 }
 "#;
 
@@ -65,13 +97,13 @@ fn foreign_result_contract(tag: u64) -> ResultContractId {
     ResultContractId::from_canonical(&TestBasis(tag))
 }
 
-fn flow_return_query(env_tag: u8) -> SemanticQueryKey {
+fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
     SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
         function: FlowFunctionSlotIdentity {
             declaration_slot: ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/flow_solve_fixture.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("solve_me"),
+                Arc::from(name),
             ),
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
@@ -89,6 +121,10 @@ fn flow_return_query(env_tag: u8) -> SemanticQueryKey {
         demand: ReturnProjectionDemand::whole_return(),
         input: FlowInputContext::empty(),
     }))
+}
+
+fn flow_return_query(env_tag: u8) -> SemanticQueryKey {
+    flow_return_query_named(env_tag, "solve_me")
 }
 
 fn registered_result_contract() -> ResultContractId {
@@ -110,6 +146,13 @@ fn base_request() -> FlowDemandRequest {
     }
 }
 
+fn request_named(name: &str) -> FlowDemandRequest {
+    FlowDemandRequest {
+        query: flow_return_query_named(0, name),
+        ..base_request()
+    }
+}
+
 fn planned() -> (FlowGraphFixtureForTests, FlowDemandPlan) {
     let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
     let plan = fixture
@@ -118,11 +161,24 @@ fn planned() -> (FlowGraphFixtureForTests, FlowDemandPlan) {
     (fixture, plan)
 }
 
+fn planned_rich() -> (FlowGraphFixtureForTests, FlowDemandPlan) {
+    let fixture = flow_graph_fixture_for_tests(RICH_FIXTURE_SOURCE, 9);
+    let plan = fixture
+        .build_plan(request_named("rich"))
+        .expect("the rich fixture demand plans within budget");
+    (fixture, plan)
+}
+
 fn spec(plan: &FlowDemandPlan, id: FlowObligationId) -> &FlowObligationSpec {
     plan.obligation_specs()
         .iter()
-        .find(|spec| spec.id == id)
+        .find(|spec| spec.id() == id)
         .expect("every planned id has a spec")
+}
+
+/// The exact declared dependency evidence of `spec`.
+fn declared_dependencies(spec: &FlowObligationSpec) -> Arc<[FlowObligationId]> {
+    Arc::from(spec.expected_dependencies())
 }
 
 /// The suboperation evidence a faithful solve presents for `spec`: exactly
@@ -131,11 +187,11 @@ fn expected_suboperations(
     plan: &FlowDemandPlan,
     spec: &FlowObligationSpec,
 ) -> Arc<[FlowSuboperationEvidence]> {
-    spec.expected_suboperations
+    spec.expected_suboperations()
         .iter()
         .map(|operation| FlowSuboperationEvidence {
             operation: *operation,
-            result_contract: plan.basis.result_contract.clone(),
+            result_contract: plan.basis().result_contract.clone(),
         })
         .collect()
 }
@@ -148,7 +204,7 @@ fn discharge_one(runtime: &mut ObligationRuntime, plan: &FlowDemandPlan, id: Flo
     runtime
         .discharge_flow_obligation(
             id,
-            obligation.expected_dependencies.clone(),
+            declared_dependencies(obligation),
             expected_suboperations(plan, obligation),
         )
         .expect("a running obligation discharges with its spec-declared evidence");
@@ -185,13 +241,13 @@ fn solve_value() -> FlowReturnResult {
 }
 
 /// The sole completion path: install, discharge every planned obligation in
-/// work order, let the runtime observe convergence, seal, finalize.
+/// work order, let the runtime observe convergence, seal.
 fn drive_to_completion(plan: &FlowDemandPlan) -> (ObligationRuntime, SealedFlowCompletion) {
     let mut runtime = ObligationRuntime::default();
     runtime
         .install_flow_demand(plan)
         .expect("the plan installs on a fresh runtime");
-    discharge_all(&mut runtime, plan, &plan.work_order);
+    discharge_all(&mut runtime, plan, plan.work_order());
     observe_convergence(&mut runtime);
     let sealed = runtime
         .seal_flow_completion(solve_value())
@@ -207,7 +263,7 @@ fn complete_result_requires_every_planned_obligation() {
     // complete, warm-admissible result.
     let (runtime, sealed) = drive_to_completion(&plan);
     let sealed_value = sealed.value().clone();
-    let outcome = finalize_flow_solve(&runtime, &plan, &sealed);
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
     let FlowSolveOutcome::Complete(complete) = &outcome else {
         panic!("a fully discharged plan must complete: {outcome:?}")
     };
@@ -226,7 +282,8 @@ fn complete_result_requires_every_planned_obligation() {
     let wider_plan = fixture
         .build_plan(wider_request)
         .expect("the widened demand plans within budget");
-    let outcome = finalize_flow_solve(&runtime, &wider_plan, &sealed);
+    let (runtime, sealed) = drive_to_completion(&plan);
+    let outcome = finalize_flow_solve(&runtime, &wider_plan, sealed);
     assert!(
         matches!(
             outcome,
@@ -240,10 +297,9 @@ fn complete_result_requires_every_planned_obligation() {
     // complete.
     let mut runtime = ObligationRuntime::default();
     runtime.install_flow_demand(&plan).expect("install");
-    let mut order = plan.work_order.to_vec();
+    let mut order = plan.work_order().to_vec();
     let held = order.pop().expect("the plan has obligations");
     discharge_all(&mut runtime, &plan, &order);
-    observe_convergence(&mut runtime);
     assert!(
         matches!(
             runtime.seal_flow_completion(solve_value()),
@@ -255,7 +311,7 @@ fn complete_result_requires_every_planned_obligation() {
         runtime
             .flow_obligations()
             .iter()
-            .find(|record| record.spec.id == held)
+            .find(|record| record.spec.id() == held)
             .map(|record| &record.state),
         Some(ObligationState::Pending)
     ));
@@ -301,12 +357,12 @@ fn unregistered_flow_requirement_becomes_a_gap() {
     }
     // The record retains the offending requirement — the private typed
     // reason survives behind the shared public gap carrier.
-    assert!(gaps.iter().any(|record| record.spec.requirement
+    assert!(gaps.iter().any(|record| *record.spec.requirement()
         == FlowRequirement {
             operation: SemanticQueryKeyTag::FlowReturn,
             requirement: FlowRequirementKind::Domain(FlowDomain::Coverage),
         }));
-    assert!(gaps.iter().any(|record| record.spec.requirement
+    assert!(gaps.iter().any(|record| *record.spec.requirement()
         == FlowRequirement {
             operation: SemanticQueryKeyTag::Relate,
             requirement: FlowRequirementKind::FactFamily(FlowFactFamily::GraphEdge(
@@ -318,41 +374,64 @@ fn unregistered_flow_requirement_becomes_a_gap() {
 #[test]
 fn discharge_order_does_not_change_the_completed_result() {
     let (_fixture, plan) = planned();
-    let canonical: Vec<FlowObligationId> = plan.work_order.to_vec();
+    let canonical: Vec<FlowObligationId> = plan.work_order().to_vec();
     assert!(
         canonical.len() >= 4,
         "the fixture must expand to enough obligations to permute"
     );
-    let reversed: Vec<FlowObligationId> = canonical.iter().rev().copied().collect();
-    let rotated: Vec<FlowObligationId> = canonical[3..]
-        .iter()
-        .chain(canonical[..3].iter())
-        .copied()
-        .collect();
-    // A fixed shuffle: even positions ascending, then odd positions descending.
-    let shuffled: Vec<FlowObligationId> = canonical
-        .iter()
-        .step_by(2)
-        .chain(canonical.iter().skip(1).step_by(2).rev())
-        .copied()
-        .collect();
+
+    // Dependency levels: an obligation's level is 1 + the maximum level of
+    // its declared dependencies (level 0 = no dependencies). Dependencies
+    // precede their dependents in the work order, so levels resolve in one
+    // pass. Any order whose levels are non-decreasing is a legal drive.
+    let mut levels: std::collections::BTreeMap<FlowObligationId, usize> =
+        std::collections::BTreeMap::new();
+    for id in &canonical {
+        let level = spec(&plan, *id)
+            .expected_dependencies()
+            .iter()
+            .map(|dependency| levels[dependency] + 1)
+            .max()
+            .unwrap_or(0);
+        levels.insert(*id, level);
+    }
+    let permute = |reverse_within: bool, rotate_within: bool| -> Vec<FlowObligationId> {
+        let mut groups: std::collections::BTreeMap<usize, Vec<FlowObligationId>> =
+            std::collections::BTreeMap::new();
+        for id in &canonical {
+            groups.entry(levels[id]).or_default().push(*id);
+        }
+        groups
+            .into_values()
+            .flat_map(|mut group| {
+                if reverse_within {
+                    group.reverse();
+                }
+                if rotate_within && group.len() > 1 {
+                    group.rotate_left(1);
+                }
+                group
+            })
+            .collect()
+    };
+    let reversed = permute(true, false);
+    let rotated = permute(false, true);
     assert_ne!(canonical, reversed);
     assert_ne!(canonical, rotated);
-    assert_ne!(canonical, shuffled);
     assert_ne!(reversed, rotated);
 
     let mut results: Vec<CompleteFlowResult> = Vec::new();
-    for order in [&canonical, &reversed, &rotated, &shuffled] {
+    for order in [&canonical, &reversed, &rotated] {
         let mut runtime = ObligationRuntime::default();
         runtime.install_flow_demand(&plan).expect("install");
         discharge_all(&mut runtime, &plan, order);
         observe_convergence(&mut runtime);
         let sealed = runtime
             .seal_flow_completion(solve_value())
-            .expect("every discharge order seals");
-        match finalize_flow_solve(&runtime, &plan, &sealed) {
+            .expect("every legal discharge order seals");
+        match finalize_flow_solve(&runtime, &plan, sealed) {
             FlowSolveOutcome::Complete(complete) => results.push(complete),
-            other => panic!("every discharge order must complete: {other:?}"),
+            other => panic!("every legal discharge order must complete: {other:?}"),
         }
     }
     for result in &results[1..] {
@@ -373,18 +452,19 @@ fn plan_binds_the_store_minted_graph_identity() {
     let plan_a = fixture_a.build_plan(base_request()).expect("plans");
     let plan_b = fixture_b.build_plan(base_request()).expect("plans");
     assert_ne!(
-        plan_a.basis, plan_b.basis,
+        plan_a.basis(),
+        plan_b.basis(),
         "distinct bound graphs must yield distinct bases"
     );
     // Replanning over the same bound graph is deterministic.
     let plan_a2 = fixture_a.build_plan(base_request()).expect("plans");
-    assert_eq!(plan_a.basis, plan_a2.basis);
+    assert_eq!(plan_a.basis(), plan_a2.basis());
     assert_eq!(plan_a.obligation_specs(), plan_a2.obligation_specs());
 
     // A solve sealed under one bound graph can never complete against a
     // plan minted over the other, even with identical source.
     let (runtime, sealed) = drive_to_completion(&plan_a);
-    let outcome = finalize_flow_solve(&runtime, &plan_b, &sealed);
+    let outcome = finalize_flow_solve(&runtime, &plan_b, sealed);
     assert!(
         matches!(
             outcome,
@@ -402,7 +482,7 @@ fn query_demand_drives_the_subject_exhaustively() {
 
     // The canonical whole-return point derives the empty projection path.
     let plan = fixture.build_plan(base_request()).expect("plans");
-    assert!(plan.subject.projection_path.is_empty());
+    assert!(plan.subject().projection_path.is_empty());
 
     // A named member-path demand derives its subject from the QUERY
     // payload — there is no caller-supplied subject to disagree with it.
@@ -417,7 +497,7 @@ fn query_demand_drives_the_subject_exhaustively() {
         .build_plan(named)
         .expect("a named member path plans");
     assert_eq!(
-        plan.subject
+        plan.subject()
             .projection_path
             .iter()
             .map(|segment| segment.as_ref())
@@ -473,7 +553,7 @@ fn same_kind_obligations_keep_distinct_provenance() {
     let bindings: Vec<&FlowObligationSpec> = plan
         .obligation_specs()
         .iter()
-        .filter(|spec| matches!(spec.basis, FlowObligationBasis::Binding { .. }))
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Binding { .. }))
         .collect();
     assert!(
         bindings.len() >= 2,
@@ -483,16 +563,17 @@ fn same_kind_obligations_keep_distinct_provenance() {
     // Same family, same origin, same declared evidence — yet distinct
     // semantic subjects. The identity, not the plan-local ordinal, is
     // what separates them.
-    assert_eq!(bindings[0].requirement, bindings[1].requirement);
-    assert_eq!(bindings[0].origin, bindings[1].origin);
+    assert_eq!(bindings[0].requirement(), bindings[1].requirement());
+    assert_eq!(bindings[0].origin(), bindings[1].origin());
     assert_ne!(
-        bindings[0].basis, bindings[1].basis,
+        bindings[0].basis(),
+        bindings[1].basis(),
         "two binding obligations of one family carry distinct provenance"
     );
     let (
         FlowObligationBasis::Binding { slot: first, .. },
         FlowObligationBasis::Binding { slot: second, .. },
-    ) = (&bindings[0].basis, &bindings[1].basis)
+    ) = (bindings[0].basis(), bindings[1].basis())
     else {
         unreachable!()
     };
@@ -504,17 +585,16 @@ fn same_kind_obligations_keep_distinct_provenance() {
     // illegal transition.
     let mut runtime = ObligationRuntime::default();
     runtime.install_flow_demand(&plan).expect("install");
-    discharge_one(&mut runtime, &plan, bindings[0].id);
+    discharge_one(&mut runtime, &plan, bindings[0].id());
     assert_eq!(
         runtime.discharge_flow_obligation(
-            bindings[0].id,
-            bindings[0].expected_dependencies.clone(),
+            bindings[0].id(),
+            declared_dependencies(bindings[0]),
             expected_suboperations(&plan, bindings[0]),
         ),
         Err(FlowTransitionError::IllegalTransition),
         "an already-discharged obligation cannot discharge again"
     );
-    observe_convergence(&mut runtime);
     assert!(
         matches!(
             runtime.seal_flow_completion(solve_value()),
@@ -530,15 +610,15 @@ fn evidence_must_match_the_specific_spec() {
     let call_spec = plan
         .obligation_specs()
         .iter()
-        .find(|spec| !spec.expected_suboperations.is_empty())
+        .find(|spec| matches!(spec.basis(), FlowObligationBasis::CallSite { .. }))
         .expect("the fixture plans a call-site obligation with required suboperations")
-        .id;
+        .id();
     let edge_spec = plan
         .obligation_specs()
         .iter()
-        .find(|spec| !spec.expected_dependencies.is_empty())
+        .find(|spec| matches!(spec.basis(), FlowObligationBasis::Edge { .. }))
         .expect("the fixture plans an edge obligation with required dependencies")
-        .id;
+        .id();
 
     let mut runtime = ObligationRuntime::default();
     runtime.install_flow_demand(&plan).expect("install");
@@ -589,7 +669,7 @@ fn evidence_must_match_the_specific_spec() {
         runtime
             .flow_obligations()
             .iter()
-            .find(|record| record.spec.id == call_spec)
+            .find(|record| record.spec.id() == call_spec)
             .map(|record| &record.state),
         Some(ObligationState::Running)
     ));
@@ -597,16 +677,20 @@ fn evidence_must_match_the_specific_spec() {
     runtime
         .discharge_flow_obligation(
             call_spec,
-            obligation.expected_dependencies.clone(),
+            declared_dependencies(obligation),
             expected_suboperations(&plan, obligation),
         )
         .expect("the still-running call-site obligation discharges");
-    let obligation = spec(&plan, edge_spec);
+    // Dependency readiness: the edge's declared dependency (its source
+    // node's primary obligation) must itself be discharged first.
+    let edge = spec(&plan, edge_spec);
+    let dependency = edge.expected_dependencies()[0];
+    discharge_one(&mut runtime, &plan, dependency);
     runtime
         .discharge_flow_obligation(
             edge_spec,
-            obligation.expected_dependencies.clone(),
-            expected_suboperations(&plan, obligation),
+            declared_dependencies(edge),
+            expected_suboperations(&plan, edge),
         )
         .expect("the still-running edge obligation discharges");
 }
@@ -618,7 +702,7 @@ fn convergence_must_be_runtime_observed() {
     // Fully discharged, but the runtime never observed a fixed point.
     let mut runtime = ObligationRuntime::default();
     runtime.install_flow_demand(&plan).expect("install");
-    discharge_all(&mut runtime, &plan, &plan.work_order);
+    discharge_all(&mut runtime, &plan, plan.work_order());
     assert!(
         matches!(
             runtime.seal_flow_completion(solve_value()),
@@ -656,8 +740,8 @@ fn convergence_must_be_runtime_observed() {
     // into it can never stabilize, so it can never seal.
     let mut runtime = ObligationRuntime::default();
     runtime.install_flow_demand(&plan).expect("install");
-    discharge_all(&mut runtime, &plan, &plan.work_order);
-    for _ in 0..plan.convergence.max_iterations {
+    discharge_all(&mut runtime, &plan, plan.work_order());
+    for _ in 0..plan.convergence().max_iterations {
         runtime.observe_flow_iteration(true).expect("within budget");
     }
     assert_eq!(
@@ -676,6 +760,210 @@ fn convergence_must_be_runtime_observed() {
         idle.observe_flow_iteration(false),
         Err(FlowTransitionError::NoDemandInstalled)
     );
+}
+
+/// The convergence gate: NO observation is admitted while the expansion
+/// frontier is open or any required obligation is undischarged.
+#[test]
+fn convergence_observation_requires_a_closed_discharged_frontier() {
+    let (_fixture, plan) = planned();
+    let mut runtime = ObligationRuntime::default();
+    runtime.install_flow_demand(&plan).expect("install");
+
+    // Frontier open, nothing discharged: both changing and stable
+    // observations are rejected.
+    assert_eq!(
+        runtime.observe_flow_iteration(true),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+    assert_eq!(
+        runtime.observe_flow_iteration(false),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+
+    // All but one obligation discharged: still rejected — "almost
+    // discharged" is not a closed frontier.
+    let order = plan.work_order().to_vec();
+    let (last, rest) = order.split_last().expect("the plan has obligations");
+    discharge_all(&mut runtime, &plan, rest);
+    assert_eq!(
+        runtime.observe_flow_iteration(true),
+        Err(FlowTransitionError::IllegalTransition),
+        "one undischarged obligation keeps the frontier open"
+    );
+
+    // Fully discharged: observation is admitted, and the solve completes.
+    discharge_one(&mut runtime, &plan, *last);
+    observe_convergence(&mut runtime);
+    let sealed = runtime
+        .seal_flow_completion(solve_value())
+        .expect("a fully discharged, runtime-converged solve seals");
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
+    assert!(outcome.warm_candidate().is_some());
+}
+
+/// A dependent obligation cannot discharge until its EXACT dependencies
+/// are themselves discharged.
+#[test]
+fn dependent_obligation_discharge_requires_discharged_dependencies() {
+    let (_fixture, plan) = planned();
+
+    // A domain obligation depends on its family-coverage obligations.
+    let domain_spec = plan
+        .obligation_specs()
+        .iter()
+        .find(|spec| matches!(spec.origin(), FlowObligationOrigin::ContractDomain))
+        .expect("the plan has contract-domain obligations");
+    assert!(
+        !domain_spec.expected_dependencies().is_empty(),
+        "every domain obligation depends on its closure's coverage obligations"
+    );
+
+    let mut runtime = ObligationRuntime::default();
+    runtime.install_flow_demand(&plan).expect("install");
+    runtime
+        .start_flow_obligation(domain_spec.id())
+        .expect("start");
+    assert_eq!(
+        runtime.discharge_flow_obligation(
+            domain_spec.id(),
+            declared_dependencies(domain_spec),
+            Arc::from([]),
+        ),
+        Err(FlowTransitionError::UndischargedDependency),
+        "a domain obligation cannot discharge before its coverage obligations discharge"
+    );
+    // The obligation is left Running: the refused discharge minted nothing.
+    assert!(matches!(
+        runtime
+            .flow_obligations()
+            .iter()
+            .find(|record| record.spec.id() == domain_spec.id())
+            .map(|record| &record.state),
+        Some(ObligationState::Running)
+    ));
+    // Discharge the exact dependencies, then the domain discharges.
+    for dependency in domain_spec.expected_dependencies() {
+        discharge_one(&mut runtime, &plan, *dependency);
+    }
+    runtime
+        .discharge_flow_obligation(
+            domain_spec.id(),
+            declared_dependencies(domain_spec),
+            Arc::from([]),
+        )
+        .expect("with every dependency discharged, the domain discharges");
+
+    // The same gate binds an edge-fact obligation to its source node's
+    // obligation.
+    let edge_spec = plan
+        .obligation_specs()
+        .iter()
+        .find(|spec| matches!(spec.basis(), FlowObligationBasis::Edge { .. }))
+        .expect("the fixture plans an edge obligation");
+    let edge_dependency = edge_spec.expected_dependencies()[0];
+    let mut runtime = ObligationRuntime::default();
+    runtime.install_flow_demand(&plan).expect("install");
+    runtime
+        .start_flow_obligation(edge_spec.id())
+        .expect("start");
+    assert_eq!(
+        runtime.discharge_flow_obligation(
+            edge_spec.id(),
+            declared_dependencies(edge_spec),
+            Arc::from([]),
+        ),
+        Err(FlowTransitionError::UndischargedDependency),
+        "an edge obligation cannot discharge before its source node's obligation"
+    );
+    discharge_one(&mut runtime, &plan, edge_dependency);
+    runtime
+        .discharge_flow_obligation(
+            edge_spec.id(),
+            declared_dependencies(edge_spec),
+            Arc::from([]),
+        )
+        .expect("with the dependency discharged, the edge discharges");
+}
+
+/// Once convergence begins, no obligation expansion or transition is
+/// legal; once sealed, EVERY transition fails and a repeated seal is
+/// `AlreadySealed`.
+#[test]
+fn no_transitions_after_convergence_and_seal_is_one_shot() {
+    let (_fixture, plan) = planned();
+    let mut runtime = ObligationRuntime::default();
+    runtime.install_flow_demand(&plan).expect("install");
+    discharge_all(&mut runtime, &plan, plan.work_order());
+    runtime
+        .observe_flow_iteration(true)
+        .expect("the first observation begins convergence");
+
+    // Converging: every obligation transition is rejected.
+    let id = plan.work_order()[0];
+    let obligation = spec(&plan, id);
+    assert_eq!(
+        runtime.start_flow_obligation(id),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+    assert_eq!(
+        runtime.discharge_flow_obligation(
+            id,
+            declared_dependencies(obligation),
+            expected_suboperations(&plan, obligation),
+        ),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+    assert_eq!(
+        runtime.gap_flow_obligation(id, FlowGap::UnmodeledExpression),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+    assert_eq!(
+        runtime.fail_flow_obligation(
+            id,
+            FlowFailure {
+                class: FlowFailureClass::Internal
+            }
+        ),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+
+    // Converged → Sealed: the artifact mints exactly once.
+    runtime
+        .observe_flow_iteration(false)
+        .expect("the stable iteration closes convergence");
+    let sealed = runtime
+        .seal_flow_completion(solve_value())
+        .expect("a fully discharged, runtime-converged solve seals");
+
+    // Post-seal: every transition fails; a repeated seal is AlreadySealed.
+    assert!(
+        matches!(
+            runtime.seal_flow_completion(solve_value()),
+            Err(FlowSealError::AlreadySealed)
+        ),
+        "the completion artifact is one-shot"
+    );
+    assert_eq!(
+        runtime.observe_flow_iteration(false),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+    assert_eq!(
+        runtime.start_flow_obligation(id),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+    assert_eq!(
+        runtime.gap_flow_obligation(id, FlowGap::UnmodeledExpression),
+        Err(FlowTransitionError::IllegalTransition)
+    );
+    assert_eq!(
+        runtime.install_flow_demand(&plan),
+        Err(FlowTransitionError::DemandAlreadyInstalled)
+    );
+
+    // The minted artifact still finalizes (the runtime is unchanged).
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
+    assert!(outcome.warm_candidate().is_some());
 }
 
 #[test]
@@ -699,7 +987,7 @@ fn foreign_value_and_partial_solve_cannot_seal() {
     // converged solve.
     let mut runtime = ObligationRuntime::default();
     runtime.install_flow_demand(&plan).expect("install");
-    discharge_all(&mut runtime, &plan, &plan.work_order);
+    discharge_all(&mut runtime, &plan, plan.work_order());
     observe_convergence(&mut runtime);
     let degraded = {
         let graph = SemanticGraphStore::new();
@@ -712,7 +1000,7 @@ fn foreign_value_and_partial_solve_cannot_seal() {
     ));
 
     // A runtime that never served a demand has nothing to seal.
-    let idle = ObligationRuntime::default();
+    let mut idle = ObligationRuntime::default();
     assert!(matches!(
         idle.seal_flow_completion(solve_value()),
         Err(FlowSealError::NoDemandInstalled)
@@ -725,7 +1013,7 @@ fn partial_replay_never_seals() {
 
     // Fully discharged control: seals, completes, warms.
     let (runtime, sealed) = drive_to_completion(&plan);
-    let outcome = finalize_flow_solve(&runtime, &plan, &sealed);
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
     assert!(outcome.warm_candidate().is_some());
 
     // A gapped obligation: never sealed, never warm.
@@ -741,10 +1029,9 @@ fn partial_replay_never_seals() {
         .flow_obligations()
         .iter()
         .filter(|record| matches!(record.state, ObligationState::Pending))
-        .map(|record| record.spec.id)
+        .map(|record| record.spec.id())
         .collect();
     discharge_all(&mut runtime, &gapped_plan, &pending);
-    observe_convergence(&mut runtime);
     assert!(matches!(
         runtime.seal_flow_completion(solve_value()),
         Err(FlowSealError::UndischargedObligations)
@@ -755,14 +1042,13 @@ fn partial_replay_never_seals() {
     for class in [FlowFailureClass::Internal, FlowFailureClass::Cancelled] {
         let mut runtime = ObligationRuntime::default();
         runtime.install_flow_demand(&plan).expect("install");
-        let mut order = plan.work_order.to_vec();
+        let mut order = plan.work_order().to_vec();
         let failed = order.pop().expect("the plan has obligations");
         discharge_all(&mut runtime, &plan, &order);
         runtime.start_flow_obligation(failed).expect("start");
         runtime
             .fail_flow_obligation(failed, FlowFailure { class })
             .expect("a running obligation fails");
-        observe_convergence(&mut runtime);
         assert!(matches!(
             runtime.seal_flow_completion(solve_value()),
             Err(FlowSealError::UndischargedObligations)
@@ -772,12 +1058,13 @@ fn partial_replay_never_seals() {
     // A partial replay (some obligations never discharged): never sealed.
     let mut runtime = ObligationRuntime::default();
     runtime.install_flow_demand(&plan).expect("install");
-    discharge_all(
-        &mut runtime,
-        &plan,
-        &plan.work_order[..plan.work_order.len() / 2],
-    );
-    observe_convergence(&mut runtime);
+    let partial_prefix: Vec<FlowObligationId> = {
+        // Prefix only: every obligation's dependencies precede it in the
+        // work order, so any prefix is a legal drive.
+        let order = plan.work_order();
+        order[..order.len() / 2].to_vec()
+    };
+    discharge_all(&mut runtime, &plan, &partial_prefix);
     assert!(matches!(
         runtime.seal_flow_completion(solve_value()),
         Err(FlowSealError::UndischargedObligations)
@@ -789,7 +1076,7 @@ fn partial_replay_never_seals() {
     stale_request.input_basis = test_input_basis(2);
     let stale_plan = fixture.build_plan(stale_request).expect("plans");
     let (runtime, sealed) = drive_to_completion(&plan);
-    let outcome = finalize_flow_solve(&runtime, &stale_plan, &sealed);
+    let outcome = finalize_flow_solve(&runtime, &stale_plan, sealed);
     assert!(matches!(outcome, FlowSolveOutcome::Partial(_)));
     assert!(outcome.warm_candidate().is_none());
 }
@@ -797,11 +1084,10 @@ fn partial_replay_never_seals() {
 #[test]
 fn stale_basis_or_foreign_contract_cannot_complete() {
     let (fixture, plan) = planned();
-    let (runtime, sealed) = drive_to_completion(&plan);
 
     // Every basis axis the finalize-time comparison covers: a plan rebuilt
     // from a request differing in any one of them must not complete against
-    // this runtime's sealed artifact.
+    // a runtime's sealed artifact.
     let stale_plans: Vec<(&str, FlowDemandPlan)> = {
         let mut legs: Vec<(&str, FlowDemandRequest)> = Vec::new();
 
@@ -834,7 +1120,8 @@ fn stale_basis_or_foreign_contract_cannot_complete() {
             .collect()
     };
     for (name, stale_plan) in &stale_plans {
-        let outcome = finalize_flow_solve(&runtime, stale_plan, &sealed);
+        let (runtime, sealed) = drive_to_completion(&plan);
+        let outcome = finalize_flow_solve(&runtime, stale_plan, sealed);
         assert!(
             matches!(outcome, FlowSolveOutcome::Partial(_)),
             "a stale {name} must not complete: {outcome:?}"
@@ -850,7 +1137,7 @@ fn stale_basis_or_foreign_contract_cannot_complete() {
         .build_plan(foreign_request)
         .expect("the demand plans");
     let (foreign_runtime, foreign_sealed) = drive_to_completion(&foreign_plan);
-    let outcome = finalize_flow_solve(&foreign_runtime, &foreign_plan, &foreign_sealed);
+    let outcome = finalize_flow_solve(&foreign_runtime, &foreign_plan, foreign_sealed);
     assert!(
         matches!(
             outcome,
@@ -863,56 +1150,52 @@ fn stale_basis_or_foreign_contract_cannot_complete() {
 
 #[test]
 fn result_contract_id_tracks_the_complete_contract() {
-    let base = *flow_operation_contract(SemanticQueryKeyTag::FlowReturn)
-        .expect("FlowReturn is a registered flow operation");
+    let base = flow_operation_contract(SemanticQueryKeyTag::FlowReturn)
+        .expect("FlowReturn is a registered flow operation")
+        .clone();
     let base_id = flow_result_contract_id(&base);
     // Deterministic: the same closed contract mints the same identity.
     assert_eq!(base_id, flow_result_contract_id(&base));
+
+    // A reordered closure list and a narrowed family list (the closed
+    // mapping is order-bearing identity).
+    let mut reordered = base.closures.to_vec();
+    reordered.reverse();
+    let reordered: &'static [FlowDomainClosure] = Box::leak(reordered.into_boxed_slice());
+    let mut narrowed = base.closures.to_vec();
+    narrowed[0] = FlowDomainClosure {
+        families: &[FlowFactFamily::BindingSlot],
+        ..narrowed[0].clone()
+    };
+    let narrowed: &'static [FlowDomainClosure] = Box::leak(narrowed.into_boxed_slice());
 
     let cases: Vec<(&str, FlowOperationContract)> = vec![
         (
             "role",
             FlowOperationContract {
                 role: FlowOperationRole::SemanticSuboperation,
-                ..base
+                ..base.clone()
             },
         ),
         (
             "status",
             FlowOperationContract {
                 status: FlowOperationStatus::PendingReducer,
-                ..base
+                ..base.clone()
             },
         ),
         (
             "domains",
             FlowOperationContract {
-                required_domains: &[FlowDomain::ReachingValue],
-                ..base
+                closures: narrowed,
+                ..base.clone()
             },
         ),
         (
             "domain order",
             FlowOperationContract {
-                required_domains: &[
-                    FlowDomain::ReachingType,
-                    FlowDomain::ReachingValue,
-                    FlowDomain::Narrowing,
-                    FlowDomain::Completion,
-                    FlowDomain::ClosureCapture,
-                    FlowDomain::Freshness,
-                    FlowDomain::Effects,
-                    FlowDomain::CallResolution,
-                    FlowDomain::Relation,
-                ],
-                ..base
-            },
-        ),
-        (
-            "fact families",
-            FlowOperationContract {
-                required_fact_families: &[FlowFactFamily::BindingSlot],
-                ..base
+                closures: reordered,
+                ..base.clone()
             },
         ),
         (
@@ -922,7 +1205,7 @@ fn result_contract_id_tracks_the_complete_contract() {
                     finalizer: FlowFinalizerKind::TypedGapOnly,
                     ..base.result
                 },
-                ..base
+                ..base.clone()
             },
         ),
         (
@@ -932,7 +1215,7 @@ fn result_contract_id_tracks_the_complete_contract() {
                     accepted_gaps: &[],
                     ..base.result
                 },
-                ..base
+                ..base.clone()
             },
         ),
     ];
@@ -948,10 +1231,10 @@ fn result_contract_id_tracks_the_complete_contract() {
 #[test]
 fn obligation_budget_trips_at_first_excess() {
     let (fixture, plan) = planned();
-    let full = plan.work_order.len() as u32;
+    let full = plan.work_order().len() as u32;
     assert!(
-        full > 9,
-        "the fixture expands past the initial domain obligations"
+        full > 20,
+        "the fixture expands past the initial coverage + domain obligations"
     );
 
     // Expansion stops at the first excess: the planner reports the
@@ -975,7 +1258,8 @@ fn obligation_budget_trips_at_first_excess() {
 
     // `additional_requirements` is unbounded caller input: it is counted
     // BEFORE any obligation construction, so the report names the counted
-    // base (contract domains + additional), never the expanded population.
+    // base (family coverage + contract domains + additional), never the
+    // expanded population.
     let mut request = base_request();
     request.additional_requirements = (0..20)
         .map(|_| FlowRequirement {
@@ -994,8 +1278,9 @@ fn obligation_budget_trips_at_first_excess() {
     };
     assert_eq!(limit, 28);
     assert_eq!(
-        observed, 29,
-        "the counted base (9 domains + 20 additional) trips before any node or edge obligation is constructed"
+        observed,
+        11 + 9 + 20,
+        "the counted base (11 coverage + 9 domains + 20 additional) trips before any concrete obligation is constructed"
     );
 }
 
@@ -1009,4 +1294,535 @@ fn unused_flow_runtime_reserves_no_obligation_storage() {
         0,
         "a runtime that never served a flow demand reserves no obligation storage"
     );
+}
+
+// ── Registry closure and the closed obligation universe ─────────────────
+
+/// The registry is a CLOSED universe: every family of the vocabulary has
+/// exactly one registered expansion route, and every declared family of
+/// every registered contract has exactly one family-coverage obligation in
+/// the plan, with each domain obligation depending on EXACTLY its
+/// closure's coverage obligations.
+#[test]
+fn registry_declares_a_closed_universe() {
+    // The family→route mapping is total over the vocabulary (a
+    // wildcard-free match): pin every family's registered route so a
+    // route-table edit is a test-visible change.
+    let vocabulary = [
+        FlowFactFamily::GraphEdge(FlowEdgeClass::ValueDef),
+        FlowFactFamily::GraphEdge(FlowEdgeClass::PathWrite),
+        FlowFactFamily::GraphEdge(FlowEdgeClass::EvalEffect),
+        FlowFactFamily::GraphEdge(FlowEdgeClass::ControlRegion),
+        FlowFactFamily::BindingSlot,
+        FlowFactFamily::ReturnSite,
+        FlowFactFamily::GuardPredicate,
+        FlowFactFamily::CallSite,
+        FlowFactFamily::ContextualTarget,
+        FlowFactFamily::Capture,
+        FlowFactFamily::SemanticRelation,
+    ];
+    for family in &vocabulary {
+        let route = flow_family_route(family);
+        // Every route resolves to a registered rule with a typed gap —
+        // totality is by construction; the pin is on the mapping itself.
+        assert!(
+            matches!(
+                route.accepted_gap,
+                FlowGap::GuardNarrowing
+                    | FlowGap::NominalRelation
+                    | FlowGap::ClosureCapture
+                    | FlowGap::AbruptCompletion
+                    | FlowGap::UnmodeledExpression
+            ),
+            "every family route carries a typed gap: {family:?}"
+        );
+    }
+
+    // Every registered contract: no duplicate domains, and the derived
+    // families are exactly the closures' families.
+    for tag in [
+        SemanticQueryKeyTag::FlowReturn,
+        SemanticQueryKeyTag::FlowNarrowingAt,
+        SemanticQueryKeyTag::ContextualTypeAt,
+        SemanticQueryKeyTag::ResolveCall,
+        SemanticQueryKeyTag::Relate,
+    ] {
+        let contract = flow_operation_contract(tag).expect("registered");
+        let domains: Vec<FlowDomain> = contract.required_domains().collect();
+        let mut dedup = domains.clone();
+        dedup.sort();
+        dedup.dedup();
+        assert_eq!(
+            domains.len(),
+            dedup.len(),
+            "{tag:?} declares no duplicate domain"
+        );
+        for closure in contract.closures {
+            assert!(
+                !closure.families.is_empty(),
+                "every declared domain maps families"
+            );
+        }
+    }
+
+    // The plan carries the registry closure and the derived families.
+    let (_fixture, plan) = planned();
+    let contract = flow_operation_contract(SemanticQueryKeyTag::FlowReturn).expect("registered");
+    assert_eq!(plan.registry_closure(), contract.closures);
+    assert_eq!(
+        plan.required_fact_families(),
+        contract.required_fact_families().as_slice()
+    );
+
+    // Exactly ONE coverage obligation per required family, minted through
+    // the family's registered expansion rule.
+    let families = plan.required_fact_families();
+    assert_eq!(plan.coverage_obligations().len(), families.len());
+    for (coverage_id, family) in plan.coverage_obligations().iter().zip(families.iter()) {
+        let coverage_spec = spec(&plan, *coverage_id);
+        assert!(
+            matches!(coverage_spec.basis(), FlowObligationBasis::FamilyCoverage { family: f } if f == family),
+            "the coverage obligation names its family: {family:?}"
+        );
+        assert_eq!(
+            coverage_spec.origin(),
+            &FlowObligationOrigin::Expansion(flow_family_route(family).rule),
+            "the coverage obligation rides the family's registered expansion rule"
+        );
+        assert!(
+            coverage_spec.expected_dependencies().is_empty()
+                && coverage_spec.expected_suboperations().is_empty(),
+            "a coverage obligation discharges on enumeration alone"
+        );
+    }
+    let coverage_specs: Vec<&FlowObligationSpec> = plan
+        .obligation_specs()
+        .iter()
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::FamilyCoverage { .. }))
+        .collect();
+    assert_eq!(
+        coverage_specs.len(),
+        families.len(),
+        "exactly one coverage obligation per family — no more, no fewer"
+    );
+
+    // Every domain obligation depends on EXACTLY the coverage obligations
+    // of the families its closure maps it to.
+    for closure in contract.closures {
+        let domain_spec = plan
+            .obligation_specs()
+            .iter()
+            .find(|spec| {
+                *spec.requirement()
+                    == FlowRequirement {
+                        operation: SemanticQueryKeyTag::FlowReturn,
+                        requirement: FlowRequirementKind::Domain(closure.domain),
+                    }
+            })
+            .expect("every closure domain has its obligation");
+        let expected: Vec<FlowObligationId> = closure
+            .families
+            .iter()
+            .map(|family| {
+                let index = families
+                    .iter()
+                    .position(|candidate| candidate == family)
+                    .expect("closure families are required families");
+                plan.coverage_obligations()[index]
+            })
+            .collect();
+        assert_eq!(
+            domain_spec.expected_dependencies(),
+            expected.as_slice(),
+            "domain {:?} depends on exactly its closure's coverage obligations",
+            closure.domain
+        );
+    }
+}
+
+/// A required family with zero concrete instances still gets its coverage
+/// obligation — "proved empty" is a discharged enumeration, never a
+/// forgotten family.
+#[test]
+fn family_coverage_is_explicit_even_when_empty() {
+    let (_fixture, plan) = planned();
+    for family in [FlowFactFamily::GuardPredicate, FlowFactFamily::Capture] {
+        // The fixture has no guard and no capture subject.
+        assert!(
+            plan.obligation_specs().iter().all(|spec| !matches!(
+                spec.basis(),
+                FlowObligationBasis::Guard { .. } if family == FlowFactFamily::GuardPredicate
+            )),
+            "the fixture has no concrete guard"
+        );
+        assert!(
+            plan.obligation_specs().iter().all(|spec| !matches!(
+                spec.basis(),
+                FlowObligationBasis::Capture { .. } if family == FlowFactFamily::Capture
+            )),
+            "the fixture has no concrete capture"
+        );
+        let coverage = plan
+            .obligation_specs()
+            .iter()
+            .find(|spec| matches!(spec.basis(), FlowObligationBasis::FamilyCoverage { family: f } if *f == family))
+            .expect("every required family has its coverage obligation even when empty");
+        assert!(coverage.expected_dependencies().is_empty());
+    }
+    // And the solve completes — the empty families discharge their
+    // coverage obligations like every other obligation.
+    let (runtime, sealed) = drive_to_completion(&plan);
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
+    assert!(
+        outcome.warm_candidate().is_some(),
+        "proved-empty families never block completion: {outcome:?}"
+    );
+}
+
+/// Every concrete call occurrence gets its OWN identity: one call
+/// obligation per (expression site, call ordinal), with the dynamic
+/// relation anchored on exactly its call occurrence.
+#[test]
+fn every_call_occurrence_has_its_own_identity() {
+    let (_fixture, plan) = planned_rich();
+    let calls: Vec<&FlowObligationSpec> = plan
+        .obligation_specs()
+        .iter()
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::CallSite { .. }))
+        .collect();
+    // The rich fixture's `pair(first(), second())` site carries three call
+    // occurrences (pair, first, second) and `side(y)` one more.
+    assert!(
+        calls.len() >= 4,
+        "the rich fixture plans one call obligation per occurrence: {}",
+        calls.len()
+    );
+    // The multi-call site: distinct obligations per (site, ordinal).
+    let mut by_site: std::collections::BTreeMap<usize, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    for call in &calls {
+        let FlowObligationBasis::CallSite {
+            site, call_ordinal, ..
+        } = call.basis()
+        else {
+            unreachable!()
+        };
+        by_site.entry(site.index()).or_default().push(*call_ordinal);
+    }
+    let (multi_site, ordinals) = by_site
+        .iter()
+        .max_by_key(|(_, ordinals)| ordinals.len())
+        .expect("a call site exists");
+    assert_eq!(
+        ordinals.len(),
+        3,
+        "the `pair(first(), second())` site has one obligation per call ordinal"
+    );
+    let mut sorted = ordinals.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, vec![0, 1, 2], "each ordinal is its own obligation");
+
+    // Each call occurrence anchors exactly one dynamic relation, depending
+    // on EXACTLY its own call obligation.
+    let relations: Vec<&FlowObligationSpec> = plan
+        .obligation_specs()
+        .iter()
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::SemanticRelation { .. }))
+        .collect();
+    assert_eq!(relations.len(), calls.len());
+    for call in &calls {
+        let FlowObligationBasis::CallSite {
+            site, call_ordinal, ..
+        } = call.basis()
+        else {
+            unreachable!()
+        };
+        let anchored: Vec<&&FlowObligationSpec> = relations
+            .iter()
+            .filter(|relation| {
+                matches!(
+                    relation.basis(),
+                    FlowObligationBasis::SemanticRelation { site: s, call_ordinal: o, .. }
+                        if s == site && o == call_ordinal
+                )
+            })
+            .collect();
+        assert_eq!(anchored.len(), 1, "one relation per call occurrence");
+        assert_eq!(
+            anchored[0].expected_dependencies(),
+            &[call.id()],
+            "the relation depends on exactly its own call occurrence"
+        );
+        assert_eq!(
+            anchored[0].expected_suboperations(),
+            &[SemanticQueryKeyTag::Relate],
+            "the relation consumes the registered Relate suboperation"
+        );
+    }
+    let _ = multi_site;
+
+    // The rich solve completes: every occurrence discharged under its own
+    // identity.
+    let (runtime, sealed) = drive_to_completion(&plan);
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
+    assert!(outcome.warm_candidate().is_some());
+}
+
+/// A required subject the structural authority cannot name — a nested
+/// function's capture set — installs the family's accepted typed gap at
+/// install, anchored on the nested function's real binding identity. It is
+/// never omitted and never discharged, so the solve can never complete.
+#[test]
+fn unnameable_capture_subject_installs_the_family_typed_gap() {
+    let fixture = flow_graph_fixture_for_tests(CAPTURE_FIXTURE_SOURCE, 11);
+    let plan = fixture
+        .build_plan(request_named("with_capture"))
+        .expect("the capture fixture plans");
+    let captures: Vec<&FlowObligationSpec> = plan
+        .obligation_specs()
+        .iter()
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Capture { .. }))
+        .collect();
+    assert_eq!(
+        captures.len(),
+        1,
+        "the nested function is one capture subject"
+    );
+    let FlowObligationBasis::Capture { identity, .. } = captures[0].basis() else {
+        unreachable!()
+    };
+    // Anchored on the capturer's real FlowBindingIdentity.
+    let identity = identity
+        .as_ref()
+        .expect("the nested function resolves an identity");
+    assert_eq!(identity.name.as_ref(), "helper");
+
+    let mut runtime = ObligationRuntime::default();
+    runtime.install_flow_demand(&plan).expect("install");
+    let record = runtime
+        .flow_obligations()
+        .iter()
+        .find(|record| record.spec.id() == captures[0].id())
+        .expect("installed");
+    assert_eq!(
+        record.state,
+        ObligationState::Gap(FlowGap::ClosureCapture),
+        "the unnameable capture subject installs the family's accepted typed gap"
+    );
+
+    // Discharge everything else; the gapped subject still blocks sealing.
+    let pending: Vec<FlowObligationId> = runtime
+        .flow_obligations()
+        .iter()
+        .filter(|record| matches!(record.state, ObligationState::Pending))
+        .map(|record| record.spec.id())
+        .collect();
+    discharge_all(&mut runtime, &plan, &pending);
+    assert!(
+        matches!(
+            runtime.seal_flow_completion(solve_value()),
+            Err(FlowSealError::UndischargedObligations)
+        ),
+        "a typed-gap subject can never be discharged, so the solve can never seal"
+    );
+}
+
+/// The universe is closed: dropping ANY planned obligation's discharge —
+/// a domain, a family-coverage obligation, a concrete fact, a call
+/// ordinal, a guard, or a relation — prevents `Complete`.
+#[test]
+fn universe_mutation_prevents_complete() {
+    let (_fixture, plan) = planned_rich();
+
+    // The rich plan exercises every category.
+    let one = |predicate: &dyn Fn(&FlowObligationSpec) -> bool, what: &str| -> FlowObligationId {
+        plan.obligation_specs()
+            .iter()
+            .find(|spec| predicate(spec))
+            .unwrap_or_else(|| panic!("the rich plan must contain {what}"))
+            .id()
+    };
+    let domain = one(
+        &|spec| matches!(spec.origin(), FlowObligationOrigin::ContractDomain),
+        "a domain",
+    );
+    let coverage = plan.coverage_obligations()[0];
+    let binding = one(
+        &|spec| matches!(spec.basis(), FlowObligationBasis::Binding { .. }),
+        "a binding fact",
+    );
+    let edge = one(
+        &|spec| matches!(spec.basis(), FlowObligationBasis::Edge { .. }),
+        "an edge fact",
+    );
+    let call = one(
+        &|spec| {
+            matches!(
+                spec.basis(),
+                FlowObligationBasis::CallSite {
+                    call_ordinal: 1,
+                    ..
+                }
+            )
+        },
+        "the second call ordinal",
+    );
+    let guard = one(
+        &|spec| matches!(spec.basis(), FlowObligationBasis::Guard { .. }),
+        "a guard",
+    );
+    let relation = one(
+        &|spec| matches!(spec.basis(), FlowObligationBasis::SemanticRelation { .. }),
+        "a relation",
+    );
+    let contextual = one(
+        &|spec| matches!(spec.basis(), FlowObligationBasis::ContextualTarget { .. }),
+        "a contextual target",
+    );
+
+    // The skip set: the held obligation plus everything that transitively
+    // depends on it (those discharges are dependency-blocked, not skipped
+    // silently).
+    let skip_closure = |held: FlowObligationId| -> Vec<FlowObligationId> {
+        let mut skip = vec![held];
+        loop {
+            let mut grew = false;
+            for spec in plan.obligation_specs() {
+                if !skip.contains(&spec.id())
+                    && spec
+                        .expected_dependencies()
+                        .iter()
+                        .any(|dependency| skip.contains(dependency))
+                {
+                    skip.push(spec.id());
+                    grew = true;
+                }
+            }
+            if !grew {
+                return skip;
+            }
+        }
+    };
+
+    for (what, held) in [
+        ("domain", domain),
+        ("family coverage", coverage),
+        ("binding fact", binding),
+        ("edge fact", edge),
+        ("call ordinal", call),
+        ("guard", guard),
+        ("relation", relation),
+        ("contextual target", contextual),
+    ] {
+        let skip = skip_closure(held);
+        let mut runtime = ObligationRuntime::default();
+        runtime.install_flow_demand(&plan).expect("install");
+        let order: Vec<FlowObligationId> = plan
+            .work_order()
+            .iter()
+            .copied()
+            .filter(|id| !skip.contains(id))
+            .collect();
+        discharge_all(&mut runtime, &plan, &order);
+        assert!(
+            matches!(
+                runtime.seal_flow_completion(solve_value()),
+                Err(FlowSealError::UndischargedObligations)
+            ),
+            "dropping the {what} obligation must prevent sealing"
+        );
+        assert!(
+            matches!(
+                runtime.observe_flow_iteration(false),
+                Err(FlowTransitionError::IllegalTransition)
+            ),
+            "dropping the {what} obligation keeps the frontier open"
+        );
+        assert!(
+            matches!(
+                runtime
+                    .flow_obligations()
+                    .iter()
+                    .find(|record| record.spec.id() == held)
+                    .map(|record| &record.state),
+                Some(ObligationState::Pending)
+            ),
+            "the dropped {what} obligation was never discharged"
+        );
+    }
+
+    // And the intact universe completes — the mutation assertions above
+    // are not vacuous.
+    let (runtime, sealed) = drive_to_completion(&plan);
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
+    assert!(outcome.warm_candidate().is_some());
+}
+
+// ── Source identity axes ────────────────────────────────────────────────
+
+/// The parse identity and the runtime language row are demand-basis axes:
+/// changing ONLY the parse key (same language, same tagged body hashes,
+/// same canonical) or the language row rebinds the basis, and a proof
+/// sealed under one basis can never finalize across either boundary.
+#[test]
+fn parse_key_and_language_axes_rebind_the_demand_basis() {
+    let base_fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    // Only the parse key changes: the same function, the same tagged body
+    // hashes, the same language row — but a source whose exact parse
+    // identity differs (a trailing comment changes the content axis the
+    // parse key binds, and nothing else).
+    let commented = format!("{FIXTURE_SOURCE}\n// identity-only comment\n");
+    let parse_key_fixture = flow_graph_fixture_for_tests(&commented, 7);
+    // The language row changes (a real tsx parse identity of the same
+    // source).
+    let tsx_fixture = flow_graph_fixture_for_tests_with_language(
+        FIXTURE_SOURCE,
+        7,
+        FileLanguage::script(ScriptSourceType::Tsx),
+    );
+
+    let plan_base = base_fixture.build_plan(base_request()).expect("plans");
+    let plan_parse = parse_key_fixture.build_plan(base_request()).expect("plans");
+    let plan_tsx = tsx_fixture.build_plan(base_request()).expect("plans");
+    assert_ne!(
+        plan_base.basis(),
+        plan_parse.basis(),
+        "a different parse key is a different demand basis"
+    );
+    assert_ne!(
+        plan_base.basis(),
+        plan_tsx.basis(),
+        "a different language row is a different demand basis"
+    );
+
+    // A proof sealed under the base basis finalizes against its own plan...
+    let (runtime, sealed) = drive_to_completion(&plan_base);
+    let outcome = finalize_flow_solve(&runtime, &plan_base, sealed);
+    assert!(outcome.warm_candidate().is_some());
+
+    // ...but never across the parse-key boundary...
+    let (runtime, sealed) = drive_to_completion(&plan_base);
+    let outcome = finalize_flow_solve(&runtime, &plan_parse, sealed);
+    assert!(
+        matches!(
+            outcome,
+            FlowSolveOutcome::Partial(ref partial)
+                if partial.reason == FlowPartialReason::StaleBasis
+        ),
+        "a proof cannot finalize across a parse-key boundary: {outcome:?}"
+    );
+    assert!(outcome.warm_candidate().is_none());
+
+    // ...and never across the language boundary.
+    let (runtime, sealed) = drive_to_completion(&plan_base);
+    let outcome = finalize_flow_solve(&runtime, &plan_tsx, sealed);
+    assert!(
+        matches!(
+            outcome,
+            FlowSolveOutcome::Partial(ref partial)
+                if partial.reason == FlowPartialReason::StaleBasis
+        ),
+        "a proof cannot finalize across a language boundary: {outcome:?}"
+    );
+    assert!(outcome.warm_candidate().is_none());
 }

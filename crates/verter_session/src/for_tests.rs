@@ -784,15 +784,43 @@ impl FlowGraphFixtureForTests {
 
 /// Parse `source`, build the skeleton + graph of its first function
 /// declaration through the store's minting path (sealed to the pinned
-/// content key, hashes tagged `body_hash_tag`), and resolve the frame's
-/// binding inventory through the real `FunctionProgramIndex`.
+/// content key, body hashes tagged `body_hash_tag`), derive the source's
+/// REAL parse identity (exact parse key + language row), and resolve the
+/// frame's binding inventory through the real `FunctionProgramIndex`.
 #[rustfmt::skip]
 pub fn flow_graph_fixture_for_tests(source: &str, body_hash_tag: u8) -> FlowGraphFixtureForTests {
+    flow_graph_fixture(source, body_hash_tag, verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts))
+}
+
+/// The same fixture under a different runtime-authoritative language row:
+/// the parse identity is derived for REAL from the same source under that
+/// language (never a tagged stand-in), so the two fixtures' keys differ in
+/// exactly the source-identity axes.
+#[rustfmt::skip]
+pub fn flow_graph_fixture_for_tests_with_language(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage) -> FlowGraphFixtureForTests {
+    flow_graph_fixture(source, body_hash_tag, file_language)
+}
+
+#[rustfmt::skip]
+fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage) -> FlowGraphFixtureForTests {
     use verter_semantic::analysis::flow::{FunctionBodySource, build_function_body_skeleton};
     use verter_semantic::analysis::function_program::{build_function_program_index, FunctionDeclarationRef, FunctionProgramKey};
     use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
+    let oxc_source_type = match &file_language {
+        verter_language::FileLanguage::Script { source_type, .. } => match source_type {
+            verter_language::ScriptSourceType::Ts => oxc_span::SourceType::ts(),
+            verter_language::ScriptSourceType::Tsx => oxc_span::SourceType::tsx(),
+            other => panic!("the hermetic flow fixture serves script languages ts/tsx, got {other:?}"),
+        },
+        other => panic!("the hermetic flow fixture serves script languages, got {other:?}"),
+    };
+    // The parse identity is DERIVED from the real source under the real
+    // language row — the same derivation the production
+    // `FileArtifactKey::for_source_identity` performs — never a constant.
+    let (_, parse_key) = verter_language::default_parse_identity_for(source, &file_language)
+        .expect("the hermetic fixture's script language derives a parse identity");
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_source_type).parse();
     assert!(parsed.errors.is_empty(), "fixture must parse");
     let function = parsed.program.body.iter().find_map(|s| match s { oxc_ast::ast::Statement::FunctionDeclaration(f) => Some(f), _ => None }).expect("fixture must contain a function declaration");
     let name = function.id.as_ref().expect("named function").name.as_str();
@@ -808,6 +836,7 @@ pub fn flow_graph_fixture_for_tests(source: &str, body_hash_tag: u8) -> FlowGrap
     let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
         canonical_id, function, parse_env_hash: [0u8; 16],
         flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
+        parse_key, file_language,
         build_toolchain_fingerprint: crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
     };
     let store = crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new();

@@ -537,3 +537,33 @@ fn flow_solve_sealed_witnesses_not_constructible() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/flow_solve_sealed_witnesses_not_constructible.rs");
 }
+
+/// The demand plan and the obligation spec are SEALED: every field is
+/// private (E0451/E0616), the spec constructor is sealed to the
+/// planner/runtime boundary (E0624), no mutable view exists (E0599), and
+/// the sealed completion artifact is not `Clone` (E0277). If any of these
+/// were widened, the corresponding line would compile and trybuild would
+/// turn red.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn flow_solve_plan_and_spec_are_sealed() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/flow_solve_plan_and_spec_are_sealed.rs");
+}
+
+/// No external struct literal of the demand plan or the obligation spec:
+/// every field is private (E0451). Kept in a separate fixture because a
+/// struct-literal privacy error on a type is suppressed when the same
+/// crate already carries a field-access privacy error on that type.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn flow_solve_plan_and_spec_no_struct_literal() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/flow_solve_plan_and_spec_no_struct_literal.rs");
+}

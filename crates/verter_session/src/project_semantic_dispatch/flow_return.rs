@@ -2015,12 +2015,30 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(flow_body_exact_hash) = entry.flow_body_exact_hash else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
+        // The source axes come from the request-bound artifact identity
+        // (the served `IndexedReady` through the canonical
+        // `FileArtifactKey` identity) — never path reclassification, never
+        // a constant. A serving artifact whose exact parse identity cannot
+        // be recomputed fails closed: no content-addressed key may name a
+        // source it cannot verify.
+        let Some(source_key) = crate::file_artifact_store::FileArtifactKey::for_source_identity(
+            Arc::from(canonical),
+            indexed.whole_hash,
+            indexed.raw_source.as_ref(),
+            indexed.file_language.clone(),
+            indexed.framework_parse.as_deref(),
+            indexed.parse_env_hash,
+        ) else {
+            return degraded(FlowReturnFailure::Unresolved, self_roots);
+        };
         let slice_key_function = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
             function: entry.key.clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash,
             flow_body_exact_hash,
             parse_env_hash: key.context.parse_env_hash,
+            parse_key: source_key.parse_key,
+            file_language: source_key.file_language_id,
             build_toolchain_fingerprint:
                 crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
         };
