@@ -1025,6 +1025,27 @@ fn unclosed_dynamic_directive_argument_at_eof_projects_typed_recovery() {
 }
 
 #[test]
+fn catalog_project_registered_accepted_parses_without_compiler_registry() {
+    let (_, _, accepted) = accepted(
+        "file:///workspace/App.vue",
+        verter_language::FileLanguage::vue(),
+        "<template><p>ok</p></template>",
+    );
+    let parses_before = super::registered_carrier_projection::registered_frontend_parse_count();
+    let projection = super::registered_carrier_projection::project_registered_accepted(&accepted)
+        .expect("catalog frontend must project accepted Vue source");
+    assert_eq!(
+        super::registered_carrier_projection::registered_frontend_parse_count(),
+        parses_before + 1
+    );
+    let artifact = projection.into_framework_parse_artifact();
+    assert_eq!(
+        artifact.adapter_id(),
+        &verter_language::FrameworkAdapterId::vue()
+    );
+}
+
+#[test]
 fn catalog_selects_vue_and_svelte_frontends_and_rejects_unknown() {
     use verter_language::{FrameworkAdapterId, LanguageId};
 

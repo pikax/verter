@@ -585,6 +585,32 @@ fn catalog_miss_from_accepted(accepted: &AcceptedRegisteredCarrierSource) -> Syn
         })
 }
 
+/// Project an accepted registered source: catalog frontend parse, then
+/// registered geometry. Callers never look up [`super::CarrierCompilerRegistry`].
+/// A catalog miss is [`SyntaxReject::UnsupportedProfile`] (`FrontendMismatch`).
+pub fn project_registered_accepted(
+    accepted: &AcceptedRegisteredCarrierSource,
+) -> Result<RegisteredCarrierProjection, SyntaxReject> {
+    let language = accepted.source().resolved_file_language();
+    let adapter_id = language
+        .adapter_id()
+        .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
+    let carrier_language_id = language
+        .carrier_language_id()
+        .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
+    let frontend = registered_frontend_for(adapter_id, carrier_language_id)
+        .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
+    let known = match frontend {
+        InstalledCarrierFrontend::Vue(_) => {
+            KnownRegisteredCompiler::Vue(Arc::new(VueCarrierCompiler))
+        }
+        InstalledCarrierFrontend::Svelte(_) => {
+            KnownRegisteredCompiler::Svelte(Arc::new(SvelteCarrierCompiler))
+        }
+    };
+    project_registered_carrier(Some(&known), accepted)
+}
+
 /// Parse through the catalog frontend for `(adapter, language)`. A catalog
 /// miss is [`SyntaxReject::UnsupportedProfile`] (`FrontendMismatch`) — never
 /// a fallback parse and never a panic.

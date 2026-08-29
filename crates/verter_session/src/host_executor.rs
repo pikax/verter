@@ -202,10 +202,9 @@ impl StageExecutor for HostStageExecutor {
         content: Arc<str>,
         generation: u64,
     ) -> Result<SourceSnapshot, StageError> {
-        // Carrier dispatch: a framework CARRIER file whose carrier language
-        // the registry serves routes its parse through the compiler-side
-        // carrier registry — the SINGLE carrier parse path, with Vue served
-        // by its bridge. EVERY OTHER framework row (a framework TEMPLATE, an
+        // Carrier dispatch: a framework CARRIER file whose catalog frontend
+        // is installed routes source-stage parse through the publication
+        // store. EVERY OTHER framework row (a framework TEMPLATE, an
         // unregistered carrier adapter, a same-adapter NON-carrier language)
         // is the typed unsupported-language state — never a silent empty,
         // never a panic. Plain scripts take the script parse path. The
@@ -216,9 +215,11 @@ impl StageExecutor for HostStageExecutor {
             file_language.carrier_language_id(),
         ) {
             (Some(adapter_id), Some(carrier_language_id)) => {
-                crate::parse::carrier_compiler_registry()
-                    .compiler_for_carrier_language(adapter_id, carrier_language_id)
-                    .is_some()
+                verter_compiler::framework_common::registered_carrier_projection::registered_frontend_for(
+                    adapter_id,
+                    carrier_language_id,
+                )
+                .is_some()
             }
             _ => false,
         };

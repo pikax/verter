@@ -3970,9 +3970,9 @@ pub struct MetaProvenance {
     /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
     pub eval_program_parses: std::sync::atomic::AtomicU64,
     /// Carrier parses performed through the single counted carrier
-    /// store-leader projector boundary — every framework
+    /// store-leader frontend boundary — every framework
     /// carrier (`.vue`, `.svelte`, …) increments this exactly once per
-    /// `CarrierCompiler::parse`. The framework-neutral parse-once rail:
+    /// elected catalog-frontend parse. The framework-neutral parse-once rail:
     /// a cold build of any carrier file bumps this once, so a duplicate
     /// carrier parse on any host lane (Vue OR Svelte) is counter-visible
     /// without naming a framework.

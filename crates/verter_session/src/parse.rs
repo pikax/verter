@@ -296,16 +296,13 @@ pub(crate) fn try_resolve_src_block(
 /// The single counted carrier-parse chokepoint for `verter_session`.
 ///
 /// EVERY framework carrier parse the host materializes — Vue, Svelte,
-/// and every later vertical — routes through here. It bumps the
-/// framework-neutral `MetaProvenance::carrier_parses` rail exactly once
-/// per `CarrierCompiler::parse`, and the Vue compatibility rail
-/// `sfc_parses` when (and only when) the dispatched carrier is Vue.
-/// Counting lives in the HOST, not the carrier: the compiler is the
-/// parser/producer only — it owns no provenance, lease, or lifecycle
-/// state. A direct `CarrierCompiler::parse` / registry `.parse()` call
-/// anywhere else in the crate is an uncounted parse the dedup suite
-/// cannot see (guard:
-/// `elected_store_leader_is_the_sole_registered_projector_caller`).
+/// and every later vertical — is counted in the publication store. It
+/// bumps the framework-neutral `MetaProvenance::carrier_parses` rail
+/// exactly once per elected catalog-frontend parse, and the Vue
+/// compatibility rail `sfc_parses` when (and only when) the dispatched
+/// carrier is Vue. Counting lives in the HOST, not the carrier: the
+/// frontend is the parser/producer only — it owns no provenance, lease,
+/// or lifecycle state.
 /// The process-wide compiler-side carrier-compiler registry.
 ///
 /// Compile / eval / IDE / template-data dispatch looks the file's adapter
@@ -322,18 +319,13 @@ pub(crate) fn carrier_compiler_registry(
     REGISTRY.get_or_init(verter_compiler::framework_common::CarrierCompilerRegistry::built_in)
 }
 
-/// Produce a carrier file's `ParseSnapshot` + framework-neutral artifact by
-/// dispatching the parse through the compiler-side carrier registry.
+/// Produce a carrier file's `ParseSnapshot` + framework-neutral artifact from
+/// an already-published registered parse.
 ///
-/// The SINGLE carrier parse dispatch the host executor reaches: it interns the
-/// file's adapter id, looks up its [`CarrierCompiler`](verter_compiler::framework_common::CarrierCompiler)
-/// (Vue via the bridge), and produces the framework-neutral artifact through
-/// the registered publication store. The host then
-/// reaches the artifact's typed carrier back out (the blessed `vue_parse`
-/// accessor) to build the Vue-shaped `ParseSnapshot`. Routing the parse through
-/// the registry keeps Vue's compile output byte-identical (the bridge calls
-/// `parse_sfc(source, None, None)` and stamps the same parser version) while a
-/// later carrier vertical's compiler drops in without a second dispatch branch.
+/// The SINGLE carrier parse dispatch the host executor reaches is the
+/// publication store (catalog frontend parse). This helper then reaches the
+/// artifact's typed carrier back out (the blessed `vue_parse` accessor) to
+/// build the Vue-shaped `ParseSnapshot`.
 ///
 /// This is the SCHEDULER Source-stage dispatch: it has no flight-shared eval
 /// program, so the Vue snapshot's script walk parses once here

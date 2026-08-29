@@ -723,8 +723,9 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
 /// The single enumeration the compiler-completeness guard
 /// (`carrier_descriptors_have_compilers`) iterates: it filters the
 /// carrier-bearing rows (`carrier_language.is_some()`) and asserts each has a
-/// registered `CarrierCompiler`. A new carrier vertical adds its descriptor here
-/// and the guard automatically covers it.
+/// registered compile/eval/IDE compiler. Source-stage parse is catalog-frontend
+/// owned; this list still covers compile-side completeness. A new carrier
+/// vertical adds its descriptor here and the guard automatically covers it.
 #[must_use]
 pub fn built_in_descriptors() -> Vec<FrameworkAdapterDescriptor> {
     vec![vue_descriptor(), svelte_descriptor()]
