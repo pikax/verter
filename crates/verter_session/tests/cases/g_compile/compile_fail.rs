@@ -521,3 +521,19 @@ fn complete_flow_result_constructor_is_private() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/complete_flow_result_constructor_is_private.rs");
 }
+
+/// The discharge evidence, the convergence evidence, and the sealed
+/// completion artifact of a flow solve are mintable ONLY by the obligation
+/// runtime: every field is private and no constructor exists outside the
+/// runtime's discharge/seal methods, so an external struct literal is
+/// E0451. If any of these types' fields were ever widened, the fixture
+/// would compile and trybuild would turn red.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn flow_solve_sealed_witnesses_not_constructible() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/flow_solve_sealed_witnesses_not_constructible.rs");
+}

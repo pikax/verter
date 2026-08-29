@@ -210,6 +210,41 @@ pub(crate) struct FlowGraphBundle {
     pub graph: Arc<FunctionFlowGraph>,
 }
 
+/// The ONE bundle construction: the graph derives from the skeleton
+/// ALONE. Every path that produces a bundle — the memoizing store and
+/// the hermetic mint below — goes through here.
+fn build_bundle(skeleton: FunctionBodySkeleton) -> FlowGraphBundle {
+    let graph = build_function_flow_graph(&skeleton);
+    FlowGraphBundle {
+        skeleton: Arc::new(skeleton),
+        graph: Arc::new(graph),
+    }
+}
+
+/// A flow graph bundle SEALED to the store key it was built for. Fields
+/// are private and the sole constructors are [`FunctionFlowGraphStore`]
+/// methods, so a consumer can never plan over one graph while naming
+/// another's body identity. This is the hermetic completeness-proof
+/// layer's graph handle; it is compile-absent from production builds.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct BoundFlowGraph {
+    key: FlowSliceFunctionKey,
+    bundle: Arc<FlowGraphBundle>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl BoundFlowGraph {
+    /// The content-pinned function identity the bundle was built for.
+    pub(crate) fn key(&self) -> &FlowSliceFunctionKey {
+        &self.key
+    }
+
+    /// The memoized bundle the key names.
+    pub(crate) fn bundle(&self) -> &FlowGraphBundle {
+        &self.bundle
+    }
+}
+
 /// The once-per-content-version graph store: `FunctionFlowGraph` (and
 /// its skeleton) is built ONCE per `(canonical, function,
 /// flow_body_stable_hash, parse_env_hash, parse_key)` and every
@@ -248,15 +283,34 @@ impl FunctionFlowGraphStore {
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
                 let skeleton = source.build_skeleton(key, resolver)?;
                 self.builds.fetch_add(1, Ordering::Relaxed);
-                let graph = build_function_flow_graph(&skeleton);
-                let bundle = Arc::new(FlowGraphBundle {
-                    skeleton: Arc::new(skeleton),
-                    graph: Arc::new(graph),
-                });
+                let bundle = Arc::new(build_bundle(skeleton));
                 vacant.insert(Arc::clone(&bundle));
                 Some(bundle)
             }
         }
+    }
+
+    /// Mint the bound graph for `key` over `skeleton` — the hermetic
+    /// fixture path. The bundle is built through the SAME construction
+    /// the memoizing path uses ([`build_bundle`]) and sealed with the
+    /// key, so a demand plan can only ever name the graph it actually
+    /// planned over.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn mint_bound_flow_graph(
+        &self,
+        key: FlowSliceFunctionKey,
+        skeleton: FunctionBodySkeleton,
+    ) -> BoundFlowGraph {
+        let bundle = match self.entries.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(occupied.get()),
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                self.builds.fetch_add(1, Ordering::Relaxed);
+                let bundle = Arc::new(build_bundle(skeleton));
+                vacant.insert(Arc::clone(&bundle));
+                bundle
+            }
+        };
+        BoundFlowGraph { key, bundle }
     }
 
     /// Non-blocking peek at the already-memoized bundle for `key` — the

@@ -1,35 +1,53 @@
 //! The private completeness-proof layer for flow-bearing semantic
 //! operations. Hermetic: reachable only from test code, never from a
-//! production entry point, and sharing the ONE graph authority (the
-//! memoized `FlowGraphBundle`) and the ONE closed query registry
-//! ([`SemanticQueryKeyTag`]) — no second graph, planner, or resolver.
+//! production entry point, and sharing the ONE graph authority — the
+//! store-minted [`BoundFlowGraph`] seals each memoized `FlowGraphBundle`
+//! to the content key it was built for — and the ONE closed query
+//! registry ([`SemanticQueryKeyTag`]): no second graph, planner, or
+//! resolver.
 //!
 //! - The flow-operation contract registry projects the flow-contract
 //!   columns over the closed query tags; an undeclared requirement is NEVER
 //!   a wildcard fallthrough — it installs as a `Gap(FlowGap)` obligation
 //!   that retains the offending requirement.
 //! - [`FlowDemandPlan`] is the demand/completeness authority over one
-//!   memoized graph bundle — NOT an alias of `ReturnSlicePlan` (graph
+//!   store-bound graph — NOT an alias of `ReturnSlicePlan` (graph
 //!   reachability selection only, stored here as the structural selection).
-//! - [`finalize_flow_solve`] is the sole proof-bearing finalizer and the
-//!   ONLY minter of [`CompleteFlowResult`] (its constructor is private).
+//!   The basis takes its body identity from the bound graph's key and the
+//!   subject from the query's own demand axis; every obligation spec
+//!   carries a closed semantic identity (demand root, graph site, real
+//!   binding slot, or full edge) plus its exact evidence contract.
+//! - The obligation runtime seals discharge evidence at mint time
+//!   (validated against the specific spec), observes convergence itself,
+//!   and mints the ONE sealed completion artifact;
+//!   [`finalize_flow_solve`] consumes ONLY that artifact and is the ONLY
+//!   minter of [`CompleteFlowResult`] (its constructor is private).
 
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
-use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeKind};
+use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
 use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
 use verter_semantic::analysis::flow::peeker::{
     FlowSliceBudget, FlowSliceBudgetExceeded, ReturnPathPeeker, SliceDemand,
 };
+use verter_semantic::analysis::flow::{FunctionBodySkeleton, SkeletonBindingKind};
+use verter_semantic::analysis::function_program::{
+    FlowBindingIdentity, FunctionBindingKind, FunctionBindingRecord, FunctionProgramKey,
+};
 
 use super::dispatch_txn::flow_obligation_state::{
-    FlowObligationId, FlowObligationOrigin, FlowObligationSpec, ObligationState,
+    FlowBindingBasis, FlowConvergenceEvidence, FlowObligationBasis, FlowObligationId,
+    FlowObligationOrigin, FlowObligationSpec, ObligationState, SealedFlowCompletion,
 };
 use super::dispatch_txn::ObligationRuntime;
-use crate::cache_runtime::flow_slice_node::{FlowGraphBundle, FlowSliceFunctionKey};
-use crate::semantic_query::{FlowGap, FlowReturnResult, SemanticQueryKey, SemanticQueryKeyTag};
+use crate::cache_runtime::flow_slice_node::{BoundFlowGraph, FlowSliceFunctionKey};
+use crate::semantic_query::demand::Demand;
+use crate::semantic_query::{
+    FlowGap, FlowReturnResult, PathSegment, SemanticQueryKey, SemanticQueryKeyTag,
+};
 
 // Short aliases keep the closed registry table and the planner legible.
 use self::FlowDomain as D;
@@ -177,13 +195,141 @@ pub fn require_registered_flow_requirement(
     }
 }
 
-/// Canonical descriptor backing [`flow_result_contract_id`].
+// ── Planner semantics shared with the result-contract identity ─────────
+
+/// The registered expansion vocabulary the planner expands through, in
+/// registration order — the ONLY expansion channel. The result-contract
+/// identity encodes this exact list, so a change to the registered
+/// expansion semantics changes every minted contract identity.
+const REGISTERED_EXPANSION_RULES: &[FlowExpansionRule] = &[
+    E::BindingSlotFacts,
+    E::ReturnSiteFacts,
+    E::SelectedEdgeFacts,
+    E::CallSiteFacts,
+];
+
+/// The fixed-point iteration cap every plan carries.
+const FLOW_FIXED_POINT_MAX_ITERATIONS: u32 = 16;
+
+/// The tie-break rule every plan's work order is built with.
+const FLOW_WORK_ORDER_TIE_BREAK: FlowTieBreak = FlowTieBreak::DomainNodeEdgeSlot;
+
+// Explicit stable discriminants for the canonical result-contract
+// encoding. The numeric value of each variant is identity schema: adding,
+// removing, or renumbering a variant requires bumping the domain tag.
+#[rustfmt::skip]
+const fn domain_discriminant(domain: FlowDomain) -> u32 {
+    match domain {
+        FlowDomain::ReachingValue => 1, FlowDomain::ReachingType => 2, FlowDomain::Narrowing => 3,
+        FlowDomain::Completion => 4, FlowDomain::ClosureCapture => 5, FlowDomain::Freshness => 6,
+        FlowDomain::Effects => 7, FlowDomain::CallResolution => 8, FlowDomain::Relation => 9,
+        FlowDomain::ContextualTyping => 10, FlowDomain::Coverage => 11,
+    }
+}
+
+#[rustfmt::skip]
+const fn edge_class_discriminant(class: FlowEdgeClass) -> u32 {
+    match class {
+        FlowEdgeClass::ValueDef => 1, FlowEdgeClass::PathWrite => 2,
+        FlowEdgeClass::EvalEffect => 3, FlowEdgeClass::ControlRegion => 4,
+    }
+}
+
+/// One fact family as a discriminant pair: the family tag, then the
+/// edge-class discriminant for `GraphEdge` (`0` otherwise).
+#[rustfmt::skip]
+const fn fact_family_discriminants(family: &FlowFactFamily) -> [u32; 2] {
+    match family {
+        FlowFactFamily::GraphEdge(class) => [1, edge_class_discriminant(*class)],
+        FlowFactFamily::BindingSlot => [2, 0], FlowFactFamily::ReturnSite => [3, 0],
+        FlowFactFamily::GuardPredicate => [4, 0], FlowFactFamily::CallSite => [5, 0],
+        FlowFactFamily::ContextualTarget => [6, 0], FlowFactFamily::Capture => [7, 0],
+        FlowFactFamily::SemanticRelation => [8, 0],
+    }
+}
+
+#[rustfmt::skip]
+const fn gap_discriminant(gap: FlowGap) -> u32 {
+    match gap {
+        FlowGap::GuardNarrowing => 1, FlowGap::NominalRelation => 2, FlowGap::ClosureCapture => 3,
+        FlowGap::AbruptCompletion => 4, FlowGap::UnmodeledExpression => 5,
+    }
+}
+
+#[rustfmt::skip]
+const fn role_discriminant(role: FlowOperationRole) -> u32 {
+    match role { FlowOperationRole::Root => 1, FlowOperationRole::SemanticSuboperation => 2 }
+}
+
+#[rustfmt::skip]
+const fn status_discriminant(status: FlowOperationStatus) -> u32 {
+    match status {
+        FlowOperationStatus::EnabledHermetic => 1, FlowOperationStatus::PendingReducer => 2,
+        FlowOperationStatus::Live => 3,
+    }
+}
+
+#[rustfmt::skip]
+const fn finalizer_discriminant(finalizer: FlowFinalizerKind) -> u32 {
+    match finalizer {
+        FlowFinalizerKind::CompletenessProof => 1, FlowFinalizerKind::TypedGapOnly => 2,
+        FlowFinalizerKind::Suboperation => 3,
+    }
+}
+
+#[rustfmt::skip]
+const fn expansion_rule_discriminant(rule: FlowExpansionRule) -> u32 {
+    match rule {
+        FlowExpansionRule::BindingSlotFacts => 1, FlowExpansionRule::ReturnSiteFacts => 2,
+        FlowExpansionRule::SelectedEdgeFacts => 3, FlowExpansionRule::CallSiteFacts => 4,
+    }
+}
+
+#[rustfmt::skip]
+const fn tie_break_discriminant(tie_break: FlowTieBreak) -> u32 {
+    match tie_break { FlowTieBreak::DomainNodeEdgeSlot => 1 }
+}
+
+/// Append one field carrying an ORDERED list of discriminants: the count
+/// (u64 LE) followed by each discriminant (u32 LE) in declaration order.
+fn encode_ordered_discriminants(
+    e: &mut CanonicalEncoder,
+    tag: u16,
+    discriminants: impl IntoIterator<Item = u32>,
+) {
+    let discriminants: Vec<u32> = discriminants.into_iter().collect();
+    let mut payload = Vec::with_capacity(8 + 4 * discriminants.len());
+    payload.extend_from_slice(&(discriminants.len() as u64).to_le_bytes());
+    for discriminant in discriminants {
+        payload.extend_from_slice(&discriminant.to_le_bytes());
+    }
+    e.field_bytes(tag, &payload);
+}
+
+/// Canonical descriptor backing [`flow_result_contract_id`]: the COMPLETE
+/// closed contract — the tag, the role and status, the ordered required
+/// domains, the ordered required fact families, the registered expansion
+/// and fixed-point semantics the planner runs under, the finalizer kind,
+/// and the accepted gaps — under a versioned domain tag. Any change to
+/// the closed contract's semantics changes the minted identity.
 struct ResultContractDescriptor<'a>(&'a FlowOperationContract);
 
 #[rustfmt::skip]
 impl CanonicalEncode for ResultContractDescriptor<'_> {
-    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v1";
-    fn encode_fields(&self, e: &mut CanonicalEncoder) { e.field_str(1, self.0.tag.name()); }
+    const DOMAIN_TAG: &'static str = "verter.session.flow.result_contract.v2";
+    fn encode_fields(&self, e: &mut CanonicalEncoder) {
+        let contract = self.0;
+        e.field_str(1, contract.tag.name());
+        e.field_u32(2, role_discriminant(contract.role));
+        e.field_u32(3, status_discriminant(contract.status));
+        encode_ordered_discriminants(e, 4, contract.required_domains.iter().map(|domain| domain_discriminant(*domain)));
+        encode_ordered_discriminants(e, 5, contract.required_fact_families.iter().flat_map(fact_family_discriminants));
+        encode_ordered_discriminants(e, 6, REGISTERED_EXPANSION_RULES.iter().map(|rule| expansion_rule_discriminant(*rule)));
+        e.field_u32(7, tie_break_discriminant(FLOW_WORK_ORDER_TIE_BREAK));
+        e.field_u32(8, FLOW_FIXED_POINT_MAX_ITERATIONS);
+        e.field_u32(9, finalizer_discriminant(contract.result.finalizer));
+        encode_ordered_discriminants(e, 10, contract.result.accepted_gaps.iter().map(|gap| gap_discriminant(*gap)));
+    }
 }
 
 /// The deterministic result-contract identity of one registered operation.
@@ -191,15 +337,17 @@ pub fn flow_result_contract_id(contract: &FlowOperationContract) -> ResultContra
     ResultContractId::from_canonical(&ResultContractDescriptor(contract))
 }
 
-/// One flow demand: the content-pinned body, the full query identity
-/// (function, demand, input, profile axes), the observation basis, the
-/// result contract, the subject, and the policies.
+/// One flow demand: the full query identity (function, demand, input,
+/// profile axes), the observation basis, the result contract, and the
+/// policies. The demand carries NO graph axis and NO subject axis: the
+/// store-minted [`BoundFlowGraph`] pins the body identity, and the
+/// subject derives EXHAUSTIVELY from the operation-specific query
+/// payload.
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
 pub struct FlowDemandRequest {
-    pub(crate) graph_body: FlowSliceFunctionKey,
     pub query: SemanticQueryKey, pub input_basis: InputBasisId, pub result_contract: ResultContractId,
-    pub subject: FlowDemandSubject, pub resources: FlowResourcePolicy,
+    pub resources: FlowResourcePolicy,
     pub additional_requirements: Arc<[FlowRequirement]>,
 }
 
@@ -213,10 +361,22 @@ pub struct FlowDemandBasis {
 }
 
 /// The subject of one flow demand: the demanded return-projection path in
-/// authored key text (empty = the whole return).
+/// authored key text (empty = the whole return). DERIVED from the query's
+/// demand axis by [`build_flow_demand_plan`] — never caller-supplied.
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowDemandSubject { pub projection_path: Arc<[Arc<str>]> }
+
+/// The frame's binding-inventory authority the planner resolves each
+/// binding obligation's cross-frame identity against: the
+/// `FunctionProgramIndex` entry's FULL binding list. Its slot numbering
+/// IS the [`FlowBindingIdentity::binding_slot`] domain — the planner zips
+/// the skeleton's binding index against it in source order, and a binding
+/// whose record does not correspond is planned as unmodelable (a typed
+/// gap at install), never with a fabricated slot.
+#[rustfmt::skip]
+#[derive(Debug, Clone)]
+pub struct FlowBindingInventory { pub bindings: Arc<[FunctionBindingRecord]> }
 
 /// The tie-break rule the work order is built with: domain rank, then
 /// ascending graph-node index, then edge class and source ordinal, then
@@ -241,12 +401,12 @@ impl Default for FlowResourcePolicy {
     fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 1024 } }
 }
 
-/// The demand plan over one memoized graph bundle: the obligation and
+/// The demand plan over one store-bound graph: the obligation and
 /// completeness authority a solve installs, discharges, and finalizes
 /// against. Not an alias of [`ReturnSlicePlan`] (graph reachability
 /// selection only), stored here as the structural selection the obligations
-/// expand from. `obligation_specs` is private: obligations enter a runtime
-/// only through `install_flow_demand`.
+/// expand from. `obligation_specs` enters a runtime only through
+/// `install_flow_demand`.
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
 pub struct FlowDemandPlan {
@@ -267,54 +427,183 @@ pub struct FlowDemandPlan {
 
 impl FlowDemandPlan {
     /// The obligation specifications, in work order.
-    pub(crate) fn obligation_specs(&self) -> &[FlowObligationSpec] {
+    pub fn obligation_specs(&self) -> &[FlowObligationSpec] {
         &self.obligation_specs
     }
 }
 
 /// Why a demand could not be planned: no registered contract, not a
-/// proof-enabled root, the slice budget tripped, or the obligation budget
-/// tripped.
+/// proof-enabled root, a demand the flow planner cannot represent, the
+/// slice budget tripped, or the obligation budget tripped.
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowDemandPlanError {
-    UnregisteredOperation, NotAnEnabledRoot,
+    UnregisteredOperation, NotAnEnabledRoot, UnrepresentableDemand,
     SliceBudget(FlowSliceBudgetExceeded),
     ObligationBudget { limit: u32, observed: u32 },
 }
 
-/// Build the demand plan of `request` over the memoized `bundle`. The
-/// demand planner runs EXACTLY ONCE over the caller-supplied graph — this
-/// function never builds or reacquires a graph — and obligations expand
-/// only through the registered [`FlowExpansionRule`]s, in domain rank,
-/// ascending node index, edge class and source ordinal order.
+/// Derive the demand subject EXHAUSTIVELY from the operation-specific
+/// query payload — the demand axis the key itself carries. The planner
+/// represents exactly the identity demand lattice point plus an authored
+/// named-member projection path; every other demand (widened signature,
+/// facet, or policy axes; numeric / symbol / index path segments) is a
+/// typed planning error, never a silent default subject.
+fn derive_demand_subject(
+    query: &SemanticQueryKey,
+) -> Result<FlowDemandSubject, FlowDemandPlanError> {
+    let SemanticQueryKey::FlowReturn(key) = query else {
+        return Err(FlowDemandPlanError::NotAnEnabledRoot);
+    };
+    let point = &key.demand.point;
+    let identity = Demand::identity();
+    let projection = &point.projection;
+    let representable = point.policy == identity.policy
+        && projection.facets == identity.projection.facets
+        && projection.member_demand == identity.projection.member_demand
+        && projection.call_signatures == identity.projection.call_signatures
+        && projection.construct_signatures == identity.projection.construct_signatures
+        && projection.index_signatures == identity.projection.index_signatures
+        && projection.display_needs == identity.projection.display_needs;
+    if !representable {
+        return Err(FlowDemandPlanError::UnrepresentableDemand);
+    }
+    let mut path = Vec::with_capacity(projection.path.len());
+    for segment in projection.path.as_slice() {
+        match segment {
+            PathSegment::Member(verter_type_expr::PropertyKey::String(name)) => {
+                path.push(Arc::clone(name));
+            }
+            PathSegment::Member(_) | PathSegment::Index(_) => {
+                return Err(FlowDemandPlanError::UnrepresentableDemand);
+            }
+        }
+    }
+    Ok(FlowDemandSubject {
+        projection_path: Arc::from(path.into_boxed_slice()),
+    })
+}
+
+/// Resolve every skeleton binding's cross-frame identity ONCE, in skeleton
+/// order, against the frame's binding inventory. The inventory records the
+/// mappable, non-destructured subset of the skeleton's bindings in the
+/// same source order, so the zip consumes one inventory slot per mappable
+/// non-destructured skeleton binding; a record that does not correspond
+/// (a foreign inventory) yields NO identity, and kinds the cross-frame
+/// vocabulary cannot name yield NONE by construction. The planner turns
+/// `None` into an unmodelable obligation (a typed gap at install), never
+/// a fabricated slot.
+fn resolve_binding_identities(
+    skeleton: &FunctionBodySkeleton,
+    inventory: &FlowBindingInventory,
+    function: &FunctionProgramKey,
+) -> Vec<Option<FlowBindingIdentity>> {
+    let mut cursor = 0usize;
+    skeleton
+        .bindings
+        .iter()
+        .map(|binding| {
+            let kind = match binding.kind {
+                SkeletonBindingKind::Param => FunctionBindingKind::Param,
+                SkeletonBindingKind::Const => FunctionBindingKind::Const,
+                SkeletonBindingKind::Let => FunctionBindingKind::Let,
+                SkeletonBindingKind::Var => FunctionBindingKind::Var,
+                SkeletonBindingKind::NestedFunction => FunctionBindingKind::NestedFunction,
+                SkeletonBindingKind::Class
+                | SkeletonBindingKind::CatchParam
+                | SkeletonBindingKind::Enum
+                | SkeletonBindingKind::Namespace
+                | SkeletonBindingKind::ImportEquals
+                | SkeletonBindingKind::TypeAlias
+                | SkeletonBindingKind::Interface => return None,
+            };
+            // A destructuring-pattern element is no whole-slot inventory
+            // entry; it consumes no slot.
+            if binding.destructured {
+                return None;
+            }
+            let slot = cursor;
+            cursor += 1;
+            let record = inventory.bindings.get(slot)?;
+            if record.name.as_ref() != skeleton.name(binding.name) || record.kind != kind {
+                return None;
+            }
+            Some(FlowBindingIdentity {
+                name: Arc::clone(&record.name),
+                kind,
+                defining_function: function.clone(),
+                binding_slot: u32::try_from(slot).unwrap_or(u32::MAX),
+            })
+        })
+        .collect()
+}
+
+/// Build the demand plan of `request` over the store-minted `bound` graph.
+/// The demand planner runs EXACTLY ONCE over the bound graph — this
+/// function never builds or reacquires a graph — the plan's body identity
+/// IS the bound graph's key, the subject derives from the query's own
+/// demand axis, and obligations expand only through the registered
+/// [`FlowExpansionRule`]s, in domain rank, ascending node index, edge
+/// class and source ordinal order. Every obligation spec carries its
+/// closed semantic identity (populated from the skeleton/graph and the
+/// frame's binding inventory) and its exact evidence contract. Obligation
+/// insertion is budget-checked BEFORE each append: the first excess
+/// returns the typed budget error and the remaining population is never
+/// constructed or scanned.
 #[rustfmt::skip]
 pub(crate) fn build_flow_demand_plan(
     request: FlowDemandRequest,
-    bundle: &FlowGraphBundle,
+    bound: &BoundFlowGraph,
+    inventory: &FlowBindingInventory,
 ) -> Result<FlowDemandPlan, FlowDemandPlanError> {
     let tag = request.query.tag();
     let contract = require_flow_operation_contract(tag).map_err(|_| FlowDemandPlanError::UnregisteredOperation)?;
     if contract.role != R::Root || contract.status != S::EnabledHermetic {
         return Err(FlowDemandPlanError::NotAnEnabledRoot);
     }
-    let demand = SliceDemand::for_return_projection(&bundle.skeleton, &request.subject.projection_path);
+    let subject = derive_demand_subject(&request.query)?;
+    let bundle = bound.bundle();
+    let max_obligations = request.resources.max_obligations;
+    let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
     let structural_selection = ReturnPathPeeker::new(&bundle.graph)
         .plan(&demand, &request.resources.slice_budget)
         .map_err(FlowDemandPlanError::SliceBudget)?;
+
     let mut specs: Vec<FlowObligationSpec> = Vec::new();
-    let mut push = |operation, requirement, origin| {
+    let mut push = |requirement: FlowRequirement, origin: FlowObligationOrigin, basis: FlowObligationBasis,
+                    expected_dependencies: Arc<[FlowObligationId]>, expected_suboperations: Arc<[SemanticQueryKeyTag]>|
+     -> Result<FlowObligationId, FlowDemandPlanError> {
+        let next = specs.len() as u64 + 1;
+        if next > u64::from(max_obligations) {
+            return Err(FlowDemandPlanError::ObligationBudget {
+                limit: max_obligations,
+                observed: u32::try_from(next).unwrap_or(u32::MAX),
+            });
+        }
         let id = FlowObligationId(u32::try_from(specs.len()).unwrap_or(u32::MAX));
-        specs.push(FlowObligationSpec { id, requirement: FlowRequirement { operation, requirement }, origin, binding: None });
-        id
+        specs.push(FlowObligationSpec { id, requirement, origin, basis, expected_dependencies, expected_suboperations });
+        Ok(id)
     };
 
     // Initial obligations: one per contract-required domain, domain-rank order.
     let mut domains: Vec<FlowDomain> = contract.required_domains.to_vec();
     domains.sort();
+    // `additional_requirements` is unbounded caller input: count its
+    // non-duplicate contribution BEFORE constructing any obligation for
+    // it, so an oversized vector trips the budget without a single spec.
+    let additional_count = request.additional_requirements.iter()
+        .filter(|requirement| !(requirement.operation == tag && matches!(&requirement.requirement, RK::Domain(domain) if domains.contains(domain))))
+        .count() as u64;
+    if domains.len() as u64 + additional_count > u64::from(max_obligations) {
+        return Err(FlowDemandPlanError::ObligationBudget {
+            limit: max_obligations,
+            observed: u32::try_from(domains.len() as u64 + additional_count).unwrap_or(u32::MAX),
+        });
+    }
     let mut initial: Vec<FlowObligationId> = Vec::with_capacity(domains.len());
     for domain in domains.iter().copied() {
-        initial.push(push(tag, RK::Domain(domain), FlowObligationOrigin::ContractDomain));
+        let basis = FlowObligationBasis::DemandRoot { subject: subject.clone() };
+        initial.push(push(FlowRequirement { operation: tag, requirement: RK::Domain(domain) }, FlowObligationOrigin::ContractDomain, basis, Arc::from([]), Arc::from([]))?);
     }
     // Caller-asserted requirements beyond the contract. A duplicate of an
     // already-planned contract domain of this root collapses onto it; every
@@ -323,8 +612,14 @@ pub(crate) fn build_flow_demand_plan(
     for requirement in request.additional_requirements.iter() {
         let duplicate = matches!(&requirement.requirement, RK::Domain(domain) if domains.contains(domain));
         if requirement.operation == tag && duplicate { continue; }
-        initial.push(push(requirement.operation, requirement.requirement.clone(), FlowObligationOrigin::Additional));
+        let basis = FlowObligationBasis::DemandRoot { subject: subject.clone() };
+        initial.push(push(requirement.clone(), FlowObligationOrigin::Additional, basis, Arc::from([]), Arc::from([]))?);
     }
+
+    // The cross-frame binding identities, resolved once against the
+    // frame's binding inventory (the ONE slot-numbering authority).
+    let identities = resolve_binding_identities(&bundle.skeleton, inventory, &bound.key().function);
+
     // Expanded obligations, through the registered rules only: node-kind
     // facts in ascending node-index order, then edge facts in (node, edge
     // class, source ordinal) order.
@@ -333,43 +628,66 @@ pub(crate) fn build_flow_demand_plan(
         .chain(structural_selection.effect_only_nodes.iter()).copied().collect();
     selected.sort_by_key(|node| node.index());
     let mut expanded: Vec<FlowObligationId> = Vec::new();
+    let mut node_obligations: FxHashMap<FlowNodeId, FlowObligationId> = FxHashMap::default();
     for node in &selected {
-        let (operation, family, rule) = match graph.node_kind(*node) {
-            FlowNodeKind::Binding(_) => (tag, F::BindingSlot, E::BindingSlotFacts),
-            FlowNodeKind::ReturnSite(_) => (tag, F::ReturnSite, E::ReturnSiteFacts),
+        let kind = graph.node_kind(*node);
+        let (operation, family, rule, basis, suboperations) = match kind {
+            FlowNodeKind::Binding(binding) => {
+                let basis = match &identities[binding.index()] {
+                    Some(identity) => FlowObligationBasis::Binding {
+                        node: *node,
+                        slot: FlowBindingBasis { binding, identity: identity.clone() },
+                    },
+                    None => FlowObligationBasis::UnmodeledBinding {
+                        node: *node, binding, kind: bundle.skeleton.binding(binding).kind,
+                    },
+                };
+                (tag, F::BindingSlot, E::BindingSlotFacts, basis, Vec::new())
+            }
+            FlowNodeKind::ReturnSite(_) =>
+                (tag, F::ReturnSite, E::ReturnSiteFacts, FlowObligationBasis::Site { node: *node, kind }, Vec::new()),
             FlowNodeKind::ExprSite(site) if !bundle.skeleton.expr_site(site).calls.is_empty() =>
-                (SemanticQueryKeyTag::ResolveCall, F::CallSite, E::CallSiteFacts),
+                (SemanticQueryKeyTag::ResolveCall, F::CallSite, E::CallSiteFacts,
+                 FlowObligationBasis::Site { node: *node, kind }, vec![SemanticQueryKeyTag::ResolveCall]),
             FlowNodeKind::ExprSite(_) | FlowNodeKind::Region(_) => continue,
         };
-        expanded.push(push(operation, RK::FactFamily(family), FlowObligationOrigin::Expansion(rule)));
+        let suboperations: Arc<[SemanticQueryKeyTag]> = Arc::from(suboperations.into_boxed_slice());
+        let id = push(FlowRequirement { operation, requirement: RK::FactFamily(family) }, FlowObligationOrigin::Expansion(rule), basis, Arc::from([]), suboperations)?;
+        node_obligations.insert(*node, id);
+        expanded.push(id);
     }
     for node in &selected {
         let mut edges: Vec<_> = graph.out_edges(*node).iter()
             .filter(|edge| structural_selection.is_selected(edge.to)).collect();
         edges.sort_by_key(|edge| (edge.kind.class() as u8, edge.ordinal));
         for edge in edges {
-            let family = RK::FactFamily(F::GraphEdge(edge.kind.class()));
-            expanded.push(push(tag, family, FlowObligationOrigin::Expansion(E::SelectedEdgeFacts)));
+            let class = edge.kind.class();
+            let basis = FlowObligationBasis::Edge { from: edge.from, to: edge.to, class, ordinal: edge.ordinal };
+            // The exact dependency contract of an edge-fact obligation:
+            // the obligation planned for the edge's source node, when
+            // that node carries one.
+            let dependencies: Arc<[FlowObligationId]> = match node_obligations.get(&edge.from) {
+                Some(dependency) => Arc::from(vec![*dependency].into_boxed_slice()),
+                None => Arc::from([]),
+            };
+            let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GraphEdge(class)) }, FlowObligationOrigin::Expansion(E::SelectedEdgeFacts), basis, dependencies, Arc::from([]))?;
+            expanded.push(id);
         }
-    }
-    let observed = u32::try_from(specs.len()).unwrap_or(u32::MAX);
-    if observed > request.resources.max_obligations {
-        return Err(FlowDemandPlanError::ObligationBudget { limit: request.resources.max_obligations, observed });
     }
     let mut work_order = initial.clone();
     work_order.extend(expanded.iter().copied());
     let basis = FlowDemandBasis {
-        graph_body: request.graph_body, query: request.query,
+        graph_body: bound.key().clone(), query: request.query,
         input_basis: request.input_basis, result_contract: request.result_contract,
     };
     Ok(FlowDemandPlan {
-        basis, subject: request.subject, structural_selection,
+        basis, subject, structural_selection,
         required_domains: Arc::from(domains.into_boxed_slice()),
         initial_obligations: Arc::from(initial.into_boxed_slice()),
         expanded_obligations: Arc::from(expanded.into_boxed_slice()),
         work_order: Arc::from(work_order.into_boxed_slice()),
-        tie_break: FlowTieBreak::DomainNodeEdgeSlot,
-        convergence: FlowConvergencePolicy { max_iterations: 16 },
+        tie_break: FLOW_WORK_ORDER_TIE_BREAK,
+        convergence: FlowConvergencePolicy { max_iterations: FLOW_FIXED_POINT_MAX_ITERATIONS },
         resources: request.resources, obligation_specs: specs,
     })
 }
@@ -385,23 +703,16 @@ pub enum FlowFailureClass { Cancelled, BudgetExhausted, StaleBasis, Panic, Inter
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FlowFailure { pub class: FlowFailureClass }
 
-/// The convergence evidence a solve presents at finalization: the policy it
-/// ran under (must equal the plan's), the iterations it took, and whether
-/// the final iteration changed nothing.
-#[rustfmt::skip]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FlowConvergenceEvidence { pub policy: FlowConvergencePolicy, pub iterations: u32, pub stable: bool }
-
 /// Why a solve is not complete: no installed demand, a stale basis, an
 /// unprovable operation, a foreign result contract, a non-exact obligation
-/// set, an unfinished obligation, a typed gap, a failure, invalid evidence,
-/// non-convergence, or a degraded value payload.
+/// set, an unfinished obligation, a typed gap, a failure, or
+/// non-convergence.
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowPartialReason {
     NoDemandInstalled, StaleBasis, OperationNotProvable, ResultContractMismatch,
     ObligationSetMismatch, IncompleteObligations, Gap(FlowGap), Failed(FlowFailure),
-    InvalidEvidence, NonConverged, DegradedValue,
+    NonConverged, DegradedValue,
 }
 
 /// A non-complete outcome: the basis plus the typed reason. NEVER a warm
@@ -420,10 +731,10 @@ struct CompleteFlowResultParts {
 }
 
 /// The proof that a flow solve completed: every planned obligation of the
-/// demand discharged with validated evidence under the exact basis the
-/// demand was planned against, with deterministic convergence. Fields are
-/// private and the sole constructor is private to this module, so a proof
-/// is unforgeable outside [`finalize_flow_solve`].
+/// demand discharged with spec-validated evidence under the exact basis
+/// the demand was planned against, with runtime-observed deterministic
+/// convergence. Fields are private and the sole constructor is private to
+/// this module, so a proof is unforgeable outside [`finalize_flow_solve`].
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompleteFlowResult {
@@ -464,22 +775,26 @@ impl FlowSolveOutcome {
     }
 }
 
-/// The sole proof-bearing finalizer. Compares the complete demand basis,
-/// confirms the operation contract (registered, proof-enabled root, coherent
-/// result contract), requires the exact obligation-ID/spec set with every
-/// obligation `Discharged`, validates dependency and same-contract
-/// suboperation evidence, validates deterministic convergence, and rejects
-/// every gap, stale basis, cancellation, budget exhaustion, panic marker,
-/// or internal failure.
+/// The sole proof-bearing finalizer. Consumes ONLY the runtime-sealed
+/// completion artifact — never a separate value or caller-authored
+/// convergence evidence — and verifies the three-way binding of artifact,
+/// runtime, and plan: the artifact's basis IS the plan's basis IS the
+/// installed basis, the operation contract is coherent (registered,
+/// proof-enabled root, matching result contract), the artifact's
+/// discharge proofs equal the plan's exact spec set and the runtime's
+/// current records with every obligation `Discharged`, and the
+/// runtime-observed convergence matches the plan's policy. Every gap,
+/// stale basis, cancellation, budget exhaustion, panic marker, internal
+/// failure, non-convergence, or degraded value is a typed partial.
 #[rustfmt::skip]
 pub fn finalize_flow_solve(
-    runtime: &ObligationRuntime, plan: &FlowDemandPlan, value: FlowReturnResult,
-    convergence: &FlowConvergenceEvidence,
+    runtime: &ObligationRuntime, plan: &FlowDemandPlan, completion: &SealedFlowCompletion,
 ) -> FlowSolveOutcome {
     let partial = |reason: FlowPartialReason| FlowSolveOutcome::Partial(PartialFlowResult { basis: plan.basis.clone(), reason });
 
     let Some(installed) = runtime.flow_basis() else { return partial(FlowPartialReason::NoDemandInstalled) };
     if installed != &plan.basis { return partial(FlowPartialReason::StaleBasis); }
+    if completion.basis() != &plan.basis { return partial(FlowPartialReason::StaleBasis); }
     let Some(contract) = flow_operation_contract(plan.basis.query.tag()) else {
         return partial(FlowPartialReason::OperationNotProvable);
     };
@@ -490,30 +805,29 @@ pub fn finalize_flow_solve(
         return partial(FlowPartialReason::ResultContractMismatch);
     }
     let records = runtime.flow_obligations();
+    let proofs = completion.proofs();
     let specs = plan.obligation_specs();
-    let exact_set = records.len() == specs.len() && records.iter().zip(specs.iter()).all(|(r, s)| r.spec == *s);
+    let exact_set = records.len() == specs.len() && proofs.len() == specs.len()
+        && records.iter().zip(proofs.iter()).all(|(record, proof)| record == proof)
+        && records.iter().zip(specs.iter()).all(|(record, spec)| record.spec == *spec);
     if !exact_set { return partial(FlowPartialReason::ObligationSetMismatch); }
     for record in records {
-        let ObligationState::Discharged(evidence) = &record.state else {
-            return partial(match &record.state {
-                ObligationState::Gap(gap) => FlowPartialReason::Gap(*gap),
-                ObligationState::Failed(failure) => FlowPartialReason::Failed(*failure),
-                ObligationState::Pending | ObligationState::Running => FlowPartialReason::IncompleteObligations,
-                ObligationState::Discharged(_) => FlowPartialReason::InvalidEvidence,
-            });
-        };
-        let basis_ok = evidence.input_basis == plan.basis.input_basis && evidence.result_contract == plan.basis.result_contract;
-        let deps_ok = evidence.dependencies.iter().all(|dep| specs.iter().any(|spec| spec.id == *dep));
-        let subs_ok = evidence.suboperations.iter().all(|sub| sub.result_contract == plan.basis.result_contract
-            && flow_operation_contract(sub.operation).is_some_and(|c| c.role == R::SemanticSuboperation));
-        if !basis_ok || !deps_ok || !subs_ok { return partial(FlowPartialReason::InvalidEvidence); }
+        match &record.state {
+            ObligationState::Discharged(_) => {}
+            ObligationState::Gap(gap) => return partial(FlowPartialReason::Gap(*gap)),
+            ObligationState::Failed(failure) => return partial(FlowPartialReason::Failed(*failure)),
+            ObligationState::Pending | ObligationState::Running => {
+                return partial(FlowPartialReason::IncompleteObligations);
+            }
+        }
     }
-    if convergence.policy != plan.convergence || !convergence.stable || convergence.iterations > plan.convergence.max_iterations {
+    if completion.convergence().policy() != plan.convergence {
         return partial(FlowPartialReason::NonConverged);
     }
-    if value.degradation().is_some() { return partial(FlowPartialReason::DegradedValue); }
+    if completion.value().degradation().is_some() { return partial(FlowPartialReason::DegradedValue); }
 
     FlowSolveOutcome::Complete(CompleteFlowResult::new(CompleteFlowResultParts {
-        basis: plan.basis.clone(), value, convergence: *convergence, discharged: Arc::clone(&plan.work_order),
+        basis: plan.basis.clone(), value: completion.value().clone(),
+        convergence: *completion.convergence(), discharged: Arc::clone(&plan.work_order),
     }))
 }

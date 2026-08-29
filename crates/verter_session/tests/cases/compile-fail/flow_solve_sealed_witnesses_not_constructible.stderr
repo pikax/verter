@@ -1,0 +1,39 @@
+error[E0451]: fields `input_basis`, `result_contract`, `dependencies` and `suboperations` of struct `DischargeEvidence` are private
+  --> tests/cases/compile-fail/flow_solve_sealed_witnesses_not_constructible.rs:16:9
+   |
+15 |     let _ = DischargeEvidence {
+   |             ----------------- in this type
+16 |         input_basis: todo!(),
+   |         ^^^^^^^^^^^ private field
+17 |         result_contract: todo!(),
+   |         ^^^^^^^^^^^^^^^ private field
+18 |         dependencies: todo!(),
+   |         ^^^^^^^^^^^^ private field
+19 |         suboperations: todo!(),
+   |         ^^^^^^^^^^^^^ private field
+
+error[E0451]: fields `policy`, `iterations` and `stable` of struct `FlowConvergenceEvidence` are private
+  --> tests/cases/compile-fail/flow_solve_sealed_witnesses_not_constructible.rs:22:9
+   |
+21 |     let _ = FlowConvergenceEvidence {
+   |             ----------------------- in this type
+22 |         policy: todo!(),
+   |         ^^^^^^ private field
+23 |         iterations: 1,
+   |         ^^^^^^^^^^ private field
+24 |         stable: true,
+   |         ^^^^^^ private field
+
+error[E0451]: fields `basis`, `value`, `convergence` and `proofs` of struct `SealedFlowCompletion` are private
+  --> tests/cases/compile-fail/flow_solve_sealed_witnesses_not_constructible.rs:27:9
+   |
+26 |     let _ = SealedFlowCompletion {
+   |             -------------------- in this type
+27 |         basis: todo!(),
+   |         ^^^^^ private field
+28 |         value: todo!(),
+   |         ^^^^^ private field
+29 |         convergence: todo!(),
+   |         ^^^^^^^^^^^ private field
+30 |         proofs: todo!(),
+   |         ^^^^^^ private field

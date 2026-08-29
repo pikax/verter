@@ -886,6 +886,8 @@ pub struct ObligationRuntime {
     flow_basis: Option<super::flow_solve::FlowDemandBasis>,
     #[cfg(any(test, feature = "test-support"))]
     flow_obligations: Vec<flow_obligation_state::FlowObligationRecord>,
+    #[cfg(any(test, feature = "test-support"))]
+    flow_convergence: Option<flow_obligation_state::FlowConvergenceObservation>,
 }
 
 impl ObligationRuntime {
@@ -975,14 +977,16 @@ pub(crate) mod flow_obligation_state {
     use std::sync::Arc;
 
     use verter_identity::identity::{InputBasisId, ResultContractId};
-    use verter_semantic::analysis::flow::SkeletonBindingId;
+    use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
+    use verter_semantic::analysis::flow::{SkeletonBindingId, SkeletonBindingKind};
     use verter_semantic::analysis::function_program::FlowBindingIdentity;
 
     use super::super::flow_solve::{
-        flow_operation_contract, require_registered_flow_requirement, FlowDemandBasis,
-        FlowDemandPlan, FlowExpansionRule, FlowFailure, FlowOperationRole, FlowRequirement,
+        flow_operation_contract, require_registered_flow_requirement, FlowConvergencePolicy,
+        FlowDemandBasis, FlowDemandPlan, FlowDemandSubject, FlowExpansionRule, FlowFailure,
+        FlowOperationRole, FlowRequirement,
     };
-    use crate::semantic_query::{FlowGap, SemanticQueryKeyTag};
+    use crate::semantic_query::{FlowGap, FlowReturnResult, SemanticQueryKeyTag};
 
     /// The plan-local identity of one flow-solve obligation (work order).
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -992,35 +996,111 @@ pub(crate) mod flow_obligation_state {
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FlowObligationOrigin { ContractDomain, Expansion(FlowExpansionRule), Additional }
-    /// The binding-slot basis of one obligation: the lexical slot plus the
-    /// cross-frame binding identity — never a fresh identity. Populated by
-    /// the solver holding the cross-frame inventory (the memoized graph
-    /// bundle deliberately does not carry it).
+    /// The binding-slot identity of one binding obligation: the lexical
+    /// slot plus the cross-frame binding identity — never a fresh
+    /// identity. The planner populates both at plan time by resolving the
+    /// skeleton's binding index against the frame's binding inventory
+    /// (the ONE cross-frame authority whose slots ARE the
+    /// `FlowBindingIdentity.binding_slot` domain).
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct FlowObligationBasis { pub binding: SkeletonBindingId, pub identity: FlowBindingIdentity }
-    /// Evidence that one live semantic suboperation was consumed.
+    pub struct FlowBindingBasis { pub binding: SkeletonBindingId, pub identity: FlowBindingIdentity }
+    /// The mandatory closed semantic identity of one planned obligation:
+    /// every obligation names exactly the semantic subject it proves
+    /// something about — the demand root and its derived program point,
+    /// one graph site, one binding hub, or one full selected edge.
+    /// `UnmodeledBinding` is the fail-closed arm: the graph identity is
+    /// real, but the binding's kind has no cross-frame identity (a local
+    /// class / enum / namespace / catch / type-only or destructured
+    /// binding), so the obligation installs directly in `Gap` — never
+    /// with a fabricated slot.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum FlowObligationBasis {
+        /// Anchored at the demand root: the program point derived from
+        /// the query's own demand axis.
+        DemandRoot { subject: FlowDemandSubject },
+        /// A graph site node (expression site, return site, region).
+        Site { node: FlowNodeId, kind: FlowNodeKind },
+        /// A binding hub: the graph node plus the real slot identity.
+        Binding { node: FlowNodeId, slot: FlowBindingBasis },
+        /// A binding hub the cross-frame vocabulary cannot name.
+        UnmodeledBinding { node: FlowNodeId, binding: SkeletonBindingId, kind: SkeletonBindingKind },
+        /// One full selected edge: endpoints, class, and source ordinal.
+        Edge { from: FlowNodeId, to: FlowNodeId, class: FlowEdgeClass, ordinal: u32 },
+    }
+    /// Evidence that one live semantic suboperation was consumed. This is
+    /// a discharge INPUT: the runtime validates it against the specific
+    /// obligation's declared suboperations at mint time.
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FlowSuboperationEvidence { pub operation: SemanticQueryKeyTag, pub result_contract: ResultContractId }
-    /// The evidence one discharge presents: the basis it ran against, the
-    /// contract it produced under, and what it consumed.
+    /// The sealed evidence of one discharge. Fields are private and the
+    /// only construction is inside
+    /// [`super::ObligationRuntime::discharge_flow_obligation`], which
+    /// validates the presented claims against THAT obligation's spec
+    /// (its exact declared dependencies and suboperations) before
+    /// sealing — there is no externally callable path that constructs
+    /// arbitrary discharge evidence.
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct DischargeEvidence {
-        pub input_basis: InputBasisId, pub result_contract: ResultContractId,
-        pub dependencies: Arc<[FlowObligationId]>, pub suboperations: Arc<[FlowSuboperationEvidence]>,
+        input_basis: InputBasisId, result_contract: ResultContractId,
+        dependencies: Arc<[FlowObligationId]>, suboperations: Arc<[FlowSuboperationEvidence]>,
+    }
+    /// The runtime-OBSERVED convergence of one solve: the policy the
+    /// demand was installed under, the iterations the runtime counted,
+    /// and the observed stable point. Fields are private and the only
+    /// construction is inside
+    /// [`super::ObligationRuntime::seal_flow_completion`], minted from the
+    /// runtime's own observation log — never caller-authored.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct FlowConvergenceEvidence { policy: FlowConvergencePolicy, iterations: u32, stable: bool }
+
+    impl FlowConvergenceEvidence {
+        /// The policy the solve converged under.
+        #[must_use]
+        pub fn policy(&self) -> FlowConvergencePolicy {
+            self.policy
+        }
+        /// The iterations the runtime counted up to the stable point.
+        #[must_use]
+        pub fn iterations(&self) -> u32 {
+            self.iterations
+        }
+        /// Whether the runtime observed a stable final iteration.
+        #[must_use]
+        pub fn stable(&self) -> bool {
+            self.stable
+        }
+    }
+
+    /// The runtime's own convergence observation log for the installed
+    /// demand: the installed policy, the counted iterations, and the
+    /// observed stable point. Private to this module; mutated ONLY by
+    /// `observe_flow_iteration`.
+    #[derive(Debug, Clone, Copy)]
+    pub(super) struct FlowConvergenceObservation {
+        pub(super) policy: FlowConvergencePolicy,
+        pub(super) iterations: u32,
+        pub(super) stable: bool,
     }
     /// The typed state of one flow-solve obligation.
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum ObligationState { Pending, Running, Discharged(DischargeEvidence), Gap(FlowGap), Failed(FlowFailure) }
-    /// The specification of one planned obligation.
+    /// The specification of one planned obligation: its identity, its
+    /// closed semantic basis, and the EXACT evidence contract a discharge
+    /// must satisfy — the declared dependencies and suboperations this
+    /// specific obligation requires (per-spec, never a global subset).
     #[rustfmt::skip]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FlowObligationSpec {
         pub id: FlowObligationId, pub requirement: FlowRequirement,
-        pub origin: FlowObligationOrigin, pub binding: Option<FlowObligationBasis>,
+        pub origin: FlowObligationOrigin, pub basis: FlowObligationBasis,
+        pub expected_dependencies: Arc<[FlowObligationId]>,
+        pub expected_suboperations: Arc<[SemanticQueryKeyTag]>,
     }
     /// One installed obligation: its spec plus its current state.
     #[rustfmt::skip]
@@ -1031,25 +1111,76 @@ pub(crate) mod flow_obligation_state {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum FlowTransitionError {
         DemandAlreadyInstalled, NoDemandInstalled, UnknownObligation, IllegalTransition,
-        ContractMismatch, UnplannedDependency, NonSuboperationEvidence,
+        UnplannedDependency, NonSuboperationEvidence, ConvergenceBudget,
+    }
+    /// Why the runtime refuses to seal a completion artifact: no
+    /// installed demand, obligations still undischarged, no observed
+    /// fixed point, or a degraded value payload.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FlowSealError { NoDemandInstalled, UndischargedObligations, NonConverged, DegradedValue }
+    /// The ONE sealed completion artifact of a flow solve: the
+    /// solve-derived value, the exact installed basis, the per-spec
+    /// discharge proofs (a snapshot of the runtime's records at seal
+    /// time), and the runtime-observed convergence. Fields are private
+    /// and the only construction is inside
+    /// [`super::ObligationRuntime::seal_flow_completion`], which mints it
+    /// only when every installed obligation is `Discharged` with
+    /// spec-validated evidence and the runtime observed convergence —
+    /// the finalizer consumes this artifact and nothing else.
+    #[derive(Debug, Clone)]
+    pub struct SealedFlowCompletion {
+        basis: FlowDemandBasis,
+        value: FlowReturnResult,
+        convergence: FlowConvergenceEvidence,
+        proofs: Arc<[FlowObligationRecord]>,
+    }
+
+    impl SealedFlowCompletion {
+        /// The solve-derived value sealed into this artifact.
+        #[must_use]
+        pub fn value(&self) -> &FlowReturnResult {
+            &self.value
+        }
+        /// The exact demand basis the solve ran under.
+        #[must_use]
+        pub fn basis(&self) -> &FlowDemandBasis {
+            &self.basis
+        }
+        /// The runtime-observed convergence.
+        #[must_use]
+        pub fn convergence(&self) -> &FlowConvergenceEvidence {
+            &self.convergence
+        }
+        /// The per-spec discharge proofs (the sealed record snapshot).
+        #[must_use]
+        pub fn proofs(&self) -> &[FlowObligationRecord] {
+            &self.proofs
+        }
     }
 
     #[rustfmt::skip]
     impl super::ObligationRuntime {
-        /// Install one demand plan: its basis plus one record per planned
-        /// spec (an undeclared requirement installs directly in `Gap`).
+        /// Install one demand plan: its basis, its convergence policy, and
+        /// one record per planned spec (an undeclared requirement — or a
+        /// binding the cross-frame vocabulary cannot name — installs
+        /// directly in `Gap`).
         pub fn install_flow_demand(&mut self, plan: &FlowDemandPlan) -> Result<(), FlowTransitionError> {
             if self.flow_basis.is_some() { return Err(FlowTransitionError::DemandAlreadyInstalled); }
             let mut records = Vec::with_capacity(plan.obligation_specs().len());
             for spec in plan.obligation_specs() {
-                let state = match require_registered_flow_requirement(spec.requirement.operation, &spec.requirement.requirement) {
-                    Ok(()) => ObligationState::Pending,
-                    Err(_) => ObligationState::Gap(FlowGap::UnmodeledExpression),
+                let unmodeled = matches!(spec.basis, FlowObligationBasis::UnmodeledBinding { .. });
+                let registered = require_registered_flow_requirement(spec.requirement.operation, &spec.requirement.requirement).is_ok();
+                let state = if registered && !unmodeled {
+                    ObligationState::Pending
+                } else {
+                    ObligationState::Gap(FlowGap::UnmodeledExpression)
                 };
                 records.push(FlowObligationRecord { spec: spec.clone(), state });
             }
             self.flow_basis = Some(plan.basis.clone());
             self.flow_obligations = records;
+            self.flow_convergence = Some(FlowConvergenceObservation { policy: plan.convergence, iterations: 0, stable: false });
             Ok(())
         }
 
@@ -1058,21 +1189,41 @@ pub(crate) mod flow_obligation_state {
             self.transition(id, |state| matches!(state, ObligationState::Pending).then_some(ObligationState::Running))
         }
 
-        /// Transition Running → Discharged, validating the evidence against
-        /// the installed basis, planned dependencies, and suboperations.
-        pub fn discharge_flow_obligation(&mut self, id: FlowObligationId, evidence: DischargeEvidence) -> Result<(), FlowTransitionError> {
-            if !matches!(self.record(id)?.state, ObligationState::Running) {
+        /// Transition Running → Discharged, minting the SEALED evidence:
+        /// the presented claims are validated against THIS obligation's
+        /// spec — the exact declared dependencies (each planned, none
+        /// self) and the exact declared same-contract suboperations —
+        /// and the basis fields are taken from the installed demand,
+        /// never from the caller. Empty claims cannot discharge a spec
+        /// that declares required evidence, and a refused mint leaves
+        /// the obligation Running.
+        pub fn discharge_flow_obligation(
+            &mut self,
+            id: FlowObligationId,
+            dependencies: Arc<[FlowObligationId]>,
+            suboperations: Arc<[FlowSuboperationEvidence]>,
+        ) -> Result<(), FlowTransitionError> {
+            let Some(basis) = self.flow_basis.clone() else { return Err(FlowTransitionError::NoDemandInstalled) };
+            let record = self.record(id)?;
+            if !matches!(record.state, ObligationState::Running) {
                 return Err(FlowTransitionError::IllegalTransition);
             }
-            let basis = self.flow_basis.as_ref().ok_or(FlowTransitionError::NoDemandInstalled)?;
-            if evidence.input_basis != basis.input_basis || evidence.result_contract != basis.result_contract {
-                return Err(FlowTransitionError::ContractMismatch);
+            if dependencies != record.spec.expected_dependencies {
+                return Err(FlowTransitionError::UnplannedDependency);
             }
-            let unplanned = |dep: &FlowObligationId| *dep == id || !self.flow_obligations.iter().any(|r| r.spec.id == *dep);
-            if evidence.dependencies.iter().any(unplanned) { return Err(FlowTransitionError::UnplannedDependency); }
-            let invalid_sub = |sub: &FlowSuboperationEvidence| sub.result_contract != evidence.result_contract
-                || flow_operation_contract(sub.operation).is_none_or(|c| c.role != FlowOperationRole::SemanticSuboperation);
-            if evidence.suboperations.iter().any(invalid_sub) { return Err(FlowTransitionError::NonSuboperationEvidence); }
+            let subs_exact = suboperations.len() == record.spec.expected_suboperations.len()
+                && suboperations.iter().zip(record.spec.expected_suboperations.iter()).all(|(sub, expected)| {
+                    sub.operation == *expected
+                        && sub.result_contract == basis.result_contract
+                        && flow_operation_contract(sub.operation).is_some_and(|c| c.role == FlowOperationRole::SemanticSuboperation)
+                });
+            if !subs_exact {
+                return Err(FlowTransitionError::NonSuboperationEvidence);
+            }
+            let evidence = DischargeEvidence {
+                input_basis: basis.input_basis, result_contract: basis.result_contract,
+                dependencies, suboperations,
+            };
             self.record_mut(id)?.state = ObligationState::Discharged(evidence);
             Ok(())
         }
@@ -1084,6 +1235,48 @@ pub(crate) mod flow_obligation_state {
         pub fn fail_flow_obligation(&mut self, id: FlowObligationId, failure: FlowFailure) -> Result<(), FlowTransitionError> {
             self.transition(id, |state| matches!(state, ObligationState::Pending | ObligationState::Running).then_some(ObligationState::Failed(failure)))
         }
+
+        /// Record one fixed-point iteration the solve ran: `changed` is
+        /// whether the iteration observed a fact-set change. The first
+        /// iteration observed with `changed == false` closes convergence;
+        /// observing past the stable point is an illegal transition, and
+        /// an iteration beyond the installed policy's cap is refused as
+        /// budget exhaustion. Convergence enters the sealed artifact ONLY
+        /// from this log — it is runtime-observed, never caller-authored.
+        pub fn observe_flow_iteration(&mut self, changed: bool) -> Result<(), FlowTransitionError> {
+            let Some(observation) = self.flow_convergence.as_mut() else { return Err(FlowTransitionError::NoDemandInstalled) };
+            if observation.stable { return Err(FlowTransitionError::IllegalTransition); }
+            if observation.iterations >= observation.policy.max_iterations { return Err(FlowTransitionError::ConvergenceBudget); }
+            observation.iterations += 1;
+            if !changed { observation.stable = true; }
+            Ok(())
+        }
+
+        /// Mint the ONE sealed completion artifact of this solve. Mints
+        /// ONLY when every installed obligation is `Discharged` (each
+        /// with spec-validated evidence), the runtime observed
+        /// convergence, and the value payload carries no degradation.
+        /// The artifact binds the installed basis, the value, the
+        /// per-spec discharge proofs (a record snapshot), and the
+        /// observed convergence into one unforgeable carrier.
+        pub fn seal_flow_completion(&self, value: FlowReturnResult) -> Result<SealedFlowCompletion, FlowSealError> {
+            let Some(basis) = self.flow_basis.as_ref() else { return Err(FlowSealError::NoDemandInstalled) };
+            if !self.flow_obligations.iter().all(|record| matches!(record.state, ObligationState::Discharged(_))) {
+                return Err(FlowSealError::UndischargedObligations);
+            }
+            let Some(observation) = self.flow_convergence else { return Err(FlowSealError::NonConverged) };
+            if !observation.stable { return Err(FlowSealError::NonConverged); }
+            if value.degradation().is_some() { return Err(FlowSealError::DegradedValue); }
+            Ok(SealedFlowCompletion {
+                basis: basis.clone(),
+                value,
+                convergence: FlowConvergenceEvidence {
+                    policy: observation.policy, iterations: observation.iterations, stable: observation.stable,
+                },
+                proofs: Arc::from(self.flow_obligations.clone().into_boxed_slice()),
+            })
+        }
+
         /// The installed records, in plan work order.
         pub fn flow_obligations(&self) -> &[FlowObligationRecord] { &self.flow_obligations }
 
