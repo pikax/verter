@@ -79,8 +79,16 @@ pub trait FrameworkSemanticAuthority<FrameworkEpoch>: Send + Sync + 'static {
     type StyleMeaning: Send + Sync + 'static;
     /// Admission token issued over an already-admitted parse.
     type SemanticAdmission: Send + Sync + 'static;
+    /// Already-admitted parse artifact this authority consumes.
+    type ParseArtifact: Send + Sync + 'static;
     /// Epoch marker consumed only as a type parameter.
     const _EPOCH: PhantomData<FrameworkEpoch> = PhantomData;
+
+    /// Position-preserving eval source over an admitted parse artifact.
+    fn eval_source(&self, source: &str, artifact: &Self::ParseArtifact) -> Self::EvalSource;
+
+    /// Template facts over an admitted parse artifact. Does not re-parse.
+    fn template_facts(&self, source: &str, artifact: &Self::ParseArtifact) -> Self::TemplateFacts;
 }
 
 /// IDE companion, public-API, and declarations (TSC / `.d.ts`) projection.

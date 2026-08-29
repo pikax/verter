@@ -253,6 +253,11 @@ node_id = "CCA1D"
 commit_message = "docs(core): record registered frontend parse and publication convergence"
 commit_date = "2026-08-29T18:20:42+01:00"
 
+[[implemented]]
+node_id = "CCA1E"
+commit_message = "feat(core): register Vue semantic authority backend"
+commit_date = "2026-08-29T18:28:19+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

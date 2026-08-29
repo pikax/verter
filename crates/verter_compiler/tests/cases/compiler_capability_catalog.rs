@@ -45,6 +45,10 @@ impl FrameworkSemanticAuthority<FrameworkEpochId> for SemanticCapable {
     type TemplateFacts = ();
     type StyleMeaning = ();
     type SemanticAdmission = ();
+    type ParseArtifact = ();
+
+    fn eval_source(&self, _source: &str, _artifact: &()) {}
+    fn template_facts(&self, _source: &str, _artifact: &()) {}
 }
 
 impl RuntimeCompilerBackend<FrameworkEpochId> for RuntimeCapable {
@@ -220,6 +224,10 @@ fn register_semantic_accepts_authority_generic_over_a_local_epoch_type() {
         type TemplateFacts = ();
         type StyleMeaning = ();
         type SemanticAdmission = ();
+        type ParseArtifact = ();
+
+        fn eval_source(&self, _source: &str, _artifact: &()) {}
+        fn template_facts(&self, _source: &str, _artifact: &()) {}
     }
     let row = TypedCapabilityRegistration::register_semantic(
         FrameworkAdapterId::new("sem"),
@@ -437,6 +445,7 @@ fn walk_rs(dir: &std::path::Path, hits: &mut Vec<String>) {
             || rel_str.ends_with("framework_common/capability.rs")
             || rel_str.ends_with("framework_common/mod.rs")
             || rel_str.ends_with("framework_common/vue_carrier_frontend.rs")
+            || rel_str.ends_with("framework_common/vue_semantic_authority.rs")
             || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
             || rel_str.ends_with("svelte/carrier_frontend.rs")
             || rel_str.ends_with("lib.rs")
