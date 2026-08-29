@@ -2,9 +2,8 @@
 //!
 //! Registers the Svelte frontend against the existing Svelte parser and
 //! [`super::carrier::build_svelte_parse_artifact`] constructor (via
-//! [`SvelteCarrierCompiler::parse`]). Production request routes do not
-//! consult this row; [`Self::parse`] is the unused catalog-backed parse
-//! entry.
+//! [`SvelteCarrierCompiler::parse`]). Registered non-store parse routes
+//! select this backend through the immutable catalog.
 
 use std::sync::Arc;
 
@@ -43,11 +42,14 @@ impl SvelteCarrierFrontend {
     pub fn carrier_language_id(&self) -> LanguageId {
         SvelteCarrierCompiler.carrier_language_id()
     }
+}
 
-    /// Parse through the existing Svelte constructor. Recoverable syntax
-    /// stays `Ok` with mapped diagnostics; unimplemented loose mode
-    /// rejects before an artifact exists.
-    pub fn parse(
+impl CarrierFrontend for SvelteCarrierFrontend {
+    type ParseArtifact = Arc<UnregisteredFrameworkParseArtifact>;
+    type SyntaxReject = SyntaxReject;
+    type ParseAdmission = SvelteParseAdmission;
+
+    fn parse(
         &self,
         source: &str,
         opts: &ParseOptions,
@@ -56,13 +58,7 @@ impl SvelteCarrierFrontend {
     }
 }
 
-impl CarrierFrontend for SvelteCarrierFrontend {
-    type ParseArtifact = Arc<UnregisteredFrameworkParseArtifact>;
-    type SyntaxReject = SyntaxReject;
-    type ParseAdmission = SvelteParseAdmission;
-}
-
-/// Typed Svelte frontend catalog row. Unused by production request routes.
+/// Typed Svelte frontend catalog row.
 #[must_use]
 pub fn svelte_carrier_frontend_registration(
 ) -> TypedCapabilityRegistration<FrontendCap<SvelteCarrierFrontend>> {

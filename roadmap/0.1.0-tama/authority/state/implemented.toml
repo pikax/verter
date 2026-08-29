@@ -238,6 +238,11 @@ node_id = "CCA1C"
 commit_message = "feat(core): register Svelte carrier frontend parse backend"
 commit_date = "2026-08-29T23:59:00+01:00"
 
+[[implemented]]
+node_id = "CCA1D1"
+commit_message = "feat(core): route registered Vue/Svelte parse through catalog frontends"
+commit_date = "2026-08-29T21:30:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

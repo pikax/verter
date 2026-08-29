@@ -7,6 +7,8 @@
 
 use std::marker::PhantomData;
 
+use verter_language::ParseOptions;
+
 /// Marker wrapping a capability implementation that is actually present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Present<T>(pub T);
@@ -56,6 +58,15 @@ pub trait CarrierFrontend: Send + Sync + 'static {
     type SyntaxReject: Send + Sync + 'static;
     /// Admission token issued only after a successful parse.
     type ParseAdmission: Send + Sync + 'static;
+
+    /// Parse source through this frontend. Recoverable syntax stays `Ok`
+    /// with mapped diagnostics; unsupported options reject before an
+    /// artifact exists.
+    fn parse(
+        &self,
+        source: &str,
+        opts: &ParseOptions,
+    ) -> Result<Self::ParseArtifact, Self::SyntaxReject>;
 }
 
 /// Per-framework interpretation: eval-source, template facts, style meaning.

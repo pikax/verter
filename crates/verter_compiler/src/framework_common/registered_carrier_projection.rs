@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use verter_language::carrier_grammar::{AcceptedRegisteredCarrierSource, CarrierGrammarConfig};
 use verter_language::parse_artifact::carrier_inventory::*;
@@ -12,9 +12,17 @@ use verter_span::Span;
 
 use verter_language::ParseOptions;
 
+use super::capability::CarrierFrontend;
 use super::carrier_compiler::CarrierCompiler;
+use super::catalog::{CatalogCapability, CatalogRow, ImmutableCapabilityCatalog};
 use super::vue_bridge::VueCarrierCompiler;
-use crate::svelte::SvelteCarrierCompiler;
+use super::vue_carrier_frontend::{
+    vue_carrier_frontend_registration, VueCarrierFrontend, VueParseAdmission,
+};
+use crate::svelte::carrier_frontend::SvelteParseAdmission;
+use crate::svelte::{
+    svelte_carrier_frontend_registration, SvelteCarrierCompiler, SvelteCarrierFrontend,
+};
 
 /// Opaque in-process carrier retained by the registered projector.
 ///
@@ -218,29 +226,7 @@ fn parse_identity_for_accepted(
 ) -> Option<(verter_language::SyntaxProfileId, verter_language::ParseKey)> {
     let options = parse_options_for_accepted(accepted);
     let language = accepted.source().resolved_file_language();
-    let syntax_profile = verter_language::syntax_profile_id_for(language, &options).ok()?;
-    let (domain, epoch) = if language.is_vue() {
-        (
-            verter_language::VUE_SYNTAX_COMPATIBILITY_DOMAIN,
-            verter_language::VUE_SYNTAX_COMPATIBILITY_EPOCH,
-        )
-    } else if language.is_svelte() {
-        (
-            verter_language::SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
-            verter_language::SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
-        )
-    } else {
-        return None;
-    };
-    let parse_key = verter_language::parse_key_for(
-        accepted.source().bytes(),
-        language,
-        domain,
-        epoch,
-        &syntax_profile,
-    )
-    .ok()?;
-    Some((syntax_profile, parse_key))
+    verter_language::parse_identity_for(accepted.source().bytes(), language, &options).ok()
 }
 
 fn parse_options_for_accepted(accepted: &AcceptedRegisteredCarrierSource) -> ParseOptions {
@@ -468,16 +454,154 @@ impl KnownRegisteredCompiler {
             Self::Svelte(compiler) => compiler.carrier_language_id(),
         }
     }
+}
+
+/// Installed Vue/Svelte frontend row stored in the immutable catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstalledCarrierFrontend {
+    /// Vue SFC frontend.
+    Vue(VueCarrierFrontend),
+    /// Svelte component frontend.
+    Svelte(SvelteCarrierFrontend),
+}
+
+/// Admission token for a catalog-selected Vue or Svelte frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstalledParseAdmission {
+    /// Vue frontend admission.
+    Vue(VueParseAdmission),
+    /// Svelte frontend admission.
+    Svelte(SvelteParseAdmission),
+}
+
+impl CarrierFrontend for InstalledCarrierFrontend {
+    type ParseArtifact = Arc<UnregisteredFrameworkParseArtifact>;
+    type SyntaxReject = SyntaxReject;
+    type ParseAdmission = InstalledParseAdmission;
 
     fn parse(
         &self,
         source: &str,
         opts: &ParseOptions,
     ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
+        #[cfg(test)]
+        REGISTERED_FRONTEND_PARSE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match self {
-            Self::Vue(compiler) => compiler.parse(source, opts),
-            Self::Svelte(compiler) => compiler.parse(source, opts),
+            Self::Vue(frontend) => frontend.parse(source, opts),
+            Self::Svelte(frontend) => frontend.parse(source, opts),
         }
+    }
+}
+
+#[cfg(test)]
+static REGISTERED_FRONTEND_PARSE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn registered_frontend_parse_count() -> usize {
+    REGISTERED_FRONTEND_PARSE_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Frozen Vue + Svelte frontend catalog. Built once from the Vue/Svelte
+/// frontend registration constructors; no insert after.
+#[must_use]
+pub fn built_in_frontend_catalog(
+) -> &'static ImmutableCapabilityCatalog<InstalledCarrierFrontend, (), (), (), ()> {
+    static CATALOG: OnceLock<ImmutableCapabilityCatalog<InstalledCarrierFrontend, (), (), (), ()>> =
+        OnceLock::new();
+    CATALOG.get_or_init(|| {
+        ImmutableCapabilityCatalog::try_from_rows([
+            CatalogRow::from(
+                vue_carrier_frontend_registration().map_frontend(InstalledCarrierFrontend::Vue),
+            ),
+            CatalogRow::from(
+                svelte_carrier_frontend_registration()
+                    .map_frontend(InstalledCarrierFrontend::Svelte),
+            ),
+        ])
+        .expect("built-in Vue and Svelte frontend identities are unique")
+    })
+}
+
+/// Catalog lookup for a registered Vue/Svelte frontend. Unknown adapter or
+/// language returns `None` — no fallback parse.
+#[must_use]
+pub fn registered_frontend_for(
+    adapter_id: &FrameworkAdapterId,
+    carrier_language_id: &LanguageId,
+) -> Option<&'static InstalledCarrierFrontend> {
+    built_in_frontend_catalog().iter().find_map(|row| {
+        let identity = row.identity();
+        (identity.capability() == CatalogCapability::Frontend
+            && identity.adapter_id() == adapter_id
+            && identity.carrier_language_id() == carrier_language_id)
+            .then(|| row.frontend())
+            .flatten()
+    })
+}
+
+fn catalog_miss_reject(
+    source: &str,
+    adapter_id: &FrameworkAdapterId,
+    carrier_language_id: &LanguageId,
+    opts: &ParseOptions,
+) -> SyntaxReject {
+    let language = verter_language::FileLanguage::Framework {
+        adapter_id: adapter_id.clone(),
+        language_id: carrier_language_id.clone(),
+    };
+    let (syntax_profile, parse_key) = verter_language::parse_identity_for(source, &language, opts)
+        .expect("requested adapter/language/options identity is constructible without Vue/Svelte substitution");
+    SyntaxReject::UnsupportedProfile {
+        parse_key: Arc::new(parse_key),
+        syntax_profile: Arc::new(syntax_profile),
+        reason: UnsupportedSyntaxProfileReason::FrontendMismatch,
+    }
+}
+
+fn catalog_miss_from_accepted(accepted: &AcceptedRegisteredCarrierSource) -> SyntaxReject {
+    parse_identity_for_accepted(accepted)
+        .map(
+            |(syntax_profile, parse_key)| SyntaxReject::UnsupportedProfile {
+                parse_key: Arc::new(parse_key),
+                syntax_profile: Arc::new(syntax_profile),
+                reason: UnsupportedSyntaxProfileReason::FrontendMismatch,
+            },
+        )
+        .unwrap_or_else(|| {
+            let language = accepted.source().resolved_file_language();
+            catalog_miss_reject(
+                accepted.source().bytes(),
+                &language
+                    .adapter_id()
+                    .cloned()
+                    .unwrap_or_else(|| FrameworkAdapterId::new("")),
+                &language
+                    .carrier_language_id()
+                    .cloned()
+                    .unwrap_or_else(|| LanguageId::new("")),
+                &parse_options_for_accepted(accepted),
+            )
+        })
+}
+
+/// Parse through the catalog frontend for `(adapter, language)`. A catalog
+/// miss is [`SyntaxReject::UnsupportedProfile`] (`FrontendMismatch`) — never
+/// a fallback parse and never a panic.
+pub fn parse_registered_frontend(
+    adapter_id: &FrameworkAdapterId,
+    carrier_language_id: &LanguageId,
+    source: &str,
+    opts: &ParseOptions,
+) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
+    match registered_frontend_for(adapter_id, carrier_language_id) {
+        Some(frontend) => frontend.parse(source, opts),
+        None => Err(catalog_miss_reject(
+            source,
+            adapter_id,
+            carrier_language_id,
+            opts,
+        )),
     }
 }
 
@@ -488,22 +612,27 @@ impl KnownRegisteredCompiler {
 /// `Err(SyntaxReject)` means the carrier frontend refused the request before
 /// producing an artifact — no geometry or publishable diagnostic product exists.
 pub(super) fn project_registered_carrier(
-    known: &KnownRegisteredCompiler,
+    known: Option<&KnownRegisteredCompiler>,
     accepted: &AcceptedRegisteredCarrierSource,
 ) -> Result<RegisteredCarrierProjection, SyntaxReject> {
     let language = accepted.source().resolved_file_language();
-    assert_eq!(
-        known.adapter_id(),
-        *language.adapter_id().expect("accepted carrier adapter")
-    );
-    assert_eq!(
-        known.carrier_language_id(),
-        *language
-            .carrier_language_id()
-            .expect("accepted carrier language")
-    );
+    let adapter_id = language
+        .adapter_id()
+        .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
+    let carrier_language_id = language
+        .carrier_language_id()
+        .ok_or_else(|| catalog_miss_from_accepted(accepted))?;
+    let known = known.ok_or_else(|| catalog_miss_from_accepted(accepted))?;
+    if known.adapter_id() != *adapter_id || known.carrier_language_id() != *carrier_language_id {
+        return Err(catalog_miss_from_accepted(accepted));
+    }
     let options = parse_options_for_accepted(accepted);
-    let artifact = known.parse(accepted.source().bytes(), &options)?;
+    let artifact = parse_registered_frontend(
+        adapter_id,
+        carrier_language_id,
+        accepted.source().bytes(),
+        &options,
+    )?;
     assert_eq!(artifact.adapter_id, known.adapter_id());
     assert_eq!(artifact.language_id, known.carrier_language_id());
     let diagnostics = artifact.diagnostics.clone();

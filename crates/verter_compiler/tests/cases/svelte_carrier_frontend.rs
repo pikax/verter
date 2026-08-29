@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use verter_compiler::framework_common::{
-    CarrierCompiler, CatalogCapability, CatalogRow, FrameworkEpochId, ImmutableCapabilityCatalog,
+    CarrierCompiler, CarrierFrontend, CatalogCapability, CatalogRow, FrameworkEpochId,
+    ImmutableCapabilityCatalog,
 };
 use verter_compiler::svelte::{
     svelte_carrier_frontend_registration, SvelteCarrierCompiler, SvelteCarrierFrontend,
@@ -174,7 +175,10 @@ fn walk_production(dir: &std::path::Path, hits: &mut Vec<String>) {
             .strip_prefix(env!("CARGO_MANIFEST_DIR"))
             .unwrap_or(&path);
         let rel_str = rel.to_string_lossy();
-        if rel_str.ends_with("svelte/carrier_frontend.rs") || rel_str.ends_with("svelte/mod.rs") {
+        if rel_str.ends_with("svelte/carrier_frontend.rs")
+            || rel_str.ends_with("svelte/mod.rs")
+            || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
+        {
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("read rust");

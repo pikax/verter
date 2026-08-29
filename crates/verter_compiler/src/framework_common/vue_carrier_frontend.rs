@@ -1,9 +1,8 @@
 //! Vue [`CarrierFrontend`] adapter.
 //!
 //! Registers the Vue frontend against the existing Vue parser and
-//! [`super::vue_bridge::build_vue_parse_artifact`] constructor. Production
-//! request routes do not consult this row; [`Self::parse`] is the unused
-//! catalog-backed parse entry.
+//! [`super::vue_bridge::build_vue_parse_artifact`] constructor. Registered
+//! non-store parse routes select this backend through the immutable catalog.
 
 use std::sync::Arc;
 
@@ -41,11 +40,14 @@ impl VueCarrierFrontend {
     pub fn carrier_language_id(&self) -> LanguageId {
         VueCarrierCompiler.carrier_language_id()
     }
+}
 
-    /// Parse through the existing Vue constructor. Recoverable syntax stays
-    /// `Ok` with mapped diagnostics; empty delimiter pairs reject before an
-    /// artifact exists.
-    pub fn parse(
+impl CarrierFrontend for VueCarrierFrontend {
+    type ParseArtifact = Arc<UnregisteredFrameworkParseArtifact>;
+    type SyntaxReject = SyntaxReject;
+    type ParseAdmission = VueParseAdmission;
+
+    fn parse(
         &self,
         source: &str,
         opts: &ParseOptions,
@@ -54,13 +56,7 @@ impl VueCarrierFrontend {
     }
 }
 
-impl CarrierFrontend for VueCarrierFrontend {
-    type ParseArtifact = Arc<UnregisteredFrameworkParseArtifact>;
-    type SyntaxReject = SyntaxReject;
-    type ParseAdmission = VueParseAdmission;
-}
-
-/// Typed Vue frontend catalog row. Unused by production request routes.
+/// Typed Vue frontend catalog row.
 #[must_use]
 pub fn vue_carrier_frontend_registration(
 ) -> TypedCapabilityRegistration<FrontendCap<VueCarrierFrontend>> {

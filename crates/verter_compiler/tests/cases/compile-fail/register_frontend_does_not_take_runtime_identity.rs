@@ -10,6 +10,14 @@ impl CarrierFrontend for ToolingFrontend {
     type ParseArtifact = ();
     type SyntaxReject = ();
     type ParseAdmission = ();
+
+    fn parse(
+        &self,
+        _source: &str,
+        _opts: &verter_language::ParseOptions,
+    ) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 fn main() {

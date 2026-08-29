@@ -1,7 +1,7 @@
 error[E0599]: no associated function or constant named `new` found for struct `CatalogIdentity` in the current scope
-  --> tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs:17:26
+  --> tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs:25:26
    |
-17 |         CatalogIdentity::new(
+25 |         CatalogIdentity::new(
    |                          ^^^ associated function or constant not found in `CatalogIdentity`
    |
 help: there is a method `ne` with a similar name, but with different arguments
@@ -11,16 +11,16 @@ help: there is a method `ne` with a similar name, but with different arguments
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0061]: this function takes 4 arguments but 2 arguments were supplied
-  --> tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs:16:13
+  --> tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs:24:13
    |
-16 |       let _ = TypedCapabilityRegistration::register_frontend(
+24 |       let _ = TypedCapabilityRegistration::register_frontend(
    |  _____________^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-
-17 | |         CatalogIdentity::new(
-18 | |             FrameworkAdapterId::new("tooling"),
-19 | |             LanguageId::new("html"),
+25 | |         CatalogIdentity::new(
+26 | |             FrameworkAdapterId::new("tooling"),
+27 | |             LanguageId::new("html"),
 ...  |
-24 | |         Present(ToolingFrontend),
-25 | |     );
+32 | |         Present(ToolingFrontend),
+33 | |     );
    | |_____- two arguments of type `LanguageId` and `FrameworkEpochId` are missing
    |
 note: associated function defined here
@@ -30,10 +30,10 @@ note: associated function defined here
    |            ^^^^^^^^^^^^^^^^^
 help: provide the arguments
    |
-16 |     let _ = TypedCapabilityRegistration::register_frontend(
+24 |     let _ = TypedCapabilityRegistration::register_frontend(
 ...
-23 |         ),
-24 ~         /* LanguageId */,
-25 +         /* FrameworkEpochId */,
-26 ~         Present(ToolingFrontend),
+31 |         ),
+32 ~         /* LanguageId */,
+33 +         /* FrameworkEpochId */,
+34 ~         Present(ToolingFrontend),
    |

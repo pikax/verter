@@ -424,6 +424,18 @@ impl<F> TypedCapabilityRegistration<FrontendCap<F>> {
     pub fn frontend(&self) -> &F {
         &self.capability.0 .0
     }
+
+    /// Re-wrap the present frontend, keeping this row's identity.
+    #[must_use]
+    pub fn map_frontend<G>(
+        self,
+        map: impl FnOnce(F) -> G,
+    ) -> TypedCapabilityRegistration<FrontendCap<G>> {
+        TypedCapabilityRegistration {
+            identity: self.identity,
+            capability: FrontendCap(Present(map(self.capability.0 .0))),
+        }
+    }
 }
 
 impl<P> TypedCapabilityRegistration<ProjectionCap<P>> {

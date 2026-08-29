@@ -308,10 +308,12 @@ pub(crate) fn try_resolve_src_block(
 /// `elected_store_leader_is_the_sole_registered_projector_caller`).
 /// The process-wide compiler-side carrier-compiler registry.
 ///
-/// The carrier parse dispatch (`execute_source` → [`carrier_parse_snapshot`])
-/// looks the file's adapter compiler up here. The registry is stateless
-/// (it owns the per-framework [`CarrierCompiler`](verter_compiler::framework_common::CarrierCompiler)
-/// implementations), so one process-wide instance serves every host.
+/// Compile / eval / IDE / template-data dispatch looks the file's adapter
+/// compiler up here. This module does not select a parse frontend: host
+/// source-stage carrier parse is owned by the publication store, and
+/// [`carrier_snapshot_from_artifact`] only builds a snapshot from an
+/// already-published artifact. The compiler registry is stateless, so one
+/// process-wide instance serves every host.
 pub(crate) fn carrier_compiler_registry(
 ) -> &'static verter_compiler::framework_common::CarrierCompilerRegistry {
     use std::sync::OnceLock;

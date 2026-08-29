@@ -28,6 +28,10 @@ impl CarrierFrontend for ToolingFrontend {
     type ParseArtifact = ();
     type SyntaxReject = ();
     type ParseAdmission = ();
+
+    fn parse(&self, _source: &str, _opts: &verter_language::ParseOptions) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 impl ProjectionBackend for ProjectionOnly {
@@ -433,6 +437,7 @@ fn walk_rs(dir: &std::path::Path, hits: &mut Vec<String>) {
             || rel_str.ends_with("framework_common/capability.rs")
             || rel_str.ends_with("framework_common/mod.rs")
             || rel_str.ends_with("framework_common/vue_carrier_frontend.rs")
+            || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
             || rel_str.ends_with("svelte/carrier_frontend.rs")
             || rel_str.ends_with("lib.rs")
         {
