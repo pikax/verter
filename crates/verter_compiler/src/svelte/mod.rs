@@ -22,11 +22,13 @@ mod bind_contract_data;
 #[cfg(test)]
 mod bind_contract_tests;
 pub mod carrier;
+pub mod carrier_frontend;
 pub mod ide;
 pub mod parser;
 pub mod runtime;
 pub mod template_facts;
 
 pub use carrier::SvelteCarrierCompiler;
+pub use carrier_frontend::{svelte_carrier_frontend_registration, SvelteCarrierFrontend};
 pub use ide::{project_svelte_ide, SvelteIdeProjection};
 pub use parser::{parse_svelte, ParsedSvelte};

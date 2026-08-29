@@ -19,6 +19,7 @@ mod style_codetransform_map_coverage;
 mod style_declaration_list_routing;
 mod style_pipeline_ordering;
 mod svelte_bind_contract_freshness;
+mod svelte_carrier_frontend;
 mod svelte_carrier_parse_rejection;
 mod svelte_carrier_runtime_compile_options_channel;
 mod svelte_client_authored_value_routing_guard;
