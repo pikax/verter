@@ -466,6 +466,12 @@ export function parseIssuePayload(payload, expectedNumber) {
     throw new UnstructuredGitHubOutputError("GitHub issue body is not a string");
   }
   const result = { number, title: payload.title, body };
+  if (payload.state != null) {
+    if (payload.state !== "open" && payload.state !== "closed") {
+      throw new UnstructuredGitHubOutputError(`GitHub issue #${number} state is invalid`);
+    }
+    result.state = payload.state;
+  }
   const milestone = payload.milestone;
   if (typeof milestone === "string" && milestone.length > 0) {
     result.milestone = milestone;

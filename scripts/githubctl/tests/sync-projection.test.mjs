@@ -54,6 +54,28 @@ function milestoneCatalog() {
   };
 }
 
+function issueContentCatalog() {
+  return validateIssueContentCatalog({
+    schema: 1,
+    issue: [
+      { node_id: "ROOT", title: "Make the required source input available" },
+      { node_id: "WORK", title: "Publish deterministic dependent output" },
+    ].map(({ node_id, title }) => ({
+      node_id,
+      title,
+      problem:
+        "Current behavior can publish an incomplete result before its required input is available. This risks incorrect output, leaves consumers unable to distinguish provisional data, and makes repeated execution unreliable.",
+      expected_outcome:
+        "The required input is available before dependent work begins, and repeated execution produces the same complete result with stable provenance.",
+      acceptance: [
+        "Dependent work starts only after its required input is available.",
+        "Incomplete input cannot publish a misleading successful result.",
+        "Repeated execution preserves deterministic output and provenance.",
+      ],
+    })),
+  });
+}
+
 function fixture(options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-sync-projection-"));
   const ledgerPath = path.join(dir, "implemented.toml");
@@ -66,7 +88,10 @@ function fixture(options = {}) {
     [
       "schema = 1",
       "",
-      '[[implemented]]\nnode_id = "SYNC_READY"\ncommit_message = "test locator"\ncommit_date = "2026-08-29T00:00:00+00:00"',
+      ...(options.implemented ?? ["SYNC_READY"]).map(
+        (nodeId) =>
+          `[[implemented]]\nnode_id = "${nodeId}"\ncommit_message = "test locator"\ncommit_date = "2026-08-29T00:00:00+00:00"`,
+      ),
       ...mappings.map(
         (row) =>
           `[[github_issue]]\nnode_id = "${row.node_id}"\ngh_issue = ${row.gh_issue}\nsync_to_github = ${row.sync_to_github}`,
@@ -87,7 +112,12 @@ function fixture(options = {}) {
   ];
   const adapter = fake({
     issues: options.issues ?? [
-      { number: 9, title: "Root", body: "root" },
+      {
+        number: 9,
+        title: "Root",
+        body: "root",
+        labels: ["area:identity", "problem:capability", "framework:shared", "origin:ai"],
+      },
       { number: 10, title: "Work", body: "work", dependencies: options.dependencies ?? [] },
     ],
     repositoryLabels: labelCatalog().labels,
@@ -112,7 +142,9 @@ function run(fx, extra = {}) {
     nodes: ["WORK"],
     labelCatalog: labelCatalog(),
     milestoneCatalog: milestoneCatalog(),
+    issueContentCatalog: issueContentCatalog(),
     syncPrerequisites: [],
+    createBlockers: true,
     ...extra,
   });
 }
@@ -132,7 +164,7 @@ test("sync applies the configured milestone and direct blocked-by edge", () => {
   );
   const repeated = run(fx, { mode: "check" });
   assert.deepEqual(repeated.drift, []);
-  assert.equal(repeated.current[0].gh_issue, 10);
+  assert.equal(repeated.current.find((row) => row.node_id === "WORK").gh_issue, 10);
   assert.equal(fx.adapter.milestoneWrites.length, 1);
   assert.equal(fx.adapter.dependencyWrites.filter((row) => row.kind === "add").length, 1);
 });
@@ -177,8 +209,9 @@ test("sync removes stale mapped edges but preserves protected and unrelated depe
   );
 
   const checked = run(fx, { mode: "check" });
-  assert.deepEqual(checked.drift[0].add_blocked_by, [9]);
-  assert.deepEqual(checked.drift[0].remove_blocked_by, [8]);
+  const workDrift = checked.drift.find((row) => row.node_id === "WORK");
+  assert.deepEqual(workDrift.add_blocked_by, [9]);
+  assert.deepEqual(workDrift.remove_blocked_by, [8]);
 
   run(fx, { mode: "apply", clearance: clearanceFor(fx.adapter) });
   assert.deepEqual(
@@ -187,15 +220,182 @@ test("sync removes stale mapped edges but preserves protected and unrelated depe
   );
 });
 
-test("sync reports an unmapped predecessor without inventing a dependency", () => {
-  const fx = fixture({ mappings: [{ node_id: "WORK", gh_issue: 10, sync_to_github: true }] });
-  const checked = run(fx, { mode: "check" });
-  assert.deepEqual(checked.drift[0].blocked_by_unmapped, ["ROOT"]);
-  run(fx, { mode: "apply", clearance: clearanceFor(fx.adapter) });
-  assert.deepEqual(fx.adapter.getIssueDependencies(10), []);
+test("sync reports required unresolved blocker issues and fails without explicit creation", () => {
+  const fx = fixture({
+    mappings: [{ node_id: "WORK", gh_issue: 10, sync_to_github: true }],
+    issues: [{ number: 10, title: "Work", body: "work" }],
+  });
+  const before = fx.adapter.inspectState();
+  const checked = run(fx, { mode: "check", createBlockers: false });
+  assert.equal(checked.ok, false);
+  assert.deepEqual(checked.selection, ["WORK"]);
+  assert.deepEqual(checked.required_blocker_issues, [
+    {
+      node_id: "ROOT",
+      train: "fixture",
+      required_by: ["WORK"],
+      gh_issue: null,
+      sync_to_github: null,
+    },
+  ]);
+  assert.deepEqual(checked.drift, []);
+  const applied = run(fx, {
+    mode: "apply",
+    createBlockers: false,
+    clearance: clearanceFor(fx.adapter),
+  });
+  assert.equal(applied.ok, false);
+  assert.deepEqual(applied.required_blocker_issues, checked.required_blocker_issues);
+  assert.deepEqual(fx.adapter.inspectState(), before);
+});
+
+test("explicit blocker creation adds unresolved issues before attaching dependencies", () => {
+  const fx = fixture({
+    mappings: [{ node_id: "WORK", gh_issue: 10, sync_to_github: true }],
+    issues: [{ number: 10, title: "Work", body: "work" }],
+  });
+  const checked = run(fx, { mode: "check", createBlockers: true });
+  assert.equal(checked.ok, true);
+  assert.deepEqual(checked.selection, ["ROOT", "WORK"]);
+  assert.deepEqual(
+    checked.missing.map((row) => row.node_id),
+    ["ROOT"],
+  );
+  assert.deepEqual(checked.drift[0].create_blocked_by, ["ROOT"]);
+  const applied = run(fx, {
+    mode: "apply",
+    createBlockers: true,
+    clearance: clearanceFor(fx.adapter),
+  });
+  assert.deepEqual(applied.created, [{ node_id: "ROOT", gh_issue: 11, mapping_written: true }]);
+  assert.deepEqual(
+    fx.adapter.getIssueDependencies(10).map((row) => row.number),
+    [11],
+  );
   const repeated = run(fx, { mode: "check" });
-  assert.deepEqual(repeated.current[0].blocked_by_unmapped, ["ROOT"]);
-  assert.deepEqual(repeated.current[0].blocked_by_protected, []);
+  assert.deepEqual(repeated.missing, []);
+  assert.deepEqual(repeated.drift, []);
+});
+
+test("explicit blocker ignore permits a bounded update and preserves external relationships", () => {
+  const fx = fixture({
+    dependencies: [9],
+    issues: [
+      {
+        number: 9,
+        title: "Root",
+        body: "root",
+        labels: ["area:identity", "problem:capability", "framework:shared", "origin:ai"],
+      },
+      {
+        number: 10,
+        title: "Work",
+        body: "work",
+        milestone: "0.0.1-beta.4",
+        labels: ["area:identity", "problem:capability", "framework:shared", "origin:ai"],
+        dependencies: [9],
+      },
+    ],
+    milestones: [{ title: "0.0.1-beta.4", description: "Structural correctness baseline" }],
+  });
+  const checked = run(fx, {
+    mode: "check",
+    createBlockers: false,
+    ignoreBlockers: true,
+  });
+  assert.equal(checked.ok, true);
+  assert.deepEqual(checked.selection, ["WORK"]);
+  assert.deepEqual(checked.ignored_blocker_issues, [
+    {
+      node_id: "ROOT",
+      train: "fixture",
+      required_by: ["WORK"],
+      gh_issue: 9,
+      sync_to_github: true,
+    },
+  ]);
+  assert.deepEqual(
+    checked.current.map((row) => row.node_id),
+    ["WORK"],
+  );
+  run(fx, {
+    mode: "apply",
+    createBlockers: false,
+    ignoreBlockers: true,
+    clearance: clearanceFor(fx.adapter),
+  });
+  assert.deepEqual(
+    fx.adapter.getIssueDependencies(10).map((row) => row.number),
+    [9],
+  );
+  assert.equal(fx.adapter.dependencyWrites.length, 0);
+});
+
+test("completed requirements do not cross the selection boundary or create issues", () => {
+  const fx = fixture({
+    implemented: ["SYNC_READY", "ROOT"],
+    mappings: [{ node_id: "WORK", gh_issue: 10, sync_to_github: true }],
+    issues: [
+      {
+        number: 10,
+        title: "Work",
+        body: "work",
+        milestone: "0.0.1-beta.4",
+        labels: ["area:identity", "problem:capability", "framework:shared", "origin:ai"],
+      },
+    ],
+    milestones: [{ title: "0.0.1-beta.4", description: "Structural correctness baseline" }],
+  });
+  const checked = run(fx, { mode: "check", createBlockers: false });
+  assert.equal(checked.ok, true);
+  assert.deepEqual(checked.required_blocker_issues, []);
+  assert.deepEqual(checked.selection, ["WORK"]);
+  assert.deepEqual(checked.current[0].completed_blocked_by, ["ROOT"]);
+  run(fx, {
+    mode: "apply",
+    createBlockers: false,
+    clearance: clearanceFor(fx.adapter),
+  });
+  assert.equal(fx.adapter.getIssue(11), null);
+  assert.deepEqual(fx.adapter.getIssueDependencies(10), []);
+});
+
+test("closed issues are reported and remain byte-for-byte untouched", () => {
+  const fx = fixture({
+    issues: [
+      {
+        number: 9,
+        title: "Root",
+        body: "root",
+        labels: ["area:identity", "problem:capability", "framework:shared", "origin:ai"],
+      },
+      {
+        number: 10,
+        title: "Closed title",
+        body: "closed body",
+        state: "closed",
+        labels: ["maintainer-owned"],
+      },
+    ],
+    milestones: [{ title: "0.0.1-beta.4", description: "Structural correctness baseline" }],
+  });
+  const before = fx.adapter.inspectState();
+  const checked = run(fx, {
+    mode: "check",
+    refreshContent: true,
+    createBlockers: false,
+    ignoreBlockers: true,
+  });
+  assert.deepEqual(checked.closed, [{ node_id: "WORK", gh_issue: 10 }]);
+  const applied = run(fx, {
+    mode: "apply",
+    refreshContent: true,
+    createBlockers: false,
+    ignoreBlockers: true,
+    clearance: clearanceFor(fx.adapter),
+  });
+  assert.deepEqual(applied.closed, [{ node_id: "WORK", gh_issue: 10 }]);
+  assert.deepEqual(fx.adapter.inspectState(), before);
 });
 
 test("dependency reconciliation distinguishes repositories with the same issue number", () => {
@@ -236,7 +436,7 @@ test("dependency removals are deterministic across response order", () => {
       { id: "STALE_A", train: "fixture", kind: "implementation", predecessors: [] },
       { id: "STALE_B", train: "fixture", kind: "implementation", predecessors: [] },
     );
-    return run(fx, { mode: "check" }).drift[0].remove_blocked_by;
+    return run(fx, { mode: "check" }).drift.find((row) => row.node_id === "WORK").remove_blocked_by;
   });
   assert.deepEqual(reports, [
     [7, 8],

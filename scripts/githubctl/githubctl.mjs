@@ -33,6 +33,7 @@ Commands:
   sync-issues --check|--apply --train <train> | --nodes <id,id,...>
     [--fake] [--owner <owner> --repo <repo>]
     [--ledger <path>] [--refresh-content]
+    [--create-blockers | --ignore-blockers]
   project-status --check|--apply --node <id> --status in-progress|done
     [--ledger <path>] [--fake] [--owner <owner> --repo <repo>]
   create-pr --check|--apply --node <id> --title <final conventional commit>
@@ -88,7 +89,10 @@ explicit train or node set. Normal runs reconcile the versioned label
 catalog and managed issue labels without rewriting issue prose. Creating a
 missing issue or using --refresh-content writes the stable AI-Generated
 footer. It also reconciles catalog-backed milestones and direct blocked-by
-edges. It never imports GitHub edits.
+edges. A selection with predecessor blocks outside its boundary fails before
+mutation. --create-blockers recursively includes those predecessors and
+creates missing issues; --ignore-blockers leaves their relationships
+untouched. The flags are mutually exclusive. Sync never imports GitHub edits.
 
 project-status projects local work lifecycle onto Project 3. In Progress
 marks the selected issue and its native parent. Done rolls the parent to
@@ -184,6 +188,8 @@ function parseArgs(argv) {
     else if (arg === "--apply") flags.add("apply");
     else if (arg === "--write-locator") flags.add("write-locator");
     else if (arg === "--refresh-content") flags.add("refresh-content");
+    else if (arg === "--create-blockers") flags.add("create-blockers");
+    else if (arg === "--ignore-blockers") flags.add("ignore-blockers");
     else if (arg === "--dispatch") flags.add("dispatch");
     else if (arg === "--authorize") flags.add("authorize");
     else if (arg === "--close-milestone") flags.add("close-milestone");
@@ -240,11 +246,13 @@ function runSyncIssues(flags, options) {
     train: hasTrain ? options.train : undefined,
     nodes: hasNodes ? options.nodes.split(",").map((id) => id.trim()) : undefined,
     refreshContent: flags.has("refresh-content"),
+    createBlockers: flags.has("create-blockers"),
+    ignoreBlockers: flags.has("ignore-blockers"),
     ledgerPath: options.ledger,
     clearance,
   });
   console.log(JSON.stringify(report, null, 2));
-  return 0;
+  return report.ok ? 0 : 1;
 }
 
 function runCreatePr(flags, options) {

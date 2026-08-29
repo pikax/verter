@@ -130,7 +130,11 @@ function rendered(nodeId = "GH0") {
 }
 
 function syncIssues(options) {
-  return syncIssuesImpl({ issueContentCatalog: ISSUE_CONTENT_CATALOG, ...options });
+  return syncIssuesImpl({
+    issueContentCatalog: ISSUE_CONTENT_CATALOG,
+    ignoreBlockers: true,
+    ...options,
+  });
 }
 
 const WRITABLE_REPO = {
@@ -584,7 +588,8 @@ test("content refresh does not require a model", () => {
     {
       node_id: SYNCABLE_ID,
       gh_issue: 12,
-      blocked_by_unmapped: [...SYNCABLE.predecessors],
+      ignored_blocked_by: [...SYNCABLE.predecessors],
+      blocked_by_unmapped: [],
       blocked_by_protected: [],
     },
   ]);
@@ -745,8 +750,21 @@ test("label classification is deterministic and complete for every work item", (
     const labels = labelsForNode(item, LABEL_CATALOG);
     assert.equal(labels.filter((label) => label.startsWith("area:")).length, 1);
     assert.equal(labels.filter((label) => label.startsWith("problem:")).length, 1);
-    assert.equal(labels.filter((label) => label.startsWith("framework:")).length <= 1, true);
+    assert.equal(new Set(labels).size, labels.length);
     assert.equal(labels.includes("origin:ai"), true);
+  }
+});
+
+test("compiler bridge issues carry every supported framework filter", () => {
+  const expected = ["framework:vue", "framework:svelte", "framework:shared"];
+  const nodes = AUTHORITY.nodes.filter((item) => item.train === "compiler.compiler-bridge");
+  assert.equal(nodes.length > 0, true);
+  for (const item of nodes) {
+    assert.deepEqual(
+      labelsForNode(item, LABEL_CATALOG).filter((label) => label.startsWith("framework:")),
+      expected,
+      item.id,
+    );
   }
 });
 
@@ -1236,6 +1254,7 @@ test("GH2 live getIssue reads JSON number/title/body and does not classify paylo
             number: 4,
             title: "from gitHub",
             body: "payload",
+            state: "closed",
             status: 404,
             html_url: "https://github.com/pikax/verter/issues/99",
           };
@@ -1247,7 +1266,12 @@ test("GH2 live getIssue reads JSON number/title/body and does not classify paylo
       },
     },
   });
-  assert.deepEqual(adapter.getIssue(4), { number: 4, title: "from gitHub", body: "payload" });
+  assert.deepEqual(adapter.getIssue(4), {
+    number: 4,
+    title: "from gitHub",
+    body: "payload",
+    state: "closed",
+  });
   assert.equal(calls[0].path, "/repos/pikax/verter/issues/4");
   assert.throws(() => adapter.getIssue(8), NotFoundError);
   assert.throws(() => adapter.getIssue("4"), /positive safe integer/u);
@@ -1356,6 +1380,77 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
     [CLI_CONTENT_NODE],
   );
   assert.equal(fs.readFileSync(ledgerPath, "utf8").includes("[[github_issue]]"), false);
+  const blocked = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "sync-issues",
+      "--check",
+      "--fake",
+      "--nodes",
+      "B4R0",
+      "--ledger",
+      ledgerPath,
+      "--owner",
+      "pikax",
+      "--repo",
+      "verter",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(blocked.status, 1, blocked.stderr);
+  const blockedReport = JSON.parse(blocked.stdout);
+  assert.equal(blockedReport.ok, false);
+  assert.deepEqual(
+    blockedReport.required_blocker_issues.map((row) => row.node_id),
+    ["B4", "C1"],
+  );
+  const ignored = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "sync-issues",
+      "--check",
+      "--fake",
+      "--nodes",
+      "B4R0",
+      "--ignore-blockers",
+      "--ledger",
+      ledgerPath,
+      "--owner",
+      "pikax",
+      "--repo",
+      "verter",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(ignored.status, 0, ignored.stderr);
+  assert.deepEqual(
+    JSON.parse(ignored.stdout).ignored_blocker_issues,
+    blockedReport.required_blocker_issues,
+  );
+  const conflicting = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "sync-issues",
+      "--check",
+      "--fake",
+      "--nodes",
+      "B4R0",
+      "--create-blockers",
+      "--ignore-blockers",
+      "--ledger",
+      ledgerPath,
+      "--owner",
+      "pikax",
+      "--repo",
+      "verter",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(conflicting.status, 0);
+  assert.match(conflicting.stderr, /mutually exclusive/u);
   const refreshLedger = writeLedger({
     issues: [{ node_id: SYNCABLE_ID, gh_issue: 1, sync_to_github: true }],
   });

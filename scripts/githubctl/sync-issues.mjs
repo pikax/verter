@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
+  deriveState,
   githubIssueByNumber,
   loadAuthority,
   topological,
@@ -81,6 +82,48 @@ export function selectNodes(authority, { train, nodes }) {
   return order.filter((node) => seen.has(node.id));
 }
 
+function externalBlockerRows(authority, selected, mappingByNode, completedNodeIds) {
+  const selectedIds = new Set(selected.map((node) => node.id));
+  const requiredByNode = new Map();
+  for (const node of selected) {
+    for (const predecessor of node.predecessors) {
+      if (completedNodeIds.has(predecessor)) continue;
+      if (selectedIds.has(predecessor)) continue;
+      if (!requiredByNode.has(predecessor)) requiredByNode.set(predecessor, []);
+      requiredByNode.get(predecessor).push(node.id);
+    }
+  }
+  const { order } = topological(authority.nodes);
+  return order
+    .filter((node) => requiredByNode.has(node.id))
+    .map((node) => {
+      const mapping = mappingByNode.get(node.id);
+      return {
+        node_id: node.id,
+        train: node.train,
+        required_by: requiredByNode.get(node.id).sort(),
+        gh_issue: mapping?.gh_issue ?? null,
+        sync_to_github: mapping?.sync_to_github ?? null,
+      };
+    });
+}
+
+function expandPredecessorClosure(authority, selected, completedNodeIds) {
+  const byId = new Map(authority.nodes.map((node) => [node.id, node]));
+  const included = new Set(selected.map((node) => node.id));
+  const visit = (node) => {
+    for (const predecessor of node.predecessors) {
+      if (completedNodeIds.has(predecessor)) continue;
+      if (included.has(predecessor)) continue;
+      included.add(predecessor);
+      visit(byId.get(predecessor));
+    }
+  };
+  for (const node of selected) visit(node);
+  const { order } = topological(authority.nodes);
+  return order.filter((node) => included.has(node.id));
+}
+
 function readMappedIssue(adapter, number) {
   let payload;
   try {
@@ -109,6 +152,10 @@ function emptyReport(mode, selection) {
     mode,
     ok: true,
     selection,
+    required_blocker_issues: [],
+    included_blocker_issues: [],
+    ignored_blocker_issues: [],
+    closed: [],
     missing: [],
     drift: [],
     protected: [],
@@ -140,21 +187,53 @@ function renderNode(node, options, authority) {
   });
 }
 
-function desiredDependencyPlan(node, mappingByNode) {
+function desiredDependencyPlan(
+  node,
+  mappingByNode,
+  selectedIds,
+  plannedCreationIds,
+  completedNodeIds,
+  closedIssueNodeIds,
+) {
   const desired = [];
+  const createPredecessors = [];
+  const completedPredecessors = [];
+  const closedPredecessors = [];
+  const ignoredPredecessors = [];
   const protectedPredecessors = [];
   const unmappedPredecessors = [];
   for (const predecessor of node.predecessors) {
+    if (completedNodeIds.has(predecessor)) {
+      completedPredecessors.push(predecessor);
+      continue;
+    }
+    if (closedIssueNodeIds.has(predecessor)) {
+      closedPredecessors.push(predecessor);
+      continue;
+    }
+    if (!selectedIds.has(predecessor)) {
+      ignoredPredecessors.push(predecessor);
+      continue;
+    }
     const predecessorMapping = mappingByNode.get(predecessor);
     if (!predecessorMapping) {
-      unmappedPredecessors.push(predecessor);
+      if (plannedCreationIds.has(predecessor)) createPredecessors.push(predecessor);
+      else unmappedPredecessors.push(predecessor);
     } else if (predecessorMapping.sync_to_github === false) {
       protectedPredecessors.push(predecessor);
     } else {
       desired.push({ node_id: predecessor, mapping: predecessorMapping });
     }
   }
-  return { desired, protectedPredecessors, unmappedPredecessors };
+  return {
+    desired,
+    createPredecessors,
+    completedPredecessors,
+    closedPredecessors,
+    ignoredPredecessors,
+    protectedPredecessors,
+    unmappedPredecessors,
+  };
 }
 
 function compareIssueIdentity(left, right) {
@@ -170,9 +249,27 @@ function issueIdentityKey(row) {
   return `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${row.id}`;
 }
 
-function relationPlan({ node, mapping, adapter, mappingByNode, milestoneCatalog, currentIssue }) {
+function relationPlan({
+  node,
+  mapping,
+  adapter,
+  mappingByNode,
+  milestoneCatalog,
+  currentIssue,
+  selectedIds,
+  plannedCreationIds,
+  completedNodeIds,
+  closedIssueNodeIds,
+}) {
   const milestone = milestoneForNode(node, milestoneCatalog);
-  const dependency = desiredDependencyPlan(node, mappingByNode);
+  const dependency = desiredDependencyPlan(
+    node,
+    mappingByNode,
+    selectedIds,
+    plannedCreationIds,
+    completedNodeIds,
+    closedIssueNodeIds,
+  );
   if (!mapping) {
     return {
       milestone,
@@ -204,6 +301,9 @@ function relationPlan({ node, mapping, adapter, mappingByNode, milestoneCatalog,
       return false;
     }
     const blockerMapping = mappingByIssue.get(row.number);
+    if (completedNodeIds.has(blockerMapping?.node_id)) return false;
+    if (closedIssueNodeIds.has(blockerMapping?.node_id)) return false;
+    if (dependency.ignoredPredecessors.includes(blockerMapping?.node_id)) return false;
     return blockerMapping?.sync_to_github === true && !desiredIds.has(issueIdentityKey(row));
   });
   return {
@@ -227,6 +327,7 @@ function issuePlan({
   mappingByNode,
   authority,
   options,
+  currentIssue,
 }) {
   const desiredLabels = labelsForNode(node, catalog);
   if (!mapping) {
@@ -237,6 +338,10 @@ function issuePlan({
       mappingByNode,
       milestoneCatalog,
       currentIssue: null,
+      selectedIds: options.selectedIds,
+      plannedCreationIds: options.plannedCreationIds,
+      completedNodeIds: options.completedNodeIds,
+      closedIssueNodeIds: options.closedIssueNodeIds,
     });
     const planned = {
       kind: "missing",
@@ -249,7 +354,8 @@ function issuePlan({
   }
   if (mapping.sync_to_github === false) return { kind: "protected", node, mapping };
 
-  const issue = readMappedIssue(adapter, mapping.gh_issue);
+  const issue = currentIssue ?? readMappedIssue(adapter, mapping.gh_issue);
+  if (issue.state === "closed") return { kind: "closed", node, mapping };
   const currentLabels = adapter.getIssueLabels(mapping.gh_issue);
   const labels = planIssueLabels(currentLabels, desiredLabels, catalog);
   let rendered = null;
@@ -265,9 +371,15 @@ function issuePlan({
     mappingByNode,
     milestoneCatalog,
     currentIssue: issue,
+    selectedIds: options.selectedIds,
+    plannedCreationIds: options.plannedCreationIds,
+    completedNodeIds: options.completedNodeIds,
+    closedIssueNodeIds: options.closedIssueNodeIds,
   });
   const relationChanged =
     relations.milestoneChanged ||
+    relations.createPredecessors.length > 0 ||
+    relations.unmappedPredecessors.length > 0 ||
     relations.addDependencies.length > 0 ||
     relations.removeDependencies.length > 0;
   return {
@@ -291,15 +403,38 @@ function reportIssuePlan(report, plan) {
       content_required: true,
       milestone: plan.relations.milestone?.title ?? null,
       blocked_by: plan.relations.desired.map((row) => row.mapping.gh_issue),
+      ...(plan.relations.createPredecessors.length > 0
+        ? { create_blocked_by: plan.relations.createPredecessors }
+        : {}),
+      ...(plan.relations.completedPredecessors.length > 0
+        ? { completed_blocked_by: plan.relations.completedPredecessors }
+        : {}),
+      ...(plan.relations.closedPredecessors.length > 0
+        ? { closed_blocked_by: plan.relations.closedPredecessors }
+        : {}),
+      ...(plan.relations.ignoredPredecessors.length > 0
+        ? { ignored_blocked_by: plan.relations.ignoredPredecessors }
+        : {}),
       blocked_by_unmapped: plan.relations.unmappedPredecessors,
       blocked_by_protected: plan.relations.protectedPredecessors,
     });
   } else if (plan.kind === "protected") {
     report.protected.push({ node_id: plan.node.id, gh_issue: plan.mapping.gh_issue });
+  } else if (plan.kind === "closed") {
+    report.closed.push({ node_id: plan.node.id, gh_issue: plan.mapping.gh_issue });
   } else if (plan.kind === "current") {
     report.current.push({
       node_id: plan.node.id,
       gh_issue: plan.mapping.gh_issue,
+      ...(plan.relations.completedPredecessors.length > 0
+        ? { completed_blocked_by: plan.relations.completedPredecessors }
+        : {}),
+      ...(plan.relations.closedPredecessors.length > 0
+        ? { closed_blocked_by: plan.relations.closedPredecessors }
+        : {}),
+      ...(plan.relations.ignoredPredecessors.length > 0
+        ? { ignored_blocked_by: plan.relations.ignoredPredecessors }
+        : {}),
       blocked_by_unmapped: plan.relations.unmappedPredecessors,
       blocked_by_protected: plan.relations.protectedPredecessors,
     });
@@ -311,6 +446,18 @@ function reportIssuePlan(report, plan) {
       add_labels: plan.labels.add,
       remove_labels: plan.labels.remove,
       milestone: plan.relations.milestoneChanged ? (plan.relations.milestone?.title ?? null) : null,
+      ...(plan.relations.createPredecessors.length > 0
+        ? { create_blocked_by: plan.relations.createPredecessors }
+        : {}),
+      ...(plan.relations.completedPredecessors.length > 0
+        ? { completed_blocked_by: plan.relations.completedPredecessors }
+        : {}),
+      ...(plan.relations.closedPredecessors.length > 0
+        ? { closed_blocked_by: plan.relations.closedPredecessors }
+        : {}),
+      ...(plan.relations.ignoredPredecessors.length > 0
+        ? { ignored_blocked_by: plan.relations.ignoredPredecessors }
+        : {}),
       add_blocked_by: plan.relations.addDependencies.map((row) => row.mapping.gh_issue),
       remove_blocked_by: plan.relations.removeDependencies.map((row) => row.number),
       blocked_by_unmapped: plan.relations.unmappedPredecessors,
@@ -488,8 +635,11 @@ function applyIssueRelations({ adapter, mapping, relations, clearance, nodeId, s
 export function syncIssues(options) {
   const mode = assertMutationMode(options.mode);
   if (!options.adapter) throw new IssueSyncError("adapter is required");
+  if (options.createBlockers === true && options.ignoreBlockers === true) {
+    throw new SelectionError("--create-blockers and --ignore-blockers are mutually exclusive");
+  }
   const authority = options.authority ?? loadAuthority();
-  const selected = selectNodes(authority, options);
+  const explicitSelection = selectNodes(authority, options);
   const ledgerPath = options.ledgerPath ?? authority.ledgerFile;
   if (
     mode === "apply" &&
@@ -503,16 +653,66 @@ export function syncIssues(options) {
   const ledger = loadLedgerFile(ledgerPath);
   assertSyncAncestors(ledger, requiredSyncAncestors(authority, options.syncPrerequisites));
   const mappingByNode = new Map(ledger.github_issue.map((row) => [row.node_id, row]));
+  const localState = deriveState(authority, { implemented: ledger.implemented });
+  const completedNodeIds = new Set(
+    [...localState.states.entries()]
+      .filter(([, row]) => row.status === "COMPLETE")
+      .map(([nodeId]) => nodeId),
+  );
+  const requiredBlockers = externalBlockerRows(
+    authority,
+    explicitSelection,
+    mappingByNode,
+    completedNodeIds,
+  );
+  if (
+    requiredBlockers.length > 0 &&
+    options.createBlockers !== true &&
+    options.ignoreBlockers !== true
+  ) {
+    const report = emptyReport(
+      mode,
+      explicitSelection.map((node) => node.id),
+    );
+    report.ok = false;
+    report.required_blocker_issues = requiredBlockers;
+    return report;
+  }
+  const selected =
+    options.createBlockers === true
+      ? expandPredecessorClosure(authority, explicitSelection, completedNodeIds)
+      : explicitSelection;
+  const explicitIds = new Set(explicitSelection.map((node) => node.id));
+  const selectedIds = new Set(selected.map((node) => node.id));
+  const plannedCreationIds = new Set(
+    selected.filter((node) => !mappingByNode.has(node.id)).map((node) => node.id),
+  );
   const report = emptyReport(
     mode,
     selected.map((node) => node.id),
   );
+  if (options.createBlockers === true) {
+    report.included_blocker_issues = selected
+      .filter((node) => !explicitIds.has(node.id))
+      .map((node) => node.id);
+  } else if (options.ignoreBlockers === true) {
+    report.ignored_blocker_issues = requiredBlockers;
+  }
   if (mode === "apply" && !options.clearance) {
     throw new DoctorRequiredError("apply requires GitHubDoctor issues clearance");
   }
   const catalog = options.labelCatalog ?? loadIssueLabelCatalog(authority.packageRoot);
   const milestoneCatalog =
     options.milestoneCatalog ?? loadIssueMilestoneCatalog(authority.packageRoot);
+  const currentIssueByNode = new Map();
+  const closedIssueNodeIds = new Set();
+  for (const node of selected) {
+    const mapping = mappingByNode.get(node.id);
+    if (!mapping || mapping.sync_to_github === false) continue;
+    const issue = readMappedIssue(options.adapter, mapping.gh_issue);
+    currentIssueByNode.set(node.id, issue);
+    if (issue.state === "closed") closedIssueNodeIds.add(node.id);
+  }
   const plans = selected.map((node) =>
     issuePlan({
       node,
@@ -522,7 +722,15 @@ export function syncIssues(options) {
       milestoneCatalog,
       mappingByNode,
       authority,
-      options: { ...options, mode },
+      currentIssue: currentIssueByNode.get(node.id),
+      options: {
+        ...options,
+        mode,
+        selectedIds,
+        plannedCreationIds,
+        completedNodeIds,
+        closedIssueNodeIds,
+      },
     }),
   );
   for (const plan of plans) reportIssuePlan(report, plan);
@@ -593,7 +801,9 @@ export function syncIssues(options) {
         });
         continue;
       }
-      if (plan.kind === "protected" || plan.kind === "current") continue;
+      if (plan.kind === "protected" || plan.kind === "closed" || plan.kind === "current") {
+        continue;
+      }
       if (plan.contentChanged) {
         options.adapter.updateIssue({
           number: plan.mapping.gh_issue,
@@ -637,11 +847,12 @@ export function syncIssues(options) {
     }
   }
   for (const plan of plans) {
-    if (plan.kind === "protected") continue;
+    if (plan.kind === "protected" || plan.kind === "closed") continue;
     const mapping = mappingByNode.get(plan.node.id);
     if (!mapping) continue;
     try {
       const currentIssue = readMappedIssue(options.adapter, mapping.gh_issue);
+      if (currentIssue.state === "closed") continue;
       const relations = relationPlan({
         node: plan.node,
         mapping,
@@ -649,6 +860,10 @@ export function syncIssues(options) {
         mappingByNode,
         milestoneCatalog,
         currentIssue,
+        selectedIds,
+        plannedCreationIds,
+        completedNodeIds,
+        closedIssueNodeIds,
       });
       applyIssueRelations({
         adapter: options.adapter,

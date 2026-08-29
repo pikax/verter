@@ -102,6 +102,7 @@ function cloneIssue(issue) {
     comments: cloneComments(issue.comments),
     milestone: issue.milestone ?? null,
     labels: cloneLabels(issue.labels),
+    state: issue.state === "closed" ? "closed" : "open",
     parent: issue.parent ?? null,
     subIssues: [...(issue.subIssues ?? [])],
     dependencies: [...(issue.dependencies ?? [])],

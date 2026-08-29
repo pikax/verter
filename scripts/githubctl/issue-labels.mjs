@@ -21,7 +21,7 @@ function normalized(name) {
   return name.toLocaleLowerCase("en-US");
 }
 
-function validateRuleRows(catalog, key, selector, prefix, labelByName) {
+function validateRuleRows(catalog, key, selector, prefix, labelByName, options = {}) {
   const seen = new Set();
   for (const [index, row] of requiredArray(catalog[key], key).entries()) {
     const label = requiredText(row?.label, `${key}[${index}].label`);
@@ -30,10 +30,11 @@ function validateRuleRows(catalog, key, selector, prefix, labelByName) {
     }
     for (const value of requiredArray(row?.[selector], `${key}[${index}].${selector}`)) {
       requiredText(value, `${key}[${index}].${selector}`);
-      if (seen.has(value)) {
+      const identity = options.multiple === true ? `${normalized(label)}\0${value}` : value;
+      if (seen.has(identity)) {
         throw new IssueSyncError(`${key} classifies ${value} more than once`);
       }
-      seen.add(value);
+      seen.add(identity);
     }
   }
 }
@@ -77,7 +78,9 @@ function validateCatalog(catalog, file) {
   validateRuleRows(catalog, "area_rule", "trains", "area:", labelByName);
   validateRuleRows(catalog, "problem_train_rule", "trains", "problem:", labelByName);
   validateRuleRows(catalog, "problem_kind_rule", "kinds", "problem:", labelByName);
-  validateRuleRows(catalog, "framework_rule", "trains", "framework:", labelByName);
+  validateRuleRows(catalog, "framework_rule", "trains", "framework:", labelByName, {
+    multiple: true,
+  });
   if (!labelByName.has("origin:ai")) {
     throw new IssueSyncError(`${file}: origin:ai is required`);
   }
@@ -126,9 +129,6 @@ export function labelsForNode(node, catalog) {
         `problem classification for kind ${kind}`,
       );
   const frameworks = matchingRuleLabels(catalog.frameworkRules, "trains", train);
-  if (frameworks.length > 1) {
-    throw new IssueSyncError(`framework classification for ${train} resolved more than once`);
-  }
   return [area, problem, ...frameworks, "origin:ai"];
 }
 

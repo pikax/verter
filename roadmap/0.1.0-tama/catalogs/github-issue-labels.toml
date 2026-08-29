@@ -168,11 +168,11 @@ kinds = ["audit", "canary", "convergence", "proof", "repair", "soak", "terminal"
 
 [[framework_rule]]
 label = "framework:vue"
-trains = ["compiler.vue-compiler", "compiler.vue-style", "compiler.vue-style-query", "expansion.vue-ce"]
+trains = ["compiler.compiler-bridge", "compiler.vue-compiler", "compiler.vue-style", "compiler.vue-style-query", "expansion.vue-ce"]
 
 [[framework_rule]]
 label = "framework:svelte"
-trains = ["compiler.svelte-compiler", "compiler.svelte-style", "expansion.svelte-ce"]
+trains = ["compiler.compiler-bridge", "compiler.svelte-compiler", "compiler.svelte-style", "expansion.svelte-ce"]
 
 [[framework_rule]]
 label = "framework:shared"

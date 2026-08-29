@@ -24,7 +24,8 @@ node roadmap/0.1.0-tama/tools/programctl.mjs github-issue NUMBER
 node roadmap/0.1.0-tama/tools/validate-program-dag.mjs --strict
 node scripts/githubctl/githubctl.mjs check
 node scripts/githubctl/githubctl.mjs sync-issues --check --train TRAIN
-node scripts/githubctl/githubctl.mjs sync-issues --apply --train TRAIN
+node scripts/githubctl/githubctl.mjs sync-issues --apply --train TRAIN --create-blockers
+node scripts/githubctl/githubctl.mjs sync-issues --apply --train TRAIN --ignore-blockers
 node scripts/githubctl/githubctl.mjs sync-issues --apply --nodes ID --refresh-content
 ```
 
