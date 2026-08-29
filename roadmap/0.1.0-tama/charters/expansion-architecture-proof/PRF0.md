@@ -7,7 +7,7 @@ product=architecture_proof
 kind=lock
 semantic_role=delivery
 class=successor
-predecessors=HWC5,CEJ0,UAK2,FMT1,PUB0
+predecessors=HWC5,CEJ0,UAK2,FMT1C,PUB0
 owner=expansion.architecture-proof:sequential counterexample evidence over concrete framework geometries
 conflict_domains=carrierprofile
 resource_class=docs-light
@@ -52,9 +52,9 @@ Sequential representative-slice lock. The current owner is **provisional univers
 ## Exact predecessor contracts
 
 - **HWC5:** implemented ledger row for “Neutral HTML/WC conformance, performance, and Experimental terminal”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **CEJ0:** implemented ledger row for “Vue/Svelte Custom Element interoperability soak join”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **CEJ0:** implemented ledger row for “Vue/Svelte Custom Element interoperability soak join”; this means the complete test/evidence-only producer-consumer matrix was accepted and does not imply a production schema migration or fix. Ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **UAK2:** implemented ledger row for “Read-only provisional universal-kernel convergence”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **FMT1:** implemented ledger row for “Document algebra, renderer, edits, cursor, and maps”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **FMT1C:** implemented ledger row for “Authored-to-formatted position-map authority”; ledger presence alone satisfies the direct formatter-map predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only. PRF0's separate HWC5 ancestry already carries the completed neutral-HTML formatter, including range/cursor foundations; this direct edge pins map authority and is not a claim that the overall proof can dispatch before those transitive ancestors.
 - **PUB0:** implemented ledger row for “Versioned public request/result and capability truth”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
@@ -111,9 +111,8 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 ## Reconciled source-plan contract
 
 **Intent:** freeze one minimal, discriminating experiment for each unproven source geometry.
-**Predecessors:** `HWC5`, `CEJ0`, `UAK2`, `FMT1`, `PUB0`.
+**Predecessors:** `HWC5`, `CEJ0`, `UAK2`, `FMT1C`, `PUB0`.
 **Subblocks:** (1) pin exact releases/oracles/corpora; (2) define falsified invariant per slice; (3) lock one private-harness path per required semantic seam; (4) lock numeric budgets and zero-work controls; (5) require sequential dispatch and learning import between slices; (6) ratify proof-code deletion/promotion and amendment rules.
 **Acceptance:** each slice can fail the kernel rather than merely demonstrate a happy path; later criteria cannot be relaxed based on earlier implementation.
 **Forbidden:** parallel full vertical work, production capability advertisement, shared mutable test infrastructure that hides ownership, or a “universal” assertion from fixtures alone.
 **Deletion/abort:** no code; a failed slice opens a bounded kernel amendment and invalidates downstream proof locks.
-

@@ -8,7 +8,7 @@ kind=soak
 semantic_role=delivery
 class=successor
 predecessors=CEC0
-owner=expansion.custom-elements:standards model plus framework-specific producer/consumer adapters
+owner=expansion.custom-elements:cross-framework standards-interoperability evidence
 conflict_domains=customelementdeclaration,vue_product,svelte_product
 resource_class=rust-mixed
 review_profile=semantic-3
@@ -27,9 +27,9 @@ optional=false
 release_gating=non_release
 external_requirements=
 charter=charters/expansion-custom-elements/CEJ0.md
-max_production_loc=800
-max_production_files=8
-max_related_packages=2
+max_production_loc=0
+max_production_files=0
+max_related_packages=0
 rescope_loc=1500
 rescope_files=12
 rescope_unrelated_packages=3
@@ -41,13 +41,13 @@ Readiness comes only from trusted implementation-ledger rows. A READY node may s
 
 ## Independently acceptable outcome
 
-Vue/Svelte Custom Element interoperability soak join. The current owner is **shared legacy Web Component schema/registry**. The final and sole owner is **standards model plus framework-specific producer/consumer adapters**. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
+Vue/Svelte Custom Element interoperability soak join. The accepted `CEC0` standards model and framework adapters remain the production authority. This node owns only **cross-framework standards-interoperability evidence** over those accepted terminals. It accepts one complete soak matrix and contains no production migration, cutover, or independently dispatchable implementation outcome.
 
 ## Concrete surfaces and APIs
 
-- Production surfaces: `crates/verter_language/src`, `crates/verter_protocol/src`, `crates/verter_session/src`.
-- Named API/data boundaries: `CustomElementDeclaration`, `CustomElementRegistration`, `CemModule`, `FrameworkCeAdapter`.
-- Mutation boundary: only the production surfaces and named API/data boundaries above; every changed path must be inside both that charter surface and the acquired conflict domain, and sibling ownership is excluded.
+- Evidence surfaces: `crates/verter_language/tests`, `crates/verter_protocol/tests`, `crates/verter_session/tests/cases`, and their existing Custom Element fixtures.
+- Observed API/data boundaries: `CustomElementDeclaration`, `CustomElementRegistration`, `CemModule`, `FrameworkCeAdapter`.
+- Mutation boundary: test, fixture, benchmark, and evidence bytes only. Production source and the observed APIs are read-only subjects of the soak.
 
 ## Exact predecessor contracts
 
@@ -57,37 +57,36 @@ Vue/Svelte Custom Element interoperability soak join. The current owner is **sha
 ## Source-specific scope
 
 - **Normative intent:** continuously falsify standards interoperability across the two existing framework producers without coupling either release to the other.
-- **Atomic boundary:** the production surfaces and named API/data boundaries above form this source-owned node's exclusive acceptance subset; this node owns its complete named migration population and exactly one deletion/cutover disposition.
-- **Cutover evidence:** prove removal or structural rejection of **legacy shared CE schema**, **unqualified global registry** and satisfy the node-specific acceptance IDs below. A newly independent outcome requires an amendment and a new node before mutation.
+- **Atomic boundary:** one complete Vue-producer/Svelte-consumer, Svelte-producer/Vue-consumer, and plain-HTML differential matrix over the accepted `CEC0` model. Findings are evidence; they do not mutate or revoke an accepted terminal in this node.
+- **Evidence boundary:** cover same-tag/different-registry identity, props/attributes/events/slots/CSS/CEM fidelity, package ambiguity, incremental/fresh equivalence, stale publication, and bounded-work behavior. A production fix or independently acceptable implementation outcome requires its own amended node before mutation.
 
 ## Acceptance IDs and discriminating proof
 
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
-- **CEJ0-AC1 — sole-owner outcome:** the named final owner must be sole and every displaced route named below must be deleted or structurally rejected. Prefer existing type, capability, dependency, compiler, or static enforcement. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or a reproduced defect that existing evidence does not discriminate.
-- **CEJ0-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
-- **CEJ0-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm. Otherwise record a terse not-applicable rationale tied to the untouched authority.
-- **CEJ0-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
+- **CEJ0-AC1 — complete producer/consumer matrix:** both framework producers must be consumed by the other framework and plain HTML without framework knowledge entering the standards implementation; every required cell runs against pinned fixtures and oracles.
+- **CEJ0-AC2 — standards fidelity:** same-tag/different-registry identity and props/attributes/events/slots/CSS/CEM observations preserve exact identities, provenance, completeness, and deterministic ordering.
+- **CEJ0-AC3 — incremental equivalence:** incremental and fresh observations are identical, and cancelled, stale, ambiguous-package, or partial outcomes cannot publish or warm reusable state.
+- **CEJ0-AC4 — bounded work:** existing counters, bounded inspection, or benchmarks prove that the matrix introduces no hidden duplicate parse, resolve, emit, copy, allocation, or retained candidate. A failure is published to the exact production owner; it is not repaired here.
 - Every proposed new test must name a plausible regression or contract boundary not already discriminated; prose/format assertions are allowed only when those bytes are the public contract. Do not add implementation mirrors, duplicate permutations, or universal negative/mutation tests.
 - Test homes: `crates/verter_language/tests`, `crates/verter_protocol/tests`.
 
 ## Deletions and forbidden designs
 
-- Delete or structurally reject: **legacy shared CE schema**.
-- Delete or structurally reject: **unqualified global registry**.
+- Delete no production source, schema, registry, route, or accepted evidence in this soak node.
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
 ## Budgets and mandatory rescope
 
-- Target ceiling: 800 production LOC, 8 production files, 2 related crates/packages.
+- Target ceiling: 0 production LOC, 0 production files, 0 related crates/packages. Test, fixture, benchmark, and evidence changes must still fit one reviewable soak matrix.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
 - Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
 
 ## Abort conditions
 
-- Stop before mutation if current source disproves the named owner/API boundary, an ancestor lacks an implemented ledger row, or the complete diff will not fit one review context.
+- Stop before mutation if `CEC0` is not accepted, the required cross-framework matrix cannot remain test/evidence-only, an ancestor lacks an implemented ledger row, or the complete diff will not fit one review context.
 - Abort the candidate on unexplained output, source-map, diagnostic, cancellation, allocation, latency, or RSS divergence; do not convert it into residue locally.
 
 ## Targeted verification
@@ -115,5 +114,4 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 
 ## 11. Sequential architecture falsification slices
 
-These blocks are deliberately thin and initially unshipped. Each proves parse/extract, activation, exact authored maps, one TypeInfo contribution, one type-aware IDE request, one safe lint/action, formatter-view/map feasibility through the shared `FMT1` private harness, one `PUB0` surface-neutral path, zero-work behavior, and a vertical-specific counterexample. Proof code cannot register public LSP/CLI capabilities or survive as a second product authority. They do not imply “full support.”
-
+Formatter-view/map feasibility is not a CEJ0 acceptance requirement. `PRF0`, which converges both CEJ0 and FMT1C, owns the sequential private-harness proof and any formatter/map counterexample. CEJ0 remains limited to the cross-framework standards-interoperability soak described above.

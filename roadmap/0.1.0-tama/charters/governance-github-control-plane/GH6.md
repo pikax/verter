@@ -48,7 +48,7 @@ Prove and activate the minimal GitHub workflow without adding another feature tr
 
 - Production surfaces: `scripts/githubctl`, `.github`, `roadmap/0.1.0-tama/contracts/github-control-plane.md`.
 - Test surfaces: `scripts/githubctl/tests`.
-- Named boundary: one end-to-end workflow from ancestor-row READY through local issue mapping, final-title PR, issue description, CI, ledger finalization, normal squash landing, feedback, and release rehearsal.
+- Named boundary: one end-to-end workflow from ancestor-row READY through local issue mapping, dedicated node worktree/branch before mutation, first pushed implementation commit, final-title draft PR, issue description, CI, ledger finalization, reviewed GitHub-PR squash merge, feedback, and release rehearsal. Local-first landing/mirroring is forbidden.
 
 ## Exact predecessor contracts
 
@@ -62,7 +62,7 @@ Prove and activate the minimal GitHub workflow without adding another feature tr
 
 - Prove one-way explicit-scope issue creation and in-place opt-in issue update from local authority, strict refusal to rewrite `sync_to_github = false` issues, unique local `gh_issue` mappings, preserved issue number/discussion, lookup by issue number without reverse synchronization, clear partial-failure reporting, and no accidental implementation completion.
 - Prove opt-in issue bodies contain useful human description plus only the final model line as workflow metadata—no effort or DAG block—and protected issue bodies are never edited.
-- Prove final-title PR creation with the exact mapped `Closes #<gh_issue>` link, issue closure on merge, readable review reporting, unexpected-CI-skip refusal, finishing-agent ledger update, normal squash landing, and no post-merge restamping.
+- Prove mapping plus dedicated worktree/branch before mutation, draft final-title PR creation only after the first implementation commit is pushed, the exact mapped `Closes #<gh_issue>` link, issue closure on merge, readable review reporting, unexpected-CI-skip refusal, finishing-agent ledger update, reviewed GitHub-PR squash merge, no local-first mirroring, and no post-merge restamping.
 - Prove P0/P1 refusal, owning-policy handling for lower findings, and that GitHub issues can enter the DAG only through a manually authored DAG/charter/mapping patch.
 - Prove milestone priority never bypasses READY, blocked release refusal, and compatible release tag/publication flow.
 - Cut over operational usage only after the applicable RED/GREEN controls and owning final gate pass on the squashed review candidate.

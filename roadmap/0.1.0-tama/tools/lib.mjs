@@ -364,11 +364,15 @@ export function loadAuthority(packageRoot = PACKAGE_ROOT) {
   return { packageRoot, rootFile, metadata, nodes, moduleModels, ledgerFile, ledger };
 }
 
+function predecessorsOf(node) {
+  return Array.isArray(node?.predecessors) ? node.predecessors : [];
+}
+
 function graphMaps(nodes) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const children = new Map(nodes.map((node) => [node.id, []]));
   for (const node of nodes)
-    for (const predecessor of node.predecessors || [])
+    for (const predecessor of predecessorsOf(node))
       if (children.has(predecessor)) children.get(predecessor).push(node.id);
   return { byId, children };
 }
@@ -377,7 +381,7 @@ export function topological(nodes) {
   const { byId, children } = graphMaps(nodes);
   const indegree = new Map(nodes.map((node) => [node.id, 0]));
   for (const node of nodes)
-    for (const predecessor of node.predecessors || [])
+    for (const predecessor of predecessorsOf(node))
       if (byId.has(predecessor)) indegree.set(node.id, indegree.get(node.id) + 1);
   const ready = [...indegree]
     .filter(([, degree]) => degree === 0)
@@ -412,7 +416,7 @@ function criticalPath(nodes) {
   for (const node of order) {
     let best = 0;
     let bestId = null;
-    for (const predecessor of node.predecessors || []) {
+    for (const predecessor of predecessorsOf(node)) {
       const candidate = distance.get(predecessor) || 0;
       if (candidate > best) {
         best = candidate;
@@ -435,7 +439,7 @@ function topologyWidths(nodes) {
   const level = new Map();
   const levels = {};
   for (const node of order) {
-    const value = 1 + Math.max(0, ...(node.predecessors || []).map((id) => level.get(id) || 0));
+    const value = 1 + Math.max(0, ...predecessorsOf(node).map((id) => level.get(id) || 0));
     level.set(node.id, value);
     levels[value] = (levels[value] || 0) + 1;
   }
@@ -445,7 +449,7 @@ function topologyWidths(nodes) {
 export function metrics(authority) {
   return {
     nodes: authority.nodes.length,
-    edges: authority.nodes.reduce((sum, node) => sum + node.predecessors.length, 0),
+    edges: authority.nodes.reduce((sum, node) => sum + predecessorsOf(node).length, 0),
     modules: authority.moduleModels.length,
     charters: authority.nodes.length,
     critical_path: criticalPath(authority.nodes),
@@ -542,12 +546,13 @@ export function validateGraphModel(nodes, options = {}) {
       )
         errors.push(`${node.id}: ${field} must be a string`);
     }
-    if (new Set(node.predecessors || []).size !== (node.predecessors || []).length)
+    const predecessors = predecessorsOf(node);
+    if (new Set(predecessors).size !== predecessors.length)
       errors.push(`${node.id}: duplicate predecessor`);
-    if (node.predecessors?.includes(node.id)) errors.push(`${node.id}: self predecessor`);
+    if (predecessors.includes(node.id)) errors.push(`${node.id}: self predecessor`);
   }
   for (const node of nodes)
-    for (const predecessor of node.predecessors || [])
+    for (const predecessor of predecessorsOf(node))
       if (!byId.has(predecessor)) errors.push(`${node.id}: missing predecessor ${predecessor}`);
   const topo = topological(nodes);
   if (topo.cyclic) errors.push(`cycle detected: ${topo.unresolved.join(", ")}`);
@@ -693,6 +698,8 @@ export function validateAuthority(authority, options = {}) {
     ["implementation_state", "string"],
     ["commit_locator_fields", "object"],
     ["implemented_ledger", "string"],
+    ["final_rev11_gate", "string"],
+    ["successor_promotion_gate", "string"],
     ["modules", "object"],
   ];
   for (const [key, type] of requiredRoot)
@@ -700,6 +707,22 @@ export function validateAuthority(authority, options = {}) {
   if (authority.metadata.implementation_state !== "ledger_presence")
     errors.push("authority root: implementation_state must be ledger_presence");
   const knownNodes = new Set(authority.nodes.map((node) => node.id));
+  const finalRev11Gate = authority.metadata.final_rev11_gate;
+  const successorPromotionGate = authority.metadata.successor_promotion_gate;
+  if (typeof finalRev11Gate === "string" && !knownNodes.has(finalRev11Gate))
+    errors.push(`authority root: unknown final Rev11 gate ${finalRev11Gate}`);
+  if (typeof successorPromotionGate === "string" && !knownNodes.has(successorPromotionGate))
+    errors.push(`authority root: unknown successor promotion gate ${successorPromotionGate}`);
+  const successorPromotionNode = authority.nodes.find((node) => node.id === successorPromotionGate);
+  if (
+    knownNodes.has(finalRev11Gate) &&
+    knownNodes.has(successorPromotionGate) &&
+    (!Array.isArray(successorPromotionNode?.predecessors) ||
+      !successorPromotionNode.predecessors.includes(finalRev11Gate))
+  )
+    errors.push(
+      `authority root: successor promotion gate ${successorPromotionGate} must directly depend on final Rev11 gate ${finalRev11Gate}`,
+    );
   try {
     errors.push(
       ...validateSchemaObject(
@@ -774,7 +797,7 @@ export function deriveState(authority, options = {}) {
   const ancestorsOf = (id) => {
     if (ancestorCache.has(id)) return ancestorCache.get(id);
     const ancestors = new Set();
-    for (const predecessor of byId.get(id)?.predecessors || []) {
+    for (const predecessor of predecessorsOf(byId.get(id))) {
       ancestors.add(predecessor);
       for (const ancestor of ancestorsOf(predecessor)) ancestors.add(ancestor);
     }

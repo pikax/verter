@@ -524,13 +524,15 @@ Unit tests must only depend on locally-vendored fixtures. They must compile and 
 
 A test that references `.integration-tests/repos/<third-party>/...` from a non-gated test file is a violation. The architecture guard `external_corpus_paths_not_present_outside_gated_tests` enforces this.
 
-### No phase archaeology in production code (MANDATORY)
+### No roadmap archaeology in source or tests (MANDATORY)
 
-Source comments must not reference plan phases (`phase 5d`, `phase 11`, `post-cutover`, `pre-Phase`), cutover stages (`d-cutover`, `cutover`), deletion history (`deleted in 5g`, `retired in`), or any project-management vocabulary. Once a plan is over, the code reads as final-state.
+Production file/module names and comments, plus every test artifact—file/module/test names, comments, fixtures, snapshots, assertion messages, and guard diagnostics—must not reference an architecture program or revision, roadmap/DAG, node/block/train identifier, plan phase/stage, implementation sequence, cutover stage, or deletion history. Examples include `CCA1`, `FMT1D`, `phase 5d`, `post-cutover`, `implemented for block X`, and `deleted in 5g`. These identifiers are transient coordination state. Once work lands, code and tests read only as final-state behavior.
 
-Durable architecture insights belong in `.claude/skills/*` or `docs/arch/`, not in source comments. Test files named after retired phases must be renamed to describe the invariant they characterize, not the phase that produced them.
+Name the durable invariant or regression boundary instead: what input fails, what behavior is required, which authority owns the answer, or which compatibility/performance contract is protected. Durable architecture insights belong in `.claude/skills/*` or `docs/arch/`, not in code/test archaeology. The roadmap's own document tree and policy files are exempt.
 
-The architecture guard `no_phase_archaeology_in_production_code` enforces this on `crates/*/src/**`.
+A code or test comment may cite a GitHub issue only when it records a specific independently reported product defect that is outside the DAG-controlled `[[github_issue]]` mappings. The comment must still state the durable behavior; the issue reference is supplemental. Never cite a DAG-managed issue, PR, node, or charter as code/test rationale, because the DAG coordinates implementation rather than defining the defect.
+
+The architecture guard `no_phase_archaeology_in_production_code` enforces the production-source subset on `crates/*/src/**`. Implementer and reviewer policy applies the broader rule to tests and non-Rust code as well.
 
 See `/testing` skill for full TS/Rust test patterns, sourcemap testing, and server cleanup.
 
@@ -569,7 +571,7 @@ Execute approved plans fully in one pass, end-to-end, without intermediate check
 
 ### Orchestrating Large Plans
 
-For a large multi-block plan, refactor, migration, or staged cutover executed autonomously, drive it via the `/multi-agent-orchestration` skill: the parent owns ordering and landing, train managers own bounded implementation, and stable candidate patches receive the risk-scaled fresh review set declared by their profile.
+For a large multi-block plan, refactor, migration, or staged cutover executed autonomously, drive it via the `/multi-agent-orchestration` skill: the parent owns ordering and landing, train managers coordinate bounded node implementations, every independently landable node uses its own worktree/branch/candidate by default and its own PR when GitHub control is active, and stable candidate patches receive the risk-scaled fresh review set declared by their profile. A shared train worktree is allowed only for an explicitly requested atomic multi-node landing.
 
 Tama orchestration derives readiness from one trusted implementation ledger: a node is implemented when `roadmap/0.1.0-tama/authority/state/implemented.toml` contains its row, and a dispatchable node is READY when every transitive DAG ancestor has a row. Each row's commit message, approximate timezone-bearing date, and optional PR number are locator hints only and are never resolved or validated. The implementation patch adds its row before squash and review. Review remains risk-scaled and provider-neutral, with a soft two-cycle review/fix cap and neutral Architect escalation only for real unresolved ambiguity. See `roadmap/0.1.0-tama/APPLICATION.md` and `/multi-agent-orchestration`.
 
@@ -652,17 +654,19 @@ not a committed implementation language for those paths.
 
 This project uses **conventional commits** (`<type>(<scope>): <description>`) for automatic changelog generation via [git-cliff](https://git-cliff.org/).
 
+For DAG-managed work explicitly landing without a GitHub PR, the final squash commit body includes one `Closes #<gh_issue>` line for every included node's local `[[github_issue]]` mapping. These closing lines are reviewed with the candidate and close the issues only when the commit reaches the origin default branch. They are commit coordination metadata and never belong in source comments or test artifacts.
+
 Types: `feat` (new feature), `fix` (bug fix), `perf` (performance), `refactor` (no behavior change), `docs`, `test`, `chore` (build/CI/tooling), `release` (version bump).
 
 Scopes: `core` (verter_compiler), `napi` (verter_napi / @verter/native), `wasm` (verter_wasm / @verter/wasm), `play` (playground), `unplugin` (@verter/unplugin), `lsp` (language-server), `types` (@verter/types), `meta` (@verter/component-meta), `ci` (CI/CD workflows), `*` (multiple areas).
 
 Example: `feat(core): add v-memo directive support`
 
-**No program vocabulary in commit messages or source.** A commit message describes the change on
+**No program vocabulary in commit messages, source, or tests.** A commit message describes the change on
 its own terms: it must not name the architecture program, its revision, or any of its block
 identifiers. A commit that lands plan text says what the text decides, not which block decided it.
-The same prohibition applies to source under `crates/`, `packages/` and `scripts/` — see "No phase
-archaeology in production code". The program's own document tree and this file are exempt while the
+The same prohibition applies to source and test artifacts under `crates/`, `packages/` and `scripts/` — see "No roadmap
+archaeology in source or tests". The program's own document tree and this file are exempt while the
 program runs; this file carries the program banner and may cite blocks by identifier.
 
 ## CI/CD

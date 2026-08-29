@@ -46,7 +46,7 @@ Compiler authority, policy, demand, and admission constitution. The current owne
 ## Concrete surfaces and APIs
 
 - Production surfaces: `crates/verter_compiler/src`, `crates/verter_session/src/host_compile.rs`, `packages/unplugin/src/core/compiler.ts`.
-- Named API/data boundaries: `CarrierFrontend`, `FrameworkSemanticAuthority`, `ProjectionBackend`, `RuntimeCompiler`, `FrameworkHostIntegration`, `CompileArtifactSet`.
+- Named API/data boundaries: `CarrierFrontend`, `FrameworkSemanticAuthority<FrameworkEpoch>`, `ProjectionBackend`, `RuntimeCompilerBackend<FrameworkEpoch>`, `FrameworkHostIntegrationBackend<FrameworkEpoch, HostEpoch>`, `CompileArtifactSet`.
 - Mutation boundary: authority/evidence bytes only; production LOC is zero.
 
 ## Exact predecessor contracts
@@ -160,4 +160,3 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 **Deletion/abort:** no broad deletion; reject/rescope if the authority split requires two active semantic answers or changes accepted compiler output in this lock block.
 
 ---
-

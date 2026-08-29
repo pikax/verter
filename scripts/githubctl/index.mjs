@@ -7,7 +7,7 @@ export {
 } from "./adapter.mjs";
 export { FakeGitHubAdapter } from "./fake.mjs";
 export { GitHubDoctor } from "./doctor.mjs";
-export { renderIssueDescription } from "./charter-render.mjs";
+export { assertHumanIssueDescription, renderIssueDescription } from "./charter-render.mjs";
 export { lookupIssueMapping, selectNodes, syncIssues } from "./sync-issues.mjs";
 export { inspectIssue, FEEDBACK_REPORT_HEADINGS } from "./inspect.mjs";
 export {

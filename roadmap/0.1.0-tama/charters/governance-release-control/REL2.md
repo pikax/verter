@@ -41,7 +41,7 @@ Readiness comes only from trusted implementation-ledger rows. A READY node may s
 
 ## Independently acceptable outcome
 
-Integrate authorized release branch/PR creation, rehearsal, normal squash landing, the required release commit subject, and existing tag/publication workflows.
+Integrate an authorized dedicated release worktree/branch, post-first-push draft release PR, rehearsal, reviewed GitHub-PR squash merge, the required release commit subject, and existing tag/publication workflows. Never land the release locally first and mirror it afterward.
 
 ## Concrete surfaces and APIs
 
@@ -56,8 +56,9 @@ Integrate authorized release branch/PR creation, rehearsal, normal squash landin
 
 ## Source-specific scope
 
-- After explicit authorization, create the release/version branch and draft release PR, then run the existing rehearsal.
+- After explicit authorization and before mutation, create the dedicated release/version worktree and branch. After the first release/version commit is pushed, open the draft release PR, keep it as the reviewed landing candidate, and run the existing rehearsal.
 - Require maintainer landing authorization and passing review/verification; do not add Git-identity validation or landing receipts.
+- Squash-merge the reviewed release PR through GitHub; never land locally first and mirror it afterward.
 - Preserve the exact squash subject `release: v<version>` without an appended PR suffix when required by `.github/workflows/release-tag.yml`.
 - Reuse `.github/workflows/release-tag.yml` and `.github/workflows/release.yml`; preserve alpha/beta/rc prerelease behavior.
 - Do not automatically close the milestone without explicit maintainer policy.

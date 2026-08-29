@@ -8,8 +8,8 @@ kind=translator
 semantic_role=delivery
 class=successor
 predecessors=FMT0,FMK0,CFG0
-owner=expansion.formatter:native document algebra and carrier-composed formatter service
-conflict_domains=formatter_service
+owner=expansion.formatter:FormatterConfig translation and provenance
+conflict_domains=formatter_config
 resource_class=rust-mixed
 review_profile=architecture-3
 gate_profile=targeted-domain
@@ -41,13 +41,14 @@ Readiness comes only from trusted implementation-ledger rows. A READY node may s
 
 ## Independently acceptable outcome
 
-Prettier-compatible formatter configuration translator. The current owner is **fragmented formatting adapters**. The final and sole owner is **native document algebra and carrier-composed formatter service**. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
+Implement the sole translation from supported Prettier-compatible options/config/ignore/override inputs into internal `FormatterConfig`, preserving provenance and truthful unsupported outcomes. The sole owner is **FormatterConfig translation and provenance**; renderer, printer, geometry, service, and public capability owners only consume it.
 
 ## Concrete surfaces and APIs
 
-- Production surfaces: `crates/verter_language/src`, `crates/verter_session/src`, `packages/language-shared/src`.
-- Named API/data boundaries: `Doc`, `FormatRequest`, `FormatEdit`, `CursorMap`, `FormatterConfig`.
-- Mutation boundary: bounded validation, named residual deletion, and/or one atomic route switch only; no new authority may be introduced.
+- Production surface: `crates/verter_language/src/formatter_config/**` only; public schema/adapter projection remains FMT4P and its surface adapters.
+- Owned boundaries: `FormatterConfig`, option normalization, config/ignore/override provenance, and unsupported-option diagnostics.
+- Consumed boundaries: the FMT0 compatibility contract; this node owns no `Doc`, printer, edit, map, range, cursor, service, or public route.
+- Mutation boundary: private config translation/provenance only; no formatter route, capability, public adapter, renderer, or printer changes.
 
 ## Exact predecessor contracts
 
@@ -67,7 +68,7 @@ Prettier-compatible formatter configuration translator. The current owner is **f
 
 Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
 
-- **FCFG0-AC1 — sole-owner outcome:** the named final owner must be sole and every displaced route named below must be deleted or structurally rejected. Prefer existing type, capability, dependency, compiler, or static enforcement. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or a reproduced defect that existing evidence does not discriminate.
+- **FCFG0-AC1 — sole-owner outcome:** one private `FormatterConfig` translator owns the normalized option vocabulary and no formatter route/capability/public adapter changes.
 - **FCFG0-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
 - **FCFG0-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm. Otherwise record a terse not-applicable rationale tied to the untouched authority.
 - **FCFG0-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
@@ -76,8 +77,8 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 ## Deletions and forbidden designs
 
-- Delete or structurally reject: **format-after-build string surgery**.
-- Delete or structurally reject: **second semantic parser for formatting**.
+- Delete only an exact superseded private formatter-config reader under `crates/verter_language/src/formatter_config/**` after its private consumers migrate; name the symbol before dispatch. Delete no formatter route or adapter.
+- Structurally forbid format-after-build string surgery and a second semantic parser in config translation.
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
@@ -86,7 +87,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Target ceiling: 300 production LOC, 3 production files, 1 related crates/packages.
 - Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
-- Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
+- Performance budget: config translation is linear in captured option/override entries, performs zero parser/view/render/edit/map work, and preserves FMT0 disabled/inapplicable zero-work behavior.
 
 ## Abort conditions
 
@@ -114,9 +115,8 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 **Subblocks:** (1) map pinned Prettier options; (2) define Verter-only formatter settings in separate namespace; (3) implement overrides/ignore/provenance; (4) classify unknown/inapplicable/unsupported values; (5) generate schema/docs/capability cells; (6) differential config and invalidation tests.
 **Acceptance:** supported Prettier config resolves identically on locked fixtures; unknown or unsupported options fail truthfully; oxfmt contributes bug evidence only and no second option vocabulary.
 **Forbidden:** arbitrary JS config execution in Rust, silent option dropping, formatter rules in `CFG0`, or external formatter invocation.
-**Deletion/abort:** delete old formatter-specific config readers after zero-consumer proof; executable configs remain behind an explicit trusted-host input boundary.
+**Deletion/abort:** delete only a pre-dispatch-named private config reader in the owned surface after zero-consumer proof; executable configs remain behind an explicit trusted-host input boundary.
 
 ## Collapsed non-authoritative subblock disposition
 
-The recovery candidate mechanically split this source-owned atomic node into the following labels: `FCFG0-A`, `FCFG0-B`, `FCFG0-C`, `FCFG0-D`, `FCFG0-E`, `FCFG0-F`. They have no separate dispatch, lease, receipt, migration manifest, deletion ownership, or review standing. Their useful source-described concerns are internal RED/GREEN checklist items of **FCFG0**; FCFG0 alone owns the complete migration population, exactly one final deletion/cutover, and atomic acceptance. Any quoted “suggested subblock” wording in transferred source text is non-authoritative planning context.
-
+The internal checklist is one private configuration translation outcome. It has no route, adapter, deletion, or promotion authority beyond the exact optional private config-reader replacement above.

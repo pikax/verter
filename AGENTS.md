@@ -47,7 +47,7 @@ Use this as the neutral entry point. Reuse the shared sources below instead of c
 - Follow the build philosophy and shallow file processing invariant in `CLAUDE.md`.
 - For component-meta work, follow `/component-meta`. For type resolution work, follow `/type-resolution`.
 - **Testing hermeticity**: see `CLAUDE.md` "Testing-Hermeticity (MANDATORY)" and `.claude/skills/testing/SKILL.md`.
-- **No phase archaeology in code**: see `CLAUDE.md` "No phase archaeology in production code (MANDATORY)".
+- **No roadmap archaeology in source or tests**: see `CLAUDE.md` "No roadmap archaeology in source or tests (MANDATORY)".
 
 ## Task Routing
 

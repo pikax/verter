@@ -4,7 +4,7 @@ module = "governance-governance"
 [[node]]
 id = "BR0"
 name = "Post-L4 successor product promotion"
-predecessors = []
+predecessors = ["L4"]
 phase = "governance"
 train = "governance.governance"
 product = "governance"

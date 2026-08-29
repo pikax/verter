@@ -212,15 +212,18 @@ test("GH2-AC1 apply never writes an implemented row", () => {
   );
 });
 
-test("GH2-AC1 rendered body omits DAG metadata, effort, and charter header keys", () => {
+test("GH2-AC1 rendered body uses the human issue standard and omits charter headings", () => {
   const { title, body } = rendered("GH2");
   assert.equal(title, "Occasional issue-sync command and local mapping");
-  assert.match(body, /^## Independently acceptable outcome\n/u);
-  assert.match(body, /^## Source-specific scope\n/mu);
-  assert.match(body, /^## Deletions and forbidden designs\n/mu);
-  assert.match(body, /^## Abort conditions\n/mu);
+  assert.match(body, /^## Problem\n/u);
+  assert.match(body, /^## Expected outcome\n/mu);
+  assert.match(body, /^## Acceptance\n/mu);
   assert.match(body, /\nModel: gh2-test-model\n$/u);
   assert.equal([...body.matchAll(/^Model: /gmu)].length, 1);
+  assert.doesNotMatch(body, /^## Independently acceptable outcome/mu);
+  assert.doesNotMatch(body, /^## Source-specific scope/mu);
+  assert.doesNotMatch(body, /^## Deletions and forbidden designs/mu);
+  assert.doesNotMatch(body, /^## Abort conditions/mu);
   assert.doesNotMatch(body, /\bGH2\b/u);
   assert.doesNotMatch(body, /predecessors\s*=/u);
   assert.doesNotMatch(body, /implementation_effort/u);

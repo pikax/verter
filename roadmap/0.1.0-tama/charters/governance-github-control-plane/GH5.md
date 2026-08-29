@@ -8,7 +8,7 @@ product=github_control_plane
 kind=implementation
 semantic_role=delivery
 class=successor
-owner=governance.github-control-plane:GitHub CI and squash landing through the normal repository workflow
+owner=governance.github-control-plane:GitHub CI and reviewed PR squash-merge landing
 conflict_domains=github_projection_state,release_orchestration
 resource_class=ts-heavy
 gate_profile=canonical
@@ -42,13 +42,13 @@ Readiness comes only from trusted implementation-ledger rows. A READY node may s
 
 ## Independently acceptable outcome
 
-Use GitHub CI for integration verification, let the finishing agent complete the implementation row with final-title message, approximate timezone-bearing date, and PR number, then squash through the normal repository workflow.
+Use GitHub CI for integration verification, let the finishing agent complete the implementation row with final-title message, approximate timezone-bearing date, and PR number, then land by squash-merging the reviewed PR through GitHub.
 
 ## Concrete surfaces and APIs
 
 - Production surfaces: `.github`, `scripts/githubctl`, `roadmap/0.1.0-tama/contracts/github-control-plane.md`.
 - Test surfaces: `scripts/githubctl/tests`.
-- Named boundaries: `CiResult`, normal squash merge, and pre-review implementation-row finalization.
+- Named boundaries: `CiResult`, reviewed GitHub-PR squash merge, and pre-review implementation-row finalization; local-first landing/mirroring is forbidden.
 
 ## Exact predecessor contracts
 
@@ -60,7 +60,7 @@ Use GitHub CI for integration verification, let the finishing agent complete the
 - Present CI commands, skips, and terminal results as review evidence without binding them to a commit SHA or tree.
 - Missing jobs or unexpected skips fail the owning gate; agents rerun affected checks after material changes.
 - At the end of implementation and before squash/final review, update the same-patch `[[implemented]]` row with the expected final title as `commit_message`, approximate date with timezone, and known `pull_request`.
-- Squash-merge through the normal repository workflow after review and gates pass.
+- Squash-merge the reviewed PR through GitHub after review and gates pass; never land the candidate locally first and mirror it afterward.
 - The reviewed patch already contains the ledger row. No landing receipt, post-merge ledger update, or Git identity comparison follows.
 - P0/P1 block. Lower findings follow the owning review policy.
 

@@ -42,6 +42,76 @@ test("frontier is derived only from implemented ancestors", () => {
   assert.equal(afterOrc0.states.get("GH1").status, "BLOCKED");
 });
 
+test("successor promotion directly follows the final Rev11 gate", () => {
+  const authority = loadAuthority();
+  const finalGate = authority.metadata.final_rev11_gate;
+  const promotionGate = authority.metadata.successor_promotion_gate;
+  const implementedWithoutFinalGate = authority.nodes
+    .filter((node) => node.id !== finalGate && node.id !== promotionGate)
+    .map((node) => ({ node_id: node.id }));
+  const state = deriveState(authority, { implemented: implementedWithoutFinalGate });
+
+  assert.equal(state.states.get(promotionGate).status, "BLOCKED");
+  assert.deepEqual(state.states.get(promotionGate).missing_ancestors, [finalGate]);
+  const afterFinalGate = deriveState(authority, {
+    implemented: [...implementedWithoutFinalGate, { node_id: finalGate }],
+  });
+  assert.equal(afterFinalGate.states.get(promotionGate).status, "READY");
+
+  const promotion = authority.nodes.find((node) => node.id === promotionGate);
+  promotion.predecessors = [];
+  assert.ok(
+    validateAuthority(authority).includes(
+      `authority root: successor promotion gate ${promotionGate} must directly depend on final Rev11 gate ${finalGate}`,
+    ),
+  );
+
+  const malformed = loadAuthority();
+  const malformedPromotion = malformed.nodes.find((node) => node.id === promotionGate);
+  delete malformedPromotion.predecessors;
+  let malformedErrors;
+  assert.doesNotThrow(() => {
+    malformedErrors = validateAuthority(malformed);
+  });
+  assert.ok(malformedErrors.includes(`${promotionGate}: missing field predecessors`));
+
+  for (const invalidPredecessors of [42, {}]) {
+    const wrongType = loadAuthority();
+    const wrongTypePromotion = wrongType.nodes.find((node) => node.id === promotionGate);
+    wrongTypePromotion.predecessors = invalidPredecessors;
+    let wrongTypeErrors;
+    assert.doesNotThrow(() => {
+      wrongTypeErrors = validateAuthority(wrongType);
+    });
+    assert.ok(wrongTypeErrors.includes(`${promotionGate}: predecessors must be an array`));
+  }
+
+  const bridge = structuredClone(promotion);
+  bridge.id = `${promotionGate}_TEST_BRIDGE`;
+  bridge.predecessors = [finalGate];
+  authority.nodes.push(bridge);
+  promotion.predecessors = [bridge.id];
+  assert.ok(
+    validateAuthority(authority).includes(
+      `authority root: successor promotion gate ${promotionGate} must directly depend on final Rev11 gate ${finalGate}`,
+    ),
+  );
+});
+
+test("final and successor gate metadata names known nodes", () => {
+  const missing = loadAuthority();
+  delete missing.metadata.final_rev11_gate;
+  assert.ok(validateAuthority(missing).includes("authority root: invalid final_rev11_gate"));
+
+  const unknown = loadAuthority();
+  unknown.metadata.successor_promotion_gate = "UNKNOWN_PROMOTION_GATE";
+  assert.ok(
+    validateAuthority(unknown).includes(
+      "authority root: unknown successor promotion gate UNKNOWN_PROMOTION_GATE",
+    ),
+  );
+});
+
 test("locator hints are required strings but are not matched to Git", () => {
   const authority = loadAuthority();
   authority.ledger.implemented[0].commit_message = "a deliberately inexact search hint";

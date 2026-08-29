@@ -1,15 +1,15 @@
 <!-- unified-charter-v2
 id=FMT1
-name=Document algebra, renderer, edits, cursor, and maps
+name=Document algebra and bounded renderer
 phase=expansion
 train=expansion.formatter
 product=formatter
 kind=implementation
 semantic_role=delivery
 class=successor
-predecessors=FMT0
-owner=expansion.formatter:native document algebra and carrier-composed formatter service
-conflict_domains=mapping_geometry
+predecessors=FMT1P
+owner=expansion.formatter:Doc algebra and deterministic bounded renderer
+conflict_domains=doc
 resource_class=rust-mixed
 review_profile=architecture-3
 gate_profile=targeted-domain
@@ -21,100 +21,71 @@ verification_effort_min=high
 verification_effort_default=high
 confirmation_effort_min=high
 confirmation_effort_default=high
-size=S
+size=M
 dispatchable=true
 optional=false
 release_gating=none
 external_requirements=
 charter=charters/expansion-formatter/FMT1.md
-max_production_loc=300
-max_production_files=3
+max_production_loc=700
+max_production_files=7
 max_related_packages=1
 rescope_loc=1500
 rescope_files=12
 rescope_unrelated_packages=3
 -->
 
-# FMT1 — Document algebra, renderer, edits, cursor, and maps
+# FMT1 — Document algebra and bounded renderer
 
-Readiness comes only from trusted implementation-ledger rows. A READY node may start; tooling does not validate commit locators, Git identity, receipts, leases, external state, or runtime admission.
+## Independently acceptable outcome and rollback boundary
 
-## Independently acceptable outcome
+Land a compact framework-neutral `Doc` algebra and deterministic renderer with group/break/indent/line-suffix semantics and bounded adversarial behavior in the already-created `verter_formatter` crate. Reverting this node removes only the unused document renderer; the crate/coordinate foundation, authored syntax views, edits, maps, range/cursor behavior, printers, service routing, and public APIs remain untouched.
 
-Document algebra, renderer, edits, cursor, and maps. The current owner is **fragmented formatting adapters**. The final and sole owner is **native document algebra and carrier-composed formatter service**. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
+The sole owner is **Doc algebra and deterministic bounded renderer**. This node is a foundation, not a formatter-service or public cutover.
 
 ## Concrete surfaces and APIs
 
-- Production surfaces: `crates/verter_language/src`, `crates/verter_session/src`, `packages/language-shared/src`.
-- Named API/data boundaries: `Doc`, `FormatRequest`, `FormatEdit`, `CursorMap`, `FormatterConfig`.
-- Mutation boundary: bounded validation, named residual deletion, and/or one atomic route switch only; no new authority may be introduced.
+- Production surfaces: `crates/verter_formatter/src/doc.rs`, `crates/verter_formatter/src/render.rs`, and bounded exports in `crates/verter_formatter/src/lib.rs`.
+- Owned boundaries: `Doc<FormatProvenanceId>`, group and break identifiers, indentation/alignment, conditional content, line suffixes, `RenderOptions`, and `RenderedDoc` segment behavior.
+- Every source-backed rendered segment carries FMT1P's unchanged `FormatProvenanceId` through `Provenanced<RenderedSegment>`. This node cannot declare another token, assign authored ranges, reinterpret identity, or expose `FormatPositionMap`.
+- No parser, carrier printer, edit derivation, range selection, cursor projection, session route, or public protocol belongs here.
 
-## Exact predecessor contracts
+## Exact predecessor contract
 
-- **FMT0:** implemented ledger row for “Full formatter implementation lock”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **External requirements:** agents check any listed requirement; tooling does not validate external state.
+- **FMT1P:** supplies the formatter crate, typed authored/formatted byte domains, and the sole `FormatProvenanceId`/`Provenanced<T>` carrier contract.
 
-## Source-specific scope
+## Acceptance IDs and discriminating evidence
 
-- **Revision:** 4 — supersedes the 251-charter all-verticals proposal
-- **Prepared:** 2026-08-26
-- **Repository basis:** program/architecture-lock at d1f3d50a948597f036868543b9bb21acacd730ff
-- **Current-program condition:** maintainer work freeze; TCM0 = RESCOPE_REQUIRED; TCM1–TCM4 = LOCKED
+- **FMT1-AC1 — algebra laws:** table-driven fixtures discriminate group flatten/break choice, nesting, indentation, conditional docs, hard/soft lines, and line-suffix ordering.
+- **FMT1-AC2 — deterministic rendering:** identical `Doc` plus options yields byte-identical output and stable segment/provenance order; a planted token replacement or dropped source-backed ID fails.
+- **FMT1-AC3 — bounded behavior:** adversarial deeply nested and wide docs complete within the locked work/allocation bounds; no quadratic group search or recursive stack overflow.
+- **FMT1-AC4 — zero semantic work:** dependency and call-site evidence proves rendering cannot parse source, invoke semantic analysis, or route a formatting request.
 
-## Acceptance IDs and discriminating proof
-
-Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
-
-- **FMT1-AC1 — sole-owner outcome:** the named final owner must be sole and every displaced route named below must be deleted or structurally rejected. Prefer existing type, capability, dependency, compiler, or static enforcement. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or a reproduced defect that existing evidence does not discriminate.
-- **FMT1-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
-- **FMT1-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm. Otherwise record a terse not-applicable rationale tied to the untouched authority.
-- **FMT1-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
-- Every proposed new test must name a plausible regression or contract boundary not already discriminated; prose/format assertions are allowed only when those bytes are the public contract. Do not add implementation mirrors, duplicate permutations, or universal negative/mutation tests.
-- Test homes: `crates/verter_language/tests`, `packages/language-shared`.
+Test home: `crates/verter_formatter/tests`.
 
 ## Deletions and forbidden designs
 
-- Delete or structurally reject: **format-after-build string surgery**.
-- Delete or structurally reject: **second semantic parser for formatting**.
-- Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
-- Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
+- The deletion population is explicitly empty. Discovery of a candidate private prototype requires a pre-mutation STOP and FMT0 amendment naming its exact path/symbol and sole owner; this node never conditionally absorbs it.
+- Delete no current formatter route or public API; FMT3 owns the sole shared/LSP route cutover and deletion, adapter nodes own their exact boundary contributions, and FMT4 is proof-only promotion.
+- Forbid semantic-AST pretty printing, unbounded backtracking, quadratic group search, parser callbacks, action-map reuse, and format-after-build string surgery.
 
 ## Budgets and mandatory rescope
 
-- Target ceiling: 300 production LOC, 3 production files, 1 related crates/packages.
-- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
-- Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
-- Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
+- Target ceiling: 700 production LOC, 7 production files, 1 related crate/package.
+- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or if authored-view/edit/map/range/service/public work enters the diff.
+- Correctness budget: zero nondeterminism or group/line-suffix semantic ambiguity.
+- Performance budget: meet the FMT0 locked renderer work/allocation/stack bounds; no unbounded fallback is permitted.
 
 ## Abort conditions
 
-- Stop before mutation if current source disproves the named owner/API boundary, an ancestor lacks an implemented ledger row, or the complete diff will not fit one review context.
-- Abort the candidate on unexplained output, source-map, diagnostic, cancellation, allocation, latency, or RSS divergence; do not convert it into residue locally.
+- Abort if the locked compatibility contract requires parser-specific branches in `Doc` or the renderer.
+- Abort if bounded rendering cannot be proven without changing the FMT0 performance contract.
+- Abort if provenance retention requires this node to own authored position-map semantics.
 
-## Targeted verification
+## Verification and review
 
-1. `cargo nextest run -p verter_language -p verter_session`
-2. Run every final command in the bound `targeted-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
-3. Bind the preflight evidence selection and terse rationale in the review report. Behavioral code changes require TDD with a failing discriminating regression before production changes; do not invent a test or mutation solely to populate evidence.
+1. Follow TDD for each algebra or adversarial boundary.
+2. Run `cargo nextest run -p verter_formatter`.
+3. Run every final command in `targeted-domain` on the review candidate.
 
-## Review and lower-severity findings
-
-Apply `architecture-3`: 3 fresh distinct harness tasks covering exactly `adversarial`, `conformance`, `architecture-specialist`. P0/P1 block final acceptance. A P2 follows the owning review policy and must have a named owner when deferred; otherwise it blocks. P3 follows the currently binding owning policy and must be recorded when that policy requires it. Any post-review content change invalidates every verdict. Final acceptance requires the complete 3/3 current-round profile to contain independent clean PASS reports on the squashed review candidate, plus `independent-full` confirmation when required. A failed review/fix cycle is complete only after all assigned lenses and a FIX_REQUIRED disposition.
-
-## Trusted implementation ledger
-
-Before squashing or review, the implementation patch adds one `[[implemented]]` row to `authority/state/implemented.toml` with the node ID, planned squash commit message, approximate date with timezone, and optional pull-request number. Row presence is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
-
-## Reconciled source-plan contract
-
-**Intent:** build the framework-neutral formatting mechanics with exact authored provenance.
-**Predecessors:** `FMT0`.
-**Subblocks:** (1) compact `Doc` algebra and group/break/indent semantics; (2) bounded renderer and line-suffix handling; (3) stable format views/trivia/recovery islands; (4) minimal non-overlapping edits; (5) cursor/range expansion; (6) `FormatPositionMap`, idempotence, fuzz, and budget tests.
-**Acceptance:** renderer is deterministic, linear/bounded under adversarial docs, idempotent on locked neutral fixtures, and maps every retained authored position exactly; malformed islands preserve bytes according to lock.
-**Forbidden:** semantic-AST pretty printing, quadratic group search, action-map reuse, or whole-file replacement when smaller edits are proven.
-**Deletion/abort:** delete prototype formatter primitives after migration; abort on unbounded renderer behavior.
-
-## Collapsed non-authoritative subblock disposition
-
-The recovery candidate mechanically split this source-owned atomic node into the following labels: `FMT1-A`, `FMT1-B`, `FMT1-C`, `FMT1-D`, `FMT1-E`, `FMT1-F`. They have no separate dispatch, lease, receipt, migration manifest, deletion ownership, or review standing. Their useful source-described concerns are internal RED/GREEN checklist items of **FMT1**; FMT1 alone owns the complete migration population, exactly one final deletion/cutover, and atomic acceptance. Any quoted “suggested subblock” wording in transferred source text is non-authoritative planning context.
-
+Apply `architecture-3`. Add only FMT1's trusted implementation-ledger row before review.

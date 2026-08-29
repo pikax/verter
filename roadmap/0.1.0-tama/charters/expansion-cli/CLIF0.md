@@ -52,7 +52,7 @@ Formatter CLI adapter. The current owner is **separate package launchers and com
 ## Exact predecessor contracts
 
 - **CLI1:** implemented ledger row for “Shared application services, selection, invocation, reporters”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **FMT4:** implemented ledger row for “Formatter LSP/public parity, conformance, and promotion”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **FMT4:** implemented ledger row for “Formatter cross-surface conformance and promotion”; ledger presence guarantees common-outcome parity plus truthful per-surface capability promotion (including LSP full-document-only and cursor-free Rust/MCP) while CLI remains deliberately unavailable for this node.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -119,4 +119,3 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 ## Collapsed non-authoritative subblock disposition
 
 The recovery candidate mechanically split this source-owned atomic node into the following labels: `CLIF0-A`, `CLIF0-B`, `CLIF0-C`, `CLIF0-D`, `CLIF0-E`, `CLIF0-F`. They have no separate dispatch, lease, receipt, migration manifest, deletion ownership, or review standing. Their useful source-described concerns are internal RED/GREEN checklist items of **CLIF0**; CLIF0 alone owns the complete migration population, exactly one final deletion/cutover, and atomic acceptance. Any quoted “suggested subblock” wording in transferred source text is non-authoritative planning context.
-

@@ -1,18 +1,18 @@
 <!-- unified-charter-v2
 id=FMT4
-name=Formatter LSP/public parity, conformance, and promotion
+name=Formatter cross-surface conformance and promotion
 phase=expansion
 train=expansion.formatter
 product=formatter
 kind=terminal
 semantic_role=delivery
 class=successor
-predecessors=FMT3,PUB0,PER0
-owner=expansion.formatter:native document algebra and carrier-composed formatter service
-conflict_domains=lsp_publication,formatter_service,public_protocol
-resource_class=rust-mixed
+predecessors=FMT3,FMT4N,FMT4W,FMT4M
+owner=expansion.formatter:cross-surface formatter conformance evidence and product promotion
+conflict_domains=capability_catalog,performance_evidence
+resource_class=docs-light
 review_profile=architecture-3
-gate_profile=targeted-domain
+gate_profile=docs-domain
 implementation_effort_min=high
 implementation_effort_default=high
 review_effort_min=high
@@ -27,93 +27,59 @@ optional=false
 release_gating=product
 external_requirements=
 charter=charters/expansion-formatter/FMT4.md
-max_production_loc=300
-max_production_files=3
-max_related_packages=1
+max_production_loc=0
+max_production_files=0
+max_related_packages=0
 rescope_loc=1500
 rescope_files=12
 rescope_unrelated_packages=3
 -->
 
-# FMT4 — Formatter LSP/public parity, conformance, and promotion
+# FMT4 — Formatter cross-surface conformance and promotion
 
-Readiness comes only from trusted implementation-ledger rows. A READY node may start; tooling does not validate commit locators, Git identity, receipts, leases, external state, or runtime admission.
+## Independently acceptable outcome and owner
 
-## Independently acceptable outcome
+Ratify cross-surface parity and promote formatter product maturity only after the Rust protocol, live LSP route, NAPI, WASM, and MCP contributions are independently accepted. This proof-only terminal changes no production code, route, adapter, conversion, capability implementation, or deletion population.
 
-Formatter LSP/public parity, conformance, and promotion. The current owner is **fragmented formatting adapters**. The final and sole owner is **native document algebra and carrier-composed formatter service**. This charter accepts one authority/migration/cutover boundary; it contains no independently dispatchable subblocks.
+The sole owner is **cross-surface formatter conformance evidence and product promotion**.
 
-## Concrete surfaces and APIs
+## Authority surfaces and predecessor contracts
 
-- Production surfaces: `crates/verter_language/src`, `crates/verter_session/src`, `packages/language-shared/src`.
-- Named API/data boundaries: `Doc`, `FormatRequest`, `FormatEdit`, `CursorMap`, `FormatterConfig`.
-- Mutation boundary: bounded validation, named residual deletion, and/or one atomic route switch only; no new authority may be introduced.
+- Authority/evidence surfaces: formatter capability snapshots, conformance matrices, benchmark receipts, product/user documentation, and this roadmap authority. Production LOC is zero.
+- **FMT3:** supplies the single live LSP route and proof that the whitespace/shared route was deleted.
+- **FMT4N:** supplies the accepted NAPI adapter/export and transitive FFI/Rust protocol service.
+- **FMT4W:** supplies the accepted WASM adapter/export and transitive FFI/Rust protocol service.
+- **FMT4M:** supplies the accepted MCP adapter/export and transitive Rust protocol service.
 
-## Exact predecessor contracts
+FMT4 consumes but cannot redefine FMT4P's `Span` laws, FMT4L's negotiated LSP conversion, FMT4F's UTF-16 conversion, any printer, or service behavior.
 
-- **FMT3:** implemented ledger row for “Formatter service composition cutover”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **PUB0:** implemented ledger row for “Versioned public request/result and capability truth”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **PER0:** implemented ledger row for “Cache/backend identity, cancellation, budgets, and zero work”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **External requirements:** agents check any listed requirement; tooling does not validate external state.
+Internal proof subblocks are cross-surface semantic parity, coordinate/encoding parity, capability truth, FMT0 performance receipts, and reviewed dogfood. Evidence identity binds the exact implemented predecessor set, corpus/config versions, benchmark calibration, and candidate tree; mixed or stale evidence cannot promote.
 
-## Source-specific scope
+Promotion is per-surface rather than fictitious lowest-common-denominator parity:
 
-- **Normative intent:** expose and independently promote the formatter across all applicable surfaces.
-- **Atomic boundary:** the production surfaces and named API/data boundaries above form this source-owned node's exclusive acceptance subset; this node owns its complete named migration population and exactly one deletion/cutover disposition.
-- **Cutover evidence:** prove removal or structural rejection of **format-after-build string surgery**, **second semantic parser for formatting** and satisfy the node-specific acceptance IDs below. A newly independent outcome requires an amendment and a new node before mutation.
+| Surface | Promoted formatter cells | Coordinate/result truth |
+| --- | --- | --- |
+| Rust | full + authored range | SFC-absolute `Span` request/edit geometry; no cursor result |
+| LSP | full document only | standard `DocumentFormattingParams`/`TextEdit` with negotiated `LineIndex`; no range capability or cursor result |
+| NAPI | full + authored range + cursor | strict FMT4F UTF-16 request/result conversion |
+| WASM | full + authored range + cursor | strict FMT4F UTF-16 request/result conversion |
+| MCP | full + authored range | SFC-absolute `Span` request/edit geometry; no cursor result |
 
-## Acceptance IDs and discriminating proof
+The pre-existing LSP on-type tag-auto-close capability is retained outside the formatter product and is not promoted here.
 
-Preflight evidence selection: preserve all four acceptance outcomes below, then select the smallest evidence set that actually discriminates the touched contract. Existing behavioral coverage, compiler/type/capability enforcement, static validation, canonical gates, bounded inspection, and benchmarks are valid when accompanied by a terse rationale.
+## Conformance and promotion acceptance
 
-- **FMT4-AC1 — sole-owner outcome:** the named final owner must be sole and every displaced route named below must be deleted or structurally rejected. Prefer existing type, capability, dependency, compiler, or static enforcement. Add a negative or mutation test only for a plausible critical fail-closed/correctness boundary or a reproduced defect that existing evidence does not discriminate.
-- **FMT4-AC2 — positive contract:** the named API/data boundary must preserve exact identities, provenance, completeness, and deterministic ordering. Reuse existing coverage or extend/table-drive one test before creating a new test.
-- **FMT4-AC3 — incremental equivalence:** when the changed scope owns or affects incremental, cache, cancellation, stale-publication, or partial-result authority, prove incremental equals fresh and degraded outcomes cannot warm. Otherwise record a terse not-applicable rationale tied to the untouched authority.
-- **FMT4-AC4 — bounded work:** when the changed scope owns or affects a hot path, prove no hidden duplicate parse, resolve, plan, emit, copy, allocation, or retained candidate using applicable existing counters, inspection, or benchmarks. Otherwise record a terse not-applicable rationale; do not add counters or a soak by default.
-- Every proposed new test must name a plausible regression or contract boundary not already discriminated; prose/format assertions are allowed only when those bytes are the public contract. Do not add implementation mirrors, duplicate permutations, or universal negative/mutation tests.
-- Test homes: `crates/verter_language/tests`, `packages/language-shared`.
+- **FMT4-AC1 — common cross-surface parity:** one locked corpus proves Rust/LSP/NAPI/WASM/MCP reconstructed output bytes, authored edits, unsupported/errors, and cancellation agree for every cell shared by those surfaces. Cursor parity is proven only for private/NAPI/WASM, and range parity only for Rust/NAPI/WASM/MCP.
+- **FMT4-AC2 — coordinate truth:** LSP full-document edits use negotiated `LineIndex` conversion; NAPI/WASM request ranges/cursors and result edits/cursors use strict FMT4F UTF-16 conversion; MCP/Rust request/edit geometry uses SFC-absolute `Span`; public Rust/MCP/LSP results contain no cursor; and no private/generated coordinate serializes.
+- **FMT4-AC3 — capability truth:** each surface advertises only its independently landed cells; CLI remains unavailable until CLIF0.
+- **FMT4-AC4 — performance promotion:** FMT0 cold/first-warm/repeated-warm/incremental/edit-revert/applicable range-cursor/transition/project-open-close/long-churn/large/cancellation/zero-work receipts pass with the absolute result/cache capacity bounds and no unexplained retained growth.
+- Differential/idempotence dogfood produces a finite reviewed diff and routes any semantic failure back to its exact printer/service/adapter owner; this terminal cannot patch it.
 
-## Deletions and forbidden designs
+## Deletions, rollback, budgets, and verification
 
-- Delete or structurally reject: **format-after-build string surgery**.
-- Delete or structurally reject: **second semantic parser for formatting**.
-- Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
-- Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
-
-## Budgets and mandatory rescope
-
-- Target ceiling: 300 production LOC, 3 production files, 1 related crates/packages.
-- Mandatory rescope above 1,500 production LOC, 12 files, 3 unrelated crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is combined with another major concern.
-- Correctness budget: zero stale publication, silent fallback, wrong-complete result, map/provenance loss, or identity aliasing.
-- Performance budget: when preflight identifies touched authority or a hot path, equivalent-work counters may increase by 0 and wall/allocation/RSS regression allowance remains 0.0% unless an owning-authority amendment supplies exact replacement thresholds. Otherwise performance evidence is not applicable; do not create counters or a 100-request retention soak solely to satisfy this charter.
-
-## Abort conditions
-
-- Stop before mutation if current source disproves the named owner/API boundary, an ancestor lacks an implemented ledger row, or the complete diff will not fit one review context.
-- Abort the candidate on unexplained output, source-map, diagnostic, cancellation, allocation, latency, or RSS divergence; do not convert it into residue locally.
-
-## Targeted verification
-
-1. `cargo nextest run -p verter_language -p verter_session`
-2. Run every final command in the bound `targeted-domain` profile on the squashed review candidate; targeted success alone is iteration evidence, not acceptance.
-3. Bind the preflight evidence selection and terse rationale in the review report. Behavioral code changes require TDD with a failing discriminating regression before production changes; do not invent a test or mutation solely to populate evidence.
-
-## Review and lower-severity findings
-
-Apply `architecture-3`: 3 fresh distinct harness tasks covering exactly `adversarial`, `conformance`, `architecture-specialist`. P0/P1 block final acceptance. A P2 follows the owning review policy and must have a named owner when deferred; otherwise it blocks. P3 follows the currently binding owning policy and must be recorded when that policy requires it. Any post-review content change invalidates every verdict. Final acceptance requires the complete 3/3 current-round profile to contain independent clean PASS reports on the squashed review candidate, plus `independent-full` confirmation when required. A failed review/fix cycle is complete only after all assigned lenses and a FIX_REQUIRED disposition.
-
-## Trusted implementation ledger
-
-Before squashing or review, the implementation patch adds one `[[implemented]]` row to `authority/state/implemented.toml` with the node ID, planned squash commit message, approximate date with timezone, and optional pull-request number. Row presence is the implementation fact. Commit metadata is a loose locator only and is never resolved or validated against Git or GitHub. Reviewers inspect the squashed candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound orchestration manifests.
-
-## Reconciled source-plan contract
-
-**Intent:** expose and independently promote the formatter across all applicable surfaces.
-**Predecessors:** `FMT3`, `PUB0`, `PER0`.
-**Subblocks:** (1) Rust/NAPI/WASM request/result; (2) LSP document/range/on-type cells where applicable; (3) MCP formatting service cells; (4) config/ignore/override provenance; (5) cold/warm/large-file/RSS/cancellation/zero-work tests; (6) dogfood and exact-candidate reviews.
-**Acceptance:** Rust/NAPI/WASM/LSP/MCP surfaces agree on output/edits/maps; LSP capability is registered only under its ownership mask; repository dogfood produces a reviewed finite diff; CLI remains explicitly unavailable until `CLIF0`; formatter maturity promotes independently.
-**Forbidden:** waiting for future verticals, hiding unsupported custom blocks, or using lint fixes to make formatter conformance pass.
-**Deletion/abort:** delete only named obsolete public formatter façade APIs/packages assigned to `FMT4` by the `UAK0` ledger after zero-consumer/generated-reference proof; printer and routing deletions remain with their earlier sole owners. Any failing cell returns to its printer/composition owner.
-
-## 13. Native lint product train
-
+- Delete nothing. No route switch, public façade removal, adapter implementation, coordinate conversion, semantic fix, or capability implementation is permitted.
+- Rollback removes only promotion/evidence/documentation state; independently accepted adapters and the live route remain unchanged.
+- Target ceiling: 0 production LOC, 0 production files, 0 related production packages.
+- Abort and reopen the exact predecessor if common-cell parity, per-surface coordinate/capability truth, or performance evidence fails.
+- Verify all predecessor gates/receipts, strict DAG validation, roadmap tests, `git diff --check`, and `docs-domain`.
+- Unlocks CLIF0 and formatter product release gating. Add only FMT4's ledger row.

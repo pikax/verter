@@ -23,21 +23,53 @@ sync_to_github = true
 
 ## GitHubIssueDescription
 
-An opt-in issue is ordinary human-readable work context. For synchronization, its title comes from the selected node name and its work description comes from the live charter's current outcome, scope, forbidden designs, and abort conditions. The metadata header, predecessor/readiness fields, effort/budget fields, and transferred historical source are excluded. The creating, synchronizing, or implementing agent ends the body with exactly one model line:
+An opt-in issue is a human explanation of a product or engineering problem, not a projection of the charter. The agent reads the charter and current source as inputs, then synthesizes the issue in ordinary language. It must be understandable without access to the roadmap.
+
+The title is a short action or outcome phrase. Do not blindly copy a node name, prefix it with a node ID, or mention the program, revision, DAG, block, train, phase, or stage.
+
+The body uses this order:
+
+```markdown
+## Problem
+
+Two to four sentences explaining what is wrong today, where it occurs, and the concrete correctness, user, or maintainer impact.
+
+## Expected outcome
+
+One short paragraph describing the durable behavior and authority after the work lands.
+
+## Acceptance
+
+- Three to six observable, independently checkable results.
+
+Model: <model name>
+```
+
+An optional `## Technical context` of at most three bullets may appear between outcome and acceptance when concrete APIs or source surfaces materially help a human reader. Target 120–250 words and never exceed 350 words excluding the final model line.
+
+Do not copy charter headings or prose. Omit independently acceptable outcome boilerplate, source-plan/program conditions, revision and repository-basis text, predecessors/readiness, owner-transition slogans, effort/budgets, dispatch or rescope mechanics, generic forbidden-design lists, deletion inventories without explanatory context, abort conditions, gate/review instructions, verification commands, implementation sequence, generated labels, markers, and metadata blocks. A constraint belongs only when it explains the problem or is an observable acceptance result. The first paragraph must identify the actual defect and its impact; acceptance bullets must stand on their own.
+
+The creating, synchronizing, or implementing agent ends the body with exactly one model line:
 
 ```text
 Model: <model name>
 ```
 
-Do not include effort, reasoning tier, DAG ID, predecessors, readiness, generated labels, machine markers, or a metadata block in an opt-in issue body. An explicit rescope sync updates the opt-in issue's title and complete body while retaining or replacing the final model line as requested. A protected issue is left byte-for-byte untouched by this workflow. Titles and prose are not identity; the local `gh_issue` mapping is.
+Check mode rejects a missing required section, a prohibited charter heading, a body over the limit, or a first paragraph that does not state a concrete problem and impact. An explicit rescope sync updates the opt-in issue's title and complete body while retaining or replacing the final model line as requested. A protected issue is left byte-for-byte untouched by this workflow. Titles and prose are not identity; the local `gh_issue` mapping is.
 
 ## ExpectedPullRequestTitle
 
-When implementation begins, the agent creates the PR with the expected final conventional-commit title. Its body contains GitHub's ordinary closing link, `Closes #<gh_issue>`, using the exact local mapping. This attaches the issue to the PR and lets GitHub close it only when that PR merges; an abandoned or closed-without-merge PR leaves the issue open. The closing link is required for both mapping policies. For `sync_to_github = true`, the agent puts the useful implementation description and final model line on the issue. For `false`, the agent does not edit the issue body or title because the project did not author it. The PR may carry normal review and validation prose, but no serialized DAG metadata or effort block is required.
+Before mutation, the agent resolves the exact local issue mapping and creates the independently landable node's dedicated worktree and branch. After the first implementation commit is pushed, the agent opens a draft PR with the expected final conventional-commit title. Its body contains GitHub's ordinary closing link, `Closes #<gh_issue>`, using the exact local mapping. This attaches the issue to the PR and lets GitHub close it only when that PR merges; an abandoned or closed-without-merge PR leaves the issue open. The closing link is required for both mapping policies. For `sync_to_github = true`, the agent puts the useful implementation description and final model line on the issue. For `false`, the agent does not edit the issue body or title because the project did not author it. The PR may carry normal review and validation prose, but no serialized DAG metadata or effort block is required.
+
+One node/worktree/branch/PR is the default. Multiple nodes may share them only when the user or maintainer explicitly requests one atomic landing before mutation and records why the nodes cannot land independently; every included node retains its own mapping, ledger row, and closing link. The reviewed PR remains the candidate and GH5 lands it by squash-merging through GitHub. Never land locally first and mirror the result afterward.
 
 `githubctl create-pr --check|--apply --node <ID> --title <final conventional commit> --head <branch>` owns that start flow. Check plans; apply is doctor-gated for `issues` and `pullRequests` (Project 3 is not required). The PR body is ordinary prose plus exactly one `Closes #<n>` produced by `mappedClosingLink`; `Fixes`/`Close` and a second closing link are rejected. Apply never attaches Project 3. `--write-locator` sets `pull_request` on an existing `[[implemented]]` row only; it never invents a row or infers COMPLETE from PR state. If that row already locates a pull request, abort before issue update or PR create, independent of `--write-locator`. Missing mapping, a missing ancestor ledger row, an existing PR for the same head, or the wrong repository abort before PATCH/POST. One node, one PR. Check and apply list open pulls for that head through the shared adapter method `pullsForHead`.
 
 Before squash and review finish, the completing agent adds or updates the node's `[[implemented]]` row with the planned final `commit_message`, approximate timezone-bearing `commit_date`, and known `pull_request`. The row is part of the implementation patch. The PR number remains an unvalidated locator, and no post-merge reconciliation or SHA restamping follows.
+
+## Non-PR closing flow
+
+When a user or maintainer explicitly directs DAG work to land without a GitHub PR, the local `[[github_issue]]` mapping remains authoritative. Before final review, the squash commit body contains one exact `Closes #<gh_issue>` line per included node. The default one-node candidate therefore has one line; an explicitly approved atomic multi-node candidate has one line for each mapping. GitHub closes those issues only when the reviewed commit reaches the origin default branch. This exception changes the landing carrier, not source/test policy: mapped issue citations remain forbidden in source and tests.
 
 ## ReviewCycleSummary
 

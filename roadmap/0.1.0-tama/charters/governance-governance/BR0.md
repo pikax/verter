@@ -7,7 +7,7 @@ product=governance
 kind=genesis
 semantic_role=delivery
 class=successor
-predecessors=
+predecessors=L4
 owner=governance.governance:static DAG authority plus implemented-ledger rows and ordinary review evidence
 conflict_domains=program_authority
 resource_class=docs-light
@@ -51,7 +51,7 @@ Coordinate post-L4 successor promotion using the static DAG and trusted implemen
 
 ## Exact predecessor contracts
 
-- **Direct DAG predecessors:** none. This is a source-canonical entry; its external requirements remain mandatory and are not predecessor substitutes.
+- **L4:** implemented ledger row for “Final architecture lock”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirement maintainer_rev11_repair_freeze_lift:** agents obtain the maintainer decision; tooling does not validate it.
 - **External requirement maintainer_successor_genesis:** agents obtain the maintainer decision; tooling does not validate it.
 
@@ -108,9 +108,8 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 
 ## Current promotion contract
 
-The static BR0 node records the promotion boundary. Agents confirm the two named maintainer requirements, implement the charter, add the BR0 ledger row before squash/review, run the owning review and docs gate, and land normally. The row then unlocks product-gated descendants. No SHA, tree, receipt, digest, or GitHub lookup participates in this transition.
+The static BR0 node records the post-L4 promotion boundary. After the L4 ledger row exists, agents confirm the two named maintainer requirements, implement the charter, add the BR0 ledger row before squash/review, run the owning review and docs gate, and land normally. The BR0 row then unlocks product-gated descendants. No SHA, tree, receipt, digest, or GitHub lookup participates in this transition.
 
 ## Collapsed non-authoritative subblock disposition
 
 The recovery candidate mechanically split this source-owned atomic node into the following labels: `BR0P`. They have no separate dispatch, lease, receipt, migration manifest, deletion ownership, or review standing. Their useful source-described concerns are internal RED/GREEN checklist items of **BR0**; BR0 alone owns the complete migration population, exactly one final deletion/cutover, and atomic acceptance. Any quoted “suggested subblock” wording in transferred source text is non-authoritative planning context.
-

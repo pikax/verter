@@ -76,19 +76,59 @@ symbols = ["DiagnosticActionService","RuleId"]
 description = "Exclusive mutation lease for the concrete diagnostic action service authority surface."
 [[domain]]
 id = "doc"
-path_roots = ["crates/verter_formatter","crates/verter_language/src","crates/verter_session/src","packages"]
-symbols = ["Doc","FormatPositionMap","FormatRequest"]
-description = "Exclusive mutation lease for the concrete doc authority surface."
+path_roots = ["crates/verter_formatter","crates/verter_language/src"]
+symbols = ["Doc","FormatProvenanceId","AuthoredFormatView"]
+description = "Exclusive mutation scope for formatter document algebra, provenance, private printers, and authored-view contributions."
 [[domain]]
 id = "flowslice"
 path_roots = ["crates/verter_semantic","crates/verter_session"]
 symbols = ["FlowSlice","FlowSliceStores"]
 description = "Exclusive mutation lease for the concrete flowslice authority surface."
 [[domain]]
+id = "formatter_config"
+path_roots = ["crates/verter_language/src/formatter_config"]
+symbols = ["FormatterConfig","FormatterConfigProvenance"]
+description = "Exclusive mutation scope for private formatter option translation and provenance."
+[[domain]]
 id = "formatter_service"
-path_roots = ["crates/verter_formatter","crates/verter_identity/src","crates/verter_language/src","crates/verter_protocol/src","crates/verter_session/src","packages"]
-symbols = ["FormatterService","FormatRequest","FormatResult"]
-description = "Exclusive mutation lease for the concrete formatter service authority surface."
+path_roots = ["crates/verter_formatter/src/service","crates/verter_session/src/formatter"]
+symbols = ["FormatterService","FormatterResultCache","PrivateFormatRequest","PrivateFormatResult"]
+description = "Exclusive mutation lease for formatter service composition and bounded complete-result cache authority."
+[[domain]]
+id = "formatter_protocol_adapter"
+path_roots = ["crates/verter_protocol/src/formatter","crates/verter_session/src/formatter/protocol.rs"]
+symbols = ["FormatRequest","FormatResult","FormatterProtocolAdapter","PrivateFormatterAdapterRequest","PrivateFormatterAdapterResult"]
+description = "Exclusive mutation scope for cursor-free versioned Rust formatter DTOs, explicit private-coordinate to SFC-absolute Span conversion, and the non-serialized request/result cursor carriers."
+[[domain]]
+id = "formatter_lsp_adapter"
+path_roots = ["crates/verter_lsp","crates/verter_protocol"]
+symbols = ["FormatterLspAdapter","DocumentFormattingParams","TextEdit"]
+description = "Exclusive mutation scope for dormant full-document LSP formatter edit conversion using negotiated LineIndex encoding."
+[[domain]]
+id = "formatter_ffi_adapter"
+path_roots = ["crates/verter_ffi","crates/verter_protocol"]
+symbols = ["FormatterFfiAdapter","checked_utf16_to_byte_offset","checked_byte_offset_to_utf16"]
+description = "Exclusive mutation scope for strict bidirectional NAPI/WASM formatter UTF-16 request/result conversion."
+[[domain]]
+id = "formatter_napi_adapter"
+path_roots = ["crates/verter_napi","crates/verter_ffi","packages/native"]
+symbols = ["FormatNapiRequest","FormatNapiResult"]
+description = "Exclusive mutation scope for the NAPI formatter adapter and export."
+[[domain]]
+id = "formatter_wasm_adapter"
+path_roots = ["crates/verter_wasm","crates/verter_ffi","packages/wasm"]
+symbols = ["FormatWasmRequest","FormatWasmResult"]
+description = "Exclusive mutation scope for the WASM formatter adapter and export."
+[[domain]]
+id = "formatter_mcp_adapter"
+path_roots = ["crates/verter_mcp","crates/verter_protocol"]
+symbols = ["FormatMcpRequest","FormatMcpResult"]
+description = "Exclusive mutation scope for the full/range, cursor-free MCP formatter adapter and tool-router integration."
+[[domain]]
+id = "formatter_route_cutover"
+path_roots = ["crates/verter_lsp"]
+symbols = ["handle_formatting","format_document","FormatterLspAdapter"]
+description = "Exclusive mutation scope for the one live full-document LSP formatter route switch and deletion of its displaced whitespace-only route body; on-type tag auto-close is excluded."
 [[domain]]
 id = "host_service_graph"
 path_roots = ["crates/verter_lsp","crates/verter_napi/src","crates/verter_session","crates/verter_wasm/src"]
@@ -111,8 +151,8 @@ symbols = ["PublicationEpoch","PublishDiagnostics"]
 description = "Exclusive mutation lease for the concrete lsp publication authority surface."
 [[domain]]
 id = "mapping_geometry"
-path_roots = ["crates/verter_identity/src","crates/verter_language/src","crates/verter_protocol/src","crates/verter_session","crates/verter_span","crates/verter_type_runtime/src","packages/language-shared/src","packages/typescript-plugin"]
-symbols = ["ContentMapper","PositionEncoding","SourceMap"]
+path_roots = ["crates/verter_formatter","crates/verter_identity/src","crates/verter_language/src","crates/verter_protocol/src","crates/verter_session","crates/verter_span","crates/verter_type_runtime/src","packages/language-shared/src","packages/typescript-plugin"]
+symbols = ["ContentMapper","PositionEncoding","SourceMap","FormatPositionMap","FormattedByteOffset"]
 description = "Exclusive mutation lease for the concrete mapping geometry authority surface."
 [[domain]]
 id = "performance_evidence"

@@ -112,7 +112,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "J4"
 name = "Dialect preprocessor formatter recovery contract"
-predecessors = ["J3","CCA1","J1"]
+predecessors = ["J3","CCA1N","J1"]
 phase = "rev11"
 train = "rev11.style"
 product = "rev11"

@@ -42,7 +42,7 @@ Readiness comes only from trusted implementation-ledger rows. A READY node may s
 
 ## Independently acceptable outcome
 
-Define the agent-owned start flow: create the PR with the expected final conventional-commit title and link the locally mapped issue using `Closes #<gh_issue>`, so GitHub closes it when the PR merges. Put the useful implementation description on an opt-in issue; leave a protected pre-existing issue untouched. Review history remains GH4.
+Define the agent-owned start flow: resolve the mapped issue and create the dedicated node worktree/branch before mutation; after the first implementation commit is pushed, open the draft PR with the expected final conventional-commit title and link the mapped issue using `Closes #<gh_issue>`. Put the useful implementation description on an opt-in issue; leave a protected pre-existing issue untouched. The PR remains the reviewed candidate for GH5's GitHub squash-merge landing. Review history remains GH4.
 
 ## Concrete surfaces and APIs
 
@@ -57,11 +57,12 @@ Define the agent-owned start flow: create the PR with the expected final convent
 
 ## Source-specific scope
 
-- After READY, use the local `gh_issue` mapping, create the branch, and create a PR whose title is already the planned final conventional commit message.
-- Put exactly the mapped `Closes #<gh_issue>` link in ordinary PR prose. This is required for both mapping policies and closes the issue only on merge. When `sync_to_github = true`, write or refresh the useful implementation description and end it with exactly `Model: <model name>`. When false, do not edit the issue.
+- After READY and before mutation, use the local `gh_issue` mapping and create the node's dedicated worktree/branch. After the first implementation commit is pushed, open a draft PR whose title is already the planned final conventional commit message.
+- Put exactly the mapped `Closes #<gh_issue>` link in ordinary PR prose. This is required for both mapping policies and closes the issue only on merge. When `sync_to_github = true`, write or refresh the standalone human issue description required by `contracts/github-control-plane.md` and end it with exactly `Model: <model name>`; never paste charter sections or orchestration boilerplate. When false, do not edit the issue.
 - Do not put effort, reasoning tier, DAG ID, predecessors, readiness, generated labels, markers, or metadata blocks in the issue or PR.
 - Treat the PR number as a locator and include it in the implementation row when the finishing agent completes the ledger fields.
-- Preserve one-node/one-issue/one-PR/one-squash normal policy; exceptions require explicit charter authority.
+- Preserve one-node/one-issue/one-worktree/one-branch/one-PR/one-squash normal policy. A shared multi-node candidate requires an explicit user or maintainer request before mutation plus a recorded atomicity rationale; every included node keeps its own mapping, ledger row, and closing link.
+- Keep the reviewed PR as the GH5 landing candidate; never land locally first and mirror it to GitHub afterward.
 - Do not infer implementation from PR state or add a second PR-binding database.
 
 ## Acceptance IDs and discriminating proof

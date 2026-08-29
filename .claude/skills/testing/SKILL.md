@@ -114,6 +114,12 @@ Behavioral code changes use TDD. Documentation, generated projections, formattin
 4. Run relevant tests, verify pass
 5. Refactor while keeping tests green
 
+### Durable test vocabulary
+
+Test file/module/test names, comments, fixtures, snapshots, assertion messages, and guard diagnostics describe the lasting behavior or regression boundary. They never name an architecture program/revision, roadmap/DAG, node/block/train identifier, plan phase/stage, implementation sequence, cutover stage, or deletion history. A test for work coordinated by `CCA1`, for example, names the capability or failing behavior and contains no `CCA1` reference.
+
+A comment may supplement that durable explanation with a GitHub issue only when the issue records a specific independently reported product defect and is outside the DAG-controlled `[[github_issue]]` mappings. Never cite a DAG-managed issue, PR, node, charter, or ledger row in code or tests; the DAG coordinates delivery and is not the defect contract.
+
 ### Test Economy
 
 Tests are evidence, not a quota. At preflight, map each changed contract to the smallest sufficient proof before proposing new tests:

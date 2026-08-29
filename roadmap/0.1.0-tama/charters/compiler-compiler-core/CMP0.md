@@ -54,7 +54,7 @@ Compiler request, policy, compatibility, and identity contract. The current owne
 - **CPF1:** implemented ledger row for “Carrier frontend registration and Vue/Svelte cutover”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **PAR0:** implemented ledger row for “Parser decision, ownership, reuse, and lineage contract”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **DEM0:** implemented ledger row for “Selection, two-stage activation, and demand planning”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **CCA2:** implemented ledger row for “Compiler artifact, assembly, style-stage, and host boundary”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **CCA2:** implemented ledger row for “Compiler artifact boundary convergence join”; its CCA2A–CCA2F ancestors provide the staged artifact schema, framework assembly, host handoff, qualified style continuation, custom-block descriptor, and facade adapters. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -171,4 +171,3 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 **Deletion/abort:** delete mixed runtime options when all consumers move; abort any option whose invalidation impact cannot be classified.
 
 ---
-

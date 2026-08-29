@@ -220,7 +220,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "PRF0"
 name = "Sequential representative-slice lock"
-predecessors = ["HWC5","CEJ0","UAK2","FMT1","PUB0"]
+predecessors = ["HWC5","CEJ0","UAK2","FMT1C","PUB0"]
 phase = "expansion"
 train = "expansion.architecture-proof"
 product = "architecture_proof"

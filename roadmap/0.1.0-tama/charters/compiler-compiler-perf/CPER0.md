@@ -54,7 +54,7 @@ Compiler equivalent-work and oracle genesis lock. The current owner is **unattri
 - **CPF1:** implemented ledger row for “Carrier frontend registration and Vue/Svelte cutover”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **PAR0:** implemented ledger row for “Parser decision, ownership, reuse, and lineage contract”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **PER0:** implemented ledger row for “Cache/backend identity, cancellation, budgets, and zero work”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **CCA2:** implemented ledger row for “Compiler artifact, assembly, style-stage, and host boundary”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **CCA2:** implemented ledger row for “Compiler artifact boundary convergence join”; its CCA2A–CCA2F ancestors provide one staged artifact/assembly/host/style/custom-block/facade boundary suitable for equivalent-work attribution. Ledger presence alone satisfies the predecessor. Its locator metadata remains non-authoritative.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -141,4 +141,3 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 **Deletion/abort:** no production deletion; repair a defective baseline and rerun both sides rather than weakening the contract.
 
 ---
-

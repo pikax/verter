@@ -60,7 +60,7 @@ Stable kernel falsification/convergence gate. The current owner is **provisional
 - **ANGP:** implemented ledger row for “Angular external/inline attachment proof”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **ASTP:** implemented ledger row for “Astro heterogeneous-carrier tooling proof”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **HWC5:** implemented ledger row for “Neutral HTML/WC conformance, performance, and Experimental terminal”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
-- **CEJ0:** implemented ledger row for “Vue/Svelte Custom Element interoperability soak join”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **CEJ0:** implemented ledger row for “Vue/Svelte Custom Element interoperability soak join”; this means the complete test/evidence-only producer-consumer matrix was accepted and does not imply a production schema migration or fix. Ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
@@ -123,4 +123,3 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 **Deletion/abort:** a blocker reopens the smallest owning contract and invalidates this gate; it is not waived for schedule or popularity.
 
 ## 12. Full native formatter product train
-
