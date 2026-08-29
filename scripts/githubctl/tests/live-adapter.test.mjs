@@ -35,8 +35,9 @@ function pullsForHeadPath(owner, repo, head) {
 
 const PROJECT_GRAPHQL_OK = {
   data: {
-    organization: { projectV2: { id: "PVT_test", number: 3 } },
-    user: { projectV2: null },
+    repository: {
+      owner: { projectV2: { id: "PVT_test", number: 3, viewerCanUpdate: true } },
+    },
   },
 };
 
@@ -174,6 +175,39 @@ test("GitHubDoctor folds live capability misses into a report", () => {
   assert.equal(report.clearance, null);
   assert.equal(report.errors.includes("unauthenticated"), true);
   assert.equal(report.capabilities.authenticated, false);
+});
+
+test("Project mutation clearance requires viewerCanUpdate", () => {
+  const { adapter } = live({
+    "GET /user": { login: "alice" },
+    "GET /repos/pikax/verter": writableRepo,
+    "POST graphql": {
+      data: {
+        repository: {
+          owner: { projectV2: { id: "PVT_read_only", number: 3, viewerCanUpdate: false } },
+        },
+      },
+    },
+  });
+  const report = new GitHubDoctor(adapter).check({ require: ["projects"] });
+  assert.equal(report.ok, false);
+  assert.equal(report.capabilities.projects, false);
+  assert.equal(report.clearance, null);
+});
+
+test("doctor skips Project traffic when the command does not require it", () => {
+  const { adapter, transport } = live({
+    "GET /user": { login: "alice" },
+    "GET /repos/pikax/verter": writableRepo,
+  });
+  const report = new GitHubDoctor(adapter).check({ require: ["issues"] });
+  assert.equal(report.ok, true);
+  assert.equal(report.capabilities.issues, true);
+  assert.equal(report.capabilities.projects, false);
+  assert.equal(
+    transport.calls.some((call) => call.path === "graphql"),
+    false,
+  );
 });
 
 test("check-mode create/update/PR plans locally; apply owns existence", () => {
@@ -582,4 +616,245 @@ test("injected live transport returns one open PR for pullsForHead", () => {
     transport.calls.map((call) => `${call.method} ${call.path}`),
     [`GET ${path}`],
   );
+});
+
+test("live milestone catalog operations use repository milestone REST fields only", () => {
+  const existing = {
+    number: 4,
+    title: "0.0.1-beta.6",
+    description: "old description",
+    state: "closed",
+    due_on: "2026-09-01T00:00:00Z",
+  };
+  const created = {
+    number: 5,
+    title: "0.0.1-beta.7",
+    description: "Product-surface hardening",
+    state: "open",
+  };
+  const updated = { ...existing, description: "Svelte stable-surface correctness" };
+  const { adapter, transport } = live({
+    "GET /user": { login: "alice" },
+    "GET /repos/pikax/verter": writableRepo,
+    "GET /repos/pikax/verter/milestones?state=all&per_page=100": [existing],
+    "POST /repos/pikax/verter/milestones": (request) => {
+      assert.deepEqual(request.body, {
+        title: created.title,
+        description: created.description,
+      });
+      return created;
+    },
+    "PATCH /repos/pikax/verter/milestones/4": (request) => {
+      assert.deepEqual(request.body, {
+        description: updated.description,
+      });
+      assert.equal("state" in request.body, false);
+      assert.equal("due_on" in request.body, false);
+      return updated;
+    },
+    "GET /repos/pikax/verter/issues/10": {
+      id: 1000,
+      number: 10,
+      title: "Issue",
+      body: "Body",
+      milestone: null,
+    },
+    "PATCH /repos/pikax/verter/issues/10": (request) => {
+      assert.deepEqual(request.body, { milestone: 4 });
+      return {
+        number: 10,
+        title: "Issue",
+        body: "Body",
+        milestone: { title: updated.title },
+      };
+    },
+  });
+  const clearance = new GitHubDoctor(adapter).check({ require: ["issues"] }).clearance;
+  transport.calls.length = 0;
+
+  assert.deepEqual(adapter.getRepositoryMilestones(), [existing]);
+  assert.equal(
+    adapter.createRepositoryMilestone({
+      milestone: { title: created.title, description: created.description },
+      mode: "apply",
+      clearance,
+    }).milestone.number,
+    5,
+  );
+  assert.equal(
+    adapter.updateRepositoryMilestone({
+      existing,
+      milestone: { title: updated.title, description: updated.description },
+      mode: "apply",
+      clearance,
+    }).milestone.description,
+    updated.description,
+  );
+  assert.equal(
+    adapter.setIssueMilestone({
+      issueNumber: 10,
+      title: updated.title,
+      mode: "apply",
+      clearance,
+    }).applied,
+    true,
+  );
+  assert.deepEqual(
+    transport.calls.map((call) => `${call.method} ${call.path}`),
+    [
+      "GET /repos/pikax/verter/milestones?state=all&per_page=100",
+      "POST /repos/pikax/verter/milestones",
+      "PATCH /repos/pikax/verter/milestones/4",
+      "GET /repos/pikax/verter/issues/10",
+      "GET /repos/pikax/verter/milestones?state=all&per_page=100",
+      "PATCH /repos/pikax/verter/issues/10",
+    ],
+  );
+});
+
+test("live issue dependency operations use blocker database ids", () => {
+  const mapping = { node_id: "D2", gh_issue: 10, sync_to_github: true };
+  const blockingMapping = { node_id: "D1", gh_issue: 9, sync_to_github: true };
+  const { adapter, transport } = live({
+    "GET /user": { login: "alice" },
+    "GET /repos/pikax/verter": writableRepo,
+    "GET /repos/pikax/verter/issues/10/dependencies/blocked_by?per_page=100": [
+      {
+        id: 9000,
+        number: 9,
+        repository_url: "https://api.github.com/repos/pikax/verter",
+      },
+    ],
+    "POST /repos/pikax/verter/issues/10/dependencies/blocked_by": (request) => {
+      assert.deepEqual(request.body, { issue_id: 9000 });
+      return {};
+    },
+    "DELETE /repos/pikax/verter/issues/10/dependencies/blocked_by/9000": {},
+  });
+  const clearance = new GitHubDoctor(adapter).check({ require: ["issues"] }).clearance;
+  transport.calls.length = 0;
+
+  assert.deepEqual(adapter.getIssueDependencies(10), [
+    { id: 9000, number: 9, owner: "pikax", repo: "verter" },
+  ]);
+  assert.equal(
+    adapter.addIssueDependency({
+      number: 10,
+      blockingNumber: 9,
+      blockingId: 9000,
+      mapping,
+      blockingMapping,
+      mode: "apply",
+      clearance,
+    }).blockingId,
+    9000,
+  );
+  assert.equal(
+    adapter.removeIssueDependency({
+      number: 10,
+      blockingNumber: 9,
+      blockingId: 9000,
+      mapping,
+      blockingMapping,
+      mode: "apply",
+      clearance,
+    }).applied,
+    true,
+  );
+  assert.deepEqual(
+    transport.calls.map((call) => `${call.method} ${call.path}`),
+    [
+      "GET /repos/pikax/verter/issues/10/dependencies/blocked_by?per_page=100",
+      "POST /repos/pikax/verter/issues/10/dependencies/blocked_by",
+      "DELETE /repos/pikax/verter/issues/10/dependencies/blocked_by/9000",
+    ],
+  );
+});
+
+test("live Project status mutation resolves the configured field and option", () => {
+  const graphqlCalls = [];
+  const { adapter } = live({
+    "GET /user": { login: "alice" },
+    "GET /repos/pikax/verter": writableRepo,
+    "POST graphql": (request) => {
+      graphqlCalls.push(request.body);
+      const { query, variables } = request.body;
+      if (query.includes("updateProjectV2ItemFieldValue")) {
+        assert.deepEqual(variables, {
+          projectId: "PVT_test",
+          itemId: "PVTI_10",
+          fieldId: "PVTF_status",
+          optionId: "status-in-progress",
+        });
+        return { data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: "PVTI_10" } } } };
+      }
+      if (query.includes("subIssues(first:100)")) {
+        return {
+          data: {
+            repository: {
+              issue: {
+                id: "I_10",
+                number: 10,
+                parent: null,
+                projectItems: {
+                  totalCount: 1,
+                  nodes: [
+                    {
+                      id: "PVTI_10",
+                      project: { id: "PVT_test", number: 3 },
+                      fieldValueByName: { name: "Todo", optionId: "status-todo" },
+                    },
+                  ],
+                },
+                subIssues: { totalCount: 0, nodes: [] },
+              },
+            },
+          },
+        };
+      }
+      if (query.includes("fields(first:100)")) {
+        return {
+          data: {
+            organization: {
+              projectV2: {
+                id: "PVT_test",
+                number: 3,
+                viewerCanUpdate: true,
+                fields: {
+                  totalCount: 1,
+                  nodes: [
+                    {
+                      id: "PVTF_status",
+                      name: "Status",
+                      options: [
+                        { id: "status-todo", name: "Todo" },
+                        { id: "status-in-progress", name: "In Progress" },
+                        { id: "status-done", name: "Done" },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            user: { projectV2: null },
+          },
+        };
+      }
+      return PROJECT_GRAPHQL_OK;
+    },
+  });
+  const clearance = new GitHubDoctor(adapter).check({ require: ["projects"] }).clearance;
+  graphqlCalls.length = 0;
+
+  const result = adapter.setIssueProjectStatus({
+    issueNumber: 10,
+    status: "In Progress",
+    mode: "apply",
+    clearance,
+  });
+
+  assert.equal(result.current, "Todo");
+  assert.equal(result.status, "In Progress");
+  assert.equal(result.applied, true);
+  assert.equal(graphqlCalls.length, 4);
 });

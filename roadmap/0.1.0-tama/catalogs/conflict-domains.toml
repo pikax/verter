@@ -7,7 +7,7 @@ description = "Exclusive mutation scope for non-DAG feedback inspection, ordinar
 [[domain]]
 id = "github_projection_state"
 path_roots = [".github","roadmap/0.1.0-tama/authority/state/implemented.toml","roadmap/0.1.0-tama/contracts/github-control-plane.md","roadmap/0.1.0-tama/schemas/github-control-plane-program.schema.json","roadmap/0.1.0-tama/schemas/implementation-ledger.schema.json","scripts/githubctl"]
-symbols = ["GitHubIssueMapping","GitHubIssueSync","ExpectedPullRequestTitle"]
+symbols = ["GitHubIssueMapping","GitHubIssueSync","IssueSyncLabels","ExpectedPullRequestTitle"]
 description = "Exclusive mutation scope for local issue mappings, occasional issue creation/update, and the minimal PR workflow."
 [[domain]]
 id = "release_orchestration"

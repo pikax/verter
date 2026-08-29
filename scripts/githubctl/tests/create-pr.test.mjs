@@ -21,7 +21,6 @@ import {
   WrongRepositoryError,
   createPr,
   mappedClosingLink,
-  renderIssueDescription,
 } from "../index.mjs";
 import { parseToml } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
 
@@ -31,7 +30,6 @@ const CLI = path.join(HERE, "../githubctl.mjs");
 const TOOLS = path.join(REPO_ROOT, "roadmap/0.1.0-tama/tools");
 const LIVE_LEDGER = path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/implemented.toml");
 const CONTRACT = path.join(REPO_ROOT, "roadmap/0.1.0-tama/contracts/github-control-plane.md");
-const MODEL = "gh3-test-model";
 const TITLE = "feat(ci): example final title";
 const HEAD = "train/example";
 
@@ -42,7 +40,7 @@ function fake(options = {}) {
   return new FakeGitHubAdapter({ owner: "pikax", repo: "verter", ...options });
 }
 
-function clearanceFor(adapter, require = ["issues", "pullRequests", "projects"]) {
+function clearanceFor(adapter, require = ["issues", "pullRequests"]) {
   const report = new GitHubDoctor(adapter).check({ require });
   assert.equal(report.ok, true, report.errors?.join?.("; ") ?? "doctor failed");
   return report.clearance;
@@ -85,10 +83,6 @@ function readLedger(file) {
   return parseToml(fs.readFileSync(file, "utf8"));
 }
 
-function rendered(nodeId = "GH0") {
-  return renderIssueDescription({ nodeId, model: MODEL });
-}
-
 const WRITABLE_REPO = {
   full_name: "pikax/verter",
   has_issues: true,
@@ -127,7 +121,8 @@ function baseOptions(adapter, extra = {}) {
     head: extra.head ?? HEAD,
     base: extra.base,
     body: extra.body,
-    model: extra.model ?? MODEL,
+    authority: extra.authority,
+    createPrPrerequisites: extra.createPrPrerequisites,
     ledgerPath: extra.ledgerPath,
     writeLocator: extra.writeLocator,
     owner: extra.owner,
@@ -438,9 +433,10 @@ test("GH3-AC1 issue and PR omit DAG metadata", () => {
       clearance: clearanceFor(adapter),
     }),
   );
-  const { title, body } = rendered("GH3");
-  assert.equal(adapter.getIssue(9).title, title);
-  assert.equal(adapter.getIssue(9).body, body);
+  const { title } = adapter.getIssue(9);
+  const body = adapter.getIssue(9).body;
+  assert.equal(title, "stale");
+  assert.equal(body, "stale\n\nAI-Generated\n");
   assert.doesNotMatch(body, /\bGH3\b/u);
   assert.doesNotMatch(body, /predecessors\s*=/u);
   assert.doesNotMatch(body, /implementation_effort/u);
@@ -500,7 +496,7 @@ test("GH3-AC1 check does not mutate GitHub or the ledger", () => {
   assert.equal(fs.readFileSync(ledgerPath, "utf8"), beforeLedger);
 });
 
-test("GH3-AC2 opt-in refreshes the issue description and Model line", () => {
+test("opening a pull request preserves issue prose and normalizes provenance", () => {
   const adapter = fake({
     nextPullNumber: 21,
     issues: [
@@ -518,7 +514,6 @@ test("GH3-AC2 opt-in refreshes the issue description and Model line", () => {
   const ledgerPath = writeLedger({
     issues: [{ node_id: "GH1", gh_issue: 12, sync_to_github: true }],
   });
-  const { title, body } = rendered("GH1");
   const report = createPr(
     baseOptions(adapter, {
       node: "GH1",
@@ -533,13 +528,53 @@ test("GH3-AC2 opt-in refreshes the issue description and Model line", () => {
   assert.equal(report.issue.number, 12);
   const issue = adapter.getIssue(12);
   assert.equal(issue.number, 12);
-  assert.equal(issue.title, title);
-  assert.equal(issue.body, body);
-  assert.match(issue.body, /\nModel: gh3-test-model\n$/u);
+  assert.equal(issue.title, "old title");
+  assert.equal(issue.body, "old body\n\nAI-Generated\n");
   assert.deepEqual(issue.comments, [
     { id: 1, body: "first" },
     { id: 2, body: "second" },
   ]);
+});
+
+test("opening a pull request does not rewrite an already normalized issue", () => {
+  const adapter = fake({
+    nextPullNumber: 22,
+    issues: [{ number: 13, title: "stable title", body: "stable body\n\nAI-Generated\n" }],
+  });
+  let updates = 0;
+  const updateIssue = adapter.updateIssue.bind(adapter);
+  adapter.updateIssue = (...args) => {
+    updates += 1;
+    return updateIssue(...args);
+  };
+  const ledgerPath = writeLedger({
+    implemented: ["READY"],
+    issues: [{ node_id: "WORK", gh_issue: 13, sync_to_github: true }],
+  });
+  const authority = {
+    nodes: [
+      { id: "READY", predecessors: [] },
+      { id: "WORK", predecessors: [] },
+    ],
+    ledgerFile: path.join(path.dirname(ledgerPath), "live-implemented.toml"),
+  };
+
+  const report = createPr(
+    baseOptions(adapter, {
+      node: "WORK",
+      mode: "apply",
+      ledgerPath,
+      authority,
+      createPrPrerequisites: [],
+      clearance: clearanceFor(adapter),
+    }),
+  );
+
+  assert.equal(report.pull_request.applied, true);
+  assert.equal(report.issue.changed, false);
+  assert.equal(report.issue.applied, false);
+  assert.equal(updates, 0);
+  assert.equal(adapter.getIssue(13).body, "stable body\n\nAI-Generated\n");
 });
 
 test("GH3-AC2 final title and exactly one mapped Closes #n; Fixes/Close are rejected", () => {
@@ -793,7 +828,6 @@ test("GH3 apply reports PartialFailureError after a succeeded issue update", () 
   const ledgerPath = writeLedger({
     issues: [{ node_id: "GH1", gh_issue: 12, sync_to_github: true }],
   });
-  const { title } = rendered("GH1");
   assert.throws(
     () =>
       createPr(
@@ -811,11 +845,11 @@ test("GH3 apply reports PartialFailureError after a succeeded issue update", () 
       assert.equal(error.succeeded[0].gh_issue, 12);
       assert.equal(error.succeeded[0].kind, "update-issue");
       assert.equal(error.succeeded[0].title, undefined);
-      assert.equal(error.message.includes(title), false);
+      assert.equal(error.message.includes("old"), false);
       return true;
     },
   );
-  assert.equal(adapter.getIssue(12).title, title);
+  assert.equal(adapter.getIssue(12).title, "old");
   assert.equal(adapter.getPullRequests().length, 0);
 });
 

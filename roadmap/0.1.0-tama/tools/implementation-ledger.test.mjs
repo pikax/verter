@@ -278,6 +278,18 @@ test("strict validation cheaply covers schemas, charters, catalogs, and GitHub n
   );
 });
 
+test("gh_milestone is optional and must name the checked-in milestone catalog", () => {
+  const authority = loadAuthority();
+  const node = authority.nodes[0];
+  node.gh_milestone = "0.0.1-beta.6";
+  assert.deepEqual(validateAuthority(authority), []);
+
+  node.gh_milestone = "unplanned-release";
+  assert.ok(
+    validateAuthority(authority).includes(`${node.id}: unknown gh_milestone unplanned-release`),
+  );
+});
+
 const GITHUB_ISSUE_IDENTITY_KEYS = ["node_id", "gh_issue"];
 const GITHUB_ISSUE_STORED_FIELDS = [...GITHUB_ISSUE_IDENTITY_KEYS, "sync_to_github"];
 
@@ -632,7 +644,7 @@ const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..");
 const GITHUBCTL = path.join(REPO_ROOT, "scripts", "githubctl", "githubctl.mjs");
 const PROGRAMCTL = path.join(PACKAGE_ROOT, "tools", "programctl.mjs");
 const GITHUBCTL_COMMANDS =
-  "doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut";
+  "doctor, check, inspect, sync-issues, project-status, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut";
 
 test("FB2-AC1 githubctl has no import-dag command and does not generate DAG authority from GitHub", () => {
   const help = spawnSync(process.execPath, [GITHUBCTL, "--help"], { encoding: "utf8" });

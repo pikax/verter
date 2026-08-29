@@ -14,7 +14,7 @@ import {
   PROJECT_NUMBER,
   UnauthorizedReleaseError,
   ciResult,
-  countModelLines,
+  countAiGeneratedFooters,
   createPr,
   finalizeLedger,
   inspectIssue,
@@ -34,7 +34,6 @@ const REPO_ROOT = path.resolve(HERE, "../../..");
 const CLI = path.join(HERE, "../githubctl.mjs");
 const CONTRACT = path.join(REPO_ROOT, "roadmap/0.1.0-tama/contracts/github-control-plane.md");
 const LIVE_LEDGER = path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/implemented.toml");
-const MODEL = "workflow-test-model";
 const TITLE = "feat(ci): example final title";
 const HEAD = "train/workflow-example";
 const DATE = "2026-08-29T21:15:00+01:00";
@@ -43,6 +42,7 @@ const MILESTONE = "v0.1.0";
 const RELEASE_VERSION = "0.1.0";
 const WORKFLOW_COMMANDS = [
   "sync-issues",
+  "project-status",
   "create-pr",
   "review-summary",
   "ci-result",
@@ -130,7 +130,10 @@ test("check prints the frozen composed-workflow inventory and keeps issue-sync a
 test("one fake adapter walks issue mapping through squash landing, feedback, and release rehearsal", () => {
   const adapter = fake();
   const clearance = clearanceFor(adapter);
-  const ledgerPath = writeLedger();
+  const implemented = parseToml(fs.readFileSync(LIVE_LEDGER, "utf8"))
+    .implemented.map((row) => row.node_id)
+    .filter((nodeId) => nodeId !== "B4R0");
+  const ledgerPath = writeLedger({ implemented });
   const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-workflow-reports-"));
   const implementedBefore = readLedger(ledgerPath).implemented.length;
 
@@ -138,7 +141,6 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
     adapter,
     mode: "check",
     nodes: ["GH0", "B4R0"],
-    model: MODEL,
     ledgerPath,
   });
   assert.deepEqual(missing.missing.map((row) => row.node_id).sort(), ["B4R0", "GH0"]);
@@ -148,7 +150,6 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
     adapter,
     mode: "apply",
     nodes: ["GH0", "B4R0"],
-    model: MODEL,
     ledgerPath,
     clearance,
   });
@@ -162,17 +163,29 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
   const readyIssue = synced.created.find((row) => row.node_id === "B4R0").gh_issue;
   assert.notEqual(gh0Issue, readyIssue);
   assert.equal(adapter.getIssue(gh0Issue).number, gh0Issue);
-  assert.equal(countModelLines(adapter.getIssue(gh0Issue).body), 1);
+  assert.equal(countAiGeneratedFooters(adapter.getIssue(gh0Issue).body), 1);
   assert.doesNotMatch(
     adapter.getIssue(gh0Issue).body,
     /^(?:implementation_|review_|verification_|confirmation_)?effort(?:_(?:min|default))?\s*[:=]/imu,
   );
+  const scheduled = adapter.addIssueToProject({
+    number: 3,
+    issueNumber: gh0Issue,
+    mode: "apply",
+    clearance,
+  });
+  assert.equal(scheduled.already_member, false);
+  adapter.setIssueProjectStatus({
+    issueNumber: gh0Issue,
+    status: "Todo",
+    mode: "apply",
+    clearance,
+  });
 
   const current = syncIssues({
     adapter,
     mode: "check",
     nodes: ["GH0", "B4R0"],
-    model: MODEL,
     ledgerPath,
   });
   assert.deepEqual(current.current.map((row) => row.node_id).sort(), ["B4R0", "GH0"]);
@@ -185,7 +198,6 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
     node: "GH0",
     title: TITLE,
     head: HEAD,
-    model: MODEL,
     ledgerPath,
     writeLocator: true,
     clearance,
@@ -194,10 +206,11 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
   assert.equal(opened.gh_issue, gh0Issue);
   assert.equal(opened.pull_request.title, TITLE);
   assert.equal(opened.pull_request.body, `${mappedClosingLink(gh0Issue)}\n`);
-  assert.equal(opened.issue.applied, true);
+  assert.equal(opened.issue.changed, false);
+  assert.equal(opened.issue.applied, false);
   assert.equal(opened.locator.written, true);
   const pr = opened.pull_request.number;
-  assert.equal(countModelLines(adapter.getIssue(gh0Issue).body), 1);
+  assert.equal(countAiGeneratedFooters(adapter.getIssue(gh0Issue).body), 1);
   assert.equal(adapter.getIssue(gh0Issue).number, gh0Issue);
 
   assert.throws(
@@ -210,7 +223,6 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
         verdict: "PASS",
         body: "Problem: blockers must stop accept.\nScope: review.\nValidation: fake.\nReview: refuse.",
         findings: [{ severity: "P0", owner: "reviewer", context: "must not accept" }],
-        model: MODEL,
         ledgerPath,
         clearance,
       }),
@@ -225,7 +237,6 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
     pr,
     verdict: "PASS",
     body: "Problem: mapping stays local.\nScope: ordinary PR prose.\nValidation: fake adapter.\nReview: human-written.",
-    model: MODEL,
     ledgerPath,
     clearance,
   });
@@ -276,6 +287,7 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
   assert.equal(landed.applied, true);
   assert.equal(landed.merge_method, "squash");
   assert.deepEqual(adapter.inspectState().merges, [{ number: pr, merge_method: "squash" }]);
+  assert.equal(adapter.getProjectStatus(gh0Issue), "Done");
   assert.equal(fs.readFileSync(ledgerPath, "utf8"), beforeMergeLedger);
   assert.equal(readLedger(ledgerPath).implemented.length, implementedBefore);
 
@@ -306,15 +318,23 @@ test("one fake adapter walks issue mapping through squash landing, feedback, and
     mode: "apply",
     nodes: ["B4R0"],
     ledgerPath,
-    setMilestone: MILESTONE,
     clearance,
   });
   assert.equal(overlay.ok, true);
   assert.deepEqual(overlay.selection, ["B4R0"]);
   assert.equal(overlay.project.number, PROJECT_NUMBER);
-  assert.deepEqual(adapter.getProjectItems(), [readyIssue]);
-  assert.equal(adapter.getIssue(readyIssue).milestone, MILESTONE);
+  assert.deepEqual(
+    adapter.getProjectItems().toSorted((left, right) => left - right),
+    [gh0Issue, readyIssue].toSorted((left, right) => left - right),
+  );
+  assert.equal(adapter.getProjectStatus(readyIssue), "Todo");
 
+  adapter.setIssueMilestone({
+    issueNumber: readyIssue,
+    title: MILESTONE,
+    mode: "apply",
+    clearance,
+  });
   adapter.setIssueMilestone({
     issueNumber: gh0Issue,
     title: MILESTONE,
@@ -384,7 +404,6 @@ test("a protected mapping stays skipped and byte-for-byte untouched during issue
     adapter,
     mode: "apply",
     nodes: ["GH0"],
-    model: MODEL,
     ledgerPath,
     clearance,
   });

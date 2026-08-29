@@ -12,7 +12,7 @@ import {
   mappedClosingLink,
   parseIssuePayload,
 } from "./adapter.mjs";
-import { renderIssueDescription } from "./charter-render.mjs";
+import { ensureAiGeneratedFooter } from "./issue-provenance.mjs";
 import {
   ClosingLinkError,
   DoctorRequiredError,
@@ -29,7 +29,13 @@ import { loadAuthority } from "../../roadmap/0.1.0-tama/tools/lib.mjs";
 
 const CREATE_PR_NODE_ID = "GH3";
 
-function requiredCreatePrAncestors(authority) {
+function requiredCreatePrAncestors(authority, explicit) {
+  if (explicit != null) {
+    if (!Array.isArray(explicit) || explicit.some((row) => typeof row !== "string" || !row)) {
+      throw new GitHubAdapterError("createPrPrerequisites must be an array of node ids");
+    }
+    return [...explicit];
+  }
   const node = authority.nodes.find((row) => row.id === CREATE_PR_NODE_ID);
   if (!node) {
     throw new GitHubAdapterError(`create-pr block ${CREATE_PR_NODE_ID} is missing from the DAG`);
@@ -127,15 +133,12 @@ export function createPr(options) {
   const node = authority.nodes.find((row) => row.id === nodeId);
   if (!node) throw new SelectionError(`unknown node ${nodeId}`);
   const ledger = loadLedgerFile(ledgerPath);
-  assertSyncAncestors(ledger, requiredCreatePrAncestors(authority));
+  assertSyncAncestors(ledger, requiredCreatePrAncestors(authority, options.createPrPrerequisites));
   const mapping = ledger.github_issue.find((row) => row.node_id === nodeId);
   if (!mapping) {
     throw new MissingIssueMappingError(`create-pr requires a local issue mapping for ${nodeId}`);
   }
   const optIn = mapping.sync_to_github === true;
-  if (optIn && (typeof options.model !== "string" || options.model.length === 0)) {
-    throw new GitHubAdapterError("create-pr opt-in mapping requires --model or GITHUBCTL_MODEL");
-  }
   const body = prBodyWithMappedClose(options.body, mapping.gh_issue);
   const existing = pullsForHead(options.adapter, options.head);
   if (existing.length === 1) {
@@ -161,17 +164,14 @@ export function createPr(options) {
   if (!optIn) {
     issueReport = { kind: "protected", number: mapping.gh_issue, applied: false };
   } else {
-    const rendered = renderIssueDescription({
-      nodeId,
-      model: options.model,
-      authority,
-    });
-    readMappedIssue(options.adapter, mapping.gh_issue);
+    const current = readMappedIssue(options.adapter, mapping.gh_issue);
+    const normalizedBody = ensureAiGeneratedFooter(current.body);
     issueReport = {
       kind: "update-issue",
       number: mapping.gh_issue,
-      title: rendered.title,
-      body: rendered.body,
+      title: current.title,
+      body: normalizedBody,
+      changed: normalizedBody !== current.body,
       applied: false,
     };
   }
@@ -200,7 +200,7 @@ export function createPr(options) {
   assertApplyClearance(mode, options.clearance, "pullRequests", options.adapter);
   const succeeded = [];
   try {
-    if (optIn) {
+    if (optIn && issueReport.changed) {
       options.adapter.updateIssue({
         number: mapping.gh_issue,
         title: issueReport.title,

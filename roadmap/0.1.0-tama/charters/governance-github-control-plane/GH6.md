@@ -42,7 +42,7 @@ Readiness comes only from trusted implementation-ledger rows. A READY node may s
 
 ## Independently acceptable outcome
 
-Prove and activate the minimal GitHub workflow without adding another feature train. This node contains bounded integration fixtures and cutover wiring over already-landed owners; it must leave `githubctl sync-issues` available for the initial mapping run, occasional later train additions, and explicit mapped-issue refresh after a block rescope/content change.
+Prove and activate the minimal GitHub workflow without adding another feature train. This node contains bounded integration fixtures and cutover wiring over already-landed owners; it must leave `githubctl sync-issues` available for initial mapping, occasional later train additions, deterministic label reconciliation, and explicitly requested mapped-issue content refresh.
 
 ## Concrete surfaces and APIs
 

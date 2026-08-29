@@ -15,8 +15,10 @@ import {
   MissingProjectIdentityError,
   NonReadyNodeError,
   NotFoundError,
+  PartialFailureError,
   PROJECT_NUMBER,
   PROJECT_VIEWS,
+  ProtectedMappingError,
   schedule,
   syncIssues,
 } from "../index.mjs";
@@ -244,7 +246,8 @@ test("REL0-AC2 READY mapped node check plan includes issue number and Project 3"
   assert.equal(plan.items[0].node_id, "B");
   assert.equal(plan.items[0].gh_issue, 10);
   assert.equal(plan.items[0].project, 3);
-  assert.equal(plan.items[0].status, "READY");
+  assert.equal(plan.items[0].status, "Todo");
+  assert.equal(plan.items[0].status_changed, true);
   assert.equal(plan.items[0].milestone, "v0.1.0");
   assert.deepEqual(fx.adapter.getProjectItems(3), []);
   assert.equal(fx.adapter.milestoneWrites.length, 0);
@@ -258,7 +261,9 @@ test("REL0-AC2 apply adds Project 3 membership and a second apply is idempotent"
     clearance: clearanceFor(fx.adapter),
   });
   assert.equal(first.ok, true);
+  assert.equal(first.items[0].status_changed, true);
   assert.deepEqual(fx.adapter.getProjectItems(3), [10]);
+  assert.equal(fx.adapter.getProjectStatus(10), "Todo");
   const second = runSchedule(fx, {
     mode: "apply",
     nodes: ["B"],
@@ -266,6 +271,7 @@ test("REL0-AC2 apply adds Project 3 membership and a second apply is idempotent"
   });
   assert.equal(second.ok, true);
   assert.equal(second.items[0].already_member, true);
+  assert.equal(second.items[0].status_changed, false);
   assert.deepEqual(fx.adapter.getProjectItems(3), [10]);
   const again = fx.adapter.addIssueToProject({
     number: 3,
@@ -278,7 +284,83 @@ test("REL0-AC2 apply adds Project 3 membership and a second apply is idempotent"
   assert.deepEqual(fx.adapter.getProjectItems(3), [10]);
 });
 
-test("REL0-AC2 --set-milestone writes the issue ReleaseTarget only when the flag is present", () => {
+test("scheduling adds an eligible native parent without resetting existing status", () => {
+  const nodes = [node("A"), node("B", { predecessors: ["A"] })];
+  const issues = [{ node_id: "B", gh_issue: 10, sync_to_github: true }];
+  const adapter = fake({
+    issues: [
+      { number: 10, title: "Work", body: "work", parent: 20 },
+      { number: 20, title: "Parent", body: "parent", subIssues: [10] },
+    ],
+  });
+  const getState = adapter.getIssueProjectState.bind(adapter);
+  adapter.getIssueProjectState = (number) => {
+    const snapshot = getState(number);
+    if (snapshot.parent) {
+      snapshot.parent.owner = snapshot.parent.owner.toUpperCase();
+      snapshot.parent.repo = snapshot.parent.repo.toUpperCase();
+    }
+    return snapshot;
+  };
+  const fx = fixture({ nodes, implemented: ["A"], issues, adapter });
+
+  const first = runSchedule(fx, {
+    mode: "apply",
+    nodes: ["B"],
+    clearance: clearanceFor(adapter),
+  });
+  assert.deepEqual(adapter.getProjectItems(PROJECT_NUMBER), [10, 20]);
+  assert.equal(adapter.getProjectStatus(10), "Todo");
+  assert.equal(adapter.getProjectStatus(20), "Todo");
+  assert.equal(first.parents[0].gh_issue, 20);
+  assert.equal(first.parents[0].status_changed, true);
+
+  adapter.setIssueProjectStatus({
+    issueNumber: 20,
+    status: "In Progress",
+    mode: "apply",
+    clearance: clearanceFor(adapter),
+  });
+  const second = runSchedule(fx, {
+    mode: "apply",
+    nodes: ["B"],
+    clearance: clearanceFor(adapter),
+  });
+  assert.equal(second.parents[0].already_member, true);
+  assert.equal(second.parents[0].status_changed, false);
+  assert.equal(adapter.getProjectStatus(20), "In Progress");
+});
+
+test("a protected mapped sibling suppresses native parent scheduling", () => {
+  const nodes = [node("A"), node("B", { predecessors: ["A"] }), node("C", { predecessors: ["A"] })];
+  const issues = [
+    { node_id: "B", gh_issue: 10, sync_to_github: true },
+    { node_id: "C", gh_issue: 11, sync_to_github: false },
+  ];
+  const adapter = fake({
+    issues: [
+      { number: 10, title: "Work", body: "work", parent: 20 },
+      { number: 11, title: "Protected", body: "protected", parent: 20 },
+      { number: 20, title: "Parent", body: "parent", subIssues: [10, 11] },
+    ],
+  });
+  const fx = fixture({ nodes, implemented: ["A"], issues, adapter });
+
+  const report = runSchedule(fx, {
+    mode: "apply",
+    nodes: ["B"],
+    clearance: clearanceFor(adapter),
+  });
+  assert.deepEqual(adapter.getProjectItems(PROJECT_NUMBER), [10]);
+  assert.deepEqual(report.parents, []);
+  assert.equal(report.parent_skipped[0].gh_issue, 20);
+  assert.equal(
+    adapter.reads.some((row) => row.kind === "get-issue-project-state" && row.number === 20),
+    false,
+  );
+});
+
+test("scheduling never writes milestones even when legacy input is supplied", () => {
   const fx = fixture({
     fake: {
       issues: [{ number: 10, title: "B", body: "b" }],
@@ -303,10 +385,9 @@ test("REL0-AC2 --set-milestone writes the issue ReleaseTarget only when the flag
     setMilestone: "v0.1.0",
     clearance: clearanceFor(fx.adapter),
   });
-  assert.equal(applied.release_target.title, "v0.1.0");
-  assert.equal(applied.release_target.instructed, true);
-  assert.deepEqual(fx.adapter.milestoneWrites, [{ issueNumber: 10, title: "v0.1.0" }]);
-  assert.equal(fx.adapter.getIssue(10).milestone, "v0.1.0");
+  assert.equal(applied.release_target, null);
+  assert.deepEqual(fx.adapter.milestoneWrites, []);
+  assert.equal(fx.adapter.getIssue(10).milestone, null);
   assert.equal(fx.adapter.getPullRequest(20).milestone, undefined);
   const after = deriveState(fx.authority);
   assert.equal(after.states.get("B").status, "READY");
@@ -318,7 +399,7 @@ test("REL0-AC2 train selection READY-only ordering is deterministic topo among R
   const plan = runSchedule(fx, { mode: "check", train: "t" });
   assert.deepEqual(plan.selection, ["B", "D"]);
   assert.equal(
-    plan.items.every((row) => row.status === "READY"),
+    plan.items.every((row) => row.status === "Todo"),
     true,
   );
   assert.equal(plan.selection.includes("A") || plan.selection.includes("C"), false);
@@ -344,6 +425,33 @@ test("REL0-AC2 missing mapping for a READY node aborts", () => {
   const fx = fixture({ issues: [] });
   assert.throws(() => runSchedule(fx, { mode: "check", nodes: ["B"] }), MissingIssueMappingError);
   assert.deepEqual(fx.adapter.getProjectItems(3), []);
+});
+
+test("scheduling refuses a protected mapping before GitHub traffic", () => {
+  const fx = fixture({
+    issues: [{ node_id: "B", gh_issue: 10, sync_to_github: false }],
+  });
+  assert.throws(() => runSchedule(fx, { mode: "check", nodes: ["B"] }), ProtectedMappingError);
+  assert.deepEqual(fx.adapter.reads, []);
+  assert.deepEqual(fx.adapter.getProjectItems(PROJECT_NUMBER), []);
+});
+
+test("scheduling reports a completed membership add when status initialization fails", () => {
+  const fx = fixture({ fake: { failOnApply: 1 } });
+  assert.throws(
+    () =>
+      runSchedule(fx, {
+        mode: "apply",
+        nodes: ["B"],
+        clearance: clearanceFor(fx.adapter),
+      }),
+    (error) => {
+      assert.equal(error instanceof PartialFailureError, true);
+      assert.deepEqual(error.succeeded, [{ node_id: "B", number: 10, kind: "add-project-item" }]);
+      return true;
+    },
+  );
+  assert.deepEqual(fx.adapter.getProjectItems(PROJECT_NUMBER), [10]);
 });
 
 test("REL0-AC1 fake refuses to create a project other than Project 3", () => {
@@ -395,7 +503,7 @@ function graphqlEnvelope(query, envelopes) {
 
 const PROJECT_OK = {
   data: {
-    organization: { projectV2: { id: "PVT_3", number: 3 } },
+    organization: { projectV2: { id: "PVT_3", number: 3, viewerCanUpdate: true } },
     user: { projectV2: null },
   },
 };
@@ -431,7 +539,30 @@ test("REL0-AC1 GraphQL 200 with errors on addProjectV2ItemById aborts and schedu
         "addProjectV2ItemById",
         { data: { addProjectV2ItemById: { item: { id: "PVTI_x" } } }, errors: [{}] },
       ],
-      ["issue(", { data: { repository: { issue: { id: "I_1" } } } }],
+      [
+        "subIssues(first:100)",
+        {
+          data: {
+            repository: {
+              issue: {
+                id: "I_1",
+                number: 10,
+                parent: null,
+                projectItems: { totalCount: 0, nodes: [] },
+                subIssues: { totalCount: 0, nodes: [] },
+              },
+            },
+          },
+        },
+      ],
+      [
+        "issue(",
+        {
+          data: {
+            repository: { issue: { id: "I_1", projectsV2: { totalCount: 0, nodes: [] } } },
+          },
+        },
+      ],
       ["projectV2", PROJECT_OK],
     ]),
   );
@@ -453,58 +584,18 @@ test("REL0-AC1 GraphQL 200 with errors on addProjectV2ItemById aborts and schedu
   );
 });
 
-test("REL0-AC1 GraphQL 200 with errors on updateIssue milestone aborts and schedule is not ok", () => {
-  const { adapter } = liveGraphqlAdapter((req) =>
-    graphqlEnvelope(req.body.query, [
-      ["updateIssue", { data: { updateIssue: { issue: { number: 10 } } }, errors: [{}] }],
-      [
-        "milestones",
-        {
-          data: {
-            repository: {
-              issue: { id: "I_1" },
-              milestones: { nodes: [{ id: "M_1", title: "v0.1.0" }] },
-            },
-          },
-        },
-      ],
-      ["addProjectV2ItemById", { data: { addProjectV2ItemById: { item: { id: "PVTI_1" } } } }],
-      ["issue(", { data: { repository: { issue: { id: "I_1" } } } }],
-      ["projectV2", PROJECT_OK],
-    ]),
-  );
-  const clearance = clearanceFor(adapter);
-  assert.throws(
-    () =>
-      adapter.setIssueMilestone({
-        issueNumber: 10,
-        title: "v0.1.0",
-        mode: "apply",
-        clearance,
-      }),
-    (error) => error.name === "GitHubAdapterError",
-  );
-  const fx = fixture({
-    adapter,
-    fake: { milestones: [{ title: "v0.1.0", number: 1 }] },
-  });
-  assert.throws(
-    () =>
-      runSchedule(fx, {
-        mode: "apply",
-        nodes: ["B"],
-        setMilestone: "v0.1.0",
-        clearance,
-      }),
-    (error) => error.name === "GitHubAdapterError",
-  );
-});
-
-test("REL0-AC2 addIssueToProject requires item.id; setIssueMilestone requires the issue number", () => {
+test("addIssueToProject requires a returned item identity", () => {
   const missingItem = liveGraphqlAdapter((req) =>
     graphqlEnvelope(req.body.query, [
       ["addProjectV2ItemById", { data: { addProjectV2ItemById: { item: null } } }],
-      ["issue(", { data: { repository: { issue: { id: "I_1" } } } }],
+      [
+        "issue(",
+        {
+          data: {
+            repository: { issue: { id: "I_1", projectsV2: { totalCount: 0, nodes: [] } } },
+          },
+        },
+      ],
       ["projectV2", PROJECT_OK],
     ]),
   );
@@ -519,36 +610,9 @@ test("REL0-AC2 addIssueToProject requires item.id; setIssueMilestone requires th
       }),
     (error) => error.name === "GitHubAdapterError",
   );
-  const wrongNumber = liveGraphqlAdapter((req) =>
-    graphqlEnvelope(req.body.query, [
-      ["updateIssue", { data: { updateIssue: { issue: { number: 99 } } } }],
-      [
-        "milestones",
-        {
-          data: {
-            repository: {
-              issue: { id: "I_1" },
-              milestones: { nodes: [{ id: "M_1", title: "v0.1.0" }] },
-            },
-          },
-        },
-      ],
-      ["projectV2", PROJECT_OK],
-    ]),
-  );
-  assert.throws(
-    () =>
-      wrongNumber.adapter.setIssueMilestone({
-        issueNumber: 10,
-        title: "v0.1.0",
-        mode: "apply",
-        clearance: clearanceFor(wrongNumber.adapter),
-      }),
-    (error) => error.name === "GitHubAdapterError",
-  );
 });
 
-test("REL0-AC2 live already_member is read from membership, never hardcoded false", () => {
+test("incomplete Project membership fails closed and complete membership is exact", () => {
   const unknown = liveGraphqlAdapter((req) =>
     graphqlEnvelope(req.body.query, [
       ["addProjectV2ItemById", { data: { addProjectV2ItemById: { item: { id: "PVTI_1" } } } }],
@@ -556,14 +620,16 @@ test("REL0-AC2 live already_member is read from membership, never hardcoded fals
       ["projectV2", PROJECT_OK],
     ]),
   );
-  const unknownApplied = unknown.adapter.addIssueToProject({
-    number: 3,
-    issueNumber: 10,
-    mode: "apply",
-    clearance: clearanceFor(unknown.adapter),
-  });
-  assert.equal(unknownApplied.applied, true);
-  assert.equal("already_member" in unknownApplied, false);
+  assert.throws(
+    () =>
+      unknown.adapter.addIssueToProject({
+        number: 3,
+        issueNumber: 10,
+        mode: "apply",
+        clearance: clearanceFor(unknown.adapter),
+      }),
+    /membership is incomplete/u,
+  );
 
   const member = liveGraphqlAdapter((req) =>
     graphqlEnvelope(req.body.query, [
@@ -574,7 +640,10 @@ test("REL0-AC2 live already_member is read from membership, never hardcoded fals
             repository: {
               issue: {
                 id: "I_1",
-                projectsV2: { nodes: [{ id: "PVT_3", number: 3 }] },
+                projectsV2: {
+                  totalCount: 1,
+                  nodes: [{ id: "PVT_3", number: 3 }],
+                },
               },
             },
           },
@@ -602,7 +671,9 @@ test("REL0-AC2 live already_member is read from membership, never hardcoded fals
         "issue(",
         {
           data: {
-            repository: { issue: { id: "I_1", projectsV2: { nodes: [] } } },
+            repository: {
+              issue: { id: "I_1", projectsV2: { totalCount: 0, nodes: [] } },
+            },
           },
         },
       ],
@@ -629,7 +700,10 @@ test("REL0-AC2 live already_member is read from membership, never hardcoded fals
             repository: {
               issue: {
                 id: "I_1",
-                projectsV2: { nodes: [{ id: "PVT_3", number: 3 }] },
+                projectsV2: {
+                  totalCount: 1,
+                  nodes: [{ id: "PVT_3", number: 3 }],
+                },
               },
             },
           },
@@ -682,11 +756,19 @@ test("REL0-AC2 live addIssueToProject is doctor-gated and idempotent on GraphQL"
             return { data: { addProjectV2ItemById: { item: { id: "PVTI_1" } } } };
           }
           if (query.includes("issue(")) {
-            return { data: { repository: { issue: { id: "I_1" } } } };
+            return {
+              data: {
+                repository: {
+                  issue: { id: "I_1", projectsV2: { totalCount: 0, nodes: [] } },
+                },
+              },
+            };
           }
           return {
             data: {
-              organization: { projectV2: { id: "PVT_3", number: 3 } },
+              organization: {
+                projectV2: { id: "PVT_3", number: 3, viewerCanUpdate: true },
+              },
               user: { projectV2: null },
             },
           };
@@ -725,7 +807,7 @@ test("REL0-AC2 live addIssueToProject is doctor-gated and idempotent on GraphQL"
   );
 });
 
-test("REL0-AC2 CLI schedule check plans; apply of a missing fake issue fails closed", () => {
+test("CLI scheduling fails closed when the mapped issue is missing", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-schedule-cli-"));
   const ledgerPath = path.join(dir, "implemented.toml");
   fs.writeFileSync(
@@ -756,12 +838,8 @@ sync_to_github = true
     ],
     { encoding: "utf8" },
   );
-  assert.equal(check.status, 0, check.stderr);
-  const planned = JSON.parse(check.stdout);
-  assert.equal(planned.mode, "check");
-  assert.equal(planned.project.number, 3);
-  assert.equal(planned.items[0].gh_issue, 10);
-  assert.deepEqual(planned.views, PROJECT_VIEWS);
+  assert.notEqual(check.status, 0);
+  assert.match(check.stderr, /issue #10 is missing/u);
   const apply = spawnSync(
     process.execPath,
     [

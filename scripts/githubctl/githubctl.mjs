@@ -1,25 +1,26 @@
 #!/usr/bin/env node
 import { GitHubAdapter } from "./adapter.mjs";
-import { ciResult, finalizeLedger, squashLand } from "./ci-land.mjs";
+import { ciResult, finalizeLedger, squashLand, squashLandCapabilities } from "./ci-land.mjs";
 import { createPr } from "./create-pr.mjs";
 import {
   CREATE_PR_CAPABILITIES,
   GitHubDoctor,
   INSPECT_CAPABILITIES,
+  PROJECT_STATUS_CAPABILITIES,
   RELEASE_CUT_CAPABILITIES,
   RELEASE_PLAN_DISPATCH_CAPABILITIES,
   REVIEW_SUMMARY_CAPABILITIES,
   SCHEDULE_CAPABILITIES,
-  SQUASH_LAND_CAPABILITIES,
   SYNC_ISSUES_CAPABILITIES,
 } from "./doctor.mjs";
 import { inspectIssue } from "./inspect.mjs";
+import { projectStatus, projectStatusPreflight } from "./project-status.mjs";
 import { mutationIdentity, PartialFailureError } from "./errors.mjs";
 import { FakeGitHubAdapter } from "./fake.mjs";
 import { reviewSummary } from "./review-summary.mjs";
 import { releaseCut } from "./release-cut.mjs";
 import { releasePlan } from "./release-plan.mjs";
-import { schedule } from "./schedule.mjs";
+import { schedule, schedulePreflight } from "./schedule.mjs";
 import { syncIssues } from "./sync-issues.mjs";
 import { workflowInventory } from "./workflow.mjs";
 
@@ -30,14 +31,16 @@ Commands:
   doctor [--fake] [--owner <owner> --repo <repo>]
   check
   sync-issues --check|--apply --train <train> | --nodes <id,id,...>
-    [--fake] [--owner <owner> --repo <repo>] [--model <name>]
-    [--ledger <path>]
+    [--fake] [--owner <owner> --repo <repo>]
+    [--ledger <path>] [--refresh-content]
+  project-status --check|--apply --node <id> --status in-progress|done
+    [--ledger <path>] [--fake] [--owner <owner> --repo <repo>]
   create-pr --check|--apply --node <id> --title <final conventional commit>
-    --head <branch> [--base <base>] [--body <pr prose>] [--model <name>]
+    --head <branch> [--base <base>] [--body <pr prose>]
     [--ledger <path>] [--write-locator] [--fake]
     [--owner <owner> --repo <repo>]
   review-summary --check|--apply --pr <n> --node <id> --verdict PASS|FAIL
-    --body <human prose> [--findings <json>] [--model <name>]
+    --body <human prose> [--findings <json>]
     [--ledger <path>] [--fake] [--owner <owner> --repo <repo>]
   ci-result --check|--apply --pr <n> [--required <name,name>] [--tama-changed]
     [--fake] [--owner <owner> --repo <repo>]
@@ -51,7 +54,6 @@ Commands:
     [--report-dir <dir>]
   schedule --check|--apply --train <train> | --nodes <id,id,...>
     [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
-    [--set-milestone <title>]
   release-plan --check|--apply --milestone <title>
     [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
     [--findings <json>] [--waive-item <n>] [--dispatch]
@@ -67,10 +69,11 @@ explicit command after cutover.
 doctor validates GitHub authentication, repository access, issue/PR
 mutation capability, and whether Project 3 is readable. It never writes.
 sync-issues --apply is doctor-gated for issues and does not require
-Project 3. create-pr --apply and review-summary --apply are doctor-gated
-for issues and pullRequests and do not require Project 3. squash-land
---apply and release-cut --apply are doctor-gated for pullRequests and do
-not require Project 3.
+Project 3. project-status --apply is doctor-gated for Project 3.
+create-pr --apply and review-summary --apply are doctor-gated for issues
+and pullRequests and do not require Project 3. squash-land --apply is
+doctor-gated for pullRequests and Project 3. release-cut --apply is
+doctor-gated for pullRequests and does not require Project 3.
 schedule --apply requires issues and Project 3.
 release-plan --apply does not write GitHub. --dispatch is the only
 workflow_dispatch path, is never the default, and is doctor-gated for
@@ -81,28 +84,37 @@ Issue create/update and pull-request mutation remain library APIs. Each
 requires mode 'check' or 'apply'; apply is doctor-gated.
 
 sync-issues is occasional one-way DAG/charter-to-GitHub issue sync for an
-explicit train or node set. It never imports GitHub edits.
+explicit train or node set. Normal runs reconcile the versioned label
+catalog and managed issue labels without rewriting issue prose. Creating a
+missing issue or using --refresh-content writes the stable AI-Generated
+footer. It also reconciles catalog-backed milestones and direct blocked-by
+edges. It never imports GitHub edits.
+
+project-status projects local work lifecycle onto Project 3. In Progress
+marks the selected issue and its native parent. Done rolls the parent to
+Done only after every locally mapped child in the train is Done.
 
 create-pr creates one pull request whose title is the planned final
 conventional-commit message and whose body contains exactly the mapped
-Closes #<n> link. Opt-in mappings refresh the issue description; protected
-mappings are not edited. --write-locator sets pull_request on an existing
-implemented row only.
+Closes #<n> link. Protected mappings are not edited. --write-locator sets
+pull_request on an existing implemented row only.
 
 review-summary posts one ordinary ReviewCycleSummary PR comment. Opt-in
-mappings keep exactly one Model line on the issue; protected mappings are
-not edited. P0/P1 findings cannot accept. Apply is doctor-gated for issues
+mappings keep exactly one AI-Generated footer on the issue; protected
+mappings are not edited. P0/P1 findings cannot accept. Apply is doctor-gated for issues
 and pullRequests and does not require Project 3.
 
 ci-result presents the live pull-request check-runs list as CiResult
 evidence without SHA identity. Missing required jobs and unexpected skips
 fail. finalize-ledger updates an existing implemented row only.
-squash-land squash-merges after a successful CiResult. Check plans only.
-Apply is doctor-gated for pullRequests and does not require Project 3.
+squash-land squash-merges after a successful CiResult and then marks the
+mapped issue Done in Project 3. Check plans only. Apply is doctor-gated for
+pullRequests and Project 3.
 There is no post-merge ledger write.
 
-schedule overlays READY mapped issues onto GitHub Project 3. Check plans
-only. Apply is doctor-gated. --set-milestone is the only milestone write.
+schedule overlays READY mapped issues onto GitHub Project 3 and initializes
+unset Project status to Todo. Check plans only. Milestone assignment belongs
+exclusively to sync-issues through each block's gh_milestone field.
 
 inspect retrieves a non-DAG issue, writes a local FeedbackReport, and
 replaces exactly one AI-owned result label when the mapping allows it.
@@ -138,9 +150,8 @@ const VALUE_FLAGS = new Set([
   "--head",
   "--base",
   "--body",
-  "--model",
   "--ledger",
-  "--set-milestone",
+  "--status",
   "--milestone",
   "--pr",
   "--verdict",
@@ -172,6 +183,7 @@ function parseArgs(argv) {
     else if (arg === "--check") flags.add("check");
     else if (arg === "--apply") flags.add("apply");
     else if (arg === "--write-locator") flags.add("write-locator");
+    else if (arg === "--refresh-content") flags.add("refresh-content");
     else if (arg === "--dispatch") flags.add("dispatch");
     else if (arg === "--authorize") flags.add("authorize");
     else if (arg === "--close-milestone") flags.add("close-milestone");
@@ -212,8 +224,6 @@ function runSyncIssues(flags, options) {
   if (hasTrain === hasNodes) {
     throw new Error("sync-issues requires exactly one of --train or --nodes");
   }
-  const model = options.model ?? process.env.GITHUBCTL_MODEL;
-  if (!model) throw new Error("sync-issues requires --model or GITHUBCTL_MODEL");
   const adapter = boundAdapter(flags, options, "sync-issues");
   let clearance;
   if (apply) {
@@ -229,7 +239,7 @@ function runSyncIssues(flags, options) {
     mode: apply ? "apply" : "check",
     train: hasTrain ? options.train : undefined,
     nodes: hasNodes ? options.nodes.split(",").map((id) => id.trim()) : undefined,
-    model,
+    refreshContent: flags.has("refresh-content"),
     ledgerPath: options.ledger,
     clearance,
   });
@@ -271,7 +281,6 @@ function runCreatePr(flags, options) {
     head: options.head,
     base: options.base,
     body: options.body,
-    model: options.model ?? process.env.GITHUBCTL_MODEL,
     ledgerPath: options.ledger,
     writeLocator: flags.has("write-locator"),
     clearance,
@@ -319,7 +328,6 @@ function runReviewSummary(flags, options) {
     verdict: options.verdict,
     body: options.body,
     findings: options.findings,
-    model: options.model ?? process.env.GITHUBCTL_MODEL,
     ledgerPath: options.ledger,
     clearance,
   });
@@ -393,7 +401,9 @@ function runSquashLand(flags, options) {
   const adapter = boundAdapter(flags, options, "squash-land");
   let clearance;
   if (apply) {
-    const doctor = new GitHubDoctor(adapter).check({ require: SQUASH_LAND_CAPABILITIES });
+    const doctor = new GitHubDoctor(adapter).check({
+      require: squashLandCapabilities({ node: options.node, ledgerPath: options.ledger }),
+    });
     if (!doctor.ok) {
       console.log(JSON.stringify(doctor, null, 2));
       return 1;
@@ -466,6 +476,12 @@ function runSchedule(flags, options) {
   if (hasTrain === hasNodes) {
     throw new Error("schedule requires exactly one of --train or --nodes");
   }
+  const selection = {
+    train: hasTrain ? options.train : undefined,
+    nodes: hasNodes ? options.nodes.split(",").map((id) => id.trim()) : undefined,
+    ledgerPath: options.ledger,
+  };
+  const preflight = schedulePreflight(selection);
   const adapter = boundAdapter(flags, options, "schedule");
   let clearance;
   if (apply) {
@@ -479,11 +495,50 @@ function runSchedule(flags, options) {
   const report = schedule({
     adapter,
     mode: apply ? "apply" : "check",
-    train: hasTrain ? options.train : undefined,
-    nodes: hasNodes ? options.nodes.split(",").map((id) => id.trim()) : undefined,
-    ledgerPath: options.ledger,
+    ...selection,
+    preflight,
     clearance,
-    setMilestone: options["set-milestone"],
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return 0;
+}
+
+function runProjectStatus(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) {
+    throw new Error("project-status requires exactly one of --check or --apply");
+  }
+  if (typeof options.node !== "string" || options.node.length === 0) {
+    throw new Error("project-status requires --node");
+  }
+  if (options.status !== "in-progress" && options.status !== "done") {
+    throw new Error("project-status requires --status in-progress|done");
+  }
+  const selection = {
+    node: options.node,
+    status: options.status,
+    ledgerPath: options.ledger,
+  };
+  const preflight = projectStatusPreflight(selection);
+  const adapter = boundAdapter(flags, options, "project-status");
+  let clearance;
+  if (apply) {
+    const doctor = new GitHubDoctor(adapter).check({ require: PROJECT_STATUS_CAPABILITIES });
+    if (!doctor.ok) {
+      console.log(JSON.stringify(doctor, null, 2));
+      return 1;
+    }
+    clearance = doctor.clearance;
+  }
+  const report = projectStatus({
+    adapter,
+    mode: apply ? "apply" : "check",
+    ...selection,
+    preflight,
+    owner: options.owner,
+    repo: options.repo,
+    clearance,
   });
   console.log(JSON.stringify(report, null, 2));
   return 0;
@@ -588,6 +643,7 @@ function main(argv) {
   }
   if (command === "inspect") return runInspect(flags, options);
   if (command === "sync-issues") return runSyncIssues(flags, options);
+  if (command === "project-status") return runProjectStatus(flags, options);
   if (command === "create-pr") return runCreatePr(flags, options);
   if (command === "review-summary") return runReviewSummary(flags, options);
   if (command === "ci-result") return runCiResult(flags, options);
@@ -597,7 +653,7 @@ function main(argv) {
   if (command === "release-plan") return runReleasePlan(flags, options);
   if (command === "release-cut") return runReleaseCut(flags, options);
   throw new Error(
-    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut`,
+    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, project-status, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut`,
   );
 }
 

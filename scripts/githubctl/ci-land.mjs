@@ -14,6 +14,8 @@ import {
   DuplicateError,
   GitHubAdapterError,
   MappingMismatchError,
+  MissingIssueMappingError,
+  PartialFailureError,
 } from "./errors.mjs";
 import {
   assertCommitDate,
@@ -22,6 +24,7 @@ import {
   loadLedgerFile,
 } from "./ledger-write.mjs";
 import { loadAuthority } from "../../roadmap/0.1.0-tama/tools/lib.mjs";
+import { projectStatus } from "./project-status.mjs";
 
 export const TAMA_ROADMAP_JOB = "Tama Roadmap";
 const SQUASH_LAND_NODE_ID = "GH5";
@@ -129,7 +132,13 @@ function implementedLocator(ledger, nodeId) {
   return assertIssueNumber(value, "pull_request");
 }
 
-function requiredSquashAncestors(authority) {
+function requiredSquashAncestors(authority, explicit) {
+  if (explicit != null) {
+    if (!Array.isArray(explicit) || explicit.some((row) => typeof row !== "string" || !row)) {
+      throw new GitHubAdapterError("squashPrerequisites must be an array of node ids");
+    }
+    return [...explicit];
+  }
   const node = authority.nodes.find((row) => row.id === SQUASH_LAND_NODE_ID);
   if (!node) {
     throw new GitHubAdapterError(
@@ -137,6 +146,21 @@ function requiredSquashAncestors(authority) {
     );
   }
   return [...node.predecessors];
+}
+
+function requiredIssueMapping(ledger, nodeId) {
+  const mapping = ledger.github_issue.find((row) => row.node_id === nodeId);
+  if (!mapping) {
+    throw new MissingIssueMappingError(`squash-land requires a local issue mapping for ${nodeId}`);
+  }
+  return mapping;
+}
+
+export function squashLandCapabilities(options) {
+  const authority = options.authority ?? loadAuthority();
+  const ledger = loadLedgerFile(options.ledgerPath ?? authority.ledgerFile);
+  const mapping = requiredIssueMapping(ledger, options.node);
+  return mapping.sync_to_github === true ? ["pullRequests", "projects"] : ["pullRequests"];
 }
 
 export function squashLand(options) {
@@ -160,13 +184,27 @@ export function squashLand(options) {
     );
   }
   const ledger = loadLedgerFile(ledgerPath);
-  assertSyncAncestors(ledger, requiredSquashAncestors(authority));
+  assertSyncAncestors(ledger, requiredSquashAncestors(authority, options.squashPrerequisites));
   const located = implementedLocator(ledger, nodeId);
   if (located !== pr) {
     throw new MappingMismatchError(
       `implemented row ${nodeId} locates pull_request ${located}, not ${pr}`,
     );
   }
+  const issueMapping = requiredIssueMapping(ledger, nodeId);
+  const statusPlan =
+    issueMapping.sync_to_github === false
+      ? { kind: "protected", node_id: nodeId, applied: false }
+      : projectStatus({
+          adapter: options.adapter,
+          authority,
+          ledgerPath,
+          node: nodeId,
+          status: "done",
+          mode: "check",
+          owner: options.owner,
+          repo: options.repo,
+        });
   const ci = ciResult({
     adapter: options.adapter,
     pr,
@@ -186,12 +224,16 @@ export function squashLand(options) {
       merge_method: "squash",
       applied: false,
       node_id: nodeId,
+      project_status: statusPlan,
     };
   }
   if (!options.clearance) {
     throw new DoctorRequiredError("apply requires GitHubDoctor pullRequests clearance");
   }
   assertApplyClearance(mode, options.clearance, "pullRequests", options.adapter);
+  if (issueMapping?.sync_to_github === true) {
+    assertApplyClearance(mode, options.clearance, "projects", options.adapter);
+  }
   if (typeof options.adapter.mergePullRequest !== "function") {
     throw new GitHubAdapterError("adapter.mergePullRequest is required");
   }
@@ -203,6 +245,39 @@ export function squashLand(options) {
     owner: options.owner,
     repo: options.repo,
   });
+  let status = statusPlan;
+  if (issueMapping?.sync_to_github === true) {
+    try {
+      status = projectStatus({
+        adapter: options.adapter,
+        authority,
+        ledgerPath,
+        node: nodeId,
+        status: "done",
+        mode: "apply",
+        owner: options.owner,
+        repo: options.repo,
+        clearance: options.clearance,
+      });
+    } catch (error) {
+      const mergeIdentity = {
+        node_id: nodeId,
+        number: merged.number,
+        kind: merged.kind,
+        mapping_written: true,
+      };
+      throw new PartialFailureError({
+        succeeded:
+          error instanceof PartialFailureError
+            ? [mergeIdentity, ...error.succeeded]
+            : [mergeIdentity],
+        failed:
+          error instanceof PartialFailureError
+            ? error.failed
+            : { operation: { node_id: nodeId, kind: "set-project-status" }, error },
+      });
+    }
+  }
   return {
     mode,
     ok: true,
@@ -211,5 +286,6 @@ export function squashLand(options) {
     merge_method: merged.merge_method,
     applied: merged.applied,
     node_id: nodeId,
+    project_status: status,
   };
 }

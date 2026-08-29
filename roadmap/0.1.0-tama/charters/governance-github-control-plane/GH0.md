@@ -59,11 +59,11 @@ Ratify the minimal GitHub workflow without implementing synchronization. The loc
 
 ## Source-specific scope
 
-- Define separate `[[github_issue]]` rows containing `node_id`, `gh_issue`, and required `sync_to_github`. `true` permits one-way refresh; `false` protects a pre-existing issue. Neither value marks implementation complete.
+- Define separate `[[github_issue]]` rows containing `node_id`, `gh_issue`, and required `sync_to_github`. `true` permits deterministic managed-label sync and explicitly requested one-way content refresh; `false` protects a pre-existing issue. Neither value marks implementation complete.
 - Keep opt-in issue title/body ordinary and human-readable. Synthesize a standalone `Problem`, `Expected outcome`, and three-to-six-bullet `Acceptance` body from the charter and current source; do not copy charter sections, program/DAG wording, abort conditions, budgets, gates, commands, or generic boilerplate. End with `Model: <model name>`. Protected issues remain untouched.
 - Define the agent flow when GitHub control is active: resolve the mapping and create the independently landable node's dedicated worktree/branch before mutation; after the first implementation commit is pushed, open the draft PR with the expected final conventional-commit title and exact `Closes #<gh_issue>` body link. Keep that reviewed PR as the landing candidate and squash-merge it through GitHub; never land locally first and mirror it afterward. Update the useful issue description only when `sync_to_github = true`; never edit a protected issue.
 - Define the finishing flow: before squash/review completion, update the `[[implemented]]` row with message, approximate date, and known PR number.
-- Define an occasional post-train `githubctl sync-issues` command for initial issue creation, later train additions, and explicit in-place refresh after a block rescope/content change. Content flows only from local DAG/charter authority to an opt-in mapped issue. Preserve the issue number and discussion, refuse protected-issue writes, and never import GitHub edits or continuously reconcile.
+- Define an occasional post-train `githubctl sync-issues` command for initial issue creation, later train additions, deterministic managed-label reconciliation, and explicit in-place content refresh after a rescope/content change. Normal sync leaves existing prose untouched; content flows only from local authority to an opt-in mapped issue when refresh is explicit. Preserve the issue number and discussion, refuse protected-issue reads and writes, and never import GitHub edits or continuously reconcile.
 - Do not implement `scripts/githubctl` or inspect live repository configuration in this block.
 
 ## Acceptance IDs and discriminating proof

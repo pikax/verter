@@ -42,30 +42,44 @@ export function mutationIdentity(row) {
   if (typeof row.node_id === "string" && row.node_id.length > 0) identity.node_id = row.node_id;
   if (number != null) identity.number = number;
   if (typeof row.kind === "string" && row.kind.length > 0) identity.kind = row.kind;
-  identity.mapping_written = row.mapping_written === true;
-  if (identity.node_id == null && identity.number == null) return null;
+  if (typeof row.label === "string" && row.label.length > 0) identity.label = row.label;
+  if (typeof row.milestone === "string" && row.milestone.length > 0) {
+    identity.milestone = row.milestone;
+  }
+  if (typeof row.mapping_written === "boolean") {
+    identity.mapping_written = row.mapping_written;
+  }
+  if (
+    identity.node_id == null &&
+    identity.number == null &&
+    identity.label == null &&
+    identity.milestone == null
+  ) {
+    return null;
+  }
   return identity;
 }
 
 export class PartialFailureError extends GitHubAdapterError {
   constructor({ succeeded, failed }) {
-    const identities = (Array.isArray(succeeded) ? succeeded : [])
-      .map(mutationIdentity)
-      .filter(Boolean);
+    const completed = Array.isArray(succeeded) ? succeeded : [];
+    const identities = completed.map(mutationIdentity).filter(Boolean);
     const summary = identities
       .map((row) => {
         const parts = [];
         if (row.node_id) parts.push(row.node_id);
         if (row.number != null) parts.push(`#${row.number}`);
-        if (row.node_id) parts.push(`mapping_written=${row.mapping_written}`);
+        if (row.label) parts.push(row.label);
+        if (row.milestone) parts.push(row.milestone);
+        if (row.mapping_written != null) parts.push(`mapping_written=${row.mapping_written}`);
         return parts.join(" ");
       })
       .join("; ");
     super(
-      `partial GitHub mutation failure after ${succeeded.length} succeeded operation(s)` +
+      `partial GitHub mutation failure after ${completed.length} succeeded operation(s)` +
         (summary ? ` (${summary})` : ""),
     );
-    this.succeeded = succeeded;
+    this.succeeded = completed;
     this.failed = failed;
   }
 }

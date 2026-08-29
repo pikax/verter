@@ -11,7 +11,12 @@ import {
   FakeGitHubAdapter,
   GitHubAdapter,
   GitHubDoctor,
+  labelsForNode,
+  loadIssueContentCatalog,
+  loadIssueLabelCatalog,
+  loadIssueMilestoneCatalog,
   MissingAncestorError,
+  mutationIdentity,
   NotFoundError,
   PartialFailureError,
   PermissionDeniedError,
@@ -20,11 +25,12 @@ import {
   UnstructuredGitHubOutputError,
   lookupIssueMapping,
   renderIssueDescription,
-  syncIssues,
+  syncIssues as syncIssuesImpl,
 } from "../index.mjs";
 import {
   githubIssueByNumber,
   listGitHubIssues,
+  loadAuthority,
   parseToml,
 } from "../../../roadmap/0.1.0-tama/tools/lib.mjs";
 
@@ -33,14 +39,57 @@ const REPO_ROOT = path.resolve(HERE, "../../..");
 const CLI = path.join(HERE, "../githubctl.mjs");
 const TOOLS = path.join(REPO_ROOT, "roadmap/0.1.0-tama/tools");
 const LIVE_LEDGER = path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/implemented.toml");
-const MODEL = "gh2-test-model";
+const AUTHORITY = loadAuthority();
+const LABEL_CATALOG = loadIssueLabelCatalog(AUTHORITY.packageRoot);
+const MILESTONE_CATALOG = loadIssueMilestoneCatalog(AUTHORITY.packageRoot);
+const CLI_CONTENT_NODE = loadIssueContentCatalog(AUTHORITY.packageRoot).issues[0].node_id;
+const ISSUE_CONTENT_CATALOG = {
+  byNode: new Map(
+    AUTHORITY.nodes.map((node) => [
+      node.id,
+      {
+        node_id: node.id,
+        title: "Provide deterministic user-visible behavior",
+        problem:
+          "Current behavior can return inconsistent externally visible results when the affected capability is used across supported inputs. This leaves users with stale or incorrect output, makes the operation unreliable, and prevents maintainers from distinguishing a valid result from an accidental fallback.",
+        expected_outcome:
+          "The capability produces one deterministic result across its supported inputs and preserves the identity and provenance needed by downstream consumers.",
+        acceptance: [
+          "Supported inputs produce deterministic observable results.",
+          "Invalid or incomplete inputs fail without publishing a misleading result.",
+          "Repeated execution preserves the same identity and provenance.",
+        ],
+        technical_context: [],
+      },
+    ]),
+  ),
+};
+const SYNCABLE = AUTHORITY.nodes.find((item) => {
+  const labels = labelsForNode(item, LABEL_CATALOG);
+  return labels.includes("area:tooling") && labels.includes("problem:automation");
+});
+if (!SYNCABLE) throw new Error("expected an automation work item for issue sync tests");
+const SYNCABLE_ID = SYNCABLE.id;
+const SYNCABLE_LABELS = labelsForNode(SYNCABLE, LABEL_CATALOG);
+const MODEL = "test-model";
 
 function fake(options = {}) {
-  return new FakeGitHubAdapter({ owner: "pikax", repo: "verter", ...options });
+  const {
+    repositoryLabels = LABEL_CATALOG.labels,
+    milestones = MILESTONE_CATALOG.milestones,
+    ...rest
+  } = options;
+  return new FakeGitHubAdapter({
+    owner: "pikax",
+    repo: "verter",
+    repositoryLabels,
+    milestones,
+    ...rest,
+  });
 }
 
 function clearanceFor(adapter) {
-  const report = new GitHubDoctor(adapter).check();
+  const report = new GitHubDoctor(adapter).check({ require: ["issues"] });
   assert.equal(report.ok, true, report.errors?.join?.("; ") ?? "doctor failed");
   return report.clearance;
 }
@@ -77,7 +126,11 @@ function readLedger(file) {
 }
 
 function rendered(nodeId = "GH0") {
-  return renderIssueDescription({ nodeId, model: MODEL });
+  return renderIssueDescription({ nodeId, contentCatalog: ISSUE_CONTENT_CATALOG });
+}
+
+function syncIssues(options) {
+  return syncIssuesImpl({ issueContentCatalog: ISSUE_CONTENT_CATALOG, ...options });
 }
 
 const WRITABLE_REPO = {
@@ -162,6 +215,17 @@ test("GH2-AC1 protected mapping is skipped without updateIssue and body is uncha
   );
   assert.equal(adapter.refusals.length, 1);
   assert.equal(adapter.getIssue(7).body, originalBody);
+  assert.throws(
+    () =>
+      adapter.addIssueLabels({
+        number: 7,
+        labels: ["origin:ai"],
+        mapping: { node_id: "synthetic-item", gh_issue: 7, sync_to_github: false },
+        mode: "apply",
+        clearance: clearanceFor(adapter),
+      }),
+    ProtectedMappingError,
+  );
 });
 
 test("GH2-AC2 sync-issues apply requires issues clearance, not Project 3", () => {
@@ -214,12 +278,12 @@ test("GH2-AC1 apply never writes an implemented row", () => {
 
 test("GH2-AC1 rendered body uses the human issue standard and omits charter headings", () => {
   const { title, body } = rendered("GH2");
-  assert.equal(title, "Occasional issue-sync command and local mapping");
+  assert.equal(title, "Provide deterministic user-visible behavior");
   assert.match(body, /^## Problem\n/u);
   assert.match(body, /^## Expected outcome\n/mu);
   assert.match(body, /^## Acceptance\n/mu);
-  assert.match(body, /\nModel: gh2-test-model\n$/u);
-  assert.equal([...body.matchAll(/^Model: /gmu)].length, 1);
+  assert.equal(body.endsWith("\nAI-Generated\n"), true);
+  assert.equal([...body.matchAll(/^AI-Generated$/gmu)].length, 1);
   assert.doesNotMatch(body, /^## Independently acceptable outcome/mu);
   assert.doesNotMatch(body, /^## Source-specific scope/mu);
   assert.doesNotMatch(body, /^## Deletions and forbidden designs/mu);
@@ -247,6 +311,7 @@ test("GH2-AC1 programctl stays GitHub-blind and CLI has no createPullRequest com
   const help = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0, help.stderr);
   assert.match(help.stdout, /sync-issues/u);
+  assert.match(help.stdout, /--refresh-content/u);
   assert.doesNotMatch(help.stdout, /createPullRequest/u);
 });
 
@@ -367,7 +432,325 @@ test("GH2-AC2 missing node creates an issue and writes the returned mapping", ()
   assert.equal(typeof mapped[0].gh_issue, "number");
 });
 
-test("GH2-AC2 opt-in drift updates in place and preserves number and comments", () => {
+test("normal issue sync reconciles owned labels without rewriting prose", () => {
+  const adapter = fake({
+    issues: [
+      {
+        number: 12,
+        title: "maintainer title",
+        body: "maintainer description",
+        labels: ["bug", "ai:confirmed", "area:tooling", "problem:architecture"],
+      },
+    ],
+  });
+  const ledgerPath = writeLedger({
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true }],
+  });
+
+  const report = syncIssues({
+    adapter,
+    mode: "apply",
+    nodes: [SYNCABLE_ID],
+    ledgerPath,
+    clearance: clearanceFor(adapter),
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(adapter.getIssue(12).title, "maintainer title");
+  assert.equal(adapter.getIssue(12).body, "maintainer description");
+  assert.deepEqual(adapter.getIssueLabels(12).sort(), [
+    "ai:confirmed",
+    "area:tooling",
+    "bug",
+    "origin:ai",
+    "problem:automation",
+  ]);
+  assert.deepEqual(report.updated, [
+    {
+      node_id: SYNCABLE_ID,
+      gh_issue: 12,
+      content: false,
+      labels: true,
+    },
+  ]);
+});
+
+test("a partially applied label reconciliation reports the completed mutation", () => {
+  const adapter = fake({
+    failOnApply: 1,
+    failOnApplyError: new PermissionDeniedError("configured label removal failure"),
+    issues: [
+      {
+        number: 12,
+        title: "title",
+        body: "body",
+        labels: ["problem:architecture"],
+      },
+    ],
+  });
+  const ledgerPath = writeLedger({
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true }],
+  });
+
+  assert.throws(
+    () =>
+      syncIssues({
+        adapter,
+        mode: "apply",
+        nodes: [SYNCABLE_ID],
+        ledgerPath,
+        clearance: clearanceFor(adapter),
+      }),
+    (error) => {
+      assert.equal(error instanceof PartialFailureError, true);
+      assert.deepEqual(error.succeeded, [
+        {
+          node_id: SYNCABLE_ID,
+          gh_issue: 12,
+          kind: "add-issue-labels",
+          mapping_written: true,
+        },
+      ]);
+      assert.equal(error.failed.error instanceof PermissionDeniedError, true);
+      return true;
+    },
+  );
+});
+
+test("explicit content refresh updates prose and managed labels together", () => {
+  const adapter = fake({
+    issues: [
+      {
+        number: 12,
+        title: "maintainer title",
+        body: "maintainer description",
+        labels: ["problem:architecture"],
+      },
+    ],
+  });
+  const ledgerPath = writeLedger({
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true }],
+  });
+  const expected = rendered(SYNCABLE_ID);
+
+  const report = syncIssues({
+    adapter,
+    mode: "apply",
+    nodes: [SYNCABLE_ID],
+    model: MODEL,
+    refreshContent: true,
+    ledgerPath,
+    clearance: clearanceFor(adapter),
+  });
+
+  assert.equal(adapter.getIssue(12).title, expected.title);
+  assert.equal(adapter.getIssue(12).body, expected.body);
+  assert.deepEqual(adapter.getIssueLabels(12).sort(), [
+    "area:tooling",
+    "origin:ai",
+    "problem:automation",
+  ]);
+  assert.deepEqual(report.updated, [
+    {
+      node_id: SYNCABLE_ID,
+      gh_issue: 12,
+      content: true,
+      labels: true,
+    },
+  ]);
+});
+
+test("content refresh does not require a model", () => {
+  const adapter = fake({
+    issues: [
+      {
+        number: 12,
+        title: "title",
+        body: "body",
+        labels: ["area:tooling", "problem:automation", "origin:ai"],
+      },
+    ],
+  });
+  const mappedLedger = writeLedger({
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true }],
+  });
+  const checked = syncIssues({
+    adapter,
+    mode: "check",
+    nodes: [SYNCABLE_ID],
+    ledgerPath: mappedLedger,
+  });
+  assert.deepEqual(checked.current, [
+    {
+      node_id: SYNCABLE_ID,
+      gh_issue: 12,
+      blocked_by_unmapped: [...SYNCABLE.predecessors],
+      blocked_by_protected: [],
+    },
+  ]);
+  const refreshed = syncIssues({
+    adapter,
+    mode: "apply",
+    nodes: [SYNCABLE_ID],
+    refreshContent: true,
+    ledgerPath: mappedLedger,
+    clearance: clearanceFor(adapter),
+  });
+  assert.equal(refreshed.ok, true);
+  assert.match(adapter.getIssue(12).body, /\nAI-Generated\n$/u);
+
+  const missing = syncIssues({
+    adapter: fake(),
+    mode: "check",
+    nodes: [SYNCABLE_ID],
+    ledgerPath: writeLedger(),
+  });
+  assert.equal(missing.missing[0].node_id, SYNCABLE_ID);
+  assert.deepEqual(missing.missing[0].labels, SYNCABLE_LABELS);
+  assert.equal(missing.missing[0].content_required, true);
+});
+
+test("issue sync creates and updates the versioned repository label catalog", () => {
+  const adapter = fake({
+    repositoryLabels: [
+      {
+        name: "area:tooling",
+        color: "ffffff",
+        description: "stale description",
+      },
+      { name: "bug", color: "d73a4a", description: "preserve me" },
+    ],
+    issues: [{ number: 12, title: "title", body: "body", labels: [] }],
+  });
+  const ledgerPath = writeLedger({
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true }],
+  });
+
+  syncIssues({
+    adapter,
+    mode: "apply",
+    nodes: [SYNCABLE_ID],
+    ledgerPath,
+    clearance: clearanceFor(adapter),
+  });
+
+  const labels = adapter.getRepositoryLabels();
+  assert.equal(labels.length, LABEL_CATALOG.labels.length + 1);
+  assert.deepEqual(
+    labels.find((label) => label.name === "area:tooling"),
+    LABEL_CATALOG.labels.find((label) => label.name === "area:tooling"),
+  );
+  assert.deepEqual(
+    labels.find((label) => label.name === "bug"),
+    {
+      name: "bug",
+      color: "d73a4a",
+      description: "preserve me",
+    },
+  );
+});
+
+test("a partially created repository catalog reports stable label identities", () => {
+  const adapter = fake({
+    repositoryLabels: [],
+    failOnApply: 1,
+    failOnApplyError: new PermissionDeniedError("configured catalog failure"),
+    issues: [
+      {
+        number: 12,
+        title: "title",
+        body: "body",
+        labels: ["area:tooling", "problem:automation", "origin:ai"],
+      },
+    ],
+  });
+  const ledgerPath = writeLedger({
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true }],
+  });
+
+  assert.throws(
+    () =>
+      syncIssues({
+        adapter,
+        mode: "apply",
+        nodes: [SYNCABLE_ID],
+        ledgerPath,
+        clearance: clearanceFor(adapter),
+      }),
+    (error) => {
+      assert.equal(error instanceof PartialFailureError, true);
+      assert.deepEqual(error.succeeded, [
+        { kind: "create-repository-label", label: "area:compiler" },
+      ]);
+      assert.deepEqual(error.failed.operation, {
+        kind: "create-repository-label",
+        label: "area:identity",
+      });
+      return true;
+    },
+  );
+});
+
+test("completed catalog writes remain reportable when issue assignment fails", () => {
+  const adapter = fake({
+    repositoryLabels: [],
+    failOnApply: LABEL_CATALOG.labels.length,
+    failOnApplyError: new PermissionDeniedError("configured issue assignment failure"),
+    issues: [{ number: 12, title: "title", body: "body", labels: [] }],
+  });
+  const ledgerPath = writeLedger({
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true }],
+  });
+
+  assert.throws(
+    () =>
+      syncIssues({
+        adapter,
+        mode: "apply",
+        nodes: [SYNCABLE_ID],
+        ledgerPath,
+        clearance: clearanceFor(adapter),
+      }),
+    (error) => {
+      assert.equal(error instanceof PartialFailureError, true);
+      assert.deepEqual(
+        error.succeeded,
+        LABEL_CATALOG.labels.map((label) => ({
+          kind: "create-repository-label",
+          label: label.name,
+        })),
+      );
+      assert.deepEqual(mutationIdentity(error.succeeded[0]), {
+        kind: "create-repository-label",
+        label: LABEL_CATALOG.labels[0].name,
+      });
+      assert.deepEqual(
+        mutationIdentity({
+          kind: "create-repository-milestone",
+          milestone: "0.0.1-beta.6",
+        }),
+        {
+          kind: "create-repository-milestone",
+          milestone: "0.0.1-beta.6",
+        },
+      );
+      assert.equal(error.failed.error instanceof PermissionDeniedError, true);
+      return true;
+    },
+  );
+});
+
+test("label classification is deterministic and complete for every work item", () => {
+  for (const item of AUTHORITY.nodes) {
+    const labels = labelsForNode(item, LABEL_CATALOG);
+    assert.equal(labels.filter((label) => label.startsWith("area:")).length, 1);
+    assert.equal(labels.filter((label) => label.startsWith("problem:")).length, 1);
+    assert.equal(labels.filter((label) => label.startsWith("framework:")).length <= 1, true);
+    assert.equal(labels.includes("origin:ai"), true);
+  }
+});
+
+test("explicit content refresh preserves issue identity and discussion", () => {
   const adapter = fake({
     issues: [
       {
@@ -378,23 +761,27 @@ test("GH2-AC2 opt-in drift updates in place and preserves number and comments", 
           { id: 1, body: "first" },
           { id: 2, body: "second" },
         ],
+        labels: ["area:tooling", "problem:automation", "origin:ai"],
       },
     ],
   });
   const ledgerPath = writeLedger({
-    issues: [{ node_id: "GH1", gh_issue: 12, sync_to_github: true }],
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true }],
   });
-  const { title, body } = rendered("GH1");
+  const { title, body } = rendered(SYNCABLE_ID);
   const report = syncIssues({
     adapter,
     mode: "apply",
-    nodes: ["GH1"],
+    nodes: [SYNCABLE_ID],
     model: MODEL,
+    refreshContent: true,
     ledgerPath,
     clearance: clearanceFor(adapter),
   });
   assert.equal(report.ok, true);
-  assert.deepEqual(report.updated, [{ node_id: "GH1", gh_issue: 12 }]);
+  assert.deepEqual(report.updated, [
+    { node_id: SYNCABLE_ID, gh_issue: 12, content: true, labels: false },
+  ]);
   assert.equal(
     adapter.reads.some((row) => row.kind === "get-issue" && row.number === 12),
     true,
@@ -408,7 +795,7 @@ test("GH2-AC2 opt-in drift updates in place and preserves number and comments", 
     { id: 2, body: "second" },
   ]);
   assert.deepEqual(listGitHubIssues(readLedger(ledgerPath)), [
-    { node_id: "GH1", gh_issue: 12, sync_to_github: true },
+    { node_id: SYNCABLE_ID, gh_issue: 12, sync_to_github: true },
   ]);
 });
 
@@ -416,8 +803,18 @@ test("GH2-AC2 check reports missing vs drift vs protected", () => {
   const { title, body } = rendered("GH0");
   const adapter = fake({
     issues: [
-      { number: 10, title, body },
-      { number: 11, title: "stale", body: "stale" },
+      {
+        number: 10,
+        title,
+        body,
+        labels: ["area:tooling", "problem:automation", "origin:ai"],
+      },
+      {
+        number: 11,
+        title: "stale",
+        body: "stale",
+        labels: ["area:tooling", "problem:automation", "origin:ai"],
+      },
       { number: 12, title: "protected", body: "do not read" },
     ],
   });
@@ -433,6 +830,7 @@ test("GH2-AC2 check reports missing vs drift vs protected", () => {
     mode: "check",
     nodes: ["GH0", "GH1", "GH2", "GH3"],
     model: MODEL,
+    refreshContent: true,
     ledgerPath,
   });
   assert.deepEqual(
@@ -606,12 +1004,12 @@ test("GH2-AC2 train selection enumerates only that train in deterministic order"
   assert.equal(other.selection.includes("GH0"), false);
 });
 
-test("GH2-AC2 body ends with exactly one Model line from --model", () => {
+test("generated issue body ends with exactly one provenance footer", () => {
   const { body } = rendered("GH0");
   const lines = body.split("\n");
   assert.equal(lines.at(-1), "");
-  assert.equal(lines.at(-2), `Model: ${MODEL}`);
-  assert.equal(lines.filter((line) => /^Model: /u.test(line)).length, 1);
+  assert.equal(lines.at(-2), "AI-Generated");
+  assert.equal(lines.filter((line) => line === "AI-Generated").length, 1);
 });
 
 test("GH2-AC1 missing GH1 ancestor aborts without writing", () => {
@@ -686,6 +1084,7 @@ test("GH2 apply aborts a PR-shaped mapped GET without PATCH", () => {
   const transport = liveTransport({
     "GET /user": { login: "alice" },
     "GET /repos/pikax/verter": WRITABLE_REPO,
+    "GET /repos/pikax/verter/labels?per_page=100": LABEL_CATALOG.labels,
     "GET /repos/pikax/verter/issues/15": {
       number: 15,
       title: "PR title",
@@ -766,10 +1165,12 @@ test("GH2 create that cannot write its mapping still reports the GitHub identity
 });
 
 test("GH2 CLI prints PartialFailureError identity rows without titles", () => {
+  const selectedId = CLI_CONTENT_NODE;
+  const protectedId = AUTHORITY.nodes.find((item) => item.id !== selectedId).id;
   const ledgerPath = writeLedger({
-    issues: [{ node_id: "GH1", gh_issue: 1, sync_to_github: false }],
+    issues: [{ node_id: protectedId, gh_issue: 1, sync_to_github: false }],
   });
-  const { title } = rendered("GH0");
+  const { title } = rendered(selectedId);
   const result = spawnSync(
     process.execPath,
     [
@@ -778,9 +1179,7 @@ test("GH2 CLI prints PartialFailureError identity rows without titles", () => {
       "--apply",
       "--fake",
       "--nodes",
-      "GH0",
-      "--model",
-      MODEL,
+      selectedId,
       "--ledger",
       ledgerPath,
       "--owner",
@@ -798,12 +1197,30 @@ test("GH2 CLI prints PartialFailureError identity rows without titles", () => {
     .map((line) => line.trim())
     .filter((line) => line.startsWith("{"))
     .map((line) => JSON.parse(line));
-  assert.equal(identities.length, 1);
-  assert.equal(identities[0].node_id, "GH0");
-  assert.equal(identities[0].number, 1);
-  assert.equal(identities[0].mapping_written, false);
-  assert.equal(identities[0].title, undefined);
-  assert.equal(identities[0].body, undefined);
+  assert.equal(
+    identities.length,
+    LABEL_CATALOG.labels.length + MILESTONE_CATALOG.milestones.length + 1,
+  );
+  assert.deepEqual(
+    identities.slice(0, LABEL_CATALOG.labels.length),
+    LABEL_CATALOG.labels.map((label) => ({
+      kind: "create-repository-label",
+      label: label.name,
+    })),
+  );
+  assert.deepEqual(
+    identities.slice(LABEL_CATALOG.labels.length, -1),
+    MILESTONE_CATALOG.milestones.map((milestone) => ({
+      kind: "create-repository-milestone",
+      milestone: milestone.title,
+    })),
+  );
+  const issueIdentity = identities.at(-1);
+  assert.equal(issueIdentity.node_id, selectedId);
+  assert.equal(issueIdentity.number, 1);
+  assert.equal(issueIdentity.mapping_written, false);
+  assert.equal(issueIdentity.title, undefined);
+  assert.equal(issueIdentity.body, undefined);
 });
 
 test("GH2 live getIssue reads JSON number/title/body and does not classify payload.status", () => {
@@ -836,11 +1253,77 @@ test("GH2 live getIssue reads JSON number/title/body and does not classify paylo
   assert.throws(() => adapter.getIssue("4"), /positive safe integer/u);
 });
 
+test("live label mutations use additive and single-label endpoints", () => {
+  const desired = LABEL_CATALOG.labels.find((label) => label.name === "area:tooling");
+  const transport = liveTransport({
+    "GET /user": { login: "alice" },
+    "GET /repos/pikax/verter": WRITABLE_REPO,
+    "GET /repos/pikax/verter/labels?per_page=100": [
+      { name: "area:tooling", color: "ffffff", description: "old" },
+    ],
+    "POST /repos/pikax/verter/labels": desired,
+    "PATCH /repos/pikax/verter/labels/area%3Atooling": desired,
+    "POST /repos/pikax/verter/issues/4/labels": [desired],
+    "DELETE /repos/pikax/verter/issues/4/labels/problem%3Aarchitecture": [desired],
+  });
+  const adapter = new GitHubAdapter({ owner: "pikax", repo: "verter", transport });
+  const clearance = clearanceFor(adapter);
+  const mapping = { node_id: "test", gh_issue: 4, sync_to_github: true };
+  transport.calls.length = 0;
+
+  assert.deepEqual(adapter.getRepositoryLabels(), [
+    { name: "area:tooling", color: "ffffff", description: "old" },
+  ]);
+  adapter.createRepositoryLabel({ label: desired, mode: "apply", clearance });
+  adapter.updateRepositoryLabel({
+    existing: "area:tooling",
+    label: desired,
+    mode: "apply",
+    clearance,
+  });
+  adapter.addIssueLabels({
+    number: 4,
+    labels: ["area:tooling"],
+    mapping,
+    mode: "apply",
+    clearance,
+  });
+  adapter.removeIssueLabel({
+    number: 4,
+    label: "problem:architecture",
+    mapping,
+    mode: "apply",
+    clearance,
+  });
+
+  assert.deepEqual(
+    transport.calls.map(({ method, path }) => `${method} ${path}`),
+    [
+      "GET /repos/pikax/verter/labels?per_page=100",
+      "POST /repos/pikax/verter/labels",
+      "PATCH /repos/pikax/verter/labels/area%3Atooling",
+      "POST /repos/pikax/verter/issues/4/labels",
+      "DELETE /repos/pikax/verter/issues/4/labels/problem%3Aarchitecture",
+    ],
+  );
+  assert.deepEqual(transport.calls[1].body, desired);
+  assert.deepEqual(transport.calls[2].body, {
+    new_name: desired.name,
+    color: desired.color,
+    description: desired.description,
+  });
+  assert.deepEqual(transport.calls[3].body, { labels: ["area:tooling"] });
+  assert.equal(
+    transport.calls.some((call) => call.method === "PUT"),
+    false,
+  );
+});
+
 test("GH2 CLI sync-issues --check and --apply require an explicit selection and --fake", () => {
   const ledgerPath = writeLedger();
   const missingMode = spawnSync(
     process.execPath,
-    [CLI, "sync-issues", "--fake", "--nodes", "GH0"],
+    [CLI, "sync-issues", "--fake", "--nodes", CLI_CONTENT_NODE],
     {
       encoding: "utf8",
     },
@@ -855,9 +1338,7 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
       "--check",
       "--fake",
       "--nodes",
-      "GH0",
-      "--model",
-      MODEL,
+      CLI_CONTENT_NODE,
       "--ledger",
       ledgerPath,
       "--owner",
@@ -872,9 +1353,33 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
   assert.equal(checked.mode, "check");
   assert.deepEqual(
     checked.missing.map((row) => row.node_id),
-    ["GH0"],
+    [CLI_CONTENT_NODE],
   );
   assert.equal(fs.readFileSync(ledgerPath, "utf8").includes("[[github_issue]]"), false);
+  const refreshLedger = writeLedger({
+    issues: [{ node_id: SYNCABLE_ID, gh_issue: 1, sync_to_github: true }],
+  });
+  const refreshWithoutModel = spawnSync(
+    process.execPath,
+    [
+      CLI,
+      "sync-issues",
+      "--apply",
+      "--fake",
+      "--nodes",
+      SYNCABLE_ID,
+      "--refresh-content",
+      "--ledger",
+      refreshLedger,
+      "--owner",
+      "pikax",
+      "--repo",
+      "verter",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(refreshWithoutModel.status, 0);
+  assert.doesNotMatch(refreshWithoutModel.stderr, /requires a model/u);
   const apply = spawnSync(
     process.execPath,
     [
@@ -883,9 +1388,7 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
       "--apply",
       "--fake",
       "--nodes",
-      "GH0",
-      "--model",
-      MODEL,
+      CLI_CONTENT_NODE,
       "--ledger",
       ledgerPath,
       "--owner",
@@ -900,7 +1403,7 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
   assert.equal(applied.created[0].gh_issue, 1);
   assert.equal(applied.created[0].mapping_written, true);
   assert.deepEqual(listGitHubIssues(readLedger(ledgerPath)), [
-    { node_id: "GH0", gh_issue: 1, sync_to_github: true },
+    { node_id: CLI_CONTENT_NODE, gh_issue: 1, sync_to_github: true },
   ]);
 });
 

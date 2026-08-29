@@ -13,6 +13,8 @@ import {
   GitHubAdapter,
   GitHubDoctor,
   MappingMismatchError,
+  MissingIssueMappingError,
+  PartialFailureError,
   ciResult,
   finalizeLedger,
   squashLand,
@@ -62,6 +64,8 @@ function writeLedger(options = {}) {
   const locators = options.locators ?? {};
   const messages = options.messages ?? {};
   const dates = options.dates ?? {};
+  const issueNode = options.issueNode ?? implemented.at(-1);
+  const issues = options.issues ?? [{ node_id: issueNode, gh_issue: 4, sync_to_github: false }];
   const parts = [
     "schema = 1",
     "",
@@ -71,6 +75,13 @@ function writeLedger(options = {}) {
         message: messages[id],
         date: dates[id],
       }),
+    ),
+    ...issues.map(
+      (row) => `[[github_issue]]
+node_id = "${row.node_id}"
+gh_issue = ${row.gh_issue}
+sync_to_github = ${row.sync_to_github}
+`,
     ),
   ];
   fs.writeFileSync(file, parts.join("\n"));
@@ -84,6 +95,10 @@ function readLedger(file) {
 function seeded(options = {}) {
   return fake({
     nextNumber: options.nextNumber ?? 11,
+    issues: options.issues,
+    projectItems: options.projectItems,
+    projectStatuses: options.projectStatuses,
+    failOnApply: options.failOnApply,
     pullRequests: options.pullRequests ?? [
       {
         number: PR_NUMBER,
@@ -196,6 +211,8 @@ function squashOptions(adapter, extra = {}) {
     owner: extra.owner,
     repo: extra.repo,
     clearance: extra.clearance,
+    authority: extra.authority,
+    squashPrerequisites: extra.squashPrerequisites,
     mode: extra.mode,
   };
 }
@@ -276,6 +293,103 @@ test("GH5-AC1 squash-land with failed CI aborts without merging", () => {
   assert.deepEqual(adapter.inspectState(), before);
   assert.equal(adapter.inspectState().merges.length, 0);
   assert.equal(fs.readFileSync(ledgerPath, "utf8"), beforeLedger);
+});
+
+test("squash landing refuses a candidate without a mapped issue", () => {
+  const adapter = seeded();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-missing-mapping-"));
+  const ledgerPath = path.join(dir, "implemented.toml");
+  fs.writeFileSync(
+    ledgerPath,
+    `schema = 1
+
+[[implemented]]
+node_id = "WORK"
+commit_message = "test locator"
+commit_date = "2026-08-29T00:00:00+00:00"
+pull_request = ${PR_NUMBER}
+`,
+  );
+  const authority = {
+    nodes: [{ id: "WORK", predecessors: [], train: "test" }],
+    ledgerFile: path.join(dir, "live-implemented.toml"),
+  };
+  assert.throws(
+    () =>
+      squashLand(
+        squashOptions(adapter, {
+          mode: "check",
+          node: "WORK",
+          ledgerPath,
+          authority,
+          squashPrerequisites: [],
+          requiredJobs: [TAMA_ROADMAP],
+        }),
+      ),
+    MissingIssueMappingError,
+  );
+  assert.deepEqual(adapter.inspectState().merges, []);
+});
+
+test("post-merge failure reports both merge and completed child status", () => {
+  const adapter = seeded({
+    issues: [
+      { number: 4, title: "Work", body: "work", parent: 5 },
+      { number: 5, title: "Parent", body: "parent", subIssues: [4] },
+    ],
+    projectItems: [4, 5],
+    projectStatuses: { 4: "In Progress", 5: "In Progress" },
+    failOnApply: 2,
+  });
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-partial-status-"));
+  const ledgerPath = path.join(dir, "implemented.toml");
+  fs.writeFileSync(
+    ledgerPath,
+    `schema = 1
+
+[[implemented]]
+node_id = "WORK"
+commit_message = "test locator"
+commit_date = "2026-08-29T00:00:00+00:00"
+pull_request = ${PR_NUMBER}
+
+[[github_issue]]
+node_id = "WORK"
+gh_issue = 4
+sync_to_github = true
+`,
+  );
+  const authority = {
+    nodes: [{ id: "WORK", predecessors: [], train: "test" }],
+    ledgerFile: path.join(dir, "live-implemented.toml"),
+  };
+  assert.throws(
+    () =>
+      squashLand(
+        squashOptions(adapter, {
+          mode: "apply",
+          node: "WORK",
+          ledgerPath,
+          authority,
+          squashPrerequisites: [],
+          requiredJobs: [TAMA_ROADMAP],
+          clearance: clearanceFor(adapter, ["pullRequests", "projects"]),
+        }),
+      ),
+    (error) => {
+      assert.equal(error instanceof PartialFailureError, true, `${error.name}: ${error.message}`);
+      assert.deepEqual(
+        error.succeeded.map((row) => [row.kind, row.number]),
+        [
+          ["squash-merge", PR_NUMBER],
+          ["set-project-status", 4],
+        ],
+      );
+      return true;
+    },
+  );
+  assert.equal(adapter.getProjectStatus(4), "Done");
+  assert.equal(adapter.getProjectStatus(5), "In Progress");
 });
 
 test("GH5-AC1 CiResult public fields omit SHA identity and landing receipts", () => {

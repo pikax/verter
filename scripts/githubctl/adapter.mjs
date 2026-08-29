@@ -33,15 +33,17 @@ export const PROJECT_VIEWS = Object.freeze([
 ]);
 
 const PROJECT_LOOKUP_QUERY =
-  "query($login:String!,$number:Int!){organization(login:$login){projectV2(number:$number){id number}}user(login:$login){projectV2(number:$number){id number}}}";
+  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){owner{... on Organization{projectV2(number:$number){id number viewerCanUpdate}}... on User{projectV2(number:$number){id number viewerCanUpdate}}}}}";
 const ISSUE_ID_QUERY =
-  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id projectsV2(first:100){nodes{id number}}} pullRequest(number:$number){id}}}";
+  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id projectsV2(first:100){totalCount nodes{id number}}} pullRequest(number:$number){id}}}";
 const ADD_ITEM_MUTATION =
   "mutation($projectId:ID!,$contentId:ID!){addProjectV2ItemById(input:{projectId:$projectId,contentId:$contentId}){item{id}}}";
-const MILESTONE_QUERY =
-  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id} pullRequest(number:$number){id} milestones(first:100,states:[OPEN,CLOSED]){nodes{id title}}}}";
-const SET_MILESTONE_MUTATION =
-  "mutation($id:ID!,$milestoneId:ID){updateIssue(input:{id:$id,milestoneId:$milestoneId}){issue{number}}}";
+const PROJECT_STATUS_FIELD_QUERY =
+  "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){owner{... on Organization{projectV2(number:$number){id number viewerCanUpdate fields(first:100){totalCount nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}... on User{projectV2(number:$number){id number viewerCanUpdate fields(first:100){totalCount nodes{... on ProjectV2SingleSelectField{id name options{id name}}}}}}}}}";
+const ISSUE_PROJECT_STATE_QUERY =
+  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){id number parent{id number repository{name owner{login}}} projectItems(first:100){totalCount nodes{id project{id number} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name optionId}}}} subIssues(first:100){totalCount nodes{id number repository{name owner{login}} projectItems(first:100){totalCount nodes{id project{id number} fieldValueByName(name:"Status"){... on ProjectV2ItemFieldSingleSelectValue{name optionId}}}}}}}}}';
+const SET_PROJECT_STATUS_MUTATION =
+  "mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$optionId:String!){updateProjectV2ItemFieldValue(input:{projectId:$projectId,itemId:$itemId,fieldId:$fieldId,value:{singleSelectOptionId:$optionId}}){projectV2Item{id}}}";
 
 const MINTED_CLEARANCES = new WeakMap();
 const OWNER_REPO = /^[A-Za-z0-9_.-]+$/;
@@ -271,6 +273,157 @@ export function parseLabelsPayload(payload) {
   });
 }
 
+function parseRepositoryLabel(row, index = 0) {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) {
+    throw new UnstructuredGitHubOutputError(`GitHub label ${index} is not a JSON object`);
+  }
+  if (typeof row.name !== "string" || row.name.length === 0) {
+    throw new UnstructuredGitHubOutputError("GitHub label name is not a string");
+  }
+  if (typeof row.color !== "string" || !/^[0-9a-f]{6}$/iu.test(row.color)) {
+    throw new UnstructuredGitHubOutputError(`GitHub label ${row.name} color is invalid`);
+  }
+  const description = row.description == null ? "" : row.description;
+  if (typeof description !== "string") {
+    throw new UnstructuredGitHubOutputError(`GitHub label ${row.name} description is invalid`);
+  }
+  return { name: row.name, color: row.color.toLowerCase(), description };
+}
+
+export function parseRepositoryLabelsPayload(payload) {
+  if (!Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub repository labels response is not an array");
+  }
+  return payload.map(parseRepositoryLabel);
+}
+
+function assertLabelDefinition(label) {
+  if (label === null || typeof label !== "object" || Array.isArray(label)) {
+    throw new GitHubAdapterError("repository label definition is required");
+  }
+  assertRequiredText(label.name, "repository label name");
+  if (typeof label.color !== "string" || !/^[0-9a-f]{6}$/iu.test(label.color)) {
+    throw new GitHubAdapterError("repository label color must be six hexadecimal characters");
+  }
+  if (typeof label.description !== "string" || label.description.length > 100) {
+    throw new GitHubAdapterError("repository label description must be at most 100 characters");
+  }
+  return {
+    name: label.name,
+    color: label.color.toLowerCase(),
+    description: label.description,
+  };
+}
+
+export function planCreateRepositoryLabel(label) {
+  return { kind: "create-repository-label", label, applied: false };
+}
+
+export function prepareCreateRepositoryLabel(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const label = assertLabelDefinition(request.label);
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, label };
+}
+
+export function planUpdateRepositoryLabel(existing, label) {
+  return { kind: "update-repository-label", existing, label, applied: false };
+}
+
+function assertMilestoneDefinition(milestone) {
+  if (milestone === null || typeof milestone !== "object" || Array.isArray(milestone)) {
+    throw new GitHubAdapterError("repository milestone definition is required");
+  }
+  assertRequiredText(milestone.title, "repository milestone title");
+  assertRequiredText(milestone.description, "repository milestone description");
+  return { title: milestone.title, description: milestone.description };
+}
+
+export function planCreateRepositoryMilestone(milestone) {
+  return { kind: "create-repository-milestone", milestone, applied: false };
+}
+
+export function prepareCreateRepositoryMilestone(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const milestone = assertMilestoneDefinition(request.milestone);
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, milestone };
+}
+
+export function planUpdateRepositoryMilestone(existing, milestone) {
+  return { kind: "update-repository-milestone", existing, milestone, applied: false };
+}
+
+export function prepareUpdateRepositoryMilestone(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const existing = request.existing;
+  if (existing === null || typeof existing !== "object" || Array.isArray(existing)) {
+    throw new GitHubAdapterError("existing repository milestone is required");
+  }
+  const number = assertIssueNumber(existing.number, "milestone number");
+  const milestone = assertMilestoneDefinition(request.milestone);
+  assertRequiredText(existing.title, "existing milestone title");
+  if (existing.title !== milestone.title) {
+    throw new GitHubAdapterError("repository milestone title is immutable catalog identity");
+  }
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, number, milestone, patch: { description: milestone.description } };
+}
+
+export function prepareUpdateRepositoryLabel(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const existing = requiredLabelName(request.existing, "existing repository label name");
+  const label = assertLabelDefinition(request.label);
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, existing, label };
+}
+
+function requiredLabelName(value, description = "label name") {
+  assertRequiredText(value, description);
+  return value;
+}
+
+function prepareIssueLabelMutation(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const number = assertIssueNumber(request.number);
+  if (mappingPolicy(request.mapping, number) === "protected") {
+    throw new ProtectedMappingError(
+      `refusing label update of protected issue #${number} (${request.mapping.node_id})`,
+    );
+  }
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, number };
+}
+
+export function prepareAddIssueLabels(adapter, request) {
+  const prepared = prepareIssueLabelMutation(adapter, request);
+  if (!Array.isArray(request.labels) || request.labels.length === 0) {
+    throw new GitHubAdapterError("issue labels to add must be a non-empty array");
+  }
+  const labels = request.labels.map((label) => requiredLabelName(label));
+  return { ...prepared, labels };
+}
+
+export function planAddIssueLabels(number, labels) {
+  return { kind: "add-issue-labels", number, labels, applied: false };
+}
+
+export function prepareRemoveIssueLabel(adapter, request) {
+  return {
+    ...prepareIssueLabelMutation(adapter, request),
+    label: requiredLabelName(request.label),
+  };
+}
+
+export function planRemoveIssueLabel(number, label) {
+  return { kind: "remove-issue-label", number, label, applied: false };
+}
+
 export function planSetAiResultLabel(number, label) {
   return { kind: "set-ai-result-label", number, label, applied: false };
 }
@@ -314,7 +467,9 @@ export function parseIssuePayload(payload, expectedNumber) {
   }
   const result = { number, title: payload.title, body };
   const milestone = payload.milestone;
-  if (milestone && typeof milestone === "object" && typeof milestone.title === "string") {
+  if (typeof milestone === "string" && milestone.length > 0) {
+    result.milestone = milestone;
+  } else if (milestone && typeof milestone === "object" && typeof milestone.title === "string") {
     result.milestone = milestone.title;
   }
   return result;
@@ -332,7 +487,57 @@ export function parseMilestoneListPayload(payload) {
     if (typeof row.title !== "string" || row.title.length === 0) {
       throw new UnstructuredGitHubOutputError("GitHub milestone title is not a string");
     }
-    return { number, title: row.title };
+    const description = row.description == null ? "" : row.description;
+    if (typeof description !== "string") {
+      throw new UnstructuredGitHubOutputError(
+        `GitHub milestone ${row.title} description is invalid`,
+      );
+    }
+    if (row.state != null && row.state !== "open" && row.state !== "closed") {
+      throw new UnstructuredGitHubOutputError(`GitHub milestone ${row.title} state is invalid`);
+    }
+    return {
+      number,
+      title: row.title,
+      description,
+      ...(row.state == null ? {} : { state: row.state }),
+      ...(row.due_on == null ? {} : { due_on: row.due_on }),
+    };
+  });
+}
+
+export function parseIssueDependenciesPayload(payload) {
+  if (!Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub issue dependency list is not an array");
+  }
+  return payload.map((row, index) => {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new UnstructuredGitHubOutputError(`GitHub issue dependency ${index} is not an object`);
+    }
+    if (row.pull_request != null) {
+      throw new UnstructuredGitHubOutputError("GitHub issue dependency cannot be a pull request");
+    }
+    const number = parseGitHubResourceNumber(row);
+    if (!Number.isSafeInteger(row.id) || row.id < 1) {
+      throw new UnstructuredGitHubOutputError(
+        `GitHub issue dependency #${number} is missing its database id`,
+      );
+    }
+    let repository;
+    try {
+      repository = new URL(row.repository_url);
+    } catch {
+      throw new UnstructuredGitHubOutputError(
+        `GitHub issue dependency #${number} repository is missing`,
+      );
+    }
+    const match = /^\/repos\/([^/]+)\/([^/]+)\/?$/u.exec(repository.pathname);
+    if (!match) {
+      throw new UnstructuredGitHubOutputError(
+        `GitHub issue dependency #${number} repository is invalid`,
+      );
+    }
+    return { id: row.id, number, owner: match[1], repo: match[2] };
   });
 }
 
@@ -510,7 +715,11 @@ function missingProjectError(number) {
 }
 
 function projectFromGraphqlData(data, number) {
-  const project = data.organization?.projectV2 ?? data.user?.projectV2 ?? null;
+  const project =
+    data.repository?.owner?.projectV2 ??
+    data.organization?.projectV2 ??
+    data.user?.projectV2 ??
+    null;
   if (
     project === null ||
     typeof project !== "object" ||
@@ -521,7 +730,143 @@ function projectFromGraphqlData(data, number) {
   ) {
     throw new MissingProjectIdentityError(`GitHub Project ${number} is missing`);
   }
-  return { id: project.id, number };
+  return { id: project.id, number, viewerCanUpdate: project.viewerCanUpdate === true };
+}
+
+function projectStatusFieldFromGraphqlData(data, number) {
+  const project =
+    data.repository?.owner?.projectV2 ??
+    data.organization?.projectV2 ??
+    data.user?.projectV2 ??
+    null;
+  const base = projectFromGraphqlData(data, number);
+  const fieldConnection = project?.fields;
+  const fields = fieldConnection?.nodes;
+  if (
+    !Array.isArray(fields) ||
+    !Number.isSafeInteger(fieldConnection?.totalCount) ||
+    fieldConnection.totalCount !== fields.length
+  ) {
+    throw new MissingProjectIdentityError(`GitHub Project ${number} Status field is missing`);
+  }
+  const matches = fields.filter(
+    (row) => row && typeof row === "object" && !Array.isArray(row) && row.name === "Status",
+  );
+  if (matches.length !== 1 || typeof matches[0].id !== "string") {
+    throw new MissingProjectIdentityError(`GitHub Project ${number} Status field is missing`);
+  }
+  const options = matches[0].options;
+  if (!Array.isArray(options)) {
+    throw new MissingProjectIdentityError(`GitHub Project ${number} Status options are missing`);
+  }
+  const byName = new Map();
+  for (const row of options) {
+    if (
+      !row ||
+      typeof row !== "object" ||
+      Array.isArray(row) ||
+      typeof row.id !== "string" ||
+      typeof row.name !== "string"
+    ) {
+      throw new UnstructuredGitHubOutputError("GitHub Project Status option is invalid");
+    }
+    if (byName.has(row.name)) {
+      throw new UnstructuredGitHubOutputError(
+        `GitHub Project Status option ${row.name} is duplicate`,
+      );
+    }
+    byName.set(row.name, row.id);
+  }
+  for (const status of PROJECT_STATUSES) {
+    if (!byName.has(status)) {
+      throw new MissingProjectIdentityError(
+        `GitHub Project ${number} Status option ${status} is missing`,
+      );
+    }
+  }
+  return { ...base, fieldId: matches[0].id, options: byName };
+}
+
+function projectItemFromConnection(connection, issueNumber, projectId) {
+  const nodes = connection?.nodes;
+  if (
+    !Array.isArray(nodes) ||
+    !Number.isSafeInteger(connection?.totalCount) ||
+    connection.totalCount !== nodes.length
+  ) {
+    throw new UnstructuredGitHubOutputError(`issue #${issueNumber} project items are missing`);
+  }
+  const matches = nodes.filter((row) => row?.project?.id === projectId);
+  if (matches.length > 1) {
+    throw new UnstructuredGitHubOutputError(
+      `issue #${issueNumber} has duplicate Project ${PROJECT_NUMBER} items`,
+    );
+  }
+  if (matches.length === 0) return null;
+  const row = matches[0];
+  if (typeof row.id !== "string" || row.id.length === 0) {
+    throw new UnstructuredGitHubOutputError(`issue #${issueNumber} project item id is missing`);
+  }
+  const value = row.fieldValueByName;
+  if (value == null) return { id: row.id, status: null, optionId: null };
+  if (
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    typeof value.name !== "string" ||
+    typeof value.optionId !== "string"
+  ) {
+    throw new UnstructuredGitHubOutputError(`issue #${issueNumber} Project Status is invalid`);
+  }
+  return { id: row.id, status: value.name, optionId: value.optionId };
+}
+
+function issueRelationIdentity(row, label) {
+  const number = assertIssueNumber(row?.number, `${label} number`);
+  if (typeof row?.id !== "string" || row.id.length === 0) {
+    throw new UnstructuredGitHubOutputError(`${label} #${number} id is missing`);
+  }
+  const owner = row.repository?.owner?.login;
+  const repo = row.repository?.name;
+  if (typeof owner !== "string" || !owner || typeof repo !== "string" || !repo) {
+    throw new UnstructuredGitHubOutputError(`${label} #${number} repository is missing`);
+  }
+  return { id: row.id, number, owner, repo };
+}
+
+export function parseIssueProjectState(payload, issueNumber, projectId, repository) {
+  assertRequiredText(projectId, "Project id");
+  const data = parseGraphqlResult(
+    payload,
+    () => new NotFoundError(`issue #${issueNumber} is missing`),
+  );
+  const issue = data.repository?.issue;
+  if (!issue || issue.number !== issueNumber || typeof issue.id !== "string") {
+    throw new NotFoundError(`issue #${issueNumber} is missing`);
+  }
+  const parent = issue.parent == null ? null : issueRelationIdentity(issue.parent, "parent issue");
+  const connection = issue.subIssues;
+  if (
+    !connection ||
+    !Array.isArray(connection.nodes) ||
+    connection.totalCount !== connection.nodes.length
+  ) {
+    throw new UnstructuredGitHubOutputError(`issue #${issueNumber} sub-issue list is incomplete`);
+  }
+  const subIssues = connection.nodes.map((row) => {
+    const identity = issueRelationIdentity(row, "sub-issue");
+    return {
+      ...identity,
+      item: projectItemFromConnection(row.projectItems, identity.number, projectId),
+    };
+  });
+  return {
+    id: issue.id,
+    number: issueNumber,
+    ...(repository == null ? {} : { owner: repository.owner, repo: repository.repo }),
+    item: projectItemFromConnection(issue.projectItems, issueNumber, projectId),
+    parent,
+    subIssues,
+  };
 }
 
 export function parseGraphqlProject(payload, number = PROJECT_NUMBER) {
@@ -537,14 +882,17 @@ function issueIdFromGraphql(data, issueNumber) {
 }
 
 function projectMembership(issue, project) {
-  const nodes = issue?.projectsV2?.nodes;
-  if (!Array.isArray(nodes)) return undefined;
+  const connection = issue?.projectsV2;
+  const nodes = connection?.nodes;
+  if (
+    !Array.isArray(nodes) ||
+    !Number.isSafeInteger(connection?.totalCount) ||
+    connection.totalCount !== nodes.length
+  ) {
+    throw new UnstructuredGitHubOutputError("GitHub issue Project membership is incomplete");
+  }
   return nodes.some(
-    (row) =>
-      row &&
-      typeof row === "object" &&
-      !Array.isArray(row) &&
-      (row.id === project.id || row.number === project.number),
+    (row) => row && typeof row === "object" && !Array.isArray(row) && row.id === project.id,
   );
 }
 
@@ -557,11 +905,88 @@ export function planAddIssueToProject(issueNumber) {
   };
 }
 
+export const PROJECT_STATUSES = Object.freeze(["Todo", "In Progress", "Done"]);
+
+function requiredProjectStatus(value) {
+  if (!PROJECT_STATUSES.includes(value)) {
+    throw new GitHubAdapterError(`project status must be one of ${PROJECT_STATUSES.join(", ")}`);
+  }
+  return value;
+}
+
+export function planSetIssueProjectStatus(issueNumber, status, current = null, add = false) {
+  return {
+    kind: "set-project-status",
+    number: PROJECT_NUMBER,
+    issueNumber: assertIssueNumber(issueNumber),
+    status: requiredProjectStatus(status),
+    current,
+    add,
+    applied: false,
+  };
+}
+
+export function prepareSetIssueProjectStatus(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const issueNumber = assertIssueNumber(request.issueNumber);
+  const status = requiredProjectStatus(request.status);
+  assertApplyClearance(mode, request.clearance, "projects", adapter);
+  return { mode, issueNumber, status };
+}
+
 export function planSetIssueMilestone(issueNumber, title) {
   return { kind: "set-milestone", issueNumber, title, applied: false };
 }
 
+function prepareIssueDependencyMutation(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const number = assertIssueNumber(request.number);
+  const blockingNumber = assertIssueNumber(request.blockingNumber, "blocking issue number");
+  if (number === blockingNumber) {
+    throw new GitHubAdapterError("an issue cannot block itself");
+  }
+  if (mappingPolicy(request.mapping, number) === "protected") {
+    throw new ProtectedMappingError(`refusing dependency update of protected issue #${number}`);
+  }
+  if (mappingPolicy(request.blockingMapping, blockingNumber) === "protected") {
+    throw new ProtectedMappingError(
+      `refusing dependency update involving protected issue #${blockingNumber}`,
+    );
+  }
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, number, blockingNumber };
+}
+
+export function planAddIssueDependency(number, blockingNumber, blockingId) {
+  return { kind: "add-issue-dependency", number, blockingNumber, blockingId, applied: false };
+}
+
+export function prepareAddIssueDependency(adapter, request) {
+  const prepared = prepareIssueDependencyMutation(adapter, request);
+  const blockingId = assertIssueNumber(request.blockingId, "blocking issue database id");
+  return { ...prepared, blockingId };
+}
+
+export function planRemoveIssueDependency(number, blockingNumber, blockingId) {
+  return {
+    kind: "remove-issue-dependency",
+    number,
+    blockingNumber,
+    blockingId,
+    applied: false,
+  };
+}
+
+export function prepareRemoveIssueDependency(adapter, request) {
+  const prepared = prepareIssueDependencyMutation(adapter, request);
+  const blockingId = assertIssueNumber(request.blockingId, "blocking issue database id");
+  return { ...prepared, blockingId };
+}
+
 export function prepareAddIssueToProject(adapter, request) {
+  assertRepository(adapter, request);
   assertProjectNumber(request.number);
   const mode = assertMutationMode(request.mode);
   const issueNumber = assertIssueNumber(request.issueNumber);
@@ -570,9 +995,13 @@ export function prepareAddIssueToProject(adapter, request) {
 }
 
 export function prepareSetIssueMilestone(adapter, request) {
+  assertRepository(adapter, request);
   const mode = assertMutationMode(request.mode);
   const issueNumber = assertIssueNumber(request.issueNumber);
   assertRequiredText(request.title, "milestone title");
+  if (request.mapping != null && mappingPolicy(request.mapping, issueNumber) === "protected") {
+    throw new ProtectedMappingError(`refusing milestone update of protected issue #${issueNumber}`);
+  }
   assertApplyClearance(mode, request.clearance, "issues", adapter);
   return { mode, issueNumber, title: request.title };
 }
@@ -929,7 +1358,10 @@ export class GitHubAdapter {
     }
   }
 
-  inspectCapabilities() {
+  inspectCapabilities(options = {}) {
+    const required = Array.isArray(options.require)
+      ? new Set(options.require)
+      : new Set(["issues", "pullRequests", "projects", "actions"]);
     let user;
     try {
       user = this.#transport.request({ method: "GET", path: "/user" });
@@ -994,12 +1426,14 @@ export class GitHubAdapter {
     const pullWrite =
       permissions.admin === true || permissions.maintain === true || permissions.push === true;
     let projects = false;
-    try {
-      this.getProject(PROJECT_NUMBER);
-      projects = true;
-    } catch (error) {
-      if (!(error instanceof MissingProjectIdentityError) && !expectedCapabilityMiss(error)) {
-        throw error;
+    if (required.has("projects")) {
+      try {
+        const project = this.getProject(PROJECT_NUMBER);
+        projects = project.viewerCanUpdate === true;
+      } catch (error) {
+        if (!(error instanceof MissingProjectIdentityError) && !expectedCapabilityMiss(error)) {
+          throw error;
+        }
       }
     }
     return capabilityRecord({
@@ -1188,6 +1622,22 @@ export class GitHubAdapter {
     return parseIssuePayload(payload, expected);
   }
 
+  getIssueIdentity(number) {
+    const expected = assertIssueNumber(number);
+    const payload = this.#transport.request({
+      method: "GET",
+      path: `/repos/${this.owner}/${this.repo}/issues/${expected}`,
+    });
+    if (payload?.pull_request != null) {
+      throw new UnstructuredGitHubOutputError(`issue #${expected} is a pull request`);
+    }
+    const returned = parseGitHubResourceNumber(payload);
+    if (returned !== expected || !Number.isSafeInteger(payload.id) || payload.id < 1) {
+      throw new UnstructuredGitHubOutputError(`issue #${expected} is missing its database id`);
+    }
+    return { id: payload.id, number: expected, owner: this.owner, repo: this.repo };
+  }
+
   getIssueLabels(number) {
     const expected = assertIssueNumber(number);
     return this.#getCompleteList(
@@ -1195,6 +1645,152 @@ export class GitHubAdapter {
       parseLabelsPayload,
       "GitHub labels list is incomplete",
     );
+  }
+
+  getRepositoryLabels() {
+    return this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/labels`,
+      parseRepositoryLabelsPayload,
+      "GitHub repository labels list is incomplete",
+    );
+  }
+
+  createRepositoryLabel(request) {
+    const { mode, label } = prepareCreateRepositoryLabel(this, request);
+    if (mode === "check") return planCreateRepositoryLabel(label);
+    const payload = this.#transport.request({
+      method: "POST",
+      path: `/repos/${this.owner}/${this.repo}/labels`,
+      body: label,
+    });
+    return {
+      kind: "create-repository-label",
+      label: parseRepositoryLabel(payload),
+      applied: true,
+    };
+  }
+
+  updateRepositoryLabel(request) {
+    const { mode, existing, label } = prepareUpdateRepositoryLabel(this, request);
+    if (mode === "check") return planUpdateRepositoryLabel(existing, label);
+    const payload = this.#transport.request({
+      method: "PATCH",
+      path: `/repos/${this.owner}/${this.repo}/labels/${encodeURIComponent(existing)}`,
+      body: { new_name: label.name, color: label.color, description: label.description },
+    });
+    return {
+      kind: "update-repository-label",
+      previous: existing,
+      label: parseRepositoryLabel(payload),
+      applied: true,
+    };
+  }
+
+  getRepositoryMilestones() {
+    return this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/milestones?state=all`,
+      parseMilestoneListPayload,
+      "GitHub repository milestone list is incomplete",
+    );
+  }
+
+  createRepositoryMilestone(request) {
+    const { mode, milestone } = prepareCreateRepositoryMilestone(this, request);
+    if (mode === "check") return planCreateRepositoryMilestone(milestone);
+    const payload = this.#transport.request({
+      method: "POST",
+      path: `/repos/${this.owner}/${this.repo}/milestones`,
+      body: milestone,
+    });
+    const [created] = parseMilestoneListPayload([payload]);
+    return { kind: "create-repository-milestone", milestone: created, applied: true };
+  }
+
+  updateRepositoryMilestone(request) {
+    const { mode, number, milestone, patch } = prepareUpdateRepositoryMilestone(this, request);
+    if (mode === "check") return planUpdateRepositoryMilestone(request.existing, milestone);
+    const payload = this.#transport.request({
+      method: "PATCH",
+      path: `/repos/${this.owner}/${this.repo}/milestones/${number}`,
+      body: patch,
+    });
+    const [updated] = parseMilestoneListPayload([payload]);
+    if (updated.number !== number) {
+      throw new UnstructuredGitHubOutputError(
+        `GitHub milestone update returned number ${updated.number}, expected ${number}`,
+      );
+    }
+    return { kind: "update-repository-milestone", milestone: updated, applied: true };
+  }
+
+  addIssueLabels(request) {
+    const { mode, number, labels } = prepareAddIssueLabels(this, request);
+    if (mode === "check") return planAddIssueLabels(number, labels);
+    const payload = this.#transport.request({
+      method: "POST",
+      path: `/repos/${this.owner}/${this.repo}/issues/${number}/labels`,
+      body: { labels },
+    });
+    parseLabelsPayload(payload);
+    return { kind: "add-issue-labels", number, labels, applied: true };
+  }
+
+  removeIssueLabel(request) {
+    const { mode, number, label } = prepareRemoveIssueLabel(this, request);
+    if (mode === "check") return planRemoveIssueLabel(number, label);
+    const payload = this.#transport.request({
+      method: "DELETE",
+      path: `/repos/${this.owner}/${this.repo}/issues/${number}/labels/${encodeURIComponent(label)}`,
+    });
+    parseLabelsPayload(payload);
+    return { kind: "remove-issue-label", number, label, applied: true };
+  }
+
+  getIssueDependencies(number) {
+    const expected = assertIssueNumber(number);
+    return this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/issues/${expected}/dependencies/blocked_by`,
+      parseIssueDependenciesPayload,
+      "GitHub issue dependency list is incomplete",
+    );
+  }
+
+  addIssueDependency(request) {
+    const { mode, number, blockingNumber, blockingId } = prepareAddIssueDependency(this, request);
+    if (mode === "check") return planAddIssueDependency(number, blockingNumber, blockingId);
+    this.#transport.request({
+      method: "POST",
+      path: `/repos/${this.owner}/${this.repo}/issues/${number}/dependencies/blocked_by`,
+      body: { issue_id: blockingId },
+    });
+    return {
+      kind: "add-issue-dependency",
+      number,
+      blockingNumber,
+      blockingId,
+      applied: true,
+    };
+  }
+
+  removeIssueDependency(request) {
+    const { mode, number, blockingNumber, blockingId } = prepareRemoveIssueDependency(
+      this,
+      request,
+    );
+    if (mode === "check") {
+      return planRemoveIssueDependency(number, blockingNumber, blockingId);
+    }
+    this.#transport.request({
+      method: "DELETE",
+      path: `/repos/${this.owner}/${this.repo}/issues/${number}/dependencies/blocked_by/${blockingId}`,
+    });
+    return {
+      kind: "remove-issue-dependency",
+      number,
+      blockingNumber,
+      blockingId,
+      applied: true,
+    };
   }
 
   setAiResultLabel(request) {
@@ -1248,11 +1844,37 @@ export class GitHubAdapter {
     return projectFromGraphqlData(
       this.#graphql(
         PROJECT_LOOKUP_QUERY,
-        { login: this.owner, number },
+        { owner: this.owner, name: this.repo, number },
         missingProjectError(number),
       ),
       number,
     );
+  }
+
+  getProjectStatusField(number = PROJECT_NUMBER) {
+    assertProjectNumber(number);
+    return projectStatusFieldFromGraphqlData(
+      this.#graphql(
+        PROJECT_STATUS_FIELD_QUERY,
+        { owner: this.owner, name: this.repo, number },
+        missingProjectError(number),
+      ),
+      number,
+    );
+  }
+
+  getIssueProjectState(issueNumber) {
+    const number = assertIssueNumber(issueNumber);
+    const project = this.getProject(PROJECT_NUMBER);
+    const data = this.#graphql(
+      ISSUE_PROJECT_STATE_QUERY,
+      { owner: this.owner, name: this.repo, number },
+      () => new NotFoundError(`issue #${number} is missing`),
+    );
+    return parseIssueProjectState({ data }, number, project.id, {
+      owner: this.owner,
+      repo: this.repo,
+    });
   }
 
   addIssueToProject(request) {
@@ -1267,6 +1889,16 @@ export class GitHubAdapter {
     );
     const contentId = issueIdFromGraphql(data, issueNumber);
     const alreadyMember = projectMembership(data.repository?.issue, project);
+    if (alreadyMember) {
+      return {
+        kind: "add-project-item",
+        number: PROJECT_NUMBER,
+        issueNumber,
+        applied: true,
+        already_member: true,
+        unchanged: true,
+      };
+    }
     const mutation = this.#graphql(
       ADD_ITEM_MUTATION,
       { projectId: project.id, contentId },
@@ -1284,43 +1916,78 @@ export class GitHubAdapter {
       issueNumber,
       applied: true,
     };
-    if (typeof alreadyMember === "boolean") added.already_member = alreadyMember;
+    added.already_member = false;
+    if (typeof itemId === "string" && itemId.length > 0) added.item_id = itemId;
     return added;
+  }
+
+  setIssueProjectStatus(request) {
+    const { mode, issueNumber, status } = prepareSetIssueProjectStatus(this, request);
+    const project = this.getProjectStatusField(PROJECT_NUMBER);
+    const snapshot = this.getIssueProjectState(issueNumber);
+    if (!snapshot.item) {
+      throw new MissingProjectIdentityError(
+        `issue #${issueNumber} Project ${PROJECT_NUMBER} item is missing`,
+      );
+    }
+    if (mode === "check") {
+      return planSetIssueProjectStatus(issueNumber, status, snapshot.item?.status ?? null, false);
+    }
+    const itemId = snapshot.item?.id ?? null;
+    if (!itemId) {
+      throw new MissingProjectIdentityError(
+        `issue #${issueNumber} Project ${PROJECT_NUMBER} item is missing`,
+      );
+    }
+    const current = snapshot.item?.status ?? null;
+    if (current === status) {
+      return {
+        kind: "set-project-status",
+        number: PROJECT_NUMBER,
+        issueNumber,
+        status,
+        current,
+        added: false,
+        unchanged: true,
+        applied: true,
+      };
+    }
+    const mutation = this.#graphql(
+      SET_PROJECT_STATUS_MUTATION,
+      {
+        projectId: project.id,
+        itemId,
+        fieldId: project.fieldId,
+        optionId: project.options.get(status),
+      },
+      () => new GitHubAdapterError("updateProjectV2ItemFieldValue failed"),
+    );
+    if (mutation.updateProjectV2ItemFieldValue?.projectV2Item?.id !== itemId) {
+      throw new GitHubAdapterError("updateProjectV2ItemFieldValue returned the wrong item");
+    }
+    return {
+      kind: "set-project-status",
+      number: PROJECT_NUMBER,
+      issueNumber,
+      status,
+      current,
+      added: false,
+      applied: true,
+    };
   }
 
   setIssueMilestone(request) {
     const { mode, issueNumber, title } = prepareSetIssueMilestone(this, request);
     if (mode === "check") return planSetIssueMilestone(issueNumber, title);
-    const missingIssue = () => new NotFoundError(`issue #${issueNumber} is missing`);
-    const data = this.#graphql(
-      MILESTONE_QUERY,
-      { owner: this.owner, name: this.repo, number: issueNumber },
-      missingIssue,
-    );
-    const repository = data.repository;
-    if (repository?.pullRequest?.id && !repository?.issue?.id) {
-      throw new GitHubAdapterError("ReleaseTarget is set on the issue, never on a PR");
-    }
-    const issueId = repository?.issue?.id;
-    if (typeof issueId !== "string" || issueId.length === 0) {
-      throw new NotFoundError(`issue #${issueNumber} is missing`);
-    }
-    const nodes = repository?.milestones?.nodes;
-    const found = Array.isArray(nodes)
-      ? nodes.find((row) => row && row.title === title && typeof row.id === "string")
-      : null;
+    this.getIssue(issueNumber);
+    const found = this.getRepositoryMilestones().find((row) => row.title === title);
     if (!found) throw new NotFoundError(`milestone ${title} is missing`);
-    const mutation = this.#graphql(
-      SET_MILESTONE_MUTATION,
-      { id: issueId, milestoneId: found.id },
-      () => new GitHubAdapterError("updateIssue milestone failed"),
-    );
-    const returned = mutation.updateIssue?.issue?.number;
-    if (returned !== issueNumber) {
-      throw new GitHubAdapterError(
-        `GitHub milestone update returned issue ${returned}, expected ${issueNumber}`,
-      );
-    }
+    const payload = this.#transport.request({
+      method: "PATCH",
+      path: `/repos/${this.owner}/${this.repo}/issues/${issueNumber}`,
+      body: { milestone: found.number },
+    });
+    parseIssuePayload(payload, issueNumber);
     return { kind: "set-milestone", issueNumber, title, applied: true };
   }
 

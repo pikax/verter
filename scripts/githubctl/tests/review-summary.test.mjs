@@ -17,7 +17,7 @@ import {
   MissingIssueMappingError,
   PartialFailureError,
   PermissionDeniedError,
-  countModelLines,
+  countAiGeneratedFooters,
   mappedClosingLink,
   reviewSummary,
 } from "../index.mjs";
@@ -29,7 +29,6 @@ const CLI = path.join(HERE, "../githubctl.mjs");
 const TOOLS = path.join(REPO_ROOT, "roadmap/0.1.0-tama/tools");
 const LIVE_LEDGER = path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/implemented.toml");
 const CONTRACT = path.join(REPO_ROOT, "roadmap/0.1.0-tama/contracts/github-control-plane.md");
-const MODEL = "gh4-test-model";
 const HUMAN_BODY =
   "Problem: mapping must stay local.\nScope: ordinary PR prose.\nValidation: fake adapter.\nReview: human-written.";
 const ISSUE_NUMBER = 4;
@@ -146,7 +145,6 @@ function baseOptions(adapter, extra = {}) {
     verdict: extra.verdict ?? "FAIL",
     body: extra.body ?? HUMAN_BODY,
     findings: extra.findings,
-    model: extra.model ?? MODEL,
     ledgerPath: extra.ledgerPath,
     owner: extra.owner,
     repo: extra.repo,
@@ -208,7 +206,7 @@ test("GH4-AC1 protected mapping never edits the issue and still records a PR com
   assert.equal(issue.title, "kept title");
   assert.equal(issue.body, originalBody);
   assert.deepEqual(issue.comments, [{ id: 1, body: "discussion" }]);
-  assert.equal(countModelLines(issue.body), 0);
+  assert.equal(countAiGeneratedFooters(issue.body), 0);
   const pull = adapter.getPullRequest(PR_NUMBER);
   assert.equal(pull.comments.length, 1);
   assert.equal(pull.comments[0].body, report.comment.body);
@@ -384,7 +382,7 @@ test("GH4-AC1 missing mapping, missing ancestor, and issue-closure findings abor
   assert.equal(adapter.getPullRequests().length, 1);
 });
 
-test("GH4-AC2 opt-in keeps human prose and ends with exactly one Model line", () => {
+test("review publication keeps human prose and normalizes provenance", () => {
   const adapter = seeded({
     issueBody:
       "human work notes\n\nModel: first\nModel: second\nEffort: high\nimplementation_effort = high\n",
@@ -404,8 +402,8 @@ test("GH4-AC2 opt-in keeps human prose and ends with exactly one Model line", ()
   assert.equal(report.issue.applied, true);
   const issue = adapter.getIssue(ISSUE_NUMBER);
   assert.match(issue.body, /human work notes/u);
-  assert.match(issue.body, /\nModel: gh4-test-model\n$/u);
-  assert.equal(countModelLines(issue.body), 1);
+  assert.match(issue.body, /\nAI-Generated\n$/u);
+  assert.equal(countAiGeneratedFooters(issue.body), 1);
   assert.doesNotMatch(issue.body, /^Effort:/mu);
   assert.doesNotMatch(issue.body, /implementation_effort/u);
   assert.doesNotMatch(issue.body, /Model: first/u);
@@ -635,7 +633,7 @@ test("GH4-AC2 CLI check/apply flags, help, and contract name ReviewCycleSummary"
   const next = contract.indexOf("\n## ", heading + 1);
   const section = contract.slice(heading, next === -1 ? contract.length : next);
   assert.match(section, /githubctl review-summary/u);
-  assert.match(section, /Model:/u);
+  assert.match(section, /AI-Generated/u);
   assert.match(section, /P0\/P1/u);
   assert.match(section, /protected/iu);
   assert.doesNotMatch(section, /digest-bind/u);
@@ -669,7 +667,7 @@ test("GH4 apply reports PartialFailureError after a succeeded PR comment", () =>
   );
   assert.equal(adapter.getPullRequest(PR_NUMBER).comments.length, 1);
   assert.match(adapter.getIssue(ISSUE_NUMBER).body, /Model: stale/u);
-  assert.equal(countModelLines(adapter.getIssue(ISSUE_NUMBER).body), 2);
+  assert.equal(countAiGeneratedFooters(adapter.getIssue(ISSUE_NUMBER).body), 0);
 });
 
 test("GH4 apply in tests refuses the live ledger path", () => {

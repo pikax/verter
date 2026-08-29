@@ -7,8 +7,30 @@ export {
 } from "./adapter.mjs";
 export { FakeGitHubAdapter } from "./fake.mjs";
 export { GitHubDoctor } from "./doctor.mjs";
-export { assertHumanIssueDescription, renderIssueDescription } from "./charter-render.mjs";
+export {
+  assertHumanIssueDescription,
+  loadIssueContentCatalog,
+  renderIssueDescription,
+  validateIssueContentCatalog,
+} from "./charter-render.mjs";
+export {
+  AI_GENERATED_FOOTER,
+  countAiGeneratedFooters,
+  ensureAiGeneratedFooter,
+} from "./issue-provenance.mjs";
 export { lookupIssueMapping, selectNodes, syncIssues } from "./sync-issues.mjs";
+export {
+  isManagedIssueLabel,
+  labelsForNode,
+  loadIssueLabelCatalog,
+  planIssueLabels,
+  planRepositoryLabels,
+} from "./issue-labels.mjs";
+export {
+  loadIssueMilestoneCatalog,
+  milestoneForNode,
+  planRepositoryMilestones,
+} from "./issue-milestones.mjs";
 export { inspectIssue, FEEDBACK_REPORT_HEADINGS } from "./inspect.mjs";
 export {
   PROJECT_NUMBER,
@@ -17,12 +39,19 @@ export {
   AI_OWNED_LABELS,
   MAINTAINER_IGNORE_LABEL,
 } from "./adapter.mjs";
-export { schedule } from "./schedule.mjs";
+export { schedule, schedulePreflight } from "./schedule.mjs";
+export { projectStatus, projectStatusPreflight } from "./project-status.mjs";
 export { releasePlan, RELEASE_REHEARSAL, rehearsalIdentity } from "./release-plan.mjs";
 export { releaseCut, createReleasePullRequest } from "./release-cut.mjs";
 export { createPr } from "./create-pr.mjs";
-export { countModelLines, ensureOneModelLine, reviewSummary } from "./review-summary.mjs";
-export { TAMA_ROADMAP_JOB, ciResult, finalizeLedger, squashLand } from "./ci-land.mjs";
+export { reviewSummary } from "./review-summary.mjs";
+export {
+  TAMA_ROADMAP_JOB,
+  ciResult,
+  finalizeLedger,
+  squashLand,
+  squashLandCapabilities,
+} from "./ci-land.mjs";
 export { MINIMAL_GITHUB_WORKFLOW, workflowInventory } from "./workflow.mjs";
 export {
   BlockingFindingError,
@@ -38,6 +67,7 @@ export {
   MissingAncestorError,
   MissingIssueMappingError,
   MissingProjectIdentityError,
+  mutationIdentity,
   MutationModeRequiredError,
   NonReadyNodeError,
   NotFoundError,

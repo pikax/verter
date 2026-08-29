@@ -6,7 +6,10 @@ import {
   bindOwnerRepo,
   capabilityRecord,
   planAddIssueToProject,
+  planAddIssueLabels,
   planCreateIssue,
+  planCreateRepositoryLabel,
+  planCreateRepositoryMilestone,
   planCloseMilestone,
   planCreatePullRequest,
   planCreatePullRequestComment,
@@ -14,19 +17,34 @@ import {
   planMergePullRequest,
   planDispatchReleaseRehearsal,
   planSetAiResultLabel,
+  planSetIssueProjectStatus,
   planSetIssueMilestone,
+  planAddIssueDependency,
+  planRemoveIssueDependency,
   planUpdateIssue,
+  planUpdateRepositoryLabel,
+  planUpdateRepositoryMilestone,
+  planRemoveIssueLabel,
   prepareAddIssueToProject,
+  prepareAddIssueLabels,
   prepareCloseMilestone,
   prepareCreateIssue,
+  prepareCreateRepositoryLabel,
+  prepareCreateRepositoryMilestone,
   prepareCreatePullRequest,
   prepareCreatePullRequestComment,
   prepareCreateReleasePullRequest,
   prepareDispatchReleaseRehearsal,
   prepareMergePullRequest,
   prepareSetAiResultLabel,
+  prepareSetIssueProjectStatus,
   prepareSetIssueMilestone,
+  prepareAddIssueDependency,
+  prepareRemoveIssueDependency,
   prepareUpdateIssue,
+  prepareUpdateRepositoryLabel,
+  prepareUpdateRepositoryMilestone,
+  prepareRemoveIssueLabel,
   PROJECT_NUMBER,
   selectAiResultLabel,
 } from "./adapter.mjs";
@@ -55,6 +73,27 @@ function cloneLabels(labels) {
   });
 }
 
+function cloneRepositoryLabel(label) {
+  if (label === null || typeof label !== "object" || Array.isArray(label)) {
+    throw new GitHubAdapterError("repository label definition is required");
+  }
+  if (typeof label.name !== "string" || label.name.length === 0) {
+    throw new GitHubAdapterError("repository label name is required");
+  }
+  if (typeof label.color !== "string" || !/^[0-9a-f]{6}$/iu.test(label.color)) {
+    throw new GitHubAdapterError("repository label color must be six hexadecimal characters");
+  }
+  const description = label.description == null ? "" : label.description;
+  if (typeof description !== "string") {
+    throw new GitHubAdapterError("repository label description must be a string");
+  }
+  return { name: label.name, color: label.color.toLowerCase(), description };
+}
+
+function labelKey(name) {
+  return name.toLocaleLowerCase("en-US");
+}
+
 function cloneIssue(issue) {
   return {
     number: issue.number,
@@ -63,6 +102,9 @@ function cloneIssue(issue) {
     comments: cloneComments(issue.comments),
     milestone: issue.milestone ?? null,
     labels: cloneLabels(issue.labels),
+    parent: issue.parent ?? null,
+    subIssues: [...(issue.subIssues ?? [])],
+    dependencies: [...(issue.dependencies ?? [])],
   };
 }
 
@@ -89,11 +131,13 @@ function cloneCheckRun(row) {
 
 export class FakeGitHubAdapter {
   #issues;
+  #repositoryLabels;
   #pulls;
   #heads;
   #applyAttempts;
   #projectMissing;
   #projectItems;
+  #projectStatuses;
   #milestones;
   #checkRuns;
   #merges;
@@ -110,6 +154,7 @@ export class FakeGitHubAdapter {
       issues: options.permissions?.issues !== false,
       pullRequests: options.permissions?.pullRequests !== false,
       projects: options.permissions?.projects !== false,
+      projectRead: options.permissions?.projectRead !== false,
       actions: options.permissions?.actions !== false,
     };
     this.failOnApply = options.failOnApply;
@@ -118,22 +163,45 @@ export class FakeGitHubAdapter {
     this.reads = [];
     this.milestoneWrites = [];
     this.milestoneCloses = [];
+    this.repositoryMilestoneWrites = [];
+    this.dependencyWrites = [];
     this.labelWrites = [];
+    this.repositoryLabelWrites = [];
+    this.projectStatusWrites = [];
     this.workflowDispatches = [];
     this.#issues = new Map();
+    this.#repositoryLabels = new Map();
     this.#pulls = new Map();
     this.#heads = new Set();
     this.#applyAttempts = 0;
     this.#projectMissing = options.missing === true;
     this.#projectItems = new Set();
+    this.#projectStatuses = new Map();
     this.#milestones = new Map();
     this.#checkRuns = new Map();
     this.#merges = [];
+    for (const label of options.repositoryLabels ?? []) {
+      const cloned = cloneRepositoryLabel(label);
+      const key = labelKey(cloned.name);
+      if (this.#repositoryLabels.has(key)) {
+        throw new DuplicateError(`repository label ${cloned.name} already exists`);
+      }
+      this.#repositoryLabels.set(key, cloned);
+    }
     for (const number of options.projectItems ?? []) {
       this.#projectItems.add(assertIssueNumber(number));
     }
-    for (const row of options.milestones ?? []) {
-      this.#milestones.set(row.title, row);
+    for (const [number, status] of Object.entries(options.projectStatuses ?? {})) {
+      this.#projectStatuses.set(assertIssueNumber(Number(number)), status);
+    }
+    for (const [index, row] of (options.milestones ?? []).entries()) {
+      this.#milestones.set(row.title, {
+        number: row.number ?? index + 1,
+        title: row.title,
+        description: row.description ?? "",
+        state: row.state ?? "open",
+        ...(row.due_on == null ? {} : { due_on: row.due_on }),
+      });
     }
     for (const issue of options.issues ?? []) {
       const number = assertIssueNumber(issue.number);
@@ -146,7 +214,17 @@ export class FakeGitHubAdapter {
         milestone: issue.milestone ?? null,
         labels: cloneLabels(issue.labels),
         state: issue.state === "closed" ? "closed" : "open",
+        parent: issue.parent ?? null,
+        subIssues: [...(issue.subIssues ?? [])],
+        dependencies: [...(issue.dependencies ?? [])].map((candidate) =>
+          assertIssueNumber(candidate, "blocking issue number"),
+        ),
       });
+    }
+    for (const issue of this.#issues.values()) {
+      if (issue.parent == null) continue;
+      const parent = this.#issues.get(assertIssueNumber(issue.parent, "parent issue"));
+      if (parent && !parent.subIssues.includes(issue.number)) parent.subIssues.push(issue.number);
     }
     for (const pull of options.pullRequests ?? []) {
       const number = assertIssueNumber(pull.number, "pull request number");
@@ -170,7 +248,10 @@ export class FakeGitHubAdapter {
     this.nextNumber = nextIssue ?? nextPull ?? maxUsed + 1;
   }
 
-  inspectCapabilities() {
+  inspectCapabilities(options = {}) {
+    const required = Array.isArray(options.require)
+      ? new Set(options.require)
+      : new Set(["issues", "pullRequests", "projects", "actions"]);
     if (!this.authenticated) {
       return capabilityRecord({
         authenticated: false,
@@ -194,7 +275,11 @@ export class FakeGitHubAdapter {
       repository: { owner: this.owner, repo: this.repo },
       issues: this.permissions.issues,
       pullRequests: this.permissions.pullRequests,
-      projects: this.permissions.projects && !this.#projectMissing,
+      projects:
+        required.has("projects") &&
+        this.permissions.projects &&
+        this.permissions.projectRead &&
+        !this.#projectMissing,
       actions: this.permissions.actions,
     });
   }
@@ -232,6 +317,9 @@ export class FakeGitHubAdapter {
       milestone: null,
       labels: [],
       state: "open",
+      parent: null,
+      subIssues: [],
+      dependencies: [],
     });
     return {
       kind: "create-issue",
@@ -401,12 +489,217 @@ export class FakeGitHubAdapter {
     return this.#cloneIssue(expected);
   }
 
+  getIssueIdentity(number) {
+    const expected = assertIssueNumber(number);
+    this.reads.push({ kind: "get-issue-identity", number: expected });
+    if (!this.#issues.has(expected)) {
+      throw new NotFoundError(`issue #${expected} is not in the fake`);
+    }
+    return { id: expected * 1000, number: expected, owner: this.owner, repo: this.repo };
+  }
+
   getIssueLabels(number) {
     const expected = assertIssueNumber(number);
     this.reads.push({ kind: "get-issue-labels", number: expected });
     const issue = this.#issues.get(expected);
     if (!issue) throw new NotFoundError(`issue #${expected} is not in the fake`);
     return [...issue.labels];
+  }
+
+  getRepositoryLabels() {
+    this.reads.push({ kind: "get-repository-labels" });
+    return [...this.#repositoryLabels.values()]
+      .map(cloneRepositoryLabel)
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  createRepositoryLabel(request) {
+    const { mode, label } = prepareCreateRepositoryLabel(this, request);
+    if (mode === "check") return planCreateRepositoryLabel(label);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const key = labelKey(label.name);
+    if (this.#repositoryLabels.has(key)) {
+      throw new DuplicateError(`repository label ${label.name} already exists`);
+    }
+    this.#repositoryLabels.set(key, cloneRepositoryLabel(label));
+    this.repositoryLabelWrites.push({ kind: "create", label: cloneRepositoryLabel(label) });
+    return { kind: "create-repository-label", label: cloneRepositoryLabel(label), applied: true };
+  }
+
+  updateRepositoryLabel(request) {
+    const { mode, existing, label } = prepareUpdateRepositoryLabel(this, request);
+    if (mode === "check") return planUpdateRepositoryLabel(existing, label);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const existingKey = labelKey(existing);
+    if (!this.#repositoryLabels.has(existingKey)) {
+      throw new NotFoundError(`repository label ${existing} is not in the fake`);
+    }
+    const nextKey = labelKey(label.name);
+    if (existingKey !== nextKey && this.#repositoryLabels.has(nextKey)) {
+      throw new DuplicateError(`repository label ${label.name} already exists`);
+    }
+    this.#repositoryLabels.delete(existingKey);
+    this.#repositoryLabels.set(nextKey, cloneRepositoryLabel(label));
+    for (const issue of this.#issues.values()) {
+      issue.labels = issue.labels.map((name) =>
+        labelKey(name) === existingKey ? label.name : name,
+      );
+    }
+    this.repositoryLabelWrites.push({
+      kind: "update",
+      previous: existing,
+      label: cloneRepositoryLabel(label),
+    });
+    return {
+      kind: "update-repository-label",
+      previous: existing,
+      label: cloneRepositoryLabel(label),
+      applied: true,
+    };
+  }
+
+  getRepositoryMilestones() {
+    this.reads.push({ kind: "get-repository-milestones" });
+    return [...this.#milestones.values()]
+      .map((row) => ({ ...row }))
+      .sort((left, right) => left.number - right.number);
+  }
+
+  createRepositoryMilestone(request) {
+    const { mode, milestone } = prepareCreateRepositoryMilestone(this, request);
+    if (mode === "check") return planCreateRepositoryMilestone(milestone);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    if (this.#milestones.has(milestone.title)) {
+      throw new DuplicateError(`repository milestone ${milestone.title} already exists`);
+    }
+    const number = Math.max(0, ...[...this.#milestones.values()].map((row) => row.number)) + 1;
+    const created = { number, ...milestone, state: "open" };
+    this.#milestones.set(created.title, created);
+    this.repositoryMilestoneWrites.push({ kind: "create", title: created.title });
+    return { kind: "create-repository-milestone", milestone: { ...created }, applied: true };
+  }
+
+  updateRepositoryMilestone(request) {
+    const { mode, number, milestone } = prepareUpdateRepositoryMilestone(this, request);
+    if (mode === "check") return planUpdateRepositoryMilestone(request.existing, milestone);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const existing = [...this.#milestones.values()].find((row) => row.number === number);
+    if (!existing) throw new NotFoundError(`repository milestone #${number} is not in the fake`);
+    this.#milestones.delete(existing.title);
+    const updated = { ...existing, ...milestone, number };
+    this.#milestones.set(updated.title, updated);
+    for (const issue of this.#issues.values()) {
+      if (issue.milestone === existing.title) issue.milestone = updated.title;
+    }
+    this.repositoryMilestoneWrites.push({
+      kind: "update",
+      number,
+      previous: existing.title,
+      title: updated.title,
+    });
+    return { kind: "update-repository-milestone", milestone: { ...updated }, applied: true };
+  }
+
+  addIssueLabels(request) {
+    const { mode, number, labels } = prepareAddIssueLabels(this, request);
+    if (mode === "check") return planAddIssueLabels(number, labels);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const issue = this.#issues.get(number);
+    if (!issue) throw new NotFoundError(`issue #${number} is not in the fake`);
+    for (const label of labels) {
+      if (!this.#repositoryLabels.has(labelKey(label))) {
+        throw new NotFoundError(`repository label ${label} is not in the fake`);
+      }
+      if (!issue.labels.some((name) => labelKey(name) === labelKey(label))) {
+        issue.labels.push(label);
+      }
+    }
+    this.labelWrites.push({ number, add: [...labels], remove: null });
+    return { kind: "add-issue-labels", number, labels: [...labels], applied: true };
+  }
+
+  removeIssueLabel(request) {
+    const { mode, number, label } = prepareRemoveIssueLabel(this, request);
+    if (mode === "check") return planRemoveIssueLabel(number, label);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const issue = this.#issues.get(number);
+    if (!issue) throw new NotFoundError(`issue #${number} is not in the fake`);
+    const key = labelKey(label);
+    const index = issue.labels.findIndex((name) => labelKey(name) === key);
+    if (index === -1) throw new NotFoundError(`issue #${number} does not have label ${label}`);
+    issue.labels.splice(index, 1);
+    this.labelWrites.push({ number, add: null, remove: label });
+    return { kind: "remove-issue-label", number, label, applied: true };
+  }
+
+  getIssueDependencies(number) {
+    const expected = assertIssueNumber(number);
+    this.reads.push({ kind: "get-issue-dependencies", number: expected });
+    const issue = this.#issues.get(expected);
+    if (!issue) throw new NotFoundError(`issue #${expected} is not in the fake`);
+    return issue.dependencies
+      .map((blockingNumber) => ({
+        id: blockingNumber * 1000,
+        number: blockingNumber,
+        owner: this.owner,
+        repo: this.repo,
+      }))
+      .sort((left, right) => left.number - right.number);
+  }
+
+  addIssueDependency(request) {
+    const { mode, number, blockingNumber, blockingId } = prepareAddIssueDependency(this, request);
+    if (mode === "check") return planAddIssueDependency(number, blockingNumber, blockingId);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const issue = this.#issues.get(number);
+    if (!issue) throw new NotFoundError(`issue #${number} is not in the fake`);
+    if (!this.#issues.has(blockingNumber)) {
+      throw new NotFoundError(`blocking issue #${blockingNumber} is not in the fake`);
+    }
+    if (!issue.dependencies.includes(blockingNumber)) issue.dependencies.push(blockingNumber);
+    issue.dependencies.sort((left, right) => left - right);
+    this.dependencyWrites.push({ kind: "add", number, blockingNumber, blockingId });
+    return {
+      kind: "add-issue-dependency",
+      number,
+      blockingNumber,
+      blockingId,
+      applied: true,
+    };
+  }
+
+  removeIssueDependency(request) {
+    const { mode, number, blockingNumber, blockingId } = prepareRemoveIssueDependency(
+      this,
+      request,
+    );
+    if (mode === "check") {
+      return planRemoveIssueDependency(number, blockingNumber, blockingId);
+    }
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const issue = this.#issues.get(number);
+    if (!issue) throw new NotFoundError(`issue #${number} is not in the fake`);
+    const index = issue.dependencies.indexOf(blockingNumber);
+    if (index === -1) {
+      throw new NotFoundError(`issue #${number} is not blocked by #${blockingNumber}`);
+    }
+    issue.dependencies.splice(index, 1);
+    this.dependencyWrites.push({ kind: "remove", number, blockingNumber, blockingId });
+    return {
+      kind: "remove-issue-dependency",
+      number,
+      blockingNumber,
+      blockingId,
+      applied: true,
+    };
   }
 
   setAiResultLabel(request) {
@@ -482,10 +775,21 @@ export class FakeGitHubAdapter {
         title: row.title,
       })),
       milestoneCloses: this.milestoneCloses.map((row) => ({ title: row.title })),
+      repositoryMilestones: this.getRepositoryMilestones(),
+      repositoryMilestoneWrites: this.repositoryMilestoneWrites.map((row) => ({ ...row })),
+      dependencyWrites: this.dependencyWrites.map((row) => ({ ...row })),
       labelWrites: this.labelWrites.map((row) => ({
         number: row.number,
         add: row.add,
         remove: row.remove,
+      })),
+      repositoryLabels: [...this.#repositoryLabels.values()]
+        .map(cloneRepositoryLabel)
+        .sort((left, right) => left.name.localeCompare(right.name)),
+      repositoryLabelWrites: this.repositoryLabelWrites.map((row) => ({
+        kind: row.kind,
+        ...(row.previous == null ? {} : { previous: row.previous }),
+        label: cloneRepositoryLabel(row.label),
       })),
       workflowDispatches: this.workflowDispatches.map((row) => ({
         workflow: row.workflow,
@@ -507,7 +811,27 @@ export class FakeGitHubAdapter {
     if (this.#projectMissing) {
       throw new MissingProjectIdentityError(`GitHub Project ${PROJECT_NUMBER} is missing`);
     }
-    return { id: "fake-project-3", number: PROJECT_NUMBER };
+    if (!this.permissions.projectRead) {
+      throw new PermissionDeniedError("project read permission denied");
+    }
+    return {
+      id: "fake-project-3",
+      number: PROJECT_NUMBER,
+      viewerCanUpdate: this.permissions.projects,
+    };
+  }
+
+  getProjectStatusField(number = PROJECT_NUMBER) {
+    const project = this.getProject(number);
+    return {
+      ...project,
+      fieldId: "fake-status-field",
+      options: new Map([
+        ["Todo", "fake-todo"],
+        ["In Progress", "fake-in-progress"],
+        ["Done", "fake-done"],
+      ]),
+    };
   }
 
   getProjectItems(number = PROJECT_NUMBER) {
@@ -515,6 +839,50 @@ export class FakeGitHubAdapter {
       throw new GitHubAdapterError(`scheduling overlay uses GitHub Project ${PROJECT_NUMBER} only`);
     }
     return [...this.#projectItems].sort((left, right) => left - right);
+  }
+
+  getProjectStatus(issueNumber) {
+    const number = assertIssueNumber(issueNumber);
+    return this.#projectStatuses.get(number) ?? null;
+  }
+
+  getIssueProjectState(issueNumber) {
+    const number = assertIssueNumber(issueNumber);
+    this.reads.push({ kind: "get-issue-project-state", number });
+    this.getProject(PROJECT_NUMBER);
+    const issue = this.#issues.get(number);
+    if (!issue) throw new NotFoundError(`issue #${number} is missing`);
+    const itemFor = (candidate) =>
+      this.#projectItems.has(candidate)
+        ? {
+            id: `fake-project-item-${candidate}`,
+            status: this.#projectStatuses.get(candidate) ?? null,
+            optionId: null,
+          }
+        : null;
+    return {
+      id: `fake-issue-${number}`,
+      number,
+      owner: this.owner,
+      repo: this.repo,
+      item: itemFor(number),
+      parent:
+        issue.parent == null
+          ? null
+          : {
+              id: `fake-issue-${issue.parent}`,
+              number: issue.parent,
+              owner: this.owner,
+              repo: this.repo,
+            },
+      subIssues: issue.subIssues.map((subIssue) => ({
+        id: `fake-issue-${subIssue}`,
+        number: subIssue,
+        owner: this.owner,
+        repo: this.repo,
+        item: itemFor(subIssue),
+      })),
+    };
   }
 
   addIssueToProject(request) {
@@ -534,6 +902,37 @@ export class FakeGitHubAdapter {
       issueNumber,
       applied: true,
       already_member: alreadyMember,
+      item_id: `fake-project-item-${issueNumber}`,
+    };
+  }
+
+  setIssueProjectStatus(request) {
+    const { mode, issueNumber, status } = prepareSetIssueProjectStatus(this, request);
+    this.getProjectStatusField(PROJECT_NUMBER);
+    const snapshot = this.getIssueProjectState(issueNumber);
+    if (!snapshot.item) {
+      throw new MissingProjectIdentityError(
+        `issue #${issueNumber} Project ${PROJECT_NUMBER} item is missing`,
+      );
+    }
+    if (mode === "check") {
+      return planSetIssueProjectStatus(issueNumber, status, snapshot.item?.status ?? null, false);
+    }
+    this.#beginApply();
+    if (!this.permissions.projects) throw new PermissionDeniedError("projects permission denied");
+    const current = this.#projectStatuses.get(issueNumber) ?? null;
+    const unchanged = current === status;
+    this.#projectStatuses.set(issueNumber, status);
+    if (!unchanged) this.projectStatusWrites.push({ issueNumber, status, current });
+    return {
+      kind: "set-project-status",
+      number: PROJECT_NUMBER,
+      issueNumber,
+      status,
+      current,
+      added: false,
+      unchanged,
+      applied: true,
     };
   }
 

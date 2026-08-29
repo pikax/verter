@@ -1,0 +1,15 @@
+schema = 1
+
+[[issue]]
+node_id = "GH0"
+title = "Keep GitHub issue synchronization explicit and one-way"
+problem = "GitHub coordination can become unreliable when issue text, labels, and lifecycle fields are treated as a second source of implementation truth. This creates competing representations, leaves maintainers unsure which state is authoritative, and risks overwriting useful issue discussion with machine-oriented planning data. The repository needs a small, explicit synchronization boundary that keeps local mappings authoritative while preserving GitHub as a readable collaboration surface."
+expected_outcome = "Issue synchronization runs only when requested, creates or updates project-owned coordination fields deterministically, and never imports GitHub state into implementation authority. Existing issue prose remains stable during normal synchronization, protected issues remain untouched, and partial external writes are reported with enough identity for safe repair."
+acceptance = ["A local mapping is the only node-to-issue identity and does not mark implementation complete.", "Normal synchronization preserves existing issue title, body, comments, and unrelated labels.", "Protected mappings receive no issue or Project mutation from synchronization.", "Every successful external mutation remains visible when a later operation fails."]
+
+[[issue]]
+node_id = "B4R0"
+title = "Keep source-unit identity stable across revisions and mappings"
+problem = "Source units can still be identified through constructors and mapping keys that vary with a revision or collapse to a path-only alias. This can make caches, source maps, compiler output, and session state treat one logical source as several unrelated units—or treat distinct revisions as the same unit—causing stale results and misattributed diagnostics. The identity boundary needs to distinguish stable lineage from the content and mapping changes that occur within that lineage."
+expected_outcome = "A source unit keeps one stable logical identity while revision, content, and source-map revisions change independently. The identity, compiler, and session layers use those separate values consistently, so cached and published results retain deterministic provenance without path-only or revision-derived aliases."
+acceptance = ["Changing source content or map data does not replace the logical source-unit identity.", "Revision-derived source-unit constructors and path-only lineage aliases are unavailable to production callers.", "Compiler and session mapping keys preserve separate source, revision, content, and map identities.", "Identity and session coverage demonstrates deterministic lookup and provenance across repeated revisions."]

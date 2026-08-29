@@ -42,6 +42,7 @@ export const NODE_FIELDS = [
 ];
 
 const REQUIRED_NODE_FIELDS = NODE_FIELDS;
+const OPTIONAL_NODE_FIELDS = ["gh_milestone"];
 const ARRAY_FIELDS = new Set(["predecessors", "conflict_domains", "external_requirements"]);
 const BOOL_FIELDS = new Set(["dispatchable", "optional"]);
 const INT_FIELDS = new Set([
@@ -524,7 +525,7 @@ export function validateGraphModel(nodes, options = {}) {
   const byId = new Map();
   for (const node of nodes) {
     for (const key of Object.keys(node))
-      if (!NODE_FIELDS.includes(key) && key !== "_module")
+      if (!NODE_FIELDS.includes(key) && !OPTIONAL_NODE_FIELDS.includes(key) && key !== "_module")
         errors.push(`${node.id}: unknown field ${key}`);
     if (typeof node.id !== "string" || !/^[A-Z][A-Z0-9-]*$/u.test(node.id))
       errors.push(`invalid node id ${node.id}`);
@@ -545,6 +546,14 @@ export function validateGraphModel(nodes, options = {}) {
         typeof node[field] !== "string"
       )
         errors.push(`${node.id}: ${field} must be a string`);
+    }
+    for (const field of OPTIONAL_NODE_FIELDS) {
+      if (
+        Object.hasOwn(node, field) &&
+        (typeof node[field] !== "string" || node[field].length === 0)
+      ) {
+        errors.push(`${node.id}: ${field} must be a non-empty string`);
+      }
     }
     const predecessors = predecessorsOf(node);
     if (new Set(predecessors).size !== predecessors.length)
@@ -572,6 +581,8 @@ const RETAINED_CATALOG_SCHEMAS = [
     "slice",
     "id",
   ],
+  ["github-milestones.toml", "github-milestone-catalog.schema.json", "milestone", "title"],
+  ["github-issue-content.toml", "github-issue-content-catalog.schema.json", "issue", "node_id"],
 ];
 
 export function validateRetainedCatalogSchemas(packageRoot = PACKAGE_ROOT) {
@@ -680,6 +691,24 @@ function validateCatalogReferences(authority) {
       const values = Array.isArray(node[field]) ? node[field] : [node[field]];
       for (const value of values)
         if (!ids.has(value)) errors.push(`${node.id}: unknown ${field} ${value}`);
+    }
+  }
+  const milestoneCatalog = readToml(
+    path.join(authority.packageRoot, "catalogs", "github-milestones.toml"),
+  );
+  const milestoneTitles = new Set((milestoneCatalog.milestone || []).map((row) => row.title));
+  for (const node of authority.nodes) {
+    if (node.gh_milestone != null && !milestoneTitles.has(node.gh_milestone)) {
+      errors.push(`${node.id}: unknown gh_milestone ${node.gh_milestone}`);
+    }
+  }
+  const issueContentCatalog = readToml(
+    path.join(authority.packageRoot, "catalogs", "github-issue-content.toml"),
+  );
+  const nodeIds = new Set(authority.nodes.map((node) => node.id));
+  for (const row of issueContentCatalog.issue || []) {
+    if (!nodeIds.has(row.node_id)) {
+      errors.push(`github-issue-content.toml: unknown node_id ${row.node_id}`);
     }
   }
   const githubProgram = readToml(

@@ -24,11 +24,9 @@ import {
 } from "./errors.mjs";
 import { assertSyncAncestors, loadLedgerFile } from "./ledger-write.mjs";
 import { loadAuthority } from "../../roadmap/0.1.0-tama/tools/lib.mjs";
+import { ensureAiGeneratedFooter } from "./issue-provenance.mjs";
 
 const REVIEW_SUMMARY_NODE_ID = "GH4";
-const MODEL_LINE = /^Model:\s*/u;
-const EFFORT_FIELD =
-  /^(?:implementation_|review_|verification_|confirmation_)?effort(?:_(?:min|default))?\s*[:=]/iu;
 const BLOCKING_SEVERITY = new Set(["P0", "P1"]);
 
 function requiredReviewSummaryAncestors(authority) {
@@ -141,21 +139,6 @@ function blockingFinding(findings) {
   return findings.find((row) => BLOCKING_SEVERITY.has(row.severity)) ?? null;
 }
 
-export function countModelLines(body) {
-  if (typeof body !== "string" || body.length === 0) return 0;
-  return body.split(/\r?\n/u).filter((line) => /^Model:\s+\S/u.test(line)).length;
-}
-
-export function ensureOneModelLine(body, model) {
-  assertRequiredText(model, "model");
-  if (/[\r\n]/u.test(model)) throw new GitHubAdapterError("model must be a single line");
-  const lines = (typeof body === "string" ? body : "").replaceAll("\r\n", "\n").split("\n");
-  const kept = lines.filter((line) => !MODEL_LINE.test(line) && !EFFORT_FIELD.test(line));
-  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
-  kept.push("", `Model: ${model}`);
-  return `${kept.join("\n")}\n`;
-}
-
 function buildReviewCycleSummary({ verdict, body, findings }) {
   const lines = [`Verdict: ${verdict}`, "", body.trimEnd()];
   if (findings.length > 0) {
@@ -232,11 +215,6 @@ export function reviewSummary(options) {
     );
   }
   const optIn = mapping.sync_to_github === true;
-  if (optIn && (typeof options.model !== "string" || options.model.length === 0)) {
-    throw new GitHubAdapterError(
-      "review-summary opt-in mapping requires --model or GITHUBCTL_MODEL",
-    );
-  }
   const pull = readPullRequest(options.adapter, prNumber);
   if (pull.number !== prNumber) {
     throw new UnstructuredGitHubOutputError(
@@ -256,7 +234,7 @@ export function reviewSummary(options) {
     issueReport = { kind: "protected", number: mapping.gh_issue, applied: false };
   } else {
     currentIssue = readMappedIssue(options.adapter, mapping.gh_issue);
-    nextIssueBody = ensureOneModelLine(currentIssue.body, options.model);
+    nextIssueBody = ensureAiGeneratedFooter(currentIssue.body);
     issueReport = {
       kind: "update-issue",
       number: mapping.gh_issue,

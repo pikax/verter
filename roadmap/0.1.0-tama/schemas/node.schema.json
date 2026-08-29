@@ -74,6 +74,7 @@
     "dispatchable": { "type": "boolean" },
     "optional": { "type": "boolean" },
     "release_gating": { "type": "string", "minLength": 1 },
+    "gh_milestone": { "type": "string", "minLength": 1 },
     "external_requirements": {
       "type": "array",
       "uniqueItems": true,

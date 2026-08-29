@@ -3,9 +3,9 @@ import { GitHubAdapterError } from "./errors.mjs";
 
 export const DOCTOR_ALL_CAPABILITIES = Object.freeze(["issues", "pullRequests", "projects"]);
 export const SYNC_ISSUES_CAPABILITIES = Object.freeze(["issues"]);
+export const PROJECT_STATUS_CAPABILITIES = Object.freeze(["projects"]);
 export const CREATE_PR_CAPABILITIES = Object.freeze(["issues", "pullRequests"]);
 export const REVIEW_SUMMARY_CAPABILITIES = Object.freeze(["issues", "pullRequests"]);
-export const SQUASH_LAND_CAPABILITIES = Object.freeze(["pullRequests"]);
 export const SCHEDULE_CAPABILITIES = Object.freeze(["issues", "projects"]);
 export const INSPECT_CAPABILITIES = Object.freeze(["issues"]);
 export const RELEASE_PLAN_DISPATCH_CAPABILITIES = Object.freeze(["actions"]);
@@ -37,8 +37,8 @@ export class GitHubDoctor {
   }
 
   check(options = {}) {
-    const capabilities = this.adapter.inspectCapabilities();
     const required = requiredCapabilities(options.require);
+    const capabilities = this.adapter.inspectCapabilities({ require: required });
     const errors = [];
     if (!capabilities.authenticated) errors.push("unauthenticated");
     if (!capabilities.repository) errors.push("repository");

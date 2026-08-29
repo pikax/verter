@@ -1,0 +1,53 @@
+schema = 1
+
+[[milestone]]
+title = "0.0.1-beta.4"
+description = "Structural correctness baseline"
+
+[[milestone]]
+title = "0.0.1-beta.5"
+description = "Vue stable-surface correctness"
+
+[[milestone]]
+title = "0.0.1-beta.6"
+description = "Svelte stable-surface correctness"
+
+[[milestone]]
+title = "0.0.1-beta.7"
+description = "Product-surface hardening"
+
+[[milestone]]
+title = "0.0.1-rc"
+description = "Scope-frozen release candidate"
+
+[[milestone]]
+title = "0.0.1"
+description = "Trustworthy public baseline"
+
+[[milestone]]
+title = "0.0.2"
+description = "Rev11 foundation"
+
+[[milestone]]
+title = "0.0.3"
+description = "Vue compiler product"
+
+[[milestone]]
+title = "0.0.4"
+description = "Vue tooling product"
+
+[[milestone]]
+title = "0.0.5"
+description = "Native checker product"
+
+[[milestone]]
+title = "0.0.6"
+description = "Broad tooling product"
+
+[[milestone]]
+title = "0.0.7"
+description = "Second framework product"
+
+[[milestone]]
+title = "0.1.0"
+description = "Coherent platform release"

@@ -3,6 +3,7 @@ export const MINIMAL_GITHUB_WORKFLOW = Object.freeze({
   sync_issues_available: true,
   steps: Object.freeze([
     Object.freeze({ command: "sync-issues" }),
+    Object.freeze({ command: "project-status" }),
     Object.freeze({ command: "create-pr" }),
     Object.freeze({ command: "review-summary" }),
     Object.freeze({ command: "ci-result" }),
