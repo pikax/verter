@@ -20,6 +20,8 @@
 // imports resolved through `meta_resolve` private siblings; after the
 // move, `super` is `host_manage`, so the rewrite goes via the parent
 // module's `pub(crate)`-re-exported surface.
+use std::sync::Arc;
+
 use crate::fact_signature_helpers::named_fact_tracer;
 use crate::host_manage::component_meta_trace_custom;
 use crate::meta_resolve::ResolvedComponentMetaState;
@@ -116,7 +118,7 @@ pub(crate) fn should_skip_imported_registry_seed_refresh(
 pub struct CapturedComponentMetaInputs {
     pub(crate) whole_hash: Hash16,
     pub(crate) snapshot: FileAnalysisSnapshot,
-    pub(crate) owner_eval_source: Option<String>,
+    pub(crate) owner_eval_source: Option<Arc<str>>,
     pub(crate) direct_dependency_candidates: std::collections::BTreeSet<String>,
     pub(crate) audit_capture_inputs_ms: f64,
     pub(crate) audit_store_read_ms: f64,
@@ -231,11 +233,7 @@ impl ComponentMetaRequestHost for VerterHost {
                 facts.framework_parse.is_some(),
             ),
         );
-        let owner_eval_source = VerterHost::build_eval_script_source(
-            canonical,
-            &facts.raw_source,
-            facts.framework_parse.as_deref(),
-        );
+        let owner_eval_source = Arc::clone(&facts.eval_source);
         let direct_import_started = audit_enabled.then(Instant::now);
         let direct_dependency_candidates =
             self.cache_dependency_candidates_from_snapshot(canonical, &snapshot);

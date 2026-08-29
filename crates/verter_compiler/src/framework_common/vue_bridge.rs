@@ -590,35 +590,6 @@ impl CarrierCompiler for VueCarrierCompiler {
         Ok(build_vue_parse_artifact(source, parsed, opts))
     }
 
-    fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
-        // Position-preserving blanking from the artifact's own typed
-        // script regions: every byte starts blanked (line terminators
-        // preserved so line/column geometry is unchanged), then each
-        // script region's RAW bytes are stamped over their carrier-
-        // absolute offsets. Output length == input length by
-        // construction.
-        let src = source.as_bytes();
-        let mut out: Vec<u8> = src
-            .iter()
-            .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
-            .collect();
-        for region in artifact.script_regions() {
-            let start = region.span.start as usize;
-            let end = region.span.end as usize;
-            if start <= end && end <= src.len() {
-                out[start..end].copy_from_slice(&src[start..end]);
-            }
-        }
-        // Every replaced byte is single-byte ASCII and every preserved
-        // range is copied wholesale from valid UTF-8, so `out` is valid
-        // UTF-8 and exactly `source.len()` bytes long.
-        Arc::from(
-            String::from_utf8(out)
-                .unwrap_or_else(|_| source.to_string())
-                .as_str(),
-        )
-    }
-
     fn compile_ide(
         &self,
         source: &str,
@@ -3426,29 +3397,6 @@ mod tests {
         assert_eq!(artifact.parse_key(), &expected_parse_key(source));
         assert_eq!(artifact.script_regions().len(), 1);
         assert_eq!(artifact.common().template_regions().len(), 1);
-    }
-
-    #[test]
-    fn vue_compiler_eval_source_is_position_preserving_with_script_at_raw_offsets() {
-        let compiler = VueCarrierCompiler;
-        let source = "<template><div/></template>\n<script setup lang=\"ts\">const a = 1</script>";
-        let artifact = artifact_for(source);
-        let eval = compiler.eval_source(source, &artifact);
-        // Length invariant.
-        assert_eq!(
-            eval.len(),
-            source.len(),
-            "eval source must equal SFC length"
-        );
-        // The script region's bytes sit at their raw offsets.
-        let region = artifact.script_regions()[0].span;
-        let (s, e) = (region.start as usize, region.end as usize);
-        assert_eq!(&eval[s..e], "const a = 1");
-        // The `<template>` markup is blanked (no `<` survives outside script).
-        assert!(
-            !eval[..s].contains('<'),
-            "markup before the script must be blanked"
-        );
     }
 
     #[test]

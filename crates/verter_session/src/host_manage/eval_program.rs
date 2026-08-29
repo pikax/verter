@@ -78,23 +78,21 @@ impl VerterHost {
 
     /// Central caller for the `IndexedReady.eval_source` body.
     ///
-    /// For a framework CARRIER (any adapter — Vue, Svelte, …) this returns the
-    /// **position-preserving** script-only source: each script block's content
-    /// sits at its RAW carrier byte offsets and every other byte is
-    /// whitespace-blanked (line terminators preserved), so every OXC-produced
-    /// span — eval-env decls, shallow-index facts, member/signature spans —
-    /// is carrier-absolute by construction. The blanking is CARRIER-NEUTRAL: it
-    /// reads the neutral `FrameworkParseCommon.script_regions` the carrier's
-    /// producer populated (BOTH the instance and module script blocks), so a new
-    /// carrier needs no per-adapter eval-source branch here. For a non-carrier
-    /// file the source is returned unchanged (its offsets are already
-    /// file-absolute).
+    /// For a framework CARRIER this returns the **position-preserving**
+    /// script-only `Arc<str>` produced by one semantic-catalog lookup
+    /// (adapter × artifact epoch × Semantic). For a non-carrier file the
+    /// source is returned unchanged (its offsets are already
+    /// file-absolute). Catalog miss and a classified carrier without its
+    /// parse artifact are `None` — no blanked projection, no parse, no
+    /// publication.
+    #[cfg(test)]
     pub(crate) fn build_eval_script_source(
         canonical_id: &str,
         source: &str,
         framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
-    ) -> String {
-        Self::build_eval_script_source_with_extraction(canonical_id, source, framework_parse).0
+    ) -> Option<Arc<str>> {
+        Self::build_eval_script_source_with_extraction(canonical_id, source, framework_parse)
+            .map(|(eval, _)| eval)
     }
 
     /// [`Self::build_eval_script_source`] plus the extraction provenance: the
@@ -105,87 +103,31 @@ impl VerterHost {
     /// ([`crate::parse::VueScriptProgram::Shared`] for Vue,
     /// [`crate::parse::FrameworkScriptProgram::Shared`] for other carriers).
     /// `false` means the raw source passed through unchanged (non-carrier
-    /// files, or a carrier with no extractable script), where the eval program
-    /// covers different bytes than a script-program walk would.
+    /// files), where the eval program covers different bytes than a
+    /// script-program walk would.
     ///
-    /// Carrier-NEUTRAL: a non-Vue carrier blanks from the producer's recorded
-    /// `script_regions` (both instance + module blocks), Vue keeps its exact
-    /// `extract_vue_script_content` behaviour, and a non-carrier passes through.
-    ///
-    /// Extraction is gated on the file's LANGUAGE CLASSIFICATION, never on the
-    /// raw text: `canonical_id` classifies through the single static registry
-    /// (the same authority `resolve_route_type_edge` uses), and ONLY a
-    /// framework-carrier file may script-extract when no parse artifact is
-    /// available. A non-carrier `.ts` / `.d.ts` whose TEXT happens to contain a
-    /// `<script ...>` ... `</script>` pair — a JSDoc `@example` block in a
-    /// package declaration file (vue-router@5, @regle/core, unhead dist all
-    /// ship one) — passes through UNCHANGED; the former unconditional forgiving
-    /// raw scan blanked such a file down to its documentation example,
-    /// destroying its whole type surface (empty shallow inventory → every
-    /// dependent member value unresolvable).
+    /// Catalog semantic authorities own carrier eval-source. A classified
+    /// carrier without its registered artifact, or a catalog miss, is
+    /// typed refusal (`None`) before parse/lease/publication. A
+    /// non-carrier file's raw source is already script: `<script>` text
+    /// inside it is documentation/data, not structure.
     pub(crate) fn build_eval_script_source_with_extraction(
         canonical_id: &str,
         source: &str,
         framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
-    ) -> (String, bool) {
-        // A NON-Vue framework carrier blanks NEUTRALLY from the producer's
-        // recorded `script_regions` (BOTH the instance and module script blocks)
-        // — so a `.svelte` eval-source carries both scripts at their raw carrier
-        // offsets with the markup/styles whitespace-blanked. A new carrier needs
-        // no per-adapter branch here. The blanked text IS a position-preserving
-        // extracted script (the eval program over it is shareable), so the
-        // provenance is `true`.
+    ) -> Option<(Arc<str>, bool)> {
         if let Some(artifact) = framework_parse {
-            let is_vue = crate::typeinfo::adapters::vue::vue_parse(artifact).is_some();
-            if !is_vue {
-                let mut spans: Vec<(u32, u32)> = artifact
-                    .common()
-                    .script_regions()
-                    .iter()
-                    .map(|region| (region.span.start, region.span.end))
-                    .filter(|(start, end)| end > start)
-                    .collect();
-                spans.sort_by_key(|(start, _)| *start);
-                // Even with NO script regions (a pure-markup `.svelte`) the
-                // eval-source is the FULLY-BLANKED, line-preserving source — never
-                // the raw markup. `build_position_preserving_script_source` over an
-                // empty span set blanks every non-line-terminator byte, so a shared
-                // eval-source consumer parses an empty TS program, not HTML.
-                let blanked =
-                    crate::host_resolve::build_position_preserving_script_source(source, &spans);
-                return (blanked, true);
-            }
+            let eval = crate::parse::catalog_eval_source(artifact, source)?;
+            return Some((eval, true));
         }
-        // Vue extraction consumes parser-owned spans only. A classified
-        // carrier without its registered artifact fails closed by preserving
-        // offsets while exposing no markup or script bytes to type evaluation.
-        let parsed = framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse);
-        // A file with NO parse artifact script-extracts ONLY when its
-        // canonical CLASSIFIES as a framework carrier. A non-carrier file's
-        // raw source is already script: `<script>` text inside it is
-        // documentation/data, not structure, and the forgiving raw scan must
-        // never blank it (typed classification decides, never text sniffing).
-        if parsed.is_none()
-            && !verter_language::LanguageRegistry::global()
-                .classify_static(canonical_id)
-                .static_resolution()
-                .is_framework_carrier()
+        if !verter_language::LanguageRegistry::global()
+            .classify_static(canonical_id)
+            .static_resolution()
+            .is_framework_carrier()
         {
-            return (source.to_string(), false);
+            return Some((Arc::from(source), false));
         }
-        let Some(parsed) = parsed else {
-            return (
-                crate::host_resolve::build_position_preserving_script_source(source, &[]),
-                true,
-            );
-        };
-        match crate::host_resolve::extract_vue_script_content(source, parsed.as_ref()) {
-            Some(script) => (script, true),
-            None => (
-                crate::host_resolve::build_position_preserving_script_source(source, &[]),
-                true,
-            ),
-        }
+        None
     }
 
     /// Selects the `.vue` snapshot build's script-program input for a cold
@@ -228,28 +170,6 @@ impl VerterHost {
             Some(program) => crate::parse::FrameworkScriptProgram::Shared(program),
             None => crate::parse::FrameworkScriptProgram::SharedFatal,
         }
-    }
-
-    /// Resolve the authoritative `source_type` for cache-key purposes.
-    ///
-    /// Prefers the scheduler-stored [`crate::host_executor::HostSourceData::source_type`]
-    /// (set once at `execute_source` time). Falls back to a pure recomputation for
-    /// canonicals the scheduler has not yet processed — WASM path, first-time routing,
-    /// or snapshot construction for files the scheduler does not own.
-    pub(crate) fn imported_eval_source_type_for(
-        &self,
-        canonical_id: &str,
-        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
-    ) -> oxc_span::SourceType {
-        {
-            if let Some(st) = self.authoritative_source_type_for(canonical_id) {
-                return st;
-            }
-        }
-        crate::parse::imported_eval_source_type(
-            &self.language_classifier.classify(canonical_id),
-            framework_parse,
-        )
     }
 
     /// View-aware variant of [`Self::read_analysis_source`].

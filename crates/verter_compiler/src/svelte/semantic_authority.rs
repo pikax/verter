@@ -1,8 +1,8 @@
 //! Svelte [`FrameworkSemanticAuthority`] adapter.
 //!
-//! Registers Svelte eval-source and template-fact interpretation against
-//! the existing Svelte compiler methods over an already-admitted parse
-//! artifact. Catalog rows stay unused by production request routes.
+//! Owns Svelte eval-source and template-fact interpretation over an
+//! already-admitted parse artifact. Eval-source is selected by catalog
+//! identity (adapter × epoch × Semantic).
 
 use std::sync::Arc;
 
@@ -49,7 +49,9 @@ impl FrameworkSemanticAuthority<SvelteSfc5> for SvelteSemanticAuthority {
     type ParseArtifact = FrameworkParseArtifact;
 
     fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
-        SvelteCarrierCompiler.eval_source(source, artifact)
+        crate::framework_common::vue_semantic_authority::position_preserving_eval_source(
+            source, artifact,
+        )
     }
 
     fn template_facts(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {

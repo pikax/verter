@@ -1,9 +1,9 @@
 //! Carrier-compiler trait and framework-neutral I/O.
 //!
-//! One trait per carrier: parse, position-preserving eval-source
-//! blanking, IDE codegen, template-fact extraction. Vue is the
-//! reference (`vue_bridge::VueCarrierCompiler`). Script facts go
-//! through the host `ScriptFactProvider` seam — not this trait.
+//! One trait per carrier: parse, IDE codegen, template-fact extraction.
+//! Vue is the reference (`vue_bridge::VueCarrierCompiler`). Eval-source
+//! belongs to [`super::capability::FrameworkSemanticAuthority`]. Script
+//! facts go through the host `ScriptFactProvider` seam — not this trait.
 //!
 //! Each adapter's IDE codegen owns its own
 //! [`crate::code_transform::CodeTransform`]. The trait does not thread
@@ -909,16 +909,6 @@ pub trait CarrierCompiler: Send + Sync {
         opts: &ParseOptions,
     ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject>;
 
-    /// Build the POSITION-PRESERVING eval source for `source`.
-    ///
-    /// The result is byte-for-byte the SAME LENGTH as `source`: every
-    /// script region's bytes sit at their RAW carrier offsets and every
-    /// other byte is whitespace-blanked (line terminators preserved so
-    /// line/column geometry is unchanged). Because the script text sits at
-    /// its raw offsets, every span the downstream TS parser produces is
-    /// carrier-absolute by construction.
-    fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str>;
-
     /// Generate the IDE (TSX/JSX) artifact for the carrier, or a typed
     /// [`CompileUnsupported`].
     ///
@@ -1129,21 +1119,6 @@ mod contract_tests {
             )))
         }
 
-        fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
-            let src = source.as_bytes();
-            let mut out: Vec<u8> = src
-                .iter()
-                .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
-                .collect();
-            for region in artifact.script_regions() {
-                let (s, e) = (region.span.start as usize, region.span.end as usize);
-                if s <= e && e <= src.len() {
-                    out[s..e].copy_from_slice(&src[s..e]);
-                }
-            }
-            Arc::from(String::from_utf8(out).unwrap().as_str())
-        }
-
         fn compile_ide(
             &self,
             _source: &str,
@@ -1185,61 +1160,6 @@ mod contract_tests {
     fn adapter_id_is_the_registration_key() {
         let compiler = FixtureCompiler;
         assert_eq!(compiler.adapter_id(), FrameworkAdapterId::new("fixture"));
-    }
-
-    #[test]
-    fn eval_source_is_position_preserving_same_length_with_script_bytes_at_raw_offsets() {
-        let compiler = FixtureCompiler;
-        // `markup @@const x = 1@@ trailing` — the script run is between @@.
-        let source = "markup @@const x = 1@@ trailing\nsecond line";
-        let artifact = compiler.registered(source);
-        let eval = compiler.eval_source(source, &artifact);
-
-        // Length invariant: byte-for-byte same length.
-        assert_eq!(
-            eval.len(),
-            source.len(),
-            "eval source must be position-preserving (same byte length)"
-        );
-
-        // The script region's bytes sit at their RAW offsets, unchanged.
-        let region = artifact.script_regions()[0].span;
-        let (s, e) = (region.start as usize, region.end as usize);
-        assert_eq!(
-            &eval[s..e],
-            "const x = 1",
-            "script bytes must be copied verbatim at their raw carrier offsets"
-        );
-        assert_eq!(&source[s..e], &eval[s..e]);
-
-        // Every non-script, non-line-terminator byte is blanked to a space.
-        for (i, (&sb, eb)) in source.as_bytes().iter().zip(eval.bytes()).enumerate() {
-            if i >= s && i < e {
-                continue; // script region — verified above
-            }
-            if sb == b'\n' || sb == b'\r' {
-                assert_eq!(eb, sb, "line terminators are preserved at offset {i}");
-            } else {
-                assert_eq!(eb, b' ', "non-script byte at offset {i} must be blanked");
-            }
-        }
-    }
-
-    #[test]
-    fn eval_source_with_no_script_region_is_all_blank_same_length() {
-        let compiler = FixtureCompiler;
-        let source = "no script here\njust markup";
-        let artifact = compiler.registered(source);
-        assert!(artifact.script_regions().is_empty());
-        let eval = compiler.eval_source(source, &artifact);
-        assert_eq!(eval.len(), source.len());
-        for (&sb, eb) in source.as_bytes().iter().zip(eval.bytes()) {
-            if sb == b'\n' || sb == b'\r' {
-                assert_eq!(eb, sb);
-            } else {
-                assert_eq!(eb, b' ');
-            }
-        }
     }
 
     #[test]

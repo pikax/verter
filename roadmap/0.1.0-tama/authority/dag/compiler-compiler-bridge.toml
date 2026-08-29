@@ -353,12 +353,12 @@ verification_effort_min = "high"
 verification_effort_default = "high"
 confirmation_effort_min = "high"
 confirmation_effort_default = "high"
-size = "S"
-max_production_loc = 600
-max_production_files = 5
+size = "M"
+max_production_loc = 1200
+max_production_files = 20
 max_related_packages = 2
 rescope_loc = 1500
-rescope_files = 12
+rescope_files = 24
 rescope_unrelated_packages = 3
 
 [[node]]

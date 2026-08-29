@@ -1,8 +1,8 @@
 //! Vue [`FrameworkSemanticAuthority`] adapter.
 //!
-//! Registers Vue eval-source and template-fact interpretation against the
-//! existing Vue compiler methods over an already-admitted parse artifact.
-//! Catalog rows stay unused by production request routes.
+//! Owns Vue eval-source and template-fact interpretation over an
+//! already-admitted parse artifact. Eval-source is selected by catalog
+//! identity (adapter × epoch × Semantic).
 
 use std::sync::Arc;
 
@@ -14,6 +14,33 @@ use super::catalog::{SemanticCap, TypedCapabilityRegistration};
 use super::vue_bridge::VueCarrierCompiler;
 use super::vue_carrier_frontend::VueSfcV3;
 use super::FrameworkParseArtifact;
+
+/// Position-preserving eval source over admitted script regions.
+///
+/// Script bytes stay at their raw offsets; every other byte is blanked
+/// (line terminators preserved). Output length equals input length. It
+/// does not inject a newline between adjacent script regions.
+pub(crate) fn position_preserving_eval_source(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+) -> Arc<str> {
+    let src = source.as_bytes();
+    let mut out: Vec<u8> = src
+        .iter()
+        .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
+        .collect();
+    for region in artifact.script_regions() {
+        let start = region.span.start as usize;
+        let end = region.span.end as usize;
+        if start <= end && end <= src.len() {
+            out[start..end].copy_from_slice(&src[start..end]);
+        }
+    }
+    match String::from_utf8(out) {
+        Ok(text) => Arc::from(text),
+        Err(_) => Arc::from(source),
+    }
+}
 
 /// Vue semantic authority: eval-source, template facts, typed identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,7 +74,7 @@ impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
     type ParseArtifact = FrameworkParseArtifact;
 
     fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
-        VueCarrierCompiler.eval_source(source, artifact)
+        position_preserving_eval_source(source, artifact)
     }
 
     fn template_facts(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {

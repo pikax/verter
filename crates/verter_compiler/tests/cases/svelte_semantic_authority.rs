@@ -1,10 +1,12 @@
 //! Svelte `FrameworkSemanticAuthority` backend: eval-source and
-//! template-fact equivalence with the existing Svelte compiler methods,
-//! catalog identity, and proof that production request routes still do
-//! not consult this row.
+//! template-fact interpretation, catalog identity lookup, and
+//! identity-mismatch refusal.
 
 use std::sync::Arc;
 
+use verter_compiler::framework_common::registered_carrier_projection::{
+    eval_source_from_catalog, registered_semantic_for,
+};
 use verter_compiler::framework_common::{
     svelte_semantic_authority_registration, vue_semantic_authority_registration, CarrierCompiler,
     CarrierCompilerRegistry, CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
@@ -62,20 +64,6 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
         .project_registered(&accepted)
         .expect("registered projection")
         .into_framework_parse_artifact()
-}
-
-fn assert_eval_equivalent(source: &str, left: &str, right: &str) {
-    assert_eq!(left.len(), source.len());
-    assert_eq!(right.len(), source.len());
-    assert_eq!(left, right);
-}
-
-#[test]
-fn svelte_semantic_eval_source_matches_existing_compiler() {
-    let artifact = registered_artifact("file:///kitchen.svelte", KITCHEN_SINK);
-    let via_authority = SvelteSemanticAuthority.eval_source(KITCHEN_SINK, &artifact);
-    let via_compiler = SvelteCarrierCompiler.eval_source(KITCHEN_SINK, &artifact);
-    assert_eval_equivalent(KITCHEN_SINK, via_authority.as_ref(), via_compiler.as_ref());
 }
 
 #[test]
@@ -190,42 +178,19 @@ fn vue_and_svelte_semantic_rows_coexist_as_independent_catalogs() {
 }
 
 #[test]
-fn production_request_routes_do_not_call_the_svelte_semantic_row() {
-    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut hits = Vec::new();
-    walk_production(&src_root, &mut hits);
-    assert!(
-        hits.is_empty(),
-        "production request routes must not consult the Svelte semantic catalog row yet: {hits:?}"
+fn svelte_semantic_catalog_lookup_is_adapter_and_epoch_identity() {
+    let artifact = registered_artifact("file:///lookup.svelte", KITCHEN_SINK);
+    assert_eq!(artifact.epoch().as_str(), SvelteSfc5::ID);
+    let selected = registered_semantic_for(artifact.adapter_id(), artifact.epoch())
+        .expect("Svelte adapter × Svelte epoch must select a semantic row");
+    let via_catalog = selected.eval_source(KITCHEN_SINK, &artifact);
+    let via_authority = SvelteSemanticAuthority.eval_source(KITCHEN_SINK, &artifact);
+    assert_eq!(
+        via_catalog.as_ref(),
+        via_authority.as_ref(),
+        "lookup must invoke the selected row's eval-source payload directly"
     );
-}
-
-fn walk_production(dir: &std::path::Path, hits: &mut Vec<String>) {
-    for entry in std::fs::read_dir(dir).expect("src walk") {
-        let entry = entry.expect("dirent");
-        let path = entry.path();
-        if path.is_dir() {
-            walk_production(&path, hits);
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-            .unwrap_or(&path);
-        let rel_str = rel.to_string_lossy();
-        if rel_str.ends_with("svelte/semantic_authority.rs")
-            || rel_str.ends_with("svelte/mod.rs")
-            || rel_str.ends_with("framework_common/mod.rs")
-        {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).expect("read rust");
-        if text.contains("SvelteSemanticAuthority")
-            || text.contains("svelte_semantic_authority_registration")
-        {
-            hits.push(rel_str.into_owned());
-        }
-    }
+    let via_one_lookup = eval_source_from_catalog(&artifact, KITCHEN_SINK)
+        .expect("one semantic-catalog lookup must serve the Svelte artifact");
+    assert_eq!(via_one_lookup.as_ref(), via_authority.as_ref());
 }

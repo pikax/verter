@@ -783,11 +783,7 @@ impl VerterHost {
             let store_read_ms = store_read_started
                 .map(|started| started.elapsed().as_secs_f64() * 1000.0)
                 .unwrap_or(0.0);
-            let owner_eval_source = VerterHost::build_eval_script_source(
-                canonical,
-                &facts.raw_source,
-                facts.framework_parse.as_deref(),
-            );
+            let owner_eval_source = Arc::clone(&facts.eval_source);
             let direct_import_started = audit_enabled.then(Instant::now);
             let direct_dependency_candidates =
                 self.cache_dependency_candidates_from_snapshot(canonical, &snapshot);

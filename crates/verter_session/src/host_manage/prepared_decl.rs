@@ -1679,6 +1679,44 @@ impl VerterHost {
 }
 
 impl VerterHost {
+    /// Source-bound `FileAnalysisSnapshot` from a held `ParseSnapshot`.
+    ///
+    /// `export_signatures` is the single Arc shared with `IndexedReady`.
+    /// `template` is only an entry stamped with the held source snapshot's
+    /// generation; otherwise `None`.
+    fn source_bound_file_analysis_snapshot(
+        parse: &crate::ParseSnapshot,
+        export_signatures: Arc<Vec<verter_semantic::analysis::ExportSignature>>,
+        template: Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
+    ) -> crate::types::FileAnalysisSnapshot {
+        let sa = parse.script_analysis.as_ref();
+        crate::types::FileAnalysisSnapshot {
+            imports: sa.imports.clone(),
+            bindings: sa.bindings.clone(),
+            module_references: Arc::new(sa.module_references.clone()),
+            macros: Arc::new(sa.macros.clone()),
+            macro_type_deps: Arc::new(sa.macro_type_deps.clone()),
+            script_flags: sa.flags.bits(),
+            styles: Arc::new(parse.style_analyses.clone()),
+            template,
+            vue_api_calls: Arc::new(sa.vue_api_calls.clone()),
+            dom_query_calls: Arc::new(sa.dom_query_calls.clone()),
+            css_var_manipulations: Arc::new(sa.css_var_manipulations.clone()),
+            script_binding_occurrences: Arc::new(sa.script_binding_occurrences.clone()),
+            macro_usage: sa.macro_usage.clone(),
+            style_vbind_roots: sa.style_vbind_roots.clone(),
+            markup_class_tokens: Arc::new(parse.markup_class_tokens.clone()),
+            export_signatures,
+            options_api: sa.options_api.clone(),
+            store_usages: Arc::new(sa.store_usages.clone()),
+            store_definitions: Arc::new(sa.store_definitions.clone()),
+            is_typescript: sa.is_typescript,
+            anchor_revision: crate::types::AnalysisSourceRevision::from_whole_hash(
+                parse.whole_hash,
+            ),
+        }
+    }
+
     /// Build the file's `ShallowFileState` from its content-addressed
     /// payload parts: the parser's route inventory, the lazy
     /// declaration-body memo, and the framework component-`default`
@@ -1798,6 +1836,19 @@ impl VerterHost {
     #[cfg(test)]
     pub(crate) fn fire_compile_blockers_serve_seam(&self) {
         let hook = self.compile_blockers_serve_seam_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    /// Test-only seam fired after the cold IndexedReady flight holds its
+    /// source snapshot and before remaining IndexedReady products are
+    /// assembled from that object — see the `indexed_source_capture_seam_hook`
+    /// field docs. Same clone-out-then-invoke discipline as
+    /// [`Self::fire_materialize_seam`].
+    #[cfg(test)]
+    pub(crate) fn fire_indexed_source_capture_seam(&self) {
+        let hook = self.indexed_source_capture_seam_hook.lock().clone();
         if let Some(hook) = hook {
             hook();
         }
@@ -1983,6 +2034,8 @@ impl VerterHost {
         }
 
         let materialize = || -> Option<crate::project_type_store::IndexedFlightOutcome> {
+            #[cfg(test)]
+            let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
             verter_workspace::probe_scope!(ENSURE_INDEXED_COLD);
             self.provenance
                 .indexed_ready_materializes
@@ -2006,34 +2059,46 @@ impl VerterHost {
             // the scheduler — the canonical way to materialize a file. If
             // the scheduler still misses after `ensure_loaded`, return None
             // (file doesn't exist in the workspace).
-            let (raw_source, file_language, framework_parse, whole_hash) = {
-                let state = match self.effective_file_state(canonical_id, None) {
-                    Some(state) => state,
-                    None => {
-                        // On scheduler miss, call ensure_loaded once — the
-                        // canonical way to materialize a file into the
-                        // scheduler + current request view's extension store.
-                        // Raw import specifiers and empty canonicals are
-                        // never loadable.
-                        if canonical_id.is_empty()
-                            || is_raw_import_specifier_id(canonical_id)
-                            || !self.ensure_loaded(canonical_id)
-                        {
-                            return None;
-                        }
-                        self.effective_file_state(canonical_id, None)?
+            //
+            // ONE held source snapshot. Once this SourceSnapshot is held,
+            // no canonical-keyed live read may contribute content to the
+            // IndexedReady: whole_hash, raw, eval-source, language,
+            // source_type, script analysis, snapshot, and export
+            // signatures all come from this object. An independent later
+            // `try_get_source` / `try_get_analysis` could observe a
+            // concurrent edit and pair snapshot-A hashes with snapshot-B
+            // analysis.
+            let source_snap = match self.scheduler.try_get_source(canonical_id) {
+                Some(snap) => snap,
+                None => {
+                    // On scheduler miss, call ensure_loaded once — the
+                    // canonical way to materialize a file into the
+                    // scheduler + current request view's extension store.
+                    // Raw import specifiers and empty canonicals are
+                    // never loadable.
+                    if canonical_id.is_empty()
+                        || is_raw_import_specifier_id(canonical_id)
+                        || !self.ensure_loaded(canonical_id)
+                    {
+                        return None;
                     }
-                };
-                if !self.store_view_allows_current_whole_hash(canonical_id, state.whole_hash) {
-                    return None;
+                    self.scheduler.try_get_source(canonical_id)?
                 }
-                (
-                    state.source,
-                    state.file_language,
-                    state.framework_parse,
-                    state.whole_hash,
-                )
             };
+            // Missing host data is refusal — never recatalog, never a
+            // second scheduler read. Every content-addressed product
+            // below is derived from this one object.
+            let hd = source_snap.downcast_data::<crate::host_executor::HostSourceData>()?;
+            let whole_hash = hd.parse.whole_hash;
+            if !self.store_view_allows_current_whole_hash(canonical_id, whole_hash) {
+                return None;
+            }
+            let raw_source = Arc::clone(&source_snap.source);
+            let file_language = hd.file_language.clone();
+            let framework_parse = hd.framework_parse.clone();
+            let eval_source = Arc::clone(&hd.eval_source);
+            let source_type = hd.source_type;
+            let script_analysis = Arc::clone(&hd.parse.script_analysis);
 
             // A carrier canonical (`.vue`, `.svelte`, …) the scheduler has not
             // parsed yet runs the carrier parser ONCE here through the counted
@@ -2043,67 +2108,35 @@ impl VerterHost {
             if framework_parse.is_none() && file_language.is_framework_carrier() {
                 return None;
             }
-            let framework_parse = framework_parse;
 
-            // `eval_is_extracted_script` records whether the eval source is the
-            // position-preserving extracted carrier script — the predicate that
-            // lets the snapshot build below walk the flight's single
-            // eval-program parse instead of re-parsing the same script bytes.
-            let (eval_source_text, eval_is_extracted_script) =
-                Self::build_eval_script_source_with_extraction(
-                    canonical_id,
-                    raw_source.as_ref(),
-                    framework_parse.as_deref(),
-                );
-            let eval_source = Arc::<str>::from(eval_source_text);
-            // The authoritative `source_type` is resolved ONCE (scheduler
-            // value first) and feeds the single eval-program parse below;
-            // per-call recomputation diverged for `.vue` `lang="tsx"`.
-            let source_type =
-                self.imported_eval_source_type_for(canonical_id, framework_parse.as_deref());
+            #[cfg(test)]
+            self.fire_indexed_source_capture_seam();
+
             // THE single eval-program parse for this cold canonical
             // build — performed AND RETAINED on the lazy lowering
             // service's worker (keyed by the content-generation
             // `SnapshotKey`), so later declaration-body demands reuse
             // the same parse instead of re-parsing per touch. The cold
             // job builds only INDEX products from the borrowed program:
-            // the declaration headers and exact route inventory, plus
-            // (when the scheduler had no snapshot) the file-analysis
-            // snapshot. ZERO declaration bodies lower here.
+            // declaration headers, route inventory, owner table, and
+            // runes mode. ZERO declaration bodies lower here. The
+            // file-analysis snapshot is source-bound from `hd.parse`,
+            // never rebuilt from the retained program.
             let snapshot_key = crate::decl_lowering::SnapshotKey {
                 canonical: Arc::from(canonical_id),
                 whole_hash,
                 parse_env_hash: flight_parse_env_hash,
             };
 
-            let scheduler_snapshot = self.build_snapshot_from_scheduler(canonical_id).map(|s| {
-                self.provenance
-                    .indexed_ready_scheduler_snapshot_reuse
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Arc::new(s)
-            });
-
             struct ColdIndexProducts {
                 header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
                 route_inventory:
                     verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory,
-                snapshot: Option<crate::types::FileAnalysisSnapshot>,
                 svelte_component_runes_mode: bool,
                 owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
             }
 
-            let job_canonical = canonical_id.to_string();
-            let job_raw_source = Arc::clone(&raw_source);
             let job_framework_parse = framework_parse.clone();
-            let job_scope = self.config.effective_scope();
-            let job_provenance = Arc::clone(&self.provenance);
-            let need_snapshot = scheduler_snapshot.is_none();
-            // A carrier whose neutral artifact opens through the blessed Vue
-            // accessor builds the Vue-shaped snapshot; any other carrier (Svelte
-            // today) builds the carrier-neutral snapshot from its retained eval
-            // program. The dispatch is by the artifact's own carrier — never a
-            // hardcoded extension branch.
-            let is_carrier = file_language.is_framework_carrier();
             // Pin the retained parse for this content generation HERE — at
             // the cold-index parse, the earliest service parse — and hand
             // the lease to the artifact's memo below, so the header-index
@@ -2160,75 +2193,9 @@ impl VerterHost {
                         // authoritative `source_type` already failed).
                         None => Default::default(),
                     };
-                    let vue_parsed = job_framework_parse
-                        .as_deref()
-                        .and_then(crate::typeinfo::adapters::vue::vue_parse);
-                    let snapshot = if !need_snapshot {
-                        None
-                    } else if let Some(parsed_sfc) = vue_parsed {
-                        // Vue SFC snapshot from the artifact's typed parse (opened
-                        // through the blessed `vue_parse` accessor). The script
-                        // program is the flight's eval program when the eval
-                        // source IS the extracted script — the snapshot walks the
-                        // SAME retained parse.
-                        let parse = crate::parse::build_vue_snapshot_from_parsed(
-                            &job_canonical,
-                            job_raw_source.as_ref(),
-                            job_scope,
-                            &parsed_sfc,
-                            job_framework_parse
-                                .as_deref()
-                                .expect("Vue parse came from this framework artifact"),
-                            &job_provenance,
-                            VerterHost::vue_flight_script_program(
-                                eval_is_extracted_script,
-                                program,
-                            ),
-                            Some(&owner_table),
-                        );
-                        Some(VerterHost::build_snapshot_from_parse(parse))
-                    } else if is_carrier {
-                        // A non-Vue carrier (Svelte): its eval source IS the
-                        // position-preserving extracted script, so the snapshot's
-                        // script program is the flight's retained eval program —
-                        // walk it, parse nothing. The carrier-neutral snapshot
-                        // builder runs the script analysis over that program.
-                        job_framework_parse.as_deref().map(|artifact| {
-                            let parse =
-                                crate::parse::build_carrier_snapshot_from_artifact_with_program(
-                                    &job_canonical,
-                                    job_raw_source.as_ref(),
-                                    job_scope,
-                                    artifact,
-                                    &job_provenance,
-                                    VerterHost::framework_flight_script_program(
-                                        eval_is_extracted_script,
-                                        program,
-                                    ),
-                                    Some(&owner_table),
-                                );
-                            VerterHost::build_snapshot_from_parse(parse)
-                        })
-                    } else if let Some(parsed) = program {
-                        let parse = crate::parse::build_non_sfc_snapshot_from_program(
-                            &job_canonical,
-                            job_raw_source.as_ref(),
-                            source_type,
-                            parsed.borrow_dependent(),
-                            parsed.had_errors(),
-                        );
-                        Some(VerterHost::build_snapshot_from_parse(parse))
-                    } else {
-                        // Fatal (panicked) eval-program parse on a non-carrier
-                        // canonical: a re-parse over the same bytes under
-                        // the same source type panics identically, so the
-                        // default-empty snapshot IS the parse outcome.
-                        Some(crate::types::FileAnalysisSnapshot::default())
-                    };
                     Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
                         header_index,
                         route_inventory,
-                        snapshot,
                         svelte_component_runes_mode,
                         owner_table,
                     })
@@ -2259,9 +2226,24 @@ impl VerterHost {
                     return None;
                 }
             };
-            let snapshot = scheduler_snapshot
-                .unwrap_or_else(|| Arc::new(products.snapshot.unwrap_or_default()));
             let route_inventory = Arc::new(products.route_inventory);
+
+            // Source-bound FileAnalysisSnapshot from the held parse —
+            // never a live Analysis read. Template analysis is the one
+            // canonical-keyed lookup allowed here, and only an entry
+            // stamped with this source snapshot's generation; otherwise
+            // None. Never consult live Analysis B.
+            self.provenance
+                .indexed_ready_scheduler_snapshot_reuse
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let export_signatures = Arc::new(hd.parse.export_signatures.clone());
+            let template =
+                self.validated_raw_template_analysis(canonical_id, source_snap.generation);
+            let snapshot = Arc::new(Self::source_bound_file_analysis_snapshot(
+                &hd.parse,
+                Arc::clone(&export_signatures),
+                template,
+            ));
 
             // The lazy declaration-body memo this artifact owns — the
             // body authority for this content generation; bodies lower
@@ -2290,46 +2272,14 @@ impl VerterHost {
                 Some(eval_source.as_ref()),
             );
 
-            // Prefer the scheduler's file state for script_analysis (it may have
-            // richer compilation context), but fall back to the snapshot's data
-            // for workspace-only files that are not in the scheduler.
-            let script_analysis = self
-                .effective_file_state(canonical_id, None)
-                .filter(|state| state.whole_hash == whole_hash)
-                // `state.script_analysis` is already the shared
-                // `Arc<ScriptAnalysisSnapshot>` — thread the same allocation
-                // onto `IndexedReady` instead of re-wrapping a deep copy.
-                .map(|state| state.script_analysis)
-                .or_else(|| {
-                    Some(Arc::new(
-                        verter_semantic::analysis::ScriptAnalysisSnapshot {
-                            imports: snapshot.imports.clone(),
-                            module_references: snapshot.module_references.as_ref().clone(),
-                            bindings: snapshot.bindings.clone(),
-                            macros: snapshot.macros.as_ref().clone(),
-                            macro_type_deps: snapshot.macro_type_deps.as_ref().clone(),
-                            flags: verter_semantic::analysis::AnalysisFlags::from_bits_truncate(
-                                snapshot.script_flags,
-                            ),
-                            ..Default::default()
-                        },
-                    ))
-                });
-            let export_signatures = Some(Arc::clone(&snapshot.export_signatures));
-
-            // Project the AppConfig-interface flag from the merged
-            // analysis snapshot onto IndexedReady. The flag is the
-            // production input the `AppConfigNoOverrideProofDb`
+            // Project the AppConfig-interface flag from the held
+            // source-stage script analysis onto IndexedReady. The flag
+            // is the production input the `AppConfigNoOverrideProofDb`
             // producer consults to short-circuit files that cannot
             // contribute an override.
             let declares_interface_app_config = script_analysis
-                .as_ref()
-                .map(|sa| {
-                    sa.flags.contains(
-                        verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG,
-                    )
-                })
-                .unwrap_or(false);
+                .flags
+                .contains(verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG);
 
             // Publish the canonical post-parse artifact into FileArtifactStore.
             // This is the single authoritative cache consumers read from.
@@ -2342,8 +2292,8 @@ impl VerterHost {
                 raw_source: Arc::clone(&raw_source),
                 eval_source: Arc::clone(&eval_source),
                 framework_parse,
-                script_analysis,
-                export_signatures,
+                script_analysis: Some(script_analysis),
+                export_signatures: Some(export_signatures),
                 snapshot,
                 route_inventory: Arc::clone(&route_inventory),
                 declares_interface_app_config,

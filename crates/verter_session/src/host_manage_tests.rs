@@ -408,7 +408,7 @@ fn clear_framework_parse(host: &VerterHost) {
 // in `component_meta_audit/structured_event.rs`.
 
 #[test]
-fn build_eval_script_source_without_parse_artifact_fails_closed() {
+fn build_eval_script_source_without_parse_artifact_is_zero_work() {
     let source = r#"<script lang="ts">
 interface Props {
   label: string
@@ -419,17 +419,9 @@ defineProps<Props>()
 </script>
 <template><div /></template>"#;
 
-    let extracted = VerterHost::build_eval_script_source("/App.vue", source, None);
     assert!(
-        extracted
-            .bytes()
-            .all(|byte| matches!(byte, b' ' | b'\r' | b'\n')),
-        "a registered carrier without its parse artifact must not be rescanned: {extracted:?}"
-    );
-    assert_eq!(
-        extracted.len(),
-        source.len(),
-        "fail-closed blanking preserves offsets"
+        VerterHost::build_eval_script_source("/App.vue", source, None).is_none(),
+        "a classified carrier without its parse artifact must refuse before parse or publication"
     );
 }
 
@@ -454,30 +446,25 @@ export type Real = string | { path: string }
 
     for canonical in ["/dep.ts", "/dep.d.ts", "/dep.tsx", "/dep.mjs"] {
         let (eval, extracted) =
-            VerterHost::build_eval_script_source_with_extraction(canonical, source, None);
+            VerterHost::build_eval_script_source_with_extraction(canonical, source, None)
+                .unwrap_or_else(|| panic!("{canonical}: a non-carrier file passes through"));
         assert!(
             !extracted,
             "{canonical}: a non-carrier file must never report script extraction"
         );
         assert_eq!(
-            eval, source,
+            eval.as_ref(),
+            source,
             "{canonical}: a non-carrier file's source passes through unchanged"
         );
     }
 
-    // Control: the SAME text under a carrier canonical enters the carrier
-    // extraction path, but without its parse artifact it fails closed rather
-    // than falling back to a raw script scan.
-    let (eval, extracted) =
-        VerterHost::build_eval_script_source_with_extraction("/Doc.vue", source, None);
+    // Control: the SAME text under a carrier canonical without its parse
+    // artifact is typed refusal — never a raw script scan and never a
+    // blanked IndexedReady body.
     assert!(
-        extracted,
-        "a carrier canonical still reports the fail-closed extraction path"
-    );
-    assert!(
-        eval.bytes()
-            .all(|byte| matches!(byte, b' ' | b'\r' | b'\n')),
-        "artifact-less carrier extraction must preserve offsets while blanking bytes, got: {eval}"
+        VerterHost::build_eval_script_source_with_extraction("/Doc.vue", source, None).is_none(),
+        "an artifact-less carrier must refuse eval-source rather than blank or scan"
     );
 }
 

@@ -473,6 +473,18 @@ impl<S> TypedCapabilityRegistration<SemanticCap<S>> {
     pub fn semantic(&self) -> &S {
         &self.capability.0 .0
     }
+
+    /// Re-wrap the present semantic authority, keeping this row's identity.
+    #[must_use]
+    pub fn map_semantic<T>(
+        self,
+        map: impl FnOnce(S) -> T,
+    ) -> TypedCapabilityRegistration<SemanticCap<T>> {
+        TypedCapabilityRegistration {
+            identity: self.identity,
+            capability: SemanticCap(Present(map(self.capability.0 .0))),
+        }
+    }
 }
 
 impl<R> TypedCapabilityRegistration<RuntimeCap<R>> {

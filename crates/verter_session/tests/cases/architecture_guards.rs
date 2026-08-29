@@ -3060,6 +3060,18 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "compile_blockers_serve_seam_hook",
             "Compile-blockers single-generation snapshot regression pin (source_move_inside_the_compile_blockers_window_never_serves_a_generation_mix): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired in the source-capture→products-assembly window for deterministic mid-flight mutation choreography. Compiled out in production builds. NOT a cache.",
         ),
+        // - `indexed_source_capture_seam_hook` (NOT a cache):
+        //     `#[cfg(test)] indexed_source_capture_seam_hook` is the
+        //     sibling single-cell hook slot fired inside the base
+        //     `IndexedReady` materialise flight (after the source
+        //     snapshot is held, before remaining IndexedReady products
+        //     are assembled from that object) so fence tests can land a
+        //     content upsert deterministically in that window. Compiled
+        //     out in production builds.
+        (
+            "indexed_source_capture_seam_hook",
+            "IndexedReady snapshot-coherence regression pin (source_move_between_parse_facts_and_eval_source_never_serves_torn_identity): Mutex<Option<Arc<dyn Fn()>>> test-only seam slot fired after the source snapshot is held so every content-addressed IndexedReady product stays one snapshot object. Compiled out in production builds. NOT a cache.",
+        ),
         // - `parse_env_override` (NOT a cache):
         //     `#[cfg(test)] parse_env_override` is a single-cell
         //     `Mutex<Option<Hash16>>` test-only override of the live

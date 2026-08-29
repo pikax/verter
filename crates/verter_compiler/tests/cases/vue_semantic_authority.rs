@@ -1,13 +1,15 @@
 //! Vue `FrameworkSemanticAuthority` backend: eval-source and template-fact
-//! equivalence with the existing Vue compiler methods, catalog identity,
-//! and proof that production request routes still do not consult this row.
+//! interpretation, catalog identity lookup, and identity-mismatch refusal.
 
 use std::sync::Arc;
 
+use verter_compiler::framework_common::registered_carrier_projection::{
+    eval_source_from_catalog, registered_semantic_for,
+};
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
-    vue_semantic_authority_registration, CarrierCompiler, CarrierCompilerRegistry,
-    CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
+    svelte_semantic_authority_registration, vue_semantic_authority_registration, CarrierCompiler,
+    CarrierCompilerRegistry, CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
     FrameworkSemanticAuthority, ImmutableCapabilityCatalog, VueSemanticAuthority, VueSfcV3,
 };
 use verter_language::carrier_grammar::{
@@ -17,7 +19,8 @@ use verter_language::carrier_grammar::{
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
 };
-use verter_language::{FrameworkAdapterId, LanguageId};
+use verter_language::FrameworkAdapterId;
+use verter_language::LanguageId;
 
 const KITCHEN_SINK: &str = include_str!("../fixtures/kitchen-sink.vue");
 
@@ -62,18 +65,37 @@ fn registered_artifact(canonical: &str, source: &str) -> FrameworkParseArtifact 
         .into_framework_parse_artifact()
 }
 
-fn assert_eval_equivalent(source: &str, left: &str, right: &str) {
-    assert_eq!(left.len(), source.len());
-    assert_eq!(right.len(), source.len());
-    assert_eq!(left, right);
+#[test]
+fn vue_semantic_eval_source_is_position_preserving_on_kitchen_sink() {
+    let artifact = registered_artifact("file:///kitchen.vue", KITCHEN_SINK);
+    let eval = VueSemanticAuthority.eval_source(KITCHEN_SINK, &artifact);
+    assert_eq!(eval.len(), KITCHEN_SINK.len());
+    for region in artifact.script_regions() {
+        let (s, e) = (region.span.start as usize, region.span.end as usize);
+        assert_eq!(&eval[s..e], &KITCHEN_SINK[s..e]);
+    }
 }
 
 #[test]
-fn vue_semantic_eval_source_matches_existing_compiler_on_kitchen_sink() {
-    let artifact = registered_artifact("file:///kitchen.vue", KITCHEN_SINK);
-    let via_authority = VueSemanticAuthority.eval_source(KITCHEN_SINK, &artifact);
-    let via_compiler = VueCarrierCompiler.eval_source(KITCHEN_SINK, &artifact);
-    assert_eval_equivalent(KITCHEN_SINK, via_authority.as_ref(), via_compiler.as_ref());
+fn vue_semantic_eval_source_does_not_inject_newline_between_adjacent_scripts() {
+    let source = concat!(
+        "<script lang=\"ts\">const a = 1</script>",
+        "<script setup lang=\"ts\">const b = a</script>",
+        "<template><div /></template>",
+    );
+    let artifact = registered_artifact("file:///adjacent.vue", source);
+    let eval = VueSemanticAuthority.eval_source(source, &artifact);
+    assert_eq!(eval.len(), source.len());
+    let a_end = eval.find("const a = 1").expect("first script body") + "const a = 1".len();
+    assert_eq!(
+        eval.as_bytes()[a_end],
+        b' ',
+        "eval-source blanks the inter-script markup; it does not inject a newline, got: {eval:?}"
+    );
+    assert!(
+        !eval.contains('<'),
+        "markup must not leak into eval source: {eval:?}"
+    );
 }
 
 #[test]
@@ -153,41 +175,41 @@ fn vue_semantic_catalog_row_binds_vue_adapter_identity() {
 }
 
 #[test]
-fn production_request_routes_do_not_call_the_vue_semantic_row() {
-    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut hits = Vec::new();
-    walk_production(&src_root, &mut hits);
-    assert!(
-        hits.is_empty(),
-        "production request routes must not consult the Vue semantic catalog row yet: {hits:?}"
+fn vue_semantic_catalog_lookup_is_adapter_and_epoch_identity() {
+    let artifact = registered_artifact("file:///lookup.vue", SIMPLE);
+    assert_eq!(artifact.epoch().as_str(), VueSfcV3::ID);
+    let selected = registered_semantic_for(artifact.adapter_id(), artifact.epoch())
+        .expect("Vue adapter × Vue epoch must select a semantic row");
+    let via_catalog = selected.eval_source(SIMPLE, &artifact);
+    let via_authority = VueSemanticAuthority.eval_source(SIMPLE, &artifact);
+    assert_eq!(
+        via_catalog.as_ref(),
+        via_authority.as_ref(),
+        "lookup must invoke the selected row's eval-source payload directly"
     );
+    let via_one_lookup = eval_source_from_catalog(&artifact, SIMPLE)
+        .expect("one semantic-catalog lookup must serve the Vue artifact");
+    assert_eq!(via_one_lookup.as_ref(), via_authority.as_ref());
 }
 
-fn walk_production(dir: &std::path::Path, hits: &mut Vec<String>) {
-    for entry in std::fs::read_dir(dir).expect("src walk") {
-        let entry = entry.expect("dirent");
-        let path = entry.path();
-        if path.is_dir() {
-            walk_production(&path, hits);
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-            .unwrap_or(&path);
-        let rel_str = rel.to_string_lossy();
-        if rel_str.ends_with("framework_common/vue_semantic_authority.rs")
-            || rel_str.ends_with("framework_common/mod.rs")
-        {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).expect("read rust");
-        if text.contains("VueSemanticAuthority")
-            || text.contains("vue_semantic_authority_registration")
-        {
-            hits.push(rel_str.into_owned());
-        }
-    }
+#[test]
+fn combined_compiler_eval_source_is_unnameable() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/cases/compile-fail/carrier_compiler_eval_source_unnameable.rs");
+}
+
+#[test]
+fn planted_vue_epoch_does_not_select_a_svelte_semantic_authority() {
+    let vue_row = vue_semantic_authority_registration();
+    assert!(
+        registered_semantic_for(&FrameworkAdapterId::svelte(), vue_row.identity().epoch())
+            .is_none(),
+        "a Vue epoch must not select a Svelte semantic row"
+    );
+    let svelte_row = svelte_semantic_authority_registration();
+    assert!(
+        registered_semantic_for(&FrameworkAdapterId::vue(), svelte_row.identity().epoch())
+            .is_none(),
+        "a Svelte epoch must not select a Vue semantic row"
+    );
 }

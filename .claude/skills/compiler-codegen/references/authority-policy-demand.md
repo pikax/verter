@@ -81,6 +81,12 @@ Cheap Default local-fact corrections are `SemanticFact` + `SemanticAdmission`,
 issued only by `FrameworkSemanticAuthority` over already-admitted parse. No
 backend-private type environment; no second resolve around TypeInfo.
 
+Session eval-source is one `built_in_semantic_catalog` lookup keyed adapter ×
+artifact epoch × Semantic, then the selected row's eval-source payload. The
+generic selector has no Vue/Svelte match. Catalog miss is typed refusal
+before parse/lease/publication. The combined `CarrierCompiler::eval_source`
+method is gone.
+
 Spelling/versioning, the per-kind equivalence matrix, demand kinds,
 reason-edge types, semantic namespaces, and the caller→owner table are in the
 bound contract.

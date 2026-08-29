@@ -492,6 +492,8 @@ impl VerterHost {
             #[cfg(test)]
             compile_blockers_serve_seam_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
+            indexed_source_capture_seam_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
             parse_env_override: parking_lot::Mutex::new(None),
             typeinfo_scratch_cache: parking_lot::Mutex::new(match scratch_cache_capacity {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),

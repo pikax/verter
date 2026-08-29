@@ -681,18 +681,10 @@ fn the_recorded_runes_axis_matches_what_the_shipped_route_infers() {
         .unwrap_or_else(|| panic!("{}: no Svelte carrier artifact", cell.golden_name));
 
         // The mode classifier reads the component's SCRIPTS, so it runs over the
-        // carrier's own position-preserving eval source — the same bytes the
-        // host's Svelte snapshot builder analyses — rather than a second
-        // hand-rolled blanking of the carrier text.
-        let compiler = crate::parse::carrier_compiler_registry()
-            .compiler_for_carrier_language(
-                language.adapter_id().expect("svelte has an adapter id"),
-                language
-                    .carrier_language_id()
-                    .expect("svelte has a carrier language id"),
-            )
-            .expect("the registry serves the Svelte carrier");
-        let eval_source = compiler.eval_source(&cell.source, &artifact);
+        // catalog semantic authority's position-preserving eval source — the
+        // same bytes the host's Svelte snapshot builder analyses.
+        let eval_source = crate::parse::catalog_eval_source(&artifact, &cell.source)
+            .expect("the semantic catalog serves the Svelte carrier");
         let allocator = oxc_allocator::Allocator::new();
         let parsed_program = oxc_parser::Parser::new(
             &allocator,

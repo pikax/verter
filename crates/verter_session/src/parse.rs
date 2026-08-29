@@ -4,11 +4,17 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
+
 use oxc_allocator::Allocator;
 use oxc_ast::ast::Program;
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType};
 
+use verter_compiler::framework_common::registered_carrier_projection::InstalledSemanticAuthority;
 use verter_compiler::parser::types::ParsedSfc;
 use verter_compiler::types::NodeProp;
 
@@ -353,7 +359,7 @@ pub(crate) fn carrier_parse_snapshot(
         file_language,
         provenance,
     )?;
-    let snapshot = carrier_snapshot_from_artifact(
+    let (snapshot, _) = carrier_snapshot_from_artifact(
         canonical_id,
         source,
         analysis_scope,
@@ -366,6 +372,9 @@ pub(crate) fn carrier_parse_snapshot(
 
 /// Build the host compatibility snapshot from the already-published carrier.
 /// This consumes inventory/retained AST only and never parses carrier source.
+///
+/// Returns the catalog `Arc<str>` produced for this snapshot so a same-request
+/// IndexedReady can clone it instead of recataloging.
 pub(crate) fn carrier_snapshot_from_artifact(
     canonical_id: &str,
     source: &str,
@@ -373,43 +382,188 @@ pub(crate) fn carrier_snapshot_from_artifact(
     file_language: &verter_language::FileLanguage,
     provenance: &crate::types::MetaProvenance,
     artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
+) -> Option<(ParseSnapshot, Arc<str>)> {
+    let eval_source = catalog_eval_source(artifact, source)?;
+    let snapshot = carrier_snapshot_from_eval_source(
+        canonical_id,
+        source,
+        analysis_scope,
+        file_language,
+        provenance,
+        artifact,
+        eval_source.as_ref(),
+    )?;
+    Some((snapshot, eval_source))
+}
+
+/// Snapshot construction from an already-selected catalog eval-source.
+/// Does not look up the semantic catalog.
+pub(crate) fn carrier_snapshot_from_eval_source(
+    canonical_id: &str,
+    source: &str,
+    analysis_scope: verter_semantic::analysis::AnalysisScope,
+    file_language: &verter_language::FileLanguage,
+    provenance: &crate::types::MetaProvenance,
+    artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
+    eval_source: &str,
 ) -> Option<ParseSnapshot> {
-    let adapter_id = file_language.adapter_id()?;
-    let carrier_language_id = file_language.carrier_language_id()?;
-    let compiler = carrier_compiler_registry()
-        .compiler_for_carrier_language(adapter_id, carrier_language_id)?;
-    // Vue builds the Vue-shaped snapshot through the blessed `vue_parse`
-    // accessor; Svelte builds its snapshot from the neutral artifact's script
-    // regions (the script analysis runs over the position-preserving
-    // eval-source). The carrier-row dispatch chose the compiler, so the artifact
-    // is that carrier's — open it through the matching accessor.
+    let _ = file_language.adapter_id()?;
+    let _ = file_language.carrier_language_id()?;
+    // Snapshot *shape* still opens the typed carrier; eval-source itself
+    // is the retained catalog row invoked by the caller.
     if let Some(parsed) = crate::typeinfo::adapters::vue::vue_parse(artifact) {
-        let snapshot = build_vue_snapshot_from_parsed(
+        return Some(build_vue_snapshot_from_parsed(
             canonical_id,
             source,
             analysis_scope,
             &parsed,
             artifact,
             provenance,
+            eval_source,
             VueScriptProgram::ParseHere,
             None,
-        );
-        return Some(snapshot);
+        ));
     }
     if crate::typeinfo::adapters::svelte::svelte_parse(artifact).is_some() {
-        let eval_source = compiler.eval_source(source, artifact);
-        let snapshot = build_svelte_snapshot_from_eval_source(
+        return Some(build_svelte_snapshot_from_eval_source(
             canonical_id,
             source,
-            eval_source.as_ref(),
+            eval_source,
             artifact,
             provenance,
             FrameworkScriptProgram::ParseHere,
             None,
-        );
-        return Some(snapshot);
+        ));
     }
     None
+}
+
+/// Identity-bound semantic catalog row for source-stage: adapter ×
+/// registered frontend epoch × Semantic. Catalog miss is `None` before
+/// parse, publication, or eval-source invocation.
+pub(crate) fn retained_semantic_for_source_stage(
+    adapter_id: &verter_language::FrameworkAdapterId,
+    carrier_language_id: &verter_language::LanguageId,
+) -> Option<&'static InstalledSemanticAuthority> {
+    #[cfg(test)]
+    if FORCE_CATALOG_EVAL_SOURCE_MISS.with(Cell::get) {
+        return None;
+    }
+    verter_compiler::framework_common::registered_carrier_projection::registered_semantic_for_frontend(
+        adapter_id,
+        carrier_language_id,
+    )
+}
+
+/// Invoke a previously selected semantic catalog row. Counts as one
+/// backend eval-source call; does not look up the catalog again.
+pub(crate) fn invoke_retained_semantic_eval_source(
+    authority: &InstalledSemanticAuthority,
+    source: &str,
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+) -> Arc<str> {
+    #[cfg(test)]
+    record_catalog_eval_source_call();
+    authority.eval_source(source, artifact)
+}
+
+/// Eval-source from one semantic-catalog lookup keyed adapter × artifact
+/// epoch × Semantic. Catalog miss is `None` — no frontend hop, no
+/// Vue/Svelte match, no host blanking.
+pub(crate) fn catalog_eval_source(
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+    source: &str,
+) -> Option<Arc<str>> {
+    #[cfg(test)]
+    {
+        record_catalog_eval_source_call();
+        if FORCE_CATALOG_EVAL_SOURCE_MISS.with(Cell::get) {
+            return None;
+        }
+    }
+    verter_compiler::framework_common::registered_carrier_projection::eval_source_from_catalog(
+        artifact, source,
+    )
+}
+
+#[cfg(test)]
+thread_local! {
+    static CATALOG_EVAL_SOURCE_CALLS: Cell<u64> = const { Cell::new(0) };
+    static CATALOG_EVAL_SOURCE_HOST: Cell<Option<u64>> = const { Cell::new(None) };
+    static FORCE_CATALOG_EVAL_SOURCE_MISS: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+static CATALOG_EVAL_SOURCE_BY_HOST: LazyLock<Mutex<std::collections::HashMap<u64, u64>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn record_catalog_eval_source_call() {
+    CATALOG_EVAL_SOURCE_CALLS.with(|count| count.set(count.get() + 1));
+    if let Some(host_id) = CATALOG_EVAL_SOURCE_HOST.with(Cell::get) {
+        *CATALOG_EVAL_SOURCE_BY_HOST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(host_id)
+            .or_insert(0) += 1;
+    }
+}
+
+/// Session catalog-eval-source invocations on this thread.
+#[cfg(test)]
+pub(crate) fn catalog_eval_source_call_count() -> u64 {
+    CATALOG_EVAL_SOURCE_CALLS.with(Cell::get)
+}
+
+/// Bind catalog-eval-source counts to `host_id` for the current thread
+/// (including scheduler workers that run [`crate::host_executor::HostStageExecutor::execute_source`]).
+#[cfg(test)]
+pub(crate) struct CatalogEvalSourceHostGuard {
+    previous: Option<u64>,
+}
+
+#[cfg(test)]
+impl CatalogEvalSourceHostGuard {
+    pub(crate) fn new(host_id: u64) -> Self {
+        let previous = CATALOG_EVAL_SOURCE_HOST.with(|cell| {
+            let previous = cell.get();
+            cell.set(Some(host_id));
+            previous
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CatalogEvalSourceHostGuard {
+    fn drop(&mut self) {
+        CATALOG_EVAL_SOURCE_HOST.with(|cell| cell.set(self.previous));
+    }
+}
+
+/// Catalog-eval-source invocations attributed to `host_id` on any thread.
+#[cfg(test)]
+pub(crate) fn catalog_eval_source_call_count_for_host(host_id: u64) -> u64 {
+    CATALOG_EVAL_SOURCE_BY_HOST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&host_id)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Force every [`catalog_eval_source`] call in `f` to miss, then restore.
+#[cfg(test)]
+pub(crate) fn with_forced_catalog_eval_source_miss<R>(f: impl FnOnce() -> R) -> R {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORCE_CATALOG_EVAL_SOURCE_MISS.with(|flag| flag.set(false));
+        }
+    }
+    FORCE_CATALOG_EVAL_SOURCE_MISS.with(|flag| flag.set(true));
+    let _reset = Reset;
+    f()
 }
 
 /// Capture a file's active framework script-fact candidates from its
@@ -1335,6 +1489,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     parsed: &ParsedSfc,
     framework_parse: &verter_compiler::framework_common::FrameworkParseArtifact,
     provenance: &crate::types::MetaProvenance,
+    eval_source: &str,
     script_program: VueScriptProgram<'_>,
     script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
@@ -1539,6 +1694,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         VueScriptProgram::ParseHere => build_vue_script_outputs(
             parsed,
             source,
+            eval_source,
             /* needs_exports */ true,
             analysis_scope.needs_script_analysis(),
             provenance,
@@ -1546,17 +1702,11 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         VueScriptProgram::Shared(program) => {
             #[cfg(debug_assertions)]
             {
-                let expected_script = crate::host_resolve::extract_vue_script_content(
-                    source, parsed,
-                )
-                .unwrap_or_else(|| {
-                    crate::host_resolve::build_position_preserving_script_source(source, &[])
-                });
                 assert_eq!(
                     program.source_str(),
-                    expected_script,
+                    eval_source,
                     "a shared script program must carry this SFC's \
-                     position-preserving extracted script",
+                     catalog-produced eval source",
                 );
             }
             match script_owners {
@@ -1981,13 +2131,13 @@ fn vue_oxc_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
 
 /// Build script analysis from an already-parsed SFC.
 ///
-/// Runs OXC analysis over the **position-preserving** script source
-/// ([`crate::host_resolve::extract_vue_script_content`]) — script content at
-/// its raw SFC byte offsets, non-script bytes whitespace-blanked — so every
-/// span the analyzer produces (including each `AnalyzedMacro.parsed_type_argument`
-/// internal `TypeExpr` span) is SFC-absolute by construction. No post-analysis
-/// offset translation is required; downstream consumers use the spans directly
-/// with `LineIndex::offset_to_position()`.
+/// Runs OXC analysis over the **position-preserving** catalog eval source
+/// — script content at its raw SFC byte offsets, non-script bytes
+/// whitespace-blanked — so every span the analyzer produces (including each
+/// `AnalyzedMacro.parsed_type_argument` internal `TypeExpr` span) is
+/// SFC-absolute by construction. No post-analysis offset translation is
+/// required; downstream consumers use the spans directly with
+/// `LineIndex::offset_to_position()`.
 ///
 /// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_parsed()`.
 /// Combined `.vue` script-program outputs from a SINGLE OXC parse.
@@ -2117,8 +2267,7 @@ fn vue_script_walks_for_sfc(
 
 /// The single `.vue` script-program parse for the snapshot path.
 ///
-/// Extracts the **position-preserving** script source
-/// ([`crate::host_resolve::extract_vue_script_content`] — script content
+/// Walks the **position-preserving** catalog eval source (script content
 /// at its raw SFC byte offsets, non-script bytes whitespace-blanked, so
 /// every span the analyzer produces is SFC-absolute by construction),
 /// OXC-parses it EXACTLY ONCE (counted on the
@@ -2138,6 +2287,7 @@ fn vue_script_walks_for_sfc(
 fn build_vue_script_outputs(
     parsed: &ParsedSfc,
     source: &str,
+    eval_source: &str,
     needs_exports: bool,
     needs_script_analysis: bool,
     provenance: &crate::types::MetaProvenance,
@@ -2151,10 +2301,7 @@ fn build_vue_script_outputs(
     if !needs_exports && !needs_script_analysis {
         return outputs;
     }
-    let Some(script_source) = crate::host_resolve::extract_vue_script_content(source, parsed)
-    else {
-        return outputs;
-    };
+    let script_source = eval_source;
     let source_type = vue_oxc_source_type(parsed, source);
     provenance
         .vue_script_snapshot_parses
@@ -2215,15 +2362,21 @@ pub(crate) fn build_script_analysis_from_source(
     // representation.
     let artifact = build_vue_parse_artifact_from_source(source, provenance);
     build_script_analysis_for_artifact(Some(&artifact), source, provenance)
+        .expect("Vue fixture artifact has a catalog eval-source")
 }
 
 pub(crate) fn build_script_analysis_from_parsed(
     parsed: &ParsedSfc,
     source: &str,
+    eval_source: &str,
     provenance: &crate::types::MetaProvenance,
 ) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
     build_vue_script_outputs(
-        parsed, source, /* needs_exports */ false, /* needs_script_analysis */ true,
+        parsed,
+        source,
+        eval_source,
+        /* needs_exports */ false,
+        /* needs_script_analysis */ true,
         provenance,
     )
     .script_analysis
@@ -2250,17 +2403,23 @@ pub(crate) fn build_style_analyses_from_source(
 }
 
 /// Artifact-facing script-analysis builder: reuse the carrier parse
-/// when the neutral artifact opens through the blessed Vue accessor,
-/// else re-parse from source.
+/// when the neutral artifact opens through the blessed Vue accessor.
+/// Catalog miss is typed refusal (`None`) — never an empty snapshot
+/// presented as successful analysis.
 pub(crate) fn build_script_analysis_for_artifact(
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     source: &str,
     provenance: &crate::types::MetaProvenance,
-) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
-    match framework_parse.and_then(crate::typeinfo::adapters::vue::vue_parse) {
-        Some(parsed) => build_script_analysis_from_parsed(&parsed, source, provenance),
-        None => verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
-    }
+) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
+    let artifact = framework_parse?;
+    let eval_source = catalog_eval_source(artifact, source)?;
+    let parsed = crate::typeinfo::adapters::vue::vue_parse(artifact)?;
+    Some(build_script_analysis_from_parsed(
+        &parsed,
+        source,
+        eval_source.as_ref(),
+        provenance,
+    ))
 }
 
 /// Artifact-facing style-analysis builder (see
@@ -2282,36 +2441,26 @@ pub(crate) fn build_style_analyses_for_artifact(
     })
 }
 
-/// The cold-flight variant of [`build_carrier_snapshot_from_artifact`]: builds a
+/// The cold-flight variant of [`carrier_snapshot_from_artifact`]: builds a
 /// non-Vue carrier snapshot reusing the flight's retained eval program (so the
-/// cold build pays exactly one parse of the script bytes). The eval source is
-/// re-derived from the artifact's recorded script regions — byte-identical to
-/// the flight's `IndexedReady.eval_source` — and the script PROGRAM is threaded
-/// in (`Shared` on a live parse, `SharedFatal` on a fatal one). Returns `None`
-/// for a non-carrier / Vue artifact (the cold path routes Vue through
-/// `build_vue_snapshot_from_parsed` directly).
+/// cold build pays exactly one parse of the script bytes). `eval_source` is
+/// the catalog-produced text already used for the flight's `IndexedReady`
+/// (never re-blanked here). The script PROGRAM is threaded in (`Shared` on a
+/// live parse, `SharedFatal` on a fatal one).
 pub(crate) fn build_carrier_snapshot_from_artifact_with_program(
     canonical_id: &str,
     source: &str,
     _analysis_scope: verter_semantic::analysis::AnalysisScope,
     framework_parse: &verter_compiler::framework_common::FrameworkParseArtifact,
     provenance: &crate::types::MetaProvenance,
+    eval_source: &str,
     script_program: FrameworkScriptProgram<'_>,
     script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
-    let mut spans: Vec<(u32, u32)> = framework_parse
-        .common()
-        .script_regions()
-        .iter()
-        .map(|region| (region.span.start, region.span.end))
-        .filter(|(s, e)| e > s)
-        .collect();
-    spans.sort_by_key(|(s, _)| *s);
-    let eval_source = crate::host_resolve::build_position_preserving_script_source(source, &spans);
     build_svelte_snapshot_from_eval_source(
         canonical_id,
         source,
-        &eval_source,
+        eval_source,
         framework_parse,
         provenance,
         script_program,
@@ -3962,5 +4111,38 @@ onMounted(() => { console.log('mounted') })
                 "{id} should parse without diagnostics"
             );
         }
+    }
+
+    #[test]
+    fn catalog_miss_script_analysis_refuses_empty_snapshot() {
+        let source =
+            "<script setup lang=\"ts\">const n = 1;</script>\n<template><div /></template>";
+        let provenance = crate::types::MetaProvenance::default();
+        let artifact = build_vue_parse_artifact_from_source(source, &provenance);
+        assert!(
+            catalog_eval_source(artifact.as_ref(), source).is_some(),
+            "the Vue artifact must hit the semantic catalog"
+        );
+        let miss = artifact.remint_epoch_for_tests("unknown-epoch");
+        assert!(
+            catalog_eval_source(&miss, source).is_none(),
+            "an unknown epoch must miss the semantic catalog"
+        );
+        let analysis = build_script_analysis_for_artifact(Some(&miss), source, &provenance);
+        assert!(
+            analysis.is_none(),
+            "catalog miss must refuse, not synthesize ScriptAnalysisSnapshot::default() as analysis"
+        );
+        let hit = build_script_analysis_for_artifact(Some(artifact.as_ref()), source, &provenance)
+            .expect("catalog hit must analyse the script");
+        assert_ne!(
+            hit,
+            verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
+            "catalog hit must not be an empty snapshot (so miss-None is distinct from empty success)"
+        );
+        assert!(
+            hit.bindings.iter().any(|binding| binding.name == "n"),
+            "catalog hit must retain the script binding"
+        );
     }
 }

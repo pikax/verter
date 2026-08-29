@@ -3,9 +3,7 @@
 //! [`SvelteParseCarrier`] wraps [`ParsedSvelte`]. [`build_svelte_parse_artifact`]
 //! produces the unregistered artifact; the projector owns inventory
 //! geometry. [`SvelteCarrierCompiler`]: `parse` → neutral artifact;
-//! `eval_source` blanks everything but both scripts at their raw offsets
-//! (output length == input length); `template_data` extracts component-usage
-//! facts; `compile_ide` projects IDE TSX.
+//! `template_data` extracts component-usage facts; `compile_ide` projects IDE TSX.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -407,32 +405,6 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             parse_key,
             syntax_profile,
         ))
-    }
-
-    fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
-        // Position-preserving blanking: every byte starts blanked (line
-        // terminators preserved so line/column geometry is unchanged), then
-        // each script region's RAW bytes are stamped back over their carrier-
-        // absolute offsets. BOTH the instance and module script blocks are
-        // preserved; everything else (template, styles) is blanked. Output
-        // length == input length by construction.
-        let src = source.as_bytes();
-        let mut out: Vec<u8> = src
-            .iter()
-            .map(|&b| if b == b'\n' || b == b'\r' { b } else { b' ' })
-            .collect();
-        for region in artifact.script_regions() {
-            let start = region.span.start as usize;
-            let end = region.span.end as usize;
-            if start <= end && end <= src.len() {
-                out[start..end].copy_from_slice(&src[start..end]);
-            }
-        }
-        Arc::from(
-            String::from_utf8(out)
-                .unwrap_or_else(|_| source.to_string())
-                .as_str(),
-        )
     }
 
     fn compile_ide(
@@ -1509,26 +1481,6 @@ mod tests {
         let artifact = artifact_for(source);
         assert_eq!(artifact.script_regions().len(), 1);
         assert_eq!(artifact.script_regions()[0].kind, ScriptRegionKind::Module);
-    }
-
-    #[test]
-    fn eval_source_is_position_preserving_with_both_scripts_at_raw_offsets() {
-        let source = "<script module>export const x = 1;</script>\n<div>{count}</div>\n<script lang=\"ts\">let count = 0;</script>";
-        let compiler = SvelteCarrierCompiler;
-        let artifact = artifact_for(source);
-        let eval = compiler.eval_source(source, &artifact);
-        assert_eq!(eval.len(), source.len(), "eval source must be same length");
-        for region in artifact.script_regions() {
-            let (s, e) = (region.span.start as usize, region.span.end as usize);
-            assert_eq!(
-                &eval[s..e],
-                &source[s..e],
-                "script bytes preserved at raw offsets"
-            );
-        }
-        // The `<div>` markup is blanked (no `<` survives outside script).
-        let markup_idx = source.find("<div>").unwrap();
-        assert_eq!(eval.as_bytes()[markup_idx], b' ', "markup is blanked");
     }
 
     #[test]
