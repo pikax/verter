@@ -47,3 +47,4 @@ mod svelte_refuse_by_default_guards;
 mod svelte_runtime_whitespace_entity_guards;
 mod verified_plain_css;
 mod verified_plain_css_compile_fail;
+mod vue_carrier_frontend;

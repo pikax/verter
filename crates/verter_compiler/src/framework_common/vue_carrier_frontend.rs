@@ -1,0 +1,73 @@
+//! Vue [`CarrierFrontend`] adapter.
+//!
+//! Registers the Vue frontend against the existing Vue parser and
+//! [`super::vue_bridge::build_vue_parse_artifact`] constructor. Production
+//! request routes do not consult this row; [`Self::parse`] is the unused
+//! catalog-backed parse entry.
+
+use std::sync::Arc;
+
+use verter_language::{
+    FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
+};
+
+use super::capability::{CarrierFrontend, FrameworkEpochId, Present};
+use super::catalog::{FrontendCap, TypedCapabilityRegistration};
+use super::vue_bridge::VueCarrierCompiler;
+use super::CarrierCompiler;
+
+/// Vue carrier frontend: parse, typed reject, adapter identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VueCarrierFrontend;
+
+/// Admission token issued only after a successful Vue frontend parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VueParseAdmission {
+    _private: (),
+}
+
+impl VueCarrierFrontend {
+    /// Catalog epoch spelling for the Vue SFC frontend row.
+    pub const EPOCH: &'static str = "vue";
+
+    /// Adapter this frontend answers to.
+    #[must_use]
+    pub fn adapter_id(&self) -> FrameworkAdapterId {
+        VueCarrierCompiler.adapter_id()
+    }
+
+    /// Carrier language this frontend parses.
+    #[must_use]
+    pub fn carrier_language_id(&self) -> LanguageId {
+        VueCarrierCompiler.carrier_language_id()
+    }
+
+    /// Parse through the existing Vue constructor. Recoverable syntax stays
+    /// `Ok` with mapped diagnostics; empty delimiter pairs reject before an
+    /// artifact exists.
+    pub fn parse(
+        &self,
+        source: &str,
+        opts: &ParseOptions,
+    ) -> Result<Arc<UnregisteredFrameworkParseArtifact>, SyntaxReject> {
+        VueCarrierCompiler.parse(source, opts)
+    }
+}
+
+impl CarrierFrontend for VueCarrierFrontend {
+    type ParseArtifact = Arc<UnregisteredFrameworkParseArtifact>;
+    type SyntaxReject = SyntaxReject;
+    type ParseAdmission = VueParseAdmission;
+}
+
+/// Typed Vue frontend catalog row. Unused by production request routes.
+#[must_use]
+pub fn vue_carrier_frontend_registration(
+) -> TypedCapabilityRegistration<FrontendCap<VueCarrierFrontend>> {
+    TypedCapabilityRegistration::register_frontend(
+        VueCarrierFrontend.adapter_id(),
+        VueCarrierFrontend.carrier_language_id(),
+        FrameworkEpochId::new(VueCarrierFrontend::EPOCH),
+        Present(VueCarrierFrontend),
+    )
+}

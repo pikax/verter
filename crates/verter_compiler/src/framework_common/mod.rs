@@ -27,6 +27,7 @@ pub mod registered_carrier_projection;
 mod registered_geometry_state;
 pub mod registry;
 pub mod vue_bridge;
+pub mod vue_carrier_frontend;
 
 #[cfg(test)]
 mod registered_carrier_projection_tests;
@@ -58,3 +59,4 @@ pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PRE
 pub use registered_carrier_projection::FrameworkParseArtifact;
 pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;
+pub use vue_carrier_frontend::{vue_carrier_frontend_registration, VueCarrierFrontend};
