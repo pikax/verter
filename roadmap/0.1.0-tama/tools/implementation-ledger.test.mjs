@@ -79,7 +79,7 @@ test("same node and issue with opposite sync_to_github is a duplicate pair", () 
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 99"), errors.join("; "));
 });
 
-test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, and FB1 with message/date locators", () => {
+test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, FB1, and FB2 with message/date locators", () => {
   const authority = loadAuthority();
   const byId = new Map(authority.ledger.implemented.map((row) => [row.node_id, row]));
   assert.deepEqual(byId.get("J1"), {
@@ -137,6 +137,11 @@ test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, and FB1 with message
     commit_message: "feat(ci): inspect GitHub issues and write local feedback reports",
     commit_date: "2026-08-29T04:14:40+01:00",
   });
+  assert.deepEqual(byId.get("FB2"), {
+    node_id: "FB2",
+    commit_message: "docs(ci): require manual patches to map existing issues into the DAG",
+    commit_date: "2026-08-29T04:55:09+01:00",
+  });
   const state = deriveState(authority);
   assert.equal(state.states.get("GH0").status, "COMPLETE");
   assert.equal(state.states.get("ORC0").status, "COMPLETE");
@@ -147,8 +152,8 @@ test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, and FB1 with message
   assert.equal(state.states.get("GH5").status, "COMPLETE");
   assert.equal(state.states.get("FB0").status, "COMPLETE");
   assert.equal(state.states.get("FB1").status, "COMPLETE");
+  assert.equal(state.states.get("FB2").status, "COMPLETE");
   assert.notEqual(state.states.get("GH6").status, "COMPLETE");
-  assert.notEqual(state.states.get("FB2").status, "COMPLETE");
   assert.equal(explainNode(authority, state, "ORC0").commit.pull_request, null);
 });
 
@@ -224,11 +229,23 @@ test("GitHub issue rows require sync_to_github", () => {
 });
 
 test("a GitHub issue mapping does not complete an unimplemented READY node", () => {
-  const authority = smallAuthority([{ node_id: "ORC0" }, { node_id: "GH0" }]);
-  assert.equal(deriveState(authority).states.get("GH1").status, "READY");
-  authority.ledger.github_issue = [{ node_id: "GH1", gh_issue: 999, sync_to_github: true }];
-  assert.equal(deriveState(authority).states.get("GH1").status, "READY");
-  assert.notEqual(deriveState(authority).states.get("GH1").status, "COMPLETE");
+  for (const syncToGithub of [true, false]) {
+    const authority = smallAuthority([{ node_id: "ORC0" }, { node_id: "GH0" }]);
+    assert.equal(deriveState(authority).states.get("GH1").status, "READY");
+    authority.ledger.github_issue = [
+      { node_id: "GH1", gh_issue: 999, sync_to_github: syncToGithub },
+    ];
+    assert.equal(
+      deriveState(authority).states.get("GH1").status,
+      "READY",
+      `sync_to_github=${syncToGithub}`,
+    );
+    assert.notEqual(
+      deriveState(authority).states.get("GH1").status,
+      "COMPLETE",
+      `sync_to_github=${syncToGithub}`,
+    );
+  }
 });
 
 test("GitHub issue mappings reject unknown node_id", () => {
@@ -367,6 +384,7 @@ test("github control plane contract names the mapping boundaries", () => {
     "MaintainerGuards",
     "FeedbackReport",
     "FindingCarryForward",
+    "ManualDagAuthoring",
   ]) {
     assert.match(text, new RegExp(`^## ${name}$`, "mu"), `missing heading ${name}`);
   }
@@ -515,4 +533,55 @@ test("FindingCarryForward schema requires issue, severity, and owner and rejects
       error.includes("additional property closed"),
     ),
   );
+});
+
+const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..");
+const GITHUBCTL = path.join(REPO_ROOT, "scripts", "githubctl", "githubctl.mjs");
+const PROGRAMCTL = path.join(PACKAGE_ROOT, "tools", "programctl.mjs");
+const GITHUBCTL_COMMANDS =
+  "doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule";
+
+test("FB2-AC1 githubctl has no import-dag command and does not generate DAG authority from GitHub", () => {
+  const help = spawnSync(process.execPath, [GITHUBCTL, "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0, help.stderr);
+  assert.doesNotMatch(help.stdout, /\bimport-dag\b/u);
+  assert.match(help.stdout, /never imports GitHub edits/u);
+
+  const imported = spawnSync(process.execPath, [GITHUBCTL, "import-dag"], { encoding: "utf8" });
+  assert.notEqual(imported.status, 0);
+  assert.match(imported.stderr, /unknown command import-dag/u);
+  assert.match(imported.stderr, new RegExp(`supported commands: ${GITHUBCTL_COMMANDS}`, "u"));
+
+  const programImported = spawnSync(process.execPath, [PROGRAMCTL, "import-dag"], {
+    encoding: "utf8",
+  });
+  assert.notEqual(programImported.status, 0);
+  assert.match(programImported.stderr, /unknown command import-dag/u);
+
+  const githubctlSource = fs.readFileSync(GITHUBCTL, "utf8");
+  assert.match(githubctlSource, new RegExp(`supported commands: ${GITHUBCTL_COMMANDS}`, "u"));
+  assert.doesNotMatch(githubctlSource, /\bimport-dag\b/u);
+});
+
+test("FB2-AC2 ManualDagAuthoring reuses the original issue and never marks the node implemented", () => {
+  const section = contractSection(controlPlaneContract(), "ManualDagAuthoring");
+  assert.match(section, /`\[\[github_issue\]\]`/u);
+  assert.match(section, /original issue number/u);
+  assert.match(section, /`sync_to_github = false`/u);
+  assert.match(section, /does not mark the node implemented/u);
+  assert.match(section, /no `import-dag` command/u);
+  assert.match(section, /never updates a protected pre-existing issue/u);
+  assert.match(section, /duplicate `gh_issue`/u);
+  assert.match(section, /Issue closure cannot/u);
+  assert.match(section, /P0\/P1/u);
+  assert.match(section, /`dag:\*` label/u);
+
+  const authority = loadAuthority();
+  authority.ledger.github_issue = [
+    ...(authority.ledger.github_issue || []),
+    { node_id: "REL1", gh_issue: 4242, sync_to_github: false },
+  ];
+  assert.deepEqual(validateAuthority(authority), []);
+  assert.equal(deriveState(authority).states.get("REL1").status, "READY");
+  assert.notEqual(deriveState(authority).states.get("REL1").status, "COMPLETE");
 });

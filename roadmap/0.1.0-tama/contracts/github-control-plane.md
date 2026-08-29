@@ -67,7 +67,7 @@ Agents are trusted to use the correct issue and PR mappings. Tooling may check l
 
 P0/P1 findings block under the owning review policy. Lower-severity findings follow that policy and may be coordinated in ordinary issue or PR prose. Surviving follow-up uses `FindingCarryForward`; issue closure is not resolution. Do not build a second receipt, lifecycle, managed-body, marker, or continuous bidirectional synchronization system.
 
-If a maintainer wants an existing GitHub issue represented in the DAG, the maintainer manually authors the DAG node, charter, and a `[[github_issue]]` row with `sync_to_github = false` in one ordinary reviewed patch. No GitHub command or issue field generates, proposes, imports, or applies local DAG authority, and later sync runs must not rewrite that issue because the project did not author it.
+Turning an existing GitHub issue into planned DAG work is `ManualDagAuthoring`. GitHub fields never generate that authority.
 
 ## GitHubAdapter
 
@@ -156,3 +156,11 @@ The machine schema is `roadmap/0.1.0-tama/schemas/finding-carry-forward.schema.j
 Issue closure is not finding resolution. Closing, editing, or labeling the follow-up issue does not dispose the finding. P0 and P1 remain blocking under the owning review policy until that policy records resolution. Lower-severity findings follow the owning review policy and may use a `FindingCarryForward` issue when that policy calls for follow-up.
 
 GitHub labels, milestones, Project Status, and implementation-ledger rows never satisfy or erase a carry-forward obligation.
+
+## ManualDagAuthoring
+
+`ManualDagAuthoring` is the sole path that turns an existing GitHub issue into planned DAG work. A maintainer authors one ordinary reviewed patch containing the train, node, predecessors, charter, and a `[[github_issue]]` row that reuses the original issue number with `sync_to_github = false`. Mapping presence does not mark the node implemented.
+
+No `githubctl` or `programctl` command proposes, generates, imports, or applies DAG, charter, or ledger authority from GitHub. There is no `import-dag` command. `githubctl sync-issues` never creates or edits that local authority from GitHub and never updates a protected pre-existing issue.
+
+The mapped issue keeps its number, comments, discussion, milestone, and unrelated labels. The patch adds no DAG metadata, managed region, parent edge, blocker edge, or `dag:*` label. Ambiguous or conflicting mappings abort: a duplicate `gh_issue` or a second mapping for the same node is refused. Issue closure cannot disposition P0/P1 or change implementation-ledger state.

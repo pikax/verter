@@ -67,7 +67,7 @@ Run `githubctl sync-issues` for initial issue creation, when explicitly adding m
 
 For implementation, resolve the mapped issue locally and create the PR with the expected final conventional-commit title. Put `Closes #<gh_issue>` in the PR body so GitHub links the issue and closes it only when the PR merges. For an opt-in mapping, place the useful description on the issue, end it with `Model: <model name>`, and omit effort and DAG metadata. For a protected mapping, keep the same closing link but do not edit the issue. At the end, before squash and final review, the agent completes the implementation row with the planned message, approximate timezone-bearing date, and known PR number.
 
-To represent an existing GitHub issue in the DAG, manually author the node, charter, and `[[github_issue]]` row with `sync_to_github = false` in the same reviewed patch. No sync command imports or generates those local authority changes, and the existing issue remains protected from rewrite.
+To represent an existing GitHub issue in the DAG, follow `ManualDagAuthoring`: manually author the node, charter, and `[[github_issue]]` row with `sync_to_github = false` in the same reviewed patch. No sync command imports or generates those local authority changes, and the existing issue remains protected from rewrite.
 
 ## Corrections
 
