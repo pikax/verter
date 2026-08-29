@@ -1,0 +1,7 @@
+error[E0599]: no method named `runtime` found for struct `TypedCapabilityRegistration<FrontendCap<ToolingFrontend>>` in the current scope
+  --> tests/cases/compile-fail/frontend_only_has_no_runtime_accessor.rs:21:17
+   |
+21 |     let _ = row.runtime();
+   |                 ^^^^^^^ method not found in `TypedCapabilityRegistration<FrontendCap<ToolingFrontend>>`
+   |
+   = note: the method was found for `TypedCapabilityRegistration<RuntimeCap<R>>`

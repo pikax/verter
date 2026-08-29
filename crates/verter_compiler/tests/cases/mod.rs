@@ -1,5 +1,7 @@
 mod assembly;
 mod capability_matrix_compile_request_coverage;
+mod compiler_capability_catalog;
+mod compiler_capability_catalog_compile_fail;
 mod compiler_layer_dependency_closure;
 mod css_class_extraction_uses_style_syntax_ir;
 mod ide_no_baked_prefix_overwrite;

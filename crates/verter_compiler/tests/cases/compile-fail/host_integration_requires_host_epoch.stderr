@@ -1,0 +1,22 @@
+error[E0061]: this function takes 5 arguments but 4 arguments were supplied
+  --> tests/cases/compile-fail/host_integration_requires_host_epoch.rs:13:13
+   |
+13 |     let _ = TypedCapabilityRegistration::register_host_integration(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+17 |         Present(HostCapable),
+   |         -------------------- argument #4 of type `HostEpochId` is missing
+   |
+note: associated function defined here
+  --> src/framework_common/catalog.rs
+   |
+   |     pub fn register_host_integration<E, HostE, H: FrameworkHostIntegrationBackend<E, HostE>>(
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the argument
+   |
+13 |     let _ = TypedCapabilityRegistration::register_host_integration(
+...
+16 |         FrameworkEpochId::new("vue-sfc-v3"),
+17 ~         /* HostEpochId */,
+18 ~         Present(HostCapable),
+   |

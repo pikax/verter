@@ -223,6 +223,11 @@ node_id = "CCA0"
 commit_message = "docs(core): lock compiler authority, policy, demand, and admission"
 commit_date = "2026-08-29T16:01:15+01:00"
 
+[[implemented]]
+node_id = "CCA1A"
+commit_message = "feat(core): add typed compiler capability catalog"
+commit_date = "2026-08-29T22:40:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

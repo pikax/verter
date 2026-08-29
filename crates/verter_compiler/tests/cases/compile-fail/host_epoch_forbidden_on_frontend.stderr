@@ -1,0 +1,20 @@
+error[E0061]: this function takes 4 arguments but 5 arguments were supplied
+  --> tests/cases/compile-fail/host_epoch_forbidden_on_frontend.rs:15:13
+   |
+15 |     let _ = TypedCapabilityRegistration::register_frontend(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+19 |         HostEpochId::new("session-v1"),
+   |         ------------------------------ unexpected argument #4 of type `HostEpochId`
+   |
+note: associated function defined here
+  --> src/framework_common/catalog.rs
+   |
+   |     pub fn register_frontend<F: CarrierFrontend>(
+   |            ^^^^^^^^^^^^^^^^^
+help: remove the extra argument
+   |
+18 -         FrameworkEpochId::new("html-v1"),
+19 -         HostEpochId::new("session-v1"),
+18 +         FrameworkEpochId::new("html-v1"),
+   |

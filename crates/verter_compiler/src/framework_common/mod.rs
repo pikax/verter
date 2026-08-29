@@ -17,7 +17,9 @@
 //! existing Vue pipeline with ZERO edits to any Vue parser/codegen
 //! module.
 
+pub mod capability;
 pub mod carrier_compiler;
+pub mod catalog;
 pub(crate) mod generated_chunk;
 pub mod generated_identifier;
 #[doc(hidden)]
@@ -34,6 +36,10 @@ mod registered_carrier_projection_tests;
 #[cfg(test)]
 pub mod sourcemap_e2e_helpers;
 
+pub use capability::{
+    CarrierFrontend, FrameworkEpochId, FrameworkHostIntegrationBackend, FrameworkSemanticAuthority,
+    HostEpochId, Present, ProjectionBackend, RuntimeCompilerBackend,
+};
 pub use carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
@@ -41,6 +47,11 @@ pub use carrier_compiler::{
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
     RuntimeSurfaceRefusal, RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
     TemplateRenderExport,
+};
+pub use catalog::{
+    CatalogCapability, CatalogIdentity, CatalogRow, DuplicateCatalogIdentity, FrontendCap, HostCap,
+    ImmutableCapabilityCatalog, ProjectionCap, RuntimeCap, SemanticCap,
+    TypedCapabilityRegistration,
 };
 pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PREFIX};
 #[doc(hidden)]
