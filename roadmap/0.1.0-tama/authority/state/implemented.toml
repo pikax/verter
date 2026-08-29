@@ -248,6 +248,11 @@ node_id = "CCA1D2"
 commit_message = "feat(core): publish registered carrier artifacts through catalog frontends"
 commit_date = "2026-08-29T12:00:00+01:00"
 
+[[implemented]]
+node_id = "CCA1D"
+commit_message = "docs(core): record registered frontend parse and publication convergence"
+commit_date = "2026-08-29T18:20:42+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
