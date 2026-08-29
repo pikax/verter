@@ -211,6 +211,7 @@ test("GitHubAdapter and FakeGitHubAdapter share the mutation surface", () => {
     "createIssue",
     "updateIssue",
     "createPullRequest",
+    "createReleasePullRequest",
     "createPullRequestComment",
     "pullsForHead",
     "getIssue",
@@ -222,6 +223,7 @@ test("GitHubAdapter and FakeGitHubAdapter share the mutation surface", () => {
     "getProject",
     "addIssueToProject",
     "setIssueMilestone",
+    "closeMilestone",
     "listMilestoneIssues",
     "dispatchReleaseRehearsal",
   ]) {

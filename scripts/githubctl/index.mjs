@@ -18,7 +18,8 @@ export {
   MAINTAINER_IGNORE_LABEL,
 } from "./adapter.mjs";
 export { schedule } from "./schedule.mjs";
-export { releasePlan, RELEASE_REHEARSAL } from "./release-plan.mjs";
+export { releasePlan, RELEASE_REHEARSAL, rehearsalIdentity } from "./release-plan.mjs";
+export { releaseCut, createReleasePullRequest } from "./release-cut.mjs";
 export { createPr } from "./create-pr.mjs";
 export { countModelLines, ensureOneModelLine, reviewSummary } from "./review-summary.mjs";
 export { TAMA_ROADMAP_JOB, ciResult, finalizeLedger, squashLand } from "./ci-land.mjs";
@@ -49,4 +50,5 @@ export {
   IgnoredIssueError,
   AmbiguousAiLabelError,
   AmbiguousWaiverError,
+  UnauthorizedReleaseError,
 } from "./errors.mjs";

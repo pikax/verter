@@ -6,6 +6,7 @@ import {
   CREATE_PR_CAPABILITIES,
   GitHubDoctor,
   INSPECT_CAPABILITIES,
+  RELEASE_CUT_CAPABILITIES,
   RELEASE_PLAN_DISPATCH_CAPABILITIES,
   REVIEW_SUMMARY_CAPABILITIES,
   SCHEDULE_CAPABILITIES,
@@ -16,6 +17,7 @@ import { inspectIssue } from "./inspect.mjs";
 import { mutationIdentity, PartialFailureError } from "./errors.mjs";
 import { FakeGitHubAdapter } from "./fake.mjs";
 import { reviewSummary } from "./review-summary.mjs";
+import { releaseCut } from "./release-cut.mjs";
 import { releasePlan } from "./release-plan.mjs";
 import { schedule } from "./schedule.mjs";
 import { syncIssues } from "./sync-issues.mjs";
@@ -52,13 +54,18 @@ Commands:
   release-plan --check|--apply --milestone <title>
     [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
     [--findings <json>] [--waive-item <n>] [--dispatch]
+  release-cut --check|--apply --version <semver> [--authorize]
+    [--head <branch>] [--base main] [--body <pr prose>] [--findings <json>]
+    [--land] [--pr <n>] [--close-milestone] [--fake]
+    [--owner <owner> --repo <repo>]
 
 doctor validates GitHub authentication, repository access, issue/PR
 mutation capability, and whether Project 3 is readable. It never writes.
 sync-issues --apply is doctor-gated for issues and does not require
 Project 3. create-pr --apply and review-summary --apply are doctor-gated
 for issues and pullRequests and do not require Project 3. squash-land
---apply is doctor-gated for pullRequests and does not require Project 3.
+--apply and release-cut --apply are doctor-gated for pullRequests and do
+not require Project 3.
 schedule --apply requires issues and Project 3.
 release-plan --apply does not write GitHub. --dispatch is the only
 workflow_dispatch path, is never the default, and is doctor-gated for
@@ -103,6 +110,16 @@ never complete a node. Unmapped items are blockers unless --waive-item
 names them. Apply records rehearsal identity without dispatching unless
 --dispatch is explicit. --dispatch is doctor-gated for actions and records
 terminal_result pending; plan.ok stays ledger-blocker emptiness.
+
+release-cut opens a release pull request whose title is exactly
+release: v<version> and whose squash subject is that same title with no
+PR suffix. Check may plan without --authorize; apply requires --authorize
+and is doctor-gated for pullRequests. Release PRs must not contain a
+GitHub closing reference. Apply records rehearsal identity and does not
+dispatch. --land squash-merges after a successful CiResult with
+commit_title preserved.
+Do not auto-close the milestone; --close-milestone is the only close path.
+P0/P1 findings block; GitHub issue state cannot erase them.
 `);
 }
 
@@ -136,6 +153,7 @@ const VALUE_FLAGS = new Set([
   "--owner-hint",
   "--recommendation",
   "--inspected-at",
+  "--version",
 ]);
 
 function parseArgs(argv) {
@@ -150,6 +168,9 @@ function parseArgs(argv) {
     else if (arg === "--apply") flags.add("apply");
     else if (arg === "--write-locator") flags.add("write-locator");
     else if (arg === "--dispatch") flags.add("dispatch");
+    else if (arg === "--authorize") flags.add("authorize");
+    else if (arg === "--close-milestone") flags.add("close-milestone");
+    else if (arg === "--land") flags.add("land");
     else if (arg === "--waive-item") {
       const value = argv[i + 1];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
@@ -498,6 +519,46 @@ function runReleasePlan(flags, options) {
   return report.ok ? 0 : 1;
 }
 
+function runReleaseCut(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) throw new Error("release-cut requires exactly one of --check or --apply");
+  if (typeof options.version !== "string" || options.version.length === 0) {
+    throw new Error("release-cut requires --version");
+  }
+  const land = flags.has("land");
+  if (land && apply && (typeof options.pr !== "string" || options.pr.length === 0)) {
+    throw new Error("release-cut --land requires --pr");
+  }
+  const adapter = boundAdapter(flags, options, "release-cut");
+  let clearance;
+  if (apply) {
+    const doctor = new GitHubDoctor(adapter).check({ require: RELEASE_CUT_CAPABILITIES });
+    if (!doctor.ok) {
+      console.log(JSON.stringify(doctor, null, 2));
+      return 1;
+    }
+    clearance = doctor.clearance;
+  }
+  const report = releaseCut({
+    adapter,
+    mode: apply ? "apply" : "check",
+    version: options.version,
+    head: options.head,
+    base: options.base,
+    body: options.body,
+    authorize: flags.has("authorize"),
+    land,
+    pr: typeof options.pr === "string" ? Number(options.pr) : undefined,
+    closeMilestone: flags.has("close-milestone"),
+    findings: options.findings,
+    requiredJobs: parseRequiredJobs(options),
+    clearance,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return report.ok ? 0 : 1;
+}
+
 function main(argv) {
   const { flags, options, positionals } = parseArgs(argv);
   if (flags.has("help") && positionals.length === 0) {
@@ -530,6 +591,7 @@ function main(argv) {
     console.log("schedule --check|--apply overlays READY work onto GitHub Project 3.");
     console.log("inspect --check|--apply writes a local FeedbackReport and one AI-result label.");
     console.log("release-plan --check|--apply plans milestone readiness from the local ledger.");
+    console.log("release-cut --check|--apply cuts a release: v<version> pull request.");
     return 0;
   }
   if (command === "inspect") return runInspect(flags, options);
@@ -541,8 +603,9 @@ function main(argv) {
   if (command === "squash-land") return runSquashLand(flags, options);
   if (command === "schedule") return runSchedule(flags, options);
   if (command === "release-plan") return runReleasePlan(flags, options);
+  if (command === "release-cut") return runReleaseCut(flags, options);
   throw new Error(
-    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan`,
+    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut`,
   );
 }
 

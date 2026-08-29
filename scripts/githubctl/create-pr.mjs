@@ -7,6 +7,7 @@ import {
   assertMutationMode,
   assertRepository,
   assertRequiredText,
+  findClosingReferences,
   hasExactMappedClosingLink,
   mappedClosingLink,
   parseIssuePayload,
@@ -27,7 +28,6 @@ import { assertSyncAncestors, loadLedgerFile, setImplementedPullRequest } from "
 import { loadAuthority } from "../../roadmap/0.1.0-tama/tools/lib.mjs";
 
 const CREATE_PR_NODE_ID = "GH3";
-const CLOSING_KEYWORD = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#\d+\b/gi;
 
 function requiredCreatePrAncestors(authority) {
   const node = authority.nodes.find((row) => row.id === CREATE_PR_NODE_ID);
@@ -59,7 +59,7 @@ function prBodyWithMappedClose(prose, issueNumber) {
   const prefix =
     typeof prose === "string" && prose.trim().length > 0 ? `${prose.trimEnd()}\n\n` : "";
   const body = `${prefix}${link}\n`;
-  const found = body.match(CLOSING_KEYWORD) ?? [];
+  const found = findClosingReferences(body);
   if (found.length !== 1 || found[0] !== link || !hasExactMappedClosingLink(body, issueNumber)) {
     throw new ClosingLinkError(
       `pull request body must contain exactly one ${link} and no other closing links`,

@@ -151,7 +151,7 @@ function assertReleaseCheckDryRun(text) {
   }
 }
 
-function rehearsalIdentity(repoRoot = REPO_ROOT) {
+export function rehearsalIdentity(repoRoot = REPO_ROOT) {
   const checkPath = path.join(repoRoot, ".github", "workflows", RELEASE_REHEARSAL.workflow);
   const releasePath = path.join(repoRoot, ".github", "workflows", RELEASE_REHEARSAL.uses);
   if (!fs.existsSync(checkPath)) {

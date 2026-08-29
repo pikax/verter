@@ -63,6 +63,9 @@ test("GitHub mappings are unique and never mark implementation complete", () => 
   assert.ok(errors.includes("GitHub issue ledger: duplicate node GH0"));
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 123"));
 
+  authority.ledger.implemented = (authority.ledger.implemented || []).filter(
+    (row) => row.node_id !== "REL2",
+  );
   authority.ledger.github_issue = [{ node_id: "REL2", gh_issue: 123, sync_to_github: false }];
   assert.equal(deriveState(authority).states.get("REL2").status, "READY");
   assert.notEqual(deriveState(authority).states.get("REL2").status, "COMPLETE");
@@ -548,7 +551,7 @@ const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..");
 const GITHUBCTL = path.join(REPO_ROOT, "scripts", "githubctl", "githubctl.mjs");
 const PROGRAMCTL = path.join(PACKAGE_ROOT, "tools", "programctl.mjs");
 const GITHUBCTL_COMMANDS =
-  "doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan";
+  "doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan, release-cut";
 
 test("FB2-AC1 githubctl has no import-dag command and does not generate DAG authority from GitHub", () => {
   const help = spawnSync(process.execPath, [GITHUBCTL, "--help"], { encoding: "utf8" });
@@ -586,8 +589,11 @@ test("FB2-AC2 ManualDagAuthoring reuses the original issue and never marks the n
   assert.match(section, /`dag:\*` label/u);
 
   const authority = loadAuthority();
+  authority.ledger.implemented = (authority.ledger.implemented || []).filter(
+    (row) => row.node_id !== "REL2",
+  );
   authority.ledger.github_issue = [
-    ...(authority.ledger.github_issue || []),
+    ...(authority.ledger.github_issue || []).filter((row) => row.node_id !== "REL2"),
     { node_id: "REL2", gh_issue: 4242, sync_to_github: false },
   ];
   assert.deepEqual(validateAuthority(authority), []);

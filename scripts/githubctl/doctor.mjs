@@ -9,6 +9,7 @@ export const SQUASH_LAND_CAPABILITIES = Object.freeze(["pullRequests"]);
 export const SCHEDULE_CAPABILITIES = Object.freeze(["issues", "projects"]);
 export const INSPECT_CAPABILITIES = Object.freeze(["issues"]);
 export const RELEASE_PLAN_DISPATCH_CAPABILITIES = Object.freeze(["actions"]);
+export const RELEASE_CUT_CAPABILITIES = Object.freeze(["pullRequests"]);
 
 const CAPABILITY_ERRORS = Object.freeze({
   issues: "issues",

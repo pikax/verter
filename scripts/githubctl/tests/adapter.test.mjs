@@ -132,6 +132,7 @@ test("PR create rejects inexact closing links without writing", () => {
   const clearance = clearanceFor(adapter);
   const attempts = [
     { body: "closes #3", mappedIssue: 3 },
+    { body: "Closes: #3", mappedIssue: 3 },
     { body: "Closes #12", mappedIssue: 1 },
     { body: "Closes #1 extra", mappedIssue: 12 },
     { body: "See issue 3", mappedIssue: 3 },

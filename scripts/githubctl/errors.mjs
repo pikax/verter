@@ -29,6 +29,7 @@ export class UnsupportedVerdictError extends GitHubAdapterError {}
 export class IgnoredIssueError extends GitHubAdapterError {}
 export class AmbiguousAiLabelError extends GitHubAdapterError {}
 export class AmbiguousWaiverError extends GitHubAdapterError {}
+export class UnauthorizedReleaseError extends GitHubAdapterError {}
 
 export function mutationIdentity(row) {
   if (!row || typeof row !== "object") return null;

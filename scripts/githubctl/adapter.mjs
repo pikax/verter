@@ -132,6 +132,86 @@ export function planCreatePullRequest(request, mappedIssue) {
   };
 }
 
+export const RELEASE_SUBJECT_PATTERN = /^release: v.+$/u;
+const RELEASE_PR_SUFFIX = /\(#\d+\)/u;
+export const RELEASE_VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$/u;
+const GH_NAME = String.raw`[A-Za-z0-9_.-]+`;
+const ISSUE_DIGITS = String.raw`[0-9]+`;
+const CLOSING_REFERENCE = new RegExp(
+  String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+(?:#${ISSUE_DIGITS}|${GH_NAME}/${GH_NAME}#${ISSUE_DIGITS}|https://github\.com/${GH_NAME}/${GH_NAME}/issues/${ISSUE_DIGITS})\b`,
+  "giu",
+);
+
+export function findClosingReferences(text) {
+  if (typeof text !== "string" || text.length === 0) return [];
+  const pattern = new RegExp(CLOSING_REFERENCE.source, CLOSING_REFERENCE.flags);
+  return Array.from(text.matchAll(pattern), (row) => row[0]);
+}
+
+export function assertReleasePullRequestTitle(title) {
+  assertRequiredText(title, "pull request title");
+  if (!RELEASE_SUBJECT_PATTERN.test(title) || RELEASE_PR_SUFFIX.test(title)) {
+    throw new GitHubAdapterError("release title must match /^release: v.+$/ without a PR suffix");
+  }
+  return title;
+}
+
+export function releasePullRequestTitle(version) {
+  assertRequiredText(version, "release version");
+  if (!RELEASE_VERSION_PATTERN.test(version)) {
+    throw new GitHubAdapterError("release title must match /^release: v.+$/ without a PR suffix");
+  }
+  return assertReleasePullRequestTitle(`release: v${version}`);
+}
+
+export function assertNoClosingLink(body) {
+  if (typeof body !== "string") {
+    throw new GitHubAdapterError("pull request body must be a string");
+  }
+  if (findClosingReferences(body).length > 0) {
+    throw new ClosingLinkError("release pull request body must not contain a closing link");
+  }
+  return body;
+}
+
+export function planCreateReleasePullRequest(request) {
+  return {
+    kind: "create-release-pull-request",
+    title: request.title,
+    body: request.body,
+    head: request.head,
+    base: request.base,
+    closes: null,
+    applied: false,
+  };
+}
+
+export function prepareCreateReleasePullRequest(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  if (request.mappedIssue != null) {
+    throw new GitHubAdapterError("release pull request must not name a mapped issue");
+  }
+  assertReleasePullRequestTitle(request.title);
+  assertRequiredText(request.head, "pull request head");
+  assertRequiredText(request.base, "pull request base");
+  assertNoClosingLink(request.body);
+  assertApplyClearance(mode, request.clearance, "pullRequests", adapter);
+  return { mode };
+}
+
+export function planCloseMilestone(title) {
+  return { kind: "close-milestone", title, applied: false };
+}
+
+export function prepareCloseMilestone(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  assertRequiredText(request.title, "milestone title");
+  assertApplyClearance(mode, request.clearance, "pullRequests", adapter);
+  return { mode, title: request.title };
+}
+
 export function parseGitHubResourceNumber(payload) {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
     throw new UnstructuredGitHubOutputError("GitHub response is not a JSON object");
@@ -500,8 +580,11 @@ export function prepareSetIssueMilestone(adapter, request) {
 export function prepareCreatePullRequest(adapter, request) {
   assertRepository(adapter, request);
   const mode = assertMutationMode(request.mode);
-  const mappedIssue = assertIssueNumber(request.mappedIssue, "mapped issue");
   assertRequiredText(request.title, "pull request title");
+  if (RELEASE_SUBJECT_PATTERN.test(request.title)) {
+    throw new GitHubAdapterError("release pull requests must use createReleasePullRequest");
+  }
+  const mappedIssue = assertIssueNumber(request.mappedIssue, "mapped issue");
   assertRequiredText(request.head, "pull request head");
   assertRequiredText(request.base, "pull request base");
   if (typeof request.body !== "string") {
@@ -595,8 +678,10 @@ function pullHeadSha(payload) {
   return sha;
 }
 
-export function planMergePullRequest(number) {
-  return { kind: "squash-merge", number, merge_method: "squash", applied: false };
+export function planMergePullRequest(number, commitTitle) {
+  const planned = { kind: "squash-merge", number, merge_method: "squash", applied: false };
+  if (commitTitle != null) planned.commit_title = commitTitle;
+  return planned;
 }
 
 export function prepareMergePullRequest(adapter, request) {
@@ -607,8 +692,10 @@ export function prepareMergePullRequest(adapter, request) {
   if (mergeMethod !== "squash") {
     throw new GitHubAdapterError("squash-land merge_method must be squash");
   }
+  const commitTitle =
+    request.commitTitle == null ? undefined : assertReleasePullRequestTitle(request.commitTitle);
   assertApplyClearance(mode, request.clearance, "pullRequests", adapter);
-  return { mode, number, mergeMethod };
+  return { mode, number, mergeMethod, commitTitle };
 }
 
 export function parseMergePayload(payload, expectedNumber) {
@@ -993,6 +1080,31 @@ export class GitHubAdapter {
     };
   }
 
+  createReleasePullRequest(request) {
+    const { mode } = prepareCreateReleasePullRequest(this, request);
+    if (mode === "check") return planCreateReleasePullRequest(request);
+    const payload = this.#transport.request({
+      method: "POST",
+      path: `/repos/${this.owner}/${this.repo}/pulls`,
+      body: {
+        title: request.title,
+        body: request.body,
+        head: request.head,
+        base: request.base,
+      },
+    });
+    return {
+      kind: "create-release-pull-request",
+      number: parseGitHubResourceNumber(payload),
+      title: request.title,
+      body: request.body,
+      head: request.head,
+      base: request.base,
+      closes: null,
+      applied: true,
+    };
+  }
+
   pullsForHead(head) {
     assertRequiredText(head, "pull request head");
     return this.#getCompleteList(
@@ -1051,12 +1163,14 @@ export class GitHubAdapter {
   }
 
   mergePullRequest(request) {
-    const { mode, number } = prepareMergePullRequest(this, request);
-    if (mode === "check") return planMergePullRequest(number);
+    const { mode, number, mergeMethod, commitTitle } = prepareMergePullRequest(this, request);
+    if (mode === "check") return planMergePullRequest(number, commitTitle);
+    const body = { merge_method: mergeMethod };
+    if (commitTitle != null) body.commit_title = commitTitle;
     const payload = this.#transport.request({
       method: "PUT",
       path: `/repos/${this.owner}/${this.repo}/pulls/${number}/merge`,
-      body: { merge_method: "squash" },
+      body,
     });
     return parseMergePayload(payload, number);
   }
@@ -1224,6 +1338,24 @@ export class GitHubAdapter {
       (payload) => parseMilestoneIssuesPayload(payload, title),
       "GitHub milestone issue list is incomplete",
     );
+  }
+
+  closeMilestone(request) {
+    const { mode, title } = prepareCloseMilestone(this, request);
+    if (mode === "check") return planCloseMilestone(title);
+    const milestones = this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/milestones?state=all`,
+      parseMilestoneListPayload,
+      "GitHub milestone list is incomplete",
+    );
+    const found = milestones.find((row) => row.title === title);
+    if (!found) throw new NotFoundError(`milestone ${title} is missing`);
+    this.#transport.request({
+      method: "PATCH",
+      path: `/repos/${this.owner}/${this.repo}/milestones/${found.number}`,
+      body: { state: "closed" },
+    });
+    return { kind: "close-milestone", title, applied: true };
   }
 
   dispatchReleaseRehearsal(request = {}) {

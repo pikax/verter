@@ -203,6 +203,11 @@ node_id = "REL1"
 commit_message = "feat(ci): plan milestone release readiness from the local ledger"
 commit_date = "2026-08-29T05:20:00+01:00"
 
+[[implemented]]
+node_id = "REL2"
+commit_message = "feat(ci): cut release pull requests with a versioned squash subject"
+commit_date = "2026-08-29T18:00:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

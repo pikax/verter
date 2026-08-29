@@ -7,17 +7,21 @@ import {
   capabilityRecord,
   planAddIssueToProject,
   planCreateIssue,
+  planCloseMilestone,
   planCreatePullRequest,
   planCreatePullRequestComment,
+  planCreateReleasePullRequest,
   planMergePullRequest,
   planDispatchReleaseRehearsal,
   planSetAiResultLabel,
   planSetIssueMilestone,
   planUpdateIssue,
   prepareAddIssueToProject,
+  prepareCloseMilestone,
   prepareCreateIssue,
   prepareCreatePullRequest,
   prepareCreatePullRequestComment,
+  prepareCreateReleasePullRequest,
   prepareDispatchReleaseRehearsal,
   prepareMergePullRequest,
   prepareSetAiResultLabel,
@@ -113,6 +117,7 @@ export class FakeGitHubAdapter {
     this.refusals = [];
     this.reads = [];
     this.milestoneWrites = [];
+    this.milestoneCloses = [];
     this.labelWrites = [];
     this.workflowDispatches = [];
     this.#issues = new Map();
@@ -295,6 +300,31 @@ export class FakeGitHubAdapter {
     return { kind: "create-pull-request", ...record, applied: true };
   }
 
+  createReleasePullRequest(request) {
+    const { mode } = prepareCreateReleasePullRequest(this, request);
+    if (mode === "check") return planCreateReleasePullRequest(request);
+    this.#beginApply();
+    if (!this.permissions.pullRequests)
+      throw new PermissionDeniedError("pull request permission denied");
+    if (this.#heads.has(request.head)) {
+      throw new DuplicateError(`pull request already exists for head ${request.head}`);
+    }
+    const number = this.#allocateNumber();
+    const record = {
+      number,
+      title: request.title,
+      body: request.body,
+      head: request.head,
+      base: request.base,
+      closes: null,
+      comments: [],
+      merged: false,
+    };
+    this.#pulls.set(number, record);
+    this.#heads.add(request.head);
+    return { kind: "create-release-pull-request", ...record, applied: true };
+  }
+
   createPullRequestComment(request) {
     const { mode, number } = prepareCreatePullRequestComment(this, request);
     if (mode === "check") return planCreatePullRequestComment(request, number);
@@ -329,8 +359,8 @@ export class FakeGitHubAdapter {
   }
 
   mergePullRequest(request) {
-    const { mode, number, mergeMethod } = prepareMergePullRequest(this, request);
-    if (mode === "check") return planMergePullRequest(number);
+    const { mode, number, mergeMethod, commitTitle } = prepareMergePullRequest(this, request);
+    if (mode === "check") return planMergePullRequest(number, commitTitle);
     this.#beginApply();
     if (!this.permissions.pullRequests) {
       throw new PermissionDeniedError("pull request permission denied");
@@ -341,8 +371,10 @@ export class FakeGitHubAdapter {
       throw new DuplicateError(`pull request #${number} is already merged`);
     }
     pull.merged = true;
-    this.#merges.push({ number, merge_method: mergeMethod });
-    return { kind: "squash-merge", number, merge_method: mergeMethod, applied: true };
+    const record = { number, merge_method: mergeMethod };
+    if (commitTitle != null) record.commit_title = commitTitle;
+    this.#merges.push(record);
+    return { kind: "squash-merge", ...record, applied: true };
   }
 
   applyOperations(operations) {
@@ -440,6 +472,7 @@ export class FakeGitHubAdapter {
         issueNumber: row.issueNumber,
         title: row.title,
       })),
+      milestoneCloses: this.milestoneCloses.map((row) => ({ title: row.title })),
       labelWrites: this.labelWrites.map((row) => ({
         number: row.number,
         add: row.add,
@@ -450,10 +483,11 @@ export class FakeGitHubAdapter {
         uses: row.uses,
         dry_run: row.dry_run,
       })),
-      merges: this.#merges.map((row) => ({
-        number: row.number,
-        merge_method: row.merge_method,
-      })),
+      merges: this.#merges.map((row) => {
+        const merge = { number: row.number, merge_method: row.merge_method };
+        if (row.commit_title != null) merge.commit_title = row.commit_title;
+        return merge;
+      }),
     };
   }
 
@@ -508,6 +542,16 @@ export class FakeGitHubAdapter {
     issue.milestone = title;
     this.milestoneWrites.push({ issueNumber, title });
     return { kind: "set-milestone", issueNumber, title, applied: true };
+  }
+
+  closeMilestone(request) {
+    const { mode, title } = prepareCloseMilestone(this, request);
+    if (mode === "check") return planCloseMilestone(title);
+    this.#beginApply();
+    if (!this.#milestones.has(title)) throw new NotFoundError(`milestone ${title} is missing`);
+    this.#milestones.get(title).state = "closed";
+    this.milestoneCloses.push({ title });
+    return { kind: "close-milestone", title, applied: true };
   }
 
   listMilestoneIssues(title) {
