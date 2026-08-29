@@ -8,12 +8,14 @@ import {
   planCreateIssue,
   planCreatePullRequest,
   planCreatePullRequestComment,
+  planMergePullRequest,
   planSetIssueMilestone,
   planUpdateIssue,
   prepareAddIssueToProject,
   prepareCreateIssue,
   prepareCreatePullRequest,
   prepareCreatePullRequestComment,
+  prepareMergePullRequest,
   prepareSetIssueMilestone,
   prepareUpdateIssue,
   PROJECT_NUMBER,
@@ -53,6 +55,15 @@ function clonePull(pull) {
   };
 }
 
+function cloneCheckRun(row) {
+  const conclusion = row?.conclusion == null ? "pending" : row.conclusion;
+  return {
+    name: row.name,
+    conclusion,
+    skipped: conclusion === "skipped",
+  };
+}
+
 export class FakeGitHubAdapter {
   #issues;
   #pulls;
@@ -61,6 +72,8 @@ export class FakeGitHubAdapter {
   #projectMissing;
   #projectItems;
   #milestones;
+  #checkRuns;
+  #merges;
 
   constructor(options = {}) {
     bindOwnerRepo(this, options, "FakeGitHubAdapter");
@@ -87,6 +100,8 @@ export class FakeGitHubAdapter {
     this.#projectMissing = options.missing === true;
     this.#projectItems = new Set();
     this.#milestones = new Map();
+    this.#checkRuns = new Map();
+    this.#merges = [];
     for (const number of options.projectItems ?? []) {
       this.#projectItems.add(assertIssueNumber(number));
     }
@@ -108,8 +123,13 @@ export class FakeGitHubAdapter {
       const number = assertIssueNumber(pull.number, "pull request number");
       if (this.#heads.has(pull.head)) throw new DuplicateError("pull request already exists");
       this.#claimNumber(number, "pull request already exists");
-      this.#pulls.set(number, clonePull({ ...pull, number }));
+      const record = clonePull({ ...pull, number });
+      record.merged = false;
+      this.#pulls.set(number, record);
       this.#heads.add(pull.head);
+      if (Array.isArray(pull.checkRuns)) {
+        this.#checkRuns.set(number, pull.checkRuns.map(cloneCheckRun));
+      }
     }
     const used = [...this.#issues.keys(), ...this.#pulls.keys()];
     const maxUsed = used.length ? Math.max(...used) : 0;
@@ -241,6 +261,7 @@ export class FakeGitHubAdapter {
       base: request.base,
       closes: mappedIssue,
       comments: [],
+      merged: false,
     };
     this.#pulls.set(number, record);
     this.#heads.add(request.head);
@@ -265,6 +286,36 @@ export class FakeGitHubAdapter {
       body: request.body,
       applied: true,
     };
+  }
+
+  listPullRequestCheckRuns(number) {
+    const expected = assertIssueNumber(number, "pull request number");
+    if (!this.#pulls.has(expected)) {
+      throw new NotFoundError(`pull request #${expected} is missing`);
+    }
+    const rows = this.#checkRuns.get(expected) ?? [];
+    return rows.map((row) => ({
+      name: row.name,
+      conclusion: row.conclusion,
+      skipped: row.skipped,
+    }));
+  }
+
+  mergePullRequest(request) {
+    const { mode, number, mergeMethod } = prepareMergePullRequest(this, request);
+    if (mode === "check") return planMergePullRequest(number);
+    this.#beginApply();
+    if (!this.permissions.pullRequests) {
+      throw new PermissionDeniedError("pull request permission denied");
+    }
+    const pull = this.#pulls.get(number);
+    if (!pull) throw new NotFoundError(`pull request #${number} is missing`);
+    if (pull.merged === true) {
+      throw new DuplicateError(`pull request #${number} is already merged`);
+    }
+    pull.merged = true;
+    this.#merges.push({ number, merge_method: mergeMethod });
+    return { kind: "squash-merge", number, merge_method: mergeMethod, applied: true };
   }
 
   applyOperations(operations) {
@@ -318,6 +369,10 @@ export class FakeGitHubAdapter {
       milestoneWrites: this.milestoneWrites.map((row) => ({
         issueNumber: row.issueNumber,
         title: row.title,
+      })),
+      merges: this.#merges.map((row) => ({
+        number: row.number,
+        merge_method: row.merge_method,
       })),
     };
   }

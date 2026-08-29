@@ -215,6 +215,8 @@ test("GitHubAdapter and FakeGitHubAdapter share the mutation surface", () => {
     "pullsForHead",
     "getIssue",
     "getPullRequest",
+    "listPullRequestCheckRuns",
+    "mergePullRequest",
     "getProject",
     "addIssueToProject",
     "setIssueMilestone",

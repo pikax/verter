@@ -432,6 +432,75 @@ export function prepareCreatePullRequestComment(adapter, request) {
   return { mode, number };
 }
 
+export function parseCheckRunsPayload(payload) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub check-runs response is not a JSON object");
+  }
+  const rows = payload.check_runs;
+  if (!Array.isArray(rows)) {
+    throw new UnstructuredGitHubOutputError("GitHub check-runs list is not a JSON array");
+  }
+  const total = payload.total_count;
+  if (total != null && (!Number.isSafeInteger(total) || total < 0 || total < rows.length)) {
+    throw new UnstructuredGitHubOutputError("GitHub check-runs total_count is inconsistent");
+  }
+  if (Number.isSafeInteger(total) && total > rows.length) {
+    throw new UnstructuredGitHubOutputError("GitHub check-runs list is incomplete");
+  }
+  return rows.map((row, index) => {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new UnstructuredGitHubOutputError(`GitHub check-run ${index} is not a JSON object`);
+    }
+    if (typeof row.name !== "string" || row.name.length === 0) {
+      throw new UnstructuredGitHubOutputError("GitHub check-run name is not a string");
+    }
+    const conclusion = row.conclusion == null ? "pending" : row.conclusion;
+    if (typeof conclusion !== "string" || conclusion.length === 0) {
+      throw new UnstructuredGitHubOutputError("GitHub check-run conclusion is not a string");
+    }
+    return { name: row.name, conclusion, skipped: conclusion === "skipped" };
+  });
+}
+
+function pullHeadSha(payload) {
+  const sha = payload?.head?.sha;
+  if (typeof sha !== "string" || !/^[0-9a-f]{40}$/i.test(sha)) {
+    throw new UnstructuredGitHubOutputError("GitHub pull request head is missing a sha");
+  }
+  return sha;
+}
+
+export function planMergePullRequest(number) {
+  return { kind: "squash-merge", number, merge_method: "squash", applied: false };
+}
+
+export function prepareMergePullRequest(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const number = assertIssueNumber(request.number, "pull request number");
+  const mergeMethod = request.mergeMethod ?? "squash";
+  if (mergeMethod !== "squash") {
+    throw new GitHubAdapterError("squash-land merge_method must be squash");
+  }
+  assertApplyClearance(mode, request.clearance, "pullRequests", adapter);
+  return { mode, number, mergeMethod };
+}
+
+export function parseMergePayload(payload, expectedNumber) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub merge response is not a JSON object");
+  }
+  if (payload.merged !== true) {
+    throw new GitHubAdapterError("GitHub squash merge did not report merged");
+  }
+  return {
+    kind: "squash-merge",
+    number: expectedNumber,
+    merge_method: "squash",
+    applied: true,
+  };
+}
+
 function dispatchOperation(adapter, operation) {
   const op = operation?.op;
   if (op === "createIssue") return adapter.createIssue(operation);
@@ -729,6 +798,38 @@ export class GitHubAdapter {
       body: request.body,
       applied: true,
     };
+  }
+
+  listPullRequestCheckRuns(number) {
+    const expected = assertIssueNumber(number, "pull request number");
+    const payload = this.#transport.request({
+      method: "GET",
+      path: `/repos/${this.owner}/${this.repo}/pulls/${expected}`,
+    });
+    const returned = parseGitHubResourceNumber(payload);
+    if (returned !== expected) {
+      throw new UnstructuredGitHubOutputError(
+        `GitHub pull request read returned number ${returned}, expected ${expected}`,
+      );
+    }
+    const sha = pullHeadSha(payload);
+    return parseCheckRunsPayload(
+      this.#transport.request({
+        method: "GET",
+        path: `/repos/${this.owner}/${this.repo}/commits/${sha}/check-runs?per_page=100`,
+      }),
+    );
+  }
+
+  mergePullRequest(request) {
+    const { mode, number } = prepareMergePullRequest(this, request);
+    if (mode === "check") return planMergePullRequest(number);
+    const payload = this.#transport.request({
+      method: "PUT",
+      path: `/repos/${this.owner}/${this.repo}/pulls/${number}/merge`,
+      body: { merge_method: "squash" },
+    });
+    return parseMergePayload(payload, number);
   }
 
   applyOperations(operations) {

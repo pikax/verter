@@ -2,7 +2,21 @@ import fs from "node:fs";
 
 import { parseToml } from "../../roadmap/0.1.0-tama/tools/lib.mjs";
 import { assertIssueNumber } from "./adapter.mjs";
-import { DuplicateError, MappingMismatchError, MissingAncestorError } from "./errors.mjs";
+import {
+  DuplicateError,
+  GitHubAdapterError,
+  MappingMismatchError,
+  MissingAncestorError,
+} from "./errors.mjs";
+
+export const COMMIT_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/u;
+
+export function assertCommitDate(value, label = "commit_date") {
+  if (typeof value !== "string" || !COMMIT_DATE_PATTERN.test(value)) {
+    throw new GitHubAdapterError(`${label} must match the ledger timezone pattern`);
+  }
+  return value;
+}
 
 export function assertUniqueMappings(rows) {
   if (!Array.isArray(rows)) throw new MappingMismatchError("github_issue must be an array");
@@ -103,6 +117,89 @@ export function setImplementedPullRequest(file, nodeId, pullRequest) {
     return { written: true, node_id: nodeId, pull_request: number };
   }
   fs.writeFileSync(file, insertPullRequestLine(loaded.text, nodeId, number));
+  return { written: true, node_id: nodeId, pull_request: number };
+}
+
+function replaceImplementedFields(text, nodeId, fields) {
+  const endedWithNewline = text.endsWith("\n");
+  const lines = text.replaceAll("\r\n", "\n").replace(/\n$/u, "").split("\n");
+  let found = false;
+  const out = [];
+  let index = 0;
+  while (index < lines.length) {
+    if (lines[index].trim() !== "[[implemented]]") {
+      out.push(lines[index]);
+      index += 1;
+      continue;
+    }
+    const block = [lines[index]];
+    index += 1;
+    while (index < lines.length && !lines[index].trim().startsWith("[")) {
+      block.push(lines[index]);
+      index += 1;
+    }
+    const isTarget = block.some((line) => {
+      const node = line.trim().match(/^node_id\s*=\s*"([^"]*)"\s*$/u);
+      return node?.[1] === nodeId;
+    });
+    if (!isTarget) {
+      out.push(...block);
+      continue;
+    }
+    if (found) throw new DuplicateError(`duplicate implemented row ${nodeId}`);
+    found = true;
+    let wroteMessage = false;
+    let wroteDate = false;
+    let wrotePr = false;
+    for (const line of block) {
+      const trimmed = line.trim();
+      if (/^commit_message\s*=/u.test(trimmed)) {
+        out.push(`commit_message = ${JSON.stringify(fields.message)}`);
+        wroteMessage = true;
+      } else if (/^commit_date\s*=/u.test(trimmed)) {
+        out.push(`commit_date = ${JSON.stringify(fields.date)}`);
+        wroteDate = true;
+      } else if (/^pull_request\s*=/u.test(trimmed)) {
+        out.push(`pull_request = ${fields.pullRequest}`);
+        wrotePr = true;
+      } else {
+        out.push(line);
+      }
+    }
+    if (!wroteMessage) out.push(`commit_message = ${JSON.stringify(fields.message)}`);
+    if (!wroteDate) out.push(`commit_date = ${JSON.stringify(fields.date)}`);
+    if (!wrotePr) out.push(`pull_request = ${fields.pullRequest}`);
+  }
+  if (!found) {
+    throw new MappingMismatchError(`implemented row ${nodeId} is missing from ledger text`);
+  }
+  const joined = out.join("\n");
+  return endedWithNewline || text.length === 0 ? `${joined}\n` : joined;
+}
+
+export function finalizeImplementedRow(file, { nodeId, message, date, pullRequest }) {
+  if (typeof nodeId !== "string" || nodeId.length === 0) {
+    throw new MappingMismatchError("node_id is required");
+  }
+  if (typeof message !== "string" || message.length === 0) {
+    throw new MappingMismatchError("commit_message is required");
+  }
+  const stamped = assertCommitDate(date);
+  const number = assertIssueNumber(pullRequest, "pull_request");
+  const loaded = loadLedgerFile(file);
+  const matches = loaded.implemented.filter((row) => row.node_id === nodeId);
+  if (matches.length > 1) throw new DuplicateError(`duplicate implemented row ${nodeId}`);
+  if (matches.length === 0) {
+    throw new MappingMismatchError(`implemented row ${nodeId} is missing from ledger text`);
+  }
+  fs.writeFileSync(
+    file,
+    replaceImplementedFields(loaded.text, nodeId, {
+      message,
+      date: stamped,
+      pullRequest: number,
+    }),
+  );
   return { written: true, node_id: nodeId, pull_request: number };
 }
 

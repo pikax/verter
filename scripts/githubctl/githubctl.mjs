@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { GitHubAdapter } from "./adapter.mjs";
+import { ciResult, finalizeLedger, squashLand } from "./ci-land.mjs";
 import { createPr } from "./create-pr.mjs";
 import {
   CREATE_PR_CAPABILITIES,
   GitHubDoctor,
   REVIEW_SUMMARY_CAPABILITIES,
   SCHEDULE_CAPABILITIES,
+  SQUASH_LAND_CAPABILITIES,
   SYNC_ISSUES_CAPABILITIES,
 } from "./doctor.mjs";
 import { mutationIdentity, PartialFailureError } from "./errors.mjs";
@@ -30,6 +32,13 @@ Commands:
   review-summary --check|--apply --pr <n> --node <id> --verdict PASS|FAIL
     --body <human prose> [--findings <json>] [--model <name>]
     [--ledger <path>] [--fake] [--owner <owner> --repo <repo>]
+  ci-result --check|--apply --pr <n> [--required <name,name>] [--tama-changed]
+    [--fake] [--owner <owner> --repo <repo>]
+  finalize-ledger --node <id> --message <title> --date <ISO> --pr <n>
+    [--ledger <path>]
+  squash-land --check|--apply --pr <n> --node <id> [--required <name,name>]
+    [--tama-changed] [--ledger <path>] [--fake]
+    [--owner <owner> --repo <repo>]
   schedule --check|--apply --train <train> | --nodes <id,id,...>
     [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
     [--set-milestone <title>]
@@ -38,8 +47,9 @@ doctor validates GitHub authentication, repository access, issue/PR
 mutation capability, and whether Project 3 is readable. It never writes.
 sync-issues --apply is doctor-gated for issues and does not require
 Project 3. create-pr --apply and review-summary --apply are doctor-gated
-for issues and pullRequests and do not require Project 3. schedule --apply
-requires issues and Project 3.
+for issues and pullRequests and do not require Project 3. squash-land
+--apply is doctor-gated for pullRequests and does not require Project 3.
+schedule --apply requires issues and Project 3.
 
 Issue create/update and pull-request mutation remain library APIs. Each
 requires mode 'check' or 'apply'; apply is doctor-gated.
@@ -57,6 +67,13 @@ review-summary posts one ordinary ReviewCycleSummary PR comment. Opt-in
 mappings keep exactly one Model line on the issue; protected mappings are
 not edited. P0/P1 findings cannot accept. Apply is doctor-gated for issues
 and pullRequests and does not require Project 3.
+
+ci-result presents the live pull-request check-runs list as CiResult
+evidence without SHA identity. Missing required jobs and unexpected skips
+fail. finalize-ledger updates an existing implemented row only.
+squash-land squash-merges after a successful CiResult. Check plans only.
+Apply is doctor-gated for pullRequests and does not require Project 3.
+There is no post-merge ledger write.
 
 schedule overlays READY mapped issues onto GitHub Project 3. Check plans
 only. Apply is doctor-gated. --set-milestone is the only milestone write.
@@ -79,6 +96,9 @@ const VALUE_FLAGS = new Set([
   "--pr",
   "--verdict",
   "--findings",
+  "--message",
+  "--date",
+  "--required",
 ]);
 
 function parseArgs(argv) {
@@ -92,6 +112,7 @@ function parseArgs(argv) {
     else if (arg === "--check") flags.add("check");
     else if (arg === "--apply") flags.add("apply");
     else if (arg === "--write-locator") flags.add("write-locator");
+    else if (arg === "--tama-changed") flags.add("tama-changed");
     else if (VALUE_FLAGS.has(arg)) {
       const value = argv[i + 1];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
@@ -236,6 +257,95 @@ function runReviewSummary(flags, options) {
   return 0;
 }
 
+function parseRequiredJobs(options) {
+  if (typeof options.required !== "string" || options.required.length === 0) return undefined;
+  return options.required
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
+
+function runCiResult(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) throw new Error("ci-result requires exactly one of --check or --apply");
+  if (typeof options.pr !== "string" || options.pr.length === 0) {
+    throw new Error("ci-result requires --pr");
+  }
+  const adapter = boundAdapter(flags, options, "ci-result");
+  const report = ciResult({
+    adapter,
+    mode: apply ? "apply" : "check",
+    pr: Number(options.pr),
+    requiredJobs: parseRequiredJobs(options),
+    tamaChanged: flags.has("tama-changed"),
+    owner: options.owner,
+    repo: options.repo,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return report.ok ? 0 : 1;
+}
+
+function runFinalizeLedger(flags, options) {
+  if (typeof options.node !== "string" || options.node.length === 0) {
+    throw new Error("finalize-ledger requires --node");
+  }
+  if (typeof options.message !== "string" || options.message.length === 0) {
+    throw new Error("finalize-ledger requires --message");
+  }
+  if (typeof options.date !== "string" || options.date.length === 0) {
+    throw new Error("finalize-ledger requires --date");
+  }
+  if (typeof options.pr !== "string" || options.pr.length === 0) {
+    throw new Error("finalize-ledger requires --pr");
+  }
+  const report = finalizeLedger({
+    node: options.node,
+    message: options.message,
+    date: options.date,
+    pr: Number(options.pr),
+    ledgerPath: options.ledger,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return 0;
+}
+
+function runSquashLand(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) throw new Error("squash-land requires exactly one of --check or --apply");
+  if (typeof options.pr !== "string" || options.pr.length === 0) {
+    throw new Error("squash-land requires --pr");
+  }
+  if (typeof options.node !== "string" || options.node.length === 0) {
+    throw new Error("squash-land requires --node");
+  }
+  const adapter = boundAdapter(flags, options, "squash-land");
+  let clearance;
+  if (apply) {
+    const doctor = new GitHubDoctor(adapter).check({ require: SQUASH_LAND_CAPABILITIES });
+    if (!doctor.ok) {
+      console.log(JSON.stringify(doctor, null, 2));
+      return 1;
+    }
+    clearance = doctor.clearance;
+  }
+  const report = squashLand({
+    adapter,
+    mode: apply ? "apply" : "check",
+    pr: Number(options.pr),
+    node: options.node,
+    requiredJobs: parseRequiredJobs(options),
+    tamaChanged: flags.has("tama-changed"),
+    ledgerPath: options.ledger,
+    clearance,
+    owner: options.owner,
+    repo: options.repo,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return 0;
+}
+
 function runSchedule(flags, options) {
   const check = flags.has("check");
   const apply = flags.has("apply");
@@ -294,15 +404,21 @@ function main(argv) {
     console.log("sync-issues --check|--apply syncs an explicit train or node set.");
     console.log("create-pr --check|--apply creates a final-title PR that closes the mapped issue.");
     console.log("review-summary --check|--apply records a ReviewCycleSummary PR comment.");
+    console.log("ci-result --check|--apply reports live pull-request check-runs as CiResult.");
+    console.log("finalize-ledger updates an existing implemented row message/date/pr.");
+    console.log("squash-land --check|--apply squash-merges after a successful CiResult.");
     console.log("schedule --check|--apply overlays READY work onto GitHub Project 3.");
     return 0;
   }
   if (command === "sync-issues") return runSyncIssues(flags, options);
   if (command === "create-pr") return runCreatePr(flags, options);
   if (command === "review-summary") return runReviewSummary(flags, options);
+  if (command === "ci-result") return runCiResult(flags, options);
+  if (command === "finalize-ledger") return runFinalizeLedger(flags, options);
+  if (command === "squash-land") return runSquashLand(flags, options);
   if (command === "schedule") return runSchedule(flags, options);
   throw new Error(
-    `unknown command ${command}; supported commands: doctor, check, sync-issues, create-pr, review-summary, schedule`,
+    `unknown command ${command}; supported commands: doctor, check, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule`,
   );
 }
 

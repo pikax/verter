@@ -164,6 +164,11 @@ commit_message = "feat(ci): record review history in ordinary pull-request prose
 commit_date = "2026-08-29T02:41:41+01:00"
 
 [[implemented]]
+node_id = "GH5"
+commit_message = "feat(ci): report pull-request checks and squash-land through GitHub"
+commit_date = "2026-08-29T03:25:00+01:00"
+
+[[implemented]]
 node_id = "J1"
 commit_message = "refactor(core): cut CSS public routes over to StyleSyntaxIr"
 commit_date = "2026-08-28T16:41:34+01:00"

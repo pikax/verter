@@ -13,8 +13,10 @@ export { PROJECT_NUMBER, PROJECT_VIEWS } from "./adapter.mjs";
 export { schedule } from "./schedule.mjs";
 export { createPr } from "./create-pr.mjs";
 export { countModelLines, ensureOneModelLine, reviewSummary } from "./review-summary.mjs";
+export { TAMA_ROADMAP_JOB, ciResult, finalizeLedger, squashLand } from "./ci-land.mjs";
 export {
   BlockingFindingError,
+  CiFailedError,
   ClosingLinkError,
   DoctorRequiredError,
   DuplicateError,
