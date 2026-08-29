@@ -25,6 +25,9 @@ export class MissingIssueMappingError extends GitHubAdapterError {}
 export class NonReadyNodeError extends GitHubAdapterError {}
 export class BlockingFindingError extends GitHubAdapterError {}
 export class CiFailedError extends GitHubAdapterError {}
+export class UnsupportedVerdictError extends GitHubAdapterError {}
+export class IgnoredIssueError extends GitHubAdapterError {}
+export class AmbiguousAiLabelError extends GitHubAdapterError {}
 
 export function mutationIdentity(row) {
   if (!row || typeof row !== "object") return null;

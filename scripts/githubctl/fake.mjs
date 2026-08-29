@@ -1,4 +1,5 @@
 import {
+  AI_OWNED_LABELS,
   applyOperations,
   assertIssueNumber,
   assertRequiredText,
@@ -9,6 +10,7 @@ import {
   planCreatePullRequest,
   planCreatePullRequestComment,
   planMergePullRequest,
+  planSetAiResultLabel,
   planSetIssueMilestone,
   planUpdateIssue,
   prepareAddIssueToProject,
@@ -16,9 +18,11 @@ import {
   prepareCreatePullRequest,
   prepareCreatePullRequestComment,
   prepareMergePullRequest,
+  prepareSetAiResultLabel,
   prepareSetIssueMilestone,
   prepareUpdateIssue,
   PROJECT_NUMBER,
+  selectAiResultLabel,
 } from "./adapter.mjs";
 import {
   DuplicateError,
@@ -33,6 +37,18 @@ function cloneComments(comments) {
   return Array.isArray(comments) ? comments.map((row) => ({ id: row.id, body: row.body })) : [];
 }
 
+function cloneLabels(labels) {
+  if (labels == null) return [];
+  if (!Array.isArray(labels)) throw new GitHubAdapterError("issue labels must be an array");
+  return labels.map((row) => {
+    if (typeof row === "string" && row.length > 0) return row;
+    if (row && typeof row === "object" && typeof row.name === "string" && row.name.length > 0) {
+      return row.name;
+    }
+    throw new GitHubAdapterError("label name is required");
+  });
+}
+
 function cloneIssue(issue) {
   return {
     number: issue.number,
@@ -40,6 +56,7 @@ function cloneIssue(issue) {
     body: issue.body,
     comments: cloneComments(issue.comments),
     milestone: issue.milestone ?? null,
+    labels: cloneLabels(issue.labels),
   };
 }
 
@@ -93,6 +110,7 @@ export class FakeGitHubAdapter {
     this.refusals = [];
     this.reads = [];
     this.milestoneWrites = [];
+    this.labelWrites = [];
     this.#issues = new Map();
     this.#pulls = new Map();
     this.#heads = new Set();
@@ -117,6 +135,7 @@ export class FakeGitHubAdapter {
         body: issue.body,
         comments: cloneComments(issue.comments),
         milestone: issue.milestone ?? null,
+        labels: cloneLabels(issue.labels),
       });
     }
     for (const pull of options.pullRequests ?? []) {
@@ -200,6 +219,7 @@ export class FakeGitHubAdapter {
       body: request.body,
       comments: [],
       milestone: null,
+      labels: [],
     });
     return {
       kind: "create-issue",
@@ -333,6 +353,49 @@ export class FakeGitHubAdapter {
     return this.#cloneIssue(expected);
   }
 
+  getIssueLabels(number) {
+    const expected = assertIssueNumber(number);
+    this.reads.push({ kind: "get-issue-labels", number: expected });
+    const issue = this.#issues.get(expected);
+    if (!issue) throw new NotFoundError(`issue #${expected} is not in the fake`);
+    return [...issue.labels];
+  }
+
+  setAiResultLabel(request) {
+    const prepared = prepareSetAiResultLabel(this, request);
+    if (prepared.mode === "check") return planSetAiResultLabel(prepared.number, prepared.label);
+    this.#beginApply();
+    if (!this.permissions.issues) throw new PermissionDeniedError("issues permission denied");
+    const issue = this.#issues.get(prepared.number);
+    if (!issue) throw new NotFoundError(`issue #${prepared.number} is not in the fake`);
+    const previous = selectAiResultLabel(issue.labels, prepared.number);
+    if (previous === prepared.label) {
+      return {
+        kind: "set-ai-result-label",
+        number: prepared.number,
+        label: prepared.label,
+        previous,
+        applied: true,
+        unchanged: true,
+      };
+    }
+    const next = issue.labels.filter((name) => !AI_OWNED_LABELS.includes(name));
+    next.push(prepared.label);
+    issue.labels = next;
+    this.labelWrites.push({
+      number: prepared.number,
+      add: prepared.label,
+      remove: previous,
+    });
+    return {
+      kind: "set-ai-result-label",
+      number: prepared.number,
+      label: prepared.label,
+      previous,
+      applied: true,
+    };
+  }
+
   getIssues() {
     return [...this.#issues.keys()]
       .sort((left, right) => left - right)
@@ -369,6 +432,11 @@ export class FakeGitHubAdapter {
       milestoneWrites: this.milestoneWrites.map((row) => ({
         issueNumber: row.issueNumber,
         title: row.title,
+      })),
+      labelWrites: this.labelWrites.map((row) => ({
+        number: row.number,
+        add: row.add,
+        remove: row.remove,
       })),
       merges: this.#merges.map((row) => ({
         number: row.number,

@@ -7,6 +7,7 @@ export const CREATE_PR_CAPABILITIES = Object.freeze(["issues", "pullRequests"]);
 export const REVIEW_SUMMARY_CAPABILITIES = Object.freeze(["issues", "pullRequests"]);
 export const SQUASH_LAND_CAPABILITIES = Object.freeze(["pullRequests"]);
 export const SCHEDULE_CAPABILITIES = Object.freeze(["issues", "projects"]);
+export const INSPECT_CAPABILITIES = Object.freeze(["issues"]);
 
 const CAPABILITY_ERRORS = Object.freeze({
   issues: "issues",

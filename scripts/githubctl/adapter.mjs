@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
 
 import {
+  AmbiguousAiLabelError,
   ClosingLinkError,
   DoctorRequiredError,
   DuplicateError,
   GitHubAdapterError,
+  IgnoredIssueError,
   InvalidIssueNumberError,
   LiveGitHubForbiddenInTestsError,
   MappingMismatchError,
@@ -15,6 +17,7 @@ import {
   PermissionDeniedError,
   ProtectedMappingError,
   UnstructuredGitHubOutputError,
+  UnsupportedVerdictError,
   WrongRepositoryError,
 } from "./errors.mjs";
 
@@ -42,6 +45,27 @@ const SET_MILESTONE_MUTATION =
 
 const MINTED_CLEARANCES = new WeakMap();
 const OWNER_REPO = /^[A-Za-z0-9_.-]+$/;
+
+export const AI_ISSUE_VERDICTS = Object.freeze([
+  "unchecked",
+  "confirmed",
+  "rejected",
+  "fixed",
+  "needs-human",
+]);
+export const AI_OWNED_LABELS = Object.freeze(AI_ISSUE_VERDICTS.map((verdict) => `ai:${verdict}`));
+export const MAINTAINER_IGNORE_LABEL = "ai:ignore";
+
+export function assertAiIssueVerdict(value) {
+  if (typeof value !== "string" || !AI_ISSUE_VERDICTS.includes(value)) {
+    throw new UnsupportedVerdictError(`unsupported AiIssueVerdict ${value}`);
+  }
+  return value;
+}
+
+export function aiOwnedLabel(verdict) {
+  return `ai:${assertAiIssueVerdict(verdict)}`;
+}
 
 export function bindOwnerRepo(target, options, label) {
   const owner = options.owner;
@@ -148,6 +172,45 @@ function parsePullsPayload(payload) {
       head: parsePullHead(row.head),
     };
   });
+}
+
+export function parseLabelsPayload(payload) {
+  if (!Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub labels response is not a JSON array");
+  }
+  return payload.map((row, index) => {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new UnstructuredGitHubOutputError(`GitHub label ${index} is not a JSON object`);
+    }
+    if (typeof row.name !== "string" || row.name.length === 0) {
+      throw new UnstructuredGitHubOutputError("GitHub label name is not a string");
+    }
+    return row.name;
+  });
+}
+
+export function planSetAiResultLabel(number, label) {
+  return { kind: "set-ai-result-label", number, label, applied: false };
+}
+
+export function prepareSetAiResultLabel(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const number = assertIssueNumber(request.number);
+  const label = aiOwnedLabel(request.verdict);
+  assertApplyClearance(mode, request.clearance, "issues", adapter);
+  return { mode, number, label };
+}
+
+export function selectAiResultLabel(names, number) {
+  if (names.includes(MAINTAINER_IGNORE_LABEL)) {
+    throw new IgnoredIssueError(`issue #${number} is labeled ${MAINTAINER_IGNORE_LABEL}`);
+  }
+  const currentAi = names.filter((name) => AI_OWNED_LABELS.includes(name));
+  if (currentAi.length > 1) {
+    throw new AmbiguousAiLabelError(`issue #${number} has multiple AI-result labels`);
+  }
+  return currentAi[0] ?? null;
 }
 
 export function parseIssuePayload(payload, expectedNumber) {
@@ -553,6 +616,80 @@ function errorFromHttpStatus(status, payload, fallbackMessage) {
 }
 
 const HTTP_STATUS_LINE = /^HTTP\/\d[\d.]*\s+(\d{3})\b/;
+const LIST_PAGE_SIZE = 100;
+const MAX_LIST_PAGES = 50;
+const LINK_NEXT = Symbol("githubctl.linkNext");
+
+function parseResponseHeaders(headerBlock) {
+  const headers = {};
+  const lines = headerBlock.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    const colon = line.indexOf(":");
+    if (colon <= 0) continue;
+    const name = line.slice(0, colon).trim().toLowerCase();
+    const value = line.slice(colon + 1).trim();
+    if (Object.hasOwn(headers, name)) headers[name] = `${headers[name]}, ${value}`;
+    else headers[name] = value;
+  }
+  return headers;
+}
+
+function parseLinkRelNext(linkHeader) {
+  if (typeof linkHeader !== "string" || linkHeader.length === 0) return null;
+  const parts = linkHeader.split(/,\s*(?=<)/);
+  for (const part of parts) {
+    const urlMatch = /<([^>]+)>/.exec(part);
+    if (!urlMatch) continue;
+    const relMatch = /(?:^|;)\s*rel\s*=\s*"?([^\s;,"]+)"?/i.exec(part);
+    if (!relMatch) continue;
+    const rels = relMatch[1].toLowerCase().split(/\s+/);
+    if (rels.includes("next")) return urlMatch[1];
+  }
+  return null;
+}
+
+function attachLinkNext(payload, linkNext) {
+  if (payload !== null && typeof payload === "object") {
+    Object.defineProperty(payload, LINK_NEXT, {
+      value: linkNext,
+      enumerable: false,
+      configurable: true,
+    });
+  }
+  return payload;
+}
+
+function readLinkNext(payload) {
+  if (payload === null || typeof payload !== "object") return null;
+  const next = payload[LINK_NEXT];
+  return typeof next === "string" && next.length > 0 ? next : null;
+}
+
+function withPerPage(path) {
+  if (/[?&]per_page=/i.test(path)) return path;
+  return path.includes("?")
+    ? `${path}&per_page=${LIST_PAGE_SIZE}`
+    : `${path}?per_page=${LIST_PAGE_SIZE}`;
+}
+
+function ghApiPathFromLink(url) {
+  if (typeof url !== "string" || url.length === 0) {
+    throw new UnstructuredGitHubOutputError("GitHub Link rel=next is missing");
+  }
+  if (url.startsWith("/")) return url;
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new UnstructuredGitHubOutputError("GitHub Link rel=next is not a URL");
+  }
+  const path = `${parsed.pathname}${parsed.search}`;
+  if (!path.startsWith("/")) {
+    throw new UnstructuredGitHubOutputError("GitHub Link rel=next is not a URL");
+  }
+  return path;
+}
 
 function parseGhApiIncludeStdout(stdout) {
   const text = typeof stdout === "string" ? stdout : "";
@@ -560,19 +697,27 @@ function parseGhApiIncludeStdout(stdout) {
   const headerBlock = split === -1 ? text : text.slice(0, split);
   const bodyText = split === -1 ? "" : text.slice(split).replace(/^\r?\n\r?\n/, "");
   const matched = HTTP_STATUS_LINE.exec(headerBlock.split(/\r?\n/, 1)[0] ?? "");
+  if (!matched) {
+    throw new UnstructuredGitHubOutputError("gh api output is missing an HTTP status line");
+  }
+  const status = Number.parseInt(matched[1], 10);
+  const headers = parseResponseHeaders(headerBlock);
+  if (status === 204) {
+    if (bodyText.trim() !== "") {
+      throw new UnstructuredGitHubOutputError("gh api 204 response is not empty");
+    }
+    return { status, payload: null, headers };
+  }
   let payload;
   try {
     payload = JSON.parse(bodyText);
   } catch {
     payload = undefined;
   }
-  if (!matched) {
-    throw new UnstructuredGitHubOutputError("gh api output is missing an HTTP status line");
-  }
   if (payload === undefined || payload === null || typeof payload !== "object") {
     throw new UnstructuredGitHubOutputError("gh api JSON was not an object");
   }
-  return { status: Number.parseInt(matched[1], 10), payload };
+  return { status, payload, headers };
 }
 
 function expectedCapabilityMiss(error) {
@@ -596,11 +741,11 @@ export function createGhApiTransport({ spawn = spawnSync } = {}) {
         maxBuffer: 4 * 1024 * 1024,
       });
       if (result.error) throw new GitHubAdapterError(result.error.message);
-      const { status, payload } = parseGhApiIncludeStdout(result.stdout ?? "");
+      const { status, payload, headers } = parseGhApiIncludeStdout(result.stdout ?? "");
       if (status < 200 || status >= 300) {
         throw errorFromHttpStatus(status, payload, "gh api request failed");
       }
-      return payload;
+      return attachLinkNext(payload, parseLinkRelNext(headers.link));
     },
   };
 }
@@ -616,6 +761,23 @@ export class GitHubAdapter {
         "Live GitHub is not a test substrate; use FakeGitHubAdapter",
       );
     } else this.#transport = createGhApiTransport();
+  }
+
+  #getCompleteList(path, parsePage, incompleteMessage) {
+    const rows = [];
+    let current = withPerPage(path);
+    const seen = new Set();
+    for (;;) {
+      if (seen.has(current) || seen.size >= MAX_LIST_PAGES) {
+        throw new UnstructuredGitHubOutputError(incompleteMessage);
+      }
+      seen.add(current);
+      const payload = this.#transport.request({ method: "GET", path: current });
+      rows.push(...parsePage(payload));
+      const next = readLinkNext(payload);
+      if (!next) return rows;
+      current = withPerPage(ghApiPathFromLink(next));
+    }
   }
 
   inspectCapabilities() {
@@ -768,11 +930,11 @@ export class GitHubAdapter {
 
   pullsForHead(head) {
     assertRequiredText(head, "pull request head");
-    const payload = this.#transport.request({
-      method: "GET",
-      path: `/repos/${this.owner}/${this.repo}/pulls?head=${encodeURIComponent(`${this.owner}:${head}`)}`,
-    });
-    return parsePullsPayload(payload);
+    return this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/pulls?head=${encodeURIComponent(`${this.owner}:${head}`)}`,
+      parsePullsPayload,
+      "GitHub pull request list is incomplete",
+    );
   }
 
   getPullRequest(number) {
@@ -813,12 +975,14 @@ export class GitHubAdapter {
       );
     }
     const sha = pullHeadSha(payload);
-    return parseCheckRunsPayload(
-      this.#transport.request({
-        method: "GET",
-        path: `/repos/${this.owner}/${this.repo}/commits/${sha}/check-runs?per_page=100`,
-      }),
-    );
+    const checkRuns = this.#transport.request({
+      method: "GET",
+      path: `/repos/${this.owner}/${this.repo}/commits/${sha}/check-runs?per_page=100`,
+    });
+    if (readLinkNext(checkRuns)) {
+      throw new UnstructuredGitHubOutputError("GitHub check-runs list is incomplete");
+    }
+    return parseCheckRunsPayload(checkRuns);
   }
 
   mergePullRequest(request) {
@@ -843,6 +1007,50 @@ export class GitHubAdapter {
       path: `/repos/${this.owner}/${this.repo}/issues/${expected}`,
     });
     return parseIssuePayload(payload, expected);
+  }
+
+  getIssueLabels(number) {
+    const expected = assertIssueNumber(number);
+    return this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/issues/${expected}/labels`,
+      parseLabelsPayload,
+      "GitHub labels list is incomplete",
+    );
+  }
+
+  setAiResultLabel(request) {
+    const { mode, number, label } = prepareSetAiResultLabel(this, request);
+    if (mode === "check") return planSetAiResultLabel(number, label);
+    const names = this.getIssueLabels(number);
+    const previous = selectAiResultLabel(names, number);
+    if (previous === label) {
+      return {
+        kind: "set-ai-result-label",
+        number,
+        label,
+        previous,
+        applied: true,
+        unchanged: true,
+      };
+    }
+    this.#transport.request({
+      method: "POST",
+      path: `/repos/${this.owner}/${this.repo}/issues/${number}/labels`,
+      body: { labels: [label] },
+    });
+    if (previous) {
+      this.#transport.request({
+        method: "DELETE",
+        path: `/repos/${this.owner}/${this.repo}/issues/${number}/labels/${encodeURIComponent(previous)}`,
+      });
+    }
+    return {
+      kind: "set-ai-result-label",
+      number,
+      label,
+      previous,
+      applied: true,
+    };
   }
 
   #graphql(query, variables, createError) {

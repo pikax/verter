@@ -79,7 +79,7 @@ test("same node and issue with opposite sync_to_github is a duplicate pair", () 
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 99"), errors.join("; "));
 });
 
-test("the live ledger records J1, ORC0, GH0-GH5, REL0, and FB0 with message/date locators", () => {
+test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, and FB1 with message/date locators", () => {
   const authority = loadAuthority();
   const byId = new Map(authority.ledger.implemented.map((row) => [row.node_id, row]));
   assert.deepEqual(byId.get("J1"), {
@@ -132,6 +132,11 @@ test("the live ledger records J1, ORC0, GH0-GH5, REL0, and FB0 with message/date
     commit_message: "docs(ci): define non-DAG feedback labels and finding follow-up",
     commit_date: "2026-08-29T03:45:51+01:00",
   });
+  assert.deepEqual(byId.get("FB1"), {
+    node_id: "FB1",
+    commit_message: "feat(ci): inspect GitHub issues and write local feedback reports",
+    commit_date: "2026-08-29T04:14:40+01:00",
+  });
   const state = deriveState(authority);
   assert.equal(state.states.get("GH0").status, "COMPLETE");
   assert.equal(state.states.get("ORC0").status, "COMPLETE");
@@ -141,8 +146,8 @@ test("the live ledger records J1, ORC0, GH0-GH5, REL0, and FB0 with message/date
   assert.equal(state.states.get("GH4").status, "COMPLETE");
   assert.equal(state.states.get("GH5").status, "COMPLETE");
   assert.equal(state.states.get("FB0").status, "COMPLETE");
+  assert.equal(state.states.get("FB1").status, "COMPLETE");
   assert.notEqual(state.states.get("GH6").status, "COMPLETE");
-  assert.notEqual(state.states.get("FB1").status, "COMPLETE");
   assert.notEqual(state.states.get("FB2").status, "COMPLETE");
   assert.equal(explainNode(authority, state, "ORC0").commit.pull_request, null);
 });

@@ -30,7 +30,7 @@ function transportMap(routes) {
 }
 
 function pullsForHeadPath(owner, repo, head) {
-  return `/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(`${owner}:${head}`)}`;
+  return `/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(`${owner}:${head}`)}&per_page=100`;
 }
 
 const PROJECT_GRAPHQL_OK = {

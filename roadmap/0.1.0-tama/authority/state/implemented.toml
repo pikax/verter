@@ -144,6 +144,11 @@ commit_message = "docs(ci): define non-DAG feedback labels and finding follow-up
 commit_date = "2026-08-29T03:45:51+01:00"
 
 [[implemented]]
+node_id = "FB1"
+commit_message = "feat(ci): inspect GitHub issues and write local feedback reports"
+commit_date = "2026-08-29T04:14:40+01:00"
+
+[[implemented]]
 node_id = "GH0"
 commit_message = "docs(ci): ratify local GitHub issue mapping"
 commit_date = "2026-08-28T21:45:48+01:00"

@@ -9,7 +9,14 @@ export { FakeGitHubAdapter } from "./fake.mjs";
 export { GitHubDoctor } from "./doctor.mjs";
 export { renderIssueDescription } from "./charter-render.mjs";
 export { lookupIssueMapping, selectNodes, syncIssues } from "./sync-issues.mjs";
-export { PROJECT_NUMBER, PROJECT_VIEWS } from "./adapter.mjs";
+export { inspectIssue, FEEDBACK_REPORT_HEADINGS } from "./inspect.mjs";
+export {
+  PROJECT_NUMBER,
+  PROJECT_VIEWS,
+  AI_ISSUE_VERDICTS,
+  AI_OWNED_LABELS,
+  MAINTAINER_IGNORE_LABEL,
+} from "./adapter.mjs";
 export { schedule } from "./schedule.mjs";
 export { createPr } from "./create-pr.mjs";
 export { countModelLines, ensureOneModelLine, reviewSummary } from "./review-summary.mjs";
@@ -36,5 +43,8 @@ export {
   ProtectedMappingError,
   SelectionError,
   UnstructuredGitHubOutputError,
+  UnsupportedVerdictError,
   WrongRepositoryError,
+  IgnoredIssueError,
+  AmbiguousAiLabelError,
 } from "./errors.mjs";

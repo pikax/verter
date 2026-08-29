@@ -5,11 +5,13 @@ import { createPr } from "./create-pr.mjs";
 import {
   CREATE_PR_CAPABILITIES,
   GitHubDoctor,
+  INSPECT_CAPABILITIES,
   REVIEW_SUMMARY_CAPABILITIES,
   SCHEDULE_CAPABILITIES,
   SQUASH_LAND_CAPABILITIES,
   SYNC_ISSUES_CAPABILITIES,
 } from "./doctor.mjs";
+import { inspectIssue } from "./inspect.mjs";
 import { mutationIdentity, PartialFailureError } from "./errors.mjs";
 import { FakeGitHubAdapter } from "./fake.mjs";
 import { reviewSummary } from "./review-summary.mjs";
@@ -39,6 +41,9 @@ Commands:
   squash-land --check|--apply --pr <n> --node <id> [--required <name,name>]
     [--tama-changed] [--ledger <path>] [--fake]
     [--owner <owner> --repo <repo>]
+  inspect --check|--apply --issue <n> --verdict <AiIssueVerdict>
+    [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
+    [--report-dir <dir>]
   schedule --check|--apply --train <train> | --nodes <id,id,...>
     [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
     [--set-milestone <title>]
@@ -77,6 +82,11 @@ There is no post-merge ledger write.
 
 schedule overlays READY mapped issues onto GitHub Project 3. Check plans
 only. Apply is doctor-gated. --set-milestone is the only milestone write.
+
+inspect retrieves a non-DAG issue, writes a local FeedbackReport, and
+replaces exactly one AI-owned result label when the mapping allows it.
+Check plans only. Apply is doctor-gated for issues and does not require
+Project 3. Protected mappings and ai:ignore never write GitHub labels.
 `);
 }
 
@@ -99,6 +109,16 @@ const VALUE_FLAGS = new Set([
   "--message",
   "--date",
   "--required",
+  "--issue",
+  "--report-dir",
+  "--classification",
+  "--reproduction",
+  "--code-paths",
+  "--commands",
+  "--confidence",
+  "--owner-hint",
+  "--recommendation",
+  "--inspected-at",
 ]);
 
 function parseArgs(argv) {
@@ -346,6 +366,47 @@ function runSquashLand(flags, options) {
   return 0;
 }
 
+function runInspect(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) throw new Error("inspect requires exactly one of --check or --apply");
+  if (typeof options.issue !== "string" || options.issue.length === 0) {
+    throw new Error("inspect requires --issue");
+  }
+  if (typeof options.verdict !== "string" || options.verdict.length === 0) {
+    throw new Error("inspect requires --verdict");
+  }
+  const adapter = boundAdapter(flags, options, "inspect");
+  let clearance;
+  if (apply) {
+    const doctor = new GitHubDoctor(adapter).check({ require: INSPECT_CAPABILITIES });
+    if (!doctor.ok) {
+      console.log(JSON.stringify(doctor, null, 2));
+      return 1;
+    }
+    clearance = doctor.clearance;
+  }
+  const report = inspectIssue({
+    adapter,
+    mode: apply ? "apply" : "check",
+    issue: Number(options.issue),
+    verdict: options.verdict,
+    ledgerPath: options.ledger,
+    reportDir: options["report-dir"],
+    classification: options.classification,
+    reproduction: options.reproduction,
+    codePaths: options["code-paths"],
+    commands: options.commands,
+    confidence: options.confidence,
+    ownerHint: options["owner-hint"],
+    recommendation: options.recommendation,
+    inspectedAt: options["inspected-at"],
+    clearance,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return report.ok ? 0 : 1;
+}
+
 function runSchedule(flags, options) {
   const check = flags.has("check");
   const apply = flags.has("apply");
@@ -408,8 +469,10 @@ function main(argv) {
     console.log("finalize-ledger updates an existing implemented row message/date/pr.");
     console.log("squash-land --check|--apply squash-merges after a successful CiResult.");
     console.log("schedule --check|--apply overlays READY work onto GitHub Project 3.");
+    console.log("inspect --check|--apply writes a local FeedbackReport and one AI-result label.");
     return 0;
   }
+  if (command === "inspect") return runInspect(flags, options);
   if (command === "sync-issues") return runSyncIssues(flags, options);
   if (command === "create-pr") return runCreatePr(flags, options);
   if (command === "review-summary") return runReviewSummary(flags, options);
@@ -418,7 +481,7 @@ function main(argv) {
   if (command === "squash-land") return runSquashLand(flags, options);
   if (command === "schedule") return runSchedule(flags, options);
   throw new Error(
-    `unknown command ${command}; supported commands: doctor, check, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule`,
+    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule`,
   );
 }
 
