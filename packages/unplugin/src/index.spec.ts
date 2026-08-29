@@ -335,6 +335,45 @@ $border: #555;
     expect(style.code).not.toContain("[data-v-");
   });
 
+  it("selects authored-only style processing only for Vite Main renders", async () => {
+    const host = loadHost();
+    const compileMany = vi.spyOn(host, "compileMany").mockReturnValue([
+      {
+        code: "export default {}",
+        errors: [],
+        diagnostics: [],
+        lang: "js",
+      },
+    ] as never);
+    const source = `<template><div>ok</div></template>
+<style lang="scss" scoped>$tone: red; .x { color: $tone; }</style>`;
+
+    const vitePlugin = await createVitePlugin();
+    await vitePlugin.transform.call(
+      { warn: vi.fn() },
+      source,
+      join(tempDir, "ViteOwned.vue").replace(/\\/g, "/"),
+    );
+    expect(compileMany.mock.calls.at(-1)?.[1]).toMatchObject({
+      target: "runtime-render",
+      compileProfile: { styleProcessing: "authored-only" },
+    });
+
+    const rollupPlugin = unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+    await rollupPlugin.transform.call(
+      { warn: vi.fn() },
+      source,
+      join(tempDir, "CompilerOwned.vue").replace(/\\/g, "/"),
+    );
+    expect(compileMany.mock.calls.at(-1)?.[1]).toMatchObject({
+      target: "runtime-render",
+      compileProfile: { styleProcessing: "complete" },
+    });
+  });
+
   it("transform() scopes CSS via transformVueStyle for scoped blocks", async () => {
     const plugin = await createVitePlugin();
     const file = join(tempDir, "ScopedTransform.vue").replace(/\\/g, "/");

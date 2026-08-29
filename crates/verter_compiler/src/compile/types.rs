@@ -300,6 +300,10 @@ pub(crate) struct ResolvedVueCompileOptions {
     /// the instance proxy (`_ctx.*`); it does not set `__ssrInlineRender`
     /// (that flag is only for setup-returned render functions).
     pub ssr: bool,
+    /// Which style stages this runtime compile owns. An authored-only bundler lane
+    /// still runs authored `v-bind()` handling but defers plain-CSS-only
+    /// modules/scoping until after preprocessing.
+    pub style_processing: crate::compile_request::RuntimeStyleProcessing,
     /// Props known to be const across all call sites (from cross-file analysis).
     /// These are treated as `Static` for reactivity purposes while keeping
     /// `$props.`/`__props.` prefix for correct runtime access.

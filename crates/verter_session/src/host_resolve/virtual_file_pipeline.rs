@@ -10,7 +10,8 @@ use rustc_hash::FxHashMap;
 use crate::instant::Instant;
 
 use super::compile_request_build::{
-    build_compile_request, derive_runtime_compile_options, request_construction_refused_diagnostics,
+    build_compile_request, build_compile_request_with_style_processing,
+    derive_runtime_compile_options, request_construction_refused_diagnostics,
 };
 use super::vue_script_extract::template_converter_inputs;
 use crate::compile::{assemble_vue_main_module, VueMainAssemblyFailure};
@@ -1228,6 +1229,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         profile: &CompileProfile,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
     ) -> Result<RenderOnlyMain, HostError> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
 
@@ -1322,7 +1324,7 @@ impl VerterHost {
         // `Main` assembly as `compile_entry`, without the per-file wrapper
         // overhead, and with the imported-macro-resolution fatality softened
         // to a warning.
-        self.compile_entry_runtime_render(&compile_input, profile)
+        self.compile_entry_runtime_render(&compile_input, profile, style_processing)
     }
 
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
@@ -3659,6 +3661,7 @@ impl VerterHost {
         &self,
         snapshot: &CompileInput,
         profile: &CompileProfile,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
     ) -> Result<RenderOnlyMain, HostError> {
         let diagnostics = snapshot.parse_diagnostics.clone();
 
@@ -3704,11 +3707,12 @@ impl VerterHost {
         // authority as `compile_entry` (this lane is Vue-only, matching its
         // own module contract). A refusal here is FATAL, matching every
         // other construction-time site this lane already treats as fatal.
-        let request = match build_compile_request(
+        let request = match build_compile_request_with_style_processing(
             profile,
             &snapshot.canonical_id,
             true,
             want_runtime,
+            style_processing,
             want_ide,
             want_template_data,
         ) {

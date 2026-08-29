@@ -257,6 +257,13 @@ export type CompileManyTarget = "host-backed" | "runtime-render";
  */
 export interface CompileBatchRenderProfile {
   /**
+   * Style stages owned by this render. `"complete"` (default) runs the full
+   * compiler cascade. `"authored-only"` keeps authored `v-bind()` handling in
+   * Main and leaves preprocessing plus plain-CSS-only stages to the bundler's
+   * separate style-module lane.
+   */
+  styleProcessing?: "complete" | "authored-only";
+  /**
    * Codegen filename override (component-name extraction, scope-id
    * derivation, source-map source/file). Omit to fall back to the canonical
    * id — same semantics as `HostCompileProfile.filename`.

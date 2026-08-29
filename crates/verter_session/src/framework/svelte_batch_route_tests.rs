@@ -90,6 +90,7 @@ fn batch_input(canonical: &str, source: &str) -> CompileBatchInput {
 /// are asked the SAME typed question.
 fn render_profile(ssr: bool, source_map: bool) -> CompileBatchRenderProfile {
     CompileBatchRenderProfile {
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
         filename: None,
         is_production: true,
         custom_element: false,

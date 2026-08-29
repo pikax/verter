@@ -385,8 +385,8 @@ describe("instance helpers", () => {
       // Verify all key ComponentInternalInstance properties exist
       type HasRequiredProperties = Internal extends {
         uid: number;
-        parent: ComponentInternalInstance | null;
-        root: ComponentInternalInstance;
+        parent: ComponentInternalInstance["parent"];
+        root: ComponentInternalInstance["root"];
         appContext: object;
         type: object;
         vnode: object;

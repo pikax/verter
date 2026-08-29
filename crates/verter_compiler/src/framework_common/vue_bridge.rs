@@ -908,6 +908,7 @@ impl CarrierCompiler for VueCarrierCompiler {
             source_map: opts.source_map,
             ide_source_map: opts.source_map && opts.want_ide,
             ssr: opts.ssr,
+            style_processing: opts.style_processing,
             prop_constness_overrides: extras.and_then(|e| e.prop_constness_overrides.clone()),
             style_v_bind_vars: extras
                 .map(|e| e.style_v_bind_vars.clone())

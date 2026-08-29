@@ -44,7 +44,7 @@ use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
     analyze_css_module_classes, complete_static_class_names, prepared_style_for_sealed_slot,
-    run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
+    run_vue_style_authored_only, run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -777,6 +777,7 @@ fn derive_legacy_vue_options(
         source_map: runtime.is_some_and(|r| r.runtime_source_map),
         ide_source_map: ide.is_some_and(|i| i.want_source_map),
         ssr,
+        style_processing: request.runtime_style_processing(),
         prop_constness_overrides: execution_inputs.prop_constness_overrides.clone(),
         style_v_bind_vars: execution_inputs.style_v_bind_vars.clone(),
         style_v_bind_usage_complete: execution_inputs.style_v_bind_usage_complete,
@@ -922,7 +923,6 @@ fn compile_inner(
                         // The CSS-Modules byte-level class-name rewrite stays
                         // CSS-only; only that one stage is conditioned on the
                         // resolved dialect.
-                        let cascade_module = style.module && authored_dialect == CssDialect::Css;
                         let mut cascade_input = AuthoredStyleInput::new(
                             style_source,
                             authored_dialect,
@@ -939,13 +939,24 @@ fn compile_inner(
                             cascade_input = cascade_input.with_prepared(prepared.ir());
                         }
 
-                        let outcome = run_vue_style_cascade(
-                            cascade_input,
-                            scope_id_str,
-                            cascade_module,
-                            style.scoped,
-                            verter_options.source_map,
-                        );
+                        let outcome = match verter_options.style_processing {
+                            crate::compile_request::RuntimeStyleProcessing::Complete => {
+                                run_vue_style_cascade(
+                                    cascade_input,
+                                    scope_id_str,
+                                    style.module && authored_dialect == CssDialect::Css,
+                                    style.scoped,
+                                    verter_options.source_map,
+                                )
+                            }
+                            crate::compile_request::RuntimeStyleProcessing::AuthoredOnly => {
+                                run_vue_style_authored_only(
+                                    cascade_input,
+                                    scope_id_str,
+                                    verter_options.source_map,
+                                )
+                            }
+                        };
                         all_v_bind_vars.extend(outcome.facts.v_bind_vars);
                         for refusal in outcome
                             .facts
@@ -964,7 +975,12 @@ fn compile_inner(
                         // surface so IDE/consumer metadata is populated even though
                         // the emitted CSS text itself is left for external
                         // preprocessing to rewrite.
-                        if style.module && authored_dialect != CssDialect::Css {
+                        if style.module
+                            && (matches!(
+                                verter_options.style_processing,
+                                crate::compile_request::RuntimeStyleProcessing::AuthoredOnly
+                            ) || authored_dialect != CssDialect::Css)
+                        {
                             match analyze_css_module_classes(cascade_input, scope_id_str) {
                                 Ok(classes) => style_module_classes = classes,
                                 Err(error) => {

@@ -249,6 +249,10 @@ impl CompileBatchEntry {
 /// do not affect the runtime `Main` and default identically on both lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileBatchRenderProfile {
+    /// Style stages owned by this render. `AuthoredOnly` is used when the
+    /// bundler's separate style-module lane owns preprocessing and every
+    /// plain-CSS-only continuation.
+    pub style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
     /// Codegen filename override (component-name extraction, scope-id
     /// derivation, source-map `source`/`file`). `None` falls back to the
     /// canonical id, exactly like an absent `CompileProfile::filename`.
@@ -428,9 +432,14 @@ impl VerterHost {
         // (reproducing the build's dev/prod/ssr/force_js/vapor/source-map/
         // comments/hmr/runtime-module/delimiters/custom-elements). Per-input
         // `component_id` is layered on later, on the RuntimeRender lane only.
-        let profile = match &target {
-            CompileManyTarget::HostBacked => compile_profile_for_bundler(),
-            CompileManyTarget::RuntimeRender { profile } => render_base_profile(profile),
+        let (profile, style_processing) = match &target {
+            CompileManyTarget::HostBacked => (
+                compile_profile_for_bundler(),
+                verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+            ),
+            CompileManyTarget::RuntimeRender { profile } => {
+                (render_base_profile(profile), profile.style_processing)
+            }
         };
 
         // Boundary canonicalization: pin every input's `canonical_id` to the
@@ -461,7 +470,6 @@ impl VerterHost {
         // Batch default cache mode; a per-input `requested_mode` overrides
         // it. `None` on both resolves to the host default `Session`.
         let default_mode = options.default_mode.unwrap_or(CompileCacheMode::Session);
-
         // ── group + selective upsert ──
         // HashMap iteration is non-deterministic, but we only iterate
         // it for parallel-independent upserts and probe-keys — never
@@ -617,8 +625,14 @@ impl VerterHost {
             coordinator
                 .run_batch(&canonical_to_compile, &compile_policy, |input| {
                     let pre_err = group_errors.get(&input.canonical_id).cloned();
-                    let entry =
-                        self.compile_one_in_batch(input, &profile, default_mode, &target, pre_err);
+                    let entry = self.compile_one_in_batch(
+                        input,
+                        &profile,
+                        default_mode,
+                        style_processing,
+                        &target,
+                        pre_err,
+                    );
                     let effective_mode = input.requested_mode.unwrap_or(default_mode);
                     (
                         (
@@ -711,6 +725,7 @@ impl VerterHost {
         input: &CompileBatchInput,
         profile: &CompileProfile,
         default_mode: CompileCacheMode,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
         target: &CompileManyTarget,
         precomputed_error: Option<String>,
     ) -> CompileBatchEntry {
@@ -812,6 +827,7 @@ impl VerterHost {
                 input,
                 &per_input_profile,
                 requested_mode,
+                style_processing,
                 start,
             );
         }
@@ -912,10 +928,11 @@ impl VerterHost {
         input: &CompileBatchInput,
         per_input_profile: &CompileProfile,
         requested_mode: CompileCacheMode,
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
         start: Instant,
     ) -> CompileBatchEntry {
         let id_prefix = format!("[{}] ", input.canonical_id);
-        match self.render_only_main(&input.canonical_id, per_input_profile) {
+        match self.render_only_main(&input.canonical_id, per_input_profile, style_processing) {
             Ok(render) => CompileBatchEntry {
                 canonical_id: input.canonical_id.clone(),
                 outcome: CompileBatchOutcome::Produced {

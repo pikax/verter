@@ -20,7 +20,7 @@ pub mod vue;
 pub use capability::{CapabilityCell, CapabilityDisposition};
 pub use product::{
     AnalysisProductRequest, CompileProduct, DeclarationProductRequest, IdeProductRequest,
-    ProductKind, PublicApiProductRequest, RuntimeProductRequest,
+    ProductKind, PublicApiProductRequest, RuntimeProductRequest, RuntimeStyleProcessing,
 };
 pub use svelte::{SvelteCompileRequest, SvelteOption, SvelteOptionAttempt, SvelteOptionClass};
 pub use vue::{VueBackendRequest, VueCompileRequest, VueOption, VueOptionAttempt, VueOptionClass};
@@ -247,6 +247,14 @@ impl CompileRequest {
             CompileProduct::RuntimeClient(r) | CompileProduct::RuntimeServer(r) => Some(r),
             _ => None,
         })
+    }
+
+    /// Style-pipeline ownership selected by the active runtime product.
+    pub fn runtime_style_processing(&self) -> RuntimeStyleProcessing {
+        self.runtime_client_or_server()
+            .map_or(RuntimeStyleProcessing::Complete, |runtime| {
+                runtime.style_processing
+            })
     }
 
     fn analysis(&self) -> Option<AnalysisProductRequest> {

@@ -97,6 +97,7 @@ fn batch_render_profile(
     source_map: bool,
 ) -> crate::host_compile::CompileBatchRenderProfile {
     crate::host_compile::CompileBatchRenderProfile {
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
         filename: None,
         is_production: true,
         custom_element: false,
@@ -2687,6 +2688,7 @@ fn bundler_vue_rollup_render_profile(
     carrier_id: &str,
 ) -> crate::host_compile::CompileBatchRenderProfile {
     crate::host_compile::CompileBatchRenderProfile {
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
         filename: Some(carrier_id.to_string()),
         is_production: false,
         custom_element: false,

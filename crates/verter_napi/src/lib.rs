@@ -2753,8 +2753,22 @@ impl NapiVerterHost {
                                 .to_string(),
                         )),
                     };
+                let style_processing = match p.styleProcessing.as_deref() {
+                    None | Some("complete") => {
+                        verter_compiler::compile_request::RuntimeStyleProcessing::Complete
+                    }
+                    Some("authored-only") => {
+                        verter_compiler::compile_request::RuntimeStyleProcessing::AuthoredOnly
+                    }
+                    Some(other) => {
+                        return Err(ffi_err(format!(
+                            "invalid compileProfile.styleProcessing '{other}', expected 'complete' or 'authored-only'"
+                        )));
+                    }
+                };
                 host_compile::CompileManyTarget::RuntimeRender {
                     profile: host_compile::CompileBatchRenderProfile {
+                        style_processing,
                         filename: p.filename,
                         is_production: p.isProduction,
                         custom_element: p.customElement,
@@ -3537,6 +3551,10 @@ pub struct NapiCompileBatchInput {
 /// the render lane reproduces the `getVirtualFile` path byte-for-byte.
 #[napi(object)]
 pub struct NapiCompileBatchRenderProfile {
+    /// Style stages owned by this render: `"complete"` (default) or
+    /// `"authored-only"` when the bundler's separate style-module lane owns
+    /// preprocessing and every plain-CSS-only continuation.
+    pub styleProcessing: Option<String>,
     /// Codegen filename override (component-name extraction, scope-id
     /// derivation, source-map `source`/`file`). Absent falls back to the
     /// canonical id — same semantics as `HostCompileProfile.filename`.

@@ -40,6 +40,31 @@ pub(crate) fn build_compile_request(
     verter_compiler::compile_request::CompileRequest,
     verter_compiler::compile_request::CompileRequestError,
 > {
+    build_compile_request_with_style_processing(
+        profile,
+        canonical_id,
+        is_vue,
+        want_runtime,
+        verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+        want_ide,
+        want_template_data,
+    )
+}
+
+/// RuntimeRender-only companion to [`build_compile_request`] for a caller
+/// whose typed render profile explicitly owns only authored style stages.
+pub(crate) fn build_compile_request_with_style_processing(
+    profile: &CompileProfile,
+    canonical_id: &str,
+    is_vue: bool,
+    want_runtime: bool,
+    runtime_style_processing: verter_compiler::compile_request::RuntimeStyleProcessing,
+    want_ide: bool,
+    want_template_data: bool,
+) -> Result<
+    verter_compiler::compile_request::CompileRequest,
+    verter_compiler::compile_request::CompileRequestError,
+> {
     use verter_compiler::compile_request::svelte::{
         SvelteCompatibilityRequest, SvelteCssRequest, SvelteCustomElementDescriptor,
         SvelteFragmentsRequest, SvelteNamespaceRequest, SvelteRunesRequest,
@@ -55,6 +80,7 @@ pub(crate) fn build_compile_request(
         let runtime_product = RuntimeProductRequest {
             inline: profile.inline,
             runtime_source_map: profile.source_map,
+            style_processing: runtime_style_processing,
             ..Default::default()
         };
         products.push(if profile.ssr {
@@ -88,6 +114,7 @@ pub(crate) fn build_compile_request(
         products.push(CompileProduct::RuntimeClient(RuntimeProductRequest {
             inline: profile.inline,
             runtime_source_map: profile.source_map,
+            style_processing: runtime_style_processing,
             ..Default::default()
         }));
     }
@@ -270,6 +297,7 @@ pub(crate) fn derive_runtime_compile_options(
         source_map: runtime.is_some_and(|r| r.runtime_source_map)
             || ide.is_some_and(|i| i.want_source_map),
         ssr,
+        style_processing: request.runtime_style_processing(),
         runtime_module_name: vue.and_then(|v| v.runtime_module_name.clone()),
         component_id: request.component_id().map(str::to_string),
         svelte_css_hash_override: profile.svelte_css_hash_override.clone(),

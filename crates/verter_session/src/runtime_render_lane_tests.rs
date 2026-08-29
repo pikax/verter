@@ -13,6 +13,7 @@
 //! | `runtime_render_unresolved_imported_macro_type_is_fatal` | An unavailable authoritative macro root remains fatal and emits no partial render. |
 //! | `runtime_render_local_type_error_is_fatal` | Local invalid macro usage stays fatal. |
 //! | `runtime_render_syntax_error_is_fatal` | Template/script syntax error stays fatal. |
+//! | `runtime_render_authored_only_style_processing_defers_scoped_scss` | The Vite-shaped lane keeps authored `v-bind()` work but defers plain-CSS-only scoping; the default lane remains fail-closed. |
 //! | `runtime_render_bypasses_stage_c_wrapper` | Zero wrapper-op counter hits on a simple render; >0 on HostBacked. |
 //! | `runtime_render_does_not_leave_stale_semantic_axis_for_host_backed` | (e)-skip safety: a later HostBacked read sees current, not stale, deps. |
 //! | `runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive_routes` | Drive-letter case parity: an upper-drive compile input converges on the lower-drive canonical whose alias routes were wired via `set_import_dependencies`. |
@@ -109,6 +110,7 @@ fn render_profile(
     hmr: crate::types::HmrStrategy,
 ) -> crate::host_compile::CompileBatchRenderProfile {
     crate::host_compile::CompileBatchRenderProfile {
+        style_processing: verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
         is_production,
         custom_element: false,
         ssr,
@@ -521,6 +523,53 @@ fn runtime_render_syntax_error_is_fatal() {
         !render.errors().is_empty(),
         "an SFC syntax error must remain fatal on RuntimeRender (got code: {:?})",
         render.code()
+    );
+}
+
+#[test]
+fn runtime_render_authored_only_style_processing_defers_scoped_scss() {
+    const SOURCE: &str = r#"<script setup>
+const tone = "red"
+</script>
+<template><div class="card">x</div></template>
+<style lang="scss" scoped>
+$pad: 1rem;
+.card { color: v-bind(tone); padding: $pad; &:hover { color: blue; } }
+</style>"#;
+
+    let host = new_host();
+    let complete = render_one(&host, "/src/ScopedScss.vue", SOURCE);
+    assert!(
+        complete
+            .errors()
+            .iter()
+            .any(|error| error.contains("StageRequiresPlainCss")),
+        "the normal complete-style runtime product must stay fail-closed: {:?}",
+        complete.errors()
+    );
+
+    let mut authored_only = host.compile_many(
+        vec![input("/src/ScopedScss.vue", SOURCE)],
+        CompileBatchOptions::default(),
+        CompileManyTarget::RuntimeRender {
+            profile: crate::host_compile::CompileBatchRenderProfile {
+                style_processing:
+                    verter_compiler::compile_request::RuntimeStyleProcessing::AuthoredOnly,
+                ..simple_render_profile()
+            },
+        },
+    );
+    let authored_only = authored_only
+        .pop()
+        .expect("one input must produce one entry");
+    assert!(
+        authored_only.errors().is_empty(),
+        "the authored-only style lane must defer scoping until Vite supplies CSS: {:?}",
+        authored_only.errors()
+    );
+    assert!(
+        authored_only.code().contains("_useCssVars"),
+        "deferring post-preprocessor stages must preserve authored v-bind runtime injection"
     );
 }
 

@@ -219,6 +219,8 @@ interface CompileBatchOptions {
 }
 
 interface CompileBatchRenderProfile {
+  /** `"authored-only"` is reserved for a bundler-owned style-module pipeline. */
+  styleProcessing?: "complete" | "authored-only";
   filename?: string;
   isProduction: boolean;
   customElement: boolean;

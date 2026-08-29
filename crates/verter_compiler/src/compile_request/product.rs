@@ -23,11 +23,28 @@ pub enum ProductKind {
     Analysis,
 }
 
+/// Which part of Vue's style cascade a runtime product owns.
+///
+/// Bundlers such as Vite preprocess and publish styles through a separate
+/// virtual-module pipeline. Their carrier `Main` render still needs the
+/// authored `v-bind()` facts for `_useCssVars`, but must not attempt the
+/// plain-CSS-only modules/scoping stages before the preprocessor has run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RuntimeStyleProcessing {
+    /// The runtime product owns the complete authored-to-published style
+    /// cascade. This is the default for standalone and host-backed compiles.
+    #[default]
+    Complete,
+    /// Run only the authored-dialect stage. A separate bundler style lane owns
+    /// preprocessing followed by CSS modules/scoping publication.
+    AuthoredOnly,
+}
+
 /// Runtime (client or server) product options. `inline` is meaningful only
 /// on a `RuntimeClient` product — its presence on a `RuntimeServer` product
 /// is refused at [`super::CompileRequest::new`] time (`inline x SSR` fails
 /// closed, no silent non-inline demotion).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeProductRequest {
     /// `None` resolves to `CompileRequest::is_production` (official
     /// default: inline in production builds) — the same default
@@ -40,8 +57,22 @@ pub struct RuntimeProductRequest {
     /// an [`IdeCompanion`](super::CompileProduct::IdeCompanion) product
     /// alongside this one no longer silently turns this flag on.
     pub runtime_source_map: bool,
+    /// Style-pipeline ownership for this runtime product.
+    pub style_processing: RuntimeStyleProcessing,
     pub output_profile: Option<OutputProfileId>,
     pub serialization: Option<SerializationProfileId>,
+}
+
+impl Default for RuntimeProductRequest {
+    fn default() -> Self {
+        Self {
+            inline: None,
+            runtime_source_map: false,
+            style_processing: RuntimeStyleProcessing::Complete,
+            output_profile: None,
+            serialization: None,
+        }
+    }
 }
 
 impl RuntimeProductRequest {
