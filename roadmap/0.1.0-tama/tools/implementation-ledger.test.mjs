@@ -82,7 +82,7 @@ test("same node and issue with opposite sync_to_github is a duplicate pair", () 
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 99"), errors.join("; "));
 });
 
-test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, FB1, and FB2 with message/date locators", () => {
+test("the live ledger records J1, ORC0, GH0-GH6, REL0-REL2, FB0, FB1, and FB2 with message/date locators", () => {
   const authority = loadAuthority();
   const byId = new Map(authority.ledger.implemented.map((row) => [row.node_id, row]));
   assert.deepEqual(byId.get("J1"), {
@@ -135,6 +135,16 @@ test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, FB1, and FB2 with me
     commit_message: "feat(ci): plan milestone release readiness from the local ledger",
     commit_date: "2026-08-29T05:20:00+01:00",
   });
+  assert.deepEqual(byId.get("REL2"), {
+    node_id: "REL2",
+    commit_message: "feat(ci): cut release pull requests with a versioned squash subject",
+    commit_date: "2026-08-29T18:00:00+01:00",
+  });
+  assert.deepEqual(byId.get("GH6"), {
+    node_id: "GH6",
+    commit_message: "feat(ci): inventory the composed GitHub workflow and prove it on the fake",
+    commit_date: "2026-08-29T21:30:00+01:00",
+  });
   assert.deepEqual(byId.get("FB0"), {
     node_id: "FB0",
     commit_message: "docs(ci): define non-DAG feedback labels and finding follow-up",
@@ -160,10 +170,11 @@ test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, FB1, and FB2 with me
   assert.equal(state.states.get("GH5").status, "COMPLETE");
   assert.equal(state.states.get("REL0").status, "COMPLETE");
   assert.equal(state.states.get("REL1").status, "COMPLETE");
+  assert.equal(state.states.get("REL2").status, "COMPLETE");
   assert.equal(state.states.get("FB0").status, "COMPLETE");
   assert.equal(state.states.get("FB1").status, "COMPLETE");
   assert.equal(state.states.get("FB2").status, "COMPLETE");
-  assert.notEqual(state.states.get("GH6").status, "COMPLETE");
+  assert.equal(state.states.get("GH6").status, "COMPLETE");
   assert.equal(explainNode(authority, state, "ORC0").commit.pull_request, null);
 });
 

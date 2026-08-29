@@ -270,8 +270,9 @@ test("githubctl doctor --fake and check stay offline", () => {
   assert.equal(report.capabilities.issues, true);
   const check = spawnSync(process.execPath, [CLI, "check"], { encoding: "utf8" });
   assert.equal(check.status, 0, check.stderr);
-  assert.match(check.stdout, /createIssue/u);
-  assert.match(check.stdout, /sync-issues --check/u);
+  const inventory = JSON.parse(check.stdout);
+  assert.equal(inventory.kind, "MinimalGitHubWorkflow");
+  assert.equal(inventory.sync_issues_available, true);
 });
 
 test("expected capability misses do not throw from inspectCapabilities", () => {

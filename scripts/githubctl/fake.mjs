@@ -358,6 +358,15 @@ export class FakeGitHubAdapter {
     }));
   }
 
+  setPullRequestCheckRuns(number, runs) {
+    const expected = assertIssueNumber(number, "pull request number");
+    if (!this.#pulls.has(expected)) {
+      throw new NotFoundError(`pull request #${expected} is missing`);
+    }
+    if (!Array.isArray(runs)) throw new GitHubAdapterError("check runs must be an array");
+    this.#checkRuns.set(expected, runs.map(cloneCheckRun));
+  }
+
   mergePullRequest(request) {
     const { mode, number, mergeMethod, commitTitle } = prepareMergePullRequest(this, request);
     if (mode === "check") return planMergePullRequest(number, commitTitle);

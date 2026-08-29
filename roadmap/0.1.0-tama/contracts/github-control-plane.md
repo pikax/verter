@@ -4,6 +4,10 @@ GH0 may begin when every transitive ancestor has an implemented-ledger row. Ever
 
 The static DAG and local ledger remain authority. GitHub is a human coordination surface. Issues and PRs do not carry or validate serialized DAG state.
 
+## MinimalGitHubWorkflow
+
+`githubctl check` prints the frozen composed-workflow inventory (`kind: MinimalGitHubWorkflow`). It is local JSON and never contacts GitHub. The inventory lists the landed owners in order: `sync-issues`, `create-pr`, `review-summary`, `ci-result`, `finalize-ledger`, `squash-land`, `inspect`, `schedule`, `release-plan`, and `release-cut`. `sync_issues_available` remains true: `githubctl sync-issues` stays the explicit one-way mapping command after cutover. The inventory does not create a second planner, a second release pipeline, or a runner that replaces those owners.
+
 ## GitHubIssueMapping
 
 The ledger may contain mappings that are separate from implementation rows:

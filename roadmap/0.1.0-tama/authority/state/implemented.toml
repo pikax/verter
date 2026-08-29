@@ -208,6 +208,11 @@ node_id = "REL2"
 commit_message = "feat(ci): cut release pull requests with a versioned squash subject"
 commit_date = "2026-08-29T18:00:00+01:00"
 
+[[implemented]]
+node_id = "GH6"
+commit_message = "feat(ci): inventory the composed GitHub workflow and prove it on the fake"
+commit_date = "2026-08-29T21:30:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

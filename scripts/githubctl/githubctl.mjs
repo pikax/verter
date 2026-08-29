@@ -21,6 +21,7 @@ import { releaseCut } from "./release-cut.mjs";
 import { releasePlan } from "./release-plan.mjs";
 import { schedule } from "./schedule.mjs";
 import { syncIssues } from "./sync-issues.mjs";
+import { workflowInventory } from "./workflow.mjs";
 
 function printHelp() {
   console.log(`Usage: githubctl <command>
@@ -58,6 +59,10 @@ Commands:
     [--head <branch>] [--base main] [--body <pr prose>] [--findings <json>]
     [--land] [--pr <n>] [--close-milestone] [--fake]
     [--owner <owner> --repo <repo>]
+
+check prints the frozen composed-workflow inventory as JSON. It is
+local and never contacts GitHub. Issue-sync stays available as an
+explicit command after cutover.
 
 doctor validates GitHub authentication, repository access, issue/PR
 mutation capability, and whether Project 3 is readable. It never writes.
@@ -578,20 +583,7 @@ function main(argv) {
     return report.ok ? 0 : 1;
   }
   if (command === "check") {
-    console.log(
-      "Mutation APIs exist as library methods: createIssue, updateIssue, createPullRequest.",
-    );
-    console.log("Each requires mode check or apply; apply is doctor-gated.");
-    console.log("sync-issues --check|--apply syncs an explicit train or node set.");
-    console.log("create-pr --check|--apply creates a final-title PR that closes the mapped issue.");
-    console.log("review-summary --check|--apply records a ReviewCycleSummary PR comment.");
-    console.log("ci-result --check|--apply reports live pull-request check-runs as CiResult.");
-    console.log("finalize-ledger updates an existing implemented row message/date/pr.");
-    console.log("squash-land --check|--apply squash-merges after a successful CiResult.");
-    console.log("schedule --check|--apply overlays READY work onto GitHub Project 3.");
-    console.log("inspect --check|--apply writes a local FeedbackReport and one AI-result label.");
-    console.log("release-plan --check|--apply plans milestone readiness from the local ledger.");
-    console.log("release-cut --check|--apply cuts a release: v<version> pull request.");
+    console.log(JSON.stringify(workflowInventory(), null, 2));
     return 0;
   }
   if (command === "inspect") return runInspect(flags, options);
