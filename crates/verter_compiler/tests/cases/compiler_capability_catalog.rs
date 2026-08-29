@@ -446,6 +446,7 @@ fn walk_rs(dir: &std::path::Path, hits: &mut Vec<String>) {
             || rel_str.ends_with("framework_common/mod.rs")
             || rel_str.ends_with("framework_common/vue_carrier_frontend.rs")
             || rel_str.ends_with("framework_common/vue_semantic_authority.rs")
+            || rel_str.ends_with("svelte/semantic_authority.rs")
             || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
             || rel_str.ends_with("svelte/carrier_frontend.rs")
             || rel_str.ends_with("lib.rs")

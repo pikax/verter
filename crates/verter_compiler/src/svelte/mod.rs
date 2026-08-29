@@ -26,9 +26,11 @@ pub mod carrier_frontend;
 pub mod ide;
 pub mod parser;
 pub mod runtime;
+pub mod semantic_authority;
 pub mod template_facts;
 
 pub use carrier::SvelteCarrierCompiler;
 pub use carrier_frontend::{svelte_carrier_frontend_registration, SvelteCarrierFrontend};
 pub use ide::{project_svelte_ide, SvelteIdeProjection};
 pub use parser::{parse_svelte, ParsedSvelte};
+pub use semantic_authority::{svelte_semantic_authority_registration, SvelteSemanticAuthority};

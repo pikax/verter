@@ -38,6 +38,7 @@ mod registered_carrier_projection_tests;
 #[cfg(test)]
 pub mod sourcemap_e2e_helpers;
 
+pub use crate::svelte::{svelte_semantic_authority_registration, SvelteSemanticAuthority};
 pub use capability::{
     CarrierFrontend, FrameworkEpochId, FrameworkHostIntegrationBackend, FrameworkSemanticAuthority,
     HostEpochId, Present, ProjectionBackend, RuntimeCompilerBackend,

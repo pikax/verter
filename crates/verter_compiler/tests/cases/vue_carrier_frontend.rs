@@ -148,6 +148,7 @@ fn walk_production(dir: &std::path::Path, hits: &mut Vec<String>) {
         let rel_str = rel.to_string_lossy();
         if rel_str.ends_with("framework_common/vue_carrier_frontend.rs")
             || rel_str.ends_with("framework_common/mod.rs")
+            || rel_str.ends_with("framework_common/vue_semantic_authority.rs")
             || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
         {
             continue;
