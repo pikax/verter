@@ -505,7 +505,7 @@ node_id = "D1"
 gh_issue = 173
 sync_to_github = true
 [[github_issue]]
-node_id = "D2"
+node_id = "D2B"
 gh_issue = 174
 sync_to_github = true
 [[github_issue]]
