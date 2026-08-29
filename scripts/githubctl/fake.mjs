@@ -10,6 +10,7 @@ import {
   planCreatePullRequest,
   planCreatePullRequestComment,
   planMergePullRequest,
+  planDispatchReleaseRehearsal,
   planSetAiResultLabel,
   planSetIssueMilestone,
   planUpdateIssue,
@@ -17,6 +18,7 @@ import {
   prepareCreateIssue,
   prepareCreatePullRequest,
   prepareCreatePullRequestComment,
+  prepareDispatchReleaseRehearsal,
   prepareMergePullRequest,
   prepareSetAiResultLabel,
   prepareSetIssueMilestone,
@@ -104,6 +106,7 @@ export class FakeGitHubAdapter {
       issues: options.permissions?.issues !== false,
       pullRequests: options.permissions?.pullRequests !== false,
       projects: options.permissions?.projects !== false,
+      actions: options.permissions?.actions !== false,
     };
     this.failOnApply = options.failOnApply;
     this.failOnApplyError = options.failOnApplyError;
@@ -111,6 +114,7 @@ export class FakeGitHubAdapter {
     this.reads = [];
     this.milestoneWrites = [];
     this.labelWrites = [];
+    this.workflowDispatches = [];
     this.#issues = new Map();
     this.#pulls = new Map();
     this.#heads = new Set();
@@ -136,6 +140,7 @@ export class FakeGitHubAdapter {
         comments: cloneComments(issue.comments),
         milestone: issue.milestone ?? null,
         labels: cloneLabels(issue.labels),
+        state: issue.state === "closed" ? "closed" : "open",
       });
     }
     for (const pull of options.pullRequests ?? []) {
@@ -185,6 +190,7 @@ export class FakeGitHubAdapter {
       issues: this.permissions.issues,
       pullRequests: this.permissions.pullRequests,
       projects: this.permissions.projects && !this.#projectMissing,
+      actions: this.permissions.actions,
     });
   }
 
@@ -220,6 +226,7 @@ export class FakeGitHubAdapter {
       comments: [],
       milestone: null,
       labels: [],
+      state: "open",
     });
     return {
       kind: "create-issue",
@@ -438,6 +445,11 @@ export class FakeGitHubAdapter {
         add: row.add,
         remove: row.remove,
       })),
+      workflowDispatches: this.workflowDispatches.map((row) => ({
+        workflow: row.workflow,
+        uses: row.uses,
+        dry_run: row.dry_run,
+      })),
       merges: this.#merges.map((row) => ({
         number: row.number,
         merge_method: row.merge_method,
@@ -496,5 +508,36 @@ export class FakeGitHubAdapter {
     issue.milestone = title;
     this.milestoneWrites.push({ issueNumber, title });
     return { kind: "set-milestone", issueNumber, title, applied: true };
+  }
+
+  listMilestoneIssues(title) {
+    assertRequiredText(title, "milestone title");
+    this.reads.push({ kind: "list-milestone-issues", title });
+    if (!this.#milestones.has(title)) throw new NotFoundError(`milestone ${title} is missing`);
+    return [...this.#issues.values()]
+      .filter((issue) => issue.milestone === title)
+      .map((issue) => ({
+        number: issue.number,
+        title: issue.title,
+        state: issue.state === "closed" ? "closed" : "open",
+        milestone: title,
+      }))
+      .sort((left, right) => left.number - right.number);
+  }
+
+  dispatchReleaseRehearsal(request = {}) {
+    const { mode } = prepareDispatchReleaseRehearsal(this, request);
+    if (mode === "check") return planDispatchReleaseRehearsal();
+    this.#beginApply();
+    this.workflowDispatches.push({
+      workflow: "release-check.yml",
+      uses: "release.yml",
+      dry_run: true,
+    });
+    return {
+      kind: "dispatch-release-check",
+      workflow: "release-check.yml",
+      applied: true,
+    };
   }
 }

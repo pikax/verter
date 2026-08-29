@@ -222,6 +222,8 @@ test("GitHubAdapter and FakeGitHubAdapter share the mutation surface", () => {
     "getProject",
     "addIssueToProject",
     "setIssueMilestone",
+    "listMilestoneIssues",
+    "dispatchReleaseRehearsal",
   ]) {
     assert.equal(typeof GitHubAdapter.prototype[name], "function", name);
     assert.equal(typeof FakeGitHubAdapter.prototype[name], "function", name);

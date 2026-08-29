@@ -6,6 +6,7 @@ import {
   CREATE_PR_CAPABILITIES,
   GitHubDoctor,
   INSPECT_CAPABILITIES,
+  RELEASE_PLAN_DISPATCH_CAPABILITIES,
   REVIEW_SUMMARY_CAPABILITIES,
   SCHEDULE_CAPABILITIES,
   SQUASH_LAND_CAPABILITIES,
@@ -15,6 +16,7 @@ import { inspectIssue } from "./inspect.mjs";
 import { mutationIdentity, PartialFailureError } from "./errors.mjs";
 import { FakeGitHubAdapter } from "./fake.mjs";
 import { reviewSummary } from "./review-summary.mjs";
+import { releasePlan } from "./release-plan.mjs";
 import { schedule } from "./schedule.mjs";
 import { syncIssues } from "./sync-issues.mjs";
 
@@ -47,6 +49,9 @@ Commands:
   schedule --check|--apply --train <train> | --nodes <id,id,...>
     [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
     [--set-milestone <title>]
+  release-plan --check|--apply --milestone <title>
+    [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
+    [--findings <json>] [--waive-item <n>] [--dispatch]
 
 doctor validates GitHub authentication, repository access, issue/PR
 mutation capability, and whether Project 3 is readable. It never writes.
@@ -55,6 +60,10 @@ Project 3. create-pr --apply and review-summary --apply are doctor-gated
 for issues and pullRequests and do not require Project 3. squash-land
 --apply is doctor-gated for pullRequests and does not require Project 3.
 schedule --apply requires issues and Project 3.
+release-plan --apply does not write GitHub. --dispatch is the only
+workflow_dispatch path, is never the default, and is doctor-gated for
+actions. HTTP 204 means the dispatch was accepted; rehearsal.dispatched
+does not imply the rehearsal passed. Live job poll is not default.
 
 Issue create/update and pull-request mutation remain library APIs. Each
 requires mode 'check' or 'apply'; apply is doctor-gated.
@@ -87,6 +96,13 @@ inspect retrieves a non-DAG issue, writes a local FeedbackReport, and
 replaces exactly one AI-owned result label when the mapping allows it.
 Check plans only. Apply is doctor-gated for issues and does not require
 Project 3. Protected mappings and ai:ignore never write GitHub labels.
+
+release-plan inspects milestone issues and derives readiness only from
+local [[implemented]] rows. GitHub closure, labels, and Project status
+never complete a node. Unmapped items are blockers unless --waive-item
+names them. Apply records rehearsal identity without dispatching unless
+--dispatch is explicit. --dispatch is doctor-gated for actions and records
+terminal_result pending; plan.ok stays ledger-blocker emptiness.
 `);
 }
 
@@ -103,6 +119,7 @@ const VALUE_FLAGS = new Set([
   "--model",
   "--ledger",
   "--set-milestone",
+  "--milestone",
   "--pr",
   "--verdict",
   "--findings",
@@ -132,7 +149,14 @@ function parseArgs(argv) {
     else if (arg === "--check") flags.add("check");
     else if (arg === "--apply") flags.add("apply");
     else if (arg === "--write-locator") flags.add("write-locator");
-    else if (arg === "--tama-changed") flags.add("tama-changed");
+    else if (arg === "--dispatch") flags.add("dispatch");
+    else if (arg === "--waive-item") {
+      const value = argv[i + 1];
+      if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
+      if (!Array.isArray(options["waive-item"])) options["waive-item"] = [];
+      options["waive-item"].push(value);
+      i += 1;
+    } else if (arg === "--tama-changed") flags.add("tama-changed");
     else if (VALUE_FLAGS.has(arg)) {
       const value = argv[i + 1];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
@@ -439,6 +463,41 @@ function runSchedule(flags, options) {
   return 0;
 }
 
+function runReleasePlan(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) throw new Error("release-plan requires exactly one of --check or --apply");
+  if (typeof options.milestone !== "string" || options.milestone.length === 0) {
+    throw new Error("release-plan requires --milestone");
+  }
+  const dispatch = flags.has("dispatch");
+  if (dispatch && !apply) throw new Error("--dispatch requires apply");
+  const adapter = boundAdapter(flags, options, "release-plan");
+  let clearance;
+  if (dispatch) {
+    const doctor = new GitHubDoctor(adapter).check({
+      require: RELEASE_PLAN_DISPATCH_CAPABILITIES,
+    });
+    if (!doctor.ok) {
+      console.log(JSON.stringify(doctor, null, 2));
+      return 1;
+    }
+    clearance = doctor.clearance;
+  }
+  const report = releasePlan({
+    adapter,
+    mode: apply ? "apply" : "check",
+    milestone: options.milestone,
+    ledgerPath: options.ledger,
+    findings: options.findings,
+    waiveItems: options["waive-item"],
+    dispatch,
+    clearance,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return report.ok ? 0 : 1;
+}
+
 function main(argv) {
   const { flags, options, positionals } = parseArgs(argv);
   if (flags.has("help") && positionals.length === 0) {
@@ -470,6 +529,7 @@ function main(argv) {
     console.log("squash-land --check|--apply squash-merges after a successful CiResult.");
     console.log("schedule --check|--apply overlays READY work onto GitHub Project 3.");
     console.log("inspect --check|--apply writes a local FeedbackReport and one AI-result label.");
+    console.log("release-plan --check|--apply plans milestone readiness from the local ledger.");
     return 0;
   }
   if (command === "inspect") return runInspect(flags, options);
@@ -480,8 +540,9 @@ function main(argv) {
   if (command === "finalize-ledger") return runFinalizeLedger(flags, options);
   if (command === "squash-land") return runSquashLand(flags, options);
   if (command === "schedule") return runSchedule(flags, options);
+  if (command === "release-plan") return runReleasePlan(flags, options);
   throw new Error(
-    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule`,
+    `unknown command ${command}; supported commands: doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan`,
   );
 }
 

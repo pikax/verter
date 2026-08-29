@@ -102,6 +102,7 @@ test("live inspectCapabilities folds expected misses and uses distinct write sig
   assert.equal(unauthorizedCaps.repository, null);
   assert.equal(unauthorizedCaps.issues, false);
   assert.equal(unauthorizedCaps.pullRequests, false);
+  assert.equal(unauthorizedCaps.actions, false);
   assert.equal("login" in unauthorizedCaps, false);
 
   const missingRepo = live({
@@ -143,6 +144,7 @@ test("live inspectCapabilities folds expected misses and uses distinct write sig
   assert.deepEqual(disabledCaps.repository, { owner: "pikax", repo: "verter" });
   assert.equal(disabledCaps.issues, false);
   assert.equal(disabledCaps.pullRequests, true);
+  assert.equal(disabledCaps.actions, true);
 
   const triageOnly = live({
     "GET /user": { login: "alice" },
@@ -155,6 +157,7 @@ test("live inspectCapabilities folds expected misses and uses distinct write sig
   const triageCaps = triageOnly.adapter.inspectCapabilities();
   assert.equal(triageCaps.issues, true);
   assert.equal(triageCaps.pullRequests, false);
+  assert.equal(triageCaps.actions, false);
 
   const unstructured = live({
     "GET /user": new UnstructuredGitHubOutputError("gh api returned non-JSON output"),

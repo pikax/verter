@@ -63,9 +63,9 @@ test("GitHub mappings are unique and never mark implementation complete", () => 
   assert.ok(errors.includes("GitHub issue ledger: duplicate node GH0"));
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 123"));
 
-  authority.ledger.github_issue = [{ node_id: "REL1", gh_issue: 123, sync_to_github: false }];
-  assert.equal(deriveState(authority).states.get("REL1").status, "READY");
-  assert.notEqual(deriveState(authority).states.get("REL1").status, "COMPLETE");
+  authority.ledger.github_issue = [{ node_id: "REL2", gh_issue: 123, sync_to_github: false }];
+  assert.equal(deriveState(authority).states.get("REL2").status, "READY");
+  assert.notEqual(deriveState(authority).states.get("REL2").status, "COMPLETE");
 });
 
 test("same node and issue with opposite sync_to_github is a duplicate pair", () => {
@@ -127,6 +127,11 @@ test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, FB1, and FB2 with me
     commit_message: "feat(ci): overlay READY work onto GitHub Project 3",
     commit_date: "2026-08-29T01:22:51+01:00",
   });
+  assert.deepEqual(byId.get("REL1"), {
+    node_id: "REL1",
+    commit_message: "feat(ci): plan milestone release readiness from the local ledger",
+    commit_date: "2026-08-29T05:20:00+01:00",
+  });
   assert.deepEqual(byId.get("FB0"), {
     node_id: "FB0",
     commit_message: "docs(ci): define non-DAG feedback labels and finding follow-up",
@@ -150,6 +155,8 @@ test("the live ledger records J1, ORC0, GH0-GH5, REL0, FB0, FB1, and FB2 with me
   assert.equal(state.states.get("GH3").status, "COMPLETE");
   assert.equal(state.states.get("GH4").status, "COMPLETE");
   assert.equal(state.states.get("GH5").status, "COMPLETE");
+  assert.equal(state.states.get("REL0").status, "COMPLETE");
+  assert.equal(state.states.get("REL1").status, "COMPLETE");
   assert.equal(state.states.get("FB0").status, "COMPLETE");
   assert.equal(state.states.get("FB1").status, "COMPLETE");
   assert.equal(state.states.get("FB2").status, "COMPLETE");
@@ -379,6 +386,8 @@ test("github control plane contract names the mapping boundaries", () => {
     "ReadySchedulingPlan",
     "MilestoneOverlay",
     "ReleaseTarget",
+    "ReleaseReadiness",
+    "ReleaseBlocker",
     "AiIssueVerdict",
     "AiOwnedLabels",
     "MaintainerGuards",
@@ -539,7 +548,7 @@ const REPO_ROOT = path.resolve(PACKAGE_ROOT, "../..");
 const GITHUBCTL = path.join(REPO_ROOT, "scripts", "githubctl", "githubctl.mjs");
 const PROGRAMCTL = path.join(PACKAGE_ROOT, "tools", "programctl.mjs");
 const GITHUBCTL_COMMANDS =
-  "doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule";
+  "doctor, check, inspect, sync-issues, create-pr, review-summary, ci-result, finalize-ledger, squash-land, schedule, release-plan";
 
 test("FB2-AC1 githubctl has no import-dag command and does not generate DAG authority from GitHub", () => {
   const help = spawnSync(process.execPath, [GITHUBCTL, "--help"], { encoding: "utf8" });
@@ -579,9 +588,9 @@ test("FB2-AC2 ManualDagAuthoring reuses the original issue and never marks the n
   const authority = loadAuthority();
   authority.ledger.github_issue = [
     ...(authority.ledger.github_issue || []),
-    { node_id: "REL1", gh_issue: 4242, sync_to_github: false },
+    { node_id: "REL2", gh_issue: 4242, sync_to_github: false },
   ];
   assert.deepEqual(validateAuthority(authority), []);
-  assert.equal(deriveState(authority).states.get("REL1").status, "READY");
-  assert.notEqual(deriveState(authority).states.get("REL1").status, "COMPLETE");
+  assert.equal(deriveState(authority).states.get("REL2").status, "READY");
+  assert.notEqual(deriveState(authority).states.get("REL2").status, "COMPLETE");
 });

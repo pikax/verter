@@ -198,6 +198,11 @@ node_id = "REL0"
 commit_message = "feat(ci): overlay READY work onto GitHub Project 3"
 commit_date = "2026-08-29T01:22:51+01:00"
 
+[[implemented]]
+node_id = "REL1"
+commit_message = "feat(ci): plan milestone release readiness from the local ledger"
+commit_date = "2026-08-29T05:20:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

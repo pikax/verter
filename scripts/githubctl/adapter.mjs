@@ -87,6 +87,7 @@ export function capabilityRecord({
   issues,
   pullRequests,
   projects,
+  actions,
 }) {
   const record = {
     authenticated: authenticated === true,
@@ -94,6 +95,7 @@ export function capabilityRecord({
     issues: issues === true,
     pullRequests: pullRequests === true,
     projects: projects === true,
+    actions: actions === true,
   };
   if (typeof login === "string" && login.length > 0) record.login = login;
   return record;
@@ -236,6 +238,66 @@ export function parseIssuePayload(payload, expectedNumber) {
     result.milestone = milestone.title;
   }
   return result;
+}
+
+export function parseMilestoneListPayload(payload) {
+  if (!Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub milestone list is not a JSON array");
+  }
+  return payload.map((row, index) => {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new UnstructuredGitHubOutputError(`GitHub milestone ${index} is not a JSON object`);
+    }
+    const number = parseGitHubResourceNumber(row);
+    if (typeof row.title !== "string" || row.title.length === 0) {
+      throw new UnstructuredGitHubOutputError("GitHub milestone title is not a string");
+    }
+    return { number, title: row.title };
+  });
+}
+
+export function parseMilestoneIssuesPayload(payload, milestoneTitle) {
+  if (!Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub milestone issue list is not a JSON array");
+  }
+  assertRequiredText(milestoneTitle, "milestone title");
+  const issues = [];
+  for (const row of payload) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new UnstructuredGitHubOutputError("GitHub milestone issue is not a JSON object");
+    }
+    if (row.pull_request != null) continue;
+    const number = parseGitHubResourceNumber(row);
+    if (typeof row.title !== "string") {
+      throw new UnstructuredGitHubOutputError("GitHub issue title is not a string");
+    }
+    if (row.state !== "open" && row.state !== "closed") {
+      throw new UnstructuredGitHubOutputError("GitHub issue state is not open or closed");
+    }
+    issues.push({
+      number,
+      title: row.title,
+      state: row.state,
+      milestone: milestoneTitle,
+    });
+  }
+  return issues;
+}
+
+export function planDispatchReleaseRehearsal() {
+  return {
+    kind: "dispatch-release-check",
+    workflow: "release-check.yml",
+    applied: false,
+  };
+}
+
+export function prepareDispatchReleaseRehearsal(adapter, request = {}) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  assertApplyClearance(mode, request.clearance, "actions", adapter);
+  const ref = typeof request.ref === "string" && request.ref.length > 0 ? request.ref : "main";
+  return { mode, ref };
 }
 
 export function assertIssueNumber(value, label = "issue number") {
@@ -860,6 +922,9 @@ export class GitHubAdapter {
       issues: repo.has_issues === true && issueWrite,
       pullRequests: pullWrite,
       projects,
+      // GitHub's repository permission object has no distinct Actions bit.
+      // workflow_dispatch requires the same write as pull-request mutation.
+      actions: pullWrite,
     });
   }
 
@@ -1143,5 +1208,36 @@ export class GitHubAdapter {
       );
     }
     return { kind: "set-milestone", issueNumber, title, applied: true };
+  }
+
+  listMilestoneIssues(title) {
+    assertRequiredText(title, "milestone title");
+    const milestones = this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/milestones?state=all`,
+      parseMilestoneListPayload,
+      "GitHub milestone list is incomplete",
+    );
+    const found = milestones.find((row) => row.title === title);
+    if (!found) throw new NotFoundError(`milestone ${title} is missing`);
+    return this.#getCompleteList(
+      `/repos/${this.owner}/${this.repo}/issues?milestone=${found.number}&state=all`,
+      (payload) => parseMilestoneIssuesPayload(payload, title),
+      "GitHub milestone issue list is incomplete",
+    );
+  }
+
+  dispatchReleaseRehearsal(request = {}) {
+    const { mode, ref } = prepareDispatchReleaseRehearsal(this, request);
+    if (mode === "check") return planDispatchReleaseRehearsal();
+    this.#transport.request({
+      method: "POST",
+      path: `/repos/${this.owner}/${this.repo}/actions/workflows/release-check.yml/dispatches`,
+      body: { ref },
+    });
+    return {
+      kind: "dispatch-release-check",
+      workflow: "release-check.yml",
+      applied: true,
+    };
   }
 }

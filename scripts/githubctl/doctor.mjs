@@ -8,11 +8,13 @@ export const REVIEW_SUMMARY_CAPABILITIES = Object.freeze(["issues", "pullRequest
 export const SQUASH_LAND_CAPABILITIES = Object.freeze(["pullRequests"]);
 export const SCHEDULE_CAPABILITIES = Object.freeze(["issues", "projects"]);
 export const INSPECT_CAPABILITIES = Object.freeze(["issues"]);
+export const RELEASE_PLAN_DISPATCH_CAPABILITIES = Object.freeze(["actions"]);
 
 const CAPABILITY_ERRORS = Object.freeze({
   issues: "issues",
   pullRequests: "pull-requests",
   projects: "projects",
+  actions: "actions",
 });
 
 function requiredCapabilities(require) {
@@ -57,6 +59,7 @@ export class GitHubDoctor {
               issues: capabilities.issues === true,
               pullRequests: capabilities.pullRequests === true,
               projects: capabilities.projects === true,
+              actions: capabilities.actions === true,
             }),
           )
         : null,
