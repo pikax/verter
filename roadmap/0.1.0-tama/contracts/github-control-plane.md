@@ -65,7 +65,7 @@ After the GH train lands, `githubctl sync-issues` owns the occasional explicit o
 
 Agents are trusted to use the correct issue and PR mappings. Tooling may check local structural uniqueness, verify that a created PR body contains exactly the mapped closing link, and compare a selected mapped issue with the locally rendered description, but it never treats GitHub as authority or imports GitHub changes. Given an issue number, reverse lookup is only a search in the local `gh_issue` table; it is not reverse synchronization. GitHub closure, labels, milestones, checks, and Project fields never satisfy DAG ancestors or mark implementation complete.
 
-P0/P1 findings block under the owning review policy. Lower-severity findings follow that policy and may be coordinated in ordinary issue or PR prose. Do not build a second receipt, lifecycle, managed-body, marker, or continuous bidirectional synchronization system.
+P0/P1 findings block under the owning review policy. Lower-severity findings follow that policy and may be coordinated in ordinary issue or PR prose. Surviving follow-up uses `FindingCarryForward`; issue closure is not resolution. Do not build a second receipt, lifecycle, managed-body, marker, or continuous bidirectional synchronization system.
 
 If a maintainer wants an existing GitHub issue represented in the DAG, the maintainer manually authors the DAG node, charter, and a `[[github_issue]]` row with `sync_to_github = false` in one ordinary reviewed patch. No GitHub command or issue field generates, proposes, imports, or applies local DAG authority, and later sync runs must not rewrite that issue because the project did not author it.
 
@@ -100,3 +100,57 @@ A milestone is the intended or earliest release, owned by maintainers. The sched
 ## ReleaseTarget
 
 `--set-milestone <title>` is the only milestone write instruction. Without that flag, schedule must not PATCH a milestone. With the flag, apply sets the release target on the mapped **issue**, never on a PR. The adapter never moves a milestone unless that instruction is present.
+
+## AiIssueVerdict
+
+`AiIssueVerdict` is the closed, mutually exclusive AI-result state of a non-DAG issue. The only results are:
+
+- `unchecked` — no AI verdict yet
+- `confirmed` — the issue is a valid product problem against current source
+- `rejected` — the issue is not a valid product problem
+- `fixed` — current source already addresses the issue
+- `needs-human` — evidence is insufficient or a product decision is required
+
+These five names are the only AI results. `ai:checked` is rejected: it has no distinct semantics from this set and must not be created, reused, or treated as a verdict. An issue carries at most one AI-result label. Applying a new verdict replaces only the previous AI-result label.
+
+`AiIssueVerdict` never encodes DAG identity, topology, readiness, or implementation-ledger state. A verdict does not promote work into the DAG.
+
+## AiOwnedLabels
+
+`AiOwnedLabels` is the closed AI-owned GitHub label namespace. The only AI-owned labels are the `AiIssueVerdict` spellings:
+
+- `ai:unchecked`
+- `ai:confirmed`
+- `ai:rejected`
+- `ai:fixed`
+- `ai:needs-human`
+
+Before creating an AI-result label, inspect the issue's current labels and reuse this vocabulary rather than a duplicate namespace. AI may add, replace, or remove only labels in this set, and only one at a time. Unrelated labels and maintainer-owned labels are preserved. Whole-label-set replacement is forbidden.
+
+Structural or lifecycle `dag:*` labels are forbidden. GitHub must not project DAG identity, topology, readiness, or implementation-ledger rows through labels or other issue fields.
+
+## MaintainerGuards
+
+`MaintainerGuards` are maintainer-owned issue labels. The only maintainer-owned feedback guard is `ai:ignore`.
+
+AI cannot create, remove, or override `ai:ignore`. Presence of `ai:ignore` is a complete no-op for AI inspection and report generation: zero GitHub mutation and zero local FeedbackReport write. Promotion of an issue into DAG work is an explicit maintainer action in an ordinary reviewed patch and is never inferred from `ai:ignore`, from any `AiIssueVerdict`, or from any other label.
+
+## FeedbackReport
+
+`FeedbackReport` is local operational evidence for a non-DAG issue inspection. Future inspection writes `.feedback/issues/<issue-number>.md`. The report is not static DAG authority, is not committed by default, and is not a GitHub-side projection.
+
+A report records issue identity, timezone-bearing inspection date, classification, reproduction, code paths, commands, `AiIssueVerdict`, confidence or ambiguity, owner hint, and recommendation. It does not record DAG identity, topology, readiness, or implementation-ledger rows. This contract does not write reports; inspection remains a later block.
+
+## FindingCarryForward
+
+`FindingCarryForward` is the durable follow-up record for a surviving review finding. Identity is `{issue, severity, owner}`:
+
+- `issue` — a durable issue URL (`https://…`) or database id (positive decimal)
+- `severity` — `P0`, `P1`, `P2`, or `P3`
+- `owner` — the named finding owner
+
+The machine schema is `roadmap/0.1.0-tama/schemas/finding-carry-forward.schema.json`. Additional properties are rejected, including DAG fields and GitHub closure.
+
+Issue closure is not finding resolution. Closing, editing, or labeling the follow-up issue does not dispose the finding. P0 and P1 remain blocking under the owning review policy until that policy records resolution. Lower-severity findings follow the owning review policy and may use a `FindingCarryForward` issue when that policy calls for follow-up.
+
+GitHub labels, milestones, Project Status, and implementation-ledger rows never satisfy or erase a carry-forward obligation.

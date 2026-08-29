@@ -14,6 +14,8 @@ import {
   readToml,
   validateAuthority,
   validateGitHubProgramCatalog,
+  validateFindingCarryForward,
+  validateSchemaObject,
 } from "./lib.mjs";
 
 function smallAuthority(implemented = []) {
@@ -77,7 +79,7 @@ test("same node and issue with opposite sync_to_github is a duplicate pair", () 
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 99"), errors.join("; "));
 });
 
-test("the live ledger records J1, ORC0, GH0, GH1, GH2, GH3, GH4, and GH5 with message/date locators", () => {
+test("the live ledger records J1, ORC0, GH0-GH5, REL0, and FB0 with message/date locators", () => {
   const authority = loadAuthority();
   const byId = new Map(authority.ledger.implemented.map((row) => [row.node_id, row]));
   assert.deepEqual(byId.get("J1"), {
@@ -125,6 +127,11 @@ test("the live ledger records J1, ORC0, GH0, GH1, GH2, GH3, GH4, and GH5 with me
     commit_message: "feat(ci): overlay READY work onto GitHub Project 3",
     commit_date: "2026-08-29T01:22:51+01:00",
   });
+  assert.deepEqual(byId.get("FB0"), {
+    node_id: "FB0",
+    commit_message: "docs(ci): define non-DAG feedback labels and finding follow-up",
+    commit_date: "2026-08-29T03:45:51+01:00",
+  });
   const state = deriveState(authority);
   assert.equal(state.states.get("GH0").status, "COMPLETE");
   assert.equal(state.states.get("ORC0").status, "COMPLETE");
@@ -133,7 +140,10 @@ test("the live ledger records J1, ORC0, GH0, GH1, GH2, GH3, GH4, and GH5 with me
   assert.equal(state.states.get("GH3").status, "COMPLETE");
   assert.equal(state.states.get("GH4").status, "COMPLETE");
   assert.equal(state.states.get("GH5").status, "COMPLETE");
+  assert.equal(state.states.get("FB0").status, "COMPLETE");
   assert.notEqual(state.states.get("GH6").status, "COMPLETE");
+  assert.notEqual(state.states.get("FB1").status, "COMPLETE");
+  assert.notEqual(state.states.get("FB2").status, "COMPLETE");
   assert.equal(explainNode(authority, state, "ORC0").commit.pull_request, null);
 });
 
@@ -347,9 +357,157 @@ test("github control plane contract names the mapping boundaries", () => {
     "ReadySchedulingPlan",
     "MilestoneOverlay",
     "ReleaseTarget",
+    "AiIssueVerdict",
+    "AiOwnedLabels",
+    "MaintainerGuards",
+    "FeedbackReport",
+    "FindingCarryForward",
   ]) {
     assert.match(text, new RegExp(`^## ${name}$`, "mu"), `missing heading ${name}`);
   }
   assert.match(text, /GitHubIssueMapping` identity is exactly `\{node_id, gh_issue\}`/u);
   assert.doesNotMatch(text, /identity is exactly `\{node_id, gh_issue, sync_to_github\}`/u);
+});
+
+const AI_ISSUE_VERDICTS = ["unchecked", "confirmed", "rejected", "fixed", "needs-human"];
+const AI_OWNED_LABELS = AI_ISSUE_VERDICTS.map((verdict) => `ai:${verdict}`);
+const FORBIDDEN_FEEDBACK_LABELS = [
+  "ai:checked",
+  "dag:ready",
+  "dag:complete",
+  "dag:blocked",
+  "dag:GH0",
+  "dag:implemented",
+];
+const FORBIDDEN_FINDING_FIELDS = [
+  "dag_id",
+  "node_id",
+  "predecessors",
+  "closed",
+  "labels",
+  "ready",
+  "implemented",
+  "status",
+  "train",
+  "pull_request",
+];
+
+function controlPlaneContract() {
+  return fs.readFileSync(path.join(PACKAGE_ROOT, "contracts", "github-control-plane.md"), "utf8");
+}
+
+function contractSection(text, name) {
+  const heading = `## ${name}`;
+  const start = text.indexOf(`${heading}\n`);
+  assert.notEqual(start, -1, `missing heading ${name}`);
+  const from = start + heading.length + 1;
+  const next = text.indexOf("\n## ", from);
+  return next === -1 ? text.slice(from) : text.slice(from, next);
+}
+
+function tickTokens(section) {
+  return [...section.matchAll(/`([^`]+)`/gu)].map((match) => match[1]);
+}
+
+function findingSchema() {
+  return JSON.parse(
+    fs.readFileSync(
+      path.join(PACKAGE_ROOT, "schemas", "finding-carry-forward.schema.json"),
+      "utf8",
+    ),
+  );
+}
+
+test("AiOwnedLabels is the closed mutually exclusive AI-result set and rejects forbidden labels", () => {
+  const text = controlPlaneContract();
+  const ownedTokens = tickTokens(contractSection(text, "AiOwnedLabels"));
+  const ownedLabels = [...new Set(ownedTokens.filter((token) => token.startsWith("ai:")))].sort();
+  assert.deepEqual(ownedLabels, [...AI_OWNED_LABELS].sort());
+  for (const label of FORBIDDEN_FEEDBACK_LABELS) {
+    assert.equal(ownedLabels.includes(label), false, `${label} must not be AI-owned`);
+  }
+  assert.equal(ownedLabels.includes("ai:ignore"), false);
+  assert.equal(new Set(AI_OWNED_LABELS).size, AI_ISSUE_VERDICTS.length);
+
+  const verdictTokens = tickTokens(contractSection(text, "AiIssueVerdict"));
+  for (const verdict of AI_ISSUE_VERDICTS) {
+    assert.equal(verdictTokens.includes(verdict), true, `missing verdict ${verdict}`);
+  }
+  assert.match(contractSection(text, "AiIssueVerdict"), /`ai:checked` is rejected/u);
+  assert.equal(verdictTokens.includes("checked"), false);
+  assert.match(contractSection(text, "AiIssueVerdict"), /at most one AI-result label/u);
+
+  const guardTokens = tickTokens(contractSection(text, "MaintainerGuards"));
+  assert.equal(guardTokens.includes("ai:ignore"), true);
+  assert.match(
+    contractSection(text, "MaintainerGuards"),
+    /AI cannot create, remove, or override `ai:ignore`/u,
+  );
+  assert.match(contractSection(text, "MaintainerGuards"), /never inferred from/u);
+  assert.equal(guardTokens.includes("ai:checked"), false);
+
+  assert.match(text, /`dag:\*` labels are forbidden/u);
+  assert.match(
+    contractSection(text, "FindingCarryForward"),
+    /Issue closure is not finding resolution/u,
+  );
+  assert.match(contractSection(text, "FindingCarryForward"), /P0 and P1 remain blocking/u);
+  assert.match(contractSection(text, "FeedbackReport"), /\.feedback\/issues\/<issue-number>\.md/u);
+});
+
+test("FindingCarryForward schema requires issue, severity, and owner and rejects DAG fields", () => {
+  const schema = findingSchema();
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required, ["issue", "severity", "owner"]);
+  for (const field of FORBIDDEN_FINDING_FIELDS) {
+    assert.equal(
+      Object.hasOwn(schema.properties, field),
+      false,
+      `schema must not declare ${field}`,
+    );
+  }
+
+  const validUrl = {
+    issue: "https://github.com/verter-org/verter/issues/12",
+    severity: "P2",
+    owner: "reviewer",
+  };
+  const validId = { issue: "12", severity: "P3", owner: "alice" };
+  assert.deepEqual(validateFindingCarryForward(validUrl), []);
+  assert.deepEqual(validateFindingCarryForward(validId), []);
+  assert.deepEqual(validateSchemaObject(validUrl, schema, "finding"), []);
+
+  for (const field of FORBIDDEN_FINDING_FIELDS) {
+    const errors = validateFindingCarryForward({ ...validUrl, [field]: true });
+    assert.ok(
+      errors.some((error) => error.includes(`additional property ${field}`)),
+      `${field} must be structurally rejected, got: ${errors.join("; ")}`,
+    );
+  }
+
+  assert.ok(
+    validateFindingCarryForward({ severity: "P2", owner: "reviewer" }).some((error) =>
+      error.includes("missing required property issue"),
+    ),
+  );
+  assert.ok(
+    validateFindingCarryForward({ ...validUrl, severity: "blocking" }).some((error) =>
+      error.includes("expected one of"),
+    ),
+  );
+  assert.ok(
+    validateFindingCarryForward({ ...validUrl, issue: "dag:GH0" }).some((error) =>
+      error.includes("does not match"),
+    ),
+  );
+  assert.ok(
+    validateFindingCarryForward({ ...validUrl, issue: "0" }).some((error) =>
+      error.includes("does not match"),
+    ),
+  );
+  assert.ok(
+    validateFindingCarryForward({ ...validUrl, closed: true }).some((error) =>
+      error.includes("additional property closed"),
+    ),
+  );
 });

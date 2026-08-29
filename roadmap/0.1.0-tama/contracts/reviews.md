@@ -8,3 +8,5 @@ Review tasks remain fresh and independent where the profile requires it. They do
 
 Do not rebuild the retired validation system around report filenames, task IDs, Git objects, or GitHub metadata.
 
+Surviving findings follow `FindingCarryForward` in `github-control-plane.md`. P0/P1 block; issue closure is not resolution.
+

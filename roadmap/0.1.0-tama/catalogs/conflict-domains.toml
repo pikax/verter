@@ -2,7 +2,7 @@ schema = 2
 [[domain]]
 id = "feedback_operations"
 path_roots = [".feedback","roadmap/0.1.0-tama/authority/dag","roadmap/0.1.0-tama/charters","roadmap/0.1.0-tama/contracts/github-control-plane.md","roadmap/0.1.0-tama/schemas/finding-carry-forward.schema.json","scripts/githubctl"]
-symbols = ["FeedbackInspection","FindingCarryForward","ManualDagAuthoring"]
+symbols = ["AiIssueVerdict","AiOwnedLabels","MaintainerGuards","FeedbackReport","FindingCarryForward","FeedbackInspection","ManualDagAuthoring"]
 description = "Exclusive mutation scope for non-DAG feedback inspection, ordinary finding follow-up, and maintainer-authored DAG mapping."
 [[domain]]
 id = "github_projection_state"

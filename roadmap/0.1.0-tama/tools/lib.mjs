@@ -279,6 +279,52 @@ export function validateSchemaObject(value, schema, location = "object") {
   return schemaErrors(value, schema, location);
 }
 
+const FINDING_CARRY_FORWARD_SCHEMA = "finding-carry-forward.schema.json";
+const FINDING_CARRY_FORWARD_REQUIRED = ["issue", "severity", "owner"];
+const FINDING_CARRY_FORWARD_FORBIDDEN_FIELDS = new Set([
+  "dag_id",
+  "node_id",
+  "predecessors",
+  "closed",
+  "labels",
+  "ready",
+  "implemented",
+  "status",
+  "train",
+  "pull_request",
+]);
+
+export function validateFindingCarryForward(
+  value,
+  location = "finding-carry-forward",
+  packageRoot = PACKAGE_ROOT,
+) {
+  return validateSchemaObject(
+    value,
+    loadSchema(packageRoot, FINDING_CARRY_FORWARD_SCHEMA),
+    location,
+  );
+}
+
+function validateFindingCarryForwardSchema(packageRoot) {
+  const errors = [];
+  try {
+    const schema = loadSchema(packageRoot, FINDING_CARRY_FORWARD_SCHEMA);
+    if (schema.additionalProperties !== false)
+      errors.push(`${FINDING_CARRY_FORWARD_SCHEMA}: additionalProperties must be false`);
+    const required = schema.required || [];
+    for (const key of FINDING_CARRY_FORWARD_REQUIRED)
+      if (!required.includes(key))
+        errors.push(`${FINDING_CARRY_FORWARD_SCHEMA}: ${key} must be required`);
+    for (const key of Object.keys(schema.properties || {}))
+      if (FINDING_CARRY_FORWARD_FORBIDDEN_FIELDS.has(key))
+        errors.push(`${FINDING_CARRY_FORWARD_SCHEMA}: forbidden field ${key}`);
+  } catch (error) {
+    errors.push(error.message);
+  }
+  return errors;
+}
+
 function loadSchema(packageRoot, name) {
   const file = confinedFile(path.join(packageRoot, "schemas"), name, `schema ${name}`);
   try {
@@ -569,6 +615,7 @@ function validateStaticSchemas(authority) {
     errors.push(error.message);
   }
   errors.push(...validateRetainedCatalogSchemas(authority.packageRoot));
+  errors.push(...validateFindingCarryForwardSchema(authority.packageRoot));
   return errors;
 }
 
