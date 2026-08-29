@@ -506,3 +506,18 @@ fn host_diagnostic_span_is_mandatory() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/host_diagnostic_span_is_mandatory.rs");
 }
+
+/// The completeness-proof carrier of a flow solve is mintable ONLY by the
+/// proof finalizer: the type is re-exported for test naming, but its sole
+/// constructor is private to the finalizer's module, so an external call is
+/// E0624. If the constructor were ever widened, the fixture would compile
+/// and trybuild would turn red.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn complete_flow_result_constructor_is_private() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/complete_flow_result_constructor_is_private.rs");
+}

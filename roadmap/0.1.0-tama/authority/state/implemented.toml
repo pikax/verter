@@ -218,6 +218,11 @@ node_id = "B4R0"
 commit_message = "fix(core): keep source-unit identity stable across edits"
 commit_date = "2026-08-29T07:58:40+01:00"
 
+[[implemented]]
+node_id = "D1"
+commit_message = "feat(session): add private hermetic flow completeness foundation"
+commit_date = "2026-08-29T20:05:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

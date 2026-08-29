@@ -121,6 +121,11 @@ pub(crate) mod flow_return_positional_tests;
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_tests;
+// The private completeness-proof layer for flow-bearing operations: a
+// hermetic candidate reachable only from test code. Compile-absent from
+// every production build.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod flow_solve;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 mod output_materialization_guards;

@@ -754,3 +754,63 @@ pub mod projection_bench_support {
         ProjectionBenchCase, ProjectionBenchHarness,
     };
 }
+
+// ── Private flow-solve completeness-proof surface (hermetic) ────────────
+// The fixtures' content keys stay `pub(crate)`; construction/planning go
+// through the wrapper below.
+pub use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::*;
+pub use crate::project_semantic_dispatch::dispatch_txn::ObligationRuntime;
+pub use crate::project_semantic_dispatch::flow_solve::*;
+
+/// One hermetic flow-graph fixture: `source`'s first function declaration,
+/// parsed, skeletoned, and graphed ONCE, keyed by `body_hash_tag`.
+pub struct FlowGraphFixtureForTests {
+    key: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    bundle: crate::cache_runtime::flow_slice_node::FlowGraphBundle,
+}
+
+#[rustfmt::skip]
+impl FlowGraphFixtureForTests {
+    /// A demand request pinning this fixture's key (whole-return subject).
+    pub fn demand_request(&self, query: crate::semantic_query::SemanticQueryKey, input_basis: verter_identity::identity::InputBasisId, result_contract: verter_identity::identity::ResultContractId) -> FlowDemandRequest {
+        FlowDemandRequest {
+            graph_body: self.key.clone(), query, input_basis, result_contract, resources: FlowResourcePolicy::default(),
+            subject: FlowDemandSubject { projection_path: std::sync::Arc::from([]) }, additional_requirements: std::sync::Arc::from([]),
+        }
+    }
+
+    /// Plan `request` over this fixture's memoized graph.
+    pub fn build_plan(&self, request: FlowDemandRequest) -> Result<FlowDemandPlan, FlowDemandPlanError> {
+        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bundle)
+    }
+}
+
+/// Parse `source`, build the skeleton + graph of its first function
+/// declaration, and pin the content key (hashes tagged `body_hash_tag`).
+#[rustfmt::skip]
+pub fn flow_graph_fixture_for_tests(source: &str, body_hash_tag: u8) -> FlowGraphFixtureForTests {
+    use verter_semantic::analysis::flow::{FunctionBodySource, build_function_body_skeleton, flow_graph::build_function_flow_graph};
+    use verter_semantic::analysis::function_program::{FunctionDeclarationRef, FunctionProgramKey};
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed = oxc_parser::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+    assert!(parsed.errors.is_empty(), "fixture must parse");
+    let function = parsed.program.body.iter().find_map(|s| match s { oxc_ast::ast::Statement::FunctionDeclaration(f) => Some(f), _ => None }).expect("fixture must contain a function declaration");
+    let name = function.id.as_ref().expect("named function").name.as_str();
+    let skeleton = build_function_body_skeleton(&FunctionBodySource::from_function(function).expect("bodied function"));
+    let graph = build_function_flow_graph(&skeleton);
+    let declaration = FunctionDeclarationRef { owner: verter_type_expr::TopLevelOwnerId::ordinary_file(), name: std::sync::Arc::from(name), space: verter_semantic::facts::SymbolSpace::Value };
+    let function = FunctionProgramKey { declaration, part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, overload_ordinal: 0 };
+    let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+        canonical_id: std::sync::Arc::from("/flow_solve_fixture.ts"), function, parse_env_hash: [0u8; 16],
+        flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
+        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+    };
+    let bundle = crate::cache_runtime::flow_slice_node::FlowGraphBundle { skeleton: std::sync::Arc::new(skeleton), graph: std::sync::Arc::new(graph) };
+    FlowGraphFixtureForTests { key, bundle }
+}
+
+/// Mint the hermetic value payload: a clean flow-return result over `return_type`.
+#[rustfmt::skip]
+pub fn flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: crate::semantic_query::SemanticNodeId) -> crate::semantic_query::FlowReturnResult {
+    crate::semantic_query::FlowReturnResult::new(graph, return_type, false, None)
+}

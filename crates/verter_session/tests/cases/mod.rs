@@ -24,6 +24,7 @@ mod defect_b_corpus_prevention_gate;
 mod exposed_binding_regression;
 mod fact_matrix;
 mod family_warm_read_releases_mutex_before_validate;
+mod flow_solve_completeness;
 mod framework_corpus_svelte;
 mod g_audit;
 mod g_binder;

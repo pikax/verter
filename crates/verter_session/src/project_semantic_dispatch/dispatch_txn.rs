@@ -874,12 +874,18 @@ pub(crate) fn provisional_resolve_call_result<'a>(
 /// The generic obligation runtime: tagged identities, generic frames /
 /// backedges / lowlinks, the generic pending ledger + watermarks, and the
 /// tagged provisional substitution table. Domain runtimes own their
-/// verdict algebra; this runtime owns the SCC topology.
+/// verdict algebra; this runtime owns the SCC topology. The flow-solve
+/// fields are the completeness-proof layer's typed obligation state, ON
+/// this runtime (never a peer ledger), compile-absent in production.
 #[derive(Debug, Default)]
-pub(crate) struct ObligationRuntime {
+pub struct ObligationRuntime {
     stack: ObligationReentryStack,
     pending: ObligationPendingLedger,
     substitution: ProvisionalSubstitution,
+    #[cfg(any(test, feature = "test-support"))]
+    flow_basis: Option<super::flow_solve::FlowDemandBasis>,
+    #[cfg(any(test, feature = "test-support"))]
+    flow_obligations: Vec<flow_obligation_state::FlowObligationRecord>,
 }
 
 impl ObligationRuntime {
@@ -958,6 +964,148 @@ impl ObligationRuntime {
     /// Restore a previously saved substitution table.
     pub(crate) fn restore_substitution(&mut self, saved: ProvisionalSubstitution) {
         self.substitution = saved;
+    }
+}
+
+/// The typed flow-solve obligation state of the ONE obligation runtime:
+/// the completeness-proof layer's state machine and evidence carriers —
+/// records ON [`ObligationRuntime`] itself, never a peer ledger.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod flow_obligation_state {
+    use std::sync::Arc;
+
+    use verter_identity::identity::{InputBasisId, ResultContractId};
+    use verter_semantic::analysis::flow::SkeletonBindingId;
+    use verter_semantic::analysis::function_program::FlowBindingIdentity;
+
+    use super::super::flow_solve::{
+        flow_operation_contract, require_registered_flow_requirement, FlowDemandBasis,
+        FlowDemandPlan, FlowExpansionRule, FlowFailure, FlowOperationRole, FlowRequirement,
+    };
+    use crate::semantic_query::{FlowGap, SemanticQueryKeyTag};
+
+    /// The plan-local identity of one flow-solve obligation (work order).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    pub struct FlowObligationId(pub u32);
+    /// Where an obligation came from: a contract-required domain, a
+    /// registered expansion rule, or a caller-asserted requirement.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum FlowObligationOrigin { ContractDomain, Expansion(FlowExpansionRule), Additional }
+    /// The binding-slot basis of one obligation: the lexical slot plus the
+    /// cross-frame binding identity — never a fresh identity. Populated by
+    /// the solver holding the cross-frame inventory (the memoized graph
+    /// bundle deliberately does not carry it).
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FlowObligationBasis { pub binding: SkeletonBindingId, pub identity: FlowBindingIdentity }
+    /// Evidence that one live semantic suboperation was consumed.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FlowSuboperationEvidence { pub operation: SemanticQueryKeyTag, pub result_contract: ResultContractId }
+    /// The evidence one discharge presents: the basis it ran against, the
+    /// contract it produced under, and what it consumed.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DischargeEvidence {
+        pub input_basis: InputBasisId, pub result_contract: ResultContractId,
+        pub dependencies: Arc<[FlowObligationId]>, pub suboperations: Arc<[FlowSuboperationEvidence]>,
+    }
+    /// The typed state of one flow-solve obligation.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ObligationState { Pending, Running, Discharged(DischargeEvidence), Gap(FlowGap), Failed(FlowFailure) }
+    /// The specification of one planned obligation.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FlowObligationSpec {
+        pub id: FlowObligationId, pub requirement: FlowRequirement,
+        pub origin: FlowObligationOrigin, pub binding: Option<FlowObligationBasis>,
+    }
+    /// One installed obligation: its spec plus its current state.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct FlowObligationRecord { pub spec: FlowObligationSpec, pub state: ObligationState }
+    /// Why a flow-obligation transition was refused.
+    #[rustfmt::skip]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FlowTransitionError {
+        DemandAlreadyInstalled, NoDemandInstalled, UnknownObligation, IllegalTransition,
+        ContractMismatch, UnplannedDependency, NonSuboperationEvidence,
+    }
+
+    #[rustfmt::skip]
+    impl super::ObligationRuntime {
+        /// Install one demand plan: its basis plus one record per planned
+        /// spec (an undeclared requirement installs directly in `Gap`).
+        pub fn install_flow_demand(&mut self, plan: &FlowDemandPlan) -> Result<(), FlowTransitionError> {
+            if self.flow_basis.is_some() { return Err(FlowTransitionError::DemandAlreadyInstalled); }
+            let mut records = Vec::with_capacity(plan.obligation_specs().len());
+            for spec in plan.obligation_specs() {
+                let state = match require_registered_flow_requirement(spec.requirement.operation, &spec.requirement.requirement) {
+                    Ok(()) => ObligationState::Pending,
+                    Err(_) => ObligationState::Gap(FlowGap::UnmodeledExpression),
+                };
+                records.push(FlowObligationRecord { spec: spec.clone(), state });
+            }
+            self.flow_basis = Some(plan.basis.clone());
+            self.flow_obligations = records;
+            Ok(())
+        }
+
+        /// Transition Pending → Running.
+        pub fn start_flow_obligation(&mut self, id: FlowObligationId) -> Result<(), FlowTransitionError> {
+            self.transition(id, |state| matches!(state, ObligationState::Pending).then_some(ObligationState::Running))
+        }
+
+        /// Transition Running → Discharged, validating the evidence against
+        /// the installed basis, planned dependencies, and suboperations.
+        pub fn discharge_flow_obligation(&mut self, id: FlowObligationId, evidence: DischargeEvidence) -> Result<(), FlowTransitionError> {
+            if !matches!(self.record(id)?.state, ObligationState::Running) {
+                return Err(FlowTransitionError::IllegalTransition);
+            }
+            let basis = self.flow_basis.as_ref().ok_or(FlowTransitionError::NoDemandInstalled)?;
+            if evidence.input_basis != basis.input_basis || evidence.result_contract != basis.result_contract {
+                return Err(FlowTransitionError::ContractMismatch);
+            }
+            let unplanned = |dep: &FlowObligationId| *dep == id || !self.flow_obligations.iter().any(|r| r.spec.id == *dep);
+            if evidence.dependencies.iter().any(unplanned) { return Err(FlowTransitionError::UnplannedDependency); }
+            let invalid_sub = |sub: &FlowSuboperationEvidence| sub.result_contract != evidence.result_contract
+                || flow_operation_contract(sub.operation).is_none_or(|c| c.role != FlowOperationRole::SemanticSuboperation);
+            if evidence.suboperations.iter().any(invalid_sub) { return Err(FlowTransitionError::NonSuboperationEvidence); }
+            self.record_mut(id)?.state = ObligationState::Discharged(evidence);
+            Ok(())
+        }
+        /// Transition Pending|Running → Gap.
+        pub fn gap_flow_obligation(&mut self, id: FlowObligationId, gap: FlowGap) -> Result<(), FlowTransitionError> {
+            self.transition(id, |state| matches!(state, ObligationState::Pending | ObligationState::Running).then_some(ObligationState::Gap(gap)))
+        }
+        /// Transition Pending|Running → Failed.
+        pub fn fail_flow_obligation(&mut self, id: FlowObligationId, failure: FlowFailure) -> Result<(), FlowTransitionError> {
+            self.transition(id, |state| matches!(state, ObligationState::Pending | ObligationState::Running).then_some(ObligationState::Failed(failure)))
+        }
+        /// The installed records, in plan work order.
+        pub fn flow_obligations(&self) -> &[FlowObligationRecord] { &self.flow_obligations }
+
+        /// The installed demand basis, when a demand was installed.
+        pub fn flow_basis(&self) -> Option<&FlowDemandBasis> { self.flow_basis.as_ref() }
+
+        /// The reserved capacity of the obligation storage — the
+        /// no-reservation probe for a runtime that never served a demand.
+        pub fn flow_obligation_storage_capacity(&self) -> usize { self.flow_obligations.capacity() }
+
+        fn record(&self, id: FlowObligationId) -> Result<&FlowObligationRecord, FlowTransitionError> {
+            self.flow_obligations.iter().find(|r| r.spec.id == id).ok_or(FlowTransitionError::UnknownObligation)
+        }
+        fn record_mut(&mut self, id: FlowObligationId) -> Result<&mut FlowObligationRecord, FlowTransitionError> {
+            self.flow_obligations.iter_mut().find(|r| r.spec.id == id).ok_or(FlowTransitionError::UnknownObligation)
+        }
+        fn transition(&mut self, id: FlowObligationId, next: impl FnOnce(&ObligationState) -> Option<ObligationState>) -> Result<(), FlowTransitionError> {
+            let record = self.record_mut(id)?;
+            let Some(state) = next(&record.state) else { return Err(FlowTransitionError::IllegalTransition) };
+            record.state = state;
+            Ok(())
+        }
     }
 }
 
