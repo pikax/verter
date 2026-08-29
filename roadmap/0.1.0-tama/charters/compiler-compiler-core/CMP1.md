@@ -59,6 +59,7 @@ Demand-refined semantic consumption and admissions. The current owner is **frame
 
 - **Intent:** ensure runtime compilation reuses the canonical framework analysis and computes only demanded fact families.
 - **Problem:** compiler-local semantic analysis, repeated import/expression parsing, and a demand plan created after semantic work cause disagreement and unnecessary work.
+- **Compatibility closure:** remove the retained mixed request/policy conversion when typed `CompileRequest`, `CompilerPolicy`, demand, and artifact qualifiers become the sole production admission route.
 - **Solution and architecture decisions:**
 - specialize successor DEM0 into a finite compiler demand closure;
 
@@ -78,6 +79,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 - Delete or structurally reject: **dynamic dispatch inside node loops**.
 - Delete or structurally reject: **whole-tree materialization fallback**.
 - Delete or structurally reject: **unqualified artifact assembly**.
+- Delete or structurally reject: **retained mixed request/policy compatibility conversion feeding the staged facade**.
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
@@ -137,4 +139,3 @@ Before squashing or review, the implementation patch adds one `[[implemented]]` 
 **Deletion/abort:** delete duplicate compiler-local analysis only with fact/output parity; rescope any semantic fact that lacks one framework owner.
 
 ---
-

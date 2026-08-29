@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=implementation
 semantic_role=delivery
 class=compiler
-predecessors=CCA2A,J1
+predecessors=CCA2A,J4
 owner=compiler.compiler-bridge:additive stage-qualified external-style continuation contract
 conflict_domains=style_semantics,compiler_execution
 resource_class=rust-mixed
@@ -22,10 +22,10 @@ verification_effort_default=high
 confirmation_effort_min=high
 confirmation_effort_default=high
 size=S
-dispatchable=false
+dispatchable=true
 optional=false
 release_gating=none
-external_requirements=maintainer_cca2_style_contract_and_deletion_ownership_ruling
+external_requirements=
 charter=charters/compiler-compiler-bridge/CCA2D0.md
 max_production_loc=500
 max_production_files=5
@@ -37,7 +37,7 @@ rescope_unrelated_packages=3
 
 # CCA2D0 — Stage-qualified external-style boundary
 
-Dispatch is blocked pending `maintainer_cca2_style_contract_and_deletion_ownership_ruling`. The ruling must identify the ratified predecessor that supplies the typed completed-preprocessing result and partition legacy style-transport deletion between that style owner and CCA2D. This charter does not authorize either choice in advance.
+`J4` supplies the typed completed-preprocessing result. J4 owns deletion of style-owner-local unqualified preprocessor output; CCA2D owns deletion of compiler bridge transport, `RuntimeStyleBlock`, and its compatibility helpers.
 
 ## Independently acceptable outcome, role, and owners
 
@@ -54,7 +54,7 @@ The boundary includes authored dialect, completed preprocessing stage, canonical
 ## Exact predecessor contracts and binding architecture
 
 - **CCA2A:** the artifact schema can represent role, provenance, typed relations, content state, and source/generated map spaces.
-- **J1:** CSS owner reconciliation identifies the sole preprocessing authority, but does not itself define the currently named `StyleStage`/`QualifiedStyleResult` contract. The maintainer ruling must identify the supplying boundary and amend this predecessor edge before implementation.
+- **J4:** the converged style owner supplies the completed `QualifiedStyleResult` with exact `StyleStage`, source/style identity, basis, diagnostics, and qualified maps. Its style-owner-local cleanup does not authorize compiler bridge transport deletion.
 - Construction rejects wrong stage, stale or mismatched basis, source aliasing, duplicate continuation, unqualified maps, and partial results. It never guesses, reparses, preprocesses, or normalizes CSS independently.
 
 ## Internal subblocks, acceptance, and performance

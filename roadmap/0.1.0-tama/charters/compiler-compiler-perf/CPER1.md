@@ -59,6 +59,7 @@ Compiler work ledger and lifetime attribution. The current owner is **unattribut
 
 - **Intent:** make compiler work, memory, and reuse mechanically observable with negligible disabled overhead.
 - **Problem:** time measurements alone cannot catch extra traversals, reparses, allocations, or unrequested semantic/style work.
+- **Compatibility closure:** remove the retained legacy work-attribution view when `CompilerWorkLedger`, `WorkKind`, and `OwnerPhase` become the sole production attribution boundary.
 - **Solution and architecture decisions:**
 - Implement a versioned CompileWorkLedger covering at least:
 
@@ -77,6 +78,7 @@ Preflight evidence selection: preserve all four acceptance outcomes below, then 
 
 - Delete or structurally reject: **unlabeled work counters**.
 - Delete or structurally reject: **wall-clock-only acceptance**.
+- Delete or structurally reject: **retained legacy work-attribution view over staged compiler events**.
 - Never add a dual-running authority, compatibility fallback, string/regex semantic recovery, test-only production bypass, resource-capacity predecessor, sleep/poll readiness, or unqualified cache/public identity.
 - Do not implement successors or silently enlarge this charter. Discovery of a second independently acceptable outcome requires an amendment and a new DAG node before mutation.
 
@@ -186,4 +188,3 @@ concurrency.cancellation_waste
 **Deletion/abort:** remove superseded ad hoc compiler telemetry only after parity; abort counters whose disabled cost exceeds the prelocked budget.
 
 ---
-

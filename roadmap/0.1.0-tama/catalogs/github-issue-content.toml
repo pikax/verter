@@ -13,3 +13,38 @@ title = "Keep source-unit identity stable across revisions and mappings"
 problem = "Source units can still be identified through constructors and mapping keys that vary with a revision or collapse to a path-only alias. This can make caches, source maps, compiler output, and session state treat one logical source as several unrelated units—or treat distinct revisions as the same unit—causing stale results and misattributed diagnostics. The identity boundary needs to distinguish stable lineage from the content and mapping changes that occur within that lineage."
 expected_outcome = "A source unit keeps one stable logical identity while revision, content, and source-map revisions change independently. The identity, compiler, and session layers use those separate values consistently, so cached and published results retain deterministic provenance without path-only or revision-derived aliases."
 acceptance = ["Changing source content or map data does not replace the logical source-unit identity.", "Revision-derived source-unit constructors and path-only lineage aliases are unavailable to production callers.", "Compiler and session mapping keys preserve separate source, revision, content, and map identities.", "Identity and session coverage demonstrates deterministic lookup and provenance across repeated revisions."]
+
+[[issue]]
+node_id = "J2"
+title = "Qualify style results with stable identity and ownership"
+problem = "Style consumers and external preprocessing glue can pass CSS results without a complete stage, source identity, revision basis, provenance, or qualified source map. That makes stale or mismatched preprocessing results difficult to reject and allows multiple components to behave as competing style authorities."
+expected_outcome = "The CSS owner publishes one qualified style-result contract with stable source and style identities, explicit processing stage, deterministic diagnostics and dependencies, and owner-specific adapters for compiler and editor consumers."
+acceptance = ["Qualified style results bind stage, source and style identity, revision basis, provenance, diagnostics, dependencies, and source maps.", "Consumers cannot admit unqualified or stale preprocessor output.", "CSS parsing and preprocessing have one production authority with no competing fallback route.", "Compiler and editor consumers preserve deterministic output and provenance through owner-specific adapters."]
+
+[[issue]]
+node_id = "J3"
+title = "Converge shared CSS plans and terminal materialization"
+problem = "CSS consumers can independently rediscover structure or materialize output through owner-specific paths, causing duplicate parsing, inconsistent diagnostics, and source-map divergence. Shared plans need one bounded path from qualified style facts to terminal output."
+expected_outcome = "Qualified style facts feed reusable shared CSS plans and one deterministic terminal materialization boundary without introducing a second parser or unqualified result path."
+acceptance = ["Shared CSS plans preserve qualified identity, stage, dependencies, diagnostics, and map provenance.", "Terminal materialization is deterministic and rejects incomplete or mismatched inputs.", "No consumer performs a competing CSS parse or retains an unqualified preprocessing fallback.", "Applicable reuse avoids duplicate parsing or materialization while absent work remains zero-work."]
+
+[[issue]]
+node_id = "J4"
+title = "Converge dialect preprocessing and formatter recovery"
+problem = "Dialect preprocessors, formatters, and framework style consumers need one recovery boundary for completed CSS results. Without it, callers can accept partially processed content, lose source-map lineage, or preserve obsolete unqualified preprocessing routes, risking incorrect generated styles and diagnostics."
+expected_outcome = "The style owner exposes one completed, stage-qualified preprocessing result for compiler and editor consumers, with deterministic formatter recovery and no residual unqualified output path."
+acceptance = ["Completed preprocessing results use `QualifiedStyleResult` and an exact `StyleStage`.", "Dialect, source identity, revision basis, diagnostics, and composed maps survive recovery deterministically.", "Partial, stale, cancelled, or mismatched results cannot enter downstream compilation.", "Style-owner-local unqualified preprocessing output and competing fallback routes are removed."]
+
+[[issue]]
+node_id = "CCA2D0"
+title = "Add a stage-qualified external-style boundary"
+problem = "Compiler style inputs can carry supplied or prepared CSS without proving the completed processing stage, source identity, revision basis, diagnostics, provenance, or map lineage. The compiler therefore cannot reliably reject stale, partial, or mismatched external-style results."
+expected_outcome = "The compiler accepts one completed `QualifiedStyleResult` from the style owner and converts it into a staged compile artifact through immutable validation, without parsing or preprocessing CSS again."
+acceptance = ["The continuation validates exact style stage, source and style identity, revision basis, provenance, diagnostics, and qualified maps.", "Wrong-stage, stale, partial, cancelled, duplicated, or mismatched results are rejected.", "Artifact conversion preserves bytes, diagnostics, provenance, source-unit relations, and source-map spaces deterministically.", "The boundary introduces no second CSS parser, framework-specific behavior, or production route migration."]
+
+[[issue]]
+node_id = "CCA2F"
+title = "Expose staged artifacts through the compiler facade"
+problem = "The compiler and session facades still expose SFC-shaped results and compatibility views that obscure the staged artifact, qualified style, custom-block, and work-attribution contracts. This leaves downstream consumers dependent on ambiguous compatibility routes unless one stable facade and explicit adapter-deletion owners are established."
+expected_outcome = "The existing facade exposes the staged compile artifact and its qualified handoffs while retaining only three behavior-preserving adapters, each assigned to a production-capable downstream deletion owner."
+acceptance = ["Compiler bytes, maps, diagnostics, and text-only behavior remain equivalent through the facade conversion.", "Generic session code contains no framework module topology or unqualified style continuation.", "Exactly three retained adapters remain and each has one downstream API authority and one production deletion owner.", "Facade execution performs no duplicate parse, plan, emit, assembly, copy, or work attribution."]

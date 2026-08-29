@@ -483,3 +483,15 @@ sync_to_github = true
 node_id = "CCA2"
 gh_issue = 169
 sync_to_github = true
+[[github_issue]]
+node_id = "J2"
+gh_issue = 170
+sync_to_github = true
+[[github_issue]]
+node_id = "J3"
+gh_issue = 171
+sync_to_github = true
+[[github_issue]]
+node_id = "J4"
+gh_issue = 172
+sync_to_github = true

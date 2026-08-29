@@ -41,6 +41,8 @@ rescope_unrelated_packages=3
 
 Delete the now-unused unqualified supplied/prepared-style transport, `RuntimeStyleBlock`, and compatibility helpers after Vue and Svelte independently consume the stage-qualified boundary. Current residual ownership is the legacy neutral DTO/input bucket; final style handoff ownership is CCA2D0's typed continuation. Reverting restores only unused compatibility declarations.
 
+J4 owns deletion of style-owner-local unqualified preprocessor output. This node owns only the compiler bridge transport, `RuntimeStyleBlock`, and bridge compatibility population named below.
+
 ## Exact deletion population and boundary
 
 - `crates/verter_compiler/src/framework_common/carrier_compiler.rs` and `framework_common/mod.rs` — delete `RuntimeStyleBlock` and its exports.
