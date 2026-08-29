@@ -31,6 +31,8 @@ Maintainer-directed correction round 2, applied as authority text only:
 
 5. Codex architect review of the round-2 diff returned TRAIN HOLD on two residual contradictions, both fixed as prescribed: D1's no-second-engine law is now scoped to **production reachability** with the single private hermetic candidate as the one permitted construction (contract §6); D2's named API/data boundaries now include `FlowReturnResult`, so retiring its three distributed admission channels is inside D2's declared mutation scope.
 
+6. Maintainer waiver (2026-08-29): the A6 capability-matrix gate is WAIVED for D2. The external requirement `maintainer_a6_flow_capability_rows_ratification` is removed from the D2 charter header, the D2 DAG node, the predecessor-contract bullet, and the abort conditions; D2's cutover no longer waits on matrix revision or ratification. The capability-matrix revision remains good practice but is not a D2 gate.
+
 The maintainer explicitly refused GitHub issue prose updates: issues #173/#174 remain as-is, and no `catalogs/github-issue-content.toml` entries are authored. This record and the charters carry the correction instead.
 
 Resolved by maintainer direction (2026-08-29): no pull requests. D1+D2 land directly on the shared `train/rev11-flow` branch and are pushed to origin; each node keeps its own issue mapping, ledger row, and one `Closes #<gh_issue>` line in the landing commit body per the non-PR closing flow in `contracts/github-control-plane.md`. Issues close when the train branch reaches the origin default branch; Project 3 `done` is marked only after that point. No `githubctl create-pr`/`squash-land` extension is built.
