@@ -48,6 +48,64 @@ export function assertSyncAncestors(ledger, ancestorIds) {
   }
 }
 
+function insertPullRequestLine(text, nodeId, number) {
+  const endedWithNewline = text.endsWith("\n");
+  const lines = text.replaceAll("\r\n", "\n").replace(/\n$/u, "").split("\n");
+  let targetLastField = -1;
+  let found = false;
+  let index = 0;
+  while (index < lines.length) {
+    if (lines[index].trim() !== "[[implemented]]") {
+      index += 1;
+      continue;
+    }
+    let isTarget = false;
+    let lastField = index;
+    index += 1;
+    while (index < lines.length && !lines[index].trim().startsWith("[")) {
+      const trimmed = lines[index].trim();
+      const node = trimmed.match(/^node_id\s*=\s*"([^"]*)"\s*$/u);
+      if (node?.[1] === nodeId) isTarget = true;
+      if (trimmed && !trimmed.startsWith("#")) lastField = index;
+      index += 1;
+    }
+    if (isTarget) {
+      if (found) throw new DuplicateError(`duplicate implemented row ${nodeId}`);
+      found = true;
+      targetLastField = lastField;
+    }
+  }
+  if (!found) {
+    throw new MappingMismatchError(`implemented row ${nodeId} is missing from ledger text`);
+  }
+  lines.splice(targetLastField + 1, 0, `pull_request = ${number}`);
+  const joined = lines.join("\n");
+  return endedWithNewline || text.length === 0 ? `${joined}\n` : joined;
+}
+
+export function setImplementedPullRequest(file, nodeId, pullRequest) {
+  const number = assertIssueNumber(pullRequest, "pull_request");
+  if (typeof nodeId !== "string" || nodeId.length === 0) {
+    throw new MappingMismatchError("node_id is required");
+  }
+  const loaded = loadLedgerFile(file);
+  const matches = loaded.implemented.filter((row) => row.node_id === nodeId);
+  if (matches.length > 1) throw new DuplicateError(`duplicate implemented row ${nodeId}`);
+  if (matches.length === 0) {
+    return { written: false, node_id: nodeId, pull_request: number };
+  }
+  const existing = matches[0].pull_request;
+  if (existing != null) {
+    const current = assertIssueNumber(existing, "pull_request");
+    if (current !== number) {
+      throw new DuplicateError(`implemented row ${nodeId} already locates pull_request ${current}`);
+    }
+    return { written: true, node_id: nodeId, pull_request: number };
+  }
+  fs.writeFileSync(file, insertPullRequestLine(loaded.text, nodeId, number));
+  return { written: true, node_id: nodeId, pull_request: number };
+}
+
 export function appendGitHubIssueMapping(file, mapping) {
   if (mapping.sync_to_github !== true) {
     throw new MappingMismatchError("created mappings must set sync_to_github = true");

@@ -19,13 +19,18 @@ function transportMap(routes) {
     calls,
     request(req) {
       calls.push(req);
-      const hit = routes[`${req.method} ${req.path}`];
+      const key = `${req.method} ${req.path}`;
+      if (!Object.hasOwn(routes, key)) throw new Error(`unexpected ${key}`);
+      const hit = routes[key];
       if (typeof hit === "function") return hit(req);
       if (hit instanceof Error) throw hit;
-      if (hit) return hit;
-      throw new Error(`unexpected ${req.method} ${req.path}`);
+      return hit;
     },
   };
+}
+
+function pullsForHeadPath(owner, repo, head) {
+  return `/repos/${owner}/${repo}/pulls?head=${encodeURIComponent(`${owner}:${head}`)}`;
 }
 
 const PROJECT_GRAPHQL_OK = {
@@ -534,4 +539,44 @@ test("protected update still cannot reach the network port", () => {
     ProtectedMappingError,
   );
   assert.deepEqual(transport.calls, []);
+});
+
+test("live pullsForHead lists open pulls for a head through gh api --include", () => {
+  const path = pullsForHeadPath("pikax", "verter", "train/example");
+  const listed = liveFromSpawn({
+    [`GET ${path}`]: {
+      body: [{ number: 3, head: { ref: "train/example" } }],
+    },
+  }).pullsForHead("train/example");
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].number, 3);
+  assert.equal(listed[0].head, "train/example");
+
+  const empty = liveFromSpawn({
+    [`GET ${path}`]: { body: [] },
+  }).pullsForHead("train/example");
+  assert.deepEqual(empty, []);
+
+  const unstructured = liveFromSpawn({
+    [`GET ${path}`]: { body: { number: 3, head: { ref: "train/example" } } },
+  });
+  assert.throws(() => unstructured.pullsForHead("train/example"), UnstructuredGitHubOutputError);
+});
+
+test("injected live transport returns one open PR for pullsForHead", () => {
+  const path = pullsForHeadPath("pikax", "verter", "train/example");
+  const { adapter, transport } = live({
+    "GET /user": { login: "alice" },
+    "GET /repos/pikax/verter": writableRepo,
+    [`GET ${path}`]: [{ number: 8, head: { ref: "train/example" } }],
+  });
+  transport.calls.length = 0;
+  const listed = adapter.pullsForHead("train/example");
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].number, 8);
+  assert.equal(listed[0].head, "train/example");
+  assert.deepEqual(
+    transport.calls.map((call) => `${call.method} ${call.path}`),
+    [`GET ${path}`],
+  );
 });

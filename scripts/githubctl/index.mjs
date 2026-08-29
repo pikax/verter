@@ -11,6 +11,7 @@ export { renderIssueDescription } from "./charter-render.mjs";
 export { lookupIssueMapping, selectNodes, syncIssues } from "./sync-issues.mjs";
 export { PROJECT_NUMBER, PROJECT_VIEWS } from "./adapter.mjs";
 export { schedule } from "./schedule.mjs";
+export { createPr } from "./create-pr.mjs";
 export {
   ClosingLinkError,
   DoctorRequiredError,

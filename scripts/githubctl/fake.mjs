@@ -1,6 +1,7 @@
 import {
   applyOperations,
   assertIssueNumber,
+  assertRequiredText,
   bindOwnerRepo,
   capabilityRecord,
   planAddIssueToProject,
@@ -272,6 +273,11 @@ export class FakeGitHubAdapter {
     return [...this.#pulls.keys()]
       .sort((left, right) => left - right)
       .map((number) => this.getPullRequest(number));
+  }
+
+  pullsForHead(head) {
+    assertRequiredText(head, "pull request head");
+    return this.getPullRequests().filter((row) => row.head === head);
   }
 
   inspectState() {

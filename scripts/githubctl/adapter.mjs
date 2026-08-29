@@ -119,6 +119,35 @@ export function parseGitHubResourceNumber(payload) {
   return number;
 }
 
+function parsePullHead(head) {
+  if (typeof head === "string" && head.length > 0) return head;
+  if (
+    head !== null &&
+    typeof head === "object" &&
+    !Array.isArray(head) &&
+    typeof head.ref === "string" &&
+    head.ref.length > 0
+  ) {
+    return head.ref;
+  }
+  throw new UnstructuredGitHubOutputError("GitHub pull request head is missing a ref");
+}
+
+function parsePullsPayload(payload) {
+  if (!Array.isArray(payload)) {
+    throw new UnstructuredGitHubOutputError("GitHub pull request list is not a JSON array");
+  }
+  return payload.map((row) => {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new UnstructuredGitHubOutputError("GitHub pull request list entry is not a JSON object");
+    }
+    return {
+      number: parseGitHubResourceNumber(row),
+      head: parsePullHead(row.head),
+    };
+  });
+}
+
 export function parseIssuePayload(payload, expectedNumber) {
   const number = parseGitHubResourceNumber(payload);
   if (number !== expectedNumber) {
@@ -425,10 +454,11 @@ function parseGhApiIncludeStdout(stdout) {
   } catch {
     payload = undefined;
   }
-  if (!matched || payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new UnstructuredGitHubOutputError(
-      matched ? "gh api JSON was not an object" : "gh api output is missing an HTTP status line",
-    );
+  if (!matched) {
+    throw new UnstructuredGitHubOutputError("gh api output is missing an HTTP status line");
+  }
+  if (payload === undefined || payload === null || typeof payload !== "object") {
+    throw new UnstructuredGitHubOutputError("gh api JSON was not an object");
   }
   return { status: Number.parseInt(matched[1], 10), payload };
 }
@@ -622,6 +652,15 @@ export class GitHubAdapter {
       closes: mappedIssue,
       applied: true,
     };
+  }
+
+  pullsForHead(head) {
+    assertRequiredText(head, "pull request head");
+    const payload = this.#transport.request({
+      method: "GET",
+      path: `/repos/${this.owner}/${this.repo}/pulls?head=${encodeURIComponent(`${this.owner}:${head}`)}`,
+    });
+    return parsePullsPayload(payload);
   }
 
   applyOperations(operations) {

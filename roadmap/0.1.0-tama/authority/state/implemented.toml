@@ -154,6 +154,11 @@ commit_message = "feat(ci): add one-way GitHub issue sync from the local ledger"
 commit_date = "2026-08-29T00:05:33+01:00"
 
 [[implemented]]
+node_id = "GH3"
+commit_message = "feat(ci): create final-title pull requests that close mapped issues"
+commit_date = "2026-08-29T02:28:30+01:00"
+
+[[implemented]]
 node_id = "J1"
 commit_message = "refactor(core): cut CSS public routes over to StyleSyntaxIr"
 commit_date = "2026-08-28T16:41:34+01:00"

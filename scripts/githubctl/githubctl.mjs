@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { GitHubAdapter } from "./adapter.mjs";
-import { GitHubDoctor, SCHEDULE_CAPABILITIES, SYNC_ISSUES_CAPABILITIES } from "./doctor.mjs";
+import { createPr } from "./create-pr.mjs";
+import {
+  CREATE_PR_CAPABILITIES,
+  GitHubDoctor,
+  SCHEDULE_CAPABILITIES,
+  SYNC_ISSUES_CAPABILITIES,
+} from "./doctor.mjs";
 import { mutationIdentity, PartialFailureError } from "./errors.mjs";
 import { FakeGitHubAdapter } from "./fake.mjs";
 import { schedule } from "./schedule.mjs";
@@ -15,6 +21,10 @@ Commands:
   sync-issues --check|--apply --train <train> | --nodes <id,id,...>
     [--fake] [--owner <owner> --repo <repo>] [--model <name>]
     [--ledger <path>]
+  create-pr --check|--apply --node <id> --title <final conventional commit>
+    --head <branch> [--base <base>] [--body <pr prose>] [--model <name>]
+    [--ledger <path>] [--write-locator] [--fake]
+    [--owner <owner> --repo <repo>]
   schedule --check|--apply --train <train> | --nodes <id,id,...>
     [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
     [--set-milestone <title>]
@@ -22,14 +32,21 @@ Commands:
 doctor validates GitHub authentication, repository access, issue/PR
 mutation capability, and whether Project 3 is readable. It never writes.
 sync-issues --apply is doctor-gated for issues and does not require
-Project 3. schedule --apply requires issues and Project 3.
+Project 3. create-pr --apply is doctor-gated for issues and pullRequests
+and does not require Project 3. schedule --apply requires issues and
+Project 3.
 
 Issue create/update and pull-request mutation remain library APIs. Each
-requires mode 'check' or 'apply'; apply is doctor-gated. Pull-request
-creation is not a githubctl command.
+requires mode 'check' or 'apply'; apply is doctor-gated.
 
 sync-issues is occasional one-way DAG/charter-to-GitHub issue sync for an
 explicit train or node set. It never imports GitHub edits.
+
+create-pr creates one pull request whose title is the planned final
+conventional-commit message and whose body contains exactly the mapped
+Closes #<n> link. Opt-in mappings refresh the issue description; protected
+mappings are not edited. --write-locator sets pull_request on an existing
+implemented row only.
 
 schedule overlays READY mapped issues onto GitHub Project 3. Check plans
 only. Apply is doctor-gated. --set-milestone is the only milestone write.
@@ -41,6 +58,11 @@ const VALUE_FLAGS = new Set([
   "--repo",
   "--train",
   "--nodes",
+  "--node",
+  "--title",
+  "--head",
+  "--base",
+  "--body",
   "--model",
   "--ledger",
   "--set-milestone",
@@ -56,6 +78,7 @@ function parseArgs(argv) {
     else if (arg === "--fake") flags.add("fake");
     else if (arg === "--check") flags.add("check");
     else if (arg === "--apply") flags.add("apply");
+    else if (arg === "--write-locator") flags.add("write-locator");
     else if (VALUE_FLAGS.has(arg)) {
       const value = argv[i + 1];
       if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
@@ -104,6 +127,49 @@ function runSyncIssues(flags, options) {
     nodes: hasNodes ? options.nodes.split(",").map((id) => id.trim()) : undefined,
     model,
     ledgerPath: options.ledger,
+    clearance,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return 0;
+}
+
+function runCreatePr(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) throw new Error("create-pr requires exactly one of --check or --apply");
+  if (typeof options.train === "string" || typeof options.nodes === "string") {
+    throw new Error("create-pr accepts exactly one --node; batch selection is forbidden");
+  }
+  if (typeof options.node !== "string" || options.node.length === 0) {
+    throw new Error("create-pr requires --node");
+  }
+  if (typeof options.title !== "string" || options.title.length === 0) {
+    throw new Error("create-pr requires --title");
+  }
+  if (typeof options.head !== "string" || options.head.length === 0) {
+    throw new Error("create-pr requires --head");
+  }
+  const adapter = boundAdapter(flags, options, "create-pr");
+  let clearance;
+  if (apply) {
+    const doctor = new GitHubDoctor(adapter).check({ require: CREATE_PR_CAPABILITIES });
+    if (!doctor.ok) {
+      console.log(JSON.stringify(doctor, null, 2));
+      return 1;
+    }
+    clearance = doctor.clearance;
+  }
+  const report = createPr({
+    adapter,
+    mode: apply ? "apply" : "check",
+    node: options.node,
+    title: options.title,
+    head: options.head,
+    base: options.base,
+    body: options.body,
+    model: options.model ?? process.env.GITHUBCTL_MODEL,
+    ledgerPath: options.ledger,
+    writeLocator: flags.has("write-locator"),
     clearance,
   });
   console.log(JSON.stringify(report, null, 2));
@@ -166,13 +232,15 @@ function main(argv) {
     );
     console.log("Each requires mode check or apply; apply is doctor-gated.");
     console.log("sync-issues --check|--apply syncs an explicit train or node set.");
+    console.log("create-pr --check|--apply creates a final-title PR that closes the mapped issue.");
     console.log("schedule --check|--apply overlays READY work onto GitHub Project 3.");
     return 0;
   }
   if (command === "sync-issues") return runSyncIssues(flags, options);
+  if (command === "create-pr") return runCreatePr(flags, options);
   if (command === "schedule") return runSchedule(flags, options);
   throw new Error(
-    `unknown command ${command}; supported commands: doctor, check, sync-issues, schedule`,
+    `unknown command ${command}; supported commands: doctor, check, sync-issues, create-pr, schedule`,
   );
 }
 

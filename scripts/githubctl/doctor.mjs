@@ -3,6 +3,7 @@ import { GitHubAdapterError } from "./errors.mjs";
 
 export const DOCTOR_ALL_CAPABILITIES = Object.freeze(["issues", "pullRequests", "projects"]);
 export const SYNC_ISSUES_CAPABILITIES = Object.freeze(["issues"]);
+export const CREATE_PR_CAPABILITIES = Object.freeze(["issues", "pullRequests"]);
 export const SCHEDULE_CAPABILITIES = Object.freeze(["issues", "projects"]);
 
 const CAPABILITY_ERRORS = Object.freeze({
