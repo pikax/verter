@@ -733,7 +733,7 @@ test("REL0-AC2 CLI schedule check plans; apply of a missing fake issue fails clo
     `${fs.readFileSync(path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/implemented.toml"), "utf8").trimEnd()}
 
 [[github_issue]]
-node_id = "GH4"
+node_id = "GH5"
 gh_issue = 10
 sync_to_github = true
 `,
@@ -746,7 +746,7 @@ sync_to_github = true
       "--check",
       "--fake",
       "--nodes",
-      "GH4",
+      "GH5",
       "--ledger",
       ledgerPath,
       "--owner",
@@ -770,7 +770,7 @@ sync_to_github = true
       "--apply",
       "--fake",
       "--nodes",
-      "GH4",
+      "GH5",
       "--ledger",
       ledgerPath,
       "--owner",

@@ -61,9 +61,9 @@ test("GitHub mappings are unique and never mark implementation complete", () => 
   assert.ok(errors.includes("GitHub issue ledger: duplicate node GH0"));
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 123"));
 
-  authority.ledger.github_issue = [{ node_id: "GH4", gh_issue: 123, sync_to_github: false }];
-  assert.equal(deriveState(authority).states.get("GH4").status, "READY");
-  assert.notEqual(deriveState(authority).states.get("GH4").status, "COMPLETE");
+  authority.ledger.github_issue = [{ node_id: "GH5", gh_issue: 123, sync_to_github: false }];
+  assert.equal(deriveState(authority).states.get("GH5").status, "READY");
+  assert.notEqual(deriveState(authority).states.get("GH5").status, "COMPLETE");
 });
 
 test("same node and issue with opposite sync_to_github is a duplicate pair", () => {
@@ -77,7 +77,7 @@ test("same node and issue with opposite sync_to_github is a duplicate pair", () 
   assert.ok(errors.includes("GitHub issue ledger: duplicate issue 99"), errors.join("; "));
 });
 
-test("the live ledger records J1, ORC0, GH0, GH1, GH2, and GH3 with message/date locators", () => {
+test("the live ledger records J1, ORC0, GH0, GH1, GH2, GH3, and GH4 with message/date locators", () => {
   const authority = loadAuthority();
   const byId = new Map(authority.ledger.implemented.map((row) => [row.node_id, row]));
   assert.deepEqual(byId.get("J1"), {
@@ -110,6 +110,11 @@ test("the live ledger records J1, ORC0, GH0, GH1, GH2, and GH3 with message/date
     commit_message: "feat(ci): create final-title pull requests that close mapped issues",
     commit_date: "2026-08-29T02:28:30+01:00",
   });
+  assert.deepEqual(byId.get("GH4"), {
+    node_id: "GH4",
+    commit_message: "feat(ci): record review history in ordinary pull-request prose",
+    commit_date: "2026-08-29T02:41:41+01:00",
+  });
   assert.deepEqual(byId.get("REL0"), {
     node_id: "REL0",
     commit_message: "feat(ci): overlay READY work onto GitHub Project 3",
@@ -121,7 +126,8 @@ test("the live ledger records J1, ORC0, GH0, GH1, GH2, and GH3 with message/date
   assert.equal(state.states.get("GH1").status, "COMPLETE");
   assert.equal(state.states.get("GH2").status, "COMPLETE");
   assert.equal(state.states.get("GH3").status, "COMPLETE");
-  assert.equal(state.states.get("GH4").status, "READY");
+  assert.equal(state.states.get("GH4").status, "COMPLETE");
+  assert.equal(state.states.get("GH5").status, "READY");
   assert.equal(explainNode(authority, state, "ORC0").commit.pull_request, null);
 });
 
@@ -326,6 +332,7 @@ test("github control plane contract names the mapping boundaries", () => {
     "GitHubIssueMapping",
     "GitHubIssueDescription",
     "ExpectedPullRequestTitle",
+    "ReviewCycleSummary",
     "GitHubIssueSync",
     "GitHubAdapter",
     "GitHubDoctor",

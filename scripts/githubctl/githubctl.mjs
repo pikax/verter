@@ -4,11 +4,13 @@ import { createPr } from "./create-pr.mjs";
 import {
   CREATE_PR_CAPABILITIES,
   GitHubDoctor,
+  REVIEW_SUMMARY_CAPABILITIES,
   SCHEDULE_CAPABILITIES,
   SYNC_ISSUES_CAPABILITIES,
 } from "./doctor.mjs";
 import { mutationIdentity, PartialFailureError } from "./errors.mjs";
 import { FakeGitHubAdapter } from "./fake.mjs";
+import { reviewSummary } from "./review-summary.mjs";
 import { schedule } from "./schedule.mjs";
 import { syncIssues } from "./sync-issues.mjs";
 
@@ -25,6 +27,9 @@ Commands:
     --head <branch> [--base <base>] [--body <pr prose>] [--model <name>]
     [--ledger <path>] [--write-locator] [--fake]
     [--owner <owner> --repo <repo>]
+  review-summary --check|--apply --pr <n> --node <id> --verdict PASS|FAIL
+    --body <human prose> [--findings <json>] [--model <name>]
+    [--ledger <path>] [--fake] [--owner <owner> --repo <repo>]
   schedule --check|--apply --train <train> | --nodes <id,id,...>
     [--fake] [--owner <owner> --repo <repo>] [--ledger <path>]
     [--set-milestone <title>]
@@ -32,9 +37,9 @@ Commands:
 doctor validates GitHub authentication, repository access, issue/PR
 mutation capability, and whether Project 3 is readable. It never writes.
 sync-issues --apply is doctor-gated for issues and does not require
-Project 3. create-pr --apply is doctor-gated for issues and pullRequests
-and does not require Project 3. schedule --apply requires issues and
-Project 3.
+Project 3. create-pr --apply and review-summary --apply are doctor-gated
+for issues and pullRequests and do not require Project 3. schedule --apply
+requires issues and Project 3.
 
 Issue create/update and pull-request mutation remain library APIs. Each
 requires mode 'check' or 'apply'; apply is doctor-gated.
@@ -47,6 +52,11 @@ conventional-commit message and whose body contains exactly the mapped
 Closes #<n> link. Opt-in mappings refresh the issue description; protected
 mappings are not edited. --write-locator sets pull_request on an existing
 implemented row only.
+
+review-summary posts one ordinary ReviewCycleSummary PR comment. Opt-in
+mappings keep exactly one Model line on the issue; protected mappings are
+not edited. P0/P1 findings cannot accept. Apply is doctor-gated for issues
+and pullRequests and does not require Project 3.
 
 schedule overlays READY mapped issues onto GitHub Project 3. Check plans
 only. Apply is doctor-gated. --set-milestone is the only milestone write.
@@ -66,6 +76,9 @@ const VALUE_FLAGS = new Set([
   "--model",
   "--ledger",
   "--set-milestone",
+  "--pr",
+  "--verdict",
+  "--findings",
 ]);
 
 function parseArgs(argv) {
@@ -176,6 +189,53 @@ function runCreatePr(flags, options) {
   return 0;
 }
 
+function runReviewSummary(flags, options) {
+  const check = flags.has("check");
+  const apply = flags.has("apply");
+  if (check === apply) {
+    throw new Error("review-summary requires exactly one of --check or --apply");
+  }
+  if (typeof options.train === "string" || typeof options.nodes === "string") {
+    throw new Error("review-summary accepts exactly one --node; batch selection is forbidden");
+  }
+  if (typeof options.node !== "string" || options.node.length === 0) {
+    throw new Error("review-summary requires --node");
+  }
+  if (typeof options.pr !== "string" || options.pr.length === 0) {
+    throw new Error("review-summary requires --pr");
+  }
+  if (typeof options.verdict !== "string" || options.verdict.length === 0) {
+    throw new Error("review-summary requires --verdict");
+  }
+  if (typeof options.body !== "string" || options.body.length === 0) {
+    throw new Error("review-summary requires --body");
+  }
+  const adapter = boundAdapter(flags, options, "review-summary");
+  let clearance;
+  if (apply) {
+    const doctor = new GitHubDoctor(adapter).check({ require: REVIEW_SUMMARY_CAPABILITIES });
+    if (!doctor.ok) {
+      console.log(JSON.stringify(doctor, null, 2));
+      return 1;
+    }
+    clearance = doctor.clearance;
+  }
+  const report = reviewSummary({
+    adapter,
+    mode: apply ? "apply" : "check",
+    node: options.node,
+    pr: Number(options.pr),
+    verdict: options.verdict,
+    body: options.body,
+    findings: options.findings,
+    model: options.model ?? process.env.GITHUBCTL_MODEL,
+    ledgerPath: options.ledger,
+    clearance,
+  });
+  console.log(JSON.stringify(report, null, 2));
+  return 0;
+}
+
 function runSchedule(flags, options) {
   const check = flags.has("check");
   const apply = flags.has("apply");
@@ -233,14 +293,16 @@ function main(argv) {
     console.log("Each requires mode check or apply; apply is doctor-gated.");
     console.log("sync-issues --check|--apply syncs an explicit train or node set.");
     console.log("create-pr --check|--apply creates a final-title PR that closes the mapped issue.");
+    console.log("review-summary --check|--apply records a ReviewCycleSummary PR comment.");
     console.log("schedule --check|--apply overlays READY work onto GitHub Project 3.");
     return 0;
   }
   if (command === "sync-issues") return runSyncIssues(flags, options);
   if (command === "create-pr") return runCreatePr(flags, options);
+  if (command === "review-summary") return runReviewSummary(flags, options);
   if (command === "schedule") return runSchedule(flags, options);
   throw new Error(
-    `unknown command ${command}; supported commands: doctor, check, sync-issues, create-pr, schedule`,
+    `unknown command ${command}; supported commands: doctor, check, sync-issues, create-pr, review-summary, schedule`,
   );
 }
 

@@ -139,7 +139,9 @@ function parsePullsPayload(payload) {
   }
   return payload.map((row) => {
     if (row === null || typeof row !== "object" || Array.isArray(row)) {
-      throw new UnstructuredGitHubOutputError("GitHub pull request list entry is not a JSON object");
+      throw new UnstructuredGitHubOutputError(
+        "GitHub pull request list entry is not a JSON object",
+      );
     }
     return {
       number: parseGitHubResourceNumber(row),
@@ -387,6 +389,47 @@ export function prepareCreatePullRequest(adapter, request) {
   }
   assertApplyClearance(mode, request.clearance, "pullRequests", adapter);
   return { mode, mappedIssue };
+}
+
+export function parsePullRequestPayload(payload, expectedNumber) {
+  const number = parseGitHubResourceNumber(payload);
+  if (number !== expectedNumber) {
+    throw new UnstructuredGitHubOutputError(
+      `GitHub pull request read returned number ${number}, expected ${expectedNumber}`,
+    );
+  }
+  if (typeof payload.title !== "string") {
+    throw new UnstructuredGitHubOutputError("GitHub pull request title is not a string");
+  }
+  const body = payload.body == null ? "" : payload.body;
+  if (typeof body !== "string") {
+    throw new UnstructuredGitHubOutputError("GitHub pull request body is not a string");
+  }
+  return {
+    number,
+    title: payload.title,
+    body,
+    head: parsePullHead(payload.head),
+    base: parsePullHead(payload.base),
+  };
+}
+
+export function planCreatePullRequestComment(request, number) {
+  return {
+    kind: "create-pull-request-comment",
+    number,
+    body: request.body,
+    applied: false,
+  };
+}
+
+export function prepareCreatePullRequestComment(adapter, request) {
+  assertRepository(adapter, request);
+  const mode = assertMutationMode(request.mode);
+  const number = assertIssueNumber(request.number, "pull request number");
+  assertRequiredText(request.body, "comment body");
+  assertApplyClearance(mode, request.clearance, "pullRequests", adapter);
+  return { mode, number };
 }
 
 function dispatchOperation(adapter, operation) {
@@ -661,6 +704,31 @@ export class GitHubAdapter {
       path: `/repos/${this.owner}/${this.repo}/pulls?head=${encodeURIComponent(`${this.owner}:${head}`)}`,
     });
     return parsePullsPayload(payload);
+  }
+
+  getPullRequest(number) {
+    const expected = assertIssueNumber(number, "pull request number");
+    const payload = this.#transport.request({
+      method: "GET",
+      path: `/repos/${this.owner}/${this.repo}/pulls/${expected}`,
+    });
+    return parsePullRequestPayload(payload, expected);
+  }
+
+  createPullRequestComment(request) {
+    const { mode, number } = prepareCreatePullRequestComment(this, request);
+    if (mode === "check") return planCreatePullRequestComment(request, number);
+    this.#transport.request({
+      method: "POST",
+      path: `/repos/${this.owner}/${this.repo}/issues/${number}/comments`,
+      body: { body: request.body },
+    });
+    return {
+      kind: "create-pull-request-comment",
+      number,
+      body: request.body,
+      applied: true,
+    };
   }
 
   applyOperations(operations) {

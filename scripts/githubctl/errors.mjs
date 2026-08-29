@@ -23,6 +23,7 @@ export class MissingAncestorError extends IssueSyncError {}
 export class MissingProjectIdentityError extends GitHubAdapterError {}
 export class MissingIssueMappingError extends GitHubAdapterError {}
 export class NonReadyNodeError extends GitHubAdapterError {}
+export class BlockingFindingError extends GitHubAdapterError {}
 
 export function mutationIdentity(row) {
   if (!row || typeof row !== "object") return null;

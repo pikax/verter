@@ -7,11 +7,13 @@ import {
   planAddIssueToProject,
   planCreateIssue,
   planCreatePullRequest,
+  planCreatePullRequestComment,
   planSetIssueMilestone,
   planUpdateIssue,
   prepareAddIssueToProject,
   prepareCreateIssue,
   prepareCreatePullRequest,
+  prepareCreatePullRequestComment,
   prepareSetIssueMilestone,
   prepareUpdateIssue,
   PROJECT_NUMBER,
@@ -47,6 +49,7 @@ function clonePull(pull) {
     head: pull.head,
     base: pull.base,
     closes: pull.closes,
+    comments: cloneComments(pull.comments),
   };
 }
 
@@ -237,10 +240,31 @@ export class FakeGitHubAdapter {
       head: request.head,
       base: request.base,
       closes: mappedIssue,
+      comments: [],
     };
     this.#pulls.set(number, record);
     this.#heads.add(request.head);
     return { kind: "create-pull-request", ...record, applied: true };
+  }
+
+  createPullRequestComment(request) {
+    const { mode, number } = prepareCreatePullRequestComment(this, request);
+    if (mode === "check") return planCreatePullRequestComment(request, number);
+    this.#beginApply();
+    if (!this.permissions.pullRequests) {
+      throw new PermissionDeniedError("pull request permission denied");
+    }
+    const pull = this.#pulls.get(number);
+    if (!pull) throw new NotFoundError(`pull request #${number} is missing`);
+    if (!Array.isArray(pull.comments)) pull.comments = [];
+    const id = pull.comments.length === 0 ? 1 : Math.max(...pull.comments.map((row) => row.id)) + 1;
+    pull.comments.push({ id, body: request.body });
+    return {
+      kind: "create-pull-request-comment",
+      number,
+      body: request.body,
+      applied: true,
+    };
   }
 
   applyOperations(operations) {
