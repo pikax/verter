@@ -1,0 +1,11 @@
+error[E0599]: no associated function or constant named `from_canonical` found for struct `SourceUnitId` in the current scope
+  --> tests/compile-fail/source_unit_id_has_no_from_canonical.rs:13:27
+   |
+13 |     let _ = SourceUnitId::from_canonical(&Descriptor);
+   |                           ^^^^^^^^^^^^^^ associated function or constant not found in `SourceUnitId`
+   |
+note: if you're trying to build a new `SourceUnitId`, consider using `SourceUnitId::from_lineage` which returns `SourceUnitId`
+  --> src/identity.rs
+   |
+   |     pub fn from_lineage(source_id: &SourceId, logical_role: &str) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

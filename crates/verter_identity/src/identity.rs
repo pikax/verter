@@ -40,10 +40,45 @@ digest_identity!(
     /// Exact source version.
     SourceRevision
 );
-digest_identity!(
-    /// Stable logical carrier-unit identity.
-    SourceUnitId
-);
+
+/// Stable logical carrier-unit identity.
+///
+/// Lineage is `SourceId` plus logical role. Revision and content are
+/// neighbouring facts, never inputs to this constructor — an edit or
+/// reparse must not mint a new unit.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SourceUnitId(Canonical);
+
+impl SourceUnitId {
+    const LINEAGE_DOMAIN_TAG: &'static str = "verter.identity.source_unit_id.lineage.v1";
+
+    /// Mint from the source's logical identity and the unit's role inside
+    /// that source (`"script"`, `"template"`, `"style:0"`, …).
+    pub fn from_lineage(source_id: &SourceId, logical_role: &str) -> Self {
+        let mut encoder = CanonicalEncoder::new(Self::LINEAGE_DOMAIN_TAG);
+        encoder.field_bytes(1, source_id.digest().as_bytes());
+        encoder.field_str(2, logical_role);
+        Self(Canonical::from_encoder(&encoder))
+    }
+
+    /// The compact digest, for hot-path hashing/comparison.
+    pub fn digest(&self) -> CanonicalDigest {
+        self.0.digest()
+    }
+
+    /// The retained canonical bytes, for full-equality verification on a
+    /// suspected collision.
+    pub fn canonical_bytes(&self) -> &[u8] {
+        self.0.bytes()
+    }
+}
+
+impl core::fmt::Debug for SourceUnitId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "SourceUnitId({:?})", self.0)
+    }
+}
+
 digest_identity!(
     /// Project topology identity.
     ProjectRevision
@@ -429,6 +464,31 @@ mod tests {
         let b = ContentId::from_content_bytes(b"world");
         assert_eq!(a1, a2);
         assert_ne!(a1, b);
+    }
+
+    #[test]
+    fn source_unit_lineage_is_stable_across_revision_and_content() {
+        let source = SourceId::from_canonical(&Args(1));
+        let a = SourceUnitId::from_lineage(&source, "script");
+        let b = SourceUnitId::from_lineage(&source, "script");
+        assert_eq!(a, b);
+        assert_ne!(
+            a,
+            SourceUnitId::from_lineage(&source, "template"),
+            "logical role is part of lineage"
+        );
+        assert_ne!(
+            a,
+            SourceUnitId::from_lineage(&SourceId::from_canonical(&Args(2)), "script"),
+            "source identity is part of lineage"
+        );
+        let _revision = SourceRevision::from_canonical(&Args(9));
+        let _content = ContentId::from_content_bytes(b"const a = 1");
+        assert_eq!(
+            a,
+            SourceUnitId::from_lineage(&source, "script"),
+            "lineage does not take revision or content"
+        );
     }
 
     #[test]

@@ -5,33 +5,11 @@
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 pub use verter_identity::identity::{ContentId, SourceId, SourceRevision, SourceUnitId};
 
-/// One caller-supplied descriptor: which logical carrier block, inside
-/// which source, at which revision, with which exact bytes. Two calls with
-/// the same four fields mint the same [`SourceUnitId`] — the identity is a
-/// pure function of them, never a counter.
-pub struct SourceUnitDescriptor<'a> {
-    pub source_id: &'a SourceId,
-    pub revision: &'a SourceRevision,
-    /// Stable logical role inside the source (`"script"`, `"template"`,
-    /// `"style:0"`, …) — distinguishes multiple units minted from the same
-    /// `(source_id, revision)`.
-    pub logical_role: &'a str,
-    pub content: &'a ContentId,
-}
-
-impl CanonicalEncode for SourceUnitDescriptor<'_> {
-    const DOMAIN_TAG: &'static str = "verter.compiler.assembly.source_unit.v1";
-
-    fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
-        encoder.field_bytes(1, self.source_id.digest().as_bytes());
-        encoder.field_bytes(2, self.revision.digest().as_bytes());
-        encoder.field_str(3, self.logical_role);
-        encoder.field_bytes(4, self.content.digest().as_bytes());
-    }
-}
-
 /// A logical source unit: stable lineage, exact revision, exact content —
 /// the identity every [`super::fragment::Fragment`] is minted against.
+///
+/// [`SourceUnitId`] is lineage only (`SourceId` + logical role). Revision
+/// and content are stored as neighbouring facts and never enter that id.
 #[derive(Debug, Clone)]
 pub struct SourceUnit {
     id: SourceUnitId,
@@ -42,10 +20,10 @@ pub struct SourceUnit {
 }
 
 impl SourceUnit {
-    /// Mint a source unit from its four identity-bearing fields. `content`
-    /// is the exact-bytes identity of this unit's authored content — the
-    /// caller derives it from the same bytes it will hand the fragment
-    /// producer, never a placeholder.
+    /// Mint a source unit from its lineage plus neighbouring revision and
+    /// content facts. `content` is the exact-bytes identity of this unit's
+    /// authored content — the caller derives it from the same bytes it will
+    /// hand the fragment producer, never a placeholder.
     pub fn mint(
         source_id: SourceId,
         revision: SourceRevision,
@@ -53,12 +31,7 @@ impl SourceUnit {
         content: ContentId,
     ) -> Self {
         let logical_role = logical_role.into();
-        let id = SourceUnitId::from_canonical(&SourceUnitDescriptor {
-            source_id: &source_id,
-            revision: &revision,
-            logical_role: &logical_role,
-            content: &content,
-        });
+        let id = SourceUnitId::from_lineage(&source_id, &logical_role);
         Self {
             id,
             source_id,
@@ -87,6 +60,23 @@ impl SourceUnit {
     pub fn logical_role(&self) -> &str {
         &self.logical_role
     }
+}
+
+/// Lineage identity for a compiler fragment: logical source (from its
+/// canonical id) plus the unit's role. Revision and content stay off this
+/// constructor — hashing a path string into [`SourceUnitId`] is forbidden.
+pub(crate) fn source_unit_id(canonical_id: &str, logical_role: &str) -> SourceUnitId {
+    struct CanonicalSource<'a>(&'a str);
+    impl CanonicalEncode for CanonicalSource<'_> {
+        const DOMAIN_TAG: &'static str = "verter.compiler.assembly.logical_source.v1";
+        fn encode_fields(&self, e: &mut CanonicalEncoder) {
+            e.field_str(1, self.0);
+        }
+    }
+    SourceUnitId::from_lineage(
+        &SourceId::from_canonical(&CanonicalSource(canonical_id)),
+        logical_role,
+    )
 }
 
 #[cfg(test)]
@@ -130,19 +120,33 @@ mod tests {
     }
 
     #[test]
-    fn different_content_mints_a_different_id() {
-        let a = SourceUnit::mint(
-            source_id(),
-            revision(),
-            "script",
-            ContentId::from_content_bytes(b"const a = 1"),
+    fn content_and_revision_do_not_change_source_unit_id() {
+        let content_a = ContentId::from_content_bytes(b"const a = 1");
+        let content_b = ContentId::from_content_bytes(b"const a = 2");
+        let a = SourceUnit::mint(source_id(), revision(), "script", content_a.clone());
+        let b = SourceUnit::mint(source_id(), revision(), "script", content_b);
+        assert_eq!(
+            a.id(),
+            b.id(),
+            "same source and role keep the same unit identity when content changes"
         );
-        let b = SourceUnit::mint(
-            source_id(),
-            revision(),
-            "script",
-            ContentId::from_content_bytes(b"const a = 2"),
+        assert_ne!(
+            a.content(),
+            b.content(),
+            "distinct contents must not alias onto one ContentId"
         );
-        assert_ne!(a.id(), b.id());
+
+        let other_revision = SourceRevision::from_canonical(&Tag("rev-2"));
+        let c = SourceUnit::mint(source_id(), other_revision, "script", content_a);
+        assert_eq!(
+            a.id(),
+            c.id(),
+            "same source and role keep the same unit identity when revision changes"
+        );
+        assert_ne!(
+            a.revision(),
+            c.revision(),
+            "distinct revisions must not alias onto one SourceRevision"
+        );
     }
 }

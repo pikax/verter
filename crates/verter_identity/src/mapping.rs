@@ -1,7 +1,8 @@
-//! Four mapping-product identities. A single "maps enabled" boolean is
-//! not enough (`mapping-products.md` §1). This module does not construct,
-//! encode, or round-trip maps — that stays with the source-unit /
-//! `CodeTransform` owner.
+//! Mapping-product identities (placement, projection, runtime, encoded)
+//! plus the exact map-construction identity [`MapRevision`]. A single
+//! "maps enabled" boolean is not enough (`mapping-products.md` §1). This
+//! module does not construct, encode, or round-trip maps — that stays
+//! with the source-unit / `CodeTransform` owner.
 
 digest_identity!(
     /// Internal source-unit placement/composition identity.
@@ -23,6 +24,11 @@ digest_identity!(
     /// the same underlying map data.
     EncodedSourceMapId
 );
+digest_identity!(
+    /// Exact map-construction identity. Neighbour of source revision and
+    /// content — never folded into [`crate::identity::SourceUnitId`].
+    MapRevision
+);
 
 #[cfg(test)]
 mod tests {
@@ -43,7 +49,10 @@ mod tests {
         let projection = SourceProjectionMapId::from_canonical(&MapDescriptor(1));
         let runtime = RuntimeSourceMapDataId::from_canonical(&MapDescriptor(1));
         let encoded = EncodedSourceMapId::from_canonical(&MapDescriptor(1));
+        let map_revision = MapRevision::from_canonical(&MapDescriptor(1));
         assert_eq!(placement, PlacementMapId::from_canonical(&MapDescriptor(1)));
+        assert_eq!(map_revision, MapRevision::from_canonical(&MapDescriptor(1)));
+        assert_ne!(map_revision, MapRevision::from_canonical(&MapDescriptor(2)));
         assert_eq!(
             projection,
             SourceProjectionMapId::from_canonical(&MapDescriptor(1))

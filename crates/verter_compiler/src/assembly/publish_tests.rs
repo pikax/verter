@@ -17,14 +17,7 @@ use crate::compile_request::{
 };
 
 fn unit(tag: &str) -> SourceUnitId {
-    struct Tag<'a>(&'a str);
-    impl verter_identity::encoding::CanonicalEncode for Tag<'_> {
-        const DOMAIN_TAG: &'static str = "verter.compiler.assembly.publish.test.tag.v1";
-        fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
-            e.field_str(1, self.0);
-        }
-    }
-    SourceUnitId::from_canonical(&Tag(tag))
+    crate::assembly::source_unit::source_unit_id("source", tag)
 }
 
 fn fragment_with_helper(helper: &str) -> ValidatedFragment {

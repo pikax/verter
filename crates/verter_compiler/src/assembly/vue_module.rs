@@ -22,12 +22,11 @@ use super::fragment::{
 use super::plan::{PlannedArtifact, ProductPlan};
 use super::publish::{publish, ArtifactContribution, ArtifactSet, AssemblyRefusal};
 use super::source_space::SourceSpaceKind;
-use super::source_unit::SourceUnitId;
+use super::source_unit::source_unit_id;
 use crate::code_transform::CodeTransform;
 use crate::compile::format_import_specifier;
 use crate::compile_request::ProductKind;
 use crate::framework_common::{RuntimeCompileOutput, TemplateRenderExport};
-use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 
 /// Every `binding_ranges` entry's own bytes must equal this literal — the
 /// identifier every runtime-emission site writes before host assembly
@@ -314,23 +313,6 @@ impl std::fmt::Display for VueMainAssemblyFailure {
 
 impl std::error::Error for VueMainAssemblyFailure {}
 
-/// Deterministic role-based [`SourceUnitId`] for one of this function's own
-/// scaffold/content fragments — same `canonical_id` + `role` always mints
-/// the same id, so the identity is a pure function of the two, never a
-/// counter.
-struct MainFragmentTag<'a> {
-    canonical_id: &'a str,
-    role: &'a str,
-}
-
-impl CanonicalEncode for MainFragmentTag<'_> {
-    const DOMAIN_TAG: &'static str = "verter.compiler.assembly.vue_main_fragment.v1";
-    fn encode_fields(&self, e: &mut CanonicalEncoder) {
-        e.field_str(1, self.canonical_id);
-        e.field_str(2, self.role);
-    }
-}
-
 /// One scaffold/content piece, minted, validated, and pushed onto
 /// `fragments` in one step — every piece of the Main module goes through
 /// this, so `assemble_sequence`/`publish` always compose the SAME
@@ -351,7 +333,7 @@ fn mint_and_validate(
     let fragment = Fragment {
         domain: FrameworkDomain::Vue,
         product: planned_kind,
-        source_unit: SourceUnitId::from_canonical(&MainFragmentTag { canonical_id, role }),
+        source_unit: source_unit_id(canonical_id, role),
         source_space: SourceSpaceKind::GeneratedFragment,
         placement,
         contract: SyntacticContract::CompleteModule,

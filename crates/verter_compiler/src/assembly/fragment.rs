@@ -392,7 +392,7 @@ mod tests {
         Fragment {
             domain: FrameworkDomain::Vue,
             product: ProductKind::RuntimeClient,
-            source_unit: SourceUnitId::from_canonical(&TestTag("unit")),
+            source_unit: crate::assembly::source_unit::source_unit_id("source", "unit"),
             source_space: SourceSpaceKind::GeneratedFragment,
             placement: PlacementSlot::ModuleBody,
             contract,
@@ -437,14 +437,6 @@ mod tests {
             "const n: number = 1",
         );
         assert!(fragment.validate().is_ok());
-    }
-
-    struct TestTag(&'static str);
-    impl verter_identity::encoding::CanonicalEncode for TestTag {
-        const DOMAIN_TAG: &'static str = "verter.compiler.assembly.fragment.test.tag.v1";
-        fn encode_fields(&self, e: &mut verter_identity::encoding::CanonicalEncoder) {
-            e.field_str(1, self.0);
-        }
     }
 
     #[test]

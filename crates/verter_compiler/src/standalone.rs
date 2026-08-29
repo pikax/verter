@@ -41,7 +41,7 @@ use crate::assembly::fragment::{
 use crate::assembly::plan::ProductPlan;
 use crate::assembly::publish::{publish, ArtifactContribution};
 use crate::assembly::source_space::SourceSpaceKind;
-use crate::assembly::source_unit::SourceUnitId;
+use crate::assembly::source_unit::source_unit_id;
 use crate::assembly::vue_module::{
     compose_fragments, ComposedFragments, VueMainCompositionFailure, VueMainModuleRequest,
 };
@@ -62,7 +62,6 @@ use crate::svelte::runtime::{
 use crate::svelte::ParsedSvelte;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
-use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 
 /// Ephemeral, non-identity execution inputs for a Svelte compile — resolved
 /// framework facts threaded alongside a canonical
@@ -831,10 +830,10 @@ impl StandaloneCompiler {
             let fragment = Fragment {
                 domain: FrameworkDomain::Svelte,
                 product: kind,
-                source_unit: SourceUnitId::from_canonical(&DirectSvelteFragmentTag {
-                    canonical_id: request.filename().unwrap_or(""),
-                    role: svelte_fragment_role(kind),
-                }),
+                source_unit: source_unit_id(
+                    request.filename().unwrap_or(""),
+                    svelte_fragment_role(kind),
+                ),
                 source_space: SourceSpaceKind::GeneratedFragment,
                 placement: PlacementSlot::ModuleBody,
                 contract: SyntacticContract::CompleteModule,
@@ -1291,23 +1290,6 @@ fn svelte_fragment_role(kind: ProductKind) -> &'static str {
     match kind {
         ProductKind::RuntimeServer => "server",
         _ => "client",
-    }
-}
-
-/// Deterministic per-request, per-runtime-kind [`SourceUnitId`] for the
-/// direct core's Svelte client-module fragment(s) — `role` keeps a
-/// dual-`RuntimeClient`+`RuntimeServer` request's two fragments distinct
-/// identities.
-struct DirectSvelteFragmentTag<'a> {
-    canonical_id: &'a str,
-    role: &'static str,
-}
-
-impl CanonicalEncode for DirectSvelteFragmentTag<'_> {
-    const DOMAIN_TAG: &'static str = "verter.compiler.standalone.svelte_client_fragment.v1";
-    fn encode_fields(&self, e: &mut CanonicalEncoder) {
-        e.field_str(1, self.canonical_id);
-        e.field_str(2, self.role);
     }
 }
 
