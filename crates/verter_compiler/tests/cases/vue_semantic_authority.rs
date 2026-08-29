@@ -7,9 +7,8 @@ use std::sync::Arc;
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
     vue_semantic_authority_registration, CarrierCompiler, CarrierCompilerRegistry,
-    CatalogCapability, CatalogRow, FrameworkEpochId, FrameworkParseArtifact,
-    FrameworkSemanticAuthority, ImmutableCapabilityCatalog, VueCarrierFrontend,
-    VueSemanticAuthority,
+    CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
+    FrameworkSemanticAuthority, ImmutableCapabilityCatalog, VueSemanticAuthority, VueSfcV3,
 };
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
@@ -143,10 +142,7 @@ fn vue_semantic_catalog_row_binds_vue_adapter_identity() {
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Semantic);
     assert!(row.identity().host_epoch().is_none());
-    assert_eq!(
-        row.identity().epoch(),
-        &FrameworkEpochId::new(VueCarrierFrontend::EPOCH)
-    );
+    assert_eq!(row.identity().epoch().as_str(), VueSfcV3::ID);
     let _authority: &VueSemanticAuthority = row.semantic();
     let catalog =
         ImmutableCapabilityCatalog::<(), (), VueSemanticAuthority, (), ()>::try_from_rows([

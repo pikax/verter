@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use verter_compiler::framework_common::{
     svelte_semantic_authority_registration, vue_semantic_authority_registration, CarrierCompiler,
-    CarrierCompilerRegistry, CatalogCapability, CatalogRow, FrameworkEpochId,
-    FrameworkParseArtifact, FrameworkSemanticAuthority, ImmutableCapabilityCatalog,
-    SvelteSemanticAuthority, VueSemanticAuthority,
+    CarrierCompilerRegistry, CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
+    FrameworkSemanticAuthority, ImmutableCapabilityCatalog, SvelteSemanticAuthority,
+    VueSemanticAuthority,
 };
-use verter_compiler::svelte::{SvelteCarrierCompiler, SvelteCarrierFrontend};
+use verter_compiler::svelte::{SvelteCarrierCompiler, SvelteSfc5};
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
     FrameworkAdapterSemanticVersion,
@@ -160,10 +160,7 @@ fn svelte_semantic_catalog_row_binds_svelte_adapter_identity() {
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Semantic);
     assert!(row.identity().host_epoch().is_none());
-    assert_eq!(
-        row.identity().epoch(),
-        &FrameworkEpochId::new(SvelteCarrierFrontend::EPOCH)
-    );
+    assert_eq!(row.identity().epoch().as_str(), SvelteSfc5::ID);
     let _authority: &SvelteSemanticAuthority = row.semantic();
     let catalog =
         ImmutableCapabilityCatalog::<(), (), SvelteSemanticAuthority, (), ()>::try_from_rows([

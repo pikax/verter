@@ -40,8 +40,9 @@ pub mod sourcemap_e2e_helpers;
 
 pub use crate::svelte::{svelte_semantic_authority_registration, SvelteSemanticAuthority};
 pub use capability::{
-    CarrierFrontend, FrameworkEpochId, FrameworkHostIntegrationBackend, FrameworkSemanticAuthority,
-    HostEpochId, Present, ProjectionBackend, RuntimeCompilerBackend,
+    CarrierFrontend, FrameworkEpoch, FrameworkEpochId, FrameworkHostIntegrationBackend,
+    FrameworkSemanticAuthority, HostEpoch, HostEpochId, Present, ProjectionBackend,
+    RuntimeCompilerBackend,
 };
 pub use carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
@@ -61,5 +62,5 @@ pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PRE
 pub use registered_carrier_projection::FrameworkParseArtifact;
 pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;
-pub use vue_carrier_frontend::{vue_carrier_frontend_registration, VueCarrierFrontend};
+pub use vue_carrier_frontend::{vue_carrier_frontend_registration, VueCarrierFrontend, VueSfcV3};
 pub use vue_semantic_authority::{vue_semantic_authority_registration, VueSemanticAuthority};

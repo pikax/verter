@@ -1,5 +1,5 @@
 use verter_compiler::framework_common::{
-    CarrierFrontend, FrameworkEpochId, Present, TypedCapabilityRegistration,
+    CarrierFrontend, FrameworkEpoch, Present, TypedCapabilityRegistration,
 };
 use verter_language::{FrameworkAdapterId, LanguageId};
 
@@ -19,11 +19,15 @@ impl CarrierFrontend for ToolingFrontend {
     }
 }
 
+struct HtmlEpoch;
+impl FrameworkEpoch for HtmlEpoch {
+    const ID: &'static str = "html-v1";
+}
+
 fn main() {
-    let row = TypedCapabilityRegistration::register_frontend(
+    let row = TypedCapabilityRegistration::register_frontend::<HtmlEpoch, _>(
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
-        FrameworkEpochId::new("html-v1"),
         Present(ToolingFrontend),
     );
     let _ = row.runtime();

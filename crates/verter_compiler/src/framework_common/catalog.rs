@@ -11,8 +11,9 @@ use std::collections::HashSet;
 use verter_language::{FrameworkAdapterId, LanguageId};
 
 use super::capability::{
-    CarrierFrontend, FrameworkEpochId, FrameworkHostIntegrationBackend, FrameworkSemanticAuthority,
-    HostEpochId, Present, ProjectionBackend, RuntimeCompilerBackend,
+    CarrierFrontend, FrameworkEpoch, FrameworkEpochId, FrameworkHostIntegrationBackend,
+    FrameworkSemanticAuthority, HostEpoch, HostEpochId, Present, ProjectionBackend,
+    RuntimeCompilerBackend,
 };
 
 /// Which of the five authorities a catalog row names.
@@ -302,17 +303,20 @@ pub struct TypedCapabilityRegistration<Cap> {
 impl TypedCapabilityRegistration<()> {
     /// Frontend-only registration. No runtime backend is in the type.
     /// Capability is minted as [`CatalogCapability::Frontend`].
-    pub fn register_frontend<F: CarrierFrontend>(
+    ///
+    /// Catalog epoch identity is derived from `E`. The frontend trait has
+    /// no epoch type parameter; the constructor still takes `E` so there
+    /// is no independent epoch-value argument.
+    pub fn register_frontend<E: FrameworkEpoch, F: CarrierFrontend>(
         adapter_id: FrameworkAdapterId,
         carrier_language_id: LanguageId,
-        epoch: FrameworkEpochId,
         frontend: Present<F>,
     ) -> TypedCapabilityRegistration<FrontendCap<F>> {
         TypedCapabilityRegistration {
             identity: CatalogIdentity::ordinary(
                 adapter_id,
                 carrier_language_id,
-                epoch,
+                FrameworkEpochId::from_type::<E>(),
                 CatalogCapability::Frontend,
             ),
             capability: FrontendCap(frontend),
@@ -320,17 +324,19 @@ impl TypedCapabilityRegistration<()> {
     }
 
     /// Projection-only registration. No runtime backend is in the type.
-    pub fn register_projection<P: ProjectionBackend>(
+    ///
+    /// Catalog epoch identity is derived from `E`. The projection trait
+    /// has no epoch type parameter; the constructor still takes `E`.
+    pub fn register_projection<E: FrameworkEpoch, P: ProjectionBackend>(
         adapter_id: FrameworkAdapterId,
         carrier_language_id: LanguageId,
-        epoch: FrameworkEpochId,
         projection: Present<P>,
     ) -> TypedCapabilityRegistration<ProjectionCap<P>> {
         TypedCapabilityRegistration {
             identity: CatalogIdentity::ordinary(
                 adapter_id,
                 carrier_language_id,
-                epoch,
+                FrameworkEpochId::from_type::<E>(),
                 CatalogCapability::Projection,
             ),
             capability: ProjectionCap(projection),
@@ -339,19 +345,18 @@ impl TypedCapabilityRegistration<()> {
 
     /// Semantic-authority registration.
     ///
-    /// `E` is the authority's epoch type parameter; the row stores
-    /// [`FrameworkEpochId`] as a value independently of `E`.
-    pub fn register_semantic<E, S: FrameworkSemanticAuthority<E>>(
+    /// Catalog epoch identity is derived from `E`. There is no separate
+    /// epoch-value argument that could disagree with the authority type.
+    pub fn register_semantic<E: FrameworkEpoch, S: FrameworkSemanticAuthority<E>>(
         adapter_id: FrameworkAdapterId,
         carrier_language_id: LanguageId,
-        epoch: FrameworkEpochId,
         semantic: Present<S>,
     ) -> TypedCapabilityRegistration<SemanticCap<S>> {
         TypedCapabilityRegistration {
             identity: CatalogIdentity::ordinary(
                 adapter_id,
                 carrier_language_id,
-                epoch,
+                FrameworkEpochId::from_type::<E>(),
                 CatalogCapability::Semantic,
             ),
             capability: SemanticCap(semantic),
@@ -359,37 +364,41 @@ impl TypedCapabilityRegistration<()> {
     }
 
     /// Runtime-capable registration with a real backend (not a stub).
-    pub fn register_runtime<E, R: RuntimeCompilerBackend<E>>(
+    ///
+    /// Catalog epoch identity is derived from `E`.
+    pub fn register_runtime<E: FrameworkEpoch, R: RuntimeCompilerBackend<E>>(
         adapter_id: FrameworkAdapterId,
         carrier_language_id: LanguageId,
-        epoch: FrameworkEpochId,
         runtime: Present<R>,
     ) -> TypedCapabilityRegistration<RuntimeCap<R>> {
         TypedCapabilityRegistration {
             identity: CatalogIdentity::ordinary(
                 adapter_id,
                 carrier_language_id,
-                epoch,
+                FrameworkEpochId::from_type::<E>(),
                 CatalogCapability::Runtime,
             ),
             capability: RuntimeCap(runtime),
         }
     }
 
-    /// Host-integration registration. Host epoch is required.
-    pub fn register_host_integration<E, HostE, H: FrameworkHostIntegrationBackend<E, HostE>>(
+    /// Host-integration registration. Framework and host epochs are
+    /// derived from `E` and `HostE`.
+    pub fn register_host_integration<
+        E: FrameworkEpoch,
+        HostE: HostEpoch,
+        H: FrameworkHostIntegrationBackend<E, HostE>,
+    >(
         adapter_id: FrameworkAdapterId,
         carrier_language_id: LanguageId,
-        epoch: FrameworkEpochId,
-        host_epoch: HostEpochId,
         host: Present<H>,
     ) -> TypedCapabilityRegistration<HostCap<H>> {
         TypedCapabilityRegistration {
             identity: CatalogIdentity::host_integration(
                 adapter_id,
                 carrier_language_id,
-                epoch,
-                host_epoch,
+                FrameworkEpochId::from_type::<E>(),
+                HostEpochId::from_type::<HostE>(),
             ),
             capability: HostCap(host),
         }

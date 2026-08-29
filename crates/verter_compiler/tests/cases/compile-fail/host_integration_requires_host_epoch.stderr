@@ -1,22 +1,26 @@
-error[E0061]: this function takes 5 arguments but 4 arguments were supplied
-  --> tests/cases/compile-fail/host_integration_requires_host_epoch.rs:13:13
+error[E0277]: the trait bound `(): HostEpoch` is not satisfied
+  --> tests/cases/compile-fail/host_integration_requires_host_epoch.rs:13:6
    |
-13 |     let _ = TypedCapabilityRegistration::register_host_integration(
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-...
-17 |         Present(HostCapable),
-   |         -------------------- argument #4 of type `HostEpochId` is missing
+13 | impl FrameworkHostIntegrationBackend<TestEpoch, ()> for HostCapable {
+   |      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `HostEpoch` is not implemented for `()`
    |
-note: associated function defined here
+note: required by a bound in `FrameworkHostIntegrationBackend`
+  --> src/framework_common/capability.rs
+   |
+   | pub trait FrameworkHostIntegrationBackend<E: FrameworkEpoch, HostE: HostEpoch>:
+   |                                                                     ^^^^^^^^^ required by this bound in `FrameworkHostIntegrationBackend`
+
+error[E0277]: the trait bound `(): HostEpoch` is not satisfied
+  --> tests/cases/compile-fail/host_integration_requires_host_epoch.rs:18:81
+   |
+18 |     let _ = TypedCapabilityRegistration::register_host_integration::<TestEpoch, (), _>(
+   |                                                                                 ^^ the trait `HostEpoch` is not implemented for `()`
+   |
+note: required by a bound in `TypedCapabilityRegistration::<()>::register_host_integration`
   --> src/framework_common/catalog.rs
    |
-   |     pub fn register_host_integration<E, HostE, H: FrameworkHostIntegrationBackend<E, HostE>>(
-   |            ^^^^^^^^^^^^^^^^^^^^^^^^^
-help: provide the argument
-   |
-13 |     let _ = TypedCapabilityRegistration::register_host_integration(
-...
-16 |         FrameworkEpochId::new("vue-sfc-v3"),
-17 ~         /* HostEpochId */,
-18 ~         Present(HostCapable),
-   |
+   |     pub fn register_host_integration<
+   |            ------------------------- required by a bound in this associated function
+   |         E: FrameworkEpoch,
+   |         HostE: HostEpoch,
+   |                ^^^^^^^^^ required by this bound in `TypedCapabilityRegistration::<()>::register_host_integration`

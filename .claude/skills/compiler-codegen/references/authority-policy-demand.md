@@ -38,8 +38,11 @@ added to it.
 
 ## Catalog (summary)
 
-Catalog key = **adapter × epoch × capability**. The table is process-lifetime
-immutable. There is no runtime plugin load.
+Catalog key = **adapter × epoch × capability**. Every `register_*`
+constructor derives the catalog epoch id from an `E: FrameworkEpoch`
+type parameter; none takes a separate spelling. `CarrierFrontend` and
+`ProjectionBackend` themselves do not take an epoch type parameter.
+The table is process-lifetime immutable. There is no runtime plugin load.
 
 Identity methods (`adapter_id`, `carrier_language_id`) belong on the catalog
 row, not on a combined-authority trait.

@@ -8,11 +8,11 @@ use std::sync::Arc;
 
 use verter_language::{FrameworkAdapterId, LanguageId};
 
-use super::capability::{FrameworkEpochId, FrameworkSemanticAuthority, Present};
+use super::capability::{FrameworkSemanticAuthority, Present};
 use super::carrier_compiler::{CarrierCompiler, TemplateFacts};
 use super::catalog::{SemanticCap, TypedCapabilityRegistration};
 use super::vue_bridge::VueCarrierCompiler;
-use super::vue_carrier_frontend::VueCarrierFrontend;
+use super::vue_carrier_frontend::VueSfcV3;
 use super::FrameworkParseArtifact;
 
 /// Vue semantic authority: eval-source, template facts, typed identity.
@@ -39,7 +39,7 @@ impl VueSemanticAuthority {
     }
 }
 
-impl FrameworkSemanticAuthority<FrameworkEpochId> for VueSemanticAuthority {
+impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
     type EvalSource = Arc<str>;
     type TemplateFacts = TemplateFacts;
     type StyleMeaning = ();
@@ -59,10 +59,9 @@ impl FrameworkSemanticAuthority<FrameworkEpochId> for VueSemanticAuthority {
 #[must_use]
 pub fn vue_semantic_authority_registration(
 ) -> TypedCapabilityRegistration<SemanticCap<VueSemanticAuthority>> {
-    TypedCapabilityRegistration::register_semantic(
+    TypedCapabilityRegistration::register_semantic::<VueSfcV3, _>(
         VueSemanticAuthority.adapter_id(),
         VueSemanticAuthority.carrier_language_id(),
-        FrameworkEpochId::new(VueCarrierFrontend::EPOCH),
         Present(VueSemanticAuthority),
     )
 }

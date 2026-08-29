@@ -9,6 +9,9 @@ fn absent_capabilities_are_compile_time_truth() {
     tests.compile_fail(
         "tests/cases/compile-fail/register_frontend_does_not_take_runtime_identity.rs",
     );
+    tests.compile_fail("tests/cases/compile-fail/register_frontend_does_not_take_epoch_value.rs");
     tests.compile_fail("tests/cases/compile-fail/host_epoch_forbidden_on_frontend.rs");
     tests.compile_fail("tests/cases/compile-fail/host_integration_requires_host_epoch.rs");
+    tests.compile_fail("tests/cases/compile-fail/register_semantic_rejects_mismatched_epoch.rs");
+    tests.compile_fail("tests/cases/compile-fail/epoch_id_is_not_a_framework_epoch.rs");
 }

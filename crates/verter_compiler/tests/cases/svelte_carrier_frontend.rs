@@ -5,11 +5,11 @@
 use std::sync::Arc;
 
 use verter_compiler::framework_common::{
-    CarrierCompiler, CarrierFrontend, CatalogCapability, CatalogRow, FrameworkEpochId,
+    CarrierCompiler, CarrierFrontend, CatalogCapability, CatalogRow, FrameworkEpoch,
     ImmutableCapabilityCatalog,
 };
 use verter_compiler::svelte::{
-    svelte_carrier_frontend_registration, SvelteCarrierCompiler, SvelteCarrierFrontend,
+    svelte_carrier_frontend_registration, SvelteCarrierCompiler, SvelteCarrierFrontend, SvelteSfc5,
 };
 use verter_language::{
     parse_key_for, syntax_profile_id_for, FileLanguage, FrameworkAdapterId, LanguageId,
@@ -114,10 +114,7 @@ fn svelte_frontend_catalog_row_binds_svelte_adapter_identity() {
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Frontend);
     assert!(row.identity().host_epoch().is_none());
-    assert_eq!(
-        row.identity().epoch(),
-        &FrameworkEpochId::new(SvelteCarrierFrontend::EPOCH)
-    );
+    assert_eq!(row.identity().epoch().as_str(), SvelteSfc5::ID);
     let _frontend: &SvelteCarrierFrontend = row.frontend();
     let catalog =
         ImmutableCapabilityCatalog::<SvelteCarrierFrontend, (), (), (), ()>::try_from_rows([

@@ -14,13 +14,23 @@ use verter_language::ParseOptions;
 pub struct Present<T>(pub T);
 
 /// Framework semantic epoch identity (catalog key component).
+///
+/// Derived from a [`FrameworkEpoch`] type. Callers do not invent this
+/// independently of the register constructor's epoch type parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FrameworkEpochId(std::sync::Arc<str>);
 
 impl FrameworkEpochId {
+    pub(crate) fn from_type<E: FrameworkEpoch>() -> Self {
+        Self::new(E::ID)
+    }
+
     /// Intern-free epoch id from a stable spelling.
+    ///
+    /// Catalog constructors derive identity from [`FrameworkEpoch::ID`]
+    /// through [`Self::from_type`]; they do not take this value.
     #[must_use]
-    pub fn new(id: &str) -> Self {
+    pub(crate) fn new(id: &str) -> Self {
         Self(std::sync::Arc::from(id))
     }
 
@@ -31,14 +41,27 @@ impl FrameworkEpochId {
     }
 }
 
+/// Typed framework epoch. The type is the authority; catalog identity is
+/// derived from [`Self::ID`].
+pub trait FrameworkEpoch: Send + Sync + 'static {
+    /// Stable catalog spelling for this epoch type.
+    const ID: &'static str;
+}
+
 /// Host integration epoch identity (catalog key component for host rows).
+///
+/// Derived from a [`HostEpoch`] type on host-integration registrations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct HostEpochId(std::sync::Arc<str>);
 
 impl HostEpochId {
+    pub(crate) fn from_type<H: HostEpoch>() -> Self {
+        Self::new(H::ID)
+    }
+
     /// Host-epoch spelling.
     #[must_use]
-    pub fn new(id: &str) -> Self {
+    pub(crate) fn new(id: &str) -> Self {
         Self(std::sync::Arc::from(id))
     }
 
@@ -47,6 +70,13 @@ impl HostEpochId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Typed host epoch. The type is the authority; catalog identity is
+/// derived from [`Self::ID`].
+pub trait HostEpoch: Send + Sync + 'static {
+    /// Stable catalog spelling for this host epoch type.
+    const ID: &'static str;
 }
 
 /// Parse, registered geometry, unregistered parse artifacts, parse
@@ -70,7 +100,7 @@ pub trait CarrierFrontend: Send + Sync + 'static {
 }
 
 /// Per-framework interpretation: eval-source, template facts, style meaning.
-pub trait FrameworkSemanticAuthority<FrameworkEpoch>: Send + Sync + 'static {
+pub trait FrameworkSemanticAuthority<E: FrameworkEpoch>: Send + Sync + 'static {
     /// Position-preserving eval source.
     type EvalSource: Send + Sync + 'static;
     /// Admitted template facts.
@@ -82,7 +112,7 @@ pub trait FrameworkSemanticAuthority<FrameworkEpoch>: Send + Sync + 'static {
     /// Already-admitted parse artifact this authority consumes.
     type ParseArtifact: Send + Sync + 'static;
     /// Epoch marker consumed only as a type parameter.
-    const _EPOCH: PhantomData<FrameworkEpoch> = PhantomData;
+    const _EPOCH: PhantomData<E> = PhantomData;
 
     /// Position-preserving eval source over an admitted parse artifact.
     fn eval_source(&self, source: &str, artifact: &Self::ParseArtifact) -> Self::EvalSource;
@@ -102,21 +132,21 @@ pub trait ProjectionBackend: Send + Sync + 'static {
 }
 
 /// Runtime emit with statically selected targets; emits admitted facts only.
-pub trait RuntimeCompilerBackend<FrameworkEpoch>: Send + Sync + 'static {
+pub trait RuntimeCompilerBackend<E: FrameworkEpoch>: Send + Sync + 'static {
     /// Client runtime product.
     type RuntimeClient: Send + Sync + 'static;
     /// Server runtime product.
     type RuntimeServer: Send + Sync + 'static;
     /// Epoch marker consumed only as a type parameter.
-    const _EPOCH: PhantomData<FrameworkEpoch> = PhantomData;
+    const _EPOCH: PhantomData<E> = PhantomData;
 }
 
 /// Host/unplugin/session integration; composes parse + semantic into compile admission.
-pub trait FrameworkHostIntegrationBackend<FrameworkEpoch, HostEpoch>:
+pub trait FrameworkHostIntegrationBackend<E: FrameworkEpoch, HostE: HostEpoch>:
     Send + Sync + 'static
 {
     /// The sole compile-admission token type for this host epoch.
     type CompileAdmission: Send + Sync + 'static;
     /// Epoch markers consumed only as type parameters.
-    const _EPOCH: PhantomData<(FrameworkEpoch, HostEpoch)> = PhantomData;
+    const _EPOCH: PhantomData<(E, HostE)> = PhantomData;
 }

@@ -8,14 +8,14 @@ use std::sync::Arc;
 
 use verter_language::{FrameworkAdapterId, LanguageId};
 
-use crate::framework_common::capability::{FrameworkEpochId, FrameworkSemanticAuthority, Present};
+use crate::framework_common::capability::{FrameworkSemanticAuthority, Present};
 use crate::framework_common::catalog::{SemanticCap, TypedCapabilityRegistration};
 use crate::framework_common::CarrierCompiler;
 use crate::framework_common::FrameworkParseArtifact;
 use crate::framework_common::TemplateFacts;
 
 use super::carrier::SvelteCarrierCompiler;
-use super::carrier_frontend::SvelteCarrierFrontend;
+use super::carrier_frontend::SvelteSfc5;
 
 /// Svelte semantic authority: eval-source, template facts, typed identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,7 +41,7 @@ impl SvelteSemanticAuthority {
     }
 }
 
-impl FrameworkSemanticAuthority<FrameworkEpochId> for SvelteSemanticAuthority {
+impl FrameworkSemanticAuthority<SvelteSfc5> for SvelteSemanticAuthority {
     type EvalSource = Arc<str>;
     type TemplateFacts = TemplateFacts;
     type StyleMeaning = ();
@@ -61,10 +61,9 @@ impl FrameworkSemanticAuthority<FrameworkEpochId> for SvelteSemanticAuthority {
 #[must_use]
 pub fn svelte_semantic_authority_registration(
 ) -> TypedCapabilityRegistration<SemanticCap<SvelteSemanticAuthority>> {
-    TypedCapabilityRegistration::register_semantic(
+    TypedCapabilityRegistration::register_semantic::<SvelteSfc5, _>(
         SvelteSemanticAuthority.adapter_id(),
         SvelteSemanticAuthority.carrier_language_id(),
-        FrameworkEpochId::new(SvelteCarrierFrontend::EPOCH),
         Present(SvelteSemanticAuthority),
     )
 }

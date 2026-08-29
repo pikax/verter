@@ -11,7 +11,7 @@ use verter_language::{
     FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
 };
 
-use crate::framework_common::capability::{CarrierFrontend, FrameworkEpochId, Present};
+use crate::framework_common::capability::{CarrierFrontend, FrameworkEpoch, Present};
 use crate::framework_common::catalog::{FrontendCap, TypedCapabilityRegistration};
 use crate::framework_common::CarrierCompiler;
 
@@ -25,6 +25,14 @@ pub struct SvelteCarrierFrontend;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SvelteParseAdmission {
     _private: (),
+}
+
+/// Typed Svelte epoch. Catalog identity is derived from [`FrameworkEpoch::ID`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SvelteSfc5;
+
+impl FrameworkEpoch for SvelteSfc5 {
+    const ID: &'static str = SvelteCarrierFrontend::EPOCH;
 }
 
 impl SvelteCarrierFrontend {
@@ -62,10 +70,9 @@ impl CarrierFrontend for SvelteCarrierFrontend {
 #[must_use]
 pub fn svelte_carrier_frontend_registration(
 ) -> TypedCapabilityRegistration<FrontendCap<SvelteCarrierFrontend>> {
-    TypedCapabilityRegistration::register_frontend(
+    TypedCapabilityRegistration::register_frontend::<SvelteSfc5, _>(
         SvelteCarrierFrontend.adapter_id(),
         SvelteCarrierFrontend.carrier_language_id(),
-        FrameworkEpochId::new(SvelteCarrierFrontend::EPOCH),
         Present(SvelteCarrierFrontend),
     )
 }

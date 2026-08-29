@@ -6,8 +6,8 @@
 //! and that no production request route consults the catalog yet.
 
 use verter_compiler::framework_common::{
-    CarrierFrontend, CatalogCapability, CatalogRow, DuplicateCatalogIdentity, FrameworkEpochId,
-    FrameworkHostIntegrationBackend, FrameworkSemanticAuthority, HostEpochId,
+    CarrierFrontend, CatalogCapability, CatalogRow, DuplicateCatalogIdentity, FrameworkEpoch,
+    FrameworkHostIntegrationBackend, FrameworkSemanticAuthority, HostEpoch, HostEpochId,
     ImmutableCapabilityCatalog, Present, ProjectionBackend, RuntimeCompilerBackend,
     TypedCapabilityRegistration,
 };
@@ -40,7 +40,47 @@ impl ProjectionBackend for ProjectionOnly {
     type Declarations = ();
 }
 
-impl FrameworkSemanticAuthority<FrameworkEpochId> for SemanticCapable {
+struct TestEpoch;
+impl FrameworkEpoch for TestEpoch {
+    const ID: &'static str = "vue-sfc-v3";
+}
+
+struct HtmlEpoch;
+impl FrameworkEpoch for HtmlEpoch {
+    const ID: &'static str = "html-v1";
+}
+
+struct DtsEpoch;
+impl FrameworkEpoch for DtsEpoch {
+    const ID: &'static str = "dts-v1";
+}
+
+struct EpochOne;
+impl FrameworkEpoch for EpochOne {
+    const ID: &'static str = "e1";
+}
+
+struct EpochTwo;
+impl FrameworkEpoch for EpochTwo {
+    const ID: &'static str = "e2";
+}
+
+struct SessionHostEpoch;
+impl HostEpoch for SessionHostEpoch {
+    const ID: &'static str = "session-v1";
+}
+
+struct HostEpochA;
+impl HostEpoch for HostEpochA {
+    const ID: &'static str = "host-a";
+}
+
+struct HostEpochB;
+impl HostEpoch for HostEpochB {
+    const ID: &'static str = "host-b";
+}
+
+impl FrameworkSemanticAuthority<TestEpoch> for SemanticCapable {
     type EvalSource = ();
     type TemplateFacts = ();
     type StyleMeaning = ();
@@ -51,54 +91,60 @@ impl FrameworkSemanticAuthority<FrameworkEpochId> for SemanticCapable {
     fn template_facts(&self, _source: &str, _artifact: &()) {}
 }
 
-impl RuntimeCompilerBackend<FrameworkEpochId> for RuntimeCapable {
+impl RuntimeCompilerBackend<TestEpoch> for RuntimeCapable {
     type RuntimeClient = ();
     type RuntimeServer = ();
 }
 
-impl FrameworkHostIntegrationBackend<FrameworkEpochId, HostEpochId> for HostCapable {
+impl FrameworkHostIntegrationBackend<TestEpoch, SessionHostEpoch> for HostCapable {
+    type CompileAdmission = ();
+}
+
+impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochA> for HostCapable {
+    type CompileAdmission = ();
+}
+
+impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochB> for HostCapable {
     type CompileAdmission = ();
 }
 
 type TestCatalogRow =
     CatalogRow<ToolingFrontend, ProjectionOnly, SemanticCapable, RuntimeCapable, HostCapable>;
 
-fn frontend_row(adapter: &str, language: &str, epoch: &str) -> TestCatalogRow {
-    TypedCapabilityRegistration::register_frontend(
+fn frontend_row<E: FrameworkEpoch>(adapter: &str, language: &str) -> TestCatalogRow {
+    TypedCapabilityRegistration::register_frontend::<E, _>(
         FrameworkAdapterId::new(adapter),
         LanguageId::new(language),
-        FrameworkEpochId::new(epoch),
         Present(ToolingFrontend),
     )
     .into()
 }
 
-fn projection_row(adapter: &str, language: &str, epoch: &str) -> TestCatalogRow {
-    TypedCapabilityRegistration::register_projection(
+fn projection_row<E: FrameworkEpoch>(adapter: &str, language: &str) -> TestCatalogRow {
+    TypedCapabilityRegistration::register_projection::<E, _>(
         FrameworkAdapterId::new(adapter),
         LanguageId::new(language),
-        FrameworkEpochId::new(epoch),
         Present(ProjectionOnly),
     )
     .into()
 }
 
-fn runtime_row(adapter: &str, language: &str, epoch: &str) -> TestCatalogRow {
-    TypedCapabilityRegistration::register_runtime(
+fn runtime_row(adapter: &str, language: &str) -> TestCatalogRow {
+    TypedCapabilityRegistration::register_runtime::<TestEpoch, _>(
         FrameworkAdapterId::new(adapter),
         LanguageId::new(language),
-        FrameworkEpochId::new(epoch),
         Present(RuntimeCapable),
     )
     .into()
 }
 
-fn host_row(adapter: &str, language: &str, epoch: &str, host: &str) -> TestCatalogRow {
-    TypedCapabilityRegistration::register_host_integration(
+fn host_row<HostE: HostEpoch>(adapter: &str, language: &str) -> TestCatalogRow
+where
+    HostCapable: FrameworkHostIntegrationBackend<TestEpoch, HostE>,
+{
+    TypedCapabilityRegistration::register_host_integration::<TestEpoch, HostE, _>(
         FrameworkAdapterId::new(adapter),
         LanguageId::new(language),
-        FrameworkEpochId::new(epoch),
-        HostEpochId::new(host),
         Present(HostCapable),
     )
     .into()
@@ -106,70 +152,70 @@ fn host_row(adapter: &str, language: &str, epoch: &str, host: &str) -> TestCatal
 
 #[test]
 fn frontend_only_registration_does_not_require_runtime_backend() {
-    let row = TypedCapabilityRegistration::register_frontend(
+    let row = TypedCapabilityRegistration::register_frontend::<HtmlEpoch, _>(
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
-        FrameworkEpochId::new("html-v1"),
         Present(ToolingFrontend),
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Frontend);
+    assert_eq!(row.identity().epoch().as_str(), HtmlEpoch::ID);
     assert!(row.identity().host_epoch().is_none());
     let _ = row.frontend();
 }
 
 #[test]
 fn projection_only_registration_does_not_require_runtime_backend() {
-    let row = TypedCapabilityRegistration::register_projection(
+    let row = TypedCapabilityRegistration::register_projection::<DtsEpoch, _>(
         FrameworkAdapterId::new("api"),
         LanguageId::new("dts"),
-        FrameworkEpochId::new("dts-v1"),
         Present(ProjectionOnly),
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Projection);
+    assert_eq!(row.identity().epoch().as_str(), DtsEpoch::ID);
     assert!(row.identity().host_epoch().is_none());
     let _ = row.projection();
 }
 
 #[test]
 fn runtime_capable_registration_binds_a_real_runtime_backend() {
-    let row = TypedCapabilityRegistration::register_runtime(
+    let row = TypedCapabilityRegistration::register_runtime::<TestEpoch, _>(
         FrameworkAdapterId::new("rt"),
         LanguageId::new("vue"),
-        FrameworkEpochId::new("vue-sfc-v3"),
         Present(RuntimeCapable),
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Runtime);
+    assert_eq!(row.identity().epoch().as_str(), TestEpoch::ID);
     assert!(row.identity().host_epoch().is_none());
     let _ = row.runtime();
 }
 
 #[test]
 fn semantic_and_host_registrations_are_typed_without_stubs() {
-    let semantic = TypedCapabilityRegistration::register_semantic(
+    let semantic = TypedCapabilityRegistration::register_semantic::<TestEpoch, _>(
         FrameworkAdapterId::new("sem"),
         LanguageId::new("vue"),
-        FrameworkEpochId::new("vue-sfc-v3"),
         Present(SemanticCapable),
     );
-    let host = TypedCapabilityRegistration::register_host_integration(
-        FrameworkAdapterId::new("host"),
-        LanguageId::new("vue"),
-        FrameworkEpochId::new("vue-sfc-v3"),
-        HostEpochId::new("session-v1"),
-        Present(HostCapable),
-    );
+    let host =
+        TypedCapabilityRegistration::register_host_integration::<TestEpoch, SessionHostEpoch, _>(
+            FrameworkAdapterId::new("host"),
+            LanguageId::new("vue"),
+            Present(HostCapable),
+        );
     assert_eq!(
         semantic.identity().capability(),
         CatalogCapability::Semantic
     );
+    assert_eq!(semantic.identity().epoch().as_str(), TestEpoch::ID);
     assert!(semantic.identity().host_epoch().is_none());
     assert_eq!(
         host.identity().capability(),
         CatalogCapability::HostIntegration
     );
+    assert_eq!(host.identity().epoch().as_str(), TestEpoch::ID);
     assert_eq!(
         host.identity().host_epoch().map(HostEpochId::as_str),
-        Some("session-v1")
+        Some(SessionHostEpoch::ID)
     );
     let _ = semantic.semantic();
     let _ = host.host_integration();
@@ -177,37 +223,32 @@ fn semantic_and_host_registrations_are_typed_without_stubs() {
 
 #[test]
 fn host_epoch_is_present_only_on_host_integration_rows() {
-    let frontend = TypedCapabilityRegistration::register_frontend(
+    let frontend = TypedCapabilityRegistration::register_frontend::<HtmlEpoch, _>(
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
-        FrameworkEpochId::new("html-v1"),
         Present(ToolingFrontend),
     );
-    let projection = TypedCapabilityRegistration::register_projection(
+    let projection = TypedCapabilityRegistration::register_projection::<DtsEpoch, _>(
         FrameworkAdapterId::new("api"),
         LanguageId::new("dts"),
-        FrameworkEpochId::new("dts-v1"),
         Present(ProjectionOnly),
     );
-    let semantic = TypedCapabilityRegistration::register_semantic(
+    let semantic = TypedCapabilityRegistration::register_semantic::<TestEpoch, _>(
         FrameworkAdapterId::new("sem"),
         LanguageId::new("vue"),
-        FrameworkEpochId::new("vue-sfc-v3"),
         Present(SemanticCapable),
     );
-    let runtime = TypedCapabilityRegistration::register_runtime(
+    let runtime = TypedCapabilityRegistration::register_runtime::<TestEpoch, _>(
         FrameworkAdapterId::new("rt"),
         LanguageId::new("vue"),
-        FrameworkEpochId::new("vue-sfc-v3"),
         Present(RuntimeCapable),
     );
-    let host = TypedCapabilityRegistration::register_host_integration(
-        FrameworkAdapterId::new("host"),
-        LanguageId::new("vue"),
-        FrameworkEpochId::new("vue-sfc-v3"),
-        HostEpochId::new("session-v1"),
-        Present(HostCapable),
-    );
+    let host =
+        TypedCapabilityRegistration::register_host_integration::<TestEpoch, SessionHostEpoch, _>(
+            FrameworkAdapterId::new("host"),
+            LanguageId::new("vue"),
+            Present(HostCapable),
+        );
     assert!(frontend.identity().host_epoch().is_none());
     assert!(projection.identity().host_epoch().is_none());
     assert!(semantic.identity().host_epoch().is_none());
@@ -216,8 +257,41 @@ fn host_epoch_is_present_only_on_host_integration_rows() {
 }
 
 #[test]
-fn register_semantic_accepts_authority_generic_over_a_local_epoch_type() {
+fn register_frontend_catalog_epoch_is_derived_from_the_epoch_type() {
     struct LocalEpoch;
+    impl FrameworkEpoch for LocalEpoch {
+        const ID: &'static str = "local-frontend-epoch";
+    }
+    let row = TypedCapabilityRegistration::register_frontend::<LocalEpoch, _>(
+        FrameworkAdapterId::new("tooling"),
+        LanguageId::new("html"),
+        Present(ToolingFrontend),
+    );
+    assert_eq!(row.identity().epoch().as_str(), LocalEpoch::ID);
+    let _ = row.frontend();
+}
+
+#[test]
+fn register_projection_catalog_epoch_is_derived_from_the_epoch_type() {
+    struct LocalEpoch;
+    impl FrameworkEpoch for LocalEpoch {
+        const ID: &'static str = "local-projection-epoch";
+    }
+    let row = TypedCapabilityRegistration::register_projection::<LocalEpoch, _>(
+        FrameworkAdapterId::new("api"),
+        LanguageId::new("dts"),
+        Present(ProjectionOnly),
+    );
+    assert_eq!(row.identity().epoch().as_str(), LocalEpoch::ID);
+    let _ = row.projection();
+}
+
+#[test]
+fn register_semantic_catalog_epoch_is_derived_from_the_epoch_type() {
+    struct LocalEpoch;
+    impl FrameworkEpoch for LocalEpoch {
+        const ID: &'static str = "local-epoch";
+    }
     struct LocalSemantic;
     impl FrameworkSemanticAuthority<LocalEpoch> for LocalSemantic {
         type EvalSource = ();
@@ -229,21 +303,20 @@ fn register_semantic_accepts_authority_generic_over_a_local_epoch_type() {
         fn eval_source(&self, _source: &str, _artifact: &()) {}
         fn template_facts(&self, _source: &str, _artifact: &()) {}
     }
-    let row = TypedCapabilityRegistration::register_semantic(
+    let row = TypedCapabilityRegistration::register_semantic::<LocalEpoch, _>(
         FrameworkAdapterId::new("sem"),
         LanguageId::new("vue"),
-        FrameworkEpochId::new("vue-sfc-v3"),
         Present(LocalSemantic),
     );
-    assert_eq!(row.identity().epoch().as_str(), "vue-sfc-v3");
+    assert_eq!(row.identity().epoch().as_str(), LocalEpoch::ID);
     let _ = row.semantic();
 }
 
 #[test]
 fn duplicate_identities_fail_construction() {
     let err = ImmutableCapabilityCatalog::try_from_rows([
-        frontend_row("vue", "vue", "vue-sfc-v3"),
-        frontend_row("vue", "vue", "vue-sfc-v3"),
+        frontend_row::<TestEpoch>("vue", "vue"),
+        frontend_row::<TestEpoch>("vue", "vue"),
     ])
     .expect_err("duplicate adapter/epoch/capability must fail");
     assert!(matches!(err, DuplicateCatalogIdentity { .. }));
@@ -252,9 +325,9 @@ fn duplicate_identities_fail_construction() {
 #[test]
 fn duplicate_frontend_is_detected_across_languages_with_intervening_projection() {
     let err = ImmutableCapabilityCatalog::try_from_rows([
-        frontend_row("vue", "a", "vue-sfc-v3"),
-        projection_row("vue", "m", "vue-sfc-v3"),
-        frontend_row("vue", "z", "vue-sfc-v3"),
+        frontend_row::<TestEpoch>("vue", "a"),
+        projection_row::<TestEpoch>("vue", "m"),
+        frontend_row::<TestEpoch>("vue", "z"),
     ])
     .expect_err("same adapter/epoch/Frontend is duplicate regardless of language");
     assert_eq!(err.identity.capability(), CatalogCapability::Frontend);
@@ -265,8 +338,8 @@ fn duplicate_frontend_is_detected_across_languages_with_intervening_projection()
 #[test]
 fn host_epoch_distinguishes_otherwise_equal_rows() {
     ImmutableCapabilityCatalog::try_from_rows([
-        host_row("vue", "vue", "vue-sfc-v3", "host-a"),
-        host_row("vue", "vue", "vue-sfc-v3", "host-b"),
+        host_row::<HostEpochA>("vue", "vue"),
+        host_row::<HostEpochB>("vue", "vue"),
     ])
     .expect("distinct host epochs must coexist");
 }
@@ -274,8 +347,8 @@ fn host_epoch_distinguishes_otherwise_equal_rows() {
 #[test]
 fn same_host_epoch_duplicate_fails_construction() {
     let err = ImmutableCapabilityCatalog::try_from_rows([
-        host_row("vue", "vue", "vue-sfc-v3", "host-a"),
-        host_row("vue", "vue", "vue-sfc-v3", "host-a"),
+        host_row::<HostEpochA>("vue", "vue"),
+        host_row::<HostEpochA>("vue", "vue"),
     ])
     .expect_err("same adapter/epoch/host-epoch/capability must fail");
     assert_eq!(
@@ -284,24 +357,23 @@ fn same_host_epoch_duplicate_fails_construction() {
     );
     assert_eq!(
         err.identity.host_epoch().map(HostEpochId::as_str),
-        Some("host-a")
+        Some(HostEpochA::ID)
     );
 }
 
 #[test]
 fn frozen_catalog_retains_typed_capability_payloads() {
     let catalog = ImmutableCapabilityCatalog::try_from_rows([
-        frontend_row("tooling", "html", "html-v1"),
-        projection_row("api", "dts", "dts-v1"),
-        runtime_row("rt", "vue", "vue-sfc-v3"),
-        TypedCapabilityRegistration::register_semantic(
+        frontend_row::<HtmlEpoch>("tooling", "html"),
+        projection_row::<DtsEpoch>("api", "dts"),
+        runtime_row("rt", "vue"),
+        TypedCapabilityRegistration::register_semantic::<TestEpoch, _>(
             FrameworkAdapterId::new("sem"),
             LanguageId::new("vue"),
-            FrameworkEpochId::new("vue-sfc-v3"),
             Present(SemanticCapable),
         )
         .into(),
-        host_row("host", "vue", "vue-sfc-v3", "session-v1"),
+        host_row::<SessionHostEpoch>("host", "vue"),
     ])
     .expect("distinct capabilities must coexist");
     let mut saw_frontend = false;
@@ -347,14 +419,14 @@ fn frozen_catalog_retains_typed_capability_payloads() {
 #[test]
 fn catalog_iteration_is_deterministic_regardless_of_insert_order() {
     let rows_a = [
-        projection_row("b", "b", "e2"),
-        frontend_row("a", "a", "e1"),
-        runtime_row("a", "a", "e2"),
+        projection_row::<EpochTwo>("b", "b"),
+        frontend_row::<EpochOne>("a", "a"),
+        runtime_row("a", "a"),
     ];
     let rows_b = [
-        runtime_row("a", "a", "e2"),
-        frontend_row("a", "a", "e1"),
-        projection_row("b", "b", "e2"),
+        runtime_row("a", "a"),
+        frontend_row::<EpochOne>("a", "a"),
+        projection_row::<EpochTwo>("b", "b"),
     ];
     let catalog_a = ImmutableCapabilityCatalog::try_from_rows(rows_a).unwrap();
     let catalog_b = ImmutableCapabilityCatalog::try_from_rows(rows_b).unwrap();

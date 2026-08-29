@@ -1,7 +1,7 @@
 error[E0599]: no method named `runtime` found for struct `TypedCapabilityRegistration<ProjectionCap<ProjectionOnly>>` in the current scope
-  --> tests/cases/compile-fail/projection_only_has_no_runtime_accessor.rs:21:17
+  --> tests/cases/compile-fail/projection_only_has_no_runtime_accessor.rs:25:17
    |
-21 |     let _ = row.runtime();
+25 |     let _ = row.runtime();
    |                 ^^^^^^^ method not found in `TypedCapabilityRegistration<ProjectionCap<ProjectionOnly>>`
    |
    = note: the method was found for `TypedCapabilityRegistration<RuntimeCap<R>>`

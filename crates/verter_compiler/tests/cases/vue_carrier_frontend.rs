@@ -7,7 +7,7 @@ use std::sync::Arc;
 use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
     vue_carrier_frontend_registration, CarrierCompiler, CarrierFrontend, CatalogCapability,
-    CatalogRow, FrameworkEpochId, ImmutableCapabilityCatalog, VueCarrierFrontend,
+    CatalogRow, FrameworkEpoch, ImmutableCapabilityCatalog, VueCarrierFrontend, VueSfcV3,
 };
 use verter_language::{
     parse_key_for, syntax_profile_id_for, FileLanguage, FrameworkAdapterId, LanguageId,
@@ -107,10 +107,7 @@ fn vue_frontend_catalog_row_binds_vue_adapter_identity() {
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Frontend);
     assert!(row.identity().host_epoch().is_none());
-    assert_eq!(
-        row.identity().epoch(),
-        &FrameworkEpochId::new(VueCarrierFrontend::EPOCH)
-    );
+    assert_eq!(row.identity().epoch().as_str(), VueSfcV3::ID);
     let _frontend: &VueCarrierFrontend = row.frontend();
     let catalog =
         ImmutableCapabilityCatalog::<VueCarrierFrontend, (), (), (), ()>::try_from_rows([

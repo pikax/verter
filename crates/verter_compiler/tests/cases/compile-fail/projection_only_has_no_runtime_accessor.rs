@@ -1,5 +1,5 @@
 use verter_compiler::framework_common::{
-    FrameworkEpochId, Present, ProjectionBackend, TypedCapabilityRegistration,
+    FrameworkEpoch, Present, ProjectionBackend, TypedCapabilityRegistration,
 };
 use verter_language::{FrameworkAdapterId, LanguageId};
 
@@ -11,11 +11,15 @@ impl ProjectionBackend for ProjectionOnly {
     type Declarations = ();
 }
 
+struct DtsEpoch;
+impl FrameworkEpoch for DtsEpoch {
+    const ID: &'static str = "dts-v1";
+}
+
 fn main() {
-    let row = TypedCapabilityRegistration::register_projection(
+    let row = TypedCapabilityRegistration::register_projection::<DtsEpoch, _>(
         FrameworkAdapterId::new("api"),
         LanguageId::new("dts"),
-        FrameworkEpochId::new("dts-v1"),
         Present(ProjectionOnly),
     );
     let _ = row.runtime();

@@ -57,6 +57,13 @@ eventual artifact relation, not a sixth authority.
 ## Catalog
 
 - **Key:** `adapter × epoch × capability`.
+- **Epoch type is the authority.** `FrameworkSemanticAuthority<E>`,
+  `RuntimeCompilerBackend<E>`, and `FrameworkHostIntegrationBackend<E, HostE>`
+  take a typed epoch. `CarrierFrontend` and `ProjectionBackend` do not; their
+  `register_frontend` / `register_projection` constructors still take
+  `E: FrameworkEpoch`. Catalog `FrameworkEpochId` / `HostEpochId` are derived
+  from that type (`E::ID` / `HostE::ID`). A backend cannot be registered under
+  a different epoch spelling: there is no independent epoch-value argument.
 - **Table:** process-lifetime immutable. Built once. No insert, replace, or
   unload after process start.
 - **No runtime plugin.** Dynamic ABI / plugin load is forbidden.

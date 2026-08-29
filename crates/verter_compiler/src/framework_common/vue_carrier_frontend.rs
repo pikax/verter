@@ -10,7 +10,7 @@ use verter_language::{
     FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
 };
 
-use super::capability::{CarrierFrontend, FrameworkEpochId, Present};
+use super::capability::{CarrierFrontend, FrameworkEpoch, Present};
 use super::catalog::{FrontendCap, TypedCapabilityRegistration};
 use super::vue_bridge::VueCarrierCompiler;
 use super::CarrierCompiler;
@@ -23,6 +23,14 @@ pub struct VueCarrierFrontend;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VueParseAdmission {
     _private: (),
+}
+
+/// Typed Vue SFC epoch. Catalog identity is derived from [`FrameworkEpoch::ID`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VueSfcV3;
+
+impl FrameworkEpoch for VueSfcV3 {
+    const ID: &'static str = VueCarrierFrontend::EPOCH;
 }
 
 impl VueCarrierFrontend {
@@ -60,10 +68,9 @@ impl CarrierFrontend for VueCarrierFrontend {
 #[must_use]
 pub fn vue_carrier_frontend_registration(
 ) -> TypedCapabilityRegistration<FrontendCap<VueCarrierFrontend>> {
-    TypedCapabilityRegistration::register_frontend(
+    TypedCapabilityRegistration::register_frontend::<VueSfcV3, _>(
         VueCarrierFrontend.adapter_id(),
         VueCarrierFrontend.carrier_language_id(),
-        FrameworkEpochId::new(VueCarrierFrontend::EPOCH),
         Present(VueCarrierFrontend),
     )
 }

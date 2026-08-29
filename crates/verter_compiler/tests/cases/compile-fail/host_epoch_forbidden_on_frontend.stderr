@@ -1,20 +1,31 @@
-error[E0061]: this function takes 4 arguments but 5 arguments were supplied
-  --> tests/cases/compile-fail/host_epoch_forbidden_on_frontend.rs:23:13
+error[E0624]: associated function `new` is private
+  --> tests/cases/compile-fail/host_epoch_forbidden_on_frontend.rs:31:22
    |
-23 |     let _ = TypedCapabilityRegistration::register_frontend(
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+31 |         HostEpochId::new("session-v1"),
+   |                      ^^^ private associated function
+   |
+  ::: src/framework_common/capability.rs
+   |
+   |     pub(crate) fn new(id: &str) -> Self {
+   |     ----------------------------------- private associated function defined here
+
+error[E0061]: this function takes 3 arguments but 4 arguments were supplied
+  --> tests/cases/compile-fail/host_epoch_forbidden_on_frontend.rs:28:13
+   |
+28 |     let _ = TypedCapabilityRegistration::register_frontend::<HtmlEpoch, _>(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
-27 |         HostEpochId::new("session-v1"),
-   |         ------------------------------ unexpected argument #4 of type `HostEpochId`
+31 |         HostEpochId::new("session-v1"),
+   |         ------------------------------ unexpected argument #3 of type `HostEpochId`
    |
 note: associated function defined here
   --> src/framework_common/catalog.rs
    |
-   |     pub fn register_frontend<F: CarrierFrontend>(
+   |     pub fn register_frontend<E: FrameworkEpoch, F: CarrierFrontend>(
    |            ^^^^^^^^^^^^^^^^^
 help: remove the extra argument
    |
-26 -         FrameworkEpochId::new("html-v1"),
-27 -         HostEpochId::new("session-v1"),
-26 +         FrameworkEpochId::new("html-v1"),
+30 -         LanguageId::new("html"),
+31 -         HostEpochId::new("session-v1"),
+30 +         LanguageId::new("html"),
    |
