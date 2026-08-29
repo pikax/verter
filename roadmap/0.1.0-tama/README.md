@@ -29,4 +29,4 @@ node scripts/githubctl/githubctl.mjs sync-issues --apply --train TRAIN --ignore-
 node scripts/githubctl/githubctl.mjs sync-issues --apply --nodes ID --refresh-content
 ```
 
-See `APPLICATION.md` for the implementation and review workflow. The historical failure, maintainer ruling, and reasons for intentionally superseding ORC0 are recorded in `decisions/2026-08-28-trusted-implementation-ledger.md`. The simpler post-GH issue mapping and PR flow are recorded in `decisions/2026-08-28-minimal-github-issue-mapping.md`.
+See `APPLICATION.md` for the implementation and review workflow. The historical failure, maintainer ruling, and reasons for intentionally superseding ORC0 are recorded in `decisions/2026-08-28-trusted-implementation-ledger.md`. The simpler post-GH issue mapping and PR flow are recorded in `decisions/2026-08-28-minimal-github-issue-mapping.md`. The maintainer-directed authority correction to the rev11.flow D-train charters (source-verified owners and API boundaries, AMD-004 debt ownership, atomic D1+D2 landing) is recorded in `decisions/2026-08-29-rev11-flow-authority-correction.md`.
