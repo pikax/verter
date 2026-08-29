@@ -145,6 +145,8 @@ function run(fx, extra = {}) {
     issueContentCatalog: issueContentCatalog(),
     syncPrerequisites: [],
     createBlockers: true,
+    projectIssues: false,
+    syncTrainParents: false,
     ...extra,
   });
 }

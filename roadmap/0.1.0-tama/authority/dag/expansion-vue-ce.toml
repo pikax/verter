@@ -19,6 +19,7 @@ review_profile = "architecture-3"
 dispatchable = true
 optional = false
 release_gating = "product"
+gh_milestone = "0.1.0"
 external_requirements = []
 charter = "charters/expansion-vue-ce/VCE0.md"
 implementation_effort_min = "high"

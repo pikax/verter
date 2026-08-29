@@ -231,17 +231,29 @@ export function releasePlan(options) {
   const ledger = loadLedgerFile(ledgerPath);
   const implemented = new Set(ledger.implemented.map((row) => row.node_id));
   const mappings = new Map(ledger.github_issue.map((row) => [row.gh_issue, row]));
+  const nodeById = new Map(authority.nodes.map((row) => [row.id, row]));
+  const authorityTrains = new Set(authority.nodes.map((row) => row.train));
+  for (const row of ledger.github_train_issue) {
+    if (!authorityTrains.has(row.train)) {
+      throw new GitHubAdapterError(`unknown train mapping ${row.train}`);
+    }
+  }
+  const trainMappings = new Map(ledger.github_train_issue.map((row) => [row.gh_issue, row]));
   const state = deriveState(authority, { implemented: ledger.implemented });
   const items = options.adapter
     .listMilestoneIssues(options.milestone)
     .map((row) => {
       const mapping = mappings.get(row.number) ?? null;
+      const trainMapping = trainMappings.get(row.number) ?? null;
       const nodeId = mapping?.node_id ?? null;
+      const node = nodeId == null ? null : nodeById.get(nodeId);
       return {
         number: row.number,
         title: row.title,
         state: row.state,
         node_id: nodeId,
+        train_parent: trainMapping?.train ?? null,
+        release_gating: node?.release_gating ?? null,
         mapped: nodeId != null,
         implemented: nodeId != null && implemented.has(nodeId),
       };
@@ -255,7 +267,7 @@ export function releasePlan(options) {
       throw new AmbiguousWaiverError(`--waive-item ${number} is not a milestone item`);
     }
     const item = items.find((row) => row.number === number);
-    if (item.mapped) {
+    if (item.mapped || item.train_parent != null) {
       throw new AmbiguousWaiverError(`--waive-item ${number} names a mapped DAG item`);
     }
   }
@@ -264,6 +276,8 @@ export function releasePlan(options) {
   const ready = [];
   const blockers = [];
   for (const item of items) {
+    if (item.train_parent != null) continue;
+    if (item.release_gating === "non_release") continue;
     if (!item.mapped) {
       if (!waived.has(item.number)) {
         blockers.push({ kind: "ReleaseBlocker", reason: "unmapped", gh_issue: item.number });

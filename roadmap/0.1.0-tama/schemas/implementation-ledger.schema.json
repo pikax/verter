@@ -35,6 +35,18 @@
           "sync_to_github": { "type": "boolean" }
         }
       }
+    },
+    "github_train_issue": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["train", "gh_issue"],
+        "properties": {
+          "train": { "type": "string", "minLength": 1 },
+          "gh_issue": { "type": "integer", "minimum": 1 }
+        }
+      }
     }
   }
 }

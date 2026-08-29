@@ -19,6 +19,7 @@ review_profile = "semantic-3"
 dispatchable = true
 optional = false
 release_gating = "external"
+gh_milestone = "0.0.3"
 external_requirements = ["maintainer_rev11_repair_freeze_lift","maintainer_successor_genesis"]
 charter = "charters/governance-governance/BR0.md"
 implementation_effort_min = "high"

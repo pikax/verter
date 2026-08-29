@@ -1432,7 +1432,122 @@ node_id = "OPT0"
 gh_issue = 406
 sync_to_github = true
 
+[[github_train_issue]]
+train = "compiler.compiler-bridge"
+gh_issue = 104
+
 [[github_issue]]
 node_id = "VST1"
 gh_issue = 407
 sync_to_github = true
+[[github_train_issue]]
+train = "rev11.flow"
+gh_issue = 408
+[[github_train_issue]]
+train = "rev11.public-typeinfo"
+gh_issue = 409
+[[github_train_issue]]
+train = "rev11.style"
+gh_issue = 410
+[[github_train_issue]]
+train = "rev11.semantic-compile"
+gh_issue = 411
+[[github_train_issue]]
+train = "rev11.inputs"
+gh_issue = 412
+[[github_train_issue]]
+train = "rev11.core"
+gh_issue = 413
+[[github_train_issue]]
+train = "rev11.query-runtime"
+gh_issue = 414
+[[github_train_issue]]
+train = "rev11.scheduler-runtime"
+gh_issue = 415
+[[github_train_issue]]
+train = "rev11.cache-runtime"
+gh_issue = 416
+[[github_train_issue]]
+train = "rev11.host-runtime"
+gh_issue = 417
+[[github_train_issue]]
+train = "rev11.provider-runtime"
+gh_issue = 418
+[[github_train_issue]]
+train = "rev11.publication"
+gh_issue = 419
+[[github_train_issue]]
+train = "rev11.host-session"
+gh_issue = 420
+[[github_train_issue]]
+train = "rev11.typescript-mapper"
+gh_issue = 421
+[[github_train_issue]]
+train = "rev11.finalization"
+gh_issue = 422
+[[github_train_issue]]
+train = "governance.governance"
+gh_issue = 423
+[[github_train_issue]]
+train = "expansion.kernel"
+gh_issue = 424
+[[github_train_issue]]
+train = "compiler.compiler-core"
+gh_issue = 425
+[[github_train_issue]]
+train = "expansion.formatter"
+gh_issue = 426
+[[github_train_issue]]
+train = "expansion.lint"
+gh_issue = 427
+[[github_train_issue]]
+train = "compiler.compiler-perf"
+gh_issue = 428
+[[github_train_issue]]
+train = "expansion.cli"
+gh_issue = 429
+[[github_train_issue]]
+train = "expansion.engine-provisioning"
+gh_issue = 430
+[[github_train_issue]]
+train = "expansion.native-checker"
+gh_issue = 431
+[[github_train_issue]]
+train = "compiler.svelte-compiler"
+gh_issue = 432
+[[github_train_issue]]
+train = "compiler.svelte-style"
+gh_issue = 433
+[[github_train_issue]]
+train = "expansion.language-service"
+gh_issue = 434
+[[github_train_issue]]
+train = "compiler.vue-compiler"
+gh_issue = 435
+[[github_train_issue]]
+train = "expansion.skills"
+gh_issue = 436
+[[github_train_issue]]
+train = "expansion.html-wc"
+gh_issue = 437
+[[github_train_issue]]
+train = "expansion.svelte-ce"
+gh_issue = 438
+[[github_train_issue]]
+train = "expansion.vue-ce"
+gh_issue = 439
+[[github_train_issue]]
+train = "expansion.custom-elements"
+gh_issue = 440
+[[github_train_issue]]
+train = "expansion.architecture-proof"
+gh_issue = 441
+[[github_train_issue]]
+train = "compiler.vue-style"
+gh_issue = 442
+[[github_train_issue]]
+train = "compiler.compiler-optimization"
+gh_issue = 443
+[[github_train_issue]]
+train = "compiler.vue-style-query"
+gh_issue = 444

@@ -132,6 +132,23 @@ export function labelsForNode(node, catalog) {
   return [area, problem, ...frameworks, "origin:ai"];
 }
 
+export function labelsForTrain(trainIssue, catalog) {
+  const train = requiredText(trainIssue?.train, "train issue train");
+  const area = exactlyOne(
+    matchingRuleLabels(catalog.areaRules, "trains", train),
+    `area classification for ${train}`,
+  );
+  const problem = requiredText(trainIssue?.problem_label, "train issue problem_label");
+  if (
+    !problem.startsWith("problem:") ||
+    !catalog.labels.some((label) => normalized(label.name) === normalized(problem))
+  ) {
+    throw new IssueSyncError(`problem classification for ${train} references unknown ${problem}`);
+  }
+  const frameworks = matchingRuleLabels(catalog.frameworkRules, "trains", train);
+  return [area, problem, ...frameworks, "origin:ai"];
+}
+
 export function isManagedIssueLabel(name, catalog) {
   const candidate = normalized(requiredText(name, "issue label"));
   return (

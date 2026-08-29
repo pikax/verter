@@ -42,7 +42,27 @@ const LIVE_LEDGER = path.join(REPO_ROOT, "roadmap/0.1.0-tama/authority/state/imp
 const AUTHORITY = loadAuthority();
 const LABEL_CATALOG = loadIssueLabelCatalog(AUTHORITY.packageRoot);
 const MILESTONE_CATALOG = loadIssueMilestoneCatalog(AUTHORITY.packageRoot);
-const CLI_CONTENT_NODE = loadIssueContentCatalog(AUTHORITY.packageRoot).issues[0].node_id;
+const IMPLEMENTED_NODE_IDS = new Set(AUTHORITY.ledger.implemented.map((row) => row.node_id));
+const CLI_IMPLEMENTED_NODE_IDS = [...IMPLEMENTED_NODE_IDS].sort();
+const REVIEWED_ISSUES = loadIssueContentCatalog(AUTHORITY.packageRoot).issues;
+const CLI_CONTENT_NODE = REVIEWED_ISSUES.find((row) => {
+  const node = AUTHORITY.nodes.find((candidate) => candidate.id === row.node_id);
+  return node?.semantic_role !== "history" && !IMPLEMENTED_NODE_IDS.has(row.node_id);
+})?.node_id;
+if (!CLI_CONTENT_NODE) throw new Error("expected active reviewed issue content for CLI tests");
+const CLI_BLOCKED_NODE = REVIEWED_ISSUES.map((row) =>
+  AUTHORITY.nodes.find((candidate) => candidate.id === row.node_id),
+)
+  .filter(Boolean)
+  .filter(
+    (row) =>
+      row.semantic_role !== "history" &&
+      !IMPLEMENTED_NODE_IDS.has(row.id) &&
+      row.predecessors.some((predecessor) => !IMPLEMENTED_NODE_IDS.has(predecessor)),
+  )
+  .sort((left, right) => left.id.localeCompare(right.id))[0];
+if (!CLI_BLOCKED_NODE)
+  throw new Error("expected active reviewed work with an unresolved dependency");
 const ISSUE_CONTENT_CATALOG = {
   byNode: new Map(
     AUTHORITY.nodes.map((node) => [
@@ -113,7 +133,7 @@ sync_to_github = ${syncToGithub}
 function writeLedger(options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-sync-"));
   const file = path.join(dir, "implemented.toml");
-  const implemented = options.implemented ?? ["ORC0", "GH0", "GH1"];
+  const implemented = options.implemented ?? ["sync-capability"];
   const issues = options.issues ?? [];
   const parts = ["schema = 1", "", ...implemented.map(implementedBlock)];
   for (const row of issues) parts.push(mappingBlock(row.node_id, row.gh_issue, row.sync_to_github));
@@ -133,6 +153,9 @@ function syncIssues(options) {
   return syncIssuesImpl({
     issueContentCatalog: ISSUE_CONTENT_CATALOG,
     ignoreBlockers: true,
+    projectIssues: false,
+    syncTrainParents: false,
+    syncPrerequisites: ["sync-capability"],
     ...options,
   });
 }
@@ -584,15 +607,9 @@ test("content refresh does not require a model", () => {
     nodes: [SYNCABLE_ID],
     ledgerPath: mappedLedger,
   });
-  assert.deepEqual(checked.current, [
-    {
-      node_id: SYNCABLE_ID,
-      gh_issue: 12,
-      ignored_blocked_by: [...SYNCABLE.predecessors],
-      blocked_by_unmapped: [],
-      blocked_by_protected: [],
-    },
-  ]);
+  assert.equal(checked.drift[0].node_id, SYNCABLE_ID);
+  assert.equal(checked.drift[0].gh_issue, 12);
+  assert.equal(checked.drift[0].milestone, SYNCABLE.gh_milestone);
   const refreshed = syncIssues({
     adapter,
     mode: "apply",
@@ -1030,9 +1047,9 @@ test("generated issue body ends with exactly one provenance footer", () => {
   assert.equal(lines.filter((line) => line === "AI-Generated").length, 1);
 });
 
-test("GH2-AC1 missing GH1 ancestor aborts without writing", () => {
+test("missing required sync capability aborts without writing", () => {
   const adapter = fake({ nextIssueNumber: 3 });
-  const ledgerPath = writeLedger({ implemented: ["ORC0", "GH0"] });
+  const ledgerPath = writeLedger({ implemented: [] });
   assert.throws(
     () =>
       syncIssues({
@@ -1042,6 +1059,7 @@ test("GH2-AC1 missing GH1 ancestor aborts without writing", () => {
         model: MODEL,
         ledgerPath,
         clearance: clearanceFor(adapter),
+        syncPrerequisites: ["required-capability"],
       }),
     MissingAncestorError,
   );
@@ -1182,10 +1200,11 @@ test("GH2 create that cannot write its mapping still reports the GitHub identity
   ]);
 });
 
-test("GH2 CLI prints PartialFailureError identity rows without titles", () => {
+test("CLI partial failures print catalog identities without issue prose", () => {
   const selectedId = CLI_CONTENT_NODE;
   const protectedId = AUTHORITY.nodes.find((item) => item.id !== selectedId).id;
   const ledgerPath = writeLedger({
+    implemented: CLI_IMPLEMENTED_NODE_IDS,
     issues: [{ node_id: protectedId, gh_issue: 1, sync_to_github: false }],
   });
   const { title } = rendered(selectedId);
@@ -1204,6 +1223,7 @@ test("GH2 CLI prints PartialFailureError identity rows without titles", () => {
       "pikax",
       "--repo",
       "verter",
+      "--ignore-blockers",
     ],
     { encoding: "utf8" },
   );
@@ -1233,12 +1253,11 @@ test("GH2 CLI prints PartialFailureError identity rows without titles", () => {
       milestone: milestone.title,
     })),
   );
-  const issueIdentity = identities.at(-1);
-  assert.equal(issueIdentity.node_id, selectedId);
-  assert.equal(issueIdentity.number, 1);
-  assert.equal(issueIdentity.mapping_written, false);
-  assert.equal(issueIdentity.title, undefined);
-  assert.equal(issueIdentity.body, undefined);
+  const parentIdentity = identities.at(-1);
+  assert.equal(parentIdentity.number, 1);
+  assert.equal(parentIdentity.kind, "create-train-issue");
+  assert.equal(parentIdentity.mapping_written, false);
+  assert.equal(result.stderr.includes("body"), false);
 });
 
 test("GH2 live getIssue reads JSON number/title/body and does not classify payload.status", () => {
@@ -1343,8 +1362,8 @@ test("live label mutations use additive and single-label endpoints", () => {
   );
 });
 
-test("GH2 CLI sync-issues --check and --apply require an explicit selection and --fake", () => {
-  const ledgerPath = writeLedger();
+test("sync-issues CLI requires an explicit selection, mode, and fake in tests", () => {
+  const ledgerPath = writeLedger({ implemented: CLI_IMPLEMENTED_NODE_IDS });
   const missingMode = spawnSync(
     process.execPath,
     [CLI, "sync-issues", "--fake", "--nodes", CLI_CONTENT_NODE],
@@ -1388,7 +1407,7 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
       "--check",
       "--fake",
       "--nodes",
-      "B4R0",
+      CLI_BLOCKED_NODE.id,
       "--ledger",
       ledgerPath,
       "--owner",
@@ -1402,8 +1421,8 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
   const blockedReport = JSON.parse(blocked.stdout);
   assert.equal(blockedReport.ok, false);
   assert.deepEqual(
-    blockedReport.required_blocker_issues.map((row) => row.node_id),
-    ["B4", "C1"],
+    blockedReport.required_blocker_issues.map((row) => row.node_id).sort(),
+    CLI_BLOCKED_NODE.predecessors.filter((row) => !IMPLEMENTED_NODE_IDS.has(row)).sort(),
   );
   const ignored = spawnSync(
     process.execPath,
@@ -1413,7 +1432,7 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
       "--check",
       "--fake",
       "--nodes",
-      "B4R0",
+      CLI_BLOCKED_NODE.id,
       "--ignore-blockers",
       "--ledger",
       ledgerPath,
@@ -1437,7 +1456,7 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
       "--check",
       "--fake",
       "--nodes",
-      "B4R0",
+      CLI_BLOCKED_NODE.id,
       "--create-blockers",
       "--ignore-blockers",
       "--ledger",
@@ -1452,6 +1471,7 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
   assert.notEqual(conflicting.status, 0);
   assert.match(conflicting.stderr, /mutually exclusive/u);
   const refreshLedger = writeLedger({
+    implemented: CLI_IMPLEMENTED_NODE_IDS,
     issues: [{ node_id: SYNCABLE_ID, gh_issue: 1, sync_to_github: true }],
   });
   const refreshWithoutModel = spawnSync(
@@ -1495,10 +1515,13 @@ test("GH2 CLI sync-issues --check and --apply require an explicit selection and 
   );
   assert.equal(apply.status, 0, apply.stderr);
   const applied = JSON.parse(apply.stdout);
-  assert.equal(applied.created[0].gh_issue, 1);
+  assert.equal(applied.created[0].gh_issue, 2);
   assert.equal(applied.created[0].mapping_written, true);
   assert.deepEqual(listGitHubIssues(readLedger(ledgerPath)), [
-    { node_id: CLI_CONTENT_NODE, gh_issue: 1, sync_to_github: true },
+    { node_id: CLI_CONTENT_NODE, gh_issue: 2, sync_to_github: true },
+  ]);
+  assert.deepEqual(readLedger(ledgerPath).github_train_issue, [
+    { train: AUTHORITY.nodes.find((node) => node.id === CLI_CONTENT_NODE).train, gh_issue: 1 },
   ]);
 });
 
