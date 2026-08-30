@@ -176,6 +176,12 @@ fn walk_production(dir: &std::path::Path, hits: &mut Vec<String>) {
             || rel_str.ends_with("svelte/mod.rs")
             || rel_str.ends_with("svelte/semantic_authority.rs")
             || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
+            // The host-integration backend is the sanctioned frontend
+            // CONSUMER: it composes the frontend's parse admission into
+            // `CompileAdmission` and is itself consumed by no production
+            // route (proven behaviorally by
+            // `generic_compile_route_never_consults_the_host_backend`).
+            || rel_str.ends_with("framework_common/svelte_host_integration.rs")
         {
             continue;
         }

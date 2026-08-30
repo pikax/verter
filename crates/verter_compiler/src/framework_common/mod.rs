@@ -26,6 +26,7 @@ pub mod generated_identifier;
 pub mod registered_carrier_projection;
 mod registered_geometry_state;
 pub mod registry;
+pub mod svelte_host_integration;
 pub mod vue_bridge;
 pub mod vue_carrier_frontend;
 pub mod vue_host_integration;
@@ -64,6 +65,12 @@ pub use generated_identifier::{is_generated_identifier, GENERATED_IDENTIFIER_PRE
 pub use registered_carrier_projection::FrameworkParseArtifact;
 pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;
+pub use svelte_host_integration::{
+    svelte_host_integration_registration, SvelteAdmittedDemand, SvelteCompileAdmission,
+    SvelteHostAdmissionRefusal, SvelteHostCompileRefusal, SvelteHostCompiledProducts,
+    SvelteHostExecutionInputs, SvelteHostIntegrationBackend, SvelteHostMultiProductDemand,
+    SvelteHostRenderedMain, SvelteHostRuntimeRenderDemand, SvelteHostUnproducibleDemand,
+};
 pub use vue_carrier_frontend::{vue_carrier_frontend_registration, VueCarrierFrontend, VueSfcV3};
 pub use vue_host_integration::{
     built_in_host_integration_catalog, registered_host_integration_for,

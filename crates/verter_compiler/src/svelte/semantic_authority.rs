@@ -30,6 +30,27 @@ pub struct SvelteSemanticAdmission {
 }
 
 impl SvelteSemanticAuthority {
+    /// Issue the semantic admission over an already-admitted Svelte parse:
+    /// the parse admission's witnessed [`verter_language::ParseKey`] must
+    /// be the artifact's own, and the artifact's epoch must select this
+    /// authority's registered semantic catalog row. Crate-private —
+    /// reached only from host-integration composition, and only with the
+    /// parse admission in hand; product backends never mint it.
+    pub(crate) fn admit_over_parse(
+        &self,
+        parse: &super::carrier_frontend::SvelteParseAdmission,
+        artifact: &FrameworkParseArtifact,
+    ) -> Option<SvelteSemanticAdmission> {
+        if parse.parse_key().as_ref() != artifact.parse_key() {
+            return None;
+        }
+        crate::framework_common::registered_carrier_projection::registered_semantic_for(
+            artifact.adapter_id(),
+            artifact.epoch(),
+        )
+        .map(|_| SvelteSemanticAdmission { _private: () })
+    }
+
     /// Adapter this authority answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {

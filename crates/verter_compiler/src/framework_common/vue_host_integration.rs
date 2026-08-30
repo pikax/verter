@@ -755,6 +755,8 @@ pub fn vue_host_integration_registration(
 pub enum InstalledHostIntegration {
     /// Vue host-integration backend.
     Vue(VueHostIntegrationBackend),
+    /// Svelte host-integration backend.
+    Svelte(super::svelte_host_integration::SvelteHostIntegrationBackend),
 }
 
 /// Frozen host-integration catalog. Built once from the host-integration
@@ -765,10 +767,17 @@ pub fn built_in_host_integration_catalog(
     static CATALOG: OnceLock<ImmutableCapabilityCatalog<(), (), (), (), InstalledHostIntegration>> =
         OnceLock::new();
     CATALOG.get_or_init(|| {
-        ImmutableCapabilityCatalog::try_from_rows([CatalogRow::from(
-            vue_host_integration_registration().map_host_integration(InstalledHostIntegration::Vue),
-        )])
-        .expect("the built-in Vue host-integration identity is unique")
+        ImmutableCapabilityCatalog::try_from_rows([
+            CatalogRow::from(
+                vue_host_integration_registration()
+                    .map_host_integration(InstalledHostIntegration::Vue),
+            ),
+            CatalogRow::from(
+                super::svelte_host_integration::svelte_host_integration_registration()
+                    .map_host_integration(InstalledHostIntegration::Svelte),
+            ),
+        ])
+        .expect("the built-in Vue and Svelte host-integration identities are unique")
     })
 }
 
@@ -853,8 +862,11 @@ mod tests {
     #[test]
     fn host_integration_catalog_registers_the_vue_native_row() {
         let catalog = built_in_host_integration_catalog();
-        assert_eq!(catalog.len(), 1);
-        let identity = catalog.iter().next().unwrap().identity();
+        let identity = catalog
+            .iter()
+            .map(|row| row.identity())
+            .find(|identity| identity.adapter_id() == &FrameworkAdapterId::vue())
+            .expect("the catalog holds the Vue host-integration row");
         assert_eq!(identity.capability(), CatalogCapability::HostIntegration);
         assert_eq!(identity.adapter_id(), &FrameworkAdapterId::vue());
         assert_eq!(identity.epoch().as_str(), "vue");

@@ -333,6 +333,11 @@ node_id = "CCA1N1"
 commit_message = "feat(core): add the vue host-integration backend with demand-scoped admission"
 commit_date = "2026-08-30T20:00:02+01:00"
 
+[[implemented]]
+node_id = "CCA1N2"
+commit_message = "feat(core): add the svelte host-integration backend with demand-scoped admission"
+commit_date = "2026-08-30T21:45:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

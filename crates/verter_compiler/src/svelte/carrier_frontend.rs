@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use verter_language::carrier_grammar::CarrierGrammarConfig;
 use verter_language::{
-    FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
+    FrameworkAdapterId, LanguageId, ParseKey, ParseOptions, SyntaxReject,
+    UnregisteredFrameworkParseArtifact,
 };
 
 use crate::framework_common::capability::{CarrierFrontend, FrameworkEpoch, Present};
@@ -23,9 +24,20 @@ use super::carrier::SvelteCarrierCompiler;
 pub struct SvelteCarrierFrontend;
 
 /// Admission token issued only after a successful Svelte frontend parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Carries the exact [`ParseKey`] it was issued over, so downstream
+/// composition verifies the witness against the artifact it consumes
+/// instead of trusting by-convention pairing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SvelteParseAdmission {
-    _private: (),
+    parse_key: Arc<ParseKey>,
+}
+
+impl SvelteParseAdmission {
+    /// The exact parse identity this admission was issued over.
+    #[must_use]
+    pub(crate) fn parse_key(&self) -> &Arc<ParseKey> {
+        &self.parse_key
+    }
 }
 
 /// Typed Svelte epoch. Catalog identity is derived from [`FrameworkEpoch::ID`].
@@ -39,6 +51,23 @@ impl FrameworkEpoch for SvelteSfc5 {
 impl SvelteCarrierFrontend {
     /// Catalog epoch spelling for the Svelte frontend row.
     pub const EPOCH: &'static str = "svelte";
+
+    /// Issue the parse admission over a registered artifact this frontend
+    /// actually parsed: the Svelte adapter, the Svelte carrier language,
+    /// and a readable Svelte carrier payload are all required.
+    /// Crate-private — reached only from host-integration composition;
+    /// product backends never mint it.
+    pub(crate) fn admit_registered(
+        &self,
+        artifact: &crate::framework_common::FrameworkParseArtifact,
+    ) -> Option<SvelteParseAdmission> {
+        (artifact.adapter_id() == &self.adapter_id()
+            && artifact.language_id() == &self.carrier_language_id()
+            && SvelteCarrierCompiler.parsed_svelte(artifact).is_some())
+        .then(|| SvelteParseAdmission {
+            parse_key: Arc::new(artifact.parse_key().clone()),
+        })
+    }
 
     /// Adapter this frontend answers to.
     #[must_use]
