@@ -311,7 +311,8 @@ export interface CompileBatchOptions {
   defaultMode?: CompileCacheMode;
   /**
    * The compile lane. `"host-backed"` (default) runs the full session
-   * wrapper; `"runtime-render"` runs the render-only bundler lane, which
+   * wrapper; `"runtime-render"` selects the Vue render-only path while other
+   * registered carriers keep their effective host-backed route. The request
    * REQUIRES `compileProfile`.
    */
   target?: CompileManyTarget;
@@ -337,9 +338,9 @@ export interface CompileBatchEntry {
   /**
    * Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
    * compile, separate from the fatal `errors`. Populated by the
-   * RuntimeRender lane's soft-macro contract (an unresolved imported
+   * Vue render-only path's soft-macro contract (an unresolved imported
    * macro type renders successfully and reports a warning here). Always
-   * empty on the HostBacked lane and on any fatal outcome.
+   * empty on effective host-backed paths and on any fatal outcome.
    */
   diagnostics: HostDiagnostic[];
   durationMs: number;

@@ -1,10 +1,12 @@
-//! Tests for the [`crate::host_compile::CompileManyTarget::RuntimeRender`]
-//! render-only bundler compile lane.
+//! Tests for the public
+//! [`crate::host_compile::CompileManyTarget::RuntimeRender`] bundler request.
 //!
-//! The lane produces byte-identical `Main` output to the `HostBacked`
-//! session wrapper through the SAME shared substrate + host-side
-//! assembly, without the per-file wrapper overhead. Unavailable macro roots
-//! fail closed; only row-local runtime-type degradation remains a warning.
+//! Vue requests use a private render-only worker that produces byte-identical
+//! `Main` output to the `HostBacked` session wrapper through the SAME shared
+//! substrate + host-side assembly, without the per-file wrapper overhead.
+//! Svelte requests retain their effective host-backed route. Unavailable Vue
+//! macro roots fail closed; only row-local runtime-type degradation remains a
+//! warning.
 //!
 //! | Test | Discriminating assertion |
 //! | ---- | ------------------------ |
@@ -14,7 +16,8 @@
 //! | `runtime_render_local_type_error_is_fatal` | Local invalid macro usage stays fatal. |
 //! | `runtime_render_syntax_error_is_fatal` | Template/script syntax error stays fatal. |
 //! | `runtime_render_authored_only_style_processing_defers_scoped_scss` | The Vite-shaped lane keeps authored `v-bind()` work but defers plain-CSS-only scoping; the default lane remains fail-closed. |
-//! | `runtime_render_bypasses_stage_c_wrapper` | Zero wrapper-op counter hits on a simple render; >0 on HostBacked. |
+//! | `runtime_render_bypasses_stage_c_wrapper` | A Vue request records zero wrapper-op hits; Svelte RuntimeRender and Vue HostBacked controls record >0. |
+//! | `render_only_main_rejects_a_registered_svelte_artifact_without_a_product` | The private Vue worker rejects a direct Svelte call with `HOST_RUNTIME_RENDER_REQUIRES_VUE` and no product. |
 //! | `runtime_render_does_not_leave_stale_semantic_axis_for_host_backed` | (e)-skip safety: a later HostBacked read sees current, not stale, deps. |
 //! | `runtime_render_upper_drive_input_resolves_macro_types_wired_under_lower_drive_routes` | Drive-letter case parity: an upper-drive compile input converges on the lower-drive canonical whose alias routes were wired via `set_import_dependencies`. |
 //! | `runtime_render_upper_drive_input_single_hop_relative_import_control` | Single-hop relative control: resolves without the route table across the same case split. |
@@ -706,6 +709,44 @@ fn runtime_render_bypasses_stage_c_wrapper() {
         "RuntimeRender must NOT construct a resolver context for a simple file"
     );
 
+    // A public RuntimeRender request for Svelte keeps the effective
+    // host-backed carrier route. It must succeed and exercise the wrapper;
+    // only Vue owns the render-only worker above.
+    let host_svelte = new_host();
+    let svelte = render_one(
+        &host_svelte,
+        "/proj/Bypass.svelte",
+        "<script>let value = 1;</script>\n<div>{value}</div>\n",
+    );
+    assert!(
+        svelte.errors().is_empty(),
+        "Svelte RuntimeRender errors: {:?}",
+        svelte.errors()
+    );
+    assert!(
+        host_svelte
+            .test_force
+            .wrapper_source_clone_count
+            .load(Ordering::Relaxed)
+            > 0,
+        "Svelte RuntimeRender must exercise the host-backed source clone"
+    );
+    assert!(
+        host_svelte
+            .test_force
+            .wrapper_cache_mode_classification_count
+            .load(Ordering::Relaxed)
+            > 0,
+        "Svelte RuntimeRender must exercise host-backed cache-mode classification"
+    );
+    assert!(
+        host_svelte
+            .test_force
+            .wrapper_sync_transitive_count
+            .load(Ordering::Relaxed)
+            > 0,
+        "Svelte RuntimeRender must exercise host-backed dependency synchronization"
+    );
     // HostBacked: the SAME file touches the wrapper ops (counters fire).
     let host_h = new_host();
     let host_backed = host_backed_one(&host_h, "/proj/Bypass.vue", src);
@@ -738,6 +779,38 @@ fn runtime_render_bypasses_stage_c_wrapper() {
             > 0,
         "HostBacked must exercise the transitive dep sync (proves the counter fires)"
     );
+}
+
+#[test]
+fn render_only_main_rejects_a_registered_svelte_artifact_without_a_product() {
+    let host = new_host();
+    let canonical_id = "/proj/PrivateWorkerGuard.svelte";
+    upsert_sibling(
+        &host,
+        canonical_id,
+        "<script>let value = 1;</script>\n<div>{value}</div>\n",
+    );
+    let profile = get_virtual_file_profile(simple_render_profile(), None);
+
+    match host.render_only_main(
+        canonical_id,
+        &profile,
+        verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+    ) {
+        Err(crate::types::HostError::CompileError(failure)) => {
+            assert!(
+                failure
+                    .diagnostics
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code == "HOST_RUNTIME_RENDER_REQUIRES_VUE"),
+                "the private Vue worker must reject the registered Svelte artifact with the exact guard diagnostic: {:?}",
+                failure.diagnostics.diagnostics
+            );
+        }
+        Err(other) => panic!("expected the typed Vue-artifact guard, got {other:?}"),
+        Ok(_) => panic!("the private Vue worker must not publish a product for Svelte"),
+    }
 }
 
 // ---------------------------------------------------------------------------

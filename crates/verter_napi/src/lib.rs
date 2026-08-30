@@ -1276,8 +1276,8 @@ fn ffi_hmr_strategy_to_host(s: &str) -> std::result::Result<host::HmrStrategy, S
 }
 
 /// Convert a single host [`host::HostDiagnostic`] into its NAPI wire
-/// shape. Used to surface the RuntimeRender soft-macro warnings on
-/// [`NapiCompileBatchEntry::diagnostics`].
+/// shape. Used to surface the private Vue render worker's soft-macro warnings
+/// on [`NapiCompileBatchEntry::diagnostics`].
 fn napi_diagnostic_from_host(d: &host::HostDiagnostic) -> NapiDiagnostic {
     NapiDiagnostic {
         severity: match d.severity {
@@ -3568,17 +3568,19 @@ pub struct NapiCompileBatchInput {
     /// "session"). `None` inherits the batch `defaultMode`.
     pub requestedMode: Option<String>,
     /// Explicit per-component scoped-style / HMR id. Threaded into this
-    /// input's compile profile ONLY on the RuntimeRender lane (scoped-style
-    /// / HMR identity is per-component, not per-build). `None` lets codegen
-    /// auto-generate the id.
+    /// input's compile profile ONLY for a public RuntimeRender request
+    /// (scoped-style / HMR identity is per-component, not per-build). Vue uses
+    /// it in the private render worker; Svelte uses it on the effective
+    /// host-backed route. `None` lets codegen auto-generate the id.
     pub componentId: Option<String>,
 }
 
-/// The batch-level render profile for the RuntimeRender lane (JS mirror of
-/// [`host_compile::CompileBatchRenderProfile`]). Every field is
+/// The batch-level render profile for a public RuntimeRender request (JS
+/// mirror of [`host_compile::CompileBatchRenderProfile`]). Every field is
 /// output-affecting and uniform across a single bundler build. This carries
-/// the full output-affecting projection of the JS `HostCompileProfile` so
-/// the render lane reproduces the `getVirtualFile` path byte-for-byte.
+/// the full output-affecting projection of the JS `HostCompileProfile`: Vue's
+/// private render worker reproduces the `getVirtualFile` output byte-for-byte,
+/// while Svelte keeps the effective host-backed path.
 #[napi(object)]
 pub struct NapiCompileBatchRenderProfile {
     /// Style stages owned by this render: `"complete"` (default) or
@@ -3632,9 +3634,10 @@ pub struct NapiCompileBatchOptions {
     /// Default compile cache mode for inputs whose `requestedMode` is
     /// unset. `None` resolves to "session" (the host default).
     pub defaultMode: Option<String>,
-    /// The compile lane: `"host-backed"` (default) runs the full session
-    /// wrapper; `"runtime-render"` runs the render-only bundler lane. The
-    /// render lane REQUIRES `compileProfile` (fail-closed).
+    /// The compile request: `"host-backed"` (default) runs the full session
+    /// wrapper; `"runtime-render"` uses Vue's private render-only worker or a
+    /// non-Vue carrier's effective host-backed route. RuntimeRender REQUIRES
+    /// `compileProfile` (fail-closed).
     pub target: Option<String>,
     /// The batch-level render profile for the `"runtime-render"` lane. It
     /// is REQUIRED for that lane (the NAPI conversion fails closed when it
@@ -3657,10 +3660,11 @@ pub struct NapiCompileBatchEntry {
     /// All compilation errors for this file. Empty on success.
     pub errors: Vec<String>,
     /// Non-fatal WARNING-severity diagnostics surfaced on a SUCCESSFUL
-    /// compile, separate from the fatal `errors`. Populated by the
-    /// RuntimeRender lane's soft-macro contract (an unresolved imported
-    /// macro type renders successfully and reports a warning here). Always
-    /// empty on the HostBacked lane and on any fatal outcome.
+    /// compile, separate from the fatal `errors`. Populated by the private Vue
+    /// render worker's soft-macro contract (an unresolved imported macro type
+    /// renders successfully and reports a warning here). Always empty on the
+    /// HostBacked lane, the effective Svelte host-backed route, and any fatal
+    /// outcome.
     pub diagnostics: Vec<NapiDiagnostic>,
     pub durationMs: f64,
     /// `true` iff this input was served from a warm cache entry under its
