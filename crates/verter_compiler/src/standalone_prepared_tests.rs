@@ -2195,26 +2195,14 @@ fn direct_runtime_compile_honors_caller_runtime_template_hole() {
     );
 }
 
-/// A dual client+server runtime request publishes the secondary (client)
-/// compile's own diagnostics alongside the primary (server) leg's — the
-/// published list is exactly the server leg's diagnostics followed by the
-/// client leg's, matching what each single-kind request reports on its own.
+/// A dual client+server runtime request publishes the PRIMARY (server)
+/// compile's diagnostics ONLY — exactly the set a server-only request
+/// reports. Both legs lower the same retained parse, so the secondary
+/// (client) leg's diagnostics are re-reports of the same source findings;
+/// appending them would double-publish every target-independent diagnostic.
 #[test]
-fn dual_runtime_compile_publishes_secondary_leg_diagnostics() {
+fn dual_runtime_compile_publishes_primary_diagnostics_only() {
     let compiler = StandaloneCompiler;
-    let client_only = compiler
-        .compile(
-            VUE_DUPLICATE_DIRECTIVE,
-            &vue_request(vec![CompileProduct::RuntimeClient(
-                RuntimeProductRequest::default(),
-            )]),
-            vue_inputs(),
-        )
-        .expect("client-only compile succeeds");
-    assert!(
-        !client_only.diagnostics.is_empty(),
-        "fixture must produce a client-leg diagnostic for this test to discriminate"
-    );
     let server_only = compiler
         .compile(
             VUE_DUPLICATE_DIRECTIVE,
@@ -2224,6 +2212,10 @@ fn dual_runtime_compile_publishes_secondary_leg_diagnostics() {
             vue_inputs(),
         )
         .expect("server-only compile succeeds");
+    assert!(
+        !server_only.diagnostics.is_empty(),
+        "fixture must produce a primary-leg diagnostic for this test to discriminate"
+    );
     let dual = compiler
         .compile(
             VUE_DUPLICATE_DIRECTIVE,
@@ -2234,16 +2226,64 @@ fn dual_runtime_compile_publishes_secondary_leg_diagnostics() {
             vue_inputs(),
         )
         .expect("dual runtime compile succeeds");
-    let expected: Vec<_> = server_only
-        .diagnostics
-        .iter()
-        .chain(client_only.diagnostics.iter())
-        .cloned()
-        .collect();
     assert_eq!(
-        dual.diagnostics, expected,
-        "a dual-kind request must publish the primary (server) diagnostics \
-         followed by the secondary (client) compile's own"
+        dual.diagnostics, server_only.diagnostics,
+        "a dual-kind request must publish exactly the primary (server) \
+         compile's diagnostic set — never a duplicated secondary-leg copy"
+    );
+}
+
+/// The prepared and batch routes publish the SAME primary-only diagnostic
+/// set on a dual client+server runtime request as the direct route — each
+/// source finding appears exactly once, never re-appended from the
+/// secondary (client) leg's compile of the same retained parse.
+#[test]
+fn prepared_and_batch_dual_runtime_publish_primary_diagnostics_only() {
+    let compiler = StandaloneCompiler;
+    let server_request = vue_request(vec![CompileProduct::RuntimeServer(
+        RuntimeProductRequest::default(),
+    )]);
+    let expected = compiler
+        .compile(VUE_DUPLICATE_DIRECTIVE, &server_request, vue_inputs())
+        .expect("server-only compile succeeds")
+        .diagnostics;
+    assert!(
+        !expected.is_empty(),
+        "fixture must produce a primary-leg diagnostic for this test to discriminate"
+    );
+    let dual_request = vue_request(vec![
+        CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+        CompileProduct::RuntimeServer(RuntimeProductRequest::default()),
+    ]);
+
+    let prepared = compiler.prepare(VUE_DUPLICATE_DIRECTIVE, &dual_request);
+    let via_prepared = compiler
+        .compile_prepared(
+            VUE_DUPLICATE_DIRECTIVE,
+            &prepared,
+            &dual_request,
+            vue_inputs(),
+        )
+        .expect("prepared dual runtime compile succeeds");
+    assert_eq!(
+        via_prepared.diagnostics, expected,
+        "the prepared route must publish exactly the primary (server) \
+         compile's diagnostic set — each finding exactly once"
+    );
+
+    let items = vec![BatchCompileItem {
+        source: VUE_DUPLICATE_DIRECTIVE,
+        request: &dual_request,
+        inputs: vue_inputs(),
+    }];
+    let batch = compiler.compile_batch(&items);
+    let via_batch = batch.results[0]
+        .as_ref()
+        .expect("batch dual runtime compile succeeds");
+    assert_eq!(
+        via_batch.diagnostics, expected,
+        "the batch route must publish exactly the primary (server) \
+         compile's diagnostic set — each finding exactly once"
     );
 }
 

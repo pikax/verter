@@ -1502,8 +1502,6 @@ struct ComposedVueRuntimeLegs {
     /// Publication-ordered `(composed, kind, dialect, want_maps)` legs —
     /// server-first when both runtime kinds are planned.
     legs: Vec<(ComposedFragments, ProductKind, FragmentDialect, bool)>,
-    /// The secondary (client) compile's own diagnostics, when it ran.
-    secondary_diagnostics: Vec<CompileDiagnostic>,
 }
 
 /// Compose every planned runtime leg from an already-produced primary
@@ -1549,7 +1547,6 @@ fn compose_vue_runtime_legs(
     )
     .map_err(map_direct_runtime_err)?;
     let mut legs = vec![(composed, primary_kind, dialect, want_maps)];
-    let mut secondary_diagnostics = Vec::new();
 
     if wants_client && wants_server {
         let secondary_kind = ProductKind::RuntimeClient;
@@ -1571,7 +1568,6 @@ fn compose_vue_runtime_legs(
             style_prepared,
             &allocator,
         )?;
-        secondary_diagnostics = secondary_output.diagnostics;
         let secondary_dialect = direct_vue_dialect(parsed, secondary_request.force_js());
         let secondary_want_maps = runtime_source_map_wanted(&secondary_request, secondary_kind);
         let secondary_vue = secondary_request
@@ -1600,10 +1596,7 @@ fn compose_vue_runtime_legs(
         ));
     }
 
-    Ok(ComposedVueRuntimeLegs {
-        legs,
-        secondary_diagnostics,
-    })
+    Ok(ComposedVueRuntimeLegs { legs })
 }
 
 /// Compile requested Vue runtime products over an already-parsed SFC through
@@ -1634,7 +1627,11 @@ pub(crate) fn compile_vue_parsed_runtime(
         &allocator,
     )?;
 
-    let mut diagnostics = primary.diagnostics.clone();
+    // Every route publishes the PRIMARY compile's diagnostics only: both
+    // legs lower the same retained parse, so a dual-kind request's secondary
+    // (client) leg re-reports the same target-independent findings and
+    // appending them would double-publish every one of them.
+    let diagnostics = primary.diagnostics.clone();
     let composed = compose_vue_runtime_legs(
         source,
         parsed,
@@ -1645,8 +1642,6 @@ pub(crate) fn compile_vue_parsed_runtime(
         style_prepared,
         &primary.bundle,
     )?;
-    diagnostics.extend(composed.secondary_diagnostics);
-
     let plan = ProductPlan::from_request(request);
     let mut contributions: Vec<ArtifactContribution<'_>> = Vec::new();
     for (composed, kind, dialect, want_maps) in &composed.legs {
@@ -2445,10 +2440,10 @@ impl StandaloneCompiler {
                     &bundle,
                 )
                 .map_err(|err| vue_parsed_runtime_to_direct(err, &plan))?;
-            // The mixed route publishes the primary compile's diagnostics
-            // only: the secondary leg's diagnostics are byte-identical
-            // re-reports of the same source findings, so appending them
-            // would double-publish every target-independent diagnostic.
+            // Diagnostics stay the primary compile's set: the shared leg
+            // composition carries artifact legs only — a dual-kind secondary
+            // compile's diagnostics are byte-identical re-reports of the
+            // same source findings and are never published.
             runtime_legs = Some(composed.legs);
         }
         for (composed, kind, dialect, want_maps) in runtime_legs.iter().flatten() {
