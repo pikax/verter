@@ -328,6 +328,11 @@ node_id = "CCA1M"
 commit_message = "docs(roadmap): confirm runtime compile route convergence"
 commit_date = "2026-08-30T17:23:00+01:00"
 
+[[implemented]]
+node_id = "CCA1N1"
+commit_message = "feat(core): add the vue host-integration backend with demand-scoped admission"
+commit_date = "2026-08-30T20:00:02+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

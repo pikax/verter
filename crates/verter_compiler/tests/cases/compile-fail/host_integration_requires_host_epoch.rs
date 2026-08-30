@@ -12,6 +12,18 @@ struct HostCapable;
 
 impl FrameworkHostIntegrationBackend<TestEpoch, ()> for HostCapable {
     type CompileAdmission = ();
+    type ParseArtifact = ();
+    type MultiProductDemand = ();
+    type RuntimeRenderDemand = ();
+    type AdmissionRefusal = ();
+
+    fn admit_host_products(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 fn main() {

@@ -49,7 +49,7 @@ impl CatalogIdentity {
         epoch: FrameworkEpochId,
         capability: CatalogCapability,
     ) -> Self {
-        debug_assert_ne!(capability, CatalogCapability::HostIntegration);
+        verter_debug_assert_ne!(capability, CatalogCapability::HostIntegration);
         Self {
             adapter_id,
             carrier_language_id,
@@ -571,5 +571,18 @@ impl<H> TypedCapabilityRegistration<HostCap<H>> {
     #[must_use]
     pub fn host_integration(&self) -> &H {
         &self.capability.0 .0
+    }
+
+    /// Re-wrap the present host-integration backend, keeping this row's
+    /// identity.
+    #[must_use]
+    pub fn map_host_integration<G>(
+        self,
+        map: impl FnOnce(H) -> G,
+    ) -> TypedCapabilityRegistration<HostCap<G>> {
+        TypedCapabilityRegistration {
+            identity: self.identity,
+            capability: HostCap(Present(map(self.capability.0 .0))),
+        }
     }
 }

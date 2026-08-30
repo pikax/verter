@@ -414,141 +414,155 @@ impl CarrierCompiler for VueCarrierCompiler {
         opts: &RuntimeCompileOptions,
         alloc: &oxc_allocator::Allocator,
     ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
-        let Some(parsed) = self.parsed_sfc(artifact) else {
-            return Err(CompileUnsupported::NoIdeProjection {
-                adapter_id: self.adapter_id(),
-            });
-        };
-
-        // The same two fail-closed rules `CompileRequest::new` /
-        // `resolve_vue_backend` apply to every `CompileRequest`-constructed
-        // route apply here too: this trait method is a SEPARATE production
-        // entry into the same shared codegen substrate, reached by the
-        // session's per-file/virtual-product compile path (not yet
-        // converted onto `CompileRequest` itself). Without this check an
-        // SSR x Vapor or inline x SSR request would silently reach codegen
-        // and produce wrong output instead of a typed refusal — the same
-        // bug class `CompileRequest` construction closes for its own
-        // callers. `parsed.is_vapor()` covers the implicit `<template
-        // vapor>` marker; `opts.force_vapor` covers the explicit request —
-        // together they mirror `resolve_vue_backend`'s `Inferred` fallback.
-        let effective_vapor = opts.force_vapor || parsed.is_vapor();
-        if opts.ssr && effective_vapor {
-            return Err(CompileUnsupported::RequestExecutionRefused(
-                CompileRequestError::SsrVaporBackendUnsupported,
-            ));
-        }
-        if opts.ssr && opts.inline == Some(true) {
-            return Err(CompileUnsupported::RequestExecutionRefused(
-                CompileRequestError::InlineSsrUnsupported,
-            ));
-        }
-
-        // A selected template fragment is inserted at the compiler-registered
-        // IDE hole. For a carrier with only a plain script that hole is the
-        // script-content boundary, which is mid-module rather than a valid JSX
-        // statement position. These are parser-owned carrier facts plus the
-        // host-selected block input; do not rediscover the geometry by scanning
-        // source text. Keep this exact partially-capable class fail-closed.
-        if opts.want_ide
-            && opts.block_content.template.is_some()
-            && parsed.script().is_some()
-            && parsed.script_setup().is_none()
-        {
-            return Err(CompileUnsupported::BlockContentIdeUnavailable {
-                adapter_id: self.adapter_id(),
-            });
-        }
-
-        match (
-            opts.block_content.script.as_ref(),
-            opts.block_content.script_setup.as_ref(),
-        ) {
-            (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) if opts.want_ide => {
-                return Err(CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            _ => {}
-        }
-
-        // Runtime products come from one bundler pass. IDE projection is
-        // catalog-owned and never re-enters compile_inner as TSX on this
-        // path. Template facts are catalog-owned. An IDE-only request
-        // therefore skips the bundler pass unless a runtime product is
-        // actually required.
-        let mut bundle = RuntimeCompileOutput::default();
-        if opts.want_runtime {
-            bundle = VueRuntimeBackend.compile_bundle_runtime(source, parsed, opts, alloc)?;
-        }
-
-        if opts.want_ide {
-            let mut vue = vue_request_from_admitted_artifact(artifact);
-            vue.backend = if opts.force_vapor {
-                VueBackendRequest::Vapor
-            } else {
-                VueBackendRequest::Inferred
-            };
-            vue.ssr = opts.ssr;
-            vue.comments = opts.comments;
-            vue.runtime_module_name = opts.runtime_module_name.clone();
-            vue.script_custom_element = Some(opts.custom_element);
-            let request = vue_ide_only_request(
-                opts.filename.clone(),
-                opts.component_id.clone(),
-                opts.is_production,
-                opts.force_js,
-                IdeProductRequest {
-                    want_source_map: opts.source_map,
-                    embed_ambient_types: opts.embed_ambient_types,
-                    conditional_root_narrowing: opts.conditional_root_narrowing,
-                    strict_slots: opts.strict_slots,
-                    types_module_name: opts.types_module_name.clone(),
-                    ide_chunk_boundaries: opts.block_content.template.is_some(),
-                    ..Default::default()
-                },
-                vue,
-            )?;
-            let execution = opts.vue_facts.clone().unwrap_or_default();
-            let macros = execution
-                .macro_runtime
-                .clone()
-                .map(VueMacroSemanticInput::Runtime)
-                .unwrap_or_default();
-            let companion = super::registered_carrier_projection::project_ide_from_catalog(
-                artifact,
-                source,
-                &request,
-                &super::registered_carrier_projection::ProjectionCatalogInputs {
-                    block_content: opts.block_content.clone(),
-                    vue_execution: execution,
-                    vue_macros: macros,
-                },
-            )?;
-            bundle.tsx = Some(companion.ide);
-            if opts.want_runtime {
-                extend_unique_diagnostics(&mut bundle.diagnostics, companion.diagnostics);
-            } else {
-                bundle.diagnostics = companion.diagnostics;
-            }
-        }
-
-        // Vue emits a runtime surface or a genuine compile error; it never
-        // fail-closes on an unsupported runtime surface the way Svelte does, so
-        // its outcome is always `Produced`.
-        Ok(CarrierCompileOutcome::Produced(
-            with_catalog_template_facts(
-                bundle,
-                artifact,
-                source,
-                opts.want_template_data,
-                opts.block_content
-                    .template
-                    .as_ref()
-                    .map(|input| input.code.as_ref()),
-            ),
-        ))
+        vue_carrier_bundle(source, artifact, opts, alloc)
     }
+}
+
+/// The one Vue bundle orchestration over an admitted parse: ordered
+/// runtime, IDE-projection, and template-fact capability calls with shared
+/// prerequisites and deduplicated diagnostics. Shared by the compatibility
+/// [`CarrierCompiler::compile_bundle`] route and the Vue host-integration
+/// backend so both drive the identical single-population pass.
+pub(crate) fn vue_carrier_bundle(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+    opts: &RuntimeCompileOptions,
+    alloc: &oxc_allocator::Allocator,
+) -> Result<CarrierCompileOutcome, CompileUnsupported> {
+    let Some(parsed) = VueCarrierCompiler.parsed_sfc(artifact) else {
+        return Err(CompileUnsupported::NoIdeProjection {
+            adapter_id: VueCarrierCompiler.adapter_id(),
+        });
+    };
+
+    // The same two fail-closed rules `CompileRequest::new` /
+    // `resolve_vue_backend` apply to every `CompileRequest`-constructed
+    // route apply here too: this orchestration is a SEPARATE production
+    // entry into the same shared codegen substrate, reached by the
+    // session's per-file/virtual-product compile path (not yet
+    // converted onto `CompileRequest` itself). Without this check an
+    // SSR x Vapor or inline x SSR request would silently reach codegen
+    // and produce wrong output instead of a typed refusal — the same
+    // bug class `CompileRequest` construction closes for its own
+    // callers. `parsed.is_vapor()` covers the implicit `<template
+    // vapor>` marker; `opts.force_vapor` covers the explicit request —
+    // together they mirror `resolve_vue_backend`'s `Inferred` fallback.
+    let effective_vapor = opts.force_vapor || parsed.is_vapor();
+    if opts.ssr && effective_vapor {
+        return Err(CompileUnsupported::RequestExecutionRefused(
+            CompileRequestError::SsrVaporBackendUnsupported,
+        ));
+    }
+    if opts.ssr && opts.inline == Some(true) {
+        return Err(CompileUnsupported::RequestExecutionRefused(
+            CompileRequestError::InlineSsrUnsupported,
+        ));
+    }
+
+    // A selected template fragment is inserted at the compiler-registered
+    // IDE hole. For a carrier with only a plain script that hole is the
+    // script-content boundary, which is mid-module rather than a valid JSX
+    // statement position. These are parser-owned carrier facts plus the
+    // host-selected block input; do not rediscover the geometry by scanning
+    // source text. Keep this exact partially-capable class fail-closed.
+    if opts.want_ide
+        && opts.block_content.template.is_some()
+        && parsed.script().is_some()
+        && parsed.script_setup().is_none()
+    {
+        return Err(CompileUnsupported::BlockContentIdeUnavailable {
+            adapter_id: VueCarrierCompiler.adapter_id(),
+        });
+    }
+
+    match (
+        opts.block_content.script.as_ref(),
+        opts.block_content.script_setup.as_ref(),
+    ) {
+        (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) if opts.want_ide => {
+            return Err(CompileUnsupported::BlockContentIdeUnavailable {
+                adapter_id: VueCarrierCompiler.adapter_id(),
+            });
+        }
+        _ => {}
+    }
+
+    // Runtime products come from one bundler pass. IDE projection is
+    // catalog-owned and never re-enters compile_inner as TSX on this
+    // path. Template facts are catalog-owned. An IDE-only request
+    // therefore skips the bundler pass unless a runtime product is
+    // actually required.
+    let mut bundle = RuntimeCompileOutput::default();
+    if opts.want_runtime {
+        bundle = VueRuntimeBackend.compile_bundle_runtime(source, parsed, opts, alloc)?;
+    }
+
+    if opts.want_ide {
+        let mut vue = vue_request_from_admitted_artifact(artifact);
+        vue.backend = if opts.force_vapor {
+            VueBackendRequest::Vapor
+        } else {
+            VueBackendRequest::Inferred
+        };
+        vue.ssr = opts.ssr;
+        vue.comments = opts.comments;
+        vue.runtime_module_name = opts.runtime_module_name.clone();
+        vue.script_custom_element = Some(opts.custom_element);
+        let request = vue_ide_only_request(
+            opts.filename.clone(),
+            opts.component_id.clone(),
+            opts.is_production,
+            opts.force_js,
+            IdeProductRequest {
+                want_source_map: opts.ide_source_map.unwrap_or(opts.source_map),
+                embed_ambient_types: opts.embed_ambient_types,
+                conditional_root_narrowing: opts.conditional_root_narrowing,
+                strict_slots: opts.strict_slots,
+                types_module_name: opts.types_module_name.clone(),
+                ide_chunk_boundaries: opts.block_content.template.is_some(),
+                ..Default::default()
+            },
+            vue,
+        )?;
+        let execution = opts.vue_facts.clone().unwrap_or_default();
+        let macros = execution
+            .macro_runtime
+            .clone()
+            .map(VueMacroSemanticInput::Runtime)
+            .unwrap_or_default();
+        let companion = super::registered_carrier_projection::project_ide_from_catalog(
+            artifact,
+            source,
+            &request,
+            &super::registered_carrier_projection::ProjectionCatalogInputs {
+                block_content: opts.block_content.clone(),
+                vue_execution: execution,
+                vue_macros: macros,
+            },
+        )?;
+        bundle.tsx = Some(companion.ide);
+        if opts.want_runtime {
+            extend_unique_diagnostics(&mut bundle.diagnostics, companion.diagnostics);
+        } else {
+            bundle.diagnostics = companion.diagnostics;
+        }
+    }
+
+    // Vue emits a runtime surface or a genuine compile error; it never
+    // fail-closes on an unsupported runtime surface the way Svelte does, so
+    // its outcome is always `Produced`.
+    Ok(CarrierCompileOutcome::Produced(
+        with_catalog_template_facts(
+            bundle,
+            artifact,
+            source,
+            opts.want_template_data,
+            opts.block_content
+                .template
+                .as_ref()
+                .map(|input| input.code.as_ref()),
+        ),
+    ))
 }
 
 fn vue_ide_only_request(

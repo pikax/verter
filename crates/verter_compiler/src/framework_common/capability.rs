@@ -79,6 +79,16 @@ pub trait HostEpoch: Send + Sync + 'static {
     const ID: &'static str;
 }
 
+/// Typed native host epoch. Catalog identity is derived from
+/// [`HostEpoch::ID`]. Host-neutral: every framework's host-integration
+/// registration for the native host names this one epoch type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeHostEpoch;
+
+impl HostEpoch for NativeHostEpoch {
+    const ID: &'static str = "native-host";
+}
+
 /// Parse, registered geometry, unregistered parse artifacts, parse
 /// diagnostics retained on the parse artifact, and syntax reject.
 pub trait CarrierFrontend: Send + Sync + 'static {
@@ -182,11 +192,50 @@ pub trait RuntimeCompilerBackend<E: FrameworkEpoch>: Send + Sync + 'static {
 }
 
 /// Host/unplugin/session integration; composes parse + semantic into compile admission.
+///
+/// Demand-specific issuance with ONE token type: the host-backed
+/// multi-product demand and the runtime-render demand each yield a
+/// [`Self::CompileAdmission`], and demand specificity is carried in the
+/// issued admission's VALUE (the admitted demand plus the requested
+/// product set) — never by sibling token types. Capability validation is
+/// demand-specific on the implementing backend: a runtime-render demand
+/// must not require projection capability, and a missing required
+/// capability is a typed [`Self::AdmissionRefusal`] — never a fallback to
+/// another lane, framework, or compatibility compiler.
 pub trait FrameworkHostIntegrationBackend<E: FrameworkEpoch, HostE: HostEpoch>:
     Send + Sync + 'static
 {
     /// The sole compile-admission token type for this host epoch.
     type CompileAdmission: Send + Sync + 'static;
+    /// Already-admitted parse artifact this backend composes over.
+    type ParseArtifact: Send + Sync + 'static;
+    /// Host-backed multi-product demand document (framework-owned shape:
+    /// the requested product set plus the framework's typed options).
+    type MultiProductDemand: Send + Sync + 'static;
+    /// Runtime-render demand document (render-only; framework-owned shape).
+    type RuntimeRenderDemand: Send + Sync + 'static;
+    /// Typed issuance refusal: capability unavailability, request
+    /// construction refusal, or a non-composable parse.
+    type AdmissionRefusal: Send + Sync + 'static;
     /// Epoch markers consumed only as type parameters.
     const _EPOCH: PhantomData<(E, HostE)> = PhantomData;
+
+    /// Issue one admission for a host-backed multi-product demand,
+    /// composing this backend's parse + semantic admissions over the
+    /// already-admitted artifact. The issued value records the admitted
+    /// demand and the requested product set.
+    fn admit_host_products(
+        &self,
+        artifact: &Self::ParseArtifact,
+        demand: Self::MultiProductDemand,
+    ) -> Result<Self::CompileAdmission, Self::AdmissionRefusal>;
+
+    /// Issue one admission for a runtime-render (render-only) demand over
+    /// the already-admitted artifact. Validation is demand-specific:
+    /// projection capability is not required.
+    fn admit_runtime_render(
+        &self,
+        artifact: &Self::ParseArtifact,
+        demand: Self::RuntimeRenderDemand,
+    ) -> Result<Self::CompileAdmission, Self::AdmissionRefusal>;
 }

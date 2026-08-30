@@ -361,6 +361,13 @@ pub struct RuntimeCompileOptions {
     pub custom_element: bool,
     /// Generate source maps for the produced runtime output.
     pub source_map: bool,
+    /// Per-leg override for the IDE companion's own source-map demand.
+    /// `None` couples the IDE leg to [`source_map`](Self::source_map) (the
+    /// compatibility route's historical behavior); `Some(x)` is read ONLY
+    /// by the IDE projection leg, so a request-derived caller can honor
+    /// `RuntimeProductRequest.runtime_source_map` and
+    /// `IdeProductRequest.want_source_map` independently.
+    pub ide_source_map: Option<bool>,
     /// Server-side rendering mode (the carrier emits its SSR backend).
     pub ssr: bool,
     /// Runtime module name for helper imports (Vue default `"vue"`).
@@ -464,6 +471,7 @@ impl Default for RuntimeCompileOptions {
             is_production: false,
             custom_element: false,
             source_map: false,
+            ide_source_map: None,
             ssr: false,
             runtime_module_name: None,
             component_id: None,

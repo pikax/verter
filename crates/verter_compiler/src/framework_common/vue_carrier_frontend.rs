@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use verter_language::carrier_grammar::CarrierGrammarConfig;
 use verter_language::{
-    FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
+    FrameworkAdapterId, LanguageId, ParseKey, ParseOptions, SyntaxReject,
+    UnregisteredFrameworkParseArtifact,
 };
 
 use super::capability::{CarrierFrontend, FrameworkEpoch, Present};
@@ -21,9 +22,20 @@ use super::CarrierCompiler;
 pub struct VueCarrierFrontend;
 
 /// Admission token issued only after a successful Vue frontend parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Carries the exact [`ParseKey`] it was issued over, so downstream
+/// composition verifies the witness against the artifact it consumes
+/// instead of trusting by-convention pairing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VueParseAdmission {
-    _private: (),
+    parse_key: Arc<ParseKey>,
+}
+
+impl VueParseAdmission {
+    /// The exact parse identity this admission was issued over.
+    #[must_use]
+    pub(crate) fn parse_key(&self) -> &Arc<ParseKey> {
+        &self.parse_key
+    }
 }
 
 /// Typed Vue SFC epoch. Catalog identity is derived from [`FrameworkEpoch::ID`].
@@ -37,6 +49,23 @@ impl FrameworkEpoch for VueSfcV3 {
 impl VueCarrierFrontend {
     /// Catalog epoch spelling for the Vue SFC frontend row.
     pub const EPOCH: &'static str = "vue";
+
+    /// Issue the parse admission over a registered artifact this frontend
+    /// actually parsed: the Vue adapter, the Vue carrier language, and a
+    /// readable Vue carrier payload are all required. Crate-private —
+    /// reached only from host-integration composition; product backends
+    /// never mint it.
+    pub(crate) fn admit_registered(
+        &self,
+        artifact: &super::FrameworkParseArtifact,
+    ) -> Option<VueParseAdmission> {
+        (artifact.adapter_id() == &self.adapter_id()
+            && artifact.language_id() == &self.carrier_language_id()
+            && VueCarrierCompiler.parsed_sfc(artifact).is_some())
+        .then(|| VueParseAdmission {
+            parse_key: Arc::new(artifact.parse_key().clone()),
+        })
+    }
 
     /// Adapter this frontend answers to.
     #[must_use]

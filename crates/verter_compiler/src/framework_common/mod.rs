@@ -28,6 +28,7 @@ mod registered_geometry_state;
 pub mod registry;
 pub mod vue_bridge;
 pub mod vue_carrier_frontend;
+pub mod vue_host_integration;
 pub mod vue_projection_backend;
 pub mod vue_runtime_backend;
 pub mod vue_semantic_authority;
@@ -43,8 +44,8 @@ pub mod sourcemap_e2e_helpers;
 pub use crate::svelte::{svelte_semantic_authority_registration, SvelteSemanticAuthority};
 pub use capability::{
     CarrierFrontend, FrameworkEpoch, FrameworkEpochId, FrameworkHostIntegrationBackend,
-    FrameworkSemanticAuthority, HostEpoch, HostEpochId, Present, ProjectionBackend,
-    RuntimeCompilerBackend,
+    FrameworkSemanticAuthority, HostEpoch, HostEpochId, NativeHostEpoch, Present,
+    ProjectionBackend, RuntimeCompilerBackend,
 };
 pub use carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
@@ -64,6 +65,13 @@ pub use registered_carrier_projection::FrameworkParseArtifact;
 pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;
 pub use vue_carrier_frontend::{vue_carrier_frontend_registration, VueCarrierFrontend, VueSfcV3};
+pub use vue_host_integration::{
+    built_in_host_integration_catalog, registered_host_integration_for,
+    vue_host_integration_registration, InstalledHostIntegration, VueAdmittedDemand,
+    VueCompileAdmission, VueHostAdmissionRefusal, VueHostCompileRefusal, VueHostCompiledProducts,
+    VueHostExecutionInputs, VueHostIntegrationBackend, VueHostMultiProductDemand,
+    VueHostRenderedMain, VueHostRuntimeRenderDemand, VueHostUnproducibleDemand,
+};
 pub use vue_projection_backend::{
     vue_projection_backend_registration, VueIdeCompanion, VueProjectionBackend,
     VueProjectionDiagnostic, VueProjectionError, VueProjectionInputs,

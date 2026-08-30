@@ -269,6 +269,9 @@ pub(crate) fn derive_runtime_compile_options(
             .unwrap_or(false),
         source_map: runtime.is_some_and(|r| r.runtime_source_map)
             || ide.is_some_and(|i| i.want_source_map),
+        // The session's compatibility route keeps its historical shared
+        // map flag: `None` couples the IDE leg to `source_map` unchanged.
+        ide_source_map: None,
         ssr,
         runtime_module_name: vue.and_then(|v| v.runtime_module_name.clone()),
         component_id: request.component_id().map(str::to_string),

@@ -523,7 +523,7 @@ pub enum InstalledCarrierFrontend {
 }
 
 /// Admission token for a catalog-selected Vue or Svelte frontend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstalledParseAdmission {
     /// Vue frontend admission.
     Vue(VueParseAdmission),
@@ -981,6 +981,24 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Per-thread count of projection catalog CONSULTS (row lookups), so
+    /// tests can prove which demand validations touch the projection
+    /// capability at all. Counted at the one lookup choke point
+    /// ([`registered_projection_for`]), not at call sites, so any future
+    /// consult path is counted too.
+    static PROJECTION_CATALOG_CONSULTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Projection catalog consults on the calling thread. Test observability
+/// only.
+#[cfg(test)]
+#[must_use]
+pub(super) fn projection_catalog_consult_count() -> u64 {
+    PROJECTION_CATALOG_CONSULTS.with(std::cell::Cell::get)
+}
+
 /// Catalog projection-producer executions on the calling thread since the
 /// last take. Test observability only.
 #[cfg(any(test, feature = "test-support"))]
@@ -1105,6 +1123,8 @@ pub fn registered_projection_for(
     adapter_id: &FrameworkAdapterId,
     epoch: &FrameworkEpochId,
 ) -> Option<&'static InstalledProjectionBackend> {
+    #[cfg(test)]
+    PROJECTION_CATALOG_CONSULTS.with(|count| count.set(count.get().saturating_add(1)));
     built_in_projection_catalog().iter().find_map(|row| {
         let identity = row.identity();
         (identity.capability() == CatalogCapability::Projection

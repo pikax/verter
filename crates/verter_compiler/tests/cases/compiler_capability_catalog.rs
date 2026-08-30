@@ -114,14 +114,50 @@ impl RuntimeCompilerBackend<TestEpoch> for RuntimeCapable {
 
 impl FrameworkHostIntegrationBackend<TestEpoch, SessionHostEpoch> for HostCapable {
     type CompileAdmission = ();
+    type ParseArtifact = ();
+    type MultiProductDemand = ();
+    type RuntimeRenderDemand = ();
+    type AdmissionRefusal = ();
+
+    fn admit_host_products(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochA> for HostCapable {
     type CompileAdmission = ();
+    type ParseArtifact = ();
+    type MultiProductDemand = ();
+    type RuntimeRenderDemand = ();
+    type AdmissionRefusal = ();
+
+    fn admit_host_products(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochB> for HostCapable {
     type CompileAdmission = ();
+    type ParseArtifact = ();
+    type MultiProductDemand = ();
+    type RuntimeRenderDemand = ();
+    type AdmissionRefusal = ();
+
+    fn admit_host_products(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
+
+    fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+        Err(())
+    }
 }
 
 type TestCatalogRow =
