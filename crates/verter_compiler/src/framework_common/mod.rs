@@ -24,6 +24,7 @@ pub mod generated_identifier;
 pub mod registered_carrier_projection;
 mod registered_geometry_state;
 pub mod registry;
+pub(crate) mod typescript_directives;
 pub mod vue_bridge;
 
 #[cfg(test)]
