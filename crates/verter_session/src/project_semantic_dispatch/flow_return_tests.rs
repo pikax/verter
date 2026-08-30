@@ -3455,7 +3455,7 @@ fn staged_flow_proof(
         },
         query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
         input_basis: verter_identity::identity::InputBasisId::from_canonical(
-            &FlowEvaluationProvenance::new(1, 1, 0),
+            &FlowEvaluationProvenance::new(1, 1, 1, 0),
         ),
         result_contract: key.result_contract.clone(),
     };
@@ -4813,7 +4813,7 @@ fn flow_root_publish_requires_complete_flow_proof() {
 
         // Negative leg: the SAME clean value, flags clear, proof stripped.
         {
-            let _strip = inject::Guard::arm(&inject::STRIP_ROOT_PROOF);
+            let _strip = inject::Guard::arm(&host.flow_fault_injection.strip_root_proof);
             let result = flow_result_value(dispatch, key.clone());
             assert_eq!(result.degradation(), None, "the value itself is clean");
             assert_eq!(
@@ -4879,7 +4879,7 @@ fn production_missing_obligation_returns_only_and_recomputes() {
     with_dispatch(&host, |dispatch| {
         let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
         let _guard = RequestContextGuard::install(ctx);
-        let _drop_claim = inject::Guard::arm(&inject::DROP_LAST_DISCHARGE_CLAIM);
+        let _drop_claim = inject::Guard::arm(&host.flow_fault_injection.drop_last_discharge_claim);
         let key = flow_key(
             dispatch,
             "subLiteral",
@@ -5206,7 +5206,7 @@ fn flow_root_proof_gate_veto_marks_the_read_partial() {
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let _strip = inject::Guard::arm(&inject::STRIP_ROOT_PROOF);
+        let _strip = inject::Guard::arm(&host.flow_fault_injection.strip_root_proof);
         let key = flow_key(
             dispatch,
             "subLiteral",
@@ -5263,7 +5263,7 @@ fn production_flow_proof_has_evaluator_origin() {
     // nothing publishes.
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let _foreign = inject::Guard::arm(&inject::FOREIGN_EVALUATION_EVIDENCE);
+        let _foreign = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
         let key = flow_key(
             dispatch,
             "subLiteral",
@@ -5314,7 +5314,7 @@ fn unobserved_convergence_never_seals() {
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let _unobserved = inject::Guard::arm(&inject::UNOBSERVED_CONVERGENCE);
+        let _unobserved = inject::Guard::arm(&host.flow_fault_injection.unobserved_convergence);
         let key = flow_key(
             dispatch,
             "subLiteral",
@@ -5528,7 +5528,7 @@ fn foreign_flow_value_provenance_is_rejected() {
     // Root leg.
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let _stale = inject::Guard::arm(&inject::STALE_DEMAND_CARRIER);
+        let _stale = inject::Guard::arm(&host.flow_fault_injection.stale_demand_carrier);
         let key = flow_key(
             dispatch,
             "subLiteral",
@@ -5550,7 +5550,7 @@ fn foreign_flow_value_provenance_is_rejected() {
     // carrier publishes NEITHER member.
     let scc_host = make_scc_host();
     with_dispatch(&scc_host, |dispatch| {
-        let _stale = inject::Guard::arm(&inject::STALE_DEMAND_CARRIER);
+        let _stale = inject::Guard::arm(&scc_host.flow_fault_injection.stale_demand_carrier);
         let root = scc_key(dispatch, "scCleanA");
         let peer = scc_key(dispatch, "scCleanB");
         let result = flow_result_value(dispatch, root.clone());
@@ -5576,7 +5576,7 @@ fn foreign_flow_value_provenance_is_rejected() {
     // distinguishes it; a store/generation-only token could not.
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let _foreign = inject::Guard::arm(&inject::FOREIGN_DEMAND_PROVENANCE);
+        let _foreign = inject::Guard::arm(&host.flow_fault_injection.foreign_demand_provenance);
         let key = flow_key(
             dispatch,
             "subLiteral",
@@ -5595,7 +5595,7 @@ fn foreign_flow_value_provenance_is_rejected() {
     });
     let scc_host = make_scc_host();
     with_dispatch(&scc_host, |dispatch| {
-        let _foreign = inject::Guard::arm(&inject::FOREIGN_DEMAND_PROVENANCE);
+        let _foreign = inject::Guard::arm(&scc_host.flow_fault_injection.foreign_demand_provenance);
         let root = scc_key(dispatch, "scCleanA");
         let peer = scc_key(dispatch, "scCleanB");
         let result = flow_result_value(dispatch, root.clone());
@@ -5613,6 +5613,414 @@ fn foreign_flow_value_provenance_is_rejected() {
                 "{name}: a same-generation foreign demand's evidence produces zero SCC candidates"
             );
         }
+    });
+}
+
+/// A call in an `if`/ternary TEST is a narrowing CONTROL: when the
+/// callee is a same-file OVERLOADED type predicate, signature selection
+/// decides which predicate target narrows, and this substrate performs
+/// no overload/applicability resolution for the guard channel. Taking
+/// the first declaration's target narrows WRONG (`pred`'s first overload
+/// says `x is string` where the checker selects `x is number`), and
+/// certifying that call as decided-above would launder the wrong narrow
+/// warm. Required: the overloaded predicate establishes NO narrow (both
+/// arms keep the unnarrowed parameter), and the demand finalizes
+/// unproven — zero candidates, never warm.
+#[test]
+fn overloaded_same_file_predicate_never_self_certifies_control_call() {
+    const PRED_CANONICAL: &str = "/ws/overloaded-predicate.ts";
+    const PRED_FIXTURE: &str = r#"
+function pred(x: string): x is string;
+function pred(x: string | number): x is number;
+function pred(x: string | number): boolean {
+  return typeof x === "number";
+}
+
+export function makeProps(x: string | number) {
+  if (pred(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(PRED_CANONICAL.to_string()),
+        input_id: PRED_CANONICAL.to_string(),
+        source: Arc::from(PRED_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(PRED_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, PRED_CANONICAL, "makeProps");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        let has_primitive = |name: verter_type_expr::PrimitiveName| {
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(name))
+        };
+        assert!(
+            has_primitive(verter_type_expr::PrimitiveName::Number),
+            "the first overload's `x is string` target must not narrow the \
+             consequent — the number arm survives, got {expr:?}"
+        );
+        assert!(
+            has_primitive(verter_type_expr::PrimitiveName::String),
+            "no narrow is established at all for an overloaded predicate, \
+             got {expr:?}"
+        );
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(PRED_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(PRED_CANONICAL),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an overloaded predicate call in a control test carries no \
+             evaluator evidence and must never warm"
+        );
+    });
+}
+
+/// The positive control for the control-position call certification: a
+/// call in an `if` test whose callee is a same-file, SINGLE-declaration
+/// function with an authored NON-predicate return annotation provably
+/// establishes no narrowing (there is exactly one signature and its
+/// return is not a type predicate), so both arms join conservatively —
+/// which IS the checker's answer — and the call is decided above:
+/// the demand still proves and warms.
+#[test]
+fn annotated_non_predicate_control_call_stays_decided_above_and_warm() {
+    const CHECK_CANONICAL: &str = "/ws/boolean-check-control.ts";
+    const CHECK_FIXTURE: &str = r#"
+export function check(x: string | number): boolean {
+  return typeof x === "number";
+}
+
+export function makeChecked(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CHECK_CANONICAL.to_string()),
+        input_id: CHECK_CANONICAL.to_string(),
+        source: Arc::from(CHECK_FIXTURE),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(CHECK_CANONICAL)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let (expr, _) = flow_result_for_file(dispatch, &host, CHECK_CANONICAL, "makeChecked");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        assert!(
+            arms.iter().any(|arm| *arm
+                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+            "the unnarrowed parameter joins, got {expr:?}"
+        );
+        let key = FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(CHECK_CANONICAL),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeChecked"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(CHECK_CANONICAL),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "a provably non-narrowing control call stays decided above and warms"
+        );
+    });
+}
+
+/// A mixed component's UNPROVEN deferred flow members poison the
+/// MACHINERY ROOT that consumed their values. The joint fixed point
+/// feeds the evaluated flow-member overrides into the call/relation
+/// equations before the members finalize, so a close that refuses the
+/// member batch (the torn-component rule) but hands the root back as
+/// admissible would warm a verdict around an unproven flow-derived
+/// value. The discharge coordinator must mark the whole outcome
+/// non-admissible: the root's payload still flows (ReturnOnly), and the
+/// relation memo admits nothing. The proven control keeps the root
+/// admissible.
+#[test]
+fn unproven_flow_member_poisons_mixed_machinery_root() {
+    use super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence;
+    use super::dispatch_txn::{FlowReturnPendingOutcome, InferenceOccurrence, PendingVerdict};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let member_key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        // A REAL prepared member demand: the carrier below is the one the
+        // finalizer triangulates against.
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(member_key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&member_key, idx);
+        let carrier = dispatch
+            .flow_demand_carrier_of(&member_key)
+            .expect("the member demand installs");
+        let provenance = carrier.provenance;
+        // The drained member: an EVALUATED value whose discharge report is
+        // MISSING — its planned obligations stay pending, so finalization
+        // refuses (unproven), exactly the torn-component shape.
+        let member = super::relation::DrainedFlowReturnMember {
+            key: member_key,
+            outcome: FlowReturnPendingOutcome::EvaluatedValue(
+                crate::semantic_query::FlowReturnResult::new(graph, number, false, None),
+            ),
+            inline_flight: None,
+            holds: Vec::new(),
+            self_roots: Vec::new(),
+            materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+            fresh_seed: false,
+            flow_demand: Some(carrier),
+            discharge: None,
+            provenance,
+        };
+        let relate_key = dispatch.relate_key_for(number, number);
+        let outcome = dispatch
+            .relation_discharge_and_route(
+                true,
+                Some((
+                    relate_key,
+                    InferenceOccurrence::ARGUMENT_COVARIANT,
+                    PendingVerdict::Assignable {
+                        bindings: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    false,
+                    false,
+                    None,
+                    None,
+                )),
+                Vec::new(),
+                vec![member],
+                None,
+                Vec::new(),
+                false,
+                &ObservedFlowConvergence {
+                    iterations: 1,
+                    stable: true,
+                },
+            )
+            .expect("the mixed close routes");
+        assert!(
+            outcome.self_publish.is_some(),
+            "the machinery root's payload still flows to its ReturnOnly build"
+        );
+        assert!(
+            outcome.flow_batch_unproven,
+            "a refused flow-member batch must mark the machinery root's \
+             outcome non-admissible — the mixed equation consumed the \
+             members' evaluated values"
+        );
+    });
+
+    // Control: a PROVEN member batch keeps the root admissible.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let relate_key = dispatch.relate_key_for(number, number);
+        let outcome = dispatch
+            .relation_discharge_and_route(
+                true,
+                Some((
+                    relate_key,
+                    InferenceOccurrence::ARGUMENT_COVARIANT,
+                    PendingVerdict::Assignable {
+                        bindings: Arc::from(Vec::new().into_boxed_slice()),
+                    },
+                    false,
+                    false,
+                    None,
+                    None,
+                )),
+                Vec::new(),
+                Vec::new(),
+                None,
+                Vec::new(),
+                false,
+                &ObservedFlowConvergence {
+                    iterations: 1,
+                    stable: true,
+                },
+            )
+            .expect("the member-free close routes");
+        assert!(
+            outcome.self_publish.is_some() && !outcome.flow_batch_unproven,
+            "a component without a refused member batch keeps the root admissible"
+        );
+    });
+}
+
+/// Structural discharge claims are WALK-LEDGER-GATED: the execution
+/// witness yields an executed selection only from the evaluator's own
+/// recorded walk ledger (regions entered/completed at the walk sites),
+/// never by copying the plan's selection. An evaluation whose walk
+/// ledger is short/aborted (modelling an early-exit run that did not
+/// complete the structural walk) claims NO structural obligation: the
+/// usable value still flows, zero candidates, and the second demand
+/// recomputes. The unarmed control warms. Mutation: assign the witness's
+/// executed selection from the plan unconditionally; the armed leg
+/// admits and fails.
+#[test]
+fn short_walk_ledger_never_discharges_structural_claims() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _short = inject::Guard::arm(&host.flow_fault_injection.short_execution_ledger);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a short walk ledger claims no structural obligation and never warms"
+        );
+    });
+
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the completed walk's ledger yields the executed selection and warms"
+        );
+    });
+}
+
+/// The evaluation-provenance token is RUNTIME-unique, not merely
+/// (store, generation, ordinal)-unique: every fresh dispatch creates a
+/// fresh obligation runtime with an EMPTY demand ledger, so the first
+/// demand of two genuine runtimes against the same host bears the same
+/// ledger ordinal (zero). A token without the runtime axis aliases
+/// across them, and the finalizer's carrier comparison could not tell
+/// one runtime's first-demand evidence from the other's. Both first
+/// tokens must differ, and finalizing one runtime's demand with the
+/// OTHER runtime's first-demand token must be the typed
+/// `ForeignProvenance` partial — never a proof.
+#[test]
+fn provenance_distinguishes_first_demands_of_two_runtimes() {
+    use super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence;
+    use super::flow_solve::{FlowPartialReason, FlowSolveOutcome};
+
+    let host = make_host();
+    let key_of = |dispatch: &ProjectSemanticDispatch| {
+        flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        )
+    };
+    // Runtime A: its FIRST demand's carrier token.
+    let provenance_a = with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch);
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&key, idx);
+        dispatch
+            .flow_demand_carrier_of(&key)
+            .expect("the first demand installs on runtime A")
+            .provenance
+    });
+    // Runtime B: a genuine fresh dispatch runtime against the SAME host
+    // and unchanged generation — its first demand also bears ordinal 0.
+    with_dispatch(&host, |dispatch| {
+        let key = key_of(dispatch);
+        let idx = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .reentry_mut()
+            .push_flow_return(key.clone(), 0);
+        dispatch.prepare_flow_return_demand(&key, idx);
+        let carrier = dispatch
+            .flow_demand_carrier_of(&key)
+            .expect("the first demand installs on runtime B");
+        assert_ne!(
+            carrier.provenance, provenance_a,
+            "two runtimes' first demands must not mint identical provenance"
+        );
+        // The functional leg: runtime A's first-demand token presented as
+        // runtime B's evaluation evidence is foreign, never a proof.
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let result = crate::semantic_query::FlowReturnResult::new(graph, number, false, None);
+        let verdict = dispatch.finalize_flow_demand(
+            Some(&carrier),
+            None,
+            &ObservedFlowConvergence {
+                iterations: 1,
+                stable: true,
+            },
+            provenance_a,
+            &result,
+        );
+        assert!(
+            matches!(
+                verdict,
+                Some(FlowSolveOutcome::Partial(ref partial))
+                    if matches!(partial.reason, FlowPartialReason::ForeignProvenance)
+            ),
+            "the other runtime's first-demand token must finalize as the \
+             typed ForeignProvenance partial, got {verdict:?}"
+        );
     });
 }
 
@@ -5635,7 +6043,7 @@ fn discharge_claims_require_evaluator_call_evidence() {
     // claim, so the demand never seals.
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let _suppress = inject::Guard::arm(&inject::SUPPRESS_CALL_EVIDENCE);
+        let _suppress = inject::Guard::arm(&host.flow_fault_injection.suppress_call_evidence);
         let key = flow_key(
             dispatch,
             "subCallReturn",
@@ -5657,7 +6065,7 @@ fn discharge_claims_require_evaluator_call_evidence() {
     // SemanticRelation obligation has no decided outcome to claim.
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let _undecided = inject::Guard::arm(&inject::UNDECIDED_RELATION_EVIDENCE);
+        let _undecided = inject::Guard::arm(&host.flow_fault_injection.undecided_relation_evidence);
         let key = flow_key(
             dispatch,
             "subCallReturn",

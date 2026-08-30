@@ -162,14 +162,17 @@ pub struct SliceContent {
     /// type does not derive from any call inside it, e.g. a
     /// type-replacing `as T` / `<T>x` carrier or a form the shallow pass
     /// models without the call's return), and a call in a CONTROL
-    /// position (an `if` / ternary test — the demanded value never
-    /// consumes its return; the guard fact narrows, or both arms join
-    /// conservatively). Each span is a call occurrence whose type
-    /// position this run decided without the call — the containment
-    /// evidence the discharge-report producer accepts for a call
-    /// obligation the evaluator's call sink never reached. Absolute
-    /// spans: the report rebases them onto the frame anchor when pairing
-    /// against the skeleton footprint.
+    /// position (an `if` / ternary test) ONLY when its result provably
+    /// cannot control the arms' narrowing — a `new` construct, or a
+    /// same-file single-declaration callee with an authored non-predicate
+    /// return annotation. A predicate call in a test CONTROLS narrowing
+    /// and is never recorded here: it takes real evaluator evidence at
+    /// guard application, or its obligations stay unclaimed. Each span is
+    /// a call occurrence whose type position this run decided without the
+    /// call — the containment evidence the discharge-report producer
+    /// accepts for a call obligation the evaluator's call sink never
+    /// reached. Absolute spans: the report rebases them onto the frame
+    /// anchor when pairing against the skeleton footprint.
     pub decided_above_call_spans: Vec<verter_span::Span>,
 }
 
@@ -590,10 +593,11 @@ pub enum SliceGuard {
         /// Whether the test is negated.
         negated: bool,
     },
-    /// `predicate(subject)` — a same-file function whose declared return
-    /// is `x is T`. The target type lowers through the frame gate exactly
-    /// like a declarator annotation; a cross-file callee or a callee
-    /// without the predicate spelling lowers to [`SliceGuard::None`].
+    /// `predicate(subject)` — a same-file, single-declaration function
+    /// whose declared return is `x is T`. The target type lowers through
+    /// the frame gate exactly like a declarator annotation; a cross-file
+    /// callee, an overloaded group, or a callee without the predicate
+    /// spelling lowers to [`SliceGuard::None`].
     TypePredicate {
         /// The argument the predicate talks about.
         subject: SliceNarrowSubject,
@@ -601,6 +605,11 @@ pub enum SliceGuard {
         target: GatedType,
         /// Whether this is the predicate's negative reading.
         negated: bool,
+        /// The authored predicate call's span (absolute). A predicate
+        /// call CONTROLS the arms' narrowing, so it is never decided
+        /// above the call: the evaluator records real call evidence at
+        /// guard application against exactly this span.
+        call: verter_span::Span,
     },
     /// A conjunction: every fact applies at once.
     And(Arc<[SliceGuard]>),
@@ -1585,6 +1594,8 @@ pub(crate) fn build_flow_slice_content(
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
         decided_above_call_spans: Vec::new(),
+        predicate_guard_call_spans: FxHashSet::default(),
+        control_test_gap: false,
         unsafe_invoked_closure_effects: FxHashSet::default(),
         nested_free_writes: FxHashSet::default(),
         active_guard_bindings: Vec::new(),
@@ -1618,11 +1629,21 @@ pub(crate) fn build_flow_slice_content(
             } else {
                 SliceExpr::Elided
             };
+            // An expression body has no statement loop to drain the
+            // ternary-test gap into: it lands ahead of the synthesized
+            // `return` here.
+            let mut statements = Vec::with_capacity(2);
+            if std::mem::take(&mut lowerer.control_test_gap) {
+                statements.push(SliceStatement::Gap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            statements.push(SliceStatement::Return {
+                argument: Some(argument),
+                widening_literal,
+            });
             SliceRegion {
-                statements: Arc::from([SliceStatement::Return {
-                    argument: Some(argument),
-                    widening_literal,
-                }]),
+                statements: Arc::from(statements.into_boxed_slice()),
                 can_fall_through: false,
             }
         }
@@ -2390,6 +2411,17 @@ struct Lowerer<'a> {
     /// Call / construct spans of decided-above positions — see
     /// [`SliceContent::decided_above_call_spans`].
     decided_above_call_spans: Vec<verter_span::Span>,
+    /// The authored call spans whose [`SliceGuard::TypePredicate`] fact
+    /// this lowering MINTED: evidence-backed at guard application, so the
+    /// control-position recorder neither certifies them decided-above nor
+    /// gaps them.
+    predicate_guard_call_spans: FxHashSet<verter_span::Span>,
+    /// A control-position test lowered inside the CURRENT statement
+    /// carried a call this half can neither certify result-independent
+    /// nor back with guard evidence: the statement loop drains this into
+    /// a [`SliceStatement::Gap`] (`GuardNarrowing`) AHEAD of the
+    /// statement — a typed degradation, never a silent certification.
+    control_test_gap: bool,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
     active_guard_bindings: Vec<SkeletonBindingId>,
@@ -3488,6 +3520,7 @@ impl Lowerer<'_> {
                 can_fall_through = false;
                 break;
             }
+            let statement_start = out.len();
             match statement {
                 Statement::ReturnStatement(ret) => {
                     let widening_literal = ret.argument.as_ref().is_some_and(expr_is_bare_literal);
@@ -3519,11 +3552,12 @@ impl Lowerer<'_> {
                     // through the ONE guard authority both control
                     // spellings share.
                     let guard = self.lower_guard(&if_stmt.test);
-                    // A call in the TEST is a control-position call: the
-                    // demanded value never consumes its return (the guard
-                    // fact narrows, or both arms join conservatively), so
-                    // the position is decided above the call.
-                    self.record_decided_above_calls(&if_stmt.test);
+                    // A call in the TEST is decided above ONLY when its
+                    // result provably cannot control the arms' narrowing;
+                    // a predicate call takes evaluator evidence at guard
+                    // application, and an unprovable callee degrades the
+                    // demand through the typed guard-narrowing gap below.
+                    let unprovable_control_call = self.record_control_position_calls(&if_stmt.test);
                     let active_guard_base = self.active_guard_bindings.len();
                     let active_guard_name_base = self.active_guard_names.len();
                     let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
@@ -3566,7 +3600,7 @@ impl Lowerer<'_> {
                     // arm — the test lowers to guard facts only, so the
                     // marker carries the point (ahead of the `if`, where
                     // the test evaluates).
-                    if nested_predicate_gap {
+                    if nested_predicate_gap || unprovable_control_call {
                         out.push(SliceStatement::Gap(
                             crate::semantic_query::FlowGap::GuardNarrowing,
                         ));
@@ -3992,6 +4026,17 @@ impl Lowerer<'_> {
                 | Statement::TSGlobalDeclaration(_)
                 | Statement::TSImportEqualsDeclaration(_) => {}
             }
+            // A ternary test lowered INSIDE this statement carried a
+            // control call this half could neither certify nor evidence:
+            // the typed guard-narrowing gap lands AHEAD of the statement,
+            // so a terminal statement (a `return` of the ternary) cannot
+            // strand it unreachable.
+            if std::mem::take(&mut self.control_test_gap) {
+                out.insert(
+                    statement_start,
+                    SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+                );
+            }
             if hit_unsupported {
                 can_fall_through = false;
             }
@@ -4186,11 +4231,37 @@ impl Lowerer<'_> {
         let Some(subject) = self.narrow_subject_of(argument) else {
             return SliceGuard::None;
         };
+        let span: verter_span::Span = call.span.into();
+        self.predicate_guard_call_spans.insert(span);
         SliceGuard::TypePredicate {
             subject,
             target,
             negated: false,
+            call: span,
         }
+    }
+
+    /// Every same-file top-level function DECLARATION with `name`, in
+    /// source order — the direct spelling and the `export function`
+    /// spelling both count, because the group SIZE is a semantic fact
+    /// (an overload group's signature selection) that must not depend on
+    /// export syntax.
+    fn same_file_function_declarations(&self, name: &str) -> Vec<&oxc_ast::ast::Function<'_>> {
+        self.program
+            .body
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::FunctionDeclaration(function) => Some(&**function),
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(oxc_ast::ast::Declaration::FunctionDeclaration(function)) => {
+                        Some(&**function)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .filter(|function| function.id.as_ref().map(|id| id.name.as_str()) == Some(name))
+            .collect()
     }
 
     /// Read a SAME-FILE function declaration's return-type predicate:
@@ -4201,45 +4272,46 @@ impl Lowerer<'_> {
     /// in scope there, exactly like a declarator annotation); the target
     /// is `None` for the targetless assertion spelling. `None` for the
     /// whole read for any other signature spelling.
+    ///
+    /// The channel serves EXACTLY ONE declaration. An overload group
+    /// (two or more same-name declarations) is refused outright: which
+    /// signature applies is overload/applicability resolution, which
+    /// this half does not perform, and the first declaration's predicate
+    /// target can be the WRONG one — narrowing on it would publish a
+    /// checker-divergent type. A refused group establishes no fact.
     fn same_file_predicate(&self, name: &str, asserts: bool) -> Option<(usize, Option<GatedType>)> {
-        for statement in &self.program.body {
-            let Statement::FunctionDeclaration(function) = statement else {
-                continue;
-            };
-            if function.id.as_ref().map(|id| id.name.as_str()) != Some(name) {
-                continue;
-            }
-            let annotation = function.return_type.as_ref()?;
-            let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
-                return None;
-            };
-            if predicate.asserts != asserts {
-                return None;
-            }
-            let target = predicate.type_annotation.as_ref().map(|target| {
-                self.gate(
-                    lower_ts_type(&target.type_annotation, self.source),
-                    annotation.span,
-                    &[],
-                )
-            });
-            // A non-`asserts` predicate without a target type is not a
-            // predicate spelling at all.
-            if !asserts && target.is_none() {
-                return None;
-            }
-            let oxc_ast::ast::TSTypePredicateName::Identifier(parameter) =
-                &predicate.parameter_name
-            else {
-                return None;
-            };
-            let ordinal = function.params.items.iter().position(|param| {
-                matches!(&param.pattern, BindingPattern::BindingIdentifier(id)
-                    if id.name.as_str() == parameter.name.as_str())
-            })?;
-            return Some((ordinal, target));
+        let group = self.same_file_function_declarations(name);
+        let [function] = group.as_slice() else {
+            return None;
+        };
+        let annotation = function.return_type.as_ref()?;
+        let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
+            return None;
+        };
+        if predicate.asserts != asserts {
+            return None;
         }
-        None
+        let target = predicate.type_annotation.as_ref().map(|target| {
+            self.gate(
+                lower_ts_type(&target.type_annotation, self.source),
+                annotation.span,
+                &[],
+            )
+        });
+        // A non-`asserts` predicate without a target type is not a
+        // predicate spelling at all.
+        if !asserts && target.is_none() {
+            return None;
+        }
+        let oxc_ast::ast::TSTypePredicateName::Identifier(parameter) = &predicate.parameter_name
+        else {
+            return None;
+        };
+        let ordinal = function.params.items.iter().position(|param| {
+            matches!(&param.pattern, BindingPattern::BindingIdentifier(id)
+                if id.name.as_str() == parameter.name.as_str())
+        })?;
+        Some((ordinal, target))
     }
 
     /// The narrowable reference an expression NAMES: a static member
@@ -4616,8 +4688,12 @@ impl Lowerer<'_> {
                 ValueDescent::Branches(conditional) => {
                     let guard = self.lower_guard(&conditional.test);
                     // The ternary's TEST is a control position exactly as
-                    // the `if` twin's: its calls are decided above.
-                    self.record_decided_above_calls(&conditional.test);
+                    // the `if` twin's: only its provably result-independent
+                    // calls are decided above; an unprovable one flags the
+                    // enclosing statement's guard-narrowing gap.
+                    if self.record_control_position_calls(&conditional.test) {
+                        self.control_test_gap = true;
+                    }
                     let consequent = self.lower_expr(&conditional.consequent, mode);
                     let alternate = self.lower_expr(&conditional.alternate, mode);
                     SliceExpr::Union {
@@ -5020,6 +5096,8 @@ impl Lowerer<'_> {
             budget_failure: None,
             inert_write_spans: FxHashSet::default(),
             decided_above_call_spans: Vec::new(),
+            predicate_guard_call_spans: FxHashSet::default(),
+            control_test_gap: false,
             unsafe_invoked_closure_effects: FxHashSet::default(),
             nested_free_writes: FxHashSet::default(),
             active_guard_bindings: Vec::new(),
@@ -5063,17 +5141,22 @@ impl Lowerer<'_> {
                             false,
                         ),
                     });
+                // The expression body's ternary-test gap lands ahead of
+                // the synthesized `return` (no statement loop drains it).
+                let mut statements = Vec::with_capacity(2);
+                if std::mem::take(&mut nested.control_test_gap) {
+                    statements.push(SliceStatement::Gap(
+                        crate::semantic_query::FlowGap::GuardNarrowing,
+                    ));
+                }
+                statements.extend(argument.map(|(argument, widening_literal)| {
+                    SliceStatement::Return {
+                        argument: Some(argument),
+                        widening_literal,
+                    }
+                }));
                 SliceRegion {
-                    statements: Arc::from(
-                        argument
-                            .map(|(argument, widening_literal)| SliceStatement::Return {
-                                argument: Some(argument),
-                                widening_literal,
-                            })
-                            .into_iter()
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    ),
+                    statements: Arc::from(statements.into_boxed_slice()),
                     can_fall_through: false,
                 }
             }
@@ -5155,9 +5238,13 @@ impl Lowerer<'_> {
 
     /// Record the authored call / construct spans of one DECIDED-ABOVE
     /// position — see [`SliceContent::decided_above_call_spans`]. Called
-    /// only by the leaf arms that passed the fabricated-value gate and by
-    /// the two control-position (test) lowerings: in both, the produced
-    /// type does not derive from any call inside the expression.
+    /// only by positions whose produced type PROVABLY does not derive
+    /// from any call inside the expression: the leaf arms that passed
+    /// the fabricated-value gate, the optional-`any`-chain carrier, and
+    /// a sequence's discarded operands. Control-position tests take the
+    /// narrower [`Self::record_control_position_calls`] instead — a test
+    /// call can CONTROL the arms' narrowing, which this blanket recorder
+    /// cannot see.
     fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
         struct CallSpans<'s> {
             spans: &'s mut Vec<verter_span::Span>,
@@ -5176,6 +5263,96 @@ impl Lowerer<'_> {
             spans: &mut self.decided_above_call_spans,
         };
         scanner.visit_expression(expr);
+    }
+
+    /// Record the RESULT-INDEPENDENT call / construct spans of one
+    /// CONTROL-POSITION test (an `if` / ternary test). The demanded
+    /// value never consumes a test's VALUE, but a test call's RESULT can
+    /// still decide the narrowing the arms evaluate under — a
+    /// type-predicate callee — so a control call is decided above ONLY
+    /// when the callee provably establishes no narrowing:
+    /// - a `new` construct (a construct signature cannot be a type
+    ///   predicate, and the checker derives no narrowing from one);
+    /// - a bare-identifier callee resolving FREE to a same-file function
+    ///   group with EXACTLY ONE declaration whose authored return
+    ///   annotation exists and is NOT a type predicate (an inferred
+    ///   boolean return can be an inferred predicate, so an unannotated
+    ///   declaration never qualifies; an overload group's signature
+    ///   selection is beyond this half).
+    ///
+    /// A call that minted a [`SliceGuard::TypePredicate`] fact takes
+    /// REAL evaluator evidence at guard application instead. Every OTHER
+    /// control call is one this half can neither certify nor evidence —
+    /// the callee could be a predicate whose narrowing the checker
+    /// applies and this substrate does not — so the test returns `true`
+    /// and the caller emits the typed `GuardNarrowing` gap: a degraded
+    /// success, `ReturnOnly`, never a silently certified superset.
+    fn record_control_position_calls(&mut self, test: &Expression<'_>) -> bool {
+        enum ControlCall {
+            Construct(verter_span::Span),
+            Call {
+                span: verter_span::Span,
+                callee: Option<(String, oxc_span::Span)>,
+            },
+        }
+        struct ControlCalls {
+            calls: Vec<ControlCall>,
+        }
+        impl<'a> Visit<'a> for ControlCalls {
+            fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+                let callee = match unwrap_parenthesized(&call.callee) {
+                    Expression::Identifier(identifier) => {
+                        Some((identifier.name.as_str().to_owned(), identifier.span))
+                    }
+                    _ => None,
+                };
+                self.calls.push(ControlCall::Call {
+                    span: call.span.into(),
+                    callee,
+                });
+                walk::walk_call_expression(self, call);
+            }
+            fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
+                self.calls.push(ControlCall::Construct(new.span.into()));
+                walk::walk_new_expression(self, new);
+            }
+        }
+        let mut scanner = ControlCalls { calls: Vec::new() };
+        scanner.visit_expression(test);
+        let mut unprovable = false;
+        for call in scanner.calls {
+            let span = match call {
+                ControlCall::Construct(span) => span,
+                ControlCall::Call { span, callee } => {
+                    if self.predicate_guard_call_spans.contains(&span) {
+                        // Evidence-backed at guard application: neither
+                        // certified here nor gapped.
+                        continue;
+                    }
+                    let certified = callee.as_ref().is_some_and(|(name, callee_span)| {
+                        matches!(self.resolve_name(name, *callee_span), NameBinding::Free)
+                            && match self.same_file_function_declarations(name).as_slice() {
+                                [function] => {
+                                    function.return_type.as_ref().is_some_and(|annotation| {
+                                        !matches!(
+                                            annotation.type_annotation,
+                                            TSType::TSTypePredicate(_)
+                                        )
+                                    })
+                                }
+                                _ => false,
+                            }
+                    });
+                    if !certified {
+                        unprovable = true;
+                        continue;
+                    }
+                    span
+                }
+            };
+            self.decided_above_call_spans.push(span);
+        }
+        unprovable
     }
 
     /// THE root-identifier gate, half one: the names in the leaf
@@ -5371,10 +5548,12 @@ fn negate_guard(guard: SliceGuard) -> SliceGuard {
             subject,
             target,
             negated,
+            call,
         } => SliceGuard::TypePredicate {
             subject,
             target,
             negated: !negated,
+            call,
         },
         SliceGuard::And(parts) => SliceGuard::Or(Arc::from(
             parts

@@ -42,7 +42,12 @@ fn workspace_root() -> PathBuf {
 // caller outside the crate cannot name its return type without them. Six
 // names do not fit one 100-column line; the payload types all live in the
 // `compile` submodule and only the re-export is irreducibly here.
-const LIB_RS_LINE_CEILING: usize = 857;
+// +5 for the per-host `flow_fault_injection` fault-slot field: a root
+// `VerterHost` struct field is irreducibly declared here (the knob
+// STRUCT and every arming/reading site live in
+// `project_semantic_dispatch::flow_return`), and the fully-qualified
+// type does not fit the field line.
+const LIB_RS_LINE_CEILING: usize = 862;
 
 #[test]
 fn lib_rs_stays_under_line_ceiling() {

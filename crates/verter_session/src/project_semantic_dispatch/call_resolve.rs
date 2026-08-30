@@ -37,6 +37,10 @@ enum ResolveCallRootClose {
         ResolvedCallResult,
         Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     ),
+    /// A complete result whose mixed component consumed UNPROVEN
+    /// flow-member values: the value flows to the caller, the build is
+    /// cache-suppressed — never queued, never warm.
+    CompleteReturnOnly(ResolvedCallResult),
     Degraded(ResolveCallFailure),
 }
 
@@ -162,7 +166,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let outcome = self.run_resolve_call(&key);
         match self.resolve_call_frame_pop(idx, outcome, false) {
             ResolveCallFramePop::Provisional(step) => step,
-            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _)) => {
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _))
+            | ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
                 ResolveCallStep::Complete(result)
             }
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
@@ -226,6 +231,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ))
                 .with_observed_self_roots(self_roots);
                 output.cache_suppress |= !admits;
+                output
+            }
+            ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
+                // ReturnOnly-but-public: the value was composed around a
+                // mixed component whose flow members finalized UNPROVEN —
+                // the caller receives it, the memo refuses admission, and
+                // the frame close already marked the request partial.
+                let mut output: QueryBuildOutput<SemanticQueryValue> = (
+                    QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
+                    fence,
+                )
+                    .into();
+                output.cache_suppress = true;
                 output
             }
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
@@ -686,18 +704,41 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 stable: true,
             },
         );
-        if let Err(cap) = discharge {
-            if let Some(session) = root.staged_session {
-                self.abandon_session(session);
+        let discharge = match discharge {
+            Ok(outcome) => outcome,
+            Err(cap) => {
+                if let Some(session) = root.staged_session {
+                    self.abandon_session(session);
+                }
+                self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
+                return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(
+                    if cap.is_some() {
+                        ResolveCallFailure::Budget
+                    } else {
+                        ResolveCallFailure::Undecidable
+                    },
+                ));
+            }
+        };
+        if discharge.flow_batch_unproven {
+            // The root's return equation consumed UNPROVEN flow-member
+            // values (the member batch was refused at the proof gate):
+            // the call's value still flows to the caller, but the root is
+            // NON-ADMISSIBLE — never queued, never warm — and the
+            // enclosing build/request take the same rails the inline
+            // flow-root refusal folds.
+            self.fold_cache_read_rails(
+                true,
+                true,
+                crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+            );
+            if machinery_root {
+                return ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(
+                    root_result,
+                ));
             }
             self.resolve_call_abort_inline_flight(root.inline_flight.as_ref());
-            return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(
-                if cap.is_some() {
-                    ResolveCallFailure::Budget
-                } else {
-                    ResolveCallFailure::Undecidable
-                },
-            ));
+            return ResolveCallFramePop::Provisional(ResolveCallStep::Complete(root_result));
         }
 
         if !machinery_root {

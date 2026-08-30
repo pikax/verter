@@ -178,69 +178,90 @@ fn degradation_reason_class(degradation: FlowReturnDegradation) -> PartialReason
 /// built never to produce (a proofless clean value at the memo gate; a
 /// report leaving one planned obligation pending), proving the guards
 /// discriminate rather than ride along.
+///
+/// The slots are PER-HOST (a [`FlowAdmissionFaultKnobs`] field on
+/// `VerterHost`), never process-global: a test arming one on its own
+/// host cannot perturb a concurrent unrelated test running on a
+/// different host in the same process. Production reads each slot as a
+/// relaxed atomic load inside `cfg(any(test, feature = "test-support"))`
+/// blocks only — a shipped build compiles to no field and no load.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod flow_admission_fault_injection {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// When armed, [`super::ProjectSemanticDispatch::build_flow_return`]
-    /// removes the `flow_completion` proof token from its build output
-    /// while leaving the boolean rails untouched — the exact shape the
-    /// memo's flow-proof gate must refuse.
-    pub(crate) static STRIP_ROOT_PROOF: AtomicBool = AtomicBool::new(false);
+    /// The per-host flow-admission fault slots. One instance per
+    /// `VerterHost`; every slot defaults to disarmed.
+    #[derive(Debug, Default)]
+    pub(crate) struct FlowAdmissionFaultKnobs {
+        /// When armed, `build_flow_return` removes the `flow_completion`
+        /// proof token from its build output while leaving the boolean
+        /// rails untouched — the exact shape the memo's flow-proof gate
+        /// must refuse.
+        pub(crate) strip_root_proof: AtomicBool,
 
-    /// When armed, `finalize_flow_demand` applies the evaluator's
-    /// discharge report with its LAST claim removed, leaving exactly one
-    /// planned obligation pending at the seal.
-    pub(crate) static DROP_LAST_DISCHARGE_CLAIM: AtomicBool = AtomicBool::new(false);
+        /// When armed, `finalize_flow_demand` applies the evaluator's
+        /// discharge report with its LAST claim removed, leaving exactly
+        /// one planned obligation pending at the seal.
+        pub(crate) drop_last_discharge_claim: AtomicBool,
 
-    /// When armed, `finalize_flow_demand` sees evaluation evidence whose
-    /// provenance is NOT this evaluation's one-shot mint — modelling
-    /// evidence that did not originate from `evaluate_flow_return`.
-    pub(crate) static FOREIGN_EVALUATION_EVIDENCE: AtomicBool = AtomicBool::new(false);
+        /// When armed, `finalize_flow_demand` sees evaluation evidence
+        /// whose provenance is NOT this evaluation's one-shot mint —
+        /// modelling evidence that did not originate from
+        /// `evaluate_flow_return`.
+        pub(crate) foreign_evaluation_evidence: AtomicBool,
 
-    /// When armed, `finalize_flow_demand` sees evaluation evidence whose
-    /// provenance carries the carrier's OWN store/generation but a
-    /// DIFFERENT demand ordinal — modelling a same-store, same-generation
-    /// value or report produced by ANOTHER demand.
-    pub(crate) static FOREIGN_DEMAND_PROVENANCE: AtomicBool = AtomicBool::new(false);
+        /// When armed, `finalize_flow_demand` sees evaluation evidence
+        /// whose provenance carries the carrier's OWN store/generation/
+        /// runtime but a DIFFERENT demand ordinal — modelling a
+        /// same-store, same-generation value or report produced by
+        /// ANOTHER demand of the same runtime.
+        pub(crate) foreign_demand_provenance: AtomicBool,
 
-    /// When armed, `prepare_flow_return_demand` stamps the installed
-    /// demand carrier with a provenance from another store/generation —
-    /// modelling a demand handle and value pair minted elsewhere.
-    pub(crate) static STALE_DEMAND_CARRIER: AtomicBool = AtomicBool::new(false);
+        /// When armed, `prepare_flow_return_demand` stamps the installed
+        /// demand carrier with a provenance from another store/generation
+        /// — modelling a demand handle and value pair minted elsewhere.
+        pub(crate) stale_demand_carrier: AtomicBool,
 
-    /// When armed, `finalize_flow_demand` sees convergence evidence with
-    /// ZERO observed iterations — modelling a caller-fabricated claim the
-    /// discharge driver never produced.
-    pub(crate) static UNOBSERVED_CONVERGENCE: AtomicBool = AtomicBool::new(false);
+        /// When armed, `finalize_flow_demand` sees convergence evidence
+        /// with ZERO observed iterations — modelling a caller-fabricated
+        /// claim the discharge driver never produced.
+        pub(crate) unobserved_convergence: AtomicBool,
 
-    /// When armed, `evaluate_flow_return` assembles its execution witness
-    /// with the evaluator's recorded call evidence dropped — modelling an
-    /// evaluation that claims call obligations whose work it never
-    /// performed.
-    pub(crate) static SUPPRESS_CALL_EVIDENCE: AtomicBool = AtomicBool::new(false);
+        /// When armed, `evaluate_flow_return` assembles its execution
+        /// witness with the evaluator's recorded call evidence dropped —
+        /// modelling an evaluation that claims call obligations whose
+        /// work it never performed.
+        pub(crate) suppress_call_evidence: AtomicBool,
 
-    /// When armed, `evaluate_flow_return` assembles its execution witness
-    /// with every recorded call marked relation-undecided — modelling a
-    /// call whose consumed relation outcomes were never decided.
-    pub(crate) static UNDECIDED_RELATION_EVIDENCE: AtomicBool = AtomicBool::new(false);
+        /// When armed, `evaluate_flow_return` assembles its execution
+        /// witness with every recorded call marked relation-undecided —
+        /// modelling a call whose consumed relation outcomes were never
+        /// decided.
+        pub(crate) undecided_relation_evidence: AtomicBool,
 
-    /// RAII arm/disarm for one slot.
+        /// When armed, `evaluate_flow_return` assembles its execution
+        /// witness with the evaluator's walk ledger marked aborted —
+        /// modelling an evaluation whose structural walk did not run to
+        /// completion (an early exit leaving the ledger short).
+        pub(crate) short_execution_ledger: AtomicBool,
+    }
+
+    /// RAII arm/disarm for one slot of one host's knobs.
     // Constructed by the in-crate admission tests only; the lib-only
     // `test-support` build compiles the slots for the application sites
     // without constructing a guard.
     #[allow(dead_code)]
-    pub(crate) struct Guard(&'static AtomicBool);
+    pub(crate) struct Guard<'h>(&'h AtomicBool);
 
     #[allow(dead_code)]
-    impl Guard {
-        pub(crate) fn arm(slot: &'static AtomicBool) -> Self {
+    impl<'h> Guard<'h> {
+        pub(crate) fn arm(slot: &'h AtomicBool) -> Self {
             slot.store(true, Ordering::Relaxed);
             Self(slot)
         }
     }
 
-    impl Drop for Guard {
+    impl Drop for Guard<'_> {
         fn drop(&mut self) {
             self.0.store(false, Ordering::Relaxed);
         }
@@ -1325,7 +1346,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
         };
         #[cfg(any(test, feature = "test-support"))]
-        if flow_admission_fault_injection::STRIP_ROOT_PROOF
+        if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .strip_root_proof
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             built.flow_completion = None;
@@ -1470,22 +1495,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // ──────────────────────────────────────────────────────────────────
 
     /// The dispatch's current evaluation FRESHNESS mint: the semantic
-    /// store's instance identity plus the live project generation. The
-    /// demand-unique axis is NOT knowable here — the mint carries the
-    /// sentinel ordinal no installed demand ever bears, and only
+    /// store's instance identity, the live project generation, and THIS
+    /// dispatch's obligation-runtime instance identity. The demand-unique
+    /// axis is NOT knowable here — the mint carries the sentinel ordinal
+    /// no installed demand ever bears, and only
     /// [`FlowEvaluationProvenance::freshness_axes`] of a minted token may
     /// be compared against it. Demand preparation derives the real token
     /// (freshness axes + the demand's ledger ordinal) from this mint; the
     /// finalization driver accepts evidence only when the evidence token
     /// IS the demand carrier's own token and the carrier's freshness axes
     /// equal a FRESH mint's: a value, report, or convergence claim from
-    /// another demand, another store, or a stale request generation is a
-    /// typed partial, never a proof.
+    /// another demand, another runtime, another store, or a stale request
+    /// generation is a typed partial, never a proof.
     pub(super) fn current_flow_evaluation_provenance(&self) -> FlowEvaluationProvenance {
         let store_identity = Arc::as_ptr(self.graph()) as *const () as usize as u64;
+        let runtime_identity = self.dispatch_txn.borrow().obligations.instance_identity();
         FlowEvaluationProvenance::new(
             store_identity,
             self.ctx.project_type_store().project_generation(),
+            runtime_identity,
             // The sentinel ordinal: no installed demand bears it (ledger
             // ordinals are small counting numbers), so a bare freshness
             // mint can never pose as one demand's evidence.
@@ -1534,15 +1562,25 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let demand_ordinal = self.dispatch_txn.borrow().obligations.flow_demand_count() as u64;
         let provenance = {
             let freshness = self.current_flow_evaluation_provenance();
-            let (store_identity, request_generation) = freshness.freshness_axes();
-            FlowEvaluationProvenance::new(store_identity, request_generation, demand_ordinal)
+            let (store_identity, request_generation, runtime_identity) = freshness.freshness_axes();
+            FlowEvaluationProvenance::new(
+                store_identity,
+                request_generation,
+                runtime_identity,
+                demand_ordinal,
+            )
         };
         #[cfg(any(test, feature = "test-support"))]
-        let provenance = if flow_admission_fault_injection::STALE_DEMAND_CARRIER
+        let provenance = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .stale_demand_carrier
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
                 u64::MAX - 1,
+                0,
                 0,
                 0,
             )
@@ -1637,12 +1675,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(records) = txn.obligations.flow_obligations(carrier.handle) else {
             return FlowDischargeReport::new(Vec::new());
         };
-        // The whole-slice witness: the selection the evaluation executed
-        // is exactly the retained selection the plan's obligations
-        // expanded from (a torn view between the two lookups executes a
-        // DIFFERENT slice and must not claim exhaustive enumeration).
+        // The whole-slice witness: the walk-completed selection the
+        // evaluation executed is exactly the retained selection the
+        // plan's obligations expanded from. A short/aborted walk yields
+        // NO executed selection at all, and a torn view between the two
+        // lookups executes a DIFFERENT slice — neither claims exhaustive
+        // enumeration.
         let whole_selection_executed =
-            witness.executed_selection == carrier.plan.structural_selection();
+            witness.executed_selection == Some(carrier.plan.structural_selection());
         // The decided call evidence of one planned call occurrence:
         // `None` = the evaluation never evaluated it; `Some(decided)` =
         // it did, with `decided` the conjunction of every recorded
@@ -1684,12 +1724,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | FlowObligationBasis::Binding { node, .. }
                 | FlowObligationBasis::Guard { node, .. }
                 | FlowObligationBasis::ContextualTarget { node, .. }
-                | FlowObligationBasis::CapturedBinding { node, .. } => {
-                    witness.executed_selection.is_selected(*node)
-                }
+                | FlowObligationBasis::CapturedBinding { node, .. } => witness
+                    .executed_selection
+                    .is_some_and(|selection| selection.is_selected(*node)),
                 FlowObligationBasis::Edge { from, to, .. } => {
-                    witness.executed_selection.is_selected(*from)
-                        && witness.executed_selection.is_selected(*to)
+                    witness.executed_selection.is_some_and(|selection| {
+                        selection.is_selected(*from) && selection.is_selected(*to)
+                    })
                 }
                 FlowObligationBasis::CallSite {
                     site, call_ordinal, ..
@@ -1737,23 +1778,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
         use super::dispatch_txn::flow_obligation_state::FlowSealError;
         let carrier = carrier?;
         #[cfg(any(test, feature = "test-support"))]
-        let provenance = if flow_admission_fault_injection::FOREIGN_EVALUATION_EVIDENCE
+        let provenance = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .foreign_evaluation_evidence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
+                u64::MAX,
                 u64::MAX,
                 u64::MAX,
                 u64::MAX,
             )
-        } else if flow_admission_fault_injection::FOREIGN_DEMAND_PROVENANCE
+        } else if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .foreign_demand_provenance
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            // A same-store, same-generation token of ANOTHER demand: the
-            // freshness axes pass; the demand ordinal betrays it.
-            let (store_identity, request_generation) = carrier.provenance.freshness_axes();
+            // A same-store, same-generation, same-runtime token of ANOTHER
+            // demand: the freshness axes pass; the demand ordinal betrays
+            // it.
+            let (store_identity, request_generation, runtime_identity) =
+                carrier.provenance.freshness_axes();
             super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
                 store_identity,
                 request_generation,
+                runtime_identity,
                 carrier.provenance.demand_ordinal() ^ 1,
             )
         } else {
@@ -1762,7 +1815,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(any(test, feature = "test-support"))]
         let unobserved_convergence;
         #[cfg(any(test, feature = "test-support"))]
-        let convergence = if flow_admission_fault_injection::UNOBSERVED_CONVERGENCE
+        let convergence = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .unobserved_convergence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             unobserved_convergence = ObservedFlowConvergence {
@@ -1801,7 +1858,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         #[cfg(any(test, feature = "test-support"))]
         let discharge = match discharge {
             Some(report)
-                if flow_admission_fault_injection::DROP_LAST_DISCHARGE_CLAIM
+                if self
+                    .ctx
+                    .host_for_fact_tracer_install()
+                    .flow_fault_injection
+                    .drop_last_discharge_claim
                     .load(std::sync::atomic::Ordering::Relaxed)
                     && !report.entries().is_empty() =>
             {
@@ -2248,24 +2309,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (no relation root — every relation member routes to the
         // completed batch; the flow members FINALIZE there — each enters
         // the batch only with its own proof — and the call members queue
-        // beside them).
-        if (!relation_members.is_empty() || !flow_members.is_empty() || !call_results.is_empty())
-            && self
-                .relation_discharge_and_route(
-                    false,
-                    None,
-                    relation_members,
-                    flow_members,
-                    None,
-                    call_results,
-                    cyclic,
-                    &convergence,
-                )
-                .is_err()
-        {
-            self.flow_return_abort_inline_flight(inline_flight.as_ref());
-            let _ = self.fail_flow_demand(flow_demand.as_ref(), FlowReturnFailure::Unresolved);
-            return FlowFramePop::RootClose(FlowRootClose::NoValue(FlowReturnFailure::Unresolved));
+        // beside them). A refused member batch poisons the ROOT's own
+        // admission below: the root's fixed point consumed the members'
+        // evaluated values, so its verdict may flow but must never warm.
+        let mut member_batch_unproven = false;
+        if !relation_members.is_empty() || !flow_members.is_empty() || !call_results.is_empty() {
+            match self.relation_discharge_and_route(
+                false,
+                None,
+                relation_members,
+                flow_members,
+                None,
+                call_results,
+                cyclic,
+                &convergence,
+            ) {
+                Ok(outcome) => member_batch_unproven = outcome.flow_batch_unproven,
+                Err(_) => {
+                    self.flow_return_abort_inline_flight(inline_flight.as_ref());
+                    let _ =
+                        self.fail_flow_demand(flow_demand.as_ref(), FlowReturnFailure::Unresolved);
+                    return FlowFramePop::RootClose(FlowRootClose::NoValue(
+                        FlowReturnFailure::Unresolved,
+                    ));
+                }
+            }
         }
         // The root's own outcome: the machinery root publishes through
         // the family singleflight; an inline root batch-publishes with
@@ -2280,14 +2348,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let result = self.apply_frame_key_substitution(&root_key, result);
                 // FINALIZE the root's own demand — after the component
                 // fixed point, the literal widening, and the per-key
-                // substitution: the proof covers exactly this value.
-                let verdict = self.finalize_flow_demand(
-                    flow_demand.as_ref(),
-                    discharge.as_ref(),
-                    &convergence,
-                    provenance,
-                    &result,
-                );
+                // substitution: the proof covers exactly this value. A
+                // refused member batch withholds the root's own proof
+                // outright: the fixed point consumed the unproven
+                // members' values, so no verdict over this result may
+                // admit (`ReturnOnly` — the value still flows).
+                let verdict = if member_batch_unproven {
+                    None
+                } else {
+                    self.finalize_flow_demand(
+                        flow_demand.as_ref(),
+                        discharge.as_ref(),
+                        &convergence,
+                        provenance,
+                        &result,
+                    )
+                };
                 if machinery_root {
                     // The machinery root publishes through the family
                     // singleflight, which owns the root's own admission —
@@ -3199,12 +3275,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             collect_throw_points: false,
             scope_shadows: Vec::new(),
             call_evidence: Vec::new(),
+            executed_walk: ExecutedSliceWalk::default(),
         };
         let holds;
         let degradation;
         let bare_return_seen;
         let implicit_undefined_seen;
         let mut call_evidence;
+        let mut executed_walk;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
@@ -3214,6 +3292,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             bare_return_seen = evaluator.bare_return_seen;
             implicit_undefined_seen = evaluator.implicit_undefined_seen;
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
+            executed_walk = evaluator.executed_walk;
             (outcome, body_falls_through)
         };
         // A call the lowering DECIDED ABOVE (folded into a surviving
@@ -3229,11 +3308,19 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }),
         );
         #[cfg(any(test, feature = "test-support"))]
-        let call_evidence = if flow_admission_fault_injection::SUPPRESS_CALL_EVIDENCE
+        let call_evidence = if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .suppress_call_evidence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             Vec::new()
-        } else if flow_admission_fault_injection::UNDECIDED_RELATION_EVIDENCE
+        } else if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .undecided_relation_evidence
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             call_evidence
@@ -3245,17 +3332,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .collect()
         } else {
             call_evidence
-        };
-        // The evaluation's execution witness: what THIS run actually did —
-        // the retained selection whose lowered IR it executed, the frame
-        // identity to pair call spans through, and the per-occurrence call
-        // evidence. The discharge-report producer claims obligations from
-        // it, never from the plan's own expectations.
-        let witness = FlowExecutionWitness {
-            executed_selection: planned.selection(),
-            skeleton: &skeleton,
-            anchor: frame_anchor,
-            calls: &call_evidence,
         };
         // Both failure exits carry the degradation the evaluation had
         // ALREADY observed, and both classify freshness identically: an
@@ -3273,11 +3349,39 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // express a frame failure at all; without this read the budget
         // class would be laundered into `UnmodeledPosition` and the
         // request would attribute a resource edge as a semantic one.
+        // A tripped budget also SHORTENS the walk ledger: positions past
+        // the trip degraded under the resource edge, so the run must not
+        // claim a completed structural walk.
         let contributors = match self.connected_demand_trip() {
-            Some(_) => Err(FlowReturnFailure::Budget(
-                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
-            )),
+            Some(_) => {
+                executed_walk.aborted = true;
+                Err(FlowReturnFailure::Budget(
+                    verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                ))
+            }
             None => contributors,
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .short_execution_ledger
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            executed_walk.aborted = true;
+        }
+        // The evaluation's execution witness: what THIS run actually did —
+        // the walk-ledger-gated executed selection, the frame identity to
+        // pair call spans through, and the per-occurrence call evidence.
+        // The discharge-report producer claims obligations from it, never
+        // from the plan's own expectations: a short or aborted walk
+        // ledger yields NO executed selection.
+        let witness = FlowExecutionWitness {
+            executed_selection: executed_walk.completed_selection(planned.selection()),
+            skeleton: &skeleton,
+            anchor: frame_anchor,
+            calls: &call_evidence,
         };
         let contributors = match contributors {
             Ok(contributors) => contributors,
@@ -3779,6 +3883,18 @@ enum GuardNarrowing {
     Impossible,
 }
 
+/// Whether the evaluator genuinely CONSUMED a type-predicate fact, and
+/// whether every relation outcome that consumption asked was decided —
+/// the verdict the predicate call's guard-application evidence records
+/// from. `NotConsumed` (a frame-shadowed target, an unmodelled subject)
+/// deposits no evidence at all; `Undecided` deposits the call span with
+/// its relation obligation left unclaimed.
+enum PredicateNarrowConsumption {
+    NotConsumed,
+    Decided,
+    Undecided,
+}
+
 #[derive(Default)]
 struct NodeDisjointness {
     provably_disjoint: bool,
@@ -4066,6 +4182,65 @@ struct FlowEvaluator<'d, 'b> {
     /// nothing, so its obligations stay unclaimed and the demand
     /// finalizes unproven.
     call_evidence: Vec<FlowCallEvidence>,
+    /// The structural walk ledger of THIS run, recorded at the walk
+    /// sites (`eval_region`'s recording shell and its statement loop) —
+    /// see [`ExecutedSliceWalk`]. The execution witness yields an
+    /// executed selection only from a complete, unaborted ledger.
+    executed_walk: ExecutedSliceWalk,
+}
+
+/// The evaluator-recorded structural execution ledger of one run: how
+/// many regions of the slice content the walk entered and completed, how
+/// many statements it executed, and whether any abortive exit truncated
+/// it (an unsupported construct, a member-demand mismatch, a budget
+/// trip). Recorded exclusively at the evaluator's own walk sites, never
+/// assigned from the plan. The witness claims the plan's retained
+/// selection as EXECUTED only when the ledger is complete: the content
+/// the walk ran over is derived from exactly that selection (the lowered
+/// artifact is content-addressed to the plan's slice hash), so a
+/// complete walk over it is a walk of the selection — and a short
+/// ledger claims nothing.
+#[derive(Debug, Default, Clone, Copy)]
+struct ExecutedSliceWalk {
+    /// Region walks entered.
+    regions_entered: u32,
+    /// Region walks that ran to their own control-flow end.
+    regions_completed: u32,
+    /// Statements the walk actually executed.
+    statements_executed: u32,
+    /// An abortive exit truncated the walk.
+    aborted: bool,
+}
+
+impl ExecutedSliceWalk {
+    /// The plan's retained selection, yielded as EXECUTED only when this
+    /// ledger records a complete, unaborted walk (every entered region
+    /// ran to its own end, and the root region was entered at all). A
+    /// short or aborted ledger yields nothing — the discharge producer
+    /// then claims no structural obligation.
+    fn completed_selection<'p>(
+        &self,
+        selection: &'p verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan,
+    ) -> Option<&'p verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan> {
+        (!self.aborted
+            && self.regions_entered == self.regions_completed
+            && self.regions_entered > 0)
+            .then_some(selection)
+    }
+
+    /// Fold a NESTED function body's walk into this ledger: the nested
+    /// content is part of the same slice selection, so its regions,
+    /// statements, and aborts belong to the enclosing run's walk.
+    fn absorb(&mut self, nested: ExecutedSliceWalk) {
+        self.regions_entered = self.regions_entered.saturating_add(nested.regions_entered);
+        self.regions_completed = self
+            .regions_completed
+            .saturating_add(nested.regions_completed);
+        self.statements_executed = self
+            .statements_executed
+            .saturating_add(nested.statements_executed);
+        self.aborted |= nested.aborted;
+    }
 }
 
 /// One evaluated call occurrence's evidence: the authored call
@@ -4079,14 +4254,18 @@ struct FlowCallEvidence {
 }
 
 /// One evaluation run's execution witness — what the run ACTUALLY did:
-/// the retained selection whose lowered IR it executed, the frame
-/// identity its call evidence pairs against the skeleton footprint
-/// through (`anchor` is the function node's own start — the same ingress
-/// the skeleton's `FrameSpan`s were rebased with), and the call-sink
-/// evidence ledger. The discharge-report producer consumes it once; the
-/// plan's own expectations never substitute for it.
+/// the selection whose derived content the walk EXECUTED TO COMPLETION
+/// (`None` when the evaluator's own walk ledger is short or aborted —
+/// no structural obligation is then claimable), the frame identity its
+/// call evidence pairs against the skeleton footprint through (`anchor`
+/// is the function node's own start — the same ingress the skeleton's
+/// `FrameSpan`s were rebased with), and the call-sink evidence ledger.
+/// The discharge-report producer consumes it once; the plan's own
+/// expectations never substitute for it — `executed_selection` is
+/// yielded by [`ExecutedSliceWalk::completed_selection`], never assigned
+/// from the plan unconditionally.
 struct FlowExecutionWitness<'w> {
-    executed_selection: &'w verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan,
+    executed_selection: Option<&'w verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan>,
     skeleton: &'w verter_semantic::analysis::flow::FunctionBodySkeleton,
     anchor: u32,
     calls: &'w [FlowCallEvidence],
@@ -5982,7 +6161,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 subject,
                 target,
                 negated,
-            } => self.narrow_to_predicate_target(subject, target, *negated == positive),
+                call,
+            } => {
+                // A predicate call in a control test is NEVER decided
+                // above the call — its result selects the narrowing. The
+                // guard application here is the one place its result is
+                // actually consumed, so this is where its call evidence
+                // is recorded: a genuinely consumed fact deposits the
+                // call span with the narrowing computation's decidedness
+                // (an undecided relation leaves the relation obligation
+                // unclaimed), and a fact the evaluator could not consume
+                // at all (shadowed target, unmodelled subject) deposits
+                // nothing — the demand stays unproven.
+                let (fact, consumption) = self.narrow_to_predicate_target_consuming(
+                    subject,
+                    target,
+                    *negated == positive,
+                );
+                match consumption {
+                    PredicateNarrowConsumption::NotConsumed => {}
+                    PredicateNarrowConsumption::Decided => {
+                        self.call_evidence.push(FlowCallEvidence {
+                            span: *call,
+                            relations_decided: true,
+                        });
+                    }
+                    PredicateNarrowConsumption::Undecided => {
+                        self.call_evidence.push(FlowCallEvidence {
+                            span: *call,
+                            relations_decided: false,
+                        });
+                    }
+                }
+                fact
+            }
             // A conjunction applies every fact at once; its NEGATION is
             // the disjunction of the negated facts (De Morgan — the same
             // symmetry the lowering's `!` uses).
@@ -6522,44 +6734,79 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// for a predicate whose target is a strict subtype of the declared
     /// type). The target lowers like a declarator annotation — a
     /// frame-shadowed answer establishes nothing.
+    ///
+    /// The assertion-statement caller: the guard twin consumes the
+    /// consumption verdict too and records the predicate call's
+    /// evidence from it.
     fn narrow_to_predicate_target(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         target: &crate::flow_slice_content::GatedType,
         negated: bool,
     ) -> GuardNarrowing {
+        self.narrow_to_predicate_target_consuming(subject, target, negated)
+            .0
+    }
+
+    /// [`Self::narrow_to_predicate_target`] carrying the CONSUMPTION
+    /// verdict — whether the evaluator genuinely consumed the predicate
+    /// fact, and whether every relation outcome that consumption asked
+    /// was decided. This is what the guard twin's call evidence is
+    /// recorded from: a fact the evaluator could not consume at all (a
+    /// frame-shadowed target, an unmodelled subject) is
+    /// [`PredicateNarrowConsumption::NotConsumed`] — no evidence; a
+    /// consumed fact whose relation oracle answered `None` anywhere is
+    /// [`PredicateNarrowConsumption::Undecided`] — evidence with the
+    /// relation obligation left unclaimed.
+    fn narrow_to_predicate_target_consuming(
+        &mut self,
+        subject: &crate::flow_slice_content::SliceNarrowSubject,
+        target: &crate::flow_slice_content::GatedType,
+        negated: bool,
+    ) -> (GuardNarrowing, PredicateNarrowConsumption) {
+        use PredicateNarrowConsumption as Consumption;
         if target
             .shadowed()
             .iter()
             .any(|name| self.owner_scope_answers_name(name))
         {
-            return GuardNarrowing::Unchanged;
+            return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
         }
         let target_node = self.lower_body_type(target.ty());
-        let Some(current) = self.subject_current_node(subject) else {
-            return GuardNarrowing::Unchanged;
-        };
+        if self.subject_current_node(subject).is_none() {
+            return (GuardNarrowing::Unchanged, Consumption::NotConsumed);
+        }
         if !negated {
+            let current = self
+                .subject_current_node(subject)
+                .expect("the subject answered just above");
             let arms = self.union_arms_or_self(current);
             let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
             for arm in &arms {
                 match self.assignable(*arm, target_node) {
                     Some(true) => survivors.push(*arm),
                     Some(false) => {}
-                    None => return GuardNarrowing::Unchanged,
+                    None => return (GuardNarrowing::Unchanged, Consumption::Undecided),
                 }
             }
             if !survivors.is_empty() {
                 if survivors.len() == arms.len() {
-                    return GuardNarrowing::Unchanged;
+                    return (GuardNarrowing::Unchanged, Consumption::Decided);
                 }
                 let node = self
                     .dispatch
                     .intern_normalized_union_or_intersection(&survivors, true);
-                return GuardNarrowing::Narrowed(subject.clone(), node);
+                return (
+                    GuardNarrowing::Narrowed(subject.clone(), node),
+                    Consumption::Decided,
+                );
             }
-            if self.assignable(target_node, current) == Some(true) {
-                return GuardNarrowing::Narrowed(subject.clone(), target_node);
+            let reverse = self.assignable(target_node, current);
+            if reverse == Some(true) {
+                return (
+                    GuardNarrowing::Narrowed(subject.clone(), target_node),
+                    Consumption::Decided,
+                );
             }
             let relation = self.nodes_provably_disjoint(current, target_node);
             if relation.nominal_identity_missing {
@@ -6567,17 +6814,42 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     crate::semantic_query::FlowGap::NominalRelation,
                 ));
             }
+            // An undecided REVERSE relation leaves the choice between the
+            // target narrow and the intersection fallback unproven: the
+            // value keeps the checker's intersection rule, the relation
+            // obligation stays unclaimed.
+            let consumption = if reverse.is_none() {
+                Consumption::Undecided
+            } else {
+                Consumption::Decided
+            };
             if !relation.provably_disjoint {
                 let intersection = self
                     .dispatch
                     .intern_normalized_union_or_intersection(&[current, target_node], false);
-                return GuardNarrowing::Narrowed(subject.clone(), intersection);
+                return (
+                    GuardNarrowing::Narrowed(subject.clone(), intersection),
+                    consumption,
+                );
             }
-            return GuardNarrowing::Impossible;
+            return (GuardNarrowing::Impossible, consumption);
         }
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(this.assignable(arm, target_node)? != negated)
-        })
+        let mut undecided = false;
+        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            match this.assignable(arm, target_node) {
+                Some(kept) => Some(kept != negated),
+                None => {
+                    undecided = true;
+                    None
+                }
+            }
+        });
+        let consumption = if undecided {
+            Consumption::Undecided
+        } else {
+            Consumption::Decided
+        };
+        (fact, consumption)
     }
 
     /// Whether one local carries a WIDENING literal, in the layer that
@@ -6734,7 +7006,31 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// Evaluate one region, returning its contributor nodes and whether
     /// the region falls through (mirrors the IR's reachability — this
     /// recomputes nothing, it only evaluates contributors).
+    ///
+    /// The recording shell of the structural walk ledger: region entry,
+    /// completion, and every abortive `Err` exit are recorded HERE — at
+    /// the walk itself, never reconstructed from the plan — so the
+    /// execution witness can only claim a selection whose derived
+    /// content this run actually walked to completion.
     fn eval_region(
+        &mut self,
+        region: &crate::flow_slice_content::SliceRegion,
+    ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
+        self.executed_walk.regions_entered = self.executed_walk.regions_entered.saturating_add(1);
+        let outcome = self.eval_region_statements(region);
+        match &outcome.0 {
+            Ok(_) => {
+                self.executed_walk.regions_completed =
+                    self.executed_walk.regions_completed.saturating_add(1);
+            }
+            Err(_) => self.executed_walk.aborted = true,
+        }
+        outcome
+    }
+
+    /// The statement walk of [`Self::eval_region`] (the recording shell
+    /// wraps every entry and exit).
+    fn eval_region_statements(
         &mut self,
         region: &crate::flow_slice_content::SliceRegion,
     ) -> (Result<Vec<FlowContribution>, FlowReturnFailure>, bool) {
@@ -6750,6 +7046,8 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             if !path_alive {
                 break;
             }
+            self.executed_walk.statements_executed =
+                self.executed_walk.statements_executed.saturating_add(1);
             match statement {
                 crate::flow_slice_content::SliceStatement::Gap(gap) => {
                     self.pending_statement_gap.get_or_insert(*gap);
@@ -8158,6 +8456,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
                 call_evidence: Vec::new(),
+                executed_walk: ExecutedSliceWalk::default(),
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
@@ -8169,9 +8468,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.holds.append(&mut nested_evaluator.holds);
             // A call the NESTED body evaluated is still an evaluated call
             // of this evaluation run: the evidence rides the enclosing
-            // ledger exactly as the nested holds do.
+            // ledger exactly as the nested holds do — and so does the
+            // nested walk (a nested abort shortens THIS run's ledger).
             self.call_evidence
                 .append(&mut nested_evaluator.call_evidence);
+            self.executed_walk.absorb(nested_evaluator.executed_walk);
             (outcome, nested_body_falls_through)
         };
         // A degraded nested body degrades the enclosing value that

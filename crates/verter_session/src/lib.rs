@@ -809,6 +809,11 @@ pub struct VerterHost {
     /// production.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool,
+    /// Per-host (never process-global) flow-admission fault slots — see
+    /// [`crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) flow_fault_injection:
+        project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs,
     /// Test-only force-injection knobs, grouped so the root struct stays thin;
     /// `#[cfg(test)]`-gated. See [`crate::host_test_force::TestForceKnobs`].
     #[cfg(test)]

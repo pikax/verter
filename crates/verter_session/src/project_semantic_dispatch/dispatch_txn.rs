@@ -943,6 +943,14 @@ impl Default for ObligationRuntime {
 }
 
 impl ObligationRuntime {
+    /// The runtime's construction-minted instance identity — the
+    /// runtime axis of every provenance token and demand handle this
+    /// runtime issues. Content-free and transient: never a cache key,
+    /// never a fact, never persisted.
+    pub(crate) fn instance_identity(&self) -> u64 {
+        self.instance_identity
+    }
+
     pub(crate) fn stack(&self) -> &ObligationReentryStack {
         &self.stack
     }
@@ -1261,47 +1269,58 @@ pub(crate) mod flow_obligation_state {
 
     /// The opaque evaluation provenance binding one flow demand to the
     /// evaluation that serves it: the semantic store's instance identity,
-    /// the request's project generation, and the demand's OWN ordinal in
-    /// the serving runtime's ledger. Minted by the production dispatch at
-    /// demand-preparation time and carried — atomically, in
-    /// [`FlowDemandCarrier`] — with the demand's handle, plan, value, and
-    /// discharge report; the demand ordinal makes the token DEMAND-unique,
-    /// so a value or report produced by ANOTHER demand of the same store
-    /// and generation fails the finalization triangulation. The
-    /// finalization driver accepts evidence only when the carried
-    /// provenance IS the demand carrier's own and the carrier's freshness
-    /// axes ARE the dispatch's current mint: a value or report from
-    /// another demand, another store, or a stale generation is a typed
-    /// partial, never a proof.
+    /// the request's project generation, the serving obligation RUNTIME's
+    /// instance identity, and the demand's OWN ordinal in that runtime's
+    /// ledger. Minted by the production dispatch at demand-preparation
+    /// time and carried — atomically, in [`FlowDemandCarrier`] — with the
+    /// demand's handle, plan, value, and discharge report; the demand
+    /// ordinal makes the token DEMAND-unique within its runtime, and the
+    /// runtime axis makes it RUNTIME-unique across dispatches — every
+    /// fresh dispatch starts an empty demand ledger, so two runtimes'
+    /// first demands share ordinal zero and only the runtime identity
+    /// separates their tokens. The finalization driver accepts evidence
+    /// only when the carried provenance IS the demand carrier's own and
+    /// the carrier's freshness axes ARE the dispatch's current mint: a
+    /// value or report from another demand, another runtime, another
+    /// store, or a stale generation is a typed partial, never a proof.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct FlowEvaluationProvenance {
         store_identity: u64,
         request_generation: u64,
+        runtime_identity: u64,
         demand_ordinal: u64,
     }
 
     impl FlowEvaluationProvenance {
         /// Mint a provenance token. The mint inputs are owned by the
         /// caller (the production dispatch derives them from its own
-        /// store, the live project generation, and the demand's ledger
-        /// ordinal); the token is opaque identity data, not a capability.
+        /// store, the live project generation, its obligation runtime's
+        /// instance identity, and the demand's ledger ordinal); the token
+        /// is opaque identity data, not a capability.
         pub(crate) fn new(
             store_identity: u64,
             request_generation: u64,
+            runtime_identity: u64,
             demand_ordinal: u64,
         ) -> Self {
             Self {
                 store_identity,
                 request_generation,
+                runtime_identity,
                 demand_ordinal,
             }
         }
 
-        /// The freshness axes — the store identity and the request
-        /// generation. The demand ordinal is per-demand and never part of
-        /// a freshness comparison.
-        pub(crate) fn freshness_axes(&self) -> (u64, u64) {
-            (self.store_identity, self.request_generation)
+        /// The freshness axes — the store identity, the request
+        /// generation, and the serving runtime's instance identity. The
+        /// demand ordinal is per-demand and never part of a freshness
+        /// comparison.
+        pub(crate) fn freshness_axes(&self) -> (u64, u64, u64) {
+            (
+                self.store_identity,
+                self.request_generation,
+                self.runtime_identity,
+            )
         }
 
         /// The demand's ordinal in the serving runtime's ledger.
@@ -1312,12 +1331,13 @@ pub(crate) mod flow_obligation_state {
     }
 
     impl CanonicalEncode for FlowEvaluationProvenance {
-        const DOMAIN_TAG: &'static str = "verter.session.flow.evaluation_provenance.v2";
+        const DOMAIN_TAG: &'static str = "verter.session.flow.evaluation_provenance.v3";
 
         fn encode_fields(&self, e: &mut CanonicalEncoder) {
             e.field_u64(1, self.store_identity);
             e.field_u64(2, self.request_generation);
-            e.field_u64(3, self.demand_ordinal);
+            e.field_u64(3, self.runtime_identity);
+            e.field_u64(4, self.demand_ordinal);
         }
     }
 

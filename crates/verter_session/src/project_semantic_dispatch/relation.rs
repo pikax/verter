@@ -254,6 +254,10 @@ pub(crate) struct RelationInferBindings {
 enum RootClose {
     /// A decided binary judgement — publish the payload.
     Decided(RelationPayload),
+    /// A decided judgement whose mixed component consumed UNPROVEN
+    /// flow-member values — PUBLIC payload, never admitted (the
+    /// flow-poisoned twin of the budget arm's ReturnOnly-but-public).
+    DecidedReturnOnly(RelationPayload),
     /// Budget exhaustion — PUBLIC payload, never admitted (three-layer
     /// non-admission).
     BudgetExceeded(RelationPayload),
@@ -367,6 +371,14 @@ pub(super) struct RelationDischargeOutcome {
     /// The caller-return step of an inline relation SCC root (or of a
     /// session-delta root, which never publishes).
     pub(super) self_step: Option<RelationStep>,
+    /// One or more DRAINED flow members finalized UNPROVEN, so the whole
+    /// member batch was refused (the torn-component rule). The mixed
+    /// equation already consumed those members' evaluated values, so the
+    /// root's own outcome is NON-ADMISSIBLE too: every consumer treats
+    /// `self_publish` / `self_step` as ReturnOnly — the verdict still
+    /// flows to the caller, and nothing warms around an unproven
+    /// flow-derived value.
+    pub(super) flow_batch_unproven: bool,
 }
 
 impl<'a> ProjectSemanticDispatch<'a> {
@@ -481,6 +493,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match other {
                     RootClose::BudgetExceeded(_) => "BudgetExceeded",
                     RootClose::Undecided => "Undecided",
+                    RootClose::DecidedReturnOnly(_) => "DecidedReturnOnly",
                     RootClose::Decided(_) => unreachable!(),
                 }
             ),
@@ -529,6 +542,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 match other {
                     RootClose::BudgetExceeded(_) => "BudgetExceeded",
                     RootClose::Undecided => "Undecided",
+                    RootClose::DecidedReturnOnly(_) => "DecidedReturnOnly",
                     RootClose::Decided(_) => unreachable!(),
                 }
             ),
@@ -934,6 +948,26 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 ))
                 .with_observed_self_roots(observed_self_roots)
             }
+            RootClose::DecidedReturnOnly(payload) => {
+                let observed_self_roots =
+                    self.observed_self_roots_from_nodes([key.source, key.target]);
+                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
+                    SemanticQueryValue,
+                > = (
+                    QueryResult::Value(SemanticQueryValue::Relation(payload)),
+                    fence,
+                )
+                    .into();
+                // ReturnOnly-but-public: the verdict was computed around a
+                // mixed component whose flow members finalized UNPROVEN —
+                // the value flows to the caller, the memo refuses
+                // admission (no warm entry, no fact signature, no
+                // reverse-index metadata), and the frame close already
+                // marked the request partial.
+                output.cache_suppress = true;
+                output.observed_self_roots = observed_self_roots;
+                output
+            }
             RootClose::BudgetExceeded(payload) => {
                 let observed_self_roots =
                     self.observed_self_roots_from_nodes([key.source, key.target]);
@@ -1036,6 +1070,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // through the provisional path above.
                 match close {
                     RootClose::Decided(payload) => relation_step_from_payload(&payload),
+                    RootClose::DecidedReturnOnly(payload) => relation_step_from_payload(&payload),
                     RootClose::BudgetExceeded(payload) => relation_step_from_payload(&payload),
                     RootClose::Undecided => RelationStep::Unknown,
                 }
@@ -1402,6 +1437,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &flow_convergence,
         ) {
             Ok(outcome) => {
+                if outcome.flow_batch_unproven {
+                    // The mixed equation consumed UNPROVEN flow-member
+                    // values: the root's verdict still flows to the
+                    // caller, but nothing composed over it may warm —
+                    // the same funnel primitives the inline flow-root
+                    // refusal folds (an answer composed around an
+                    // unproven flow value must not warm).
+                    self.fold_cache_read_rails(
+                        true,
+                        true,
+                        crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                    );
+                    if let Some(step) = outcome.self_step {
+                        return FramePop::Provisional(step);
+                    }
+                    return FramePop::RootClose(RootClose::DecidedReturnOnly(
+                        outcome
+                            .self_publish
+                            .expect("the machinery root always produces its own payload"),
+                    ));
+                }
                 if let Some(step) = outcome.self_step {
                     return FramePop::Provisional(step);
                 }
@@ -1795,8 +1851,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // replayed, the seal, the finalizer) and enters the publish queue
         // ONLY with its own `CompleteFlowResult`. One unproven member
         // refuses the WHOLE member batch (the torn-component rule): every
-        // member flight aborts, nothing queues, and the root's own
-        // admission — already decided above — is unaffected.
+        // member flight aborts, nothing queues, and the ROOT's outcome is
+        // marked non-admissible too — the mixed equation consumed the
+        // members' evaluated values, so the root's verdict may still flow
+        // to the caller but must never warm (`ReturnOnly`).
         let mut proven_flow_members = Vec::with_capacity(flow_members.len());
         let mut flow_batch_unproven = false;
         for member in flow_members {
@@ -1874,6 +1932,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return Ok(RelationDischargeOutcome {
                 self_publish,
                 self_step,
+                flow_batch_unproven: true,
             });
         }
         let mut rootless_flights = Vec::new();
@@ -1905,6 +1964,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         Ok(RelationDischargeOutcome {
             self_publish,
             self_step,
+            flow_batch_unproven: false,
         })
     }
 
