@@ -28,7 +28,7 @@ release_gating=none
 external_requirements=
 charter=charters/compiler-compiler-bridge/CCA1N1.md
 max_production_loc=700
-max_production_files=7
+max_production_files=10
 max_related_packages=2
 rescope_loc=1500
 rescope_files=12
@@ -67,7 +67,7 @@ Implement the Vue `FrameworkHostIntegrationBackend<VueEpoch, NativeHostEpoch>` b
 ## Deletions, budgets, and aborts
 
 - Delete no generic host route; forbid Svelte, NAPI/TypeScript public DTO, unplugin, and staged-artifact work.
-- Ceiling: 700 LOC, 7 files, 2 crates; rescope if generic selection or another framework enters.
+- Ceiling: 700 LOC, 10 files, 2 crates; rescope if generic selection or another framework enters.
 - Abort on partial publication after refusal, duplicate prerequisites, an admission token exposing a general capability/service bag, or parity/performance divergence.
 
 ## Verification and review
