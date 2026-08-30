@@ -28,6 +28,7 @@ pub mod parser;
 pub mod runtime;
 pub mod semantic_authority;
 pub mod svelte_projection_backend;
+pub mod svelte_runtime_backend;
 pub mod template_facts;
 
 pub use carrier::SvelteCarrierCompiler;
@@ -40,4 +41,8 @@ pub use semantic_authority::{svelte_semantic_authority_registration, SvelteSeman
 pub use svelte_projection_backend::{
     svelte_projection_backend_registration, SvelteIdeCompanion, SvelteProjectionBackend,
     SvelteProjectionDiagnostic, SvelteProjectionError, SvelteProjectionInputs,
+};
+pub use svelte_runtime_backend::{
+    svelte_runtime_backend_registration, SvelteRuntimeBackend, SvelteRuntimeError,
+    SvelteRuntimeInputs,
 };

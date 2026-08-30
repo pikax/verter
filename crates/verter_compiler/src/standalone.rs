@@ -55,7 +55,8 @@ use crate::compile::{
     parse_template_block, style_dialect, template_unit_used_vars,
 };
 use crate::compile_request::{
-    CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, ProductKind,
+    CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, FrameworkOption,
+    ProductKind, SvelteOption,
 };
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
@@ -72,6 +73,9 @@ use crate::style_planner::{
 };
 use crate::svelte::carrier::render_admitted_svelte_ide;
 use crate::svelte::ide::SvelteIdeUnsupportedDiagnostic;
+use crate::svelte::parser::{
+    validate_custom_element_tag, CustomElementDescriptor, CustomElementProp, CustomElementShadow,
+};
 #[cfg(test)]
 use crate::svelte::runtime::UnsupportedSvelteRuntimeSurface;
 use crate::svelte::runtime::{
@@ -91,12 +95,16 @@ use verter_css_syntax::CssDialect;
 /// option authority: `css_hash_override` is the same session/host-resolved
 /// fact [`SvelteRuntimeOptions::css_hash_override`] already carries — the
 /// official user `cssHash` callback's already-computed result, preserved
-/// byte-exact. Genuine Svelte semantic options (`runes`, `namespace`,
-/// `fragments`, …) live on [`crate::compile_request::SvelteCompileRequest`]
-/// by the request layer and are never duplicated here.
+/// byte-exact. `prepared_styles` is a non-identity reuse hint for already
+/// admitted style IRs (matched by exact CSS bytes and source origin, then
+/// reused; a mismatch falls through to the existing safe reparse). Genuine
+/// Svelte semantic options (`runes`, `namespace`, `fragments`, …) live on
+/// [`crate::compile_request::SvelteCompileRequest`] by the request layer and
+/// are never duplicated here.
 #[derive(Debug, Clone, Default)]
 pub struct SvelteExecutionInputs {
     pub css_hash_override: Option<String>,
+    pub prepared_styles: Vec<Option<PreparedStyleIr>>,
 }
 
 /// The framework-tagged borrowed execution-input carrier
@@ -171,6 +179,12 @@ pub enum DirectCompileError {
     /// always land here today (the server backend fails closed until it
     /// lands) — this route never reinterprets that as anything else.
     Svelte(ClientCompileError),
+    /// A Svelte-named request-execution refusal wrapping a typed
+    /// [`CompileRequestError`] (today [`CompileRequestError::MalformedOptionValue`]
+    /// for an invalid custom-element descriptor). Never
+    /// [`DirectCompileError::Vue`]: Vue construction errors are not
+    /// Svelte-reachable.
+    SvelteOption(CompileRequestError),
     /// A Svelte-produced module failed its own declared fragment grammar —
     /// an internal codegen-invariant failure (the same class
     /// [`ClientCompileError::GeneratedModuleInvalid`] guards downstream of
@@ -1949,7 +1963,7 @@ impl StandaloneCompiler {
     /// [`Self::prepare`] call may still parse, because preparation was then
     /// the requested operation. This core still re-runs the same preflight
     /// so a `compile_prepared` of an unproducible request never compiles.
-    fn compile_svelte_from_parsed(
+    pub(crate) fn compile_svelte_from_parsed(
         &self,
         source: &str,
         parsed: &ParsedSvelte,
@@ -2423,14 +2437,12 @@ fn direct_vue_dialect(parsed: &ParsedSfc, force_js: bool) -> FragmentDialect {
 /// no canonical-request slot at all — structurally always `None`, exactly as
 /// the host bridge already sets them.
 ///
-/// `custom_element_descriptor` is NOT consumed here — a verified,
-/// PRE-EXISTING gap this route matches byte-for-byte rather than silently
-/// diverging from: the host route (`svelte/carrier.rs`) never reads it
-/// either (confirmed by inspection — zero references), and the runtime
-/// lowering's own `resolve_custom_element`
-/// (`svelte/runtime/custom_element.rs`) takes only a bare
-/// `custom_element_option: bool`, never a descriptor, when no inline
-/// `<svelte:options customElement>` exists.
+/// Canonical `css` and `custom_element_descriptor` are preserved here: css
+/// is folded with custom-element activity and inline
+/// `<svelte:options css="injected">`; a present descriptor is validated and
+/// converted before emission (never silently dropped to a plain or untagged
+/// component). `prepared_styles` is forwarded as a reuse hint, not as a
+/// second style authority.
 ///
 /// # Errors
 ///
@@ -2441,6 +2453,10 @@ fn direct_vue_dialect(parsed: &ParsedSfc, force_js: bool) -> FragmentDialect {
 /// representation for it, and neither this route nor the host route (which
 /// never round-trips this specific enum) has ever defined what it should
 /// mean, so it fails closed rather than silently defaulting to HTML.
+///
+/// [`DirectCompileError::SvelteOption`] wrapping
+/// [`CompileRequestError::MalformedOptionValue`] when a present custom-element
+/// descriptor carries an invalid tag or prop conversion type.
 fn direct_svelte_runtime_options(
     request: &CompileRequest,
     svelte_request: &crate::compile_request::SvelteCompileRequest,
@@ -2449,6 +2465,11 @@ fn direct_svelte_runtime_options(
     use crate::compile_request::svelte::{SvelteFragmentsRequest, SvelteRunesRequest};
 
     let namespace = resolve_svelte_namespace(svelte_request.namespace)?;
+    let custom_element_descriptor = svelte_request
+        .custom_element_descriptor
+        .as_ref()
+        .map(normalize_svelte_custom_element_descriptor)
+        .transpose()?;
 
     Ok(SvelteRuntimeOptions {
         filename: request.filename().map(str::to_string),
@@ -2476,7 +2497,58 @@ fn direct_svelte_runtime_options(
         immutable: None,
         hmr: None,
         compatibility_component_api: None,
-        prepared_styles: Vec::new(),
+        css: svelte_request.css,
+        custom_element_descriptor,
+        prepared_styles: execution_inputs.prepared_styles.clone(),
+    })
+}
+
+fn svelte_malformed_option(option: SvelteOption, value: impl Into<String>) -> DirectCompileError {
+    DirectCompileError::SvelteOption(CompileRequestError::MalformedOptionValue {
+        option: FrameworkOption::Svelte(option),
+        value: value.into(),
+    })
+}
+
+fn normalize_svelte_custom_element_descriptor(
+    canonical: &crate::compile_request::svelte::SvelteCustomElementDescriptor,
+) -> Result<CustomElementDescriptor, DirectCompileError> {
+    if let Some(tag) = canonical.tag.as_deref() {
+        if validate_custom_element_tag(Some(tag)).is_some() {
+            return Err(svelte_malformed_option(SvelteOption::CustomElementTag, tag));
+        }
+    }
+
+    let mut props = Vec::with_capacity(canonical.props.len());
+    for (name, prop) in &canonical.props {
+        if let Some(prop_type) = prop.prop_type.as_deref() {
+            if !matches!(
+                prop_type,
+                "String" | "Number" | "Boolean" | "Array" | "Object"
+            ) {
+                return Err(svelte_malformed_option(
+                    SvelteOption::CustomElementPropsType,
+                    prop_type,
+                ));
+            }
+        }
+        props.push(CustomElementProp {
+            name: name.clone(),
+            attribute: prop.attribute.clone(),
+            reflect: prop.reflect.unwrap_or(false),
+            type_hint: prop.prop_type.clone(),
+        });
+    }
+
+    Ok(CustomElementDescriptor {
+        tag: canonical.tag.clone(),
+        shadow: match canonical.shadow {
+            None | Some(true) => CustomElementShadow::Open,
+            Some(false) => CustomElementShadow::None,
+        },
+        props,
+        extend: None,
+        inject_styles: true,
     })
 }
 
@@ -2778,6 +2850,7 @@ mod tests {
 
     static LEAKED_SVELTE_EXECUTION_INPUTS: &SvelteExecutionInputs = &SvelteExecutionInputs {
         css_hash_override: None,
+        prepared_styles: Vec::new(),
     };
 
     #[test]

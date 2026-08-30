@@ -47,6 +47,7 @@ mod svelte_parser_recovery_routes_through_strict_facts;
 mod svelte_parser_strictness_fails_closed;
 mod svelte_projection_backend;
 mod svelte_refuse_by_default_guards;
+mod svelte_runtime_backend;
 mod svelte_runtime_whitespace_entity_guards;
 mod svelte_semantic_authority;
 mod verified_plain_css;

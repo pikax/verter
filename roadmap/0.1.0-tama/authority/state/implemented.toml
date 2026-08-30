@@ -298,6 +298,11 @@ node_id = "CCA1K"
 commit_message = "feat(core): register Vue runtime compiler backend"
 commit_date = "2026-08-30T06:42:48+01:00"
 
+[[implemented]]
+node_id = "CCA1L"
+commit_message = "feat(core): register Svelte runtime compiler backend"
+commit_date = "2026-08-30T09:24:12+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

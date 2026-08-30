@@ -95,6 +95,7 @@ fn vue_inputs() -> DirectExecutionInputs<'static> {
 
 static LEAKED_SVELTE_EXECUTION_INPUTS: &SvelteExecutionInputs = &SvelteExecutionInputs {
     css_hash_override: None,
+    prepared_styles: Vec::new(),
 };
 
 fn svelte_inputs() -> DirectExecutionInputs<'static> {

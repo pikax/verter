@@ -18,9 +18,10 @@ use verter_span::Span;
 
 use super::SvelteRuntimeOptions;
 use super::UnsupportedSvelteRuntimeSurface;
+use crate::compile_request::svelte::SvelteCssRequest;
 use crate::svelte::parser::{
-    ParsedSvelte, SvelteAttribute, SvelteElement, SvelteElementKind, SvelteNode, SvelteSpecialKind,
-    SvelteStyle,
+    CustomElementDescriptor, ParsedSvelte, SvelteAttribute, SvelteElement, SvelteElementKind,
+    SvelteNode, SvelteSpecialKind, SvelteStyle,
 };
 
 /// The pre-lowering style stage a top-level `<style>` produces when the
@@ -50,6 +51,7 @@ pub(super) fn parse_domain_gate(
     parsed: &ParsedSvelte,
     opts: &SvelteRuntimeOptions,
     admitted: &mut super::css::AdmittedStyleIrs,
+    custom_element: Option<&CustomElementDescriptor>,
 ) -> Result<Option<PreparedComponentStyle>, UnsupportedSvelteRuntimeSurface> {
     // NOTE: a template-element `attribute_duplicate` and a duplicate `<svelte:options>` are
     // official EXACT-CODE parse errors minted by the parser (the encounter-ordered
@@ -86,7 +88,12 @@ pub(super) fn parse_domain_gate(
     // refuses downstream.
     let prepared_style = match parsed.styles.first() {
         Some(style) => Some(prepare_style_surface(
-            source, style, parsed, opts, admitted,
+            source,
+            style,
+            parsed,
+            opts,
+            admitted,
+            custom_element,
         )?),
         None => None,
     };
@@ -129,6 +136,7 @@ fn prepare_style_surface(
     parsed: &ParsedSvelte,
     opts: &SvelteRuntimeOptions,
     admitted: &mut super::css::AdmittedStyleIrs,
+    custom_element: Option<&CustomElementDescriptor>,
 ) -> Result<PreparedComponentStyle, UnsupportedSvelteRuntimeSurface> {
     // An absent content span (a defensive case — a content-less `<style>` is
     // an official reject caught before this gate) plans an EMPTY body at the
@@ -151,7 +159,7 @@ fn prepare_style_surface(
     // The css output mode is a PARSE-DOMAIN fact (options element + compile
     // option); an unprovable mode fails closed on the mode surface (the
     // `<style>` content, or the open tag when content is absent).
-    let Some(mode) = detect_css_mode(source, parsed, opts) else {
+    let Some(mode) = detect_css_mode(source, parsed, opts, custom_element) else {
         return Err(UnsupportedSvelteRuntimeSurface::StyleCssModeUnsupported {
             span: style.content.unwrap_or(style.tag_open),
         });
@@ -174,9 +182,9 @@ fn prepare_style_surface(
 /// Detect the component's css OUTPUT MODE — the official `inject_styles =
 /// css === 'injected' || is_custom_element` rule over the parse-domain facts:
 ///
-/// - a custom element (the `<svelte:options customElement>` value or the
-///   `customElement: true` compile option, with the official
-///   `customElementOptions ?? custom_element_from_option` precedence) ⇒
+/// - a custom element (the already-resolved descriptor: inline
+///   `<svelte:options customElement>`, a request descriptor, or the
+///   `customElement: true` compile option) ⇒
 ///   [`Injected`](super::css::types::CssMode::Injected);
 /// - a `<svelte:options css>` attribute ⇒ `Injected` when its value is the
 ///   official-accepted static `"injected"` — a Text value OR a single static
@@ -184,6 +192,7 @@ fn prepare_style_surface(
 ///   upstream `get_static_value` rule (the ONLY value upstream accepts on the
 ///   options element; every other shape is an official reject caught before
 ///   this gate — defensively `None` here);
+/// - a compile-request `css: Injected` ⇒ Injected;
 /// - otherwise the `External` default.
 ///
 /// `None` means the mode is UNPROVABLE (a broken upstream invariant) — the
@@ -192,18 +201,13 @@ fn detect_css_mode(
     source: &str,
     parsed: &ParsedSvelte,
     opts: &SvelteRuntimeOptions,
+    custom_element: Option<&CustomElementDescriptor>,
 ) -> Option<super::css::types::CssMode> {
     use super::css::types::CssMode;
     use crate::svelte::parser::SvelteAttributeKind;
 
-    // The custom-element half of the official rule (the resolver mirrors the
-    // `customElementOptions ?? custom_element_from_option` precedence,
-    // including the `customElement={null}` fallback). A resolution failure is
-    // a broken invariant — unprovable.
-    match super::custom_element::resolve_custom_element(parsed, opts.custom_element) {
-        Ok(Some(_)) => return Some(CssMode::Injected),
-        Ok(None) => {}
-        Err(_) => return None,
+    if custom_element.is_some() {
+        return Some(CssMode::Injected);
     }
 
     // The `css === 'injected'` half: the first ROOT `<svelte:options>`
@@ -230,6 +234,7 @@ fn detect_css_mode(
             Some(CssMode::Injected)
         }
         Some(_) => None,
+        None if opts.css == Some(SvelteCssRequest::Injected) => Some(CssMode::Injected),
         None => Some(CssMode::External),
     }
 }
