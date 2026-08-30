@@ -3940,6 +3940,70 @@ fn diagnostics_generation_increments_on_successful_recompile() {
     );
 }
 
+/// Route-equivalence pin for template-expression parse diagnostics: the
+/// analysis route (lazy template computation on `get_analysis`) must carry
+/// the SAME `XInvalidExpression` set the compile/bundle route publishes on
+/// its diagnostics channel — diagnostic completeness must never depend on
+/// which consumer requested the template facts.
+#[test]
+fn template_expression_diagnostics_match_across_analysis_and_bundle_routes() {
+    use std::collections::BTreeSet;
+
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
+                  <template><div v-if=\"count ===\">x</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    // Analysis route FIRST (before any compile can persist a template into
+    // the shared slot): the lazily computed template snapshot carries the
+    // extraction's diagnostics.
+    let analysis = host
+        .get_analysis("/src/Comp.vue")
+        .expect("analysis snapshot");
+    let tpl = analysis
+        .template
+        .expect("template analysis computed on the analysis route");
+    let analysis_set: BTreeSet<(String, u32, u32)> = tpl
+        .expression_diagnostics
+        .iter()
+        .filter(|d| d.code == "XInvalidExpression")
+        .map(|d| (d.code.clone(), d.span.start, d.span.end))
+        .collect();
+    assert!(
+        !analysis_set.is_empty(),
+        "the analysis route must surface the malformed v-if expression: {:?}",
+        tpl.expression_diagnostics
+    );
+
+    // Bundle route: the IDE compile (the LSP's diagnostics producer — its
+    // codegen recovers over the malformed expression), then read the
+    // published diagnostics channel.
+    let ide_profile = CompileProfile {
+        target: CompileTarget::TSX,
+        ..CompileProfile::default()
+    };
+    let _ = host.ensure_ide_compiled("/src/Comp.vue", &ide_profile);
+    let bundle_diags = host
+        .get_diagnostics("/src/Comp.vue", &ide_profile)
+        .expect("compile publishes latest_diagnostics");
+    let bundle_set: BTreeSet<(String, u32, u32)> = bundle_diags
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "XInvalidExpression")
+        .map(|d| (d.code.clone(), d.span.start, d.span.end))
+        .collect();
+    assert!(
+        !bundle_set.is_empty(),
+        "the bundle route must publish the malformed v-if expression: {:?}",
+        bundle_diags.diagnostics
+    );
+
+    assert_eq!(
+        analysis_set, bundle_set,
+        "both routes must surface the identical XInvalidExpression set"
+    );
+}
+
 #[test]
 fn diagnostics_generation_increments_on_source_change() {
     let host = strict_host();

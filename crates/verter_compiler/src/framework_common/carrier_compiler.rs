@@ -19,7 +19,6 @@ use verter_language::{
 
 use super::FrameworkParseArtifact;
 
-use crate::compile::template_data::RawTemplateData;
 use crate::compile::types::{CompileDiagnosticSeverity, DestructuredBlockMeta};
 
 /// IDE-codegen options threaded into [`CarrierCompiler::compile_ide`].
@@ -730,7 +729,15 @@ pub struct RuntimeCompileOutput {
     /// was requested AND the catalog semantic authority produced them.
     /// Catalog miss / parse-key mismatch / producer failure stay `None`
     /// (typed refusal). A valid template-free carrier is `Some` empty facts.
-    pub template_data: Option<RawTemplateData>,
+    ///
+    /// The product keeps the extraction's own diagnostics attached to the
+    /// data: the bundle producer additionally publishes them on
+    /// [`Self::diagnostics`] (its route's channel, deduplicated), while the
+    /// attached copy travels with the facts so every downstream conversion
+    /// of the data carries the same diagnostic set — a consumer that takes
+    /// the data and drops the diagnostics erases the file's template
+    /// expression errors on its route.
+    pub template_data: Option<super::registered_carrier_projection::TemplateFactsProduct>,
     /// Diagnostics emitted during the runtime compile. The host lifts these
     /// into its `DiagnosticsSnapshot`; an error here fails the compile.
     pub diagnostics: Vec<RuntimeDiagnostic>,

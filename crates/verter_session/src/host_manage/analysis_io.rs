@@ -238,7 +238,7 @@ impl VerterHost {
                 macros: &script_analysis.macros,
                 bindings: &script_analysis.bindings,
             },
-            &raw,
+            &raw.data,
             // This builder's only caller is the content-override lane
             // (`compute_override_template_analysis`): the bytes are a
             // compile-profile override layer the store never published.
@@ -258,7 +258,7 @@ impl VerterHost {
             &script_analysis.style_vbind_roots,
         );
         Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
-            &raw,
+            (&raw).into(),
             &imports,
             &class_domains,
             Some(&unused_ctx),
@@ -380,7 +380,7 @@ impl VerterHost {
                     macros: &snapshot.macros,
                     bindings: &snapshot.bindings,
                 },
-                &raw,
+                &raw.data,
                 // The lane's own bytes attestation, threaded in by the caller
                 // that captured them: a live scheduler/workspace read at one
                 // generation is store-published; the session-overlay entry
@@ -408,7 +408,7 @@ impl VerterHost {
                 &snapshot.style_vbind_roots,
             );
             let tpl = crate::template_convert::convert_raw_to_analysis(
-                &raw,
+                (&raw).into(),
                 &imports,
                 &class_domains,
                 Some(&unused_ctx),

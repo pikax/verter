@@ -3583,7 +3583,7 @@ impl VerterHost {
         // Convert raw template data into analysis types when available
         let mut template_class_admission =
             crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable();
-        let template_analysis = compiled.template_data.as_ref().map(|raw| {
+        let template_analysis = compiled.template_data.as_ref().map(|facts_product| {
             // Build script import pairs for component â†’ source resolution
             let all_imports =
                 template_converter_inputs(&snapshot.script_imports, &snapshot.script_bindings);
@@ -3595,7 +3595,7 @@ impl VerterHost {
                     macros: &snapshot.script_macros,
                     bindings: &snapshot.script_bindings,
                 },
-                raw,
+                &facts_product.data,
                 // The compile lane's bytes attestation: an override layer is a
                 // fenced input, plain snapshot bytes are store-published. The
                 // seed-currentness half is composed inside the wrapper.
@@ -3620,7 +3620,7 @@ impl VerterHost {
                 &snapshot.style_v_bind_vars,
             );
             crate::template_convert::convert_raw_to_analysis(
-                raw,
+                facts_product.into(),
                 &all_imports,
                 &class_domains,
                 Some(&unused_ctx),

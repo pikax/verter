@@ -2512,7 +2512,8 @@ pub(crate) fn compile_template_data(
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     reuse_carrier_parse: bool,
     _provenance: &crate::types::MetaProvenance,
-) -> Option<verter_compiler::compile::RawTemplateData> {
+) -> Option<verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct>
+{
     let adapter_id = file_language.adapter_id()?;
     let carrier_language_id = file_language.carrier_language_id()?;
 
@@ -2531,12 +2532,16 @@ pub(crate) fn compile_template_data(
     }
     let artifact = framework_parse.expect("reuse implies a present artifact");
 
+    // The whole product — data plus the extraction's diagnostics — is
+    // returned: the diagnostics belong to the facts (the extraction is the
+    // only pass that parses template expressions on this lane), so every
+    // consumer converts both onto the template snapshot identically instead
+    // of choosing per-route which half to keep.
     verter_compiler::framework_common::registered_carrier_projection::template_facts_from_catalog(
         artifact,
         compile_source,
         TemplateFactsBasis::AdmittedArtifact,
     )
-    .map(|facts| facts.data)
 }
 
 pub(crate) fn build_non_sfc_snapshot_from_program(
@@ -4172,7 +4177,8 @@ onMounted(() => { console.log('mounted') })
         )
         .expect("a Vue artifact must produce template facts through the semantic catalog");
         assert!(
-            hit.components
+            hit.data
+                .components
                 .iter()
                 .any(|component| component.tag_name == "Child"),
             "catalog hit must retain the <Child> usage so miss-None is distinct from empty success"
@@ -4238,7 +4244,8 @@ onMounted(() => { console.log('mounted') })
         )
         .expect("matching source and parse_key must produce facts");
         assert!(
-            hit.components
+            hit.data
+                .components
                 .iter()
                 .any(|component| component.tag_name == "Child"),
             "matching reuse must keep the <Child> usage"
@@ -4260,7 +4267,7 @@ onMounted(() => { console.log('mounted') })
         )
         .expect("a template-free Vue SFC must be Some(empty), not None");
         assert!(
-            hit.components.is_empty(),
+            hit.data.components.is_empty(),
             "template-free facts are empty success, distinct from producer failure"
         );
     }

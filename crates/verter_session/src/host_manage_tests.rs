@@ -97,6 +97,7 @@ fn template_class_facts_for(
         &host.provenance,
     )
     .expect("raw template data");
+    let raw = raw.data;
     host.build_template_class_semantic_facts(
         canonical,
         data.parse.whole_hash,

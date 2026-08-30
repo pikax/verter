@@ -78,6 +78,18 @@ pub struct TemplateAnalysisSnapshot {
     #[serde(default)]
     pub has_expression_errors: bool,
 
+    /// Diagnostics produced by the template-facts extraction pass itself
+    /// (template expression parse errors, e.g. `XInvalidExpression` for a
+    /// malformed directive/interpolation expression). The full form of
+    /// [`Self::has_expression_errors`]: every route that serves this
+    /// snapshot carries the same set, so diagnostic completeness never
+    /// depends on which consumer requested the facts. The compile route
+    /// ALSO publishes these on its own diagnostics channel (deduplicated
+    /// there) — a publisher that already surfaces that channel must not
+    /// re-surface this field on the same route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expression_diagnostics: Vec<TemplateExpressionDiagnostic>,
+
     /// Static member reads on identifier roots inside template expressions
     /// (`props.title`, `$slots.header`). A root consumed by a member read is
     /// NOT a whole-object escape; matched against occurrences by root span.
@@ -118,6 +130,34 @@ pub struct TemplateAnalysisSnapshot {
     /// the public template-analysis wire remains source-analysis only.
     #[serde(skip)]
     pub expression_records: Vec<TemplateExpressionRecord>,
+}
+
+/// Severity of a [`TemplateExpressionDiagnostic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TemplateDiagnosticSeverity {
+    /// A hard error.
+    Error,
+    /// A non-fatal warning.
+    Warning,
+    /// Informational.
+    Info,
+}
+
+/// One diagnostic emitted by the template-facts extraction pass
+/// (a template expression parse error), carried on
+/// [`TemplateAnalysisSnapshot::expression_diagnostics`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateExpressionDiagnostic {
+    /// Severity.
+    pub severity: TemplateDiagnosticSeverity,
+    /// The compiler-defined code string (e.g. `XInvalidExpression`).
+    pub code: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Carrier-absolute source span.
+    pub span: Span,
 }
 
 /// Index into [`TemplateAnalysisSnapshot::expression_records`].

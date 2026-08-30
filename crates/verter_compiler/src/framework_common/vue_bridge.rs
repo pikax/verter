@@ -613,13 +613,14 @@ fn with_catalog_template_facts(
             None => super::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
         };
         super::registered_carrier_projection::template_facts_from_catalog(artifact, source, basis)
-            .map(|facts| {
+            .inspect(|facts| {
                 // The fact producer is the only pass that parses template
                 // expressions on this route — its diagnostics (e.g. a
                 // malformed `v-if` expression) are published with the
                 // bundle, deduplicated against the carrier's own channel.
-                extend_unique_diagnostics(&mut bundle.diagnostics, facts.diagnostics);
-                facts.data
+                // The product keeps its own copy attached so downstream
+                // conversions of the facts carry the same set.
+                extend_unique_diagnostics(&mut bundle.diagnostics, facts.diagnostics.clone());
             })
     } else {
         None
@@ -740,6 +741,29 @@ pub fn vue_result_to_runtime_bundle(
             generated_template_chunk: tsx.generated_template_chunk,
         }
     });
+    // The template-data extraction pass's own diagnostic slice rides WITH
+    // the facts. It is a subset of `errors` — the bundle's `diagnostics`
+    // below already publishes it once for this route — so the attached copy
+    // exists for downstream conversions of the data, not as a second
+    // publication.
+    let template_facts_diagnostics: Vec<RuntimeDiagnostic> = result
+        .template_data_diagnostics
+        .iter()
+        .map(|d| RuntimeDiagnostic {
+            severity: d.severity.into(),
+            code: d.code.clone(),
+            message: d.message.clone(),
+            span: d
+                .span
+                .unwrap_or_else(|| verter_span::Span::new(0, source.len() as u32)),
+        })
+        .collect();
+    let template_data = result.template_data.map(|data| {
+        super::registered_carrier_projection::TemplateFactsProduct {
+            data,
+            diagnostics: template_facts_diagnostics,
+        }
+    });
     let diagnostics = result
         .errors
         .into_iter()
@@ -767,7 +791,7 @@ pub fn vue_result_to_runtime_bundle(
         custom_blocks,
         scope_id: result.scope_id,
         tsx,
-        template_data: result.template_data,
+        template_data,
         diagnostics,
         // The RESOLVED inline topology — the compiler already merged the
         // render into `setup()` when true, so host assembly takes the inline
@@ -2773,6 +2797,7 @@ mod tests {
             .template_data
             .as_ref()
             .expect("want_template_data must fill catalog facts");
+        let bundled = &bundled.data;
         assert_eq!(bundled.components.len(), catalog.components.len());
         assert!(
             bundled
@@ -2884,6 +2909,7 @@ mod tests {
             .expect("byte-identical selected content must keep admitted carrier facts");
         assert!(
             facts
+                .data
                 .components
                 .iter()
                 .any(|component| component.tag_name == "Original"),
@@ -2891,6 +2917,7 @@ mod tests {
         );
         assert!(
             facts
+                .data
                 .components
                 .iter()
                 .all(|component| component.tag_name != "Replacement"),

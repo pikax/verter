@@ -540,9 +540,10 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             crate::framework_common::registered_carrier_projection::template_facts_from_catalog(
                 artifact, source, basis,
             )
-            .map(|facts| {
-                bundle.diagnostics.extend(facts.diagnostics);
-                facts.data
+            .inspect(|facts| {
+                // Published once on this route's own channel; the product
+                // keeps its copy attached for downstream conversions.
+                bundle.diagnostics.extend(facts.diagnostics.iter().cloned());
             })
         } else {
             None
@@ -1479,6 +1480,7 @@ let count = $state(0);
             .template_data
             .as_ref()
             .expect("want_template_data must fill catalog facts");
+        let bundled = &bundled.data;
         assert_eq!(bundled.components.len(), catalog.components.len());
         assert!(
             bundled
@@ -1586,6 +1588,7 @@ let count = $state(0);
             .expect("native admitted Svelte markup must keep catalog facts");
         assert!(
             facts
+                .data
                 .components
                 .iter()
                 .any(|component| component.tag_name == "Button"),
