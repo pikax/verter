@@ -219,13 +219,23 @@ function convertType(
     case "recursiveRef":
       return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
 
-    case "indexedAccess":
+    case "indexedAccess": {
+      const resolved = resolveIndexedAccessForSchema(
+        td,
+        typeRegistry,
+        visited,
+        registryResolutionDepth,
+      );
+      if (resolved) {
+        return convertType(resolved, options, typeRegistry, visited, registryResolutionDepth + 1);
+      }
       // Indexed-access types (`T['K']`) carry a structural shape but
       // require host-side resolution to materialise the underlying
       // member. Surface as the structural string form with an empty
       // schema (matches the Volar "unresolved compound type" behaviour
       // used for refs).
       return { kind: "object" as const, type: typeDescriptorToString(td), schema: {} };
+    }
 
     case "syntheticSlotBinding":
       // Synthetic slot-binding carriers are opaque terminals. They MUST
@@ -238,6 +248,41 @@ function convertType(
     case "unknown":
       return "unknown";
   }
+}
+
+function resolveIndexedAccessForSchema(
+  td: Extract<TypeDescriptor, { kind: "indexedAccess" }>,
+  typeRegistry?: Map<string, TypeDescriptor>,
+  visited: Set<string> = new Set(),
+  registryResolutionDepth = 0,
+): TypeDescriptor | undefined {
+  if (
+    !typeRegistry ||
+    registryResolutionDepth >= MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH ||
+    td.indexType.kind !== "literal" ||
+    typeof td.indexType.value !== "string" ||
+    td.objectType.kind !== "ref" ||
+    visited.has(td.objectType.name)
+  ) {
+    return undefined;
+  }
+
+  const object = typeRegistry.get(td.objectType.name);
+  if (object?.kind !== "object") {
+    return undefined;
+  }
+  const key = td.indexType.value;
+  const property = object.properties.find((candidate) => candidate.name === key);
+  if (!property) {
+    return undefined;
+  }
+  if (!property.optional) {
+    return property.type;
+  }
+  return {
+    kind: "union",
+    types: [property.type, { kind: "primitive", name: "undefined" }],
+  };
 }
 
 export function flattenSchemaEnumEntries(schema: PropertyMetaSchema): PropertyMetaSchema[] {

@@ -343,11 +343,11 @@ pub enum AttemptFailure {
     },
     /// The requested input is permanently unavailable from this loader.
     /// This is terminal and never retried or cached as stable missing.
-    InputLoadUnavailable { key: InputKey },
+    InputLoadUnavailable { key: Box<InputKey> },
     /// A same-key I/O flight reported a transient (non-stable-missing)
     /// failure. The workspace driver may retry only after proving that the
     /// next attempt and the same reservation both fit the operation ledger.
-    TransientInputLoadFailure { key: InputKey },
+    TransientInputLoadFailure { key: Box<InputKey> },
     /// The bounded loader did not faithfully satisfy its exact reservation.
     /// This is terminal and never cacheable as either a hit or stable miss.
     InputLoadIntegrity {

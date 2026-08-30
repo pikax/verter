@@ -8907,6 +8907,10 @@ async fn contract_kebab_prop_rename_refuses_when_a_second_parent_is_unproven() {
 /// rename leg must still classify as the current carrier and re-anchor to the
 /// AUTHORED request URI — never echo the provider's folded path as a second
 /// URI (clients key edits case-sensitively and silently drop them).
+// A fully case-folded path is the same file only on a case-insensitive host.
+// On Linux it may name a distinct real file, so accepting it there would make
+// rename fail open and edit the wrong source.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[tokio::test]
 async fn contract_rename_provider_case_folded_carrier_path_reanchors_to_authored_uri() {
     let app_source = "<script setup lang=\"ts\">\nconst vueTsTitle: string = \"x\"\n</script>\n<template><section>{{ vueTsTitle }}</section></template>\n";

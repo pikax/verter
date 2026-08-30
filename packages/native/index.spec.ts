@@ -675,6 +675,19 @@ describe("component-meta native aliases", () => {
     expect(methods).toContain("whyInstantiatedFromAuditJson");
   });
 
+  it("accepts scheduler pool sizes on the shared component-meta host config", () => {
+    const native = require("./index.js");
+    const host = new native.ComponentMetaHost({ schedulerCpuThreads: 1, schedulerIoThreads: 1 });
+    host.upsertBase(
+      "/scheduler-meta.vue",
+      '<script setup lang="ts">defineProps<{ x: string }>()</script>',
+    );
+    const session = host.openSession();
+    expect(session.getComponentMeta("/scheduler-meta.vue")).toBeDefined();
+    session.close();
+    host.shutdown();
+  });
+
   it("getComponentMetaWithAudit throws when the host does not enable audit", () => {
     // Default HostConfig has audit_enabled = false. Calling the audit
     // binding must surface a clear error rather than returning an
@@ -1392,6 +1405,30 @@ describe("VerterHost.compileMany", () => {
     expect(
       // @ts-expect-error — exercising NAPI runtime rejection of a non-numeric hostCpuThreads
       () => new VerterHost({ hostCpuThreads: {} }),
+    ).toThrow();
+  });
+
+  it("accepts explicit scheduler CPU and I/O pool sizes", () => {
+    const host = new VerterHost({ schedulerCpuThreads: 1, schedulerIoThreads: 1 });
+    const upsert = host.upsert({
+      inputId: "/scheduler-pool-sizes.vue",
+      source: "<template><div>x</div></template>",
+    });
+    expect(upsert.changed).toBe(true);
+    expect(
+      host.getVirtualFile({
+        canonicalId: upsert.canonicalId,
+        nodeKind: { kind: "main" },
+      }),
+    ).not.toBeNull();
+
+    expect(
+      // @ts-expect-error — exercising NAPI runtime rejection of a non-numeric scheduler size
+      () => new VerterHost({ schedulerCpuThreads: "nope" }),
+    ).toThrow();
+    expect(
+      // @ts-expect-error — exercising NAPI runtime rejection of a non-numeric scheduler size
+      () => new VerterHost({ schedulerIoThreads: {} }),
     ).toThrow();
   });
 });

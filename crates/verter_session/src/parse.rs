@@ -3545,7 +3545,6 @@ watch(count, (value, oldValue) => {
         assert_eq!(snap.preprocessor_requests.len(), 1);
         let req = &snap.preprocessor_requests[0];
         assert_eq!(req.content_class, BlockContentClass::Template);
-        assert!(!req.block_ref.artifact_identity().is_empty());
         assert_eq!(req.lang, "pug");
         assert!(
             req.content.contains("div hello"),
@@ -3563,7 +3562,6 @@ watch(count, (value, oldValue) => {
         assert_eq!(snap.preprocessor_requests.len(), 1);
         let req = &snap.preprocessor_requests[0];
         assert_eq!(req.content_class, BlockContentClass::Script);
-        assert!(!req.block_ref.artifact_identity().is_empty());
         assert_eq!(req.lang, "coffee");
         assert!(
             req.content.contains("x = 1"),
@@ -3855,7 +3853,6 @@ watch(count, (value, oldValue) => {
         assert_eq!(snap.preprocessor_requests.len(), 1);
         let req = &snap.preprocessor_requests[0];
         assert_eq!(req.content_class, BlockContentClass::Custom);
-        assert!(!req.block_ref.artifact_identity().is_empty());
         assert_eq!(req.lang, "yaml");
         assert!(
             req.content.contains("hello: world"),

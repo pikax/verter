@@ -9,9 +9,10 @@ use rustc_hash::FxHashMap;
 
 use crate::instant::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::compile_request_build::build_compile_request_with_style_processing;
 use super::compile_request_build::{
-    build_compile_request, build_compile_request_with_style_processing,
-    derive_runtime_compile_options, request_construction_refused_diagnostics,
+    build_compile_request, derive_runtime_compile_options, request_construction_refused_diagnostics,
 };
 use super::vue_script_extract::template_converter_inputs;
 use crate::compile::{assemble_vue_main_module, VueMainAssemblyFailure};
@@ -3665,6 +3666,31 @@ impl VerterHost {
     ) -> Result<RenderOnlyMain, HostError> {
         let diagnostics = snapshot.parse_diagnostics.clone();
 
+        // The registered parse artifact is the framework dispatch authority.
+        // Classifying the request as Vue before reading it would make a Svelte
+        // render produce Vue macro inputs and a Vue CompileRequest, even though
+        // the carrier registry later dispatches to the Svelte compiler.
+        let Some(artifact) = snapshot.framework_parse.as_ref() else {
+            return Err(HostError::CompileError(CompileFailure {
+                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
+                    HostDiagnostic {
+                        severity: HostSeverity::Error,
+                        code: "HOST_NO_CARRIER_ARTIFACT".to_string(),
+                        message: format!(
+                        "no framework parse artifact for '{}' — cannot route the runtime compile",
+                        snapshot.canonical_id
+                    ),
+                        arguments: Vec::new(),
+                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
+                    },
+                ])),
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            }));
+        };
+        let is_vue = artifact.adapter_id().is_vue();
+
         // (a) DROP the source re-clone for the common case. Only the
         // external-`src=` merge (rare, and inherently allocating) builds an
         // owned String; otherwise the substrate borrows the snapshot bytes.
@@ -3675,24 +3701,29 @@ impl VerterHost {
         // call.
         let alloc = Allocator::new();
 
-        let macro_output = self.produce_vue_macro_codegen(
-            &snapshot.canonical_id,
-            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
-        );
+        let macro_output = is_vue.then(|| {
+            self.produce_vue_macro_codegen(
+                &snapshot.canonical_id,
+                crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
+            )
+        });
 
         let scope = self.config.effective_scope();
 
-        let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
-            macro_runtime: macro_output.runtime,
-            prop_constness_overrides: None,
-            style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
-            style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
-            template_binding_metadata: None,
-            template_used_vars: None,
-            runtime_template_hole: false,
-            runtime_inline_template_chunk: false,
-            prepared_styles: snapshot.prepared_styles.clone(),
-        };
+        let vue_facts =
+            macro_output.map(
+                |macro_output| verter_compiler::compile::types::VueExecutionInputs {
+                    macro_runtime: macro_output.runtime,
+                    prop_constness_overrides: None,
+                    style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+                    style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
+                    template_binding_metadata: None,
+                    template_used_vars: None,
+                    runtime_template_hole: false,
+                    runtime_inline_template_chunk: false,
+                    prepared_styles: snapshot.prepared_styles.clone(),
+                },
+            );
 
         // The render lane's whole subject is the runtime `Main` module, so
         // it always asks for the runtime products regardless of the
@@ -3704,13 +3735,13 @@ impl VerterHost {
             scope.needs_template_analysis() || profile.target.needs_template_data();
 
         // The canonical, admission-checked request — same construction
-        // authority as `compile_entry` (this lane is Vue-only, matching its
-        // own module contract). A refusal here is FATAL, matching every
+        // authority as `compile_entry`, classified from the registered
+        // artifact. A refusal here is FATAL, matching every
         // other construction-time site this lane already treats as fatal.
         let request = match build_compile_request_with_style_processing(
             profile,
             &snapshot.canonical_id,
-            true,
+            is_vue,
             want_runtime,
             style_processing,
             want_ide,
@@ -3738,32 +3769,13 @@ impl VerterHost {
             &request,
             profile,
             snapshot.block_content_inputs.clone(),
-            Some(vue_facts),
+            vue_facts,
             snapshot.prepared_styles.clone(),
         );
 
         // Route through the carrier registry (the single dispatch authority)
         // — identical to `compile_entry`. Sites 3 (no artifact) and 4 (no
         // compiler) stay FATAL.
-        let Some(artifact) = snapshot.framework_parse.as_ref() else {
-            return Err(HostError::CompileError(CompileFailure {
-                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
-                    HostDiagnostic {
-                        severity: HostSeverity::Error,
-                        code: "HOST_NO_CARRIER_ARTIFACT".to_string(),
-                        message: format!(
-                        "no framework parse artifact for '{}' — cannot route the runtime compile",
-                        snapshot.canonical_id
-                    ),
-                        arguments: Vec::new(),
-                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
-                    },
-                ])),
-                requested_mode: profile.requested_mode,
-                actual_mode: profile.requested_mode,
-                downgrade_reason: None,
-            }));
-        };
         let Some(compiler) = crate::parse::carrier_compiler_registry()
             .compiler_for_carrier_language(artifact.adapter_id(), artifact.language_id())
         else {

@@ -30,7 +30,11 @@ import { existsSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import { createInterface } from "node:readline";
 
-import { assertNotSelfSpawn, envWithToolMarked, isLauncherActive } from "@verter/binary-launcher/cli";
+import {
+  assertNotSelfSpawn,
+  envWithToolMarked,
+  isLauncherActive,
+} from "@verter/binary-launcher/cli";
 import { launcher, serverBinaryCandidates } from "verter-mcp";
 
 /** The stdout record's single top-level key (pinned against the Rust encoder). */
@@ -274,7 +278,11 @@ export function startMcpServerProcess(options: McpServerSpawnOptions): McpServer
     // recursing — see `mcpSpawnRefusalReason`.
     env: envWithToolMarked(launcher.toolName),
   });
-  running = true;
+  // `spawn()` reports ENOENT asynchronously but returns a ChildProcess with
+  // no pid immediately. Treating that shell as running lets an equally
+  // immediate disposal call `child.kill()` before the error event; Node then
+  // targets pid 0 on Unix, signalling the caller's whole process group.
+  running = typeof child.pid === "number" && child.pid > 0;
 
   const dispose = () => {
     if (disposed) return;

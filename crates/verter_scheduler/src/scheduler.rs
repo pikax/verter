@@ -4801,14 +4801,27 @@ impl Scheduler {
                                 }
                             }
                         }
-                        // Source → Analysis transition. Owner Analysis is
-                        // admitted ungated — `admit_work` is the single
-                        // admission chokepoint, and this is the first and
-                        // only Analysis admission for this canonical at
-                        // this generation. Blockers discovered during this
-                        // completion are persisted to the per-canonical
-                        // Artifact blocker registry, not attached to this
-                        // Analysis node.
+                        // Resolve Source-targeted waiters only after this
+                        // transition has published and consumed all dependency
+                        // facts. Signalling from the worker immediately after
+                        // storing the Source snapshot let callers observe a
+                        // half-integrated generation.
+                        let source = node
+                            .current_source()
+                            .expect("current Source completion must retain its snapshot");
+                        let result = RequestResult::Source(source);
+                        dag.signal_stage_complete(
+                            &canonical_arc,
+                            generation,
+                            &TaskKind::Load,
+                            &result,
+                        );
+
+                        // Source → Analysis is demand-driven. A Source-only
+                        // request has reached its target; a later Analysis or
+                        // Artifact request observes the committed Source and
+                        // admits the missing stage through normal admission.
+                        let requires_analysis = dag.has_analysis_demand(&canonical_arc, generation);
                         // Re-read the file's urgency under THIS hold. The
                         // value sampled before extraction can be stale: an
                         // interactive request joining the same generation
@@ -4818,20 +4831,22 @@ impl Scheduler {
                         let effective_priority = dag
                             .highest_priority_for_file(&canonical_arc, generation)
                             .unwrap_or(inherited_priority);
-                        admit_work(
-                            &mut dag,
-                            &canonical_arc,
-                            generation,
-                            TaskKind::Analysis,
-                            std::cmp::min(effective_priority, inherited_priority),
-                            None,
-                        );
-                        // Admit Analysis BEFORE completing Source, both
-                        // under this one hold: completing Source first
-                        // would briefly expose a state where the file has
-                        // no live stage identity, which a concurrent
-                        // dead-producer classification would read as a
-                        // Source-failed corpse.
+                        if requires_analysis {
+                            admit_work(
+                                &mut dag,
+                                &canonical_arc,
+                                generation,
+                                TaskKind::Analysis,
+                                std::cmp::min(effective_priority, inherited_priority),
+                                None,
+                            );
+                        }
+                        // When a later stage is required, admit Analysis
+                        // BEFORE completing Source under this one hold: a
+                        // concurrent dead-producer classification must never
+                        // observe an Analysis-bound generation with no live
+                        // stage identity. A Source-only request deliberately
+                        // has no later-stage producer and is complete here.
                         //
                         // Marking the Source identity complete drops its
                         // DAG bookkeeping and releases the capacity permit
@@ -6427,10 +6442,6 @@ impl Scheduler {
                 }
             }
 
-            let result = RequestResult::Source(snapshot);
-            dag.lock()
-                .signal_stage_complete(&canonical, generation, &TaskKind::Load, &result);
-
             let _ = inbox_sender.send(Submission::StageComplete {
                 file_id: node.canonical_id.clone(),
                 generation,
@@ -7571,6 +7582,50 @@ mod tests {
             }
             _ => panic!("expected Source"),
         }
+        assert!(
+            sched.try_get_analysis("/a.vue").is_none(),
+            "a Source-only request must not eagerly execute Analysis"
+        );
+    }
+
+    #[test]
+    fn analysis_request_after_source_only_completion_admits_missing_stage() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/a.vue".to_string(), Arc::from("<template>hi</template>"));
+        let sched = test_scheduler_with_loader(loader);
+
+        let source_handle = sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Source,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        sched.drive_all();
+        assert!(matches!(
+            source_handle.try_get(),
+            Some(CompletionState::Ready(RequestResult::Source(_)))
+        ));
+        assert!(sched.try_get_analysis("/a.vue").is_none());
+
+        let analysis_handle = sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        sched.drive_all();
+
+        match analysis_handle.try_get() {
+            Some(CompletionState::Ready(RequestResult::Analysis(snapshot))) => {
+                assert_eq!(snapshot.generation, 1);
+            }
+            state => panic!("expected Analysis after Source-only completion, got {state:?}"),
+        }
+        assert!(sched.try_get_analysis("/a.vue").is_some());
     }
 
     #[test]

@@ -21,6 +21,8 @@ dts-build/packages
 *.tsbuildinfo
 package-lock.json
 !editors/nvim/tests/fixtures/real-client/package-lock.json
+!packages/framework-conformance-harness/evidence/oracles/vue/package-lock.json
+!packages/framework-conformance-harness/evidence/oracles/svelte/package-lock.json
 
 # Generated type fixtures
 **/__generated__/
@@ -120,4 +122,3 @@ packages/native/npm/*/*.node
 # Build-system directory stamps.
 .dirstamp
 **/.dirstamp
-

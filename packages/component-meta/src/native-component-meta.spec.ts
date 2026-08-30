@@ -42,6 +42,17 @@ function publishedTypeFields(text?: string) {
   };
 }
 
+function typeDeclaration(canonicalSource: string, name: string) {
+  return {
+    requestedName: name,
+    resolvedName: name,
+    canonicalSource,
+    spanStart: 0,
+    spanEnd: 1,
+    kind: "typeAlias" as const,
+  };
+}
+
 function nativeMetaWithProp(prop: Record<string, unknown>) {
   return {
     filePath: "/project/src/App.vue",
@@ -1045,7 +1056,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
     ]);
   });
 
-  it("resolves indexed-access prop descriptors through the native type registry", () => {
+  it("keeps a ratified indexed-access publication shallow beside the native registry", () => {
     const native = {
       filePath: "/project/src/Link.vue",
       optionsApi: false,
@@ -1069,6 +1080,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
       typeRegistry: [
         {
           name: "NuxtLinkProps",
+          declaration: typeDeclaration("/project/src/link-types.ts", "NuxtLinkProps"),
           type: {
             kind: "object",
             properties: [
@@ -1126,16 +1138,66 @@ describe("nativeComponentMetaToComponentMeta", () => {
 
     const compat = nativeComponentMetaToComponentMeta(native);
     expect(compat.props[0]?.type).toEqual({
+      kind: "indexedAccess",
+      objectType: { kind: "ref", name: "NuxtLinkProps" },
+      indexType: { kind: "literal", value: "to" },
+    });
+
+    const registry = nativeTypeRegistryToMap(native);
+    expect(registry?.get("NuxtLinkProps")).toBeDefined();
+    expect(registry?.get("RouteLocationRaw")).toBeDefined();
+
+    native.typeRegistry[0].declaration = typeDeclaration("/project/src/Link.vue", "NuxtLinkProps");
+    const local = nativeComponentMetaToComponentMeta(native);
+    expect(local.props[0]?.type).toEqual({
       kind: "union",
       types: [
         { kind: "ref", name: "RouteLocationRaw" },
         { kind: "primitive", name: "undefined" },
       ],
     });
+  });
 
-    const registry = nativeTypeRegistryToMap(native);
-    expect(registry?.get("NuxtLinkProps")).toBeDefined();
-    expect(registry?.get("RouteLocationRaw")).toBeDefined();
+  it("keeps a ratified generic ref publication shallow beside its registry body", () => {
+    const native = nativeMetaWithProp({
+      name: "valueKey",
+      type: {
+        kind: "ref",
+        name: "GetItemKeys",
+        typeArguments: [{ kind: "ref", name: "T", typeArguments: [] }],
+      },
+      ...publishedTypeFields("GetItemKeys<T>"),
+      required: false,
+      hasDefault: true,
+    });
+    native.typeRegistry = [
+      {
+        name: "GetItemKeys",
+        declaration: typeDeclaration("/project/src/helpers.ts", "GetItemKeys"),
+        type: {
+          kind: "union",
+          types: [
+            { kind: "primitive", name: "string" },
+            { kind: "primitive", name: "number" },
+          ],
+        },
+      },
+    ];
+
+    const compat = nativeComponentMetaToComponentMeta(native);
+
+    expect(compat.props[0]?.type).toEqual({
+      kind: "ref",
+      name: "GetItemKeys",
+      typeArguments: [{ kind: "ref", name: "T" }],
+    });
+    expect(nativeTypeRegistryToMap(native)?.get("GetItemKeys")).toEqual({
+      kind: "union",
+      types: [
+        { kind: "primitive", name: "string" },
+        { kind: "primitive", name: "number" },
+      ],
+    });
   });
 
   it("maps an exact, a proven-non-wrapper and a typed-degraded return wrapper role distinctly", () => {

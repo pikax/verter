@@ -2714,6 +2714,50 @@ impl SchedulerDag {
         self.file_waiters.contains_key(&key)
     }
 
+    /// Whether any live consumer requires Analysis for
+    /// `(canonical, generation)`.
+    ///
+    /// Demand can be represented in three places: a direct Analysis/Artifact
+    /// request group, an admitted DAG node gated on this Analysis identity, or
+    /// the pre-admission Artifact blocker registry. Source completion must
+    /// consult all three or an auto-ingested blocker can stop at Source before
+    /// its owner's Artifact node has been admitted.
+    pub fn has_analysis_demand(&self, canonical: &Arc<str>, generation: u64) -> bool {
+        let key = FileGenKey {
+            canonical: Arc::clone(canonical),
+            generation,
+        };
+        let direct_request = self.file_waiters.get(&key).is_some_and(|state| {
+            state.groups.iter().any(|group| {
+                matches!(
+                    group.target,
+                    TargetStage::Analysis | TargetStage::Artifact { .. }
+                )
+            })
+        });
+        if direct_request {
+            return true;
+        }
+
+        let dep = DepKey::FileStage {
+            canonical: Arc::clone(canonical),
+            generation,
+            stage: FileStageKey::Analysis,
+        };
+        let admitted_consumer = self.waiters.get(&dep).is_some_and(|tokens| {
+            tokens.iter().any(|token| {
+                self.nodes
+                    .get(token)
+                    .is_some_and(|node| !node.cancelled && node.deps_remaining.contains(&dep))
+            })
+        });
+        admitted_consumer
+            || self
+                .artifact_blocker_deps
+                .values()
+                .any(|set| set.deps.contains(&dep))
+    }
+
     // The Artifact blocker-dep registry's typed API lives in the
     // [`blocker_registry`] child module, declared at the top of
     // this file. The underlying storage stays on `SchedulerDag` so
