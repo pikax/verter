@@ -57,6 +57,44 @@ fn prelude_opens_the_projection_and_no_script_tag_survives() {
 }
 
 #[test]
+fn javascript_projection_leaves_check_js_policy_to_the_authored_project() {
+    let source = "<script>let value = 1;</script>\n<p>{value}</p>";
+    let parsed = parse_svelte(source);
+    let projection = project_svelte_ide(source, &parsed, Some("Comp.svelte"), false);
+
+    assert!(projection.is_jsx);
+    assert!(
+        !projection.code.contains("// @ts-check"),
+        "an unannotated JavaScript carrier must not override checkJs: {}",
+        projection.code
+    );
+    assert!(
+        !projection.code.contains("// @ts-nocheck"),
+        "an unannotated JavaScript carrier must not override checkJs: {}",
+        projection.code
+    );
+}
+
+#[test]
+fn javascript_projection_lifts_authored_check_directives_to_the_generated_header() {
+    for directive in ["@ts-check", "@ts-nocheck"] {
+        let source =
+            format!("<script>\n  // {directive}\nlet value = 1;\n</script>\n<p>{{value}}</p>");
+        let parsed = parse_svelte(&source);
+        let projection = project_svelte_ide(&source, &parsed, Some("Comp.svelte"), false);
+        let expected_prefix =
+            format!("// {directive}\n/** @jsxImportSource @verter/svelte-jsx */\n");
+
+        assert!(projection.is_jsx);
+        assert!(
+            projection.code.starts_with(&expected_prefix),
+            "the authored directive must remain a file-level directive: {}",
+            projection.code
+        );
+    }
+}
+
+#[test]
 fn component_shorthand_maps_the_authored_identifier_to_the_value_expression() {
     use oxc_sourcemap::SourceMap;
 

@@ -1916,12 +1916,34 @@ fn compile_inner(
         // One CT → one source map → template diagnostics map correctly.
         let tsx_alloc = Allocator::new();
         let mut tsx_ct = CodeTransform::new(input, &tsx_alloc);
-        // The per-file official Vue JSX authority must lead every TSX/JSX
-        // carrier, including carriers whose first authored script declaration
-        // maps to generated line/column zero. Put it in CodeTransform's
+        // Authored JavaScript file-check directives must remain header pragmas in
+        // the generated companion. Put them before the JSX authority: current
+        // TSGO recognizes the file-check override only from the leading pragma
+        // sequence. An unannotated carrier emits no override and remains governed
+        // by its configured project's `checkJs` policy.
+        let mut vue_ide_header = String::new();
+        if is_jsx {
+            let script_bodies = [parsed.script(), parsed.script_setup()]
+                .into_iter()
+                .flatten()
+                .filter_map(|script| script.content)
+                .map(|content| (content.start, content.end));
+            for directive in
+                crate::framework_common::typescript_directives::authored_check_directives(
+                    input,
+                    script_bodies,
+                )
+            {
+                vue_ide_header.push_str("// ");
+                vue_ide_header.push_str(directive);
+                vue_ide_header.push('\n');
+            }
+        }
+        // The per-file official Vue JSX authority remains in CodeTransform's
         // unmapped intro so source-map generation shifts authored mappings
         // structurally instead of a provider mutating mapped bytes later.
-        tsx_ct.prepend(ide::VUE_JSX_PRAGMA);
+        vue_ide_header.push_str(ide::VUE_JSX_PRAGMA);
+        tsx_ct.prepend(&vue_ide_header);
 
         // Compute template end position (byte offset after </template> close tag)
         let template_end: Option<u32> = template_ast_opt.map(|tpl| {

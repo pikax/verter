@@ -9032,6 +9032,25 @@ fn vue_js_ide_carrier_declares_the_same_official_jsx_authority() {
 }
 
 #[test]
+fn vue_js_ide_carrier_preserves_authored_check_directives_at_the_generated_header() {
+    for directive in ["@ts-check", "@ts-nocheck"] {
+        let source = format!(
+            "<script setup>\n// {directive}\n/** @param {{PointerEvent}} event */\nfunction handlePointer(event) {{\n  return event.__verterMissingPointerMember;\n}}\n</script>\n<template><button @pointerdown=\"handlePointer\">Check</button></template>\n"
+        );
+        let result = compile_tsx_with_force_js(&source, true);
+        let tsx = result.tsx.expect("Vue JS IDE carrier");
+        let expected = format!("// {directive}\n/** @jsxImportSource vue */\n");
+
+        assert!(tsx.is_jsx);
+        assert!(
+            tsx.code.starts_with(&expected),
+            "the authored file-check pragma must lead the generated JSX carrier:\n{}",
+            tsx.code
+        );
+    }
+}
+
+#[test]
 fn tsx_basic_sfc() {
     let result = compile_tsx(
         r#"<script setup>
