@@ -6018,6 +6018,142 @@ function makeTop(x: string | number) {
     });
 }
 
+/// A same-file predicate whose target names the CALLEE's own type
+/// parameter — `function isSame<T>(x: T): x is T` — is instantiated by
+/// the call: the checker binds `T` to the argument's `string | number`
+/// and the predicate is a tautology, so `f` returns `string | number |
+/// boolean`. Resolving `T` through the CALLER's environment binds the
+/// unrelated owner-scope alias `type T = number` and narrows `string`
+/// away. The demand keeps the unnarrowed join, carries the typed gap, and
+/// holds zero candidates.
+#[test]
+fn generic_predicate_target_never_resolves_in_the_caller_environment() {
+    const CANONICAL: &str = "/ws/generic-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type T = number;
+
+function isSame<T>(x: T): x is T { return true }
+
+function f(x: string | number) {
+  if (isSame(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A nested namespace member is served from ITS OWN body: `N.M.make`
+/// returns `"x"`, `N.make` returns `111`. A locator that keeps only the
+/// inner block's statement ordinal resolves that ordinal in the OUTER
+/// block and certifies the outer body's `number` under the inner
+/// function's key — a wrong-complete result that would warm.
+#[test]
+fn nested_namespace_function_is_served_from_its_own_body() {
+    const CANONICAL: &str = "/ws/nested-namespace/main.ts";
+    const FIXTURE: &str = r#"
+namespace N {
+  function make() { return 111 }
+
+  namespace M {
+    function make() { return "x" }
+  }
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let inner_key = whole_return_key(dispatch, CANONICAL, "N.M.make");
+        let inner = flow_result_value(dispatch, inner_key.clone());
+        let inner_expr = host
+            .project_node_to_type_expr_for_test(inner.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            inner_expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+            "the inner function's own body is served"
+        );
+        assert_eq!(inner.degradation(), None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(inner_key))),
+            1,
+            "the correctly served inner body certifies and warms"
+        );
+
+        let (outer_expr, _) = flow_result_for_file(dispatch, &host, CANONICAL, "N.make");
+        assert_eq!(
+            outer_expr,
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "the outer function keeps its own body"
+        );
+    });
+}
+
+/// `x instanceof A` narrows by the VALUE `A` denotes at the test. A
+/// parameter `A: typeof B` shadows the owner-scope `class A`, and the
+/// checker narrows to `B` — `f` returns `B | boolean`. An owner-scope type
+/// reference for the constructor narrows to the class `A` instead, and
+/// with no call in the test nothing else stops that wrong narrowing from
+/// completing and warming. The frame-bound right-hand side is refused at
+/// lowering: the demand keeps both class arms unnarrowed, carries the
+/// typed gap, and holds zero candidates.
+#[test]
+fn instanceof_shadowed_by_a_parameter_never_narrows_through_the_owner_class() {
+    const CANONICAL: &str = "/ws/instanceof-shadow/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class A { a = 1 }
+class B { b = 1 }
+
+function f(x: A | B, A: typeof B) {
+  if (x instanceof A) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("the join is a union, got {expr:?}");
+        };
+        for class in ["A", "B"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+                )),
+                "no narrow is established through the shadowed constructor name — the \
+                 `{class}` arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "the shadowed constructor test degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an unprovable constructor binding never warms"
+        );
+    });
+}
+
 /// A mixed component's UNPROVEN deferred flow members poison the
 /// MACHINERY ROOT that consumed their values. The joint fixed point
 /// feeds the evaluated flow-member overrides into the call/relation

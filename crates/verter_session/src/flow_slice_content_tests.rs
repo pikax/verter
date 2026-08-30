@@ -655,6 +655,211 @@ fn namespace_owned_call_site_never_resolves_callee_closure_at_top_level() {
     }
 }
 
+/// The number of `if` statements guarded by a predicate fact.
+fn predicate_guard_count(node: &SliceContent) -> usize {
+    node.body
+        .statements
+        .iter()
+        .filter(|statement| {
+            matches!(
+                statement,
+                SliceStatement::If {
+                    guard: SliceGuard::TypePredicate { .. },
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// The number of `if` statements guarded by an `instanceof` fact.
+fn instanceof_guard_count(node: &SliceContent) -> usize {
+    node.body
+        .statements
+        .iter()
+        .filter(|statement| {
+            matches!(
+                statement,
+                SliceStatement::If {
+                    guard: SliceGuard::Instanceof { .. },
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// The number of typed guard-narrowing gaps in the body region.
+fn guard_gap_count(node: &SliceContent) -> usize {
+    node.body
+        .statements
+        .iter()
+        .filter(|statement| {
+            matches!(
+                statement,
+                SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing)
+            )
+        })
+        .count()
+}
+
+/// A same-file predicate whose TARGET names a binding of the CALLEE's own
+/// declaration — its type-parameter clause (`function isSame<T>(x: T): x
+/// is T`) or a formal parameter (`x is typeof y`) — is instantiated by the
+/// CALL: the checker binds `T` to the argument's `string | number` (a
+/// tautology here), never to the owner scope's unrelated `type T =
+/// number`. This half performs no call-site inference, and the caller's
+/// environment cannot resolve such a target, so the predicate channel
+/// refuses it: the control test lowers behind the typed gap and nothing
+/// is certified, for the guard spelling and the `asserts x is T`
+/// statement spelling alike. A generic callee whose target is closed over
+/// the module scope (`x is string`) keeps its guard.
+#[test]
+fn predicate_target_over_callee_bindings_never_resolves_in_the_caller_environment() {
+    const CALLER: &str = "function f(x: string | number) { if (isSame(x)) return x; return false }";
+    for callee in [
+        "function isSame<T>(x: T): x is T { return true }",
+        "function isSame(x: unknown, y: string): x is typeof y { return true }",
+        "function isSame<T>(x: T): x is T[] { return true }",
+    ] {
+        let source = format!("export {{}};\ntype T = number;\n{callee}\n{CALLER}");
+        let node = content_for(&source, "f");
+        assert_eq!(
+            predicate_guard_count(&node),
+            0,
+            "a call-instantiated predicate target is never minted as a guard \
+             (`{callee}`): {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "the control test gaps (`{callee}`): {node:?}"
+        );
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "the predicate call is never certified (`{callee}`): {node:?}"
+        );
+    }
+
+    let asserting = content_for(
+        "export {};\n\
+         type T = number;\n\
+         function assertSame<T>(x: T): asserts x is T {}\n\
+         function g(x: string | number) { assertSame(x); return x }",
+        "g",
+    );
+    assert!(
+        !asserting
+            .body
+            .statements
+            .iter()
+            .any(|statement| matches!(statement, SliceStatement::Assertion { .. })),
+        "a call-instantiated assertion target is never minted: {asserting:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&asserting),
+        1,
+        "the assertion statement gaps: {asserting:?}"
+    );
+
+    let closed = content_for(
+        &format!(
+            "export {{}};\ntype T = number;\n\
+             function isSame<T>(x: T): x is string {{ return true }}\n{CALLER}"
+        ),
+        "f",
+    );
+    assert_eq!(
+        predicate_guard_count(&closed),
+        1,
+        "a generic callee whose target is closed over the module scope keeps its guard: {closed:?}"
+    );
+    assert_eq!(guard_gap_count(&closed), 0, "{closed:?}");
+}
+
+/// `x instanceof A` narrows by the VALUE `A` denotes at the test, and the
+/// frame's lexical authority binds that name first: a parameter `A:
+/// typeof B` shadows the owner-scope `class A`, and the checker narrows to
+/// `B`. The evaluator lowers the constructor as an owner-scope type
+/// reference, which is exactly the class's instance type ONLY when the
+/// bare name is provably the module's single same-file `class`
+/// declaration at this call site. Every other right-hand side — a
+/// frame-bound name, a namespace-owned call site (the block scope binds
+/// first), a non-class top-level value, an import — lowers behind the
+/// typed gap rather than as a guard over the wrong binding.
+#[test]
+fn instanceof_constructor_binds_through_the_frame_before_owner_scope() {
+    const BODY: &str = "{ if (x instanceof A) return x; return false }";
+    let refused = [
+        (
+            "a parameter shadows the class",
+            format!(
+                "export {{}};\nclass A {{ a = 1 }}\nclass B {{ b = 1 }}\n\
+                 function f(x: A | B, A: typeof B) {BODY}"
+            ),
+            "f",
+        ),
+        (
+            "a body-local shadows the class",
+            "export {};\nclass A { a = 1 }\nclass B { b = 1 }\n\
+             function f(x: A | B) { const A = B; if (x instanceof A) return x; return false }"
+                .to_string(),
+            "f",
+        ),
+        (
+            "a non-class top-level value",
+            format!(
+                "export {{}};\nclass B {{ b = 1 }}\nconst A = B;\n\
+                 function f(x: B | string) {BODY}"
+            ),
+            "f",
+        ),
+        (
+            "an imported constructor",
+            format!(
+                "import {{ A }} from \"./a\";\nclass B {{ b = 1 }}\n\
+                 function f(x: A | B) {BODY}"
+            ),
+            "f",
+        ),
+        (
+            "a namespace-owned call site",
+            format!(
+                "export {{}};\nclass A {{ a = 1 }}\nclass B {{ b = 1 }}\n\
+                 namespace N {{ class A {{ n = 1 }}\nexport function f(x: A | B) {BODY} }}"
+            ),
+            "N.f",
+        ),
+        (
+            "a script file",
+            format!("class A {{ a = 1 }}\nclass B {{ b = 1 }}\nfunction f(x: A | B) {BODY}"),
+            "f",
+        ),
+    ];
+    for (case, source, name) in &refused {
+        let node = content_for(source, name);
+        assert_eq!(
+            instanceof_guard_count(&node),
+            0,
+            "{case}: no guard over an unprovable constructor binding: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 1, "{case}: the test gaps: {node:?}");
+    }
+
+    let closed = content_for(
+        &format!(
+            "export {{}};\nclass A {{ a = 1 }}\nclass B {{ b = 1 }}\nfunction f(x: A | B) {BODY}"
+        ),
+        "f",
+    );
+    assert_eq!(
+        instanceof_guard_count(&closed),
+        1,
+        "the module's single same-file class declaration keeps its guard: {closed:?}"
+    );
+    assert_eq!(guard_gap_count(&closed), 0, "{closed:?}");
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {

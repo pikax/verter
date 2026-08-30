@@ -577,7 +577,13 @@ pub enum SliceGuard {
         negated: bool,
     },
     /// `subject instanceof Ctor`, the constructor named by a bare
-    /// identifier (resolved evaluator-side, in owner scope).
+    /// identifier the frame leaves FREE that provably denotes the module's
+    /// single same-file `class` declaration (resolved evaluator-side as
+    /// an owner-scope type reference — that class's instance type). A
+    /// right-hand side the lowering cannot prove (a frame-bound name, a
+    /// namespace-owned site, a non-class value, an import, a member or
+    /// call expression) lowers to [`SliceGuard::None`] behind the typed
+    /// guard-narrowing gap.
     Instanceof {
         /// The tested reference (its root narrows).
         subject: SliceNarrowSubject,
@@ -1718,6 +1724,73 @@ fn node_span(node: &FunctionNode<'_>) -> oxc_span::Span {
     }
 }
 
+/// Whether a same-file predicate's TARGET references a name the CALLEE's
+/// own declaration binds: a type parameter of its clause (`x is T` on
+/// `isSame<T>(x: T)`) or a formal parameter (`x is typeof y`). Such a
+/// target is instantiated by the CALL — `T` from the argument's type — an
+/// inference this half does not perform, so it is not closed over
+/// anything the caller frame's environment can resolve; lowering it there
+/// binds whatever the owner scope holds under the same name.
+fn predicate_target_names_callee_binding<'a>(
+    function: &oxc_ast::ast::Function<'a>,
+    target: &TypeExpr,
+) -> bool {
+    let names = verter_type_expr::referenced_names(target);
+    let names_type_parameter = function.type_parameters.as_ref().is_some_and(|clause| {
+        clause.params.iter().any(|binder| {
+            names
+                .type_names
+                .iter()
+                .any(|occurrence| occurrence.head == binder.name.name.as_str())
+        })
+    });
+    if names_type_parameter {
+        return true;
+    }
+    if names.value_roots.is_empty() {
+        return false;
+    }
+    let mut parameter_names: FxHashSet<&'a str> = FxHashSet::default();
+    for param in &function.params.items {
+        collect_binding_pattern_names(&param.pattern, &mut parameter_names);
+    }
+    if let Some(rest) = &function.params.rest {
+        collect_binding_pattern_names(&rest.rest.argument, &mut parameter_names);
+    }
+    names
+        .value_roots
+        .iter()
+        .any(|root| parameter_names.contains(root.as_str()))
+}
+
+/// Every identifier a binding pattern binds, nested patterns included.
+fn collect_binding_pattern_names<'a>(pattern: &BindingPattern<'a>, out: &mut FxHashSet<&'a str>) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            out.insert(id.name.as_str());
+        }
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                collect_binding_pattern_names(&property.value, out);
+            }
+            if let Some(rest) = &object.rest {
+                collect_binding_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for element in array.elements.iter().flatten() {
+                collect_binding_pattern_names(element, out);
+            }
+            if let Some(rest) = &array.rest {
+                collect_binding_pattern_names(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            collect_binding_pattern_names(&assignment.left, out);
+        }
+    }
+}
+
 /// Unwrap a parenthesized expression (the IIFE callee shape).
 fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
     match expression {
@@ -2487,11 +2560,16 @@ struct Lowerer<'a> {
     /// control-position recorder neither certifies them decided-above nor
     /// gaps them.
     predicate_guard_call_spans: FxHashSet<verter_span::Span>,
-    /// A control-position test lowered inside the CURRENT statement
-    /// carried a call this half can neither certify result-independent
-    /// nor back with guard evidence: the statement loop drains this into
-    /// a [`SliceStatement::Gap`] (`GuardNarrowing`) AHEAD of the
-    /// statement — a typed degradation, never a silent certification.
+    /// A narrowing position lowered inside the CURRENT statement — a
+    /// control-position test, an assertion statement — carried a fact
+    /// this half can neither certify result-independent nor back with
+    /// guard evidence (an unprovable control call, a call-instantiated
+    /// predicate target, an unprovable `instanceof` constructor): the
+    /// statement loop drains this into a [`SliceStatement::Gap`]
+    /// (`GuardNarrowing`) AHEAD of the statement — a typed degradation,
+    /// never a silent certification. The `if` statement takes the flag
+    /// itself right after lowering its test, so an arm region's own loop
+    /// cannot drain it INTO the arm.
     control_test_gap: bool,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
@@ -3623,6 +3701,12 @@ impl Lowerer<'_> {
                     // through the ONE guard authority both control
                     // spellings share.
                     let guard = self.lower_guard(&if_stmt.test);
+                    // A guard form the lowering REFUSED (an unprovable
+                    // `instanceof` constructor) flagged the gap while the
+                    // test lowered. Take it here, ahead of the arms: an arm
+                    // region's own statement loop would otherwise drain it
+                    // INTO the arm.
+                    let unprovable_guard = std::mem::take(&mut self.control_test_gap);
                     // A call in the TEST is decided above ONLY when its
                     // result provably cannot control the arms' narrowing;
                     // a predicate call takes evaluator evidence at guard
@@ -3671,7 +3755,7 @@ impl Lowerer<'_> {
                     // arm — the test lowers to guard facts only, so the
                     // marker carries the point (ahead of the `if`, where
                     // the test evaluates).
-                    if nested_predicate_gap || unprovable_control_call {
+                    if nested_predicate_gap || unprovable_control_call || unprovable_guard {
                         out.push(SliceStatement::Gap(
                             crate::semantic_query::FlowGap::GuardNarrowing,
                         ));
@@ -4213,13 +4297,32 @@ impl Lowerer<'_> {
                 let Some(subject) = self.narrow_subject_of(&binary.left) else {
                     return SliceGuard::None;
                 };
+                // The right-hand side is the VALUE the test compares
+                // against at run time, and the evaluator lowers its NAME
+                // as an owner-scope TYPE reference — which is that value's
+                // instance type ONLY when the bare name provably denotes
+                // the module's single same-file `class` declaration at
+                // this call site ([`Self::closed_instanceof_constructor`]).
+                // Every other spelling — a frame-bound name, a
+                // namespace-owned site, a non-class value, an import, a
+                // member or call expression — names a constructor this
+                // half cannot prove, so the test degrades through the
+                // typed guard-narrowing gap rather than narrowing through
+                // the wrong binding.
                 match unwrap_parenthesized(&binary.right) {
-                    Expression::Identifier(ctor) => SliceGuard::Instanceof {
-                        subject,
-                        ctor: Arc::from(ctor.name.as_str()),
-                        negated: false,
-                    },
-                    _ => SliceGuard::None,
+                    Expression::Identifier(ctor)
+                        if self.closed_instanceof_constructor(ctor.name.as_str(), ctor.span) =>
+                    {
+                        SliceGuard::Instanceof {
+                            subject,
+                            ctor: Arc::from(ctor.name.as_str()),
+                            negated: false,
+                        }
+                    }
+                    _ => {
+                        self.control_test_gap = true;
+                        SliceGuard::None
+                    }
                 }
             }
             BinaryOperator::In => {
@@ -4315,6 +4418,56 @@ impl Lowerer<'_> {
             negated: false,
             call: span,
         }
+    }
+
+    /// THE constructor-closure gate for `instanceof`: whether the bare
+    /// right-hand side `name`, referenced at `span`, provably denotes the
+    /// module's ONE same-file top-level `class` declaration — so that the
+    /// owner-scope type reference the evaluator lowers for it (the class's
+    /// instance type) IS the instance type of the value the test compares
+    /// against. The frame's lexical authority binds first (a parameter
+    /// `A: typeof B` or a body-local `const A = B` shadows the owner-scope
+    /// class, and the checker narrows to `B`); a namespace-owned call site
+    /// binds through its block scope before the top level; a script's
+    /// top-level declaration set is not enumerable from one file; and a
+    /// non-class top-level value (`const A = B`, an import) is a
+    /// constructor whose instance type no same-name type reference
+    /// yields. A class's VALUE meaning cannot be merged away by an
+    /// augmentation (a second class of the name is a duplicate
+    /// identifier), so the export spelling does not matter here.
+    fn closed_instanceof_constructor(&self, name: &str, span: oxc_span::Span) -> bool {
+        if !self.module_scope || self.namespace_owned {
+            return false;
+        }
+        if !matches!(self.resolve_name(name, span), NameBinding::Free) {
+            return false;
+        }
+        self.same_file_class_declarations(name).len() == 1
+    }
+
+    /// Every same-file top-level `class` DECLARATION with `name`, in
+    /// source order, across the direct, `export class`, and `export
+    /// default class` spellings.
+    fn same_file_class_declarations(&self, name: &str) -> Vec<&oxc_ast::ast::Class<'_>> {
+        self.program
+            .body
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::ClassDeclaration(class) => Some(&**class),
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(oxc_ast::ast::Declaration::ClassDeclaration(class)) => Some(&**class),
+                    _ => None,
+                },
+                Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                    oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                        Some(&**class)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .filter(|class| class.id.as_ref().map(|id| id.name.as_str()) == Some(name))
+            .collect()
     }
 
     /// Every same-file top-level function DECLARATION with `name`, in
@@ -4451,21 +4604,29 @@ impl Lowerer<'_> {
     /// hold overloads this file never shows. A refused callee establishes
     /// no fact.
     fn same_file_predicate(&self, name: &str, asserts: bool) -> Option<(usize, Option<GatedType>)> {
-        let function = self.closed_callee_declaration(name)?;
-        let annotation = function.return_type.as_ref()?;
-        let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
-            return None;
-        };
+        let (function, predicate, annotation_span) = self.closed_predicate_annotation(name)?;
         if predicate.asserts != asserts {
             return None;
         }
-        let target = predicate.type_annotation.as_ref().map(|target| {
-            self.gate(
-                lower_ts_type(&target.type_annotation, self.source),
-                annotation.span,
-                &[],
-            )
-        });
+        let target = match predicate.type_annotation.as_ref() {
+            Some(target) => {
+                let lowered = lower_ts_type(&target.type_annotation, self.source);
+                // A target naming a binding of the CALLEE's own declaration
+                // is instantiated by the CALL — `T` of `isSame<T>(x: T): x
+                // is T` binds to the argument's type; `typeof y` names the
+                // callee's own parameter — an inference this half does not
+                // perform. Lowering such a target in the CALLER's
+                // environment binds whatever the owner scope holds under
+                // that name (an unrelated `type T = number`), so the
+                // channel refuses it: no fact, and the call takes the typed
+                // guard-narrowing gap at its consumer.
+                if predicate_target_names_callee_binding(function, &lowered) {
+                    return None;
+                }
+                Some(self.gate(lowered, annotation_span, &[]))
+            }
+            None => None,
+        };
         // A non-`asserts` predicate without a target type is not a
         // predicate spelling at all.
         if !asserts && target.is_none() {
@@ -4480,6 +4641,46 @@ impl Lowerer<'_> {
                 if id.name.as_str() == parameter.name.as_str())
         })?;
         Some((ordinal, target))
+    }
+
+    /// The type-predicate return annotation of the PROVABLY CLOSED
+    /// same-file callee `name` ([`Self::closed_callee_declaration`]): the
+    /// declaration, its predicate, and the annotation's span. `None` for
+    /// a refused callee or a non-predicate return.
+    fn closed_predicate_annotation(
+        &self,
+        name: &str,
+    ) -> Option<(
+        &oxc_ast::ast::Function<'_>,
+        &oxc_ast::ast::TSTypePredicate<'_>,
+        oxc_span::Span,
+    )> {
+        let function = self.closed_callee_declaration(name)?;
+        let annotation = function.return_type.as_ref()?;
+        let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
+            return None;
+        };
+        Some((function, predicate, annotation.span))
+    }
+
+    /// Whether the provably closed same-file callee `name` declares an
+    /// `asserts x is T` whose target the predicate channel REFUSES as
+    /// call-instantiated ([`predicate_target_names_callee_binding`]).
+    /// The checker narrows the rest of the region through that assertion
+    /// and this half cannot apply it, so the statement degrades through
+    /// the typed guard-narrowing gap instead of lowering as a bare throw
+    /// point that leaves the subject silently unnarrowed.
+    fn assertion_target_is_call_instantiated(&self, name: &str) -> bool {
+        let Some((function, predicate, _)) = self.closed_predicate_annotation(name) else {
+            return false;
+        };
+        predicate.asserts
+            && predicate.type_annotation.as_ref().is_some_and(|target| {
+                predicate_target_names_callee_binding(
+                    function,
+                    &lower_ts_type(&target.type_annotation, self.source),
+                )
+            })
     }
 
     /// The narrowable reference an expression NAMES: a static member
@@ -4585,14 +4786,18 @@ impl Lowerer<'_> {
                 // resolves to; a same-file assertion call additionally
                 // narrows. The marker keeps the throw point even when the
                 // assertion path below does not recognise the callee.
-                let assertion = (|| {
-                    let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
-                        return None;
-                    };
-                    let name = callee.name.as_str();
-                    if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
-                        return None;
+                let free_callee = match unwrap_parenthesized(&call.callee) {
+                    Expression::Identifier(callee)
+                        if matches!(
+                            self.resolve_name(callee.name.as_str(), callee.span),
+                            NameBinding::Free
+                        ) =>
+                    {
+                        Some(callee.name.as_str())
                     }
+                    _ => None,
+                };
+                let assertion = free_callee.and_then(|name| {
                     let (ordinal, target) = self.same_file_predicate(name, true)?;
                     let argument = call
                         .arguments
@@ -4600,7 +4805,19 @@ impl Lowerer<'_> {
                         .and_then(|argument| argument.as_expression())?;
                     let subject = self.narrow_subject_of(argument)?;
                     Some(SliceStatement::Assertion { subject, target })
-                })();
+                });
+                // A closed same-file assertion whose target the CALL
+                // instantiates (`asserts x is T` on `assertSame<T>`) narrows
+                // in the checker but is refused by the predicate channel:
+                // the statement degrades through the typed gap rather than
+                // lowering as a throw point that leaves the subject
+                // silently unnarrowed.
+                if assertion.is_none()
+                    && free_callee
+                        .is_some_and(|name| self.assertion_target_is_call_instantiated(name))
+                {
+                    self.control_test_gap = true;
+                }
                 Some(assertion.unwrap_or(SliceStatement::ThrowPoint))
             }
             // Every other value-neutral statement still carries its throw

@@ -6762,7 +6762,12 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// `subject instanceof Ctor`: keep the arms assignable to the
     /// constructor's instance type (resolved as a bare type reference in
     /// owner scope — the same lowering any authored annotation of that
-    /// name takes).
+    /// name takes). The lowering mints this fact only for a constructor
+    /// name it proved to be the module's single same-file `class`
+    /// declaration left free by the frame, which is exactly when that
+    /// type reference IS the compared value's instance type; every other
+    /// right-hand side reaches the evaluator as a typed gap, never as a
+    /// fact over the wrong binding.
     fn narrow_instanceof(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
