@@ -36,6 +36,7 @@ struct DesiredFile {
     content: String,
     access: FileAccess,
     lane: PriorityLane,
+    first_live_sequence: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +56,7 @@ struct WorkspaceChange {
 #[derive(Debug, Clone, Default)]
 struct DesiredState {
     files: BTreeMap<String, DesiredFile>,
+    next_file_sequence: u64,
     paths: Option<(String, serde_json::Value)>,
     workspace_changes: BTreeMap<String, WorkspaceChange>,
     carriers: BTreeMap<String, RegisteredCarrier>,
@@ -268,7 +270,9 @@ impl LazyManagedTypeProvider {
             registration.await?;
         }
 
-        for (path, file) in desired.files {
+        let mut files = desired.files.into_iter().collect::<Vec<_>>();
+        files.sort_unstable_by_key(|(_, file)| file.first_live_sequence);
+        for (path, file) in files {
             match (file.access, file.lane) {
                 (FileAccess::Open, PriorityLane::Interactive) => {
                     provider.open_file(&path, &file.content).await?
@@ -319,12 +323,23 @@ impl LazyManagedTypeProvider {
                 .files
                 .get(&path)
                 .map_or(FileAccess::Open, |file| file.access);
+            let first_live_sequence = match desired.files.get(&path) {
+                Some(file) => file.first_live_sequence,
+                None => {
+                    let sequence = desired.next_file_sequence;
+                    desired.next_file_sequence = sequence.checked_add(1).ok_or_else(|| {
+                        TypeProviderError::new("managed fallback file lifecycle sequence exhausted")
+                    })?;
+                    sequence
+                }
+            };
             desired.files.insert(
                 path.clone(),
                 DesiredFile {
                     content: content.clone(),
                     access: access.unwrap_or(preserved_access),
                     lane,
+                    first_live_sequence,
                 },
             );
         }
@@ -671,6 +686,21 @@ impl TypeProvider for LazyManagedTypeProvider {
             self.activate()
                 .await?
                 .get_diagnostics_background(&path)
+                .await
+        })
+    }
+
+    fn get_diagnostics_in_project<'a>(
+        &'a self,
+        path: &'a str,
+        configured_project: &'a str,
+    ) -> ProviderFuture<'a, Option<Vec<TypeDiagnostic>>> {
+        let path = path.to_string();
+        let configured_project = configured_project.to_string();
+        Box::pin(async move {
+            self.activate()
+                .await?
+                .get_diagnostics_in_project(&path, &configured_project)
                 .await
         })
     }

@@ -11,6 +11,13 @@ use crate::type_provider::protocol::{
 
 use super::position::tsx_range_to_carrier_range;
 
+/// Source-level attribute spelling owned by the carrier framework.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarrierAttributeSyntax {
+    Vue,
+    Svelte,
+}
+
 // ── JSX → Vue Attribute Transformation ──────────────────────────────
 
 /// Convert a JSX prop name to a Vue template attribute name.
@@ -227,8 +234,9 @@ fn convert_insert_text_format(format: CompletionInsertTextFormat) -> InsertTextF
 /// - Combine both lists
 /// - Filter out internal `___VERTER___` identifiers from TypeProvider results
 /// - Deduplicate by label (verter items take priority for sort ordering)
-/// - When `template_attr_context` is true, transform JSX prop names to Vue syntax
-///   (e.g., `onClick` → `@click`, `modelValue` → `model-value`)
+/// - In an attribute-name context, spell provider props for the carrier's
+///   framework: Vue projects JSX names into Vue syntax, while Svelte preserves
+///   camelCase authored names
 ///
 /// `provider_id` is the active provider's [`TypeProvider::provider_id`]. Items
 /// that carry an ACTIONABLE resolve handle are stamped with the provider-NEUTRAL
@@ -251,6 +259,7 @@ pub fn merge_completions(
     tsx_path: Option<&str>,
     provider_id: &str,
     template_attr_context: bool,
+    carrier_attr_syntax: Option<CarrierAttributeSyntax>,
 ) -> (Vec<CompletionItem>, bool) {
     let is_incomplete = type_result.is_incomplete;
     let mut result = verter_items;
@@ -276,12 +285,20 @@ pub fn merge_completions(
         if template_attr_context && !item.kind.is_some_and(is_attribute_surface_kind) {
             continue;
         }
-        // Apply JSX→Vue transformation when in template attribute context
+        // Attribute spelling belongs to the source framework, not the shared
+        // JSX projection. Vue consumes the JSX→Vue transform; Svelte retains
+        // authored camelCase and only drops the provider's optional marker.
         let label = if template_attr_context {
-            if let Some(vue_label) = jsx_prop_to_vue_attr(&item.label) {
-                vue_label
-            } else {
-                item.label.clone()
+            match carrier_attr_syntax {
+                Some(CarrierAttributeSyntax::Vue) => {
+                    jsx_prop_to_vue_attr(&item.label).unwrap_or_else(|| item.label.clone())
+                }
+                Some(CarrierAttributeSyntax::Svelte) => item
+                    .label
+                    .strip_suffix('?')
+                    .unwrap_or(&item.label)
+                    .to_string(),
+                None => item.label.clone(),
             }
         } else {
             item.label.clone()

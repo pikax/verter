@@ -649,13 +649,13 @@ pub(super) async fn handle_did_open(
     {
         if let Ok(import_ids) = &imported_carrier_priority_ids {
             for import_id in import_ids {
-                let should_sync =
-                    !server.is_background_loaded_for_source_kind(import_id, ProviderPathKind::Api);
-                if should_sync {
-                    let _ = server
-                        .sync_imported_carrier_api_lightweight(import_id)
-                        .await;
-                }
+                // The common imported-child wrapper owns TWO publications:
+                // provider bytes and the LSP-only component contract. An
+                // already-loaded API companion may still be missing/stale in
+                // the contract cache, so never bypass the wrapper here.
+                let _ = server
+                    .sync_imported_carrier_api_lightweight(import_id)
+                    .await;
             }
         }
     }
@@ -790,8 +790,14 @@ pub(super) async fn handle_did_change(
         .flatten()
         .map(|canonical_id| {
             let freshness_key = server.import_sync_freshness_key();
+            let child_contract_freshness = server.imported_child_contract_freshness_key();
             let frontier = server.dependency_frontier_signature(&canonical_id);
-            (canonical_id, freshness_key, frontier)
+            (
+                canonical_id,
+                freshness_key,
+                child_contract_freshness,
+                frontier,
+            )
         });
     let update_result = block_in_place_if_available(|| {
         server
@@ -823,8 +829,10 @@ pub(super) async fn handle_did_change(
             }
         }
     }
-    if let (Some((before_id, Some(before_key), before_frontier)), Some(canonical_id)) =
-        (import_receipt_before, canonical_id.as_ref())
+    if let (
+        Some((before_id, Some(before_key), before_contract_freshness, before_frontier)),
+        Some(canonical_id),
+    ) = (import_receipt_before, canonical_id.as_ref())
     {
         let after_frontier = server.dependency_frontier_signature(canonical_id);
         if before_id == *canonical_id {
@@ -845,6 +853,16 @@ pub(super) async fn handle_did_change(
                         after_key,
                         frontier_unchanged,
                     );
+                    if let (Some(before), Some(after)) = (
+                        before_contract_freshness,
+                        server.imported_child_contract_freshness_key(),
+                    ) {
+                        server.promote_child_contracts_after_isolated_edit(
+                            before,
+                            after,
+                            frontier_unchanged,
+                        );
+                    }
                 }
             }
         }

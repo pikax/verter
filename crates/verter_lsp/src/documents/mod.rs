@@ -1,4 +1,5 @@
 mod analysis;
+pub(crate) use analysis::type_expr_contains_boolean;
 pub(crate) use analysis::SemanticReady;
 #[cfg(test)]
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
@@ -57,6 +58,10 @@ pub struct DocumentRegistry {
     semantic_host: RwLock<Option<Arc<VerterHost>>>,
     semantic_workspace: RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     semantic_enabled: std::sync::atomic::AtomicBool,
+    /// Epoch fencing optional semantic work across disable/re-enable and
+    /// workspace-authority changes. Document revisions alone cannot distinguish
+    /// the same open buffer analyzed against two workspace graphs.
+    semantic_generation: std::sync::atomic::AtomicU64,
     /// TEST-ONLY: fires once the spawned semantic task has begun and is about
     /// to arm its quiet-window sleep. Without it, an "it has not published
     /// yet" assertion taken after `advance()` can hold simply because the task
@@ -138,6 +143,11 @@ pub struct DocumentState {
     /// Precomputed line index for byte-offset ↔ LSP Position conversion.
     pub line_index: Arc<LineIndex>,
     pub feature_snapshot: Option<Arc<DocumentFeatureSnapshot>>,
+    /// Last source revision with usable script analysis. Interactive source
+    /// features may recover only declarations whose complete source prefix is
+    /// byte-identical in the current buffer; template geometry is never
+    /// carried across revisions.
+    pub(crate) progressive_analysis: Option<Arc<ProgressiveSourceAnalysis>>,
     /// The document's provider projection (rebuilt on each document change):
     /// the source↔provider position mapper plus the discriminant of which
     /// provider buffer this document projects into (`CarrierIde` for a Vue /
@@ -153,6 +163,195 @@ pub struct DocumentState {
     /// When set, this document is a virtual file and feature requests should
     /// be routed through the source file's TSX for TSGO queries.
     pub virtual_source_uri: Option<String>,
+}
+
+/// One request-local, revision-consistent document view for source-owned
+/// language features. Carrier structure, source bytes, line geometry, and
+/// progressive state are cloned under one document-shard read.
+#[derive(Clone)]
+pub(crate) struct SourceFeatureDocumentCapture {
+    pub(crate) document: DocumentState,
+    identity: DocumentSnapshotIdentity,
+    expected_host_revision: Option<HostSourceRevisionToken>,
+    semantic_generation: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct ProgressiveSourceAnalysis {
+    source: Arc<str>,
+    analysis: Arc<verter_session::FileAnalysisSnapshot>,
+    prop_owner_witnesses: Arc<[ProgressivePropOwnerWitness]>,
+}
+
+impl ProgressiveSourceAnalysis {
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub(crate) fn analysis(&self) -> &verter_session::FileAnalysisSnapshot {
+        &self.analysis
+    }
+
+    fn prop_owner_witness_for(
+        &self,
+        prop: &verter_semantic::analysis::AnalyzedPropDefinition,
+    ) -> Option<&ProgressivePropOwnerWitness> {
+        self.prop_owner_witnesses
+            .iter()
+            .find(|witness| witness.name == prop.name && witness.binding_span == prop.span)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProgressivePropOwnerWitness {
+    name: String,
+    binding_span: verter_span::Span,
+    call_span: verter_span::Span,
+}
+
+pub(crate) fn progressive_span_is_current(
+    prior_source: &str,
+    current_source: &str,
+    span: verter_span::Span,
+) -> bool {
+    let end = span.end as usize;
+    span.end > span.start
+        && end <= prior_source.len()
+        && end <= current_source.len()
+        && prior_source.get(..end) == current_source.get(..end)
+}
+
+fn progressive_prop_owner_witness_is_current(
+    prior_source: &str,
+    current_source: &str,
+    witness: &ProgressivePropOwnerWitness,
+) -> bool {
+    progressive_span_is_current(prior_source, current_source, witness.binding_span)
+        && progressive_span_is_current(prior_source, current_source, witness.call_span)
+}
+
+fn exact_svelte_prop_owner_witnesses(
+    analysis: &verter_session::FileAnalysisSnapshot,
+    evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
+        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    >,
+) -> Vec<ProgressivePropOwnerWitness> {
+    let verter_session::framework::script_facts::ScriptFactEvidence::Exact(exact) = evidence else {
+        return Vec::new();
+    };
+    let Some(template) = analysis.template.as_deref() else {
+        return Vec::new();
+    };
+    let mut witnesses = Vec::new();
+    for prop in &template.prop_definitions {
+        for call in exact.facts().syntax().props_calls().iter() {
+            for binding in &call.local_bindings {
+                if binding.name == prop.name && binding.span == prop.span {
+                    witnesses.push(ProgressivePropOwnerWitness {
+                        name: prop.name.clone(),
+                        binding_span: binding.span,
+                        call_span: call.call_span,
+                    });
+                }
+            }
+        }
+    }
+    witnesses.sort_by(|left, right| {
+        (
+            &left.name,
+            left.binding_span.start,
+            left.binding_span.end,
+            left.call_span.start,
+        )
+            .cmp(&(
+                &right.name,
+                right.binding_span.start,
+                right.binding_span.end,
+                right.call_span.start,
+            ))
+    });
+    witnesses.dedup();
+    witnesses
+}
+
+fn exact_svelte_evidence_matches_prop_owner(
+    evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
+        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    >,
+    witness: &ProgressivePropOwnerWitness,
+) -> bool {
+    let verter_session::framework::script_facts::ScriptFactEvidence::Exact(exact) = evidence else {
+        return false;
+    };
+    exact.facts().syntax().props_calls().iter().any(|call| {
+        call.call_span == witness.call_span
+            && call
+                .local_bindings
+                .iter()
+                .any(|binding| binding.name == witness.name && binding.span == witness.binding_span)
+    })
+}
+
+fn exact_svelte_evidence_reproves_callable_role(
+    evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
+        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    >,
+    prop_name: &str,
+) -> bool {
+    matches!(
+        evidence,
+        verter_session::framework::script_facts::ScriptFactEvidence::Exact(exact)
+            if exact
+                .facts()
+                .resolution()
+                .validated_snippet_members
+                .iter()
+                .any(|member| member == prop_name)
+    )
+}
+
+fn merge_stable_progressive_prop_definitions(
+    fresh: &mut verter_session::FileAnalysisSnapshot,
+    carried: &ProgressiveSourceAnalysis,
+    fresh_source: &str,
+    fresh_svelte_evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
+        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    >,
+) {
+    let Some(carried_template) = carried.analysis().template.as_deref() else {
+        return;
+    };
+    let stable_props = carried_template
+        .prop_definitions
+        .iter()
+        .filter(|prop| {
+            carried.prop_owner_witness_for(prop).is_some_and(|witness| {
+                progressive_prop_owner_witness_is_current(carried.source(), fresh_source, witness)
+                    && exact_svelte_evidence_matches_prop_owner(fresh_svelte_evidence, witness)
+            })
+        })
+        .map(|prop| {
+            let mut prop = prop.clone();
+            if !exact_svelte_evidence_reproves_callable_role(fresh_svelte_evidence, &prop.name) {
+                prop.callable_role = verter_type_expr::PropCallableRole::Other;
+            }
+            prop
+        })
+        .collect::<Vec<_>>();
+    if stable_props.is_empty() {
+        return;
+    }
+    let mut template = fresh.template.as_deref().cloned().unwrap_or_default();
+    for prop in stable_props {
+        if !template
+            .prop_definitions
+            .iter()
+            .any(|candidate| candidate.name == prop.name)
+        {
+            template.prop_definitions.push(prop);
+        }
+    }
+    fresh.template = Some(Arc::new(template));
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -208,6 +407,7 @@ impl DocumentRevisionId {
 #[derive(Clone)]
 pub struct SemanticAnalysisEnvelope {
     document_revision: DocumentRevisionId,
+    semantic_generation: u64,
     semantic_host_revision: HostSourceRevisionToken,
     structure: RegisteredFileStructure,
     analysis: Arc<verter_session::FileAnalysisSnapshot>,
@@ -273,6 +473,17 @@ impl DocumentFeatureSnapshot {
     pub fn analysis(&self) -> Option<&SemanticAnalysisEnvelope> {
         self.analysis.as_ref()
     }
+
+    fn without_semantic_analysis(&self) -> Self {
+        Self {
+            document_revision: self.document_revision,
+            client_version: self.client_version,
+            line_index: Arc::clone(&self.line_index),
+            structure: self.structure.clone(),
+            projection_host_revision: self.projection_host_revision,
+            analysis: None,
+        }
+    }
 }
 
 /// Immutable identity for one open-document revision.
@@ -313,6 +524,7 @@ impl DocumentRegistry {
             semantic_host: RwLock::new(None),
             semantic_workspace: RwLock::new(None),
             semantic_enabled: std::sync::atomic::AtomicBool::new(false),
+            semantic_generation: std::sync::atomic::AtomicU64::new(1),
             #[cfg(test)]
             semantic_task_armed: tokio::sync::Notify::new(),
             semantic_snapshots: DashMap::new(),
@@ -587,6 +799,7 @@ impl DocumentRegistry {
                 document_revision: self.next_document_revision(),
                 line_index: Arc::new(LineIndex::new(&source, self.encoding())),
                 feature_snapshot: None,
+                progressive_analysis: None,
                 source,
                 projection: None,
                 language_id: params.language_id.clone(),
@@ -690,6 +903,7 @@ impl DocumentRegistry {
                     analysis: None,
                 })
             }),
+            progressive_analysis: None,
             projection,
             language_id: params.language_id.clone(),
             virtual_source_uri: None,
@@ -722,12 +936,57 @@ impl DocumentRegistry {
                 entry.line_index = Arc::new(LineIndex::new(&source, self.encoding()));
                 entry.source = source;
                 entry.feature_snapshot = None;
+                entry.progressive_analysis = None;
                 return HostUpdateResult::no_change(entry.canonical_id.clone());
             }
         }
 
         let canonical_id = uri_to_canonical_id(uri);
         let submitted_source: Arc<str> = Arc::from(text);
+
+        // Capture the last analyzable script surface before replacing the host
+        // source. A normal intermediate edit such as `binding.` can make the
+        // new BUILD analysis unavailable even though declarations above the
+        // edit are unchanged. Recovery remains source-authoritative: readers
+        // validate the complete declaration prefix against the current bytes,
+        // and never reuse prior template geometry.
+        let prior_source_analysis = self.documents.get(&uri_str).and_then(|document| {
+            let source = Arc::clone(&document.source);
+            let carried = document.progressive_analysis.clone();
+            drop(document);
+            let fresh_svelte_evidence = self.host.resolve_svelte_script_facts(&canonical_id);
+            let fresh = self.get_analysis(uri);
+            match fresh {
+                Some(mut fresh) => {
+                    if let Some(carried) = carried.as_ref() {
+                        merge_stable_progressive_prop_definitions(
+                            &mut fresh,
+                            carried,
+                            &source,
+                            &fresh_svelte_evidence,
+                        );
+                    }
+                    let prop_owner_witnesses =
+                        exact_svelte_prop_owner_witnesses(&fresh, &fresh_svelte_evidence).into();
+                    Some(Arc::new(ProgressiveSourceAnalysis {
+                        source,
+                        analysis: Arc::new(fresh),
+                        prop_owner_witnesses,
+                    }))
+                }
+                // An unavailable/partial current producer cannot carry
+                // absence-sensitive prop ownership. Imports/bindings may
+                // still recover from the earlier source snapshot, but props
+                // lose their witnesses and therefore fail closed.
+                None => carried.map(|carried| {
+                    Arc::new(ProgressiveSourceAnalysis {
+                        source: Arc::clone(&carried.source),
+                        analysis: Arc::clone(&carried.analysis),
+                        prop_owner_witnesses: Arc::from([]),
+                    })
+                }),
+            }
+        });
 
         let stored_language_id = self
             .documents
@@ -859,6 +1118,7 @@ impl DocumentRegistry {
                     analysis: None,
                 })
             });
+            entry.progressive_analysis = prior_source_analysis;
             // Invalidate the semantic snapshot INSIDE the same shard mutation:
             // the remove happens-before the write guard releases, so any
             // reader that observes the committed entry can never also read the

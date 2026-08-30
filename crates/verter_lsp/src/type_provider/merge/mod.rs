@@ -20,7 +20,7 @@ mod position;
 mod tests;
 
 pub(crate) use completion::provider_completion_to_lsp_item;
-pub use completion::{jsx_prop_to_vue_attr, merge_completions};
+pub use completion::{jsx_prop_to_vue_attr, merge_completions, CarrierAttributeSyntax};
 
 pub(crate) use definition::resolve_external_target_range;
 pub use definition::{

@@ -28,6 +28,65 @@ use super::{TypeProviderContext, VerterLanguageServer};
 #[path = "workspace_symbol_frontier_tests.rs"]
 mod workspace_symbol_frontier_tests;
 
+/// Resolve the exact configured-project carrier scope for a project-wide symbol
+/// query. `materialized_files` is a walk cache and may include files that a more
+/// specific nested config ultimately owns, so every carrier is reclassified by
+/// the snapshot's authoritative configured-owner resolution before admission.
+fn configured_frontier_scope(
+    snapshot: &verter_workspace::WorkspaceSnapshot,
+    owner: verter_workspace::workspace_snapshot::ProjectId,
+    initiating_canonical: &str,
+) -> Option<(Vec<String>, String)> {
+    let project = snapshot.projects.get(owner.0 as usize)?;
+    let verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+        tsconfig_path,
+        membership,
+        ..
+    } = &project.payload
+    else {
+        return None;
+    };
+    let mut sources: Vec<String> = membership
+        .materialized_files
+        .iter()
+        .map(|path| path.as_str().to_string())
+        .filter(|path| verter_semantic::resolver_core::path_is_carrier(path))
+        .filter(|path| {
+            matches!(
+                snapshot.configured_owner_resolution_for_file(path),
+                verter_workspace::workspace_snapshot::ConfiguredOwnerResolution::Unique(
+                    source_owner
+                ) if source_owner == owner
+            )
+        })
+        .collect();
+    if verter_semantic::resolver_core::path_is_carrier(initiating_canonical) {
+        sources.push(initiating_canonical.to_string());
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    Some((sources, tsconfig_path.as_str().to_string()))
+}
+
+/// Count the TSGO carrier roots whose existing receipt proves the same strict
+/// liveness/owner conditions used by project-wide symbol admission.
+fn count_live_tsgo_frontier_roots(
+    states: &dashmap::DashMap<String, ProviderSyncState>,
+    expected_sources: &[String],
+    owner_key: &str,
+) -> usize {
+    expected_sources
+        .iter()
+        .filter(|source| {
+            states.get(source.as_str()).is_some_and(|state| {
+                state.owner_binding.owner_key() == Some(owner_key)
+                    && state.ide_background_loaded
+                    && state.commit_stamp.is_some()
+            })
+        })
+        .count()
+}
+
 impl VerterLanguageServer {
     /// Capture the immutable FOREIGN-carrier IDE surface set a provider-backed
     /// request pins BEFORE its provider query, so a returned foreign carrier
@@ -391,29 +450,11 @@ impl VerterLanguageServer {
             else {
                 return false;
             };
-            let Some(project) = snapshot.projects.get(owner.0 as usize) else {
-                return false;
-            };
-            let verter_workspace::workspace_snapshot::ProjectPayload::Configured {
-                tsconfig_path,
-                membership,
-                ..
-            } = &project.payload
+            let Some((sources, owner_key)) = configured_frontier_scope(snapshot, owner, &canonical)
             else {
                 return false;
             };
-            let mut sources: Vec<String> = membership
-                .materialized_files
-                .iter()
-                .map(|path| path.as_str().to_string())
-                .filter(|path| verter_semantic::resolver_core::path_is_carrier(path))
-                .collect();
-            if verter_semantic::resolver_core::path_is_carrier(&canonical) {
-                sources.push(canonical.clone());
-            }
-            sources.sort_unstable();
-            sources.dedup();
-            (sources, tsconfig_path.as_str().to_string())
+            (sources, owner_key)
         };
 
         if expected_sources.is_empty() {
@@ -438,18 +479,11 @@ impl VerterLanguageServer {
             // path deliberately never opens it for the file under the cursor.
             // Requiring it here would gate the frontier on a companion neither
             // arm activates and the current file never gets.
-            Ok(expected_sources
-                .iter()
-                .filter(|source| {
-                    self.provider_sync_states
-                        .get(source.as_str())
-                        .is_some_and(|state| {
-                            state.owner_binding.owner_key() == Some(owner_key.as_str())
-                                && state.ide_background_loaded
-                                && state.commit_stamp.is_some()
-                        })
-                })
-                .count())
+            Ok(count_live_tsgo_frontier_roots(
+                &self.provider_sync_states,
+                &expected_sources,
+                &owner_key,
+            ))
         } else {
             coordinator
                 .activate_published_sources(&expected_sources)
