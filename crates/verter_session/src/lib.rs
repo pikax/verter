@@ -676,16 +676,6 @@ pub struct VerterHost {
     #[cfg(test)]
     pub(crate) compile_blockers_serve_seam_hook:
         parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
-    /// Test-only seam fired inside the base `IndexedReady` materialise
-    /// flight AFTER the scheduler source snapshot is held and BEFORE
-    /// remaining IndexedReady products are assembled from that object.
-    /// Fence tests install a content upsert here to land deterministically
-    /// in that window and assert every content-addressed product stays one
-    /// snapshot object — never an independent later scheduler read.
-    /// **Compiled out in production builds.**
-    #[cfg(test)]
-    pub(crate) indexed_source_capture_seam_hook:
-        parking_lot::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
     /// Test-only override of the live parse-env dimension returned by
     /// `host_view_env_hashes` / `host_view_env_hashes_for`. The
     /// production parse dimension derives solely from the constant

@@ -346,7 +346,7 @@ fn source_move_between_parse_facts_and_eval_source_never_serves_torn_identity() 
     {
         let hook_host = Arc::clone(&host);
         let moved = Arc::clone(&moved);
-        *host.indexed_source_capture_seam_hook.lock() = Some(Arc::new(move || {
+        *host.test_force.indexed_source_capture_seam_hook.0.lock() = Some(Arc::new(move || {
             if !moved.swap(true, Ordering::SeqCst) {
                 upsert_vue(&hook_host, "Torn.vue", TORN_IDENTITY_SOURCE_B);
                 assert!(
@@ -359,7 +359,7 @@ fn source_move_between_parse_facts_and_eval_source_never_serves_torn_identity() 
     let serve = host
         .ensure_indexed_ready_serve("Torn.vue")
         .expect("the cold flight must still serve its captured snapshot");
-    *host.indexed_source_capture_seam_hook.lock() = None;
+    *host.test_force.indexed_source_capture_seam_hook.0.lock() = None;
     assert!(
         moved.load(Ordering::SeqCst),
         "choreography sanity: the seam must have landed the move"

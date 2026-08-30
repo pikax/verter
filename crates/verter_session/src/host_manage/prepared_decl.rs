@@ -1843,12 +1843,17 @@ impl VerterHost {
 
     /// Test-only seam fired after the cold IndexedReady flight holds its
     /// source snapshot and before remaining IndexedReady products are
-    /// assembled from that object — see the `indexed_source_capture_seam_hook`
-    /// field docs. Same clone-out-then-invoke discipline as
+    /// assembled from that object — see the seam-hook
+    /// field docs on [`crate::host_test_force::TestForceKnobs`]. Same clone-out-then-invoke discipline as
     /// [`Self::fire_materialize_seam`].
     #[cfg(test)]
     pub(crate) fn fire_indexed_source_capture_seam(&self) {
-        let hook = self.indexed_source_capture_seam_hook.lock().clone();
+        let hook = self
+            .test_force
+            .indexed_source_capture_seam_hook
+            .0
+            .lock()
+            .clone();
         if let Some(hook) = hook {
             hook();
         }
