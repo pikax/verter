@@ -8,8 +8,9 @@ use verter_session::FileAnalysisSnapshot;
 use verter_session::carrier_publication_store::RegisteredFileStructure;
 
 use crate::documents::carrier_structure::{
-    markup_open_tag_at, parse_opening_tag, project_markup_open_tags, CarrierBlockView,
-    MarkupOpenTagFact,
+    authored_component_attribute_name_context, markup_element_at, markup_open_tag_at,
+    nearest_component_ancestor_tag, parse_opening_tag, project_markup_open_tags,
+    AuthoredComponentAttributeNameContext, CarrierBlockView, MarkupOpenTagFact,
 };
 use crate::documents::line_index::LineIndex;
 use crate::features::cursor_context::{
@@ -70,6 +71,24 @@ pub fn completions_at_position(
     // Parser-owned markup open-tag facts — the sole tag-geometry source for
     // component/slot owner recovery below.
     let markup_facts = structure.map(project_markup_open_tags);
+
+    if let Some(AuthoredComponentAttributeNameContext::InexactUnclosedOpening { tag }) =
+        structure.and_then(|structure| authored_component_attribute_name_context(structure, offset))
+    {
+        let items = component_prop_completions(
+            offset as usize,
+            markup_facts.as_deref(),
+            &tag,
+            analysis?,
+            resolve_component,
+            &[],
+            carrier_language,
+        )?;
+        return Some(CompletionResult {
+            items,
+            is_incomplete: false,
+        });
+    }
 
     match context {
         CursorContext::RootLevel => {
@@ -172,7 +191,17 @@ pub fn completions_at_position(
                     ref existing_attrs,
                 } => {
                     // For components, try to offer prop/event completions
-                    if is_component {
+                    let exact_component_attribute = structure
+                        .and_then(|structure| {
+                            authored_component_attribute_name_context(structure, offset)
+                        })
+                        .is_some_and(|context| {
+                            matches!(
+                                context,
+                                AuthoredComponentAttributeNameContext::ExactAttribute { .. }
+                            ) && context.tag() == tag_name
+                        });
+                    if is_component && exact_component_attribute {
                         let comp_offset = offset as usize;
                         if let Some(items) = component_prop_completions(
                             comp_offset,
@@ -1397,18 +1426,18 @@ fn component_prop_completions(
     existing_attrs: &[String],
     carrier_language: Option<CarrierTemplateLanguage>,
 ) -> Option<Vec<CompletionItem>> {
-    let template = analysis.template.as_deref()?;
-
     // Find which component's opening tag contains the cursor
     let component_name =
-        find_component_at_cursor(offset, markup_facts, context_tag_name, template)?;
+        find_component_at_cursor(offset, markup_facts, context_tag_name, analysis)?;
 
     // Prefer the analyzed component usage. During an incomplete opening tag the
     // template parser may not retain that usage yet, so fall back to the script
     // import whose local binding matches the structurally scanned tag name.
-    let comp_usage = template
-        .components
-        .iter()
+    let comp_usage = analysis
+        .template
+        .as_deref()
+        .into_iter()
+        .flat_map(|template| template.components.iter())
         .find(|c| c.name == component_name || to_kebab_case(&c.name) == component_name);
     let imported_binding = analysis.imports.iter().find_map(|import| {
         import
@@ -1622,7 +1651,11 @@ fn slot_owner_component<'a>(
     // element whose name matches a recorded component usage. Raw source is
     // never scanned for tag delimiters.
     let facts = markup_facts?;
-    let own = markup_open_tag_at(facts, offset as u32)?;
+    let own = if is_component {
+        markup_open_tag_at(facts, offset as u32)
+    } else {
+        markup_element_at(facts, offset as u32)
+    }?;
     let own_fact = &facts[own];
     if own_fact.name.as_deref() != Some("template") {
         let name = own_fact.name.as_deref()?;
@@ -1882,23 +1915,46 @@ fn svelte_snippet_slot_completions(
     tag_name: &str,
     structure: Option<&RegisteredFileStructure>,
 ) -> Option<Vec<CompletionItem>> {
-    let template = analysis.template.as_deref()?;
-    let component = template.components.iter().find(|component| {
-        component.name == tag_name
-            || to_kebab_case(&component.name) == tag_name
-            || component.name == to_pascal_case(tag_name)
+    let template = analysis.template.as_deref();
+    let component = template.and_then(|template| {
+        template.components.iter().find(|component| {
+            component.name == tag_name
+                || to_kebab_case(&component.name) == tag_name
+                || component.name == to_pascal_case(tag_name)
+        })
     });
     let markup_facts = structure.map(project_markup_open_tags);
-    let component = match component {
-        Some(component) => component,
-        None => slot_owner_component(offset, markup_facts.as_deref(), template, tag_name, true)?,
+    let component = component.or_else(|| {
+        template.and_then(|template| {
+            slot_owner_component(offset, markup_facts.as_deref(), template, tag_name, true)
+        })
+    });
+    let owner_tag = component
+        .map(|component| component.name.clone())
+        .or_else(|| {
+            structure.and_then(|structure| nearest_component_ancestor_tag(structure, offset as u32))
+        })?;
+    let (import_source, resolved_name) = if let Some(component) = component {
+        (component.import_source.as_deref()?, component.name.as_str())
+    } else {
+        analysis.imports.iter().find_map(|import| {
+            import
+                .bindings
+                .iter()
+                .find(|binding| {
+                    binding.name == owner_tag || to_kebab_case(&binding.name) == owner_tag
+                })
+                .map(|binding| (import.source.as_str(), binding.name.as_str()))
+        })?
     };
-    let import_source = component.import_source.as_deref()?;
     let resolve_fn = resolve_component?;
-    let child_analysis = resolve_fn(import_source, Some(&component.name))?;
+    let child_analysis = resolve_fn(import_source, Some(resolved_name))?;
 
-    let is_used = |name: &str| component.slots_used.iter().any(|used| used == name);
+    let is_used = |name: &str| {
+        component.is_some_and(|component| component.slots_used.iter().any(|used| used == name))
+    };
     let mut items = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     if let Some(child_template) = child_analysis.template.as_deref() {
         for prop_def in &child_template.prop_definitions {
             let verter_type_expr::PropCallableRole::SvelteSnippet { .. } = &prop_def.callable_role
@@ -1908,6 +1964,7 @@ fn svelte_snippet_slot_completions(
             if is_used(&prop_def.name) {
                 continue;
             }
+            seen.insert(prop_def.name.clone());
             items.push(CompletionItem {
                 label: prop_def.name.clone(),
                 kind: Some(CompletionItemKind::FIELD),
@@ -1917,6 +1974,19 @@ fn svelte_snippet_slot_completions(
                     .or_else(|| Some("snippet".to_string())),
                 insert_text: Some(prop_def.name.clone()),
                 sort_text: Some(format!("0{}", prop_def.name)),
+                ..Default::default()
+            });
+        }
+        for slot in &child_template.defined_slots {
+            if is_used(&slot.name) || !seen.insert(slot.name.clone()) {
+                continue;
+            }
+            items.push(CompletionItem {
+                label: slot.name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some("slot".to_string()),
+                insert_text: Some(slot.name.clone()),
+                sort_text: Some(format!("0{}", slot.name)),
                 ..Default::default()
             });
         }
@@ -1991,7 +2061,7 @@ fn find_component_at_cursor(
     offset: usize,
     markup_facts: Option<&[MarkupOpenTagFact]>,
     context_tag_name: &str,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    analysis: &FileAnalysisSnapshot,
 ) -> Option<String> {
     let arena_name = markup_facts.and_then(|facts| {
         let fact = &facts[markup_open_tag_at(facts, offset as u32)?];
@@ -2007,31 +2077,37 @@ fn find_component_at_cursor(
         None => return None,
     };
 
-    // Check if this tag name is a component (starts with uppercase or matches a known component)
+    let semantic_name = analysis
+        .template
+        .as_deref()
+        .into_iter()
+        .flat_map(|template| template.components.iter())
+        .find(|component| component.name == tag_name || to_kebab_case(&component.name) == tag_name)
+        .map(|component| component.name.as_str());
+    let imported_name = analysis.imports.iter().find_map(|import| {
+        import.bindings.iter().find_map(|binding| {
+            (binding.name == tag_name || to_kebab_case(&binding.name) == tag_name)
+                .then_some(binding.name.as_str())
+        })
+    });
+
+    // Parser/context establishes that this is an opening tag. Semantic
+    // component inventory is enrichment, not admission: while an opening is
+    // incomplete the committed script import is the durable component fact.
     let is_component = tag_name
         .chars()
         .next()
         .is_some_and(|c| c.is_ascii_uppercase())
-        || template
-            .components
-            .iter()
-            .any(|c| c.name == tag_name || to_kebab_case(&c.name) == tag_name);
+        || semantic_name.is_some()
+        || imported_name.is_some();
 
     if !is_component {
         return None;
     }
 
     // Convert kebab-case to PascalCase for matching
-    if tag_name.contains('-') {
-        let pascal = to_pascal_case(tag_name);
-        if template.components.iter().any(|c| c.name == pascal) {
-            return Some(pascal);
-        }
-    }
-
-    // Try direct match
-    if template.components.iter().any(|c| c.name == tag_name) {
-        return Some(tag_name.to_string());
+    if let Some(name) = semantic_name.or(imported_name) {
+        return Some(name.to_string());
     }
 
     // An incomplete opening tag can be absent from the semantic component
@@ -2041,7 +2117,7 @@ fn find_component_at_cursor(
 }
 
 /// Convert PascalCase to kebab-case.
-fn to_kebab_case(s: &str) -> String {
+pub(crate) fn to_kebab_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {
         if ch.is_ascii_uppercase() {

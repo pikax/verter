@@ -12,7 +12,7 @@ use super::*;
 pub(crate) const SEMANTIC_ANALYSIS_QUIET_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(750);
 
-fn type_expr_contains_boolean(expression: &verter_type_expr::TypeExpr) -> bool {
+pub(crate) fn type_expr_contains_boolean(expression: &verter_type_expr::TypeExpr) -> bool {
     use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
     let mut pending = vec![expression];
@@ -63,6 +63,7 @@ fn merge_semantic_prop_definitions(
 #[derive(Clone)]
 pub(super) struct SemanticSnapshot {
     pub(super) document_revision: DocumentRevisionId,
+    pub(super) semantic_generation: u64,
     pub(super) analysis: Arc<verter_session::FileAnalysisSnapshot>,
 }
 
@@ -75,6 +76,27 @@ pub(crate) struct SemanticReady {
 }
 
 impl DocumentRegistry {
+    fn current_semantic_generation(&self) -> u64 {
+        self.semantic_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn semantic_generation_is_current(&self, generation: u64) -> bool {
+        self.semantic_analysis_enabled() && self.current_semantic_generation() == generation
+    }
+
+    fn invalidate_semantic_publications(&self) {
+        for mut document in self.documents.iter_mut() {
+            let Some(feature) = document.feature_snapshot.as_ref() else {
+                continue;
+            };
+            if feature.analysis.is_some() {
+                document.feature_snapshot = Some(Arc::new(feature.without_semantic_analysis()));
+            }
+        }
+        self.semantic_snapshots.clear();
+    }
+
     /// Enable or disable optional native semantic enrichment. Disabling is
     /// immediate and drops cached results; the projection/type-provider lane is
     /// unaffected in either state.
@@ -82,7 +104,9 @@ impl DocumentRegistry {
         self.semantic_enabled
             .store(enabled, std::sync::atomic::Ordering::Release);
         if !enabled {
-            self.semantic_snapshots.clear();
+            self.semantic_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            self.invalidate_semantic_publications();
         }
     }
 
@@ -101,6 +125,9 @@ impl DocumentRegistry {
     /// Install one workspace authority into both isolated hosts. The semantic host
     /// may not exist yet; in that case the workspace is retained for lazy creation.
     pub fn set_workspace(&self, workspace: Arc<verter_workspace::FilesystemWorkspace>) {
+        self.semantic_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.invalidate_semantic_publications();
         let projection_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace.clone();
         self.host.set_workspace(projection_workspace);
         *self.semantic_workspace.write() = Some(Arc::clone(&workspace));
@@ -108,7 +135,13 @@ impl DocumentRegistry {
             let semantic_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
             host.set_workspace(semantic_workspace);
         }
-        self.semantic_snapshots.clear();
+        // A task may have been scheduled after the pre-install fence while a
+        // host still held the old workspace. Advance once more after every host
+        // observes the new authority; only tasks scheduled after this method
+        // returns may publish into the new generation.
+        self.semantic_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.invalidate_semantic_publications();
     }
 
     fn semantic_host(&self) -> Arc<VerterHost> {
@@ -145,7 +178,8 @@ impl DocumentRegistry {
     }
 
     fn spawn_semantic_analysis(self: &Arc<Self>, uri: &Uri) -> Option<tokio::task::JoinHandle<()>> {
-        if !self.semantic_analysis_enabled() {
+        let semantic_generation = self.current_semantic_generation();
+        if !self.semantic_generation_is_current(semantic_generation) {
             return None;
         }
         let document = self.documents.get(uri.as_str())?;
@@ -162,6 +196,9 @@ impl DocumentRegistry {
         let registered_structure = is_framework_carrier
             .then(|| self.host.registered_file_structure(&canonical_id))
             .flatten();
+        if !self.semantic_generation_is_current(semantic_generation) {
+            return None;
+        }
         drop(document);
 
         let registry = Arc::clone(self);
@@ -170,14 +207,14 @@ impl DocumentRegistry {
             registry.semantic_task_armed.notify_waiters();
             tokio::time::sleep(SEMANTIC_ANALYSIS_QUIET_WINDOW).await;
 
-            if !registry.semantic_analysis_enabled()
+            if !registry.semantic_generation_is_current(semantic_generation)
                 || !registry.document_snapshot_is_current(&uri_key, document_revision)
             {
                 return;
             }
             let serial = Arc::clone(&registry.semantic_serial);
             let _guard = serial.lock().await;
-            if !registry.semantic_analysis_enabled()
+            if !registry.semantic_generation_is_current(semantic_generation)
                 || !registry.document_snapshot_is_current(&uri_key, document_revision)
             {
                 return;
@@ -308,14 +345,16 @@ impl DocumentRegistry {
                     semantic_structure
                 };
 
-                if !registry.semantic_analysis_enabled() {
+                if !registry.semantic_generation_is_current(semantic_generation) {
                     return;
                 }
                 let analysis = Arc::new(analysis);
                 let Some(mut document) = registry.documents.get_mut(&uri_key) else {
                     return;
                 };
-                if document.document_revision != document_revision {
+                if document.document_revision != document_revision
+                    || !registry.semantic_generation_is_current(semantic_generation)
+                {
                     return;
                 }
                 if is_framework_carrier {
@@ -344,6 +383,7 @@ impl DocumentRegistry {
                         projection_host_revision: feature.projection_host_revision,
                         analysis: Some(SemanticAnalysisEnvelope {
                             document_revision,
+                            semantic_generation,
                             semantic_host_revision,
                             structure,
                             analysis: Arc::clone(&analysis),
@@ -368,6 +408,7 @@ impl DocumentRegistry {
                     canonical_id.clone(),
                     SemanticSnapshot {
                         document_revision,
+                        semantic_generation,
                         analysis,
                     },
                 );
@@ -399,7 +440,7 @@ impl DocumentRegistry {
     }
 
     #[cfg(test)]
-    pub(super) fn set_before_change_document_reacquire_hook_for_test(
+    pub(crate) fn set_before_change_document_reacquire_hook_for_test(
         &self,
         hook: super::AfterCompileHook,
     ) {
@@ -441,10 +482,38 @@ impl DocumentRegistry {
     /// snapshot that the IDE projection already paid to construct.
     pub fn get_analysis(&self, uri: &Uri) -> Option<verter_session::FileAnalysisSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
+        let semantic_generation = self.current_semantic_generation();
         if let Some(document) = self.documents.get(uri.as_str()) {
-            if let Some(snapshot) = self.semantic_snapshots.get(&canonical_id) {
-                if snapshot.document_revision == document.document_revision {
-                    return Some(snapshot.analysis.as_ref().clone());
+            // The feature snapshot is the atomic document-revision witness.
+            // Its semantic envelope remains valid for an unchanged document
+            // while the secondary canonical-id index is invalidated/rebuilt by
+            // dependency publication. Prefer it so native features do not
+            // transiently disappear during downstream churn.
+            if self.semantic_generation_is_current(semantic_generation) {
+                if let Some(analysis) = document
+                    .feature_snapshot
+                    .as_ref()
+                    .filter(|feature| feature.document_revision == document.document_revision)
+                    .and_then(|feature| feature.analysis.as_ref())
+                    .filter(|analysis| {
+                        analysis.document_revision == document.document_revision
+                            && analysis.semantic_generation == semantic_generation
+                    })
+                {
+                    let result = analysis.analysis.as_ref().clone();
+                    if self.semantic_generation_is_current(semantic_generation) {
+                        return Some(result);
+                    }
+                }
+                if let Some(snapshot) = self.semantic_snapshots.get(&canonical_id) {
+                    if snapshot.document_revision == document.document_revision
+                        && snapshot.semantic_generation == semantic_generation
+                    {
+                        let result = snapshot.analysis.as_ref().clone();
+                        if self.semantic_generation_is_current(semantic_generation) {
+                            return Some(result);
+                        }
+                    }
                 }
             }
         }
@@ -456,16 +525,270 @@ impl DocumentRegistry {
             .flatten()
     }
 
+    /// Clone one source-feature view under one document-shard read. A carrier
+    /// capture is admitted only when its feature snapshot names this exact
+    /// client revision and source bytes.
+    pub(crate) fn capture_source_feature_document(
+        &self,
+        uri: &Uri,
+    ) -> Option<SourceFeatureDocumentCapture> {
+        let document = self.documents.get(uri.as_str())?;
+        let expected_host_revision = match document.feature_snapshot.as_ref() {
+            Some(feature)
+                if feature.document_revision == document.document_revision
+                    && feature.client_version == document.version
+                    && feature.source() == document.source.as_ref() =>
+            {
+                Some(feature.projection_host_revision)
+            }
+            Some(_) => return None,
+            None if crate::server::server_utils::carrier_language_for(&document.canonical_id)
+                .is_some() =>
+            {
+                return None;
+            }
+            None => None,
+        };
+        let identity = DocumentSnapshotIdentity {
+            version: document.version,
+            revision: document.document_revision,
+            source: Arc::clone(&document.source),
+        };
+        Some(SourceFeatureDocumentCapture {
+            document: document.clone(),
+            identity,
+            expected_host_revision,
+            semantic_generation: self.current_semantic_generation(),
+        })
+    }
+
+    /// Check the host-side source witness paired with a request-local capture.
+    pub(crate) fn source_feature_host_revision_is_current(
+        &self,
+        capture: &SourceFeatureDocumentCapture,
+    ) -> bool {
+        match capture.expected_host_revision {
+            Some(expected) => {
+                self.host
+                    .registered_source_revision_token(&capture.document.canonical_id)
+                    == Some(expected)
+            }
+            None => self
+                .host
+                .get_source(&capture.document.canonical_id)
+                .is_some_and(|source| *source == *capture.document.source),
+        }
+    }
+
+    /// Final request-local admission: the document identity and semantic
+    /// generation must remain live, and the host revision is rechecked while
+    /// the document shard is held so an edit cannot enter a check/use gap.
+    pub(crate) fn source_feature_capture_is_current(
+        &self,
+        uri: &Uri,
+        capture: &SourceFeatureDocumentCapture,
+    ) -> bool {
+        self.current_semantic_generation() == capture.semantic_generation
+            && self
+                .with_current_snapshot_identity(uri, &capture.identity, |document| {
+                    document.source == capture.document.source
+                        && match capture.expected_host_revision {
+                            Some(expected) => {
+                                document.feature_snapshot.as_ref().is_some_and(|feature| {
+                                    feature.document_revision == document.document_revision
+                                        && feature.client_version == document.version
+                                        && feature.projection_host_revision == expected
+                                }) && self
+                                    .host
+                                    .registered_source_revision_token(&document.canonical_id)
+                                    == Some(expected)
+                            }
+                            None => self
+                                .host
+                                .get_source(&document.canonical_id)
+                                .is_some_and(|source| *source == *document.source),
+                        }
+                })
+                .unwrap_or(false)
+    }
+
+    fn current_analysis_for_source_feature_capture(
+        &self,
+        capture: &SourceFeatureDocumentCapture,
+    ) -> Option<verter_session::FileAnalysisSnapshot> {
+        if self.semantic_generation_is_current(capture.semantic_generation) {
+            if let Some(analysis) = capture
+                .document
+                .feature_snapshot
+                .as_ref()
+                .and_then(|feature| feature.analysis.as_ref())
+                .filter(|analysis| {
+                    analysis.document_revision == capture.document.document_revision
+                        && analysis.semantic_generation == capture.semantic_generation
+                })
+            {
+                return Some(analysis.analysis.as_ref().clone());
+            }
+            if let Some(snapshot) = self.semantic_snapshots.get(&capture.document.canonical_id) {
+                if snapshot.document_revision == capture.document.document_revision
+                    && snapshot.semantic_generation == capture.semantic_generation
+                {
+                    return Some(snapshot.analysis.as_ref().clone());
+                }
+            }
+        }
+        self.host
+            .config()
+            .effective_scope()
+            .contains(verter_semantic::analysis::AnalysisScope::BUILD)
+            .then(|| self.host.get_analysis(&capture.document.canonical_id))
+            .flatten()
+    }
+
+    /// Build progressive analysis from one already-captured document view and
+    /// the script facts read under that view's host revision witness.
+    pub(crate) fn source_feature_analysis_from_capture(
+        &self,
+        capture: &SourceFeatureDocumentCapture,
+        current_svelte_evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
+            verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+        >,
+    ) -> Option<verter_session::FileAnalysisSnapshot> {
+        let current = self.current_analysis_for_source_feature_capture(capture);
+        let current_source = Arc::clone(&capture.document.source);
+        let Some(progressive) = capture.document.progressive_analysis.as_ref() else {
+            return current;
+        };
+
+        let prior = progressive.analysis();
+        let prior_source = progressive.source();
+        let mut stable_imports = prior
+            .imports
+            .iter()
+            .filter(|import| {
+                super::progressive_span_is_current(prior_source, &current_source, import.span)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut stable_bindings = prior
+            .bindings
+            .iter()
+            .filter(|binding| {
+                super::progressive_span_is_current(prior_source, &current_source, binding.span)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let stable_props = prior
+            .template
+            .as_deref()
+            .into_iter()
+            .flat_map(|template| template.prop_definitions.iter())
+            .filter_map(|prop| {
+                let witness = progressive.prop_owner_witness_for(prop)?;
+                (super::progressive_prop_owner_witness_is_current(
+                    prior_source,
+                    &current_source,
+                    witness,
+                ) && super::exact_svelte_evidence_matches_prop_owner(
+                    current_svelte_evidence,
+                    witness,
+                ))
+                .then(|| {
+                    let mut prop = prop.clone();
+                    if !super::exact_svelte_evidence_reproves_callable_role(
+                        current_svelte_evidence,
+                        &prop.name,
+                    ) {
+                        prop.callable_role = verter_type_expr::PropCallableRole::Other;
+                    }
+                    prop
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut result = current.unwrap_or_default();
+        for import in stable_imports.drain(..) {
+            if !result.imports.iter().any(|candidate| {
+                candidate.span == import.span
+                    && candidate.source == import.source
+                    && candidate.bindings == import.bindings
+            }) {
+                result.imports.push(import);
+            }
+        }
+        for binding in stable_bindings.drain(..) {
+            if !result
+                .bindings
+                .iter()
+                .any(|candidate| candidate.span == binding.span && candidate.name == binding.name)
+            {
+                result.bindings.push(binding);
+            }
+        }
+        if !stable_props.is_empty() {
+            let mut template = result.template.as_deref().cloned().unwrap_or_default();
+            for prop in stable_props {
+                if !template
+                    .prop_definitions
+                    .iter()
+                    .any(|candidate| candidate.name == prop.name && candidate.span == prop.span)
+                {
+                    template.prop_definitions.push(prop);
+                }
+            }
+            result.template = Some(Arc::new(template));
+        }
+
+        (!result.imports.is_empty()
+            || !result.bindings.is_empty()
+            || result.template.is_some()
+            || !result.macros.is_empty())
+        .then_some(result)
+    }
+
+    /// Current analysis enriched only with declarations from the last usable
+    /// source revision whose complete authored producer evidence is unchanged.
+    /// The whole read is fenced by one document identity and one host revision;
+    /// a torn view is retried once and then fails closed.
+    pub(crate) fn source_feature_analysis(
+        &self,
+        uri: &Uri,
+    ) -> Option<verter_session::FileAnalysisSnapshot> {
+        for _ in 0..2 {
+            let Some(capture) = self.capture_source_feature_document(uri) else {
+                continue;
+            };
+            if !self.source_feature_host_revision_is_current(&capture) {
+                continue;
+            }
+            let evidence = self
+                .host
+                .resolve_svelte_script_facts(&capture.document.canonical_id);
+            let analysis = self.source_feature_analysis_from_capture(&capture, &evidence);
+            if self.source_feature_host_revision_is_current(&capture)
+                && self.source_feature_capture_is_current(uri, &capture)
+            {
+                return analysis;
+            }
+        }
+        None
+    }
+
     /// Return an already-published optional semantic snapshot by canonical id.
     /// This is cache-only: callers never schedule or wait for enrichment.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cached_semantic_analysis(
         &self,
         canonical_id: &str,
     ) -> Option<verter_session::FileAnalysisSnapshot> {
-        self.semantic_analysis_enabled()
+        let generation = self.current_semantic_generation();
+        let result = self
+            .semantic_generation_is_current(generation)
             .then(|| self.semantic_snapshots.get(canonical_id))
             .flatten()
-            .map(|snapshot| snapshot.analysis.as_ref().clone())
+            .filter(|snapshot| snapshot.semantic_generation == generation)
+            .map(|snapshot| snapshot.analysis.as_ref().clone());
+        result.filter(|_| self.semantic_generation_is_current(generation))
     }
 }
 

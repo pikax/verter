@@ -19,15 +19,15 @@
 //! that exact editor-owned Program. Only an observed attach/sync/decision failure or the
 //! bounded shared deadline admits the managed provider. With
 //! [`crate::type_provider::lazy_managed::LazyManagedTypeProvider`] this means a successful
-//! shared session never creates or queries a duplicate semantic engine. Diagnostics union
-//! the attached `--api` semantic channel with the strict LSP pull channel from that same
-//! process ([`compose_diagnostics`]); the managed provider is not part of that union.
+//! shared session never creates or queries a duplicate semantic engine. Carrier diagnostics
+//! are served only through the exact configured project's `--api` semantic + syntactic
+//! channels; a raw companion LSP pull is never mixed in because it can bind to a broader
+//! project with different JavaScript policy.
 //!
 //! Lifecycle/configuration calls still flow to the managed slot so a lazy fallback can
 //! cache the latest desired state without spawning; the shared overlay records carrier
 //! content independently and injects it only when a bound demand engages.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -270,27 +270,19 @@ impl SharedTsgoOverlay {
         Some(established.transport)
     }
 
-    /// Full user-facing diagnostics from the exact editor-owned Program. The `--api`
-    /// query is the configured-project membership proof; after it succeeds, the relay's
-    /// strict pull-diagnostic request supplies the complete LSP surface (syntactic,
-    /// suggestion, tags/related information, and semantic diagnostics). Either channel
-    /// failing returns `None`, admitting the managed fallback instead of presenting a
-    /// fabricated empty result.
+    /// Project-bound diagnostics from the exact editor-owned Program. `Some([])` is an
+    /// authoritative clean result; `None` or an error admits only the managed provider's
+    /// project-bound capability, never a raw companion LSP pull.
     async fn engage_diagnostics(
         &self,
         provider_path: &str,
         carrier: &BoundCarrier,
     ) -> Option<Vec<TypeDiagnostic>> {
         let provider = self.engage_provider(provider_path, carrier).await?;
-        let semantic = provider
+        provider
             .overlay_diagnostics_in_project(provider_path, carrier.bound().project())
             .await
-            .ok()??;
-        let full = provider
-            .full_diagnostics_for_carrier(provider_path)
-            .await
-            .ok()?;
-        Some(compose_diagnostics(semantic, full))
+            .ok()?
     }
 
     /// Whether injecting the recorded `companion_path` overlay is shadow-safe — i.e. no
@@ -507,69 +499,6 @@ fn real_file_occupies_injected_path(ws: &dyn WorkspaceRead, injected_path: &str)
 /// appear in the hex nonce or the decimal generation, so the composition is injective.
 fn compose_establishment_discriminant(nonce: &str, generation: u64) -> String {
     format!("{nonce}\u{1f}{generation}")
-}
-
-/// The dedup identity of a carrier diagnostic: its carrier byte span, code, and
-/// message. Two diagnostics with the same `(start, end, code, message)` are the SAME
-/// diagnostic — e.g. an identical carrier type error reported by both diagnostic
-/// channels of the SAME editor-owned session.
-type DiagnosticIdentity = (u32, u32, Option<String>, String);
-
-fn diagnostic_identity(d: &TypeDiagnostic) -> DiagnosticIdentity {
-    (d.start, d.end, d.code.clone(), d.message.clone())
-}
-
-/// Compose the two diagnostic channels of one editor-owned tsgo session.
-///
-/// The attached `--api` view proves configured-project membership and supplies semantic
-/// diagnostics. The relayed LSP pull channel can additionally supply syntactic,
-/// suggestion, tag, and related-information data. Both are views of the exact same
-/// editor process and Program. The result is their deduplicated union; this never queries
-/// or activates the managed fallback.
-///
-/// An identical diagnostic appears once. The `--api` copy's authoritative carrier span
-/// is retained, while tags and related information found only on the LSP copy are merged
-/// into it.
-fn compose_diagnostics(
-    semantic: Vec<TypeDiagnostic>,
-    full: Vec<TypeDiagnostic>,
-) -> Vec<TypeDiagnostic> {
-    let mut merged = semantic;
-    let mut index: HashMap<DiagnosticIdentity, usize> = merged
-        .iter()
-        .enumerate()
-        .map(|(i, d)| (diagnostic_identity(d), i))
-        .collect();
-    for diag in full {
-        match index.get(&diagnostic_identity(&diag)) {
-            // Collision: preserve the `--api` span and union LSP metadata.
-            Some(&i) => merge_diagnostic_metadata(&mut merged[i], diag),
-            // LSP-only: append it (and index it so a later duplicate merges).
-            None => {
-                index.insert(diagnostic_identity(&diag), merged.len());
-                merged.push(diag);
-            }
-        }
-    }
-    merged
-}
-
-/// Merge an LSP duplicate's metadata into the retained `--api` diagnostic on a
-/// `(span, code, message)` collision: UNION the `tags` and `related_information`
-/// (append each LSP entry the semantic copy does not already carry). The `--api` span,
-/// severity, and message win (its authoritative mapping is retained); only the
-/// metadata is unioned — never a silent LSP-metadata drop.
-fn merge_diagnostic_metadata(into: &mut TypeDiagnostic, from: TypeDiagnostic) {
-    for tag in from.tags {
-        if !into.tags.contains(&tag) {
-            into.tags.push(tag);
-        }
-    }
-    for info in from.related_information {
-        if !into.related_information.contains(&info) {
-            into.related_information.push(info);
-        }
-    }
 }
 
 /// Every carrier TS FEATURE provider call the composite GATES on a resolved
@@ -808,7 +737,30 @@ impl TsgoCompositeProvider {
             }
         }
 
-        self.managed_diagnostics(path, background).await
+        match self
+            .managed
+            .get_diagnostics_in_project(path, carrier.bound().project())
+            .await
+        {
+            Ok(Some(diagnostics)) => Ok(diagnostics),
+            Ok(None) => {
+                tracing::warn!(
+                    source = %source,
+                    project = carrier.bound().project(),
+                    "managed tsgo has no project-bound carrier diagnostics capability; failing closed"
+                );
+                Ok(Vec::new())
+            }
+            Err(error) => {
+                tracing::warn!(
+                    source = %source,
+                    project = carrier.bound().project(),
+                    error = %error,
+                    "managed project-bound carrier diagnostics failed; failing closed"
+                );
+                Ok(Vec::new())
+            }
+        }
     }
 
     /// Managed diagnostics for `path` on the requested lane.

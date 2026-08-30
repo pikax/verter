@@ -277,6 +277,153 @@ fn install_materialized_workspace_with_paths(
     server.install_vfs_workspace(vfs_ws);
 }
 
+fn configured_project_with_materialized_carriers(
+    id: u32,
+    root: &str,
+    tsconfig: &str,
+    materialized_files: &[String],
+) -> verter_workspace::workspace_snapshot::OwnershipProject {
+    let root_cp = verter_workspace::CanonicalPath::new(root);
+    let membership = verter_semantic::resolver_core::ConfiguredMembership {
+        spec: verter_semantic::resolver_core::StaticMembershipSpec {
+            files: Vec::new(),
+            include: vec![verter_semantic::resolver_core::CompiledGlob::new(
+                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+                    &root_cp, "**/*",
+                ),
+            )],
+            exclude: Vec::new().into(),
+        },
+        materialized_files: materialized_files
+            .iter()
+            .map(|path| verter_workspace::CanonicalPath::new(path))
+            .collect(),
+    };
+    verter_workspace::workspace_snapshot::OwnershipProject {
+        id: verter_workspace::workspace_snapshot::ProjectId(id),
+        root: root_cp.clone(),
+        workspace_root: root_cp,
+        payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
+            tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
+            membership,
+            compiler_options: Default::default(),
+            references: Vec::new(),
+            workspace_aliases: Vec::new(),
+        },
+    }
+}
+
+/// A broad parent config may materialize files that a more-specific nested config
+/// ultimately owns. A workspace-symbol frontier is one configured Program, so its
+/// source set follows the resolved owner identity, not the parent's raw walk cache.
+#[test]
+fn configured_frontier_scope_excludes_nested_project_carriers_from_broad_membership() {
+    use verter_workspace::workspace_snapshot::{
+        ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    };
+
+    let root = "d:/workspace";
+    let root_sources: Vec<String> = (0..21)
+        .map(|index| format!("{root}/src/root/Root{index:02}.vue"))
+        .collect();
+    let mut lax_sources = vec![
+        format!("{root}/src/policy/lax/vue/Case.vue"),
+        format!("{root}/src/policy/lax/svelte/Case.svelte"),
+    ];
+    lax_sources.sort_unstable();
+    let mut jsconfig_sources = vec![
+        format!("{root}/src/policy/lax-jsconfig/vue/Case.vue"),
+        format!("{root}/src/policy/lax-jsconfig/svelte/Case.svelte"),
+    ];
+    jsconfig_sources.sort_unstable();
+    let all_sources: Vec<String> = root_sources
+        .iter()
+        .chain(&lax_sources)
+        .chain(&jsconfig_sources)
+        .cloned()
+        .collect();
+    let projects = vec![
+        configured_project_with_materialized_carriers(
+            0,
+            root,
+            &format!("{root}/tsconfig.json"),
+            &all_sources,
+        ),
+        configured_project_with_materialized_carriers(
+            1,
+            &format!("{root}/src/policy/lax"),
+            &format!("{root}/src/policy/lax/tsconfig.json"),
+            &lax_sources,
+        ),
+        configured_project_with_materialized_carriers(
+            2,
+            &format!("{root}/src/policy/lax-jsconfig"),
+            &format!("{root}/src/policy/lax-jsconfig/jsconfig.json"),
+            &jsconfig_sources,
+        ),
+    ];
+    let snapshot = WorkspaceSnapshot {
+        owners_memo: Default::default(),
+        projects,
+        resolver: Default::default(),
+        generation: SnapshotGeneration(1),
+    };
+
+    let scope = |owner: ProjectId, initiating: &str| {
+        super::configured_frontier_scope(&snapshot, owner, initiating)
+            .expect("configured project")
+            .0
+    };
+    assert_eq!(scope(ProjectId(0), &root_sources[0]), root_sources);
+    assert_eq!(scope(ProjectId(1), &lax_sources[0]), lax_sources);
+    assert_eq!(scope(ProjectId(2), &jsconfig_sources[0]), jsconfig_sources);
+
+    assert!(snapshot
+        .projects
+        .iter()
+        .all(|project| matches!(project.payload, ProjectPayload::Configured { .. })));
+}
+
+/// The nested-project scoping fix must not weaken the existing TSGO delivery
+/// receipt gate: every root carrier still needs a live, owner-matched commit.
+#[test]
+fn tsgo_frontier_root_receipts_still_fail_closed_when_one_root_is_missing() {
+    use crate::provider_sync::{CarrierCommitStamp, ProviderOwnerBinding, ProviderSyncState};
+    use dashmap::DashMap;
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
+
+    let owner = "d:/workspace/tsconfig.json";
+    let sources: Vec<String> = (0..21)
+        .map(|index| format!("d:/workspace/src/root/Root{index:02}.vue"))
+        .collect();
+    let states = DashMap::new();
+    for (revision, source) in sources.iter().enumerate() {
+        let mut state = ProviderSyncState::unresolved(format!("{source}.tsx"));
+        state.owner_binding = ProviderOwnerBinding::Owned(owner.to_string());
+        state.ide_background_loaded = true;
+        state.commit_stamp = Some(CarrierCommitStamp {
+            ownership_generation: SnapshotGeneration(1),
+            source_revision: revision as u64,
+        });
+        states.insert(source.clone(), state);
+    }
+    assert_eq!(
+        super::count_live_tsgo_frontier_roots(&states, &sources, owner),
+        sources.len(),
+        "all 21 root receipts make the root frontier complete"
+    );
+
+    states
+        .get_mut(&sources[7])
+        .expect("seeded root state")
+        .commit_stamp = None;
+    assert_eq!(
+        super::count_live_tsgo_frontier_roots(&states, &sources, owner),
+        sources.len() - 1,
+        "one missing current receipt must keep the frontier fail-closed"
+    );
+}
+
 fn position_of(server: &VerterLanguageServer, uri: &Uri, needle: &str, delta: usize) -> Position {
     let doc = server.documents.get(uri).expect("document is open");
     let offset = doc

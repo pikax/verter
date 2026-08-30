@@ -16,7 +16,9 @@ use verter_session::FileAnalysisSnapshot;
 use verter_session::carrier_publication_store::RegisteredFileStructure;
 
 use crate::documents::carrier_structure::{
-    offset_in_markup_comment, project_markup_comment_facts, CarrierBlockView,
+    offset_in_markup_comment, project_markup_comment_facts,
+    svelte_local_render_snippet_definition_at, svelte_static_render_callee_span_at,
+    CarrierBlockView,
 };
 use crate::documents::line_index::LineIndex;
 
@@ -52,8 +54,17 @@ pub fn definition_at_position(
     resolve_export_location: Option<&dyn Fn(&str, &str) -> Option<Location>>,
     structure: Option<&RegisteredFileStructure>,
 ) -> Option<GotoDefinitionResponse> {
-    let analysis = analysis?;
     let offset = line_index.position_to_offset(position)? as usize;
+
+    // Local snippet identity is parser-owned. Registered structure is current
+    // immediately after a document edit, before the optional BUILD/template
+    // analysis snapshot exists, so resolve this exact lexical declaration
+    // before requiring semantic analysis for every other native feature.
+    if let Some(span) = source_local_svelte_render_span(offset as u32, structure) {
+        return span_definition(span.start, span.end, line_index);
+    }
+
+    let analysis = analysis?;
 
     // Early exit: don't navigate from inside HTML comments in template
     let in_template = blocks.iter().any(|b| {
@@ -79,6 +90,16 @@ pub fn definition_at_position(
         })
     {
         return None;
+    }
+
+    // `{@render callee(...)}` is Svelte source syntax. Its local snippet and
+    // snippet-prop declarations are already exact authored spans; provider
+    // projection commonly follows the callable type into `svelte`'s package
+    // declarations, which is the wrong navigation target.
+    if let Some(span) =
+        source_owned_svelte_render_prop_span(offset as u32, source, analysis, structure)
+    {
+        return span_definition(span.start, span.end, line_index);
     }
 
     // D6: custom directive NAME token (`v-my-thing` → `vMyThing`) — navigate
@@ -476,6 +497,21 @@ pub fn definition_at_position(
                     }
                 }
             }
+
+            // Imports above retain precedence for cross-file identities.  An
+            // ordinary authored script binding, however, is source-owned and
+            // remains navigable even when the projected provider file has not
+            // caught up with an incomplete member access (`binding.`).
+            if let Some(binding) = analysis
+                .bindings
+                .iter()
+                .find(|binding| binding.name == *word)
+            {
+                if binding.span.start > 0 || binding.span.end > 0 {
+                    return span_definition(binding.span.start, binding.span.end, line_index);
+                }
+                return None;
+            }
         }
 
         // Check if cursor is inside an import source string — navigate to the file
@@ -530,6 +566,62 @@ pub fn definition_at_position(
     }
 
     None
+}
+
+/// Whether this parser-minted Svelte `{@render ...}` callee has an exact
+/// authored local-snippet or snippet-prop identity. Callers use the same proof
+/// to suppress provider union only for the source-owned definitions.
+pub fn source_authoritative_svelte_render_offset(
+    offset: u32,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+    structure: Option<&RegisteredFileStructure>,
+) -> bool {
+    source_authoritative_local_svelte_render_offset(offset, structure)
+        || source_owned_svelte_render_prop_span(offset, source, analysis, structure).is_some()
+}
+
+/// Whether registered parser structure proves an exact lexical local-snippet
+/// target for this direct static render callee. This proof is independent of
+/// BUILD/template analysis and is therefore safe for provider suppression in
+/// the post-edit publication window.
+pub fn source_authoritative_local_svelte_render_offset(
+    offset: u32,
+    structure: Option<&RegisteredFileStructure>,
+) -> bool {
+    source_local_svelte_render_span(offset, structure).is_some()
+}
+
+fn source_local_svelte_render_span(
+    offset: u32,
+    structure: Option<&RegisteredFileStructure>,
+) -> Option<verter_span::Span> {
+    let span = structure
+        .and_then(|structure| svelte_local_render_snippet_definition_at(structure, offset))?;
+    Some(verter_span::Span::new(span.start, span.end))
+}
+
+fn source_owned_svelte_render_prop_span(
+    offset: u32,
+    source: &str,
+    analysis: &FileAnalysisSnapshot,
+    structure: Option<&RegisteredFileStructure>,
+) -> Option<verter_span::Span> {
+    let callee =
+        structure.and_then(|structure| svelte_static_render_callee_span_at(structure, offset))?;
+    let word = source.get(callee.start as usize..callee.end as usize)?;
+    let template = analysis.template.as_deref()?;
+    template
+        .prop_definitions
+        .iter()
+        .find(|prop| {
+            prop.name == word
+                && matches!(
+                    prop.callable_role,
+                    verter_type_expr::PropCallableRole::SvelteSnippet { .. }
+                )
+        })
+        .map(|prop| prop.span)
 }
 
 /// Create a definition response from a resolved canonical ID (cross-file navigation).

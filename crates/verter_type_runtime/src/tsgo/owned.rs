@@ -3,21 +3,17 @@
 //! `TsgoOwnedProvider` is ONE [`TypeProvider`] backed by ONE Verter-spawned
 //! `tsgo --lsp` process serving BOTH interfaces on ONE shared `project.Session`:
 //!
-//! The `--lsp` interface (the inner [`TsgoTypeProvider`]) serves the interactive
-//! LSP FEATURES (hover, definition, type-definition, references, rename,
-//! completion + resolve, signature-help, document highlights, semantic tokens,
-//! inlay hints) AND the user-facing diagnostics surface. Its pull diagnostic
-//! carries the FULL set — semantic, syntactic, suggestion, the LSP `tags`
-//! (unnecessary / deprecated), and related-information — so there is exactly ONE
-//! diagnostics authority per epoch.
+//! The `--lsp` interface (the inner [`TsgoTypeProvider`]) serves interactive LSP
+//! features and raw diagnostics for non-carrier files. Carrier diagnostics are
+//! resolved against an explicit configured project through the attached `--api`
+//! checker, so a generated companion cannot accidentally bind to an inferred or
+//! broader project.
 //!
 //! The `--api` CHECKER is attached onto the SAME process via
 //! `custom/initializeAPISession` and is the project-bound TYPECHECK / membership /
-//! reflection ORACLE ([`TsgoOwnedProvider::semantic_diagnostics_for_carrier_in_project`]). It
-//! is the authority S3 proves works against the CONFIGURED project; promoting it to
-//! the sole user-facing diagnostics surface (over the richer `--lsp` pull) requires
-//! closing its per-carrier program parity (the `vue` / JSX / tag / suggestion gaps)
-//! and is a full-DX-contract concern, not this provider's job.
+//! reflection ORACLE ([`TsgoOwnedProvider::semantic_diagnostics_for_carrier_in_project`]).
+//! The served carrier path combines semantic and syntactic diagnostics from one
+//! configured-project snapshot and never unions in the raw `--lsp` pull.
 //!
 //! This is the binding dual-surface architecture: ONE process, ONE query path, the
 //! two surfaces an internal implementation detail of one provider. There is NO
@@ -188,14 +184,10 @@ impl TsgoOwnedProvider {
     /// process serves every configured project because `tsconfig` is opened per
     /// query, mirroring the SHARED provider's `overlay_diagnostics_in_project`.
     ///
-    /// This is the project-bound typecheck oracle the dual-surface model proves;
-    /// it is DISTINCT from the user-facing [`TypeProvider::get_diagnostics`]
-    /// surface (which is the rich `--lsp` pull set). It is a TEST / typecheck oracle:
-    /// production OWNED user-facing diagnostics ride the `--lsp` pull, gated on the
-    /// carrier's resolved `BoundProject` by the `verter_lsp` admission layer.
-    /// Promoting this to the sole diagnostics surface is a full-DX-contract concern
-    /// (closing the `--api` per-carrier program parity), not this provider's
-    /// responsibility.
+    /// This semantic-only method is the direct typecheck oracle used by low-level
+    /// tests. Production carrier diagnostics use the same project resolution via
+    /// [`TypeProvider::get_diagnostics_in_project`] and additionally collect
+    /// syntactic diagnostics.
     pub async fn semantic_diagnostics_for_carrier_in_project(
         &self,
         path: &str,
@@ -228,6 +220,47 @@ impl TsgoOwnedProvider {
         // error (never a forged `(0, 0)` span) — see `position_carrier_diagnostics`.
         let content = self.lsp.cached_content(&engine_carrier).await;
         position_carrier_diagnostics(&diags, content, &engine_carrier)
+    }
+
+    /// Project-bound user-facing diagnostics for a carrier, with an explicit
+    /// served signal. Semantic and syntactic diagnostics are read from the same
+    /// configured-project snapshot; no raw LSP pull is mixed in because the
+    /// companion path may otherwise bind to an inferred or broader project.
+    async fn diagnostics_for_carrier_in_project(
+        &self,
+        path: &str,
+        tsconfig: &str,
+    ) -> Result<Option<Vec<TypeDiagnostic>>, crate::protocol::TypeProviderError> {
+        let carrier = slash(path);
+        let Some((snapshot, project, engine_carrier)) =
+            self.api.resolve_for(&carrier, tsconfig).await
+        else {
+            return Ok(None);
+        };
+        let mut diagnostics = self
+            .api
+            .client
+            .get_semantic_diagnostics(&snapshot, &project, &engine_carrier)
+            .await
+            .map_err(|e| {
+                crate::protocol::TypeProviderError::new(format!(
+                    "--api getSemanticDiagnostics: {e}"
+                ))
+            })?;
+        diagnostics.extend(
+            self.api
+                .client
+                .get_syntactic_diagnostics(&snapshot, &project, &engine_carrier)
+                .await
+                .map_err(|e| {
+                    crate::protocol::TypeProviderError::new(format!(
+                        "--api getSyntacticDiagnostics: {e}"
+                    ))
+                })?,
+        );
+
+        let content = self.lsp.cached_content(&engine_carrier).await;
+        position_carrier_diagnostics(&diagnostics, content, &engine_carrier).map(Some)
     }
 }
 
@@ -492,26 +525,23 @@ impl TypeProvider for TsgoOwnedProvider {
 
     // ── Diagnostics ──
     //
-    // The diagnostics SURFACE delegates to the `--lsp` pull diagnostic (the rich
-    // set: semantic + syntactic + suggestion + the LSP `tags` —
-    // unnecessary/deprecated — + related-information), which the `--api`
-    // `getSemanticDiagnostics` does NOT carry. There is exactly ONE diagnostics
-    // authority per epoch (the consult's rule), and for OWNED tsgo that authority
-    // is the `--lsp` surface — the `tsgo --lsp` server does its own configured-
-    // project discovery, so carriers are project-bound for normal layouts.
-    //
-    // The attached `--api` checker is the TYPECHECK / membership / reflection
-    // ORACLE (proven project-bound + non-vacuous in the crate's `owned_provider`
-    // live tests via `semantic_diagnostics_for_carrier_in_project`); promoting it to the sole
-    // user-facing diagnostics surface requires closing its per-carrier program
-    // parity with the `--lsp` program (the `vue`/JSX/tag/suggestion gaps) and is a
-    // full-DX-contract concern, not this provider's job.
+    // Raw diagnostics remain available for non-carrier callers. The LSP composite
+    // resolves carrier ownership first and calls `get_diagnostics_in_project`
+    // instead, which never delegates to this raw surface.
     fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         self.lsp.get_diagnostics(path)
     }
 
     fn get_diagnostics_background(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
         self.lsp.get_diagnostics_background(path)
+    }
+
+    fn get_diagnostics_in_project<'a>(
+        &'a self,
+        path: &'a str,
+        configured_project: &'a str,
+    ) -> ProviderFuture<'a, Option<Vec<TypeDiagnostic>>> {
+        Box::pin(self.diagnostics_for_carrier_in_project(path, configured_project))
     }
 
     // ── Features: delegate to the --lsp surface (the authoritative language-service

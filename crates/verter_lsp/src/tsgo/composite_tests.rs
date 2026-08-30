@@ -1,9 +1,5 @@
-//! Discriminating unit tests for the composite's diagnostics COMPOSITION — pure over
-//! the `TypeDiagnostic` carrier (no engine, no transport).
-//!
-//! The editor-owned provider exposes two diagnostic channels from one engine: configured-
-//! project semantic diagnostics over `--api`, and strict LSP pull diagnostics. Their
-//! deduplicated union preserves LSP-only syntax/metadata without consulting managed tsgo.
+//! Discriminating unit tests for the composite's project-bound admission and
+//! shared-session lifecycle.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,9 +7,6 @@ use std::sync::Arc;
 use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 use verter_session::{HostConfig, VerterHost};
-use verter_type_runtime::protocol::{
-    DiagnosticRelatedInfo, TypeDiagnostic, TypeDiagnosticSeverity, TypeDiagnosticTag,
-};
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
@@ -29,148 +22,9 @@ use verter_workspace::workspace_snapshot::{
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess};
 
 use super::{
-    carrier_source_of, compose_diagnostics, compose_establishment_discriminant,
-    injection_shadow_safe, real_file_occupies_injected_path, SharedRendezvous, SharedTsgoOverlay,
+    carrier_source_of, compose_establishment_discriminant, injection_shadow_safe,
+    real_file_occupies_injected_path, SharedRendezvous, SharedTsgoOverlay,
 };
-
-/// A minimal carrier diagnostic at `[start, end)` with `code` + `message`.
-fn diag(start: u32, end: u32, code: &str, message: &str) -> TypeDiagnostic {
-    TypeDiagnostic {
-        message: message.to_string(),
-        severity: TypeDiagnosticSeverity::Error,
-        start,
-        end,
-        code: Some(code.to_string()),
-        tags: Vec::new(),
-        related_information: Vec::new(),
-    }
-}
-
-fn codes(diags: &[TypeDiagnostic]) -> Vec<String> {
-    diags.iter().filter_map(|d| d.code.clone()).collect()
-}
-
-/// The core discriminator: for a bound carrier the merged result contains BOTH a
-/// `--api` semantic diagnostic AND an LSP-only non-semantic diagnostic, and an
-/// identical diagnostic reported by both channels is reported exactly once.
-#[test]
-fn compose_unions_api_semantic_and_lsp_full_deduped() {
-    let semantic = vec![diag(
-        10,
-        20,
-        "2322",
-        "Type 'string' is not assignable to type 'number'.",
-    )];
-    let full = vec![
-        diag(
-            10,
-            20,
-            "2322",
-            "Type 'string' is not assignable to type 'number'.",
-        ),
-        diag(30, 31, "1005", "';' expected."),
-    ];
-
-    let merged = compose_diagnostics(semantic, full);
-    let merged_codes = codes(&merged);
-
-    assert!(
-        merged_codes.iter().any(|c| c == "2322"),
-        "the `--api` semantic diagnostic must survive; got {merged_codes:?}"
-    );
-    assert!(
-        merged_codes.iter().any(|c| c == "1005"),
-        "the LSP-only syntactic diagnostic must not be dropped; got {merged_codes:?}"
-    );
-    assert_eq!(
-        merged
-            .iter()
-            .filter(|d| d.code.as_deref() == Some("2322"))
-            .count(),
-        1,
-        "an identical diagnostic reported by both channels is not double-reported"
-    );
-    assert_eq!(
-        merged.len(),
-        2,
-        "union-with-dedup: one semantic + one LSP-only syntactic"
-    );
-}
-
-/// LSP tags and related information are merged into the retained `--api` copy.
-#[test]
-fn compose_collision_merges_lsp_tags_and_related_into_api_copy() {
-    let semantic = vec![diag(10, 20, "6133", "'x' is declared but never used.")];
-    let mut lsp_diag = diag(10, 20, "6133", "'x' is declared but never used.");
-    lsp_diag.tags = vec![TypeDiagnosticTag::Unnecessary];
-    lsp_diag.related_information = vec![DiagnosticRelatedInfo {
-        path: "/w/App.vue.tsx".to_string(),
-        start: 5,
-        end: 6,
-        message: "'x' was also declared here.".to_string(),
-    }];
-
-    let merged = compose_diagnostics(semantic, vec![lsp_diag]);
-    assert_eq!(
-        merged.len(),
-        1,
-        "the identical diagnostic still collapses to one"
-    );
-    let d = &merged[0];
-    assert_eq!(
-        d.tags,
-        vec![TypeDiagnosticTag::Unnecessary],
-        "the LSP Unnecessary tag must survive dedup"
-    );
-    assert_eq!(
-        d.related_information.len(),
-        1,
-        "LSP relatedInformation must survive dedup"
-    );
-    assert_eq!(
-        d.related_information[0].message, "'x' was also declared here.",
-        "the merged related span is from LSP"
-    );
-}
-
-/// The union is deduplicated: when both channels carry a tag, it appears once,
-/// and an LSP-only tag is added — semantic metadata is preserved and never
-/// doubled.
-#[test]
-fn compose_collision_unions_tags_without_duplication() {
-    let mut semantic = diag(0, 5, "6385", "'foo' is deprecated.");
-    semantic.tags = vec![TypeDiagnosticTag::Deprecated];
-    let mut full = diag(0, 5, "6385", "'foo' is deprecated.");
-    full.tags = vec![
-        TypeDiagnosticTag::Deprecated,
-        TypeDiagnosticTag::Unnecessary,
-    ];
-
-    let merged = compose_diagnostics(vec![semantic], vec![full]);
-    assert_eq!(merged.len(), 1);
-    assert_eq!(
-        merged[0].tags,
-        vec![
-            TypeDiagnosticTag::Deprecated,
-            TypeDiagnosticTag::Unnecessary
-        ],
-        "the semantic Deprecated tag is not doubled; the LSP-only Unnecessary is added"
-    );
-}
-
-/// A same-span/code diagnostic with a DIFFERENT message is NOT a duplicate (both are
-/// kept), so dedup never silently merges genuinely distinct diagnostics.
-#[test]
-fn compose_dedup_is_span_code_and_message_exact() {
-    let semantic = vec![diag(0, 5, "2345", "Argument of type 'A' ...")];
-    let full = vec![diag(0, 5, "2345", "Argument of type 'B' ...")];
-    let merged = compose_diagnostics(semantic, full);
-    assert_eq!(
-        merged.len(),
-        2,
-        "same span+code but a DIFFERENT message are distinct diagnostics — both kept"
-    );
-}
 
 /// The SHARED-establishment re-arm discriminant depends on BOTH the
 /// shim advertisement nonce AND the workspace/config generation — so a failed
@@ -315,21 +169,6 @@ fn injection_shadow_safe_rejects_only_real_file_shadow_causes() {
         "a NoProject genuine companion with NO real file at its path is injectable as a \
          supporting import member (a real file there is CarrierPathOccupiedByRealFile, \
          rejected above)"
-    );
-}
-
-/// A valid empty semantic set still preserves LSP-only diagnostics from the same engine.
-#[test]
-fn compose_empty_semantic_preserves_lsp_full_set() {
-    let full = vec![
-        diag(0, 1, "1005", "';' expected."),
-        diag(2, 3, "6133", "unused"),
-    ];
-    let merged = compose_diagnostics(Vec::new(), full);
-    assert_eq!(
-        codes(&merged),
-        vec!["1005".to_string(), "6133".to_string()],
-        "empty semantic channel preserves the LSP full set in order"
     );
 }
 

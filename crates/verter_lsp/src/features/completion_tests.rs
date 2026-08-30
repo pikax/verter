@@ -2,6 +2,7 @@ use super::*;
 use crate::documents::carrier_structure::{
     project_carrier_blocks, test_carrier_blocks, test_structure,
 };
+use verter_language::parse_artifact::carrier_inventory::{MarkupElementKind, MarkupNodeKind};
 use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
 
@@ -2816,6 +2817,239 @@ fn test_component_prop_completions_from_macros() {
     assert_eq!(foo_item.kind, Some(CompletionItemKind::PROPERTY));
 }
 
+/// An in-progress opening tag is a parser/context fact before it is a
+/// committed semantic component usage.  The parent import plus the child's
+/// already-committed analysis must still provide the prop surface without
+/// synchronously loading the child.
+#[test]
+fn incomplete_component_opening_uses_import_and_committed_child_analysis() {
+    for (source, uri, is_svelte, expected_label) in [
+        (
+            "<script setup lang=\"ts\">import IdeSurfaceChild from './IdeSurfaceChild.vue'</script><template><IdeSurfaceChild ",
+            "file:///ws/Parent.vue",
+            false,
+            "carrier-unused-only",
+        ),
+        (
+            "<script setup>import IdeSurfaceChild from './IdeSurfaceChild.vue'</script><template><IdeSurfaceChild ",
+            "file:///ws/ParentJs.vue",
+            false,
+            "carrier-unused-only",
+        ),
+    ] {
+        let structure = test_structure(source, is_svelte);
+        let blocks = project_carrier_blocks(&structure);
+        let line_index = LineIndex::new_utf16(source);
+        let position = line_index
+            .offset_to_position(source.len() as u32)
+            .expect("EOF position");
+        let parent = FileAnalysisSnapshot {
+            // Deliberately absent: the in-progress opening has not reached the
+            // semantic component inventory yet.
+            template: None,
+            imports: vec![AnalyzedImport {
+                source: if is_svelte {
+                    "./IdeSurfaceChild.svelte".to_string()
+                } else {
+                    "./IdeSurfaceChild.vue".to_string()
+                },
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
+                is_type_only: false,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "IdeSurfaceChild".to_string(),
+                    kind: ImportBindingKind::Default,
+                    imported_name: None,
+                    is_type_only: false,
+                    vue_api: None,
+                    span: verter_span::Span::new(0, 0),
+                }],
+                span: verter_span::Span::new(0, 0),
+                resolved_canonical_id: None,
+            }],
+            ..Default::default()
+        };
+        let child = FileAnalysisSnapshot {
+            template: Some(
+                TemplateAnalysisSnapshot {
+                    prop_definitions: vec![AnalyzedPropDefinition {
+                        name: "carrierUnusedOnly".to_string(),
+                        callable_role: verter_type_expr::PropCallableRole::Other,
+                        type_annotation: Some("string".to_string()),
+                        has_default: false,
+                        is_required: true,
+                        is_boolean: false,
+                        used_in_template: false,
+                        used_in_script: false,
+                        span: verter_span::Span::new(0, 0),
+                    }],
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let resolve = |_: &str, _: Option<&str>| Some(child.clone());
+
+        let result = completions_at_position(
+            &position,
+            source,
+            &blocks,
+            Some(&parent),
+            &line_index,
+            Some(&resolve),
+            None,
+            Some(uri),
+            false,
+            Some(&structure),
+        );
+        let labels: Vec<String> = result
+            .unwrap_or_else(|| panic!("{uri}: incomplete opening must retain component props"))
+            .items
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert!(
+            labels.iter().any(|label| label == expected_label),
+            "{uri}: committed child prop missing from {labels:?}"
+        );
+
+        let cold = |_: &str, _: Option<&str>| None;
+        let cold_labels: Vec<String> = completions_at_position(
+            &position,
+            source,
+            &blocks,
+            Some(&parent),
+            &line_index,
+            Some(&cold),
+            None,
+            Some(uri),
+            false,
+            Some(&structure),
+        )
+        .map(|result| result.items.into_iter().map(|item| item.label).collect())
+        .unwrap_or_default();
+        assert!(
+            !cold_labels.iter().any(|label| label == expected_label),
+            "{uri}: a cold child must not fabricate {expected_label}: {cold_labels:?}"
+        );
+    }
+}
+
+#[test]
+fn svelte_unclosed_text_does_not_fabricate_component_attribute_authority() {
+    for (source, uri) in [
+        (
+            "<script lang=\"ts\">import IdeSurfaceChild from './IdeSurfaceChild.svelte'</script>\n<IdeSurfaceChild un",
+            "file:///ws/Parent.svelte",
+        ),
+        (
+            "<script>import IdeSurfaceChild from './IdeSurfaceChild.svelte'</script>\n<IdeSurfaceChild un",
+            "file:///ws/ParentJs.svelte",
+        ),
+    ] {
+        let structure = test_structure(source, true);
+        assert_eq!(
+            authored_component_attribute_name_context(&structure, source.len() as u32),
+            None,
+            "{uri}: parser text recovery must not mint a component attribute identity"
+        );
+        assert!(
+            !structure.inventory().markup().nodes().iter().any(|node| {
+                matches!(
+                    node.kind(),
+                    MarkupNodeKind::Element(element)
+                        if element.kind == MarkupElementKind::Component
+                )
+            }),
+            "{uri}: the parser did not retain a component element"
+        );
+
+        let line_index = LineIndex::new_utf16(source);
+        let position = line_index
+            .offset_to_position(source.len() as u32)
+            .expect("EOF position");
+        let resolver = |_: &str, _: Option<&str>| -> Option<FileAnalysisSnapshot> {
+            panic!("{uri}: a parser-unproven opening must not query the child resolver")
+        };
+        assert!(
+            completions_at_position(
+                &position,
+                source,
+                &project_carrier_blocks(&structure),
+                Some(&FileAnalysisSnapshot::default()),
+                &line_index,
+                Some(&resolver),
+                None,
+                Some(uri),
+                false,
+                Some(&structure),
+            )
+            .is_none(),
+            "{uri}: parser-unproven Svelte EOF syntax must fail closed"
+        );
+    }
+}
+
+#[test]
+fn unclosed_post_attribute_gaps_do_not_capture_the_component_resolver() {
+    for suffix in ["foo=", "foo= ", "foo "] {
+        let source = format!(
+            "<script setup lang=\"ts\">\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n<DirectComp {suffix}"
+        );
+        let structure = test_structure(&source, false);
+        assert_eq!(
+            authored_component_attribute_name_context(&structure, source.len() as u32),
+            None,
+            "{suffix:?}: the parser cannot prove this post-attribute EOF is a name context"
+        );
+        let line_index = LineIndex::new_utf16(&source);
+        let position = line_index
+            .offset_to_position(source.len() as u32)
+            .expect("EOF position");
+        let resolver_calls = std::cell::Cell::new(0usize);
+        let resolver = |_: &str, _: Option<&str>| -> Option<FileAnalysisSnapshot> {
+            resolver_calls.set(resolver_calls.get() + 1);
+            Some(FileAnalysisSnapshot::default())
+        };
+        let parent = FileAnalysisSnapshot {
+            imports: vec![AnalyzedImport {
+                source: "./DirectComp.vue".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::instance(0),
+                is_type_only: false,
+                bindings: vec![AnalyzedImportBinding {
+                    name: "DirectComp".to_string(),
+                    kind: ImportBindingKind::Default,
+                    imported_name: None,
+                    is_type_only: false,
+                    vue_api: None,
+                    span: verter_span::Span::new(0, 0),
+                }],
+                span: verter_span::Span::new(0, 0),
+                resolved_canonical_id: None,
+            }],
+            ..Default::default()
+        };
+
+        let _ = completions_at_position(
+            &position,
+            &source,
+            &project_carrier_blocks(&structure),
+            Some(&parent),
+            &line_index,
+            Some(&resolver),
+            None,
+            Some("file:///ws/Parent.vue"),
+            false,
+            Some(&structure),
+        );
+        assert_eq!(
+            resolver_calls.get(),
+            0,
+            "{suffix:?}: fail-closed geometry must leave resolution/provider ownership untouched"
+        );
+    }
+}
+
 fn assert_svelte_parent_prop_syntax_for_resolved_import(import_source: &str) {
     let source = "<Child ></Child>";
     let blocks = test_carrier_blocks(source);
@@ -3385,7 +3619,7 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
     template.components.push(d5_component(
         "IdeSurfaceChild",
         "./IdeSurfaceChild.svelte",
-        vec![],
+        vec!["usedPublic".to_string()],
     ));
     parent.template = Some(template.into());
 
@@ -3421,6 +3655,35 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
                 },
             ),
         ],
+        defined_slots: vec![
+            verter_semantic::analysis::template::DefinedSlot {
+                name: "header".to_string(),
+                has_bindings: false,
+                binding_names: Vec::new(),
+                binding_expressions: Vec::new(),
+                binding_value_spans: Vec::new(),
+                has_fallback_content: false,
+                span: verter_span::Span::new(0, 0),
+            },
+            verter_semantic::analysis::template::DefinedSlot {
+                name: "footer".to_string(),
+                has_bindings: false,
+                binding_names: Vec::new(),
+                binding_expressions: Vec::new(),
+                binding_value_spans: Vec::new(),
+                has_fallback_content: false,
+                span: verter_span::Span::new(0, 0),
+            },
+            verter_semantic::analysis::template::DefinedSlot {
+                name: "usedPublic".to_string(),
+                has_bindings: false,
+                binding_names: Vec::new(),
+                binding_expressions: Vec::new(),
+                binding_value_spans: Vec::new(),
+                has_fallback_content: false,
+                span: verter_span::Span::new(0, 0),
+            },
+        ],
         ..Default::default()
     };
     let child = FileAnalysisSnapshot {
@@ -3453,6 +3716,19 @@ fn test_svelte_snippet_slot_completions_ignore_display_text_for_eligibility() {
     assert!(
         labels.contains(&"header"),
         "typed-role snippet prop must be offered despite perturbed display, got: {labels:?}"
+    );
+    assert!(
+        labels.contains(&"footer"),
+        "the committed public slot surface must supplement callable-role props: {labels:?}"
+    );
+    let header = items.iter().find(|item| item.label == "header").unwrap();
+    assert_eq!(header.detail.as_deref(), Some("DisplayWasPerturbed"));
+    let footer = items.iter().find(|item| item.label == "footer").unwrap();
+    assert_eq!(footer.kind, Some(CompletionItemKind::FIELD));
+    assert_eq!(footer.detail.as_deref(), Some("slot"));
+    assert!(
+        !labels.contains(&"usedPublic"),
+        "used public slots must stay filtered: {labels:?}"
     );
     for rejected in ["notHeader", "extras", "pending"] {
         assert!(
@@ -3534,7 +3810,11 @@ fn component_at_cursor_ignores_decoy_tag_inside_attribute_string() {
         .push(d5_component("Fake", "./Fake.vue", vec![]));
     let structure = test_structure(source, false);
     let facts = crate::documents::carrier_structure::project_markup_open_tags(&structure);
-    let result = find_component_at_cursor(cursor, Some(&facts), "Widget", &template);
+    let analysis = FileAnalysisSnapshot {
+        template: Some(template.into()),
+        ..Default::default()
+    };
+    let result = find_component_at_cursor(cursor, Some(&facts), "Widget", &analysis);
     assert_ne!(
         result,
         Some("Fake".to_string()),

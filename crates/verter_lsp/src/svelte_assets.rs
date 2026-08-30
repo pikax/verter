@@ -2,7 +2,8 @@
 //! shim and its transitive `svelte` dependency.
 //!
 //! The Svelte IDE projection opens each `.svelte.tsx` with the per-file pragma
-//! `/** @jsxImportSource @verter/svelte-jsx */`. TSGO and the inferred project
+//! `/** @jsxImportSource @verter/svelte-jsx */`, optionally preceded by exact
+//! compiler-lifted `// @ts-check` / `// @ts-nocheck` lines. TSGO and the inferred project
 //! read REAL files (virtual content cannot serve them), so the host
 //! MATERIALIZES the Verter-owned shim once per host version into its OWN data
 //! directory (NEVER the user workspace) and path-maps the inferred project at
@@ -68,13 +69,26 @@ enum SvelteJsxAssetNamespace {
 }
 
 impl SvelteJsxAssetNamespace {
-    fn from_carrier(content: &str) -> Option<(Self, &'static str)> {
-        if content.starts_with(SVELTE_JSX_HTML_PRAGMA) {
-            Some((Self::Html, SVELTE_JSX_HTML_PRAGMA))
-        } else if content.starts_with(SVELTE_JSX_SVG_PRAGMA) {
-            Some((Self::Svg, SVELTE_JSX_SVG_PRAGMA))
-        } else if content.starts_with(SVELTE_JSX_MATHML_PRAGMA) {
-            Some((Self::MathMl, SVELTE_JSX_MATHML_PRAGMA))
+    fn from_carrier(content: &str) -> Option<(Self, &'static str, usize)> {
+        let mut pragma_start = 0;
+        loop {
+            let remaining = &content[pragma_start..];
+            let directive_len = ["// @ts-check\n", "// @ts-nocheck\n"]
+                .into_iter()
+                .find_map(|directive| remaining.starts_with(directive).then_some(directive.len()));
+            let Some(directive_len) = directive_len else {
+                break;
+            };
+            pragma_start += directive_len;
+        }
+
+        let pragma_and_body = &content[pragma_start..];
+        if pragma_and_body.starts_with(SVELTE_JSX_HTML_PRAGMA) {
+            Some((Self::Html, SVELTE_JSX_HTML_PRAGMA, pragma_start))
+        } else if pragma_and_body.starts_with(SVELTE_JSX_SVG_PRAGMA) {
+            Some((Self::Svg, SVELTE_JSX_SVG_PRAGMA, pragma_start))
+        } else if pragma_and_body.starts_with(SVELTE_JSX_MATHML_PRAGMA) {
+            Some((Self::MathMl, SVELTE_JSX_MATHML_PRAGMA, pragma_start))
         } else {
             None
         }
@@ -393,7 +407,7 @@ fn owner_asset_directory(namespace: SvelteJsxAssetNamespace, key: &str) -> PathB
 /// (nothing would be materialized).
 #[cfg(test)]
 pub(crate) fn owner_asset_dir_for_test(provider_path: &str, content: &str) -> Option<PathBuf> {
-    let (namespace, _) = SvelteJsxAssetNamespace::from_carrier(content)?;
+    let (namespace, _, _) = SvelteJsxAssetNamespace::from_carrier(content)?;
     let SvelteOwnerResolution::Usable { package, .. } =
         resolve_svelte_owner(SvelteOwnerAnchor::document(provider_path))
     else {
@@ -465,7 +479,9 @@ pub(crate) fn prepare_managed_tsgo_svelte_carrier(
     provider_path: &str,
     content: &str,
 ) -> std::io::Result<Option<PreparedManagedTsgoSvelteCarrier>> {
-    let Some((asset_namespace, pragma)) = SvelteJsxAssetNamespace::from_carrier(content) else {
+    let Some((asset_namespace, pragma, pragma_start)) =
+        SvelteJsxAssetNamespace::from_carrier(content)
+    else {
         return Ok(None);
     };
     let SvelteOwnerResolution::Usable { package, .. } =
@@ -494,8 +510,9 @@ pub(crate) fn prepare_managed_tsgo_svelte_carrier(
         "/** @jsxRuntime classic */ /** @jsx {factory_namespace}.h */ /** @jsxFrag {factory_namespace}.Fragment */ import * as {factory_namespace} from {import_path};\n"
     );
     let mut prepared = String::with_capacity(content.len() - pragma.len() + provider_intro.len());
+    prepared.push_str(&content[..pragma_start]);
     prepared.push_str(&provider_intro);
-    prepared.push_str(&content[pragma.len()..]);
+    prepared.push_str(&content[pragma_start + pragma.len()..]);
 
     Ok(Some(PreparedManagedTsgoSvelteCarrier {
         content: prepared,
@@ -1246,12 +1263,14 @@ mod tests {
                 "jsx": "preserve",
                 "jsxImportSource": "vue",
                 "strict": true,
+                "allowJs": true,
+                "checkJs": true,
                 "noEmit": true,
                 "skipLibCheck": true,
                 "allowImportingTsExtensions": true,
                 "paths": paths,
             },
-            "include": ["**/*.ts", "**/*.tsx"],
+            "include": ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"],
         });
         std::fs::write(
             root.join("tsconfig.json"),
@@ -1427,5 +1446,99 @@ mod tests {
              at the JSX attribute with TS2322; output:\n{invalid_out}\n{}",
             invalid.content
         );
+    }
+
+    #[test]
+    fn managed_tsgo_javascript_carrier_uses_owner_bound_classic_jsx_intrinsics() {
+        let Some(_) = locate_type_checker() else {
+            eprintln!("SKIP managed-tsgo JavaScript JSX carrier: no tsgo/tsc in node_modules/.bin");
+            return;
+        };
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        vendor_svelte_into(root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let carrier_path = root.join("src/App.svelte.jsx");
+        let source = concat!(
+            "/** @jsxImportSource @verter/svelte-jsx */\n",
+            "function render() { return (<div><button>ok</button></div>); }\n",
+            "void render; export {};\n",
+        );
+        let prepared = prepare_managed_tsgo_svelte_carrier(&carrier_path.to_string_lossy(), source)
+            .expect("prepare managed-tsgo JavaScript carrier")
+            .expect("Svelte carrier with an installed owner must be specialized");
+        std::fs::write(&carrier_path, &prepared.content).unwrap();
+
+        let (ok, out) = typecheck_with_paths(root, &serde_json::json!({}));
+        assert!(
+            ok,
+            "the owner-bound JavaScript carrier must expose JSX.IntrinsicElements without TS7026:\n{out}\n{}",
+            prepared.content
+        );
+    }
+
+    #[test]
+    fn managed_tsgo_svelte_carrier_specializes_after_lifted_file_check_directives() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        vendor_svelte_into(root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+
+        for extension in ["tsx", "jsx"] {
+            let carrier_path = root.join(format!("src/App.svelte.{extension}"));
+            for directive in ["@ts-check", "@ts-nocheck"] {
+                let source = format!(
+                    "// {directive}\n/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\nexport {{}};\n"
+                );
+                let prepared =
+                    prepare_managed_tsgo_svelte_carrier(&carrier_path.to_string_lossy(), &source)
+                        .expect("prepare managed-tsgo Svelte carrier")
+                        .expect(
+                            "a lifted file-check directive must not hide the Svelte JSX pragma",
+                        );
+
+                assert!(
+                    prepared.content.starts_with(&format!(
+                        "// {directive}\n/** @jsxRuntime classic */"
+                    )),
+                    "the file-check directive remains first and only the following pragma changes: {}",
+                    prepared.content
+                );
+                assert_eq!(
+                    prepared.content.lines().count(),
+                    source.lines().count(),
+                    "specialization remains one generated line for one generated line"
+                );
+                assert_eq!(
+                    prepared.content.lines().skip(2).collect::<Vec<_>>(),
+                    source.lines().skip(2).collect::<Vec<_>>(),
+                    "every generated body line retains its source-map line identity"
+                );
+                assert!(!prepared.content.contains("@jsxImportSource"));
+            }
+        }
+    }
+
+    #[test]
+    fn managed_tsgo_svelte_carrier_rejects_noncanonical_leading_prefixes() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        vendor_svelte_into(root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let carrier_path = root.join("src/App.svelte.jsx");
+
+        for source in [
+            "// @ts-check: forged\n/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n",
+            "// commentary\n/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n",
+            "\n// @ts-check\n/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n",
+            "// @ts-check\r\n/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n",
+        ] {
+            assert!(
+                prepare_managed_tsgo_svelte_carrier(&carrier_path.to_string_lossy(), source)
+                    .expect("an unrecognized prefix is a typed non-carrier outcome")
+                    .is_none(),
+                "only compiler-owned canonical lifted lines may precede the Svelte JSX pragma: {source:?}"
+            );
+        }
     }
 }

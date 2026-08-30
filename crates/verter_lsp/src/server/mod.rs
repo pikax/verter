@@ -361,14 +361,69 @@ struct CompletionSnapshotPause {
 /// run the pass inline, so a request cancelled at its deadline cannot prevent
 /// the receipt from being minted (the cancel-loop root this design deletes).
 ///
-/// All maps are owned together because all must be evicted together when the
-/// workspace is REPLACED. `content_generation` is per-workspace and a fresh
-/// workspace restarts it low, so an entry minted against the previous workspace
-/// can collide with a low generation of the new one and serve a warm skip for a
-/// pass that never ran against it. Eviction also bounds the maps' growth across a
-/// long session.
+/// Receipt and pass-observation maps are owned together because their
+/// generation-bearing entries must be evicted when the workspace is REPLACED.
+/// `content_generation` is per-workspace and a fresh workspace restarts it low,
+/// so a receipt minted against the previous workspace can collide with a low
+/// generation of the new one and serve a warm skip for a pass that never ran
+/// against it. The generation-free driver reservation survives replacement so
+/// an old driver and a new trigger cannot overlap for one canonical identity.
 mod import_sync_state;
 pub(crate) use import_sync_state::ImportSyncMemo;
+
+#[derive(Clone, Debug)]
+struct ImportedChildContractFreshnessKey {
+    workspace_content_generation: u64,
+    resolver_snapshot_generation: u64,
+    published_root: Option<Arc<verter_workspace::PublishedRoot>>,
+    project_generation: u64,
+}
+
+impl PartialEq for ImportedChildContractFreshnessKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.workspace_content_generation == other.workspace_content_generation
+            && self.resolver_snapshot_generation == other.resolver_snapshot_generation
+            && self.project_generation == other.project_generation
+            && match (&self.published_root, &other.published_root) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for ImportedChildContractFreshnessKey {}
+
+#[derive(Clone)]
+struct ChildPublicContractSnapshot {
+    contract: verter_session::framework::ComponentContractAvailability,
+    publication_witness: verter_session::framework::api_projector::ComponentApiProjectionWitness,
+    host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    freshness: ImportedChildContractFreshnessKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AuthoredBarrelComponentRouteIdentity {
+    source: String,
+    imported_name: String,
+    local_binding: String,
+    kind: verter_semantic::analysis::types::ImportBindingKind,
+    import_span: verter_span::Span,
+    binding_span: verter_span::Span,
+}
+
+#[derive(Clone)]
+struct BarrelComponentRouteSnapshot {
+    identity: AuthoredBarrelComponentRouteIdentity,
+    terminal_canonical_id: String,
+    contract: verter_session::framework::ComponentContractAvailability,
+    publication_witness: verter_session::framework::api_projector::ComponentApiProjectionWitness,
+    terminal_host_revision: verter_session::carrier_publication_store::HostSourceRevisionToken,
+    freshness: ImportedChildContractFreshnessKey,
+}
+
+#[cfg(test)]
+type ChildContractAfterProjectionHook = Box<dyn FnOnce() + Send + 'static>;
 
 /// The Verter language server implementation.
 ///
@@ -487,6 +542,18 @@ pub struct ServerCore {
     /// Per-document import-set freshness memo and its singleflight locks.
     /// Shared with `background_init` so a workspace swap evicts both.
     import_sync: Arc<ImportSyncMemo>,
+    /// Public component contracts composed by the imported-child background
+    /// publication lane. Interactive completion only captures a revision- and
+    /// workspace-fenced entry; it never starts projection work.
+    child_public_contracts: Arc<DashMap<String, ChildPublicContractSnapshot>>,
+    /// Background-published authored barrel bindings. Interactive completion
+    /// uses this exact route instead of resolving/re-walking exports.
+    barrel_component_routes: Arc<DashMap<(String, String), BarrelComponentRouteSnapshot>>,
+    #[cfg(test)]
+    child_public_contract_projection_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    child_contract_after_projection_hook:
+        parking_lot::Mutex<Option<ChildContractAfterProjectionHook>>,
     /// Project-level coalescing singleflight for `resync_open_files`. Background
     /// init fires a full close+reopen sweep of every open file up to twice per
     /// pass, and a superseded init generation can fire it concurrently with the
@@ -1176,6 +1243,12 @@ impl VerterLanguageServer {
             ide_sync_open_generations,
             ide_sync_next_generation: std::sync::atomic::AtomicU64::new(1),
             import_sync: Arc::new(ImportSyncMemo::default()),
+            child_public_contracts: Arc::new(DashMap::new()),
+            barrel_component_routes: Arc::new(DashMap::new()),
+            #[cfg(test)]
+            child_public_contract_projection_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            child_contract_after_projection_hook: parking_lot::Mutex::new(None),
             resync_coordinator: Arc::new(crate::resync_singleflight::ResyncCoordinator::new()),
             #[cfg(test)]
             ide_sync_before_lease_pause: parking_lot::Mutex::new(None),

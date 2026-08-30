@@ -703,7 +703,8 @@ mod tests {
         std::fs::create_dir_all(provider_path.parent().expect("provider parent"))
             .expect("provider parent directory");
         let provider_path = provider_path.to_string_lossy().into_owned();
-        let source = "/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n";
+        let source =
+            "// @ts-check\n/** @jsxImportSource @verter/svelte-jsx */\nconst view = <div />;\n";
 
         let mock = MockTypeProvider::new();
         let sync = ProjectSync::new_with_kind(
@@ -725,6 +726,11 @@ mod tests {
         };
         assert_ne!(delivered, source, "the managed tsgo carrier is specialized");
         assert_eq!(delivered.lines().count(), source.lines().count());
+        assert!(
+            delivered.starts_with("// @ts-check\n/** @jsxRuntime classic */"),
+            "the lifted file-check directive must remain first while only the following \
+             Svelte JSX pragma is specialized: {delivered}"
+        );
         assert_eq!(
             sync.synced_tsx_content(&provider_path).as_deref(),
             Some(delivered),

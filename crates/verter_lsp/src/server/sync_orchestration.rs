@@ -75,6 +75,401 @@ impl ImportSyncOutcome {
 }
 
 impl VerterLanguageServer {
+    pub(super) fn imported_child_contract_freshness_key(
+        &self,
+    ) -> Option<super::ImportedChildContractFreshnessKey> {
+        let (workspace_content_generation, resolver_snapshot_generation) =
+            self.import_sync_freshness_key()?;
+        let host = self.documents.host();
+        Some(super::ImportedChildContractFreshnessKey {
+            workspace_content_generation,
+            resolver_snapshot_generation,
+            published_root: host.workspace_read().published_root(),
+            project_generation: host.project_type_store().current_project_generation(),
+        })
+    }
+
+    fn child_contract_freshness_advances_only_content(
+        before: &super::ImportedChildContractFreshnessKey,
+        after: &super::ImportedChildContractFreshnessKey,
+    ) -> bool {
+        after.workspace_content_generation == before.workspace_content_generation.saturating_add(1)
+            && after.resolver_snapshot_generation == before.resolver_snapshot_generation
+            && after.project_generation == before.project_generation
+            && match (&before.published_root, &after.published_root) {
+                (Some(before), Some(after)) => std::sync::Arc::ptr_eq(before, after),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    fn import_identity_is_current(
+        &self,
+        parent_canonical_id: &str,
+        identity: &super::AuthoredBarrelComponentRouteIdentity,
+    ) -> bool {
+        self.documents
+            .host()
+            .get_script_ingress(parent_canonical_id)
+            .is_some_and(|ingress| {
+                ingress.imports.iter().any(|import| {
+                    import.source == identity.source
+                        && import.span == identity.import_span
+                        && import.bindings.iter().any(|binding| {
+                            binding.name == identity.local_binding
+                                && binding.imported_name.as_deref()
+                                    == Some(identity.imported_name.as_str())
+                                && binding.kind == identity.kind
+                                && binding.span == identity.binding_span
+                        })
+                })
+            })
+    }
+
+    fn imported_child_contract_provenance(
+        &self,
+        canonical_id: &str,
+    ) -> Option<(
+        verter_session::carrier_publication_store::HostSourceRevisionToken,
+        super::ImportedChildContractFreshnessKey,
+    )> {
+        let host_revision = self
+            .documents
+            .host()
+            .registered_source_revision_token(canonical_id)?;
+        let freshness = self.imported_child_contract_freshness_key()?;
+        Some((host_revision, freshness))
+    }
+
+    /// Pure capture of a background-published child contract. The source and
+    /// workspace witnesses are checked on both sides of the map clone so a
+    /// concurrent edit or resolver publication cannot serve a stale contract.
+    pub(super) fn cached_child_public_contract(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session::framework::ComponentContractAvailability> {
+        let (host_revision, freshness) = self.imported_child_contract_provenance(canonical_id)?;
+        let snapshot = self.child_public_contracts.get(canonical_id)?.clone();
+        if snapshot.host_revision != host_revision
+            || snapshot.freshness != freshness
+            || !snapshot
+                .publication_witness
+                .is_current(self.documents.host())
+        {
+            return None;
+        }
+        let (after_host_revision, after_freshness) =
+            self.imported_child_contract_provenance(canonical_id)?;
+        (after_host_revision == host_revision
+            && after_freshness == freshness
+            && snapshot
+                .publication_witness
+                .is_current(self.documents.host()))
+        .then_some(snapshot.contract)
+    }
+
+    /// Pure capture of a background-published authored barrel binding. The
+    /// current parser import fact, workspace/resolver generation, and terminal
+    /// child revision are fenced on both sides of the map clone.
+    pub(super) fn cached_barrel_component_contract(
+        &self,
+        parent_canonical_id: &str,
+        import_source: &str,
+        local_binding: &str,
+    ) -> Option<verter_session::framework::ComponentContractAvailability> {
+        let freshness = self.imported_child_contract_freshness_key()?;
+        let key = (parent_canonical_id.to_string(), local_binding.to_string());
+        let snapshot = self.barrel_component_routes.get(&key)?.clone();
+        if snapshot.identity.source != import_source
+            || snapshot.freshness != freshness
+            || !self.import_identity_is_current(parent_canonical_id, &snapshot.identity)
+            || self
+                .documents
+                .host()
+                .registered_source_revision_token(&snapshot.terminal_canonical_id)
+                != Some(snapshot.terminal_host_revision)
+            || !snapshot
+                .publication_witness
+                .is_current(self.documents.host())
+        {
+            return None;
+        }
+        let after_freshness = self.imported_child_contract_freshness_key()?;
+        (after_freshness == freshness
+            && self.import_identity_is_current(parent_canonical_id, &snapshot.identity)
+            && self
+                .documents
+                .host()
+                .registered_source_revision_token(&snapshot.terminal_canonical_id)
+                == Some(snapshot.terminal_host_revision)
+            && snapshot
+                .publication_witness
+                .is_current(self.documents.host()))
+        .then_some(snapshot.contract)
+    }
+
+    pub(super) fn publish_barrel_component_route(
+        &self,
+        parent_canonical_id: &str,
+        identity: super::AuthoredBarrelComponentRouteIdentity,
+        terminal_canonical_id: &str,
+    ) -> ImportSyncOutcome {
+        if !self.import_identity_is_current(parent_canonical_id, &identity) {
+            return ImportSyncOutcome::Retry;
+        }
+        let Some(child) = self
+            .child_public_contracts
+            .get(terminal_canonical_id)
+            .map(|entry| entry.clone())
+        else {
+            return ImportSyncOutcome::Retry;
+        };
+        let Some((terminal_host_revision, freshness)) =
+            self.imported_child_contract_provenance(terminal_canonical_id)
+        else {
+            return ImportSyncOutcome::Retry;
+        };
+        if child.host_revision != terminal_host_revision
+            || child.freshness != freshness
+            || !child.publication_witness.is_current(self.documents.host())
+        {
+            return ImportSyncOutcome::Retry;
+        }
+        let key = (
+            parent_canonical_id.to_string(),
+            identity.local_binding.clone(),
+        );
+        self.barrel_component_routes.insert(
+            key.clone(),
+            super::BarrelComponentRouteSnapshot {
+                identity,
+                terminal_canonical_id: terminal_canonical_id.to_string(),
+                contract: child.contract,
+                publication_witness: child.publication_witness,
+                terminal_host_revision,
+                freshness,
+            },
+        );
+        let current = self
+            .barrel_component_routes
+            .get(&key)
+            .map(|entry| entry.clone());
+        if current.as_ref().is_none_or(|route| {
+            self.cached_barrel_component_contract(
+                parent_canonical_id,
+                &route.identity.source,
+                &route.identity.local_binding,
+            )
+            .is_none()
+        }) {
+            self.barrel_component_routes.remove(&key);
+            return ImportSyncOutcome::Retry;
+        }
+        ImportSyncOutcome::Complete
+    }
+
+    /// Whether a fresh import receipt may return without revisiting imported
+    /// child contracts. Stale direct-child or previously-published barrel
+    /// routes force the background pass to repair their contract snapshots.
+    pub(super) fn imported_child_contracts_current_for_parent(
+        &self,
+        parent_canonical_id: &str,
+    ) -> bool {
+        let Some(ingress) = self
+            .documents
+            .host()
+            .get_script_ingress(parent_canonical_id)
+        else {
+            return false;
+        };
+        for import in ingress.imports.iter() {
+            let direct_carrier = import
+                .resolved_canonical_id
+                .as_deref()
+                .filter(|resolved| verter_semantic::resolver_core::path_is_carrier(resolved))
+                .map(str::to_string)
+                .or_else(|| {
+                    (verter_semantic::resolver_core::is_relative_specifier(&import.source)
+                        && verter_semantic::resolver_core::path_is_carrier(&import.source))
+                    .then(|| {
+                        verter_semantic::resolver_core::join_paths(
+                            &verter_semantic::resolver_core::parent_dir(parent_canonical_id),
+                            &import.source,
+                        )
+                    })
+                });
+            if direct_carrier
+                .as_deref()
+                .is_some_and(|resolved| self.cached_child_public_contract(resolved).is_none())
+            {
+                return false;
+            }
+            for binding in &import.bindings {
+                let binding_had_published_route =
+                    self.barrel_component_routes.iter().any(|entry| {
+                        entry.key().0 == parent_canonical_id
+                            && entry.value().identity.source == import.source
+                            && entry.value().identity.imported_name
+                                == binding.imported_name.as_deref().unwrap_or_default()
+                    });
+                let key = (parent_canonical_id.to_string(), binding.name.clone());
+                if binding_had_published_route
+                    && (!self.barrel_component_routes.contains_key(&key)
+                        || self
+                            .cached_barrel_component_contract(
+                                parent_canonical_id,
+                                &import.source,
+                                &binding.name,
+                            )
+                            .is_none())
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Compose and publish a loaded imported child's component contract on the
+    /// existing background import-publication lane. The caller holds the
+    /// child's lifecycle lease, so this projection cannot race did-open/close;
+    /// the explicit source + workspace witnesses fence edits and resolver
+    /// updates that do not need that lease.
+    fn publish_loaded_child_contract(&self, canonical_id: &str) -> ImportSyncOutcome {
+        if self.cached_child_public_contract(canonical_id).is_some() {
+            return ImportSyncOutcome::Complete;
+        }
+        let Some((host_revision, freshness)) =
+            self.imported_child_contract_provenance(canonical_id)
+        else {
+            return ImportSyncOutcome::Retry;
+        };
+        #[cfg(test)]
+        self.child_public_contract_projection_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let projection = match block_in_place_if_available(|| {
+            self.documents
+                .host()
+                .get_public_api_projection(canonical_id)
+        }) {
+            Ok(Some(projection)) => projection,
+            Ok(None) => return ImportSyncOutcome::Retry,
+            Err(error) => {
+                crate::report_public_api_projection_error(
+                    "sync_imported_carrier_api_lightweight.contract",
+                    canonical_id,
+                    &error,
+                );
+                return ImportSyncOutcome::Retry;
+            }
+        };
+        let Some(publication_witness) = projection.publication_witness else {
+            return ImportSyncOutcome::Retry;
+        };
+        if !publication_witness.is_current(self.documents.host()) {
+            return ImportSyncOutcome::Retry;
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.child_contract_after_projection_hook.lock().take() {
+            hook();
+        }
+        if self.imported_child_contract_provenance(canonical_id)
+            != Some((host_revision, freshness.clone()))
+        {
+            return ImportSyncOutcome::Retry;
+        }
+        self.child_public_contracts.insert(
+            canonical_id.to_string(),
+            super::ChildPublicContractSnapshot {
+                contract: projection.contract,
+                publication_witness,
+                host_revision,
+                freshness: freshness.clone(),
+            },
+        );
+        if self.imported_child_contract_provenance(canonical_id) != Some((host_revision, freshness))
+            || self
+                .child_public_contracts
+                .get(canonical_id)
+                .is_none_or(|snapshot| {
+                    !snapshot
+                        .publication_witness
+                        .is_current(self.documents.host())
+                })
+        {
+            self.child_public_contracts.remove(canonical_id);
+            return ImportSyncOutcome::Retry;
+        }
+        ImportSyncOutcome::Complete
+    }
+
+    /// Restamp reusable imported-child contracts after the existing
+    /// isolated-edit proof established that only the parent document's
+    /// content generation moved and its dependency frontier is unchanged.
+    /// Every semantic and publication witness remains independently fenced;
+    /// this performs no projection or resolver work.
+    pub(super) fn promote_child_contracts_after_isolated_edit(
+        &self,
+        before: super::ImportedChildContractFreshnessKey,
+        after: super::ImportedChildContractFreshnessKey,
+        dependency_frontier_unchanged: bool,
+    ) {
+        if !dependency_frontier_unchanged
+            || !Self::child_contract_freshness_advances_only_content(&before, &after)
+        {
+            return;
+        }
+        let host = self.documents.host();
+        for mut snapshot in self.child_public_contracts.iter_mut() {
+            if snapshot.freshness == before
+                && host.registered_source_revision_token(snapshot.key())
+                    == Some(snapshot.host_revision)
+                && snapshot.publication_witness.is_current(host)
+            {
+                snapshot.freshness = after.clone();
+            }
+        }
+        for mut route in self.barrel_component_routes.iter_mut() {
+            if route.freshness == before
+                && self.import_identity_is_current(&route.key().0, &route.identity)
+                && host.registered_source_revision_token(&route.terminal_canonical_id)
+                    == Some(route.terminal_host_revision)
+                && route.publication_witness.is_current(host)
+            {
+                route.freshness = after.clone();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn child_public_contract_projection_count_for_test(&self) -> usize {
+        self.child_public_contract_projection_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn evict_child_public_contract_for_test(&self, canonical_id: &str) {
+        self.child_public_contracts.remove(canonical_id);
+    }
+
+    #[cfg(test)]
+    pub(super) fn evict_barrel_component_route_for_test(
+        &self,
+        parent_canonical_id: &str,
+        local_binding: &str,
+    ) {
+        self.barrel_component_routes
+            .remove(&(parent_canonical_id.to_string(), local_binding.to_string()));
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_child_contract_after_projection_hook_for_test(
+        &self,
+        hook: super::ChildContractAfterProjectionHook,
+    ) {
+        *self.child_contract_after_projection_hook.lock() = Some(hook);
+    }
+
     pub(super) async fn publish_full_diagnostics(&self, uri: &Uri) {
         let Some(snapshot) = self.documents.snapshot_identity(uri) else {
             return;
@@ -1642,6 +2037,8 @@ impl VerterLanguageServer {
         self.documents.set_workspace(Arc::clone(&workspace));
         *self.vfs_workspace.write() = Some(workspace);
         self.import_sync.evict_all();
+        self.child_public_contracts.clear();
+        self.barrel_component_routes.clear();
     }
 
     pub(super) fn current_file_needs_inline_type_provider_sync(&self, uri: &Uri) -> bool {
@@ -2355,6 +2752,27 @@ impl VerterLanguageServer {
             .map(|s| s.ownership_ready)
             .unwrap_or(false);
 
+        // Child contracts are an LSP-owned background product, independent of
+        // an external TypeScript provider. A provider-less server still loads
+        // the imported carrier and composes the contract under this same child
+        // lifecycle lease, without opening or updating any provider buffers.
+        if matches!(self.type_provider_kind, crate::TypeProviderKind::None) {
+            if self.documents.host().get_source(canonical_id).is_none()
+                && !self.documents.host().ensure_loaded(canonical_id)
+            {
+                return ImportSyncOutcome::Retry;
+            }
+            return self.publish_loaded_child_contract(canonical_id);
+        }
+
+        // A byte-current provider delivery and a contract publication have
+        // separate witnesses. Re-entering the common background wrapper must
+        // be quiet only when BOTH are current; otherwise compose just the
+        // missing contract under this already-held child lifecycle lease.
+        if self.imported_carrier_already_delivered(canonical_id) {
+            return self.publish_loaded_child_contract(canonical_id);
+        }
+
         if matches!(
             self.type_provider_kind,
             crate::TypeProviderKind::EditorTsserver
@@ -2364,7 +2782,9 @@ impl VerterLanguageServer {
             } else {
                 self.queue_snapshot_provider_sync(canonical_id.to_string());
             }
-            return ImportSyncOutcome::Complete;
+            let provider_outcome =
+                ImportSyncOutcome::from_ok(self.imported_carrier_already_delivered(canonical_id));
+            return provider_outcome.and(self.publish_loaded_child_contract(canonical_id));
         }
 
         // Fast path: host already has the file — sync directly from cached artifacts.
@@ -2441,7 +2861,8 @@ impl VerterLanguageServer {
                 let delivered = self
                     .sync_carrier_api_unresolved(canonical_id, api.ts_labeled_code())
                     .await;
-                return outcome.and(ImportSyncOutcome::from_ok(delivered));
+                let provider_outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
+                return provider_outcome.and(self.publish_loaded_child_contract(canonical_id));
             }
 
             let mut outcome = if ide_missing_for_tsgo {
@@ -2590,7 +3011,7 @@ impl VerterLanguageServer {
                     }
                 }
             }
-            return outcome;
+            return outcome.and(self.publish_loaded_child_contract(canonical_id));
         }
 
         if !ownership_ready {
@@ -2703,7 +3124,8 @@ impl VerterLanguageServer {
                     let delivered = self
                         .sync_carrier_api_unresolved(canonical_id, api.ts_labeled_code())
                         .await;
-                    return outcome.and(ImportSyncOutcome::from_ok(delivered));
+                    let provider_outcome = outcome.and(ImportSyncOutcome::from_ok(delivered));
+                    return provider_outcome.and(self.publish_loaded_child_contract(canonical_id));
                 }
             }
 
@@ -2715,7 +3137,9 @@ impl VerterLanguageServer {
 
         // Slow path: file not in host yet — full disk read + upsert + compile + sync.
         self.resync_background_carrier_file(canonical_id).await;
-        ImportSyncOutcome::Complete
+        let provider_outcome =
+            ImportSyncOutcome::from_ok(self.imported_carrier_already_delivered(canonical_id));
+        provider_outcome.and(self.publish_loaded_child_contract(canonical_id))
     }
 
     pub(super) async fn resync_background_carrier_file(&self, canonical_id: &str) {

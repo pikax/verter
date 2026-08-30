@@ -1439,12 +1439,13 @@ pub(super) struct DidOpenProviderSyncPolicy {
     pub(super) background_api_sync: bool,
 }
 
-pub(super) fn did_open_startup_policy(kind: crate::TypeProviderKind) -> DidOpenStartupPolicy {
+pub(super) fn did_open_startup_policy(_kind: crate::TypeProviderKind) -> DidOpenStartupPolicy {
     DidOpenStartupPolicy {
-        // When a type provider is active, eagerly sync imported carrier APIs
-        // (any framework carrier — `.vue`, `.svelte`, …) so that
-        // hover/completions/go-to-definition work on <ChildComponent> immediately.
-        sync_imported_carrier_apis: !matches!(kind, crate::TypeProviderKind::None),
+        // Imported-child publication owns both provider buffers (when a
+        // provider exists) and provider-neutral component contracts. Run the
+        // common background lane for every topology so native completion has
+        // the child contract even when no external provider is configured.
+        sync_imported_carrier_apis: true,
         // Diagnostics are pushed by the sync coordinator after open/change settles.
         publish_diagnostics: false,
     }

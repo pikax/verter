@@ -14,8 +14,11 @@
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 
-use crate::documents::carrier_structure::project_carrier_blocks_for_document;
-use crate::features::completion::completions_at_position;
+use crate::documents::carrier_structure::{
+    authored_component_attribute_name_context, project_carrier_blocks_for_document,
+    svelte_head_cursor_fact, SvelteHeadCursorFact,
+};
+use crate::features::completion::{completions_at_position, to_kebab_case};
 use crate::features::cursor_context::{
     classify_cursor_context_for_language, classify_expression_context_with_trigger,
     CarrierTemplateLanguage, CursorContext, ExpressionContext, TemplateCursorContext,
@@ -37,6 +40,82 @@ use super::VerterLanguageServer;
 #[path = "nav_features_support.rs"]
 mod nav_features_support;
 use nav_features_support::*;
+
+pub(super) fn child_contract_completion_analysis(
+    availability: verter_session::framework::ComponentContractAvailability,
+) -> Option<verter_session::FileAnalysisSnapshot> {
+    let verter_session::framework::ComponentContractAvailability::Supported(contract) =
+        availability
+    else {
+        return None;
+    };
+    let prop_definitions = contract
+        .props
+        .iter()
+        .map(|prop| {
+            let materialized = prop.ty.publication.materialized_type();
+            verter_semantic::analysis::AnalyzedPropDefinition {
+                name: prop.name.to_string(),
+                callable_role: verter_type_expr::PropCallableRole::Other,
+                type_annotation: materialized.and_then(|expression| {
+                    verter_type_expr::render_type_expr_display(expression)
+                        .ok()
+                        .map(|rendered| rendered.text)
+                }),
+                has_default: prop.has_default,
+                is_required: !prop.optional,
+                is_boolean: materialized.is_some_and(crate::documents::type_expr_contains_boolean),
+                used_in_template: false,
+                used_in_script: false,
+                span: verter_span::Span::new(0, 0),
+            }
+        })
+        .collect();
+    let emit_definitions = contract
+        .events
+        .iter()
+        .map(
+            |event| verter_semantic::analysis::template::AnalyzedEmitDefinition {
+                event_name: event.name.to_string(),
+                has_validator: false,
+                is_declared: true,
+                emit_locations: Vec::new(),
+                span: verter_span::Span::new(0, 0),
+            },
+        )
+        .collect();
+    let defined_slots = contract
+        .slots
+        .iter()
+        .map(|slot| {
+            let binding_names = slot
+                .input
+                .bindings
+                .iter()
+                .map(|binding| binding.name.to_string())
+                .collect::<Vec<_>>();
+            verter_semantic::analysis::template::DefinedSlot {
+                name: slot.name.to_string(),
+                has_bindings: !binding_names.is_empty(),
+                binding_expressions: vec![String::new(); binding_names.len()],
+                binding_value_spans: vec![verter_span::Span::new(0, 0); binding_names.len()],
+                binding_names,
+                has_fallback_content: false,
+                span: verter_span::Span::new(0, 0),
+            }
+        })
+        .collect();
+    let mut analysis = verter_session::FileAnalysisSnapshot::default();
+    analysis.template = Some(std::sync::Arc::new(
+        verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            prop_definitions,
+            emit_definitions,
+            defined_slots,
+            ..Default::default()
+        },
+    ));
+    Some(analysis)
+}
 
 /// Attach provider-typed `detail` to `v-bind(|)` completion items: for each
 /// offered binding (bounded), a quickinfo at its DECLARATION position supplies
@@ -705,35 +784,115 @@ async fn handle_completion_attempt(
         blocks: Vec<crate::documents::carrier_structure::CarrierBlockView>,
         structure: Option<verter_session::carrier_publication_store::RegisteredFileStructure>,
         canonical_id: String,
+        authored_component_ingress_captured: bool,
     }
     let native_snapshot = (|| {
-        let doc = server.documents.get(uri)?;
-        let (blocks, structure) = if let Some(snapshot) = doc.feature_snapshot.as_ref() {
+        let (source, line_index, blocks, structure, feature_analysis, canonical_id) = {
+            let doc = server.documents.get(uri)?;
+            let (blocks, structure, feature_analysis) = if let Some(snapshot) =
+                doc.feature_snapshot.as_ref()
+            {
+                (
+                    project_carrier_blocks_for_document(&doc),
+                    Some(snapshot.structure().clone()),
+                    snapshot
+                        .analysis()
+                        .map(|envelope| envelope.analysis().as_ref().clone()),
+                )
+            } else {
+                server
+                    .documents
+                    .host()
+                    .registered_file_structure_snapshot(&doc.canonical_id)
+                    .filter(|(structure, _)| structure.source().bytes() == doc.source.as_ref())
+                    .map(|(structure, _)| {
+                        (
+                            crate::documents::carrier_structure::project_carrier_blocks(&structure),
+                            Some(structure),
+                            None,
+                        )
+                    })
+                    .unwrap_or_default()
+            };
             (
-                project_carrier_blocks_for_document(&doc),
-                Some(snapshot.structure().clone()),
+                doc.source.clone(),
+                doc.line_index.as_ref().clone(),
+                blocks,
+                structure,
+                feature_analysis,
+                doc.canonical_id.clone(),
             )
+        };
+
+        // An authored component attribute already has all parent-side routing
+        // facts in the source-stage ingress snapshot. Keep this request path
+        // cache-only: a missing child contract must fail closed instead of
+        // synchronously demanding BUILD analysis while the user is typing.
+        let ingress_analysis = line_index.position_to_offset(position).and_then(|offset| {
+            let structure = structure.as_ref()?;
+            let attribute_context = authored_component_attribute_name_context(structure, offset);
+            let tag_name = attribute_context
+                .as_ref()
+                .map(|context| context.tag().to_string())
+                .or_else(|| {
+                    (CarrierTemplateLanguage::from_uri(uri.as_str())
+                        == Some(CarrierTemplateLanguage::Svelte)
+                        && matches!(
+                            svelte_head_cursor_fact(structure, offset),
+                            Some(SvelteHeadCursorFact::SnippetName)
+                        ))
+                    .then(|| {
+                        crate::documents::carrier_structure::nearest_component_ancestor_tag(
+                            structure, offset,
+                        )
+                    })
+                    .flatten()
+                })?;
+            let ingress = server.documents.host().get_script_ingress(&canonical_id)?;
+            let mut imports = ingress.imports.as_ref().clone();
+            let import = imports.iter_mut().find(|import| {
+                !import.is_type_only
+                    && import.bindings.iter().any(|binding| {
+                        !binding.is_type_only
+                            && (binding.name == tag_name
+                                || to_kebab_case(&binding.name) == tag_name
+                                || binding.name == to_pascal_case(&tag_name))
+                    })
+            })?;
+            if import.resolved_canonical_id.is_none()
+                && verter_semantic::resolver_core::is_relative_specifier(&import.source)
+                && verter_semantic::resolver_core::path_is_carrier(&import.source)
+            {
+                import.resolved_canonical_id = Some(verter_semantic::resolver_core::join_paths(
+                    &verter_semantic::resolver_core::parent_dir(&canonical_id),
+                    &import.source,
+                ));
+            }
+            let analysis = verter_session::FileAnalysisSnapshot {
+                imports,
+                ..Default::default()
+            };
+            if attribute_context.is_none() {
+                if let Some(feature_analysis) = feature_analysis.as_ref() {
+                    return Some(feature_analysis.clone());
+                }
+            }
+            Some(analysis)
+        });
+        let authored_component_ingress_captured = ingress_analysis.is_some();
+        let analysis = if authored_component_ingress_captured {
+            ingress_analysis
         } else {
-            server
-                .documents
-                .host()
-                .registered_file_structure_snapshot(&doc.canonical_id)
-                .filter(|(structure, _)| structure.source().bytes() == doc.source.as_ref())
-                .map(|(structure, _)| {
-                    (
-                        crate::documents::carrier_structure::project_carrier_blocks(&structure),
-                        Some(structure),
-                    )
-                })
-                .unwrap_or_default()
+            server.documents.source_feature_analysis(uri)
         };
         Some(NativeCompletionSnapshot {
-            source: doc.source.clone(),
-            line_index: doc.line_index.as_ref().clone(),
-            analysis: server.documents.get_analysis(uri),
+            source,
+            line_index,
+            analysis,
             blocks,
             structure,
-            canonical_id: crate::documents::uri_to_canonical_id(uri),
+            canonical_id,
+            authored_component_ingress_captured,
         })
     })();
     // Normal attempts release the typing fence before cold child/meta work and
@@ -754,6 +913,7 @@ async fn handle_completion_attempt(
         server.maybe_pause_final_completion_after_snapshot().await;
     }
 
+    let recognized_authored_component_contract_miss = std::cell::Cell::new(false);
     let verter_result = native_snapshot.as_ref().and_then(|native| {
         let canonical_id = &native.canonical_id;
         // The WORKSPACE component scan is opt-in: it enumerates components the
@@ -763,90 +923,76 @@ async fn handle_completion_attempt(
         // TypeScript surface at all, so Verter is its only possible owner and
         // the resolver must be available whether or not the analysis sidebar
         // is switched on.
-        let workspace_component_scan = server.documents.semantic_analysis_enabled();
+        let workspace_component_scan = server.documents.semantic_analysis_enabled()
+            && !native.authored_component_ingress_captured;
         let resolve_component = |import_source: &str,
                                  component_name: Option<&str>|
          -> Option<verter_session::FileAnalysisSnapshot> {
-            let get_component_analysis =
-                |resolved: &str| -> Option<verter_session::FileAnalysisSnapshot> {
-                    server
-                        .documents
-                        .cached_semantic_analysis(resolved)
-                        .or_else(|| server.documents.host().get_analysis(resolved))
-                };
-            let try_follow_reexport = |resolved: &str,
-                                       comp_name: Option<&str>|
-             -> Option<verter_session::FileAnalysisSnapshot> {
-                if crate::server::is_default_export_component_carrier(resolved) {
-                    // A direct `.vue` import resolves the component file itself. Ensure
-                    // it is loaded/compiled so its prop/event/slot analysis is
-                    // available — the cold-open race where the child is not yet in the
-                    // host cache would otherwise leave component-prop completions
-                    // empty (D1: the editor then falls back to word suggestions).
-                    return get_component_analysis(resolved);
-                }
-                // For non-.vue files (barrel/index), follow re-export chains if we know the component name
-                if let Some(name) = comp_name {
-                    if let Some((terminal_id, _, _)) = server
-                        .documents
-                        .host()
-                        .get_export_span_follow_reexports(resolved, name)
-                    {
-                        if crate::server::is_default_export_component_carrier(&terminal_id) {
-                            // Ensure the terminal .vue file is compiled
-                            return get_component_analysis(&terminal_id);
+            let local_component_name = component_name?;
+            let (import, binding) =
+                native
+                    .analysis
+                    .as_ref()?
+                    .imports
+                    .iter()
+                    .find_map(|import| {
+                        if import.is_type_only || import.source != import_source {
+                            return None;
                         }
-                    }
+                        import
+                            .bindings
+                            .iter()
+                            .find(|binding| {
+                                !binding.is_type_only
+                                    && (binding.name == local_component_name
+                                        || to_kebab_case(&binding.name) == local_component_name
+                                        || binding.name == to_pascal_case(local_component_name))
+                            })
+                            .map(|binding| (import, binding))
+                    })?;
+
+            if let Some(contract) =
+                server.cached_barrel_component_contract(canonical_id, import_source, &binding.name)
+            {
+                let analysis = child_contract_completion_analysis(contract);
+                if analysis.is_none() {
+                    recognized_authored_component_contract_miss.set(true);
                 }
-                get_component_analysis(resolved)
+                return analysis;
+            }
+
+            let resolved = import
+                .resolved_canonical_id
+                .as_deref()
+                .filter(|resolved| crate::server::is_default_export_component_carrier(resolved))
+                .map(str::to_string)
+                .or_else(|| {
+                    (verter_semantic::resolver_core::is_relative_specifier(&import.source)
+                        && verter_semantic::resolver_core::path_is_carrier(&import.source))
+                    .then(|| {
+                        verter_semantic::resolver_core::join_paths(
+                            &verter_semantic::resolver_core::parent_dir(canonical_id),
+                            &import.source,
+                        )
+                    })
+                });
+            let Some(resolved) = resolved else {
+                recognized_authored_component_contract_miss.set(true);
+                return None;
             };
-
-            // Try 1: Use resolve_import_specifier (handles relative, alias, index files)
-            if let Some(resolved) =
-                server.resolve_import_specifier_transient(canonical_id, import_source)
-            {
-                if let Some(a) = try_follow_reexport(&resolved, component_name) {
-                    return Some(a);
-                }
-            }
-
-            // Try 2: Manual relative resolution (fallback for host-cached files not on disk)
-            if import_source.starts_with('.') {
-                let parts: Vec<&str> = canonical_id.split('/').collect();
-                let dir = parts[..parts.len().saturating_sub(1)].join("/");
-                let resolved = if let Some(stripped) = import_source.strip_prefix("./") {
-                    format!("{}/{}", dir, stripped)
-                } else if import_source.starts_with("../") {
-                    let mut dir_parts: Vec<&str> = dir.split('/').collect();
-                    let mut rel = import_source;
-                    while let Some(rest) = rel.strip_prefix("../") {
-                        dir_parts.pop();
-                        rel = rest;
+            match server.cached_child_public_contract(&resolved) {
+                Some(contract) => {
+                    let analysis = child_contract_completion_analysis(contract);
+                    if analysis.is_none() {
+                        recognized_authored_component_contract_miss.set(true);
                     }
-                    format!(
-                        "{}/{}",
-                        dir_parts.join("/"),
-                        rel.strip_prefix("./").unwrap_or(rel)
-                    )
-                } else {
-                    format!("{}/{}", dir, import_source)
-                };
-                if let Some(a) = try_follow_reexport(&resolved, component_name) {
-                    return Some(a);
+                    analysis
+                }
+                None => {
+                    recognized_authored_component_contract_miss.set(true);
+                    None
                 }
             }
-
-            // Try 3: VFS resolution (path aliases, tsconfig paths, disk probing)
-            if let Some(resolved_path) =
-                server.resolve_import_specifier_transient(canonical_id, import_source)
-            {
-                if let Some(a) = try_follow_reexport(&resolved_path, component_name) {
-                    return Some(a);
-                }
-            }
-
-            // Try 4: Direct lookup (bare specifiers, already-resolved)
-            try_follow_reexport(import_source, component_name)
         };
         let ws_components = if workspace_component_scan {
             build_workspace_components(&server.documents.host, canonical_id)
@@ -881,18 +1027,25 @@ async fn handle_completion_attempt(
     // prevents carrier implementation scope (DOM globals and generated helpers)
     // from masquerading as expressions users can actually name in a Vue template.
     let provider_only_template_scope = provider_only.then(|| {
-        let mut scope = verter_result
-            .as_ref()
-            .map(|result| {
-                result
-                    .items
-                    .iter()
-                    .map(|item| item.label.clone())
-                    .collect::<std::collections::HashSet<_>>()
-            })
-            .unwrap_or_default();
+        let mut scope = std::collections::HashSet::new();
         if let Some(native) = native_snapshot.as_ref() {
             if let Some(analysis) = native.analysis.as_ref() {
+                scope.extend(analysis.bindings.iter().map(|binding| binding.name.clone()));
+                scope.extend(
+                    analysis
+                        .imports
+                        .iter()
+                        .filter(|import| !import.is_type_only)
+                        .flat_map(|import| import.bindings.iter())
+                        .filter(|binding| !binding.is_type_only)
+                        .map(|binding| binding.name.clone()),
+                );
+                scope.extend(
+                    analysis
+                        .macros
+                        .iter()
+                        .filter_map(|mac| mac.binding_name.clone()),
+                );
                 if let (Some(cursor_offset), Some(template)) = (
                     native.line_index.position_to_offset(position),
                     analysis.template.as_deref(),
@@ -914,14 +1067,29 @@ async fn handle_completion_attempt(
     // no TSX projection, so each offered binding's type comes from a provider
     // quickinfo at its DECLARATION position (bounded; fail-closed to the
     // native kind detail when the mapping or provider is unavailable).
+    let maybe_style_position = native_snapshot.as_ref().is_some_and(|native| {
+        native
+            .line_index
+            .position_to_offset(position)
+            .is_some_and(|offset| {
+                native.blocks.iter().any(|block| {
+                    let (start, end) = block.content_range();
+                    block.tag_name == "style" && offset >= start && offset <= end
+                })
+            })
+    });
     let verter_items = match verter_items {
-        Some(items) if is_style_v_bind_context(server, uri, position) => {
+        Some(items) if maybe_style_position && is_style_v_bind_context(server, uri, position) => {
             Some(enrich_v_bind_completion_details(server, uri, items).await)
         }
         other => other,
     };
 
-    if native_only {
+    if recognized_authored_component_contract_miss.get() {
+        server.enqueue_import_dependency_publication_if_idle(uri);
+    }
+
+    if native_only || recognized_authored_component_contract_miss.get() {
         drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
@@ -945,8 +1113,18 @@ async fn handle_completion_attempt(
             native.structure.as_ref(),
         );
         let source_ctx = match &context {
-            CursorContext::Template(TemplateCursorContext::AttributeName { .. }) => {
-                CompletionSourceContext::TemplateAttr
+            CursorContext::Template(TemplateCursorContext::AttributeName {
+                is_component, ..
+            }) => {
+                if !is_component
+                    || native.structure.as_ref().is_some_and(|structure| {
+                        authored_component_attribute_name_context(structure, offset).is_some()
+                    })
+                {
+                    CompletionSourceContext::TemplateAttr
+                } else {
+                    CompletionSourceContext::Other
+                }
             }
             CursorContext::Template(
                 TemplateCursorContext::Expression { .. } | TemplateCursorContext::Interpolation,
@@ -1274,6 +1452,15 @@ async fn handle_completion_attempt(
                             Some(&ctx.tsx_path),
                             tp.provider_id(),
                             is_template_attr_context,
+                            match CarrierTemplateLanguage::from_uri(uri.as_str()) {
+                                Some(CarrierTemplateLanguage::Vue) => {
+                                    Some(merge::CarrierAttributeSyntax::Vue)
+                                }
+                                Some(CarrierTemplateLanguage::Svelte) => {
+                                    Some(merge::CarrierAttributeSyntax::Svelte)
+                                }
+                                None => None,
+                            },
                         );
                         return Ok(if merged.is_empty() {
                             None
