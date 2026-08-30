@@ -15,6 +15,42 @@ const repoRoot = path.resolve(extensionRoot, "..", "..");
 
 const read = (rel: string) => readFileSync(path.join(repoRoot, rel), "utf8");
 
+const workflowJobs = (yaml: string): Map<string, string> =>
+  new Map(
+    [...yaml.matchAll(/^ {2}([\w.-]+):\n([\s\S]*?)(?=^ {2}\S|(?![\s\S]))/gm)].map((match) => [
+      match[1],
+      match[2],
+    ]),
+  );
+
+const workflowRunCommands = (job: string): string[] => {
+  const lines = job.split("\n");
+  const commands: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i].match(/^(\s*)(?:-\s+)?run:\s*(.*?)\s*$/);
+    if (!match) continue;
+
+    const indentation = match[1].length;
+    const scalar = match[2];
+    if (scalar !== "" && !/^[|>][+-]?$/.test(scalar)) {
+      commands.push(scalar);
+      continue;
+    }
+
+    const block: string[] = [];
+    while (i + 1 < lines.length) {
+      const next = lines[i + 1];
+      if (next.trim() !== "" && next.length - next.trimStart().length <= indentation) break;
+      i += 1;
+      block.push(next.trim());
+    }
+    commands.push(block.join("\n"));
+  }
+
+  return commands;
+};
+
 /**
  * The packaged VSIX must actually carry the engine it advertises.
  *
@@ -300,9 +336,27 @@ describe("release gating", () => {
     expect(chainTo(parsed, "c", "a")).toBeNull();
   });
 
+  // @ai-generated - Discriminates the workflow parser's final-job EOF boundary.
+  it("parses the final workflow job when the file ends inside that job", () => {
+    const parsed = workflowJobs(
+      [
+        "jobs:",
+        "  first:",
+        "    steps:",
+        "      - run: first-command",
+        "  final:",
+        "    steps:",
+        "      - run: final-command",
+      ].join("\n"),
+    );
+
+    expect(parsed.get("first")).toContain("first-command");
+    expect(parsed.get("final")).toContain("final-command");
+  });
+
   it("defines a test job that runs the canonical Rust gate and the JS suite", () => {
     expect(release, "release.yml must define a `test:` job").toMatch(/^ {2}test:$/m);
-    const body = release.match(/^ {2}test:\n([\s\S]*?)(?=^ {2}\S|\Z)/m)?.[1] ?? "";
+    const body = workflowJobs(release).get("test") ?? "";
     expect(body, "the release test job must run the exhaustive canonical Rust gate").toContain(
       "node scripts/gate.mjs --exhaustive",
     );
@@ -311,6 +365,63 @@ describe("release gating", () => {
     );
     expect(body, "the test job must check formatting").toContain("cargo fmt");
     expect(body, "the test job must run the JS suite").toMatch(/pnpm (run )?test/);
+  });
+
+  // @ai-generated - Every hermetic gate invocation needs an explicitly provisioned oracle cache.
+  it("provisions the offline oracle cache before every release workflow gate invocation", () => {
+    const provision =
+      "node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs";
+    const gate = "node scripts/gate.mjs";
+    let gateInvocations = 0;
+
+    for (const [job, body] of workflowJobs(release)) {
+      let availableProvisions = 0;
+      for (const command of workflowRunCommands(body)) {
+        if (command.includes(provision)) availableProvisions += 1;
+        if (!command.includes(gate)) continue;
+
+        gateInvocations += 1;
+        expect(
+          availableProvisions,
+          `release.yml job \`${job}\` invokes \`${command}\` without a preceding unused oracle-cache provisioning step`,
+        ).toBeGreaterThan(0);
+        availableProvisions -= 1;
+      }
+    }
+
+    expect(
+      gateInvocations,
+      "release.yml must invoke the canonical gate at least once",
+    ).toBeGreaterThan(0);
+  });
+});
+
+describe("CI Rust path eligibility", () => {
+  const ci = read(".github/workflows/ci.yml");
+
+  // @ai-generated - Pins every non-Rust input consumed by the canonical Rust gate job.
+  it("runs the Rust job when gate, harness, provider, or install-graph inputs change", () => {
+    const rustFilter = ci.match(/^ {12}rust:\n([\s\S]*?)(?=^ {12}[\w-]+:\n)/m)?.[1] ?? "";
+    const requiredInputs = [
+      "packages/framework-conformance-harness/**",
+      "packages/language-shared/**",
+      "packages/svelte-jsx/**",
+      "packages/typescript-plugin/**",
+      "scripts/gate*.mjs",
+      ".npmrc",
+      ".nvmrc",
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+    ];
+
+    expect(rustFilter, "detect-changes must define a rust path filter").not.toBe("");
+    for (const input of requiredInputs) {
+      expect(
+        rustFilter,
+        `the Rust gate consumes \`${input}\`; changing it must make detect-changes.rust true`,
+      ).toContain(`'${input}'`);
+    }
   });
 });
 
@@ -355,7 +466,7 @@ describe("VSIX MCP engine payload", () => {
   });
 
   it("stages the per-target MCP artifact fail-closed before packaging", () => {
-    const body = release.match(/^ {2}build-vsix:\n([\s\S]*?)(?=^ {2}\S|\Z)/m)?.[1] ?? "";
+    const body = workflowJobs(release).get("build-vsix") ?? "";
     expect(body, "build-vsix must download the mcp-* artifacts").toContain("pattern: mcp-*");
     expect(body, "build-vsix must stage the per-target verter-mcp binary").toContain(
       "/tmp/mcp-artifacts/mcp-${lsp_pkg}/${MCP_BIN}",
