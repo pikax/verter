@@ -297,21 +297,14 @@ impl SvelteCarrierCompiler {
         source: &str,
         opts: &IdeCompileOptions,
     ) -> (IdeOutput, Vec<RuntimeDiagnostic>) {
-        // wasm-safe clock: the `Instant` import is `web_time` on wasm32
-        // (`std::time::Instant::now()` traps on wasm32-unknown-unknown) and
-        // `std::time` on native.
-        let start = Instant::now();
-        let projection = crate::svelte::ide::project_svelte_ide(
+        let (ide, diagnostics) = render_admitted_svelte_ide(
             source,
             parsed,
             opts.filename.as_deref(),
             opts.skip_source_map,
         );
-        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-        let diagnostics = projection
-            .diagnostics
-            .iter()
+        let diagnostics = diagnostics
+            .into_iter()
             .map(|d| RuntimeDiagnostic {
                 severity: match d.severity {
                     crate::svelte::ide::DiagnosticSeverity::Error => {
@@ -322,30 +315,50 @@ impl SvelteCarrierCompiler {
                     }
                 },
                 code: d.code.to_string(),
-                message: d.message.clone(),
+                message: d.message,
                 span: d.span,
             })
             .collect();
-
-        let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
-        let output_descriptor = RuntimeOutputDescriptor::generated(
-            &projection.code,
-            (!projection.source_map.is_empty()).then_some(projection.source_map.as_str()),
-            &[(space.as_str(), artifact.as_str())],
-            SourceMapFidelity::Approximate,
-        );
-        let ide = IdeOutput {
-            code: projection.code,
-            source_map: projection.source_map,
-            is_jsx: projection.is_jsx,
-            duration_ms,
-            destructured_block: None,
-            output_descriptor,
-            generated_template_hole: None,
-            generated_template_chunk: None,
-        };
         (ide, diagnostics)
     }
+}
+
+/// Project an already-parsed Svelte component into IDE bytes and maps.
+///
+/// Callers that already hold a [`ParsedSvelte`] must use this instead of
+/// re-parsing. Duration uses the wasm-safe `web_time` clock.
+pub(crate) fn render_admitted_svelte_ide(
+    source: &str,
+    parsed: &ParsedSvelte,
+    filename: Option<&str>,
+    skip_source_map: bool,
+) -> (
+    IdeOutput,
+    Vec<crate::svelte::ide::SvelteIdeUnsupportedDiagnostic>,
+) {
+    let start = Instant::now();
+    let projection =
+        crate::svelte::ide::project_svelte_ide(source, parsed, filename, skip_source_map);
+    let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
+    let output_descriptor = RuntimeOutputDescriptor::generated(
+        &projection.code,
+        (!projection.source_map.is_empty()).then_some(projection.source_map.as_str()),
+        &[(space.as_str(), artifact.as_str())],
+        SourceMapFidelity::Approximate,
+    );
+    let ide = IdeOutput {
+        code: projection.code,
+        source_map: projection.source_map,
+        is_jsx: projection.is_jsx,
+        duration_ms,
+        destructured_block: None,
+        output_descriptor,
+        generated_template_hole: None,
+        generated_template_chunk: None,
+    };
+    (ide, projection.diagnostics)
 }
 
 impl CarrierCompiler for SvelteCarrierCompiler {

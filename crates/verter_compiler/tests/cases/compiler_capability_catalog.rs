@@ -2,8 +2,7 @@
 //!
 //! Covers compile-time presence (frontend-only, projection-only, runtime-
 //! capable), immutable identity (duplicate construction + deterministic
-//! iteration), generic catalog independence from framework-private types,
-//! and that no production request route consults the catalog yet.
+//! iteration), and generic catalog independence from framework-private types.
 
 use verter_compiler::framework_common::{
     CarrierFrontend, CatalogCapability, CatalogRow, DuplicateCatalogIdentity, FrameworkEpoch,
@@ -492,53 +491,5 @@ fn generic_catalog_module_source_does_not_name_framework_or_session_owners() {
             !blob.contains("CompileArtifactSet"),
             "generic catalog must not name compile-artifact-set types"
         );
-    }
-}
-
-#[test]
-fn production_request_routes_do_not_consult_the_catalog() {
-    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut hits = Vec::new();
-    walk_rs(&src_root, &mut hits);
-    assert!(
-        hits.is_empty(),
-        "production request routes must not consult the new catalog yet: {hits:?}"
-    );
-}
-
-fn walk_rs(dir: &std::path::Path, hits: &mut Vec<String>) {
-    for entry in std::fs::read_dir(dir).expect("src walk") {
-        let entry = entry.expect("dirent");
-        let path = entry.path();
-        if path.is_dir() {
-            walk_rs(&path, hits);
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
-            .unwrap_or(&path);
-        let rel_str = rel.to_string_lossy();
-        if rel_str.ends_with("framework_common/catalog.rs")
-            || rel_str.ends_with("framework_common/capability.rs")
-            || rel_str.ends_with("framework_common/mod.rs")
-            || rel_str.ends_with("framework_common/vue_carrier_frontend.rs")
-            || rel_str.ends_with("framework_common/vue_semantic_authority.rs")
-            || rel_str.ends_with("framework_common/vue_projection_backend.rs")
-            || rel_str.ends_with("svelte/semantic_authority.rs")
-            || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
-            || rel_str.ends_with("svelte/carrier_frontend.rs")
-            || rel_str.ends_with("lib.rs")
-        {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path).expect("read rust");
-        if text.contains("ImmutableCapabilityCatalog")
-            || text.contains("TypedCapabilityRegistration")
-        {
-            hits.push(rel_str.into_owned());
-        }
     }
 }

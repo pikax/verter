@@ -57,10 +57,12 @@ use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, ProductKind,
 };
 use crate::framework_common::{
-    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOutput,
+    IdeOutput, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOutput,
     RuntimeOutputDescriptor, RuntimeStyleBlock,
 };
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
+use crate::svelte::carrier::render_admitted_svelte_ide;
+use crate::svelte::ide::SvelteIdeUnsupportedDiagnostic;
 #[cfg(test)]
 use crate::svelte::runtime::UnsupportedSvelteRuntimeSurface;
 use crate::svelte::runtime::{
@@ -489,6 +491,14 @@ pub(crate) struct VueParsedLowering {
     pub selected_diagnostics: Vec<CompileDiagnostic>,
 }
 
+/// Parsed Svelte IDE lowering: companion bytes plus the projector diagnostics
+/// retained from the admitted parse. Diagnostics stay on this lowering and
+/// are never rewritten onto [`CompileDiagnostic`].
+pub(crate) struct SvelteParsedLowering {
+    pub ide: IdeOutput,
+    pub diagnostics: Vec<SvelteIdeUnsupportedDiagnostic>,
+}
+
 /// Selected-template IDE lowering: parse the extra template space, compile
 /// the carrier shell with a generated hole, compile the selected chunk with
 /// transferred script bindings, and return both on one TSX result.
@@ -703,6 +713,29 @@ impl StandaloneCompiler {
                 .map_err(DirectCompileError::Vue)
             }
         }
+    }
+
+    /// Lower an already-parsed Svelte component through the IDE projector,
+    /// without publishing artifacts. Callers that already hold a
+    /// [`ParsedSvelte`] must use this instead of re-parsing.
+    ///
+    /// This is parsed-core IDE lowering, not `compile()` publication. It does
+    /// not run the compile-route product/namespace preflight: that gate is
+    /// runtime `compile()`'s, and IDE projection is gated by
+    /// `require_ide_only`.
+    pub(crate) fn lower_svelte_from_parsed(
+        &self,
+        source: &str,
+        parsed: &ParsedSvelte,
+        request: &CompileRequest,
+    ) -> Result<SvelteParsedLowering, DirectCompileError> {
+        let (ide, diagnostics) = render_admitted_svelte_ide(
+            source,
+            parsed,
+            request.filename(),
+            !request.wants_ide_source_map(),
+        );
+        Ok(SvelteParsedLowering { ide, diagnostics })
     }
 
     /// The parsed-input core [`Self::compile_vue`] delegates to once it has

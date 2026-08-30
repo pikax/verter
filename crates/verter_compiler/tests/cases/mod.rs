@@ -44,6 +44,7 @@ mod svelte_parse_defect_exact_codes;
 mod svelte_parse_parity_matrix;
 mod svelte_parser_recovery_routes_through_strict_facts;
 mod svelte_parser_strictness_fails_closed;
+mod svelte_projection_backend;
 mod svelte_refuse_by_default_guards;
 mod svelte_runtime_whitespace_entity_guards;
 mod svelte_semantic_authority;

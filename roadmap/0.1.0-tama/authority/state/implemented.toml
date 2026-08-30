@@ -283,6 +283,11 @@ node_id = "CCA1H"
 commit_message = "feat(core): register Vue IDE projection backend"
 commit_date = "2026-08-30T03:02:21+01:00"
 
+[[implemented]]
+node_id = "CCA1I"
+commit_message = "feat(core): register Svelte IDE projection backend"
+commit_date = "2026-08-30T04:18:58+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
