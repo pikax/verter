@@ -5943,6 +5943,81 @@ declare module "./main" {
     });
 }
 
+/// A NAMESPACE-OWNED call site binds its bare callee through the
+/// enclosing block's scope first — the block-local `check` / `isNum`
+/// shadow the module-scope declarations of the same name, exactly as the
+/// function index binds `N.check` over the file-global `check` for a
+/// direct call. The checker narrows `N.make`'s consequent through the
+/// block-local PREDICATE while the module scope holds a non-predicate
+/// `boolean` `check`, and narrows `N.pick`'s to `number` while the
+/// module-scope `isNum` says `string`. Neither route may resolve the
+/// callee at the top level: both demands keep the unnarrowed join, carry
+/// the typed gap, and hold zero candidates. The top-level caller of the
+/// same file keeps its provable closure — its `check` is the single
+/// unexported module-local declaration — so that call is certified and
+/// the demand warms.
+#[test]
+fn namespace_owned_control_callee_never_resolves_at_top_level() {
+    const MAIN_CANONICAL: &str = "/ws/namespace-shadow/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+export {};
+
+function check(x: string | number): boolean {
+  return true;
+}
+
+function isNum(x: string | number): x is string {
+  return typeof x === "string";
+}
+
+namespace N {
+  function check(x: string | number): x is number {
+    return typeof x === "number";
+  }
+
+  function isNum(x: string | number): x is number {
+    return typeof x === "number";
+  }
+
+  export function make(x: string | number) {
+    if (check(x)) return x;
+    return false;
+  }
+
+  export function pick(x: string | number) {
+    if (isNum(x)) return x;
+    return false;
+  }
+}
+
+function makeTop(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "N.make");
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "N.pick");
+
+        let key = whole_return_key(dispatch, MAIN_CANONICAL, "makeTop");
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the top-level call site's callee closure is provable: no gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the certified top-level control call warms"
+        );
+    });
+}
+
 /// A mixed component's UNPROVEN deferred flow members poison the
 /// MACHINERY ROOT that consumed their values. The joint fixed point
 /// feeds the evaluated flow-member overrides into the call/relation

@@ -559,6 +559,102 @@ fn control_callee_certification_requires_provable_module_local_closure() {
     }
 }
 
+/// A NAMESPACE-OWNED call site binds its bare callee through the
+/// enclosing block's own scope before the top level: a block-local
+/// declaration of the name shadows the module-scope one, exactly as the
+/// function index binds `N.check` over the file-global `check` for a
+/// direct call. The closure gate enumerates only TOP-LEVEL declarations,
+/// so inside a `namespace` / `module` block it can neither certify the
+/// top-level non-predicate (the shadowing block-local callee IS a
+/// predicate the checker applies) nor mint the top-level predicate's
+/// target (the block-local predicate narrows to a DIFFERENT type). Both
+/// directions refuse: the test lowers behind the typed `GuardNarrowing`
+/// gap, nothing is certified, no guard is minted. The top-level call site
+/// of the same file keeps its provable closure — the refusal is about the
+/// CALL SITE's scope, not the mere presence of a namespace in the file.
+#[test]
+fn namespace_owned_call_site_never_resolves_callee_closure_at_top_level() {
+    const BODY: &str = "function make(x: string | number) { if (check(x)) return x; return false }";
+    let predicate_guard_count = |node: &SliceContent| {
+        node.body
+            .statements
+            .iter()
+            .filter(|statement| {
+                matches!(
+                    statement,
+                    SliceStatement::If {
+                        guard: SliceGuard::TypePredicate { .. },
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let gap_count = |node: &SliceContent| {
+        node.body
+            .statements
+            .iter()
+            .filter(|statement| {
+                matches!(
+                    statement,
+                    SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing)
+                )
+            })
+            .count()
+    };
+    for (top_level, block_local) in [("boolean", "x is number"), ("x is string", "x is number")] {
+        let source = format!(
+            "export {{}};\n\
+             function check(x: string | number): {top_level} {{ return true }}\n\
+             namespace N {{\n\
+             function check(x: string | number): {block_local} {{ return true }}\n\
+             export {BODY}\n\
+             }}\n\
+             {BODY}"
+        );
+
+        let owned = content_for(&source, "N.make");
+        assert_eq!(
+            predicate_guard_count(&owned),
+            0,
+            "a namespace-owned call site never mints the top-level `{top_level}` \
+             declaration's guard: {owned:?}"
+        );
+        assert_eq!(
+            gap_count(&owned),
+            1,
+            "a namespace-owned control test gaps (top-level `{top_level}`): {owned:?}"
+        );
+        assert!(
+            owned.decided_above_call_spans.is_empty(),
+            "a namespace-owned control call is never certified (top-level \
+             `{top_level}`): {owned:?}"
+        );
+
+        // The top-level call site binds the top-level declaration, whose
+        // closure IS provable: the single unexported module-local `check`.
+        let top = content_for(&source, "make");
+        let top_level_is_predicate = top_level != "boolean";
+        assert_eq!(
+            predicate_guard_count(&top),
+            usize::from(top_level_is_predicate),
+            "the top-level call site keeps its provable closure (top-level \
+             `{top_level}`): {top:?}"
+        );
+        assert_eq!(
+            gap_count(&top),
+            0,
+            "the top-level control test never gaps (top-level `{top_level}`): {top:?}"
+        );
+        assert_eq!(
+            top.decided_above_call_spans.len(),
+            usize::from(!top_level_is_predicate),
+            "exactly the non-predicate top-level call is certified (top-level \
+             `{top_level}`): {top:?}"
+        );
+    }
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {

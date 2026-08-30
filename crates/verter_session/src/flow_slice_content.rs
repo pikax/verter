@@ -68,7 +68,7 @@ use verter_semantic::analysis::flow::{
 };
 use verter_semantic::analysis::function_program::{
     for_each_call_expression, inventory_statement_list, resolve_function_node,
-    FunctionControlRegion, FunctionNode, FunctionProgramEntry,
+    FunctionControlRegion, FunctionDescentStep, FunctionNode, FunctionProgramEntry,
 };
 use verter_semantic::analysis::type_eval_build::{
     embeds_call_return_carrier, infer_declaration_expression_type,
@@ -1525,6 +1525,17 @@ pub(crate) fn build_flow_slice_content(
     carrier_module: bool,
 ) -> Option<SliceContent> {
     let module_scope = carrier_module || program_has_module_syntax(program);
+    // Whether the served function is NAMESPACE-OWNED: its locator descends
+    // through a `namespace` / `module` block. Every call site in its body
+    // (nested function values included) then resolves a bare callee
+    // through that block's scope BEFORE the top level — the same lexical
+    // rule under which the function index binds a namespace-qualified
+    // direct-call target over the file-global one.
+    let namespace_owned = entry
+        .locator
+        .descent
+        .iter()
+        .any(|step| matches!(step, FunctionDescentStep::NamespaceMember { .. }));
     let resolved = resolve_function_node(program, &entry.locator)?;
     let node = resolved.node;
     let self_name = resolved.self_name;
@@ -1600,6 +1611,7 @@ pub(crate) fn build_flow_slice_content(
         direct_calls: &entry.direct_calls,
         program,
         module_scope,
+        namespace_owned,
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
         decided_above_call_spans: Vec::new(),
@@ -2447,6 +2459,22 @@ struct Lowerer<'a> {
     /// — a set this snapshot cannot enumerate — so no callee of such a
     /// file is ever certified or selected as a predicate.
     module_scope: bool,
+    /// Whether the frame's function is NAMESPACE-OWNED — lexically inside
+    /// a `namespace` / `module` block (the index locator descends through
+    /// one). A bare callee there binds through the enclosing block scope
+    /// BEFORE the top level: a block-local declaration of the name (a
+    /// function, a `const`, a class, an enum, an `import =`, an exported
+    /// member of a merged sibling block, or a member an augmentation of an
+    /// exported namespace merges in) shadows the top-level one, exactly
+    /// as the function index binds `N.check` over the file-global `check`
+    /// for a direct call. The callee closure gate
+    /// ([`Self::closed_callee_declaration`]) enumerates TOP-LEVEL
+    /// declarations only, so under this flag it would certify — or mint
+    /// the predicate target of — the WRONG declaration; it refuses
+    /// instead. Inherited by every nested frame: a namespace cannot be
+    /// declared inside a function, so the block chain between a call site
+    /// and the top level is fixed by the served function's own position.
+    namespace_owned: bool,
     /// The first budget edge a SELECTED leaf's expression lowering hit.
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
     /// Write effects proven unreachable by a literal control edge.
@@ -4254,8 +4282,10 @@ impl Lowerer<'_> {
     /// carries its authored signature through this channel — a
     /// frame-local shadow names a different function, a cross-file
     /// callee's annotation is beyond the retained snapshot this half
-    /// reads, and a script global or an exported binding has a
-    /// checker-visible signature set this file cannot enumerate.
+    /// reads, a script global or an exported binding has a
+    /// checker-visible signature set this file cannot enumerate, and a
+    /// namespace-owned call site binds its callee through a block scope
+    /// the gate does not enumerate.
     fn lower_predicate_guard(&mut self, call: &oxc_ast::ast::CallExpression<'_>) -> SliceGuard {
         let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
             return SliceGuard::None;
@@ -4362,7 +4392,7 @@ impl Lowerer<'_> {
     /// `None` whenever the closure cannot be proven, which establishes no
     /// fact (the caller emits the typed `GuardNarrowing` gap instead).
     ///
-    /// The proof needs all three of:
+    /// The proof needs all four of:
     /// - the file is provably MODULE-scoped ([`Self::module_scope`]): a
     ///   script's top-level function is a global symbol merging with
     ///   every other script's and every `declare global` block's
@@ -4374,13 +4404,21 @@ impl Lowerer<'_> {
     /// - the binding is NOT exported by any spelling
     ///   ([`Self::top_level_name_is_exported`]): an exported binding is
     ///   augmentable through `declare module`, so further signatures can
-    ///   merge into it from any file.
+    ///   merge into it from any file;
+    /// - the call site is NOT namespace-owned ([`Self::namespace_owned`]):
+    ///   inside a `namespace` / `module` block a bare name binds through
+    ///   the block scope before the top level, and the block-local
+    ///   declaration set (every declaration kind, plus merged sibling
+    ///   blocks and augmentations of an exported namespace) is one this
+    ///   gate does not enumerate — a top-level match there names the
+    ///   WRONG declaration.
     ///
-    /// A module-local, unexported binding is closed: augmentations merge
-    /// only into a module's exports, and a module's locals shadow every
-    /// global — so the file's own text is the whole declaration set.
+    /// A module-local, unexported binding called from a top-level scope is
+    /// closed: augmentations merge only into a module's exports, and a
+    /// module's locals shadow every global — so the file's own text is the
+    /// whole declaration set.
     fn closed_callee_declaration(&self, name: &str) -> Option<&oxc_ast::ast::Function<'_>> {
-        if !self.module_scope {
+        if !self.module_scope || self.namespace_owned {
             return None;
         }
         let group = self.same_file_function_declarations(name);
@@ -5224,6 +5262,7 @@ impl Lowerer<'_> {
             direct_calls: self.direct_calls,
             program: self.program,
             module_scope: self.module_scope,
+            namespace_owned: self.namespace_owned,
             budget_failure: None,
             inert_write_spans: FxHashSet::default(),
             decided_above_call_spans: Vec::new(),
@@ -5406,7 +5445,8 @@ impl Lowerer<'_> {
     ///   predicate, and the checker derives no narrowing from one);
     /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
     ///   same-file declaration ([`Self::closed_callee_declaration`]: a
-    ///   module-scoped file, exactly one declaration, not exported by any
+    ///   module-scoped file, a call site outside every namespace block,
+    ///   exactly one declaration, not exported by any
     ///   spelling) whose authored return annotation exists and is NOT a
     ///   type predicate (an inferred boolean return can be an inferred
     ///   predicate, so an unannotated declaration never qualifies; an
