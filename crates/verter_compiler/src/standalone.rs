@@ -1802,6 +1802,37 @@ impl VueRuntimeBackend {
         )
         .map_err(|err| vue_parsed_runtime_to_direct(err, &ProductPlan::from_request(request)))
     }
+
+    /// Non-publishing runtime-leg composition over a route-retained parse
+    /// and an already-produced primary bundle — the entry a route that
+    /// co-plans runtime products beside non-runtime products uses for its
+    /// runtime contributions. Drives the SAME shared leg construction as
+    /// [`Self::compile_runtime_from_parse`]'s parsed core; the caller keeps
+    /// its own atomic multi-product publication around the returned legs.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_runtime_legs_from_parse(
+        &self,
+        source: &str,
+        parsed: &ParsedSfc,
+        request: &CompileRequest,
+        execution_inputs: &VueExecutionInputs,
+        macros: &VueMacroSemanticInput,
+        block_content: &RuntimeBlockContentInputs,
+        style_prepared: &[Option<PreparedStyleIr>],
+        primary_bundle: &RuntimeCompileOutput,
+    ) -> Result<ComposedVueRuntimeLegs, VueParsedRuntimeError> {
+        record_runtime_backend_delegation();
+        compose_vue_runtime_legs(
+            source,
+            parsed,
+            request,
+            execution_inputs,
+            macros,
+            block_content,
+            style_prepared,
+            primary_bundle,
+        )
+    }
 }
 
 impl SvelteRuntimeBackend {
@@ -2382,9 +2413,18 @@ impl StandaloneCompiler {
             // `ssr = ANY RuntimeServer present` derivation
             // (`derive_legacy_vue_options`), so its bundle IS the primary
             // runtime bundle; composition — and the dual-kind secondary
-            // compile — is the SAME shared runtime-leg construction the
-            // catalog runtime backend's parsed core drives. This route owns
-            // only the co-planned atomic publication around it.
+            // compile — delegates to the catalog-selected runtime backend's
+            // non-publishing leg entry, the SAME shared runtime-leg
+            // construction its parsed core drives. This route owns only the
+            // co-planned atomic publication around it.
+            let epoch = FrameworkEpochId::from_type::<VueSfcV3>();
+            let Some(InstalledRuntimeBackend::Vue(backend)) =
+                registered_runtime_for(&VueRuntimeBackend.adapter_id(), &epoch)
+            else {
+                return Err(DirectCompileError::UnsupportedProduct(
+                    primary_planned_runtime_kind(&plan),
+                ));
+            };
             let bundle = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
                 source, parsed, result,
             );
@@ -2393,17 +2433,18 @@ impl StandaloneCompiler {
             // compile.
             styles.extend(bundle.styles.iter().cloned());
 
-            let composed = compose_vue_runtime_legs(
-                source,
-                parsed,
-                request,
-                execution_inputs,
-                macro_semantics,
-                &RuntimeBlockContentInputs::default(),
-                &[],
-                &bundle,
-            )
-            .map_err(|err| vue_parsed_runtime_to_direct(err, &plan))?;
+            let composed = backend
+                .compile_runtime_legs_from_parse(
+                    source,
+                    parsed,
+                    request,
+                    execution_inputs,
+                    macro_semantics,
+                    &RuntimeBlockContentInputs::default(),
+                    &[],
+                    &bundle,
+                )
+                .map_err(|err| vue_parsed_runtime_to_direct(err, &plan))?;
             diagnostics.extend(composed.secondary_diagnostics);
             runtime_legs = Some(composed.legs);
         }

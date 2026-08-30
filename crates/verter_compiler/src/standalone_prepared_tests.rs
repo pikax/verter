@@ -2075,6 +2075,56 @@ fn runtime_requests_on_every_route_delegate_to_the_catalog_runtime_backend() {
     );
 }
 
+/// A Vue request that co-plans a runtime product beside a non-runtime
+/// product reaches its runtime legs through the catalog-selected runtime
+/// backend exactly once, and the co-planned runtime artifact is
+/// byte-identical to what the runtime-only request publishes — one runtime
+/// construction behind both request shapes.
+#[test]
+fn mixed_product_runtime_legs_delegate_to_the_catalog_runtime_backend() {
+    let compiler = StandaloneCompiler;
+    let mixed_request = vue_request(vec![
+        CompileProduct::IdeCompanion(IdeProductRequest::default()),
+        CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+    ]);
+    let before = runtime_backend_delegation_count();
+    let mixed = compiler
+        .compile(VUE_SIMPLE, &mixed_request, vue_inputs())
+        .expect("mixed IDE + runtime compile succeeds");
+    assert_eq!(
+        runtime_backend_delegation_count(),
+        before + 1,
+        "a mixed-product Vue request must delegate its runtime legs to the \
+         catalog runtime backend exactly once"
+    );
+
+    let runtime_only = compiler
+        .compile(
+            VUE_SIMPLE,
+            &vue_request(vec![CompileProduct::RuntimeClient(
+                RuntimeProductRequest::default(),
+            )]),
+            vue_inputs(),
+        )
+        .expect("runtime-only compile succeeds");
+    let client_code = |output: &DirectCompileOutput| {
+        output
+            .artifacts
+            .artifacts()
+            .iter()
+            .find(|a| a.kind() == ProductKind::RuntimeClient)
+            .expect("client runtime artifact is published")
+            .code()
+            .to_string()
+    };
+    assert_eq!(
+        client_code(&mixed),
+        client_code(&runtime_only),
+        "the co-planned runtime leg must be byte-identical to the runtime-only \
+         request's — one runtime construction behind both request shapes"
+    );
+}
+
 /// A runtime-only direct compile publishes byte-identically to the
 /// catalog-selected backend's own parsed runtime core called directly —
 /// there is exactly one runtime construction behind both.
