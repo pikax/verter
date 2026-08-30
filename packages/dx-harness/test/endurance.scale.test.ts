@@ -17,6 +17,7 @@ import {
   runRenameCycles,
   runSoakScenario,
   runStormScenario,
+  stageEnduranceFixtureDependencies,
   type CorpusLaneSection,
   type CorpusProbeDerivation,
   type EnduranceLane,
@@ -52,6 +53,7 @@ describe.sequential(`endurance: scale lane [${config.route}]`, () => {
       execFileSync(process.execPath, [generator, corpusRoot, String(config.scaleCorpusFiles)], {
         stdio: "inherit",
       });
+      stageEnduranceFixtureDependencies(corpusRoot, "svelte");
     }
     derivation = deriveCorpusProbes(corpusRoot, { maxFiles: config.scaleOpenFiles });
     if (derivation.probes.length < 6) {

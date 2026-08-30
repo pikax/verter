@@ -28,7 +28,7 @@ plugin, and then executes one immutable Vue/Svelte, JavaScript/TypeScript fixtur
 
 The inventory is typed and fail-closed:
 
-- 71 standard-LSP cases cover diagnostics (including the absence of TS7026), hover, definition,
+- 93 standard-LSP cases cover diagnostics (including the absence of TS7026), hover, definition,
   completion, rename across script and markup, direct SFC imports, two-hop barrel imports, and a
   plain-TypeScript navigation control that distinguishes SFC projection defects from provider-route
   defects. Definition rows validate the exact declaration selection range rather than accepting a
@@ -46,11 +46,13 @@ The inventory is typed and fail-closed:
   JavaScript rows carry authored `@param {PointerEvent}` JSDoc and require PointerEvent language
   features plus a consumed invalid-member error. Strict Svelte legacy-mode controls likewise consume
   TS7006 at the declaration; accidental back-propagated inference makes that expectation unused and
-  fails with TS2578. `.jsx` and `.tsx`
-  `HTMLElement.onpointerdown` controls record native TypeScript behavior without generated JSDoc, parameter
-  annotations, or JSX-runtime shims. Both controls are compiled directly by TypeScript 7 or newer,
-  and their versions plus exact TS2339 diagnostics are recorded as authority evidence separately from
-  the standard-LSP executions. Nested authored-config rows separate strict checking from lax
+  fails with TS2578. `.jsx` and `.tsx` `HTMLElement.onpointerdown` controls record native TypeScript
+  behavior without generated JSDoc, parameter annotations, or JSX-runtime shims. Direct compilation
+  remains the diagnostic authority for both controls. TS6 tsserver legitimately reports the JSX
+  parameter as `any` and no TS2339, while current TSGO reports a `PointerEvent` hover but no pull
+  diagnostic, so the standard-LSP JSX row checks hover only on the `tsgo` and `shared-tsgo` routes.
+  The TSX hover and diagnostic rows remain required on all routes. Compiler versions and exact direct
+  diagnostics are recorded as separate authority evidence. Nested authored-config rows separate strict checking from lax
   JavaScript policy: their authored JSDoc keeps hover, completion, and definition concretely
   `PointerEvent`-aware, while `checkJs: false`/`strict: false` keeps the invalid member diagnostic-free.
   The lax invalid member is deliberately not hidden by `@ts-expect-error`, so the zero-diagnostic
@@ -58,18 +60,38 @@ The inventory is typed and fail-closed:
   The strict and lax rows are run together so a generated or hidden override of `allowJs`, `checkJs`,
   `strict`, or `noImplicitAny` cannot satisfy both policies. TypeScript 7 also compiles the nested lax
   project directly and records its zero-diagnostic result in the receipt, independently of Verter's
-  provider routing.
+  provider routing. Authored-directive rows exercise the inverse overrides too: `@ts-check` inside the
+  lax project must re-enable the invalid-member diagnostic, while `@ts-nocheck` inside the strict root
+  project must suppress it, for both Vue and Svelte carriers. The `@ts-nocheck` rows run on all
+  routes. The `@ts-check` rows run on tsserver; for a nested source config that owns the `.vue` or
+  `.svelte` file, the pinned managed/shared TSGO project API does not expose the generated JSX
+  companion as a source file. Its per-file query refuses that companion and its whole-program query
+  has no diagnostic; the provider therefore serves an empty fail-closed result instead of consulting
+  a raw or wrong project. A direct TypeScript 7 control independently requires TS2339 for the
+  authored `@ts-check` behavior. The generated Svelte companion keeps an exact canonical lifted
+  `// @ts-check` or `// @ts-nocheck` line ahead of its JSX pragma; managed TSGO replaces only the
+  immediately following known pragma, one generated line for one generated line, so the directive
+  remains file-level and mapped markup diagnostics retain their line identity.
 - One Verter custom-protocol case attests the selected provider route separately from standard LSP.
 - One provider-topology case applies only to `shared-tsgo`; it requires a live editor-owned relay
   and forbids activation of a managed fallback provider.
-- The three routes produce exactly 217 required executions. A missing route, startup failure, empty
+- The three routes produce exactly 278 required executions (93 tsserver, 92 managed TSGO, and 93
+  shared TSGO). A missing route, startup failure, empty
   response, skipped/N/A case, or incomplete execution count fails the run.
 
 The fixture intentionally has no configured `jsxImportSource`. The raw server process sets the same
 provider-only E2E completion flags as the real-editor parity suites, so completion evidence cannot be
 satisfied by Verter-authored fallback suggestions. Public Svelte hovers must expose the
 Svelte 5 `Component` contract and must not leak generated carrier types such as
-`__VerterPublicInstance`. The runner writes a JSON receipt to `VERTER_EDITOR_NEUTRAL_RECEIPT`, or
+`__VerterPublicInstance`. The direct and two-hop barrel consumers also prove semantically that
+`ReturnType<typeof Component>["focus"]` is exactly `() => void` for both Svelte script dialects on
+every route. A real-process A/B requires lazy managed activation to reproduce the exact managed
+TSGO QuickInfo from the eager route; path-sorted replay is not accepted as equivalent lifecycle.
+Vue TypeScript public hovers may preserve the authored `Props` alias and
+must expose `$props`; Vue JavaScript hovers must expose `label` and `$props`. The intentional public
+fallthrough aliases `__Verter_RootElementAttrs` and `__Verter_DataAttrs` may appear, while every
+other private `__Verter…` helper remains forbidden. The runner writes a JSON receipt to
+`VERTER_EDITOR_NEUTRAL_RECEIPT`, or
 to the operating-system temporary directory when that variable is absent. The receipt records each
 route/case outcome, duration, and failure message, plus stable inventory and execution groupings by
 route, surface, feature, and framework/language in addition to exact attempted/passed/failed totals.

@@ -49,15 +49,15 @@ function fixtureSource(document: string): string {
 }
 
 describe("editor-neutral LSP contract inventory", () => {
-  it("is a non-vacuous, exact 92-case cross-framework inventory", () => {
+  it("is a non-vacuous, exact 95-case cross-framework inventory", () => {
     const inventory = createEditorNeutralContractInventory();
-    expect(inventory).toHaveLength(92);
-    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(92);
+    expect(inventory).toHaveLength(95);
+    expect(new Set(inventory.map((testCase) => testCase.id)).size).toBe(95);
 
     const standard = inventory.filter((testCase) => testCase.surface === "standard-lsp");
     const custom = inventory.filter((testCase) => testCase.surface === "verter-custom-protocol");
     const topology = inventory.filter((testCase) => testCase.surface === "provider-topology");
-    expect(standard).toHaveLength(90);
+    expect(standard).toHaveLength(93);
     expect(custom).toHaveLength(1);
     expect(topology).toHaveLength(1);
 
@@ -105,7 +105,31 @@ describe("editor-neutral LSP contract inventory", () => {
         "diagnostics-clean",
         "hover",
       ]);
+      const authoredDirectiveCases = standard.filter((testCase) =>
+        testCase.id.startsWith(`${framework}-js-authored-ts-`),
+      );
+      expect(authoredDirectiveCases).toHaveLength(2);
+      expect(authoredDirectiveCases.map((testCase) => testCase.feature).sort()).toEqual([
+        "diagnostics-clean",
+        "diagnostics-error",
+      ]);
+      expect(
+        authoredDirectiveCases.find((testCase) => testCase.feature === "diagnostics-error")
+          ?.providers,
+      ).toEqual(["tsserver"]);
+      expect(
+        authoredDirectiveCases.find((testCase) => testCase.feature === "diagnostics-clean")
+          ?.providers,
+      ).toEqual(["tsserver", "tsgo", "shared-tsgo"]);
     }
+    const executionsByRoute = Object.fromEntries(
+      (["tsserver", "tsgo", "shared-tsgo"] as const).map((route) => [
+        route,
+        inventory.filter((testCase) => testCase.providers.includes(route)).length,
+      ]),
+    );
+    expect(executionsByRoute).toEqual({ tsserver: 93, tsgo: 92, "shared-tsgo": 93 });
+    expect(Object.values(executionsByRoute).reduce((total, count) => total + count, 0)).toBe(278);
     expect(standard.filter((testCase) => testCase.feature === "consumer-diagnostics")).toHaveLength(
       1,
     );
@@ -114,7 +138,7 @@ describe("editor-neutral LSP contract inventory", () => {
     ).toHaveLength(6);
     expect(
       standard.filter((testCase) => /^plain-[jt]sx-pointer-event\./.test(testCase.id)),
-    ).toHaveLength(4);
+    ).toHaveLength(3);
     for (const testCase of standard.filter((candidate) =>
       candidate.feature.includes("definition"),
     )) {
@@ -243,6 +267,29 @@ describe("editor-neutral fail-closed validation", () => {
         new Map([[cleanCase!.document, "<template><div /></template>"]]),
       ),
     ).rejects.toThrow(/TS7026/);
+  });
+
+  // @ai-generated - Ensures a missing staged type dependency cannot satisfy the clean lane.
+  it("rejects TS2688 from an incomplete staged type dependency closure", async () => {
+    const cleanCase = createEditorNeutralContractInventory().find(
+      (testCase) => testCase.id === "svelte-ts-state-string.diagnostics.clean",
+    );
+    expect(cleanCase).toBeDefined();
+    await expect(
+      executeEditorNeutralContractCase(
+        cleanCase!,
+        fakeDriver([
+          {
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+            message: "Cannot find type definition file for 'esrap'",
+            code: 2688,
+            severity: 1,
+            source: "ts",
+          },
+        ]),
+        new Map([[cleanCase!.document, '<script lang="ts"></script>']]),
+      ),
+    ).rejects.toThrow(/TS2688/);
   });
 
   it("rejects tsserver serving that carries no tsgo recommendation (tsgo-preferred flip)", async () => {
@@ -511,6 +558,12 @@ const CAPTURED = {
   degradedLocal: "```typescript\nconst vueTsLocal: any\n```",
   /** `vue-ts.markup.hover`, tsserver — the correct answer for a TS `const 1`. */
   correctLocal: "```typescript\n(const) const vueTsLocal: 1\n```",
+  /** Vue TS direct/barrel QuickInfo captured from the real TS6 tsserver route. */
+  vueTsTsserverPublic:
+    '```typescript\n(const) const TypeScriptCase: __OmitNew<DefineComponent<{}, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<{}, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs) => {\n    $props: import("vue").PublicProps & Props & Omit<__Verter_RootElementAttrs<"button">, "class" | "style" | keyof import("vue").PublicProps | keyof Props> & __Verter_DataAttrs;\n    $emit: (event: string, ...args: unknown[]) => void;\n    $data: {};\n    $attrs: import("vue").HTMLAttributes;\n    $refs: {};\n})\n```',
+  /** Vue TS direct/barrel QuickInfo captured from the real tsgo/shared-tsgo routes. */
+  vueTsTsgoPublic:
+    '```typescript\n(alias) const TypeScriptCase: __OmitNew<DefineComponent<{}, {}, {}, {}, {}, ComponentOptionsMixin, ComponentOptionsMixin, {}, string, PublicProps, ToResolvedProps<{}, {}>, {}, {}, {}, {}, string, ComponentProvideOptions, true, {}, any>> & (new (props?: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs) => {\n    $props: import("vue").PublicProps & Props & Omit<ButtonHTMLAttributes, "class" | "style" | keyof import("vue").PublicProps | keyof (Props)> & __Verter_DataAttrs;\n    $emit: (event: string, ...args: unknown[]) => void;\n    $data: {};\n    $attrs: import("vue").HTMLAttributes;\n    $refs: {};\n})\n```',
 } as const;
 
 function hoverDriver(value: string): EditorNeutralContractDriver {
@@ -531,7 +584,30 @@ async function runHoverCase(id: string, hover: string): Promise<Error | null> {
   }
 }
 
+// @ai-generated - Replays captured provider surfaces to pin route-specific hover authority.
 describe("editor-neutral hover assertions discriminate on real provider output", () => {
+  for (const [routeShape, id, hover] of [
+    ["tsserver direct", "vue-ts.direct-import.hover", CAPTURED.vueTsTsserverPublic],
+    ["tsserver barrel", "vue-ts.barrel-import.hover", CAPTURED.vueTsTsserverPublic],
+    ["tsgo direct", "vue-ts.direct-import.hover", CAPTURED.vueTsTsgoPublic],
+    ["tsgo barrel", "vue-ts.barrel-import.hover", CAPTURED.vueTsTsgoPublic],
+  ] as const) {
+    it(`accepts the captured ${routeShape} public alias surface`, async () => {
+      expect(await runHoverCase(id, hover)).toBeNull();
+    });
+  }
+
+  // @ai-generated - Narrows accepted fallthrough aliases while rejecting private helper leakage.
+  it("rejects a non-public Verter helper while admitting the fallthrough aliases", async () => {
+    expect(CAPTURED.vueTsTsserverPublic).toContain("__Verter_RootElementAttrs");
+    expect(CAPTURED.vueTsTsserverPublic).toContain("__Verter_DataAttrs");
+    const leaked = CAPTURED.vueTsTsserverPublic.replace("Props &", "Props & __VerterPrivate &");
+    expect(leaked).not.toBe(CAPTURED.vueTsTsserverPublic);
+    expect((await runHoverCase("vue-ts.direct-import.hover", leaked))?.message).toMatch(
+      /__VerterPrivate/,
+    );
+  });
+
   it("accepts the correct TS-const local and rejects every degraded or wrong answer", async () => {
     // The correct answer passes. `const vueTsLocal = 1` in TypeScript keeps the
     // literal type, so this — not `number` — is what a healthy route emits.
