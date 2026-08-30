@@ -323,6 +323,11 @@ node_id = "CCA1M3"
 commit_message = "test(core): characterize the fixed-vue runtime-render route"
 commit_date = "2026-08-30T16:15:28+01:00"
 
+[[implemented]]
+node_id = "CCA1M"
+commit_message = "docs(roadmap): confirm runtime compile route convergence"
+commit_date = "2026-08-30T17:23:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
