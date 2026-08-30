@@ -18607,3 +18607,51 @@ mod resolve_eval_dependency_probe_contract_tests {
         );
     }
 }
+
+/// The overlay source-registration route takes its carrier grammar from
+/// the registered frontend catalog row (adapter × carrier language) and
+/// fails closed on a catalog miss — never another framework's grammar.
+#[test]
+fn overlay_structure_grammar_comes_from_registered_catalog_identity() {
+    use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId};
+
+    let host = Arc::new(make_host());
+    let vue_canonical = "/overlay/App.vue";
+    let svelte_canonical = "/overlay/App.svelte";
+    let miss_canonical = "/overlay/App.html";
+    let vue_src: Arc<str> = Arc::from("<template><div/></template>");
+    let svelte_src: Arc<str> = Arc::from("<div/>");
+
+    let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> = rustc_hash::FxHashMap::default();
+    overlays.insert(vue_canonical.to_string(), Arc::clone(&vue_src));
+    overlays.insert(svelte_canonical.to_string(), Arc::clone(&svelte_src));
+    overlays.insert(miss_canonical.to_string(), Arc::clone(&vue_src));
+    let view = crate::session_view::OverlaidView::new(Arc::clone(&host), overlays);
+
+    // Registered identities: the catalog row's grammar fact is accepted
+    // end-to-end by the host's grammar authority on the overlay route.
+    for (canonical, source, language) in [
+        (vue_canonical, &vue_src, FileLanguage::vue()),
+        (svelte_canonical, &svelte_src, FileLanguage::svelte()),
+    ] {
+        assert!(
+            host.registered_overlay_structure(canonical, Arc::clone(source), &language, &view)
+                .is_some(),
+            "the registered catalog grammar for {language:?} must be accepted \
+             on the overlay route",
+        );
+    }
+
+    // Catalog miss: a same-adapter NON-carrier-registered row has no
+    // frontend catalog row, so the overlay route fails closed instead of
+    // falling through to another framework's grammar.
+    let unregistered = FileLanguage::Framework {
+        adapter_id: FrameworkAdapterId::vue(),
+        language_id: LanguageId::new("html"),
+    };
+    assert!(
+        host.registered_overlay_structure(miss_canonical, vue_src, &unregistered, &view)
+            .is_none(),
+        "a carrier row without a registered frontend catalog row must fail closed",
+    );
+}

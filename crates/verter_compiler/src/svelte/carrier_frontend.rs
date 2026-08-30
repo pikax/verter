@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use verter_language::carrier_grammar::CarrierGrammarConfig;
 use verter_language::{
     FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
 };
@@ -66,7 +67,8 @@ impl CarrierFrontend for SvelteCarrierFrontend {
     }
 }
 
-/// Typed Svelte frontend catalog row.
+/// Typed Svelte frontend catalog row, carrying the Svelte registered
+/// carrier-grammar fact.
 #[must_use]
 pub fn svelte_carrier_frontend_registration(
 ) -> TypedCapabilityRegistration<FrontendCap<SvelteCarrierFrontend>> {
@@ -75,4 +77,5 @@ pub fn svelte_carrier_frontend_registration(
         SvelteCarrierFrontend.carrier_language_id(),
         Present(SvelteCarrierFrontend),
     )
+    .with_registered_grammar(CarrierGrammarConfig::Svelte)
 }

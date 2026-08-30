@@ -502,3 +502,61 @@ fn generic_catalog_module_source_does_not_name_framework_or_session_owners() {
         );
     }
 }
+
+#[test]
+fn frontend_row_grammar_fact_is_explicit_registration_not_default() {
+    use verter_language::carrier_grammar::CarrierGrammarConfig;
+    let bare = TypedCapabilityRegistration::register_frontend::<HtmlEpoch, _>(
+        FrameworkAdapterId::new("tooling"),
+        LanguageId::new("html"),
+        Present(ToolingFrontend),
+    );
+    // A frontend row without a registered grammar fact publishes none —
+    // the consumer must fail closed, never substitute a framework default.
+    assert!(bare.registered_grammar().is_none());
+    let with_grammar = bare.with_registered_grammar(CarrierGrammarConfig::Svelte);
+    assert_eq!(
+        with_grammar.registered_grammar(),
+        Some(&CarrierGrammarConfig::Svelte)
+    );
+    let row: TestCatalogRow = with_grammar.into();
+    assert_eq!(
+        row.registered_grammar(),
+        Some(&CarrierGrammarConfig::Svelte)
+    );
+    // Non-frontend rows never carry a grammar fact.
+    assert!(projection_row::<HtmlEpoch>("tooling", "html")
+        .registered_grammar()
+        .is_none());
+}
+
+#[test]
+fn built_in_frontend_rows_publish_registered_grammar_facts() {
+    use verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for;
+    use verter_language::carrier_grammar::CarrierGrammarConfig;
+    let vue = registered_grammar_for(&FrameworkAdapterId::vue(), &LanguageId::new("vue"))
+        .expect("Vue frontend row carries its registered grammar");
+    assert_eq!(
+        vue,
+        &CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
+            .expect("default Vue grammar")
+    );
+    let svelte = registered_grammar_for(&FrameworkAdapterId::svelte(), &LanguageId::new("svelte"))
+        .expect("Svelte frontend row carries its registered grammar");
+    assert_eq!(svelte, &CarrierGrammarConfig::Svelte);
+}
+
+#[test]
+fn registered_grammar_lookup_fails_closed_for_unregistered_identity() {
+    use verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for;
+    // An unregistered carrier identity yields no grammar fact — never
+    // another framework's grammar.
+    assert!(registered_grammar_for(
+        &FrameworkAdapterId::new("tooling"),
+        &LanguageId::new("html"),
+    )
+    .is_none());
+    // A registered adapter paired with a language it does not carry is
+    // likewise a miss, not a fallback.
+    assert!(registered_grammar_for(&FrameworkAdapterId::vue(), &LanguageId::new("html")).is_none());
+}

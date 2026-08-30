@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::instant::Instant;
 
 use verter_language::FileLanguage;
-use verter_scheduler::executor::{ExtractedDeps, StageError, StageExecutor};
+use verter_scheduler::executor::{ExtractedDeps, StageError, StageErrorKind, StageExecutor};
 use verter_scheduler::node::{
     AnalysisSnapshot, ArtifactSnapshot, EmptyData, SnapshotData, SourceSnapshot,
 };
@@ -220,16 +220,18 @@ impl StageExecutor for HostStageExecutor {
             file_language.adapter_id(),
             file_language.carrier_language_id(),
         ) {
-            (Some(adapter_id), Some(carrier_language_id)) => {
-                verter_compiler::framework_common::registered_carrier_projection::registered_frontend_for(
+            (Some(adapter_id), Some(carrier_language_id))
+                if verter_compiler::framework_common::registered_carrier_projection::registered_frontend_for(
                     adapter_id,
                     carrier_language_id,
                 )
-                .is_some()
+                .is_some() =>
+            {
+                Some((adapter_id, carrier_language_id))
             }
-            _ => false,
+            _ => None,
         };
-        if let (false, Some(adapter_id)) = (dispatchable_carrier, file_language.adapter_id()) {
+        if let (None, Some(adapter_id)) = (dispatchable_carrier, file_language.adapter_id()) {
             // A framework row that is NOT a dispatchable carrier (template,
             // unregistered carrier, same-adapter non-carrier) is unsupported.
             return Err(StageError::unsupported_language(adapter_id.clone()));
@@ -247,90 +249,92 @@ impl StageExecutor for HostStageExecutor {
 
         let parse_start = Instant::now();
 
-        let snapshot = if dispatchable_carrier {
-            use verter_language::carrier_grammar::CarrierGrammarConfig;
+        let snapshot = if let Some((adapter_id, carrier_language_id)) = dispatchable_carrier {
             use verter_language::registered_source_authority::{
                 CanonicalFileId, FileIncarnation, SourceGeneration,
             };
             // Retain the identity-bound semantic row (adapter × registered
             // frontend epoch × Semantic) before any parse or publication.
-            let semantic = {
-                let adapter_id = file_language.adapter_id().ok_or_else(|| {
-                    StageError::new("dispatchable carrier missing adapter identity")
-                })?;
-                let carrier_language_id = file_language.carrier_language_id().ok_or_else(|| {
-                    StageError::new("dispatchable carrier missing carrier language identity")
-                })?;
+            let semantic =
                 crate::parse::retained_semantic_for_source_stage(adapter_id, carrier_language_id)
-                    .ok_or_else(|| StageError::new("semantic catalog miss for carrier identity"))?
-            };
+                    .ok_or_else(|| StageError::new("semantic catalog miss for carrier identity"))?;
             let ingested = self.registered_envelope_ingest.lock().remove(canonical_id);
-            let (framework_parse, structure, file_incarnation, source_generation) =
-                if let Some(structure) = ingested {
-                    let registered = structure.envelope().source();
-                    if registered.canonical().as_str() != canonical_id
-                        || registered.bytes() != content.as_ref()
-                        || registered.resolved_file_language() != &file_language
-                    {
-                        return Err(StageError::new(
-                            "registered envelope/source identity mismatch",
-                        ));
-                    }
-                    let file_incarnation = registered.file_incarnation();
-                    let source_generation = registered.generation();
-                    (
-                        Arc::clone(structure.artifact()),
-                        structure,
-                        file_incarnation,
-                        source_generation,
+            let (framework_parse, structure, file_incarnation, source_generation) = if let Some(
+                structure,
+            ) = ingested
+            {
+                let registered = structure.envelope().source();
+                if registered.canonical().as_str() != canonical_id
+                    || registered.bytes() != content.as_ref()
+                    || registered.resolved_file_language() != &file_language
+                {
+                    return Err(StageError::new(
+                        "registered envelope/source identity mismatch",
+                    ));
+                }
+                let file_incarnation = registered.file_incarnation();
+                let source_generation = registered.generation();
+                (
+                    Arc::clone(structure.artifact()),
+                    structure,
+                    file_incarnation,
+                    source_generation,
+                )
+            } else {
+                let registered = self
+                    .source_authority
+                    .register_source(
+                        CanonicalFileId::new(canonical_id),
+                        FileIncarnation::new(self.host_instance.get()),
+                        SourceGeneration::new(generation),
+                        file_language.clone(),
+                        Arc::clone(&content),
                     )
-                } else {
-                    let registered = self
-                        .source_authority
-                        .register_source(
-                            CanonicalFileId::new(canonical_id),
-                            FileIncarnation::new(self.host_instance.get()),
-                            SourceGeneration::new(generation),
-                            file_language.clone(),
-                            Arc::clone(&content),
+                    .map_err(|_| StageError::new("registered source authority rejected source"))?;
+                // Registered-identity fact read: the grammar comes from
+                // the file's frontend catalog row, keyed adapter ×
+                // carrier language. A miss (unregistered carrier, or a
+                // row without a grammar fact) fails closed — never
+                // another framework's grammar.
+                let grammar_config =
+                    verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+                            adapter_id,
+                            carrier_language_id,
                         )
-                        .map_err(|_| {
-                            StageError::new("registered source authority rejected source")
+                        .ok_or_else(|| StageError {
+                            message: format!(
+                                "registered frontend for framework language adapter \
+                                 '{adapter_id}' carries no registered grammar fact"
+                            ),
+                            kind: StageErrorKind::UnsupportedLanguage {
+                                adapter_id: adapter_id.clone(),
+                            },
                         })?;
-                    let grammar_config = if file_language.adapter_id().is_some_and(|id| id.is_vue())
-                    {
-                        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
-                            .expect("default Vue grammar")
-                    } else {
-                        CarrierGrammarConfig::Svelte
-                    };
-                    let accepted = self
-                        .grammar_authority
-                        .accept_registered_source(
-                            &self.source_authority,
-                            &registered,
-                            &grammar_config,
-                        )
-                        .map_err(|_| StageError::new("registered grammar rejected source"))?;
-                    let request = crate::carrier_publication_store::PublicationRequestContext::new(
-                        crate::carrier_publication_store::AuditRequestId::new(generation),
-                        crate::carrier_publication_store::PublicationSurface::ProjectionHost,
-                        verter_scheduler::cancellation::current_job_cancellation_token()
-                            .unwrap_or_default(),
-                        registered.snapshot_id().clone(),
-                    );
-                    let envelope = self
-                        .publication_store
-                        .publish_or_get(&accepted, request)
-                        .into_envelope()
-                        .ok_or_else(|| StageError::new("carrier publication did not admit"))?;
-                    (
-                        Arc::clone(envelope.artifact()),
-                        crate::carrier_publication_store::RegisteredFileStructure::new(envelope),
-                        registered.file_incarnation(),
-                        registered.generation(),
-                    )
-                };
+                let accepted = self
+                    .grammar_authority
+                    .accept_registered_source(&self.source_authority, &registered, grammar_config)
+                    .map_err(|err| {
+                        StageError::new(format!("registered grammar rejected source: {err:?}"))
+                    })?;
+                let request = crate::carrier_publication_store::PublicationRequestContext::new(
+                    crate::carrier_publication_store::AuditRequestId::new(generation),
+                    crate::carrier_publication_store::PublicationSurface::ProjectionHost,
+                    verter_scheduler::cancellation::current_job_cancellation_token()
+                        .unwrap_or_default(),
+                    registered.snapshot_id().clone(),
+                );
+                let envelope = self
+                    .publication_store
+                    .publish_or_get(&accepted, request)
+                    .into_envelope()
+                    .ok_or_else(|| StageError::new("carrier publication did not admit"))?;
+                (
+                    Arc::clone(envelope.artifact()),
+                    crate::carrier_publication_store::RegisteredFileStructure::new(envelope),
+                    registered.file_incarnation(),
+                    registered.generation(),
+                )
+            };
             let eval_source = crate::parse::invoke_retained_semantic_eval_source(
                 semantic,
                 content.as_ref(),

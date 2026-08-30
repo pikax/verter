@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use verter_language::carrier_grammar::CarrierGrammarConfig;
 use verter_language::{
     FrameworkAdapterId, LanguageId, ParseOptions, SyntaxReject, UnregisteredFrameworkParseArtifact,
 };
@@ -64,7 +65,9 @@ impl CarrierFrontend for VueCarrierFrontend {
     }
 }
 
-/// Typed Vue frontend catalog row.
+/// Typed Vue frontend catalog row, carrying the Vue registered
+/// carrier-grammar fact (default interpolation delimiters, no custom
+/// elements).
 #[must_use]
 pub fn vue_carrier_frontend_registration(
 ) -> TypedCapabilityRegistration<FrontendCap<VueCarrierFrontend>> {
@@ -72,5 +75,9 @@ pub fn vue_carrier_frontend_registration(
         VueCarrierFrontend.adapter_id(),
         VueCarrierFrontend.carrier_language_id(),
         Present(VueCarrierFrontend),
+    )
+    .with_registered_grammar(
+        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
+            .expect("default Vue grammar delimiters are non-empty"),
     )
 }

@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 
+use verter_language::carrier_grammar::CarrierGrammarConfig;
 use verter_language::{FrameworkAdapterId, LanguageId};
 
 use super::capability::{
@@ -169,6 +170,16 @@ impl<F, P, S, R, H> CatalogRow<F, P, S, R, H> {
         }
     }
 
+    /// Registered carrier-grammar fact when this row is a frontend
+    /// registration carrying one; `None` for every other row.
+    #[must_use]
+    pub fn registered_grammar(&self) -> Option<&CarrierGrammarConfig> {
+        match self {
+            Self::Frontend(row) => row.registered_grammar(),
+            _ => None,
+        }
+    }
+
     /// Present projection backend when this row is a projection registration.
     #[must_use]
     pub fn projection(&self) -> Option<&P> {
@@ -319,7 +330,10 @@ impl TypedCapabilityRegistration<()> {
                 FrameworkEpochId::from_type::<E>(),
                 CatalogCapability::Frontend,
             ),
-            capability: FrontendCap(frontend),
+            capability: FrontendCap {
+                frontend,
+                grammar: None,
+            },
         }
     }
 
@@ -405,9 +419,13 @@ impl TypedCapabilityRegistration<()> {
     }
 }
 
-/// Frontend capability payload.
+/// Frontend capability payload: the present frontend plus the row's
+/// registered carrier-grammar fact, when one is registered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrontendCap<F>(Present<F>);
+pub struct FrontendCap<F> {
+    frontend: Present<F>,
+    grammar: Option<CarrierGrammarConfig>,
+}
 /// Projection capability payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionCap<P>(Present<P>);
@@ -431,10 +449,24 @@ impl<F> TypedCapabilityRegistration<FrontendCap<F>> {
     /// The present frontend.
     #[must_use]
     pub fn frontend(&self) -> &F {
-        &self.capability.0 .0
+        &self.capability.frontend.0
     }
 
-    /// Re-wrap the present frontend, keeping this row's identity.
+    /// Attach this row's registered carrier-grammar fact.
+    #[must_use]
+    pub fn with_registered_grammar(mut self, grammar: CarrierGrammarConfig) -> Self {
+        self.capability.grammar = Some(grammar);
+        self
+    }
+
+    /// The row's registered carrier-grammar fact, when one is registered.
+    #[must_use]
+    pub fn registered_grammar(&self) -> Option<&CarrierGrammarConfig> {
+        self.capability.grammar.as_ref()
+    }
+
+    /// Re-wrap the present frontend, keeping this row's identity and
+    /// registered grammar fact.
     #[must_use]
     pub fn map_frontend<G>(
         self,
@@ -442,7 +474,10 @@ impl<F> TypedCapabilityRegistration<FrontendCap<F>> {
     ) -> TypedCapabilityRegistration<FrontendCap<G>> {
         TypedCapabilityRegistration {
             identity: self.identity,
-            capability: FrontendCap(Present(map(self.capability.0 .0))),
+            capability: FrontendCap {
+                frontend: Present(map(self.capability.frontend.0)),
+                grammar: self.capability.grammar,
+            },
         }
     }
 }

@@ -257,7 +257,6 @@ impl VerterHost {
         file_language: &verter_language::FileLanguage,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<crate::carrier_publication_store::RegisteredFileStructure> {
-        use verter_language::carrier_grammar::CarrierGrammarConfig;
         use verter_language::registered_source_authority::{
             CanonicalFileId, FileIncarnation, SourceGeneration,
         };
@@ -280,18 +279,22 @@ impl VerterHost {
                 source,
             )
             .ok()?;
-        let grammar = if file_language.adapter_id().is_some_and(|id| id.is_vue()) {
-            CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).ok()?
-        } else {
-            CarrierGrammarConfig::Svelte
-        };
+        // Registered-identity fact read: the grammar comes from the file's
+        // frontend catalog row, keyed adapter × carrier language. A miss
+        // (unregistered carrier, or a row without a grammar fact) fails
+        // closed as `None` — never another framework's grammar.
+        let grammar =
+            verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for(
+                file_language.adapter_id()?,
+                file_language.carrier_language_id()?,
+            )?;
         let accepted = self
             .carrier_publication
             .grammar_authority
             .accept_registered_source(
                 &self.carrier_publication.source_authority,
                 &registered,
-                &grammar,
+                grammar,
             )
             .ok()?;
         let request = crate::carrier_publication_store::PublicationRequestContext::new(

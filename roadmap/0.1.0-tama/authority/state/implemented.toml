@@ -313,6 +313,11 @@ node_id = "CCA1M2"
 commit_message = "refactor(core): delegate compatibility bundle runtime construction to typed backends"
 commit_date = "2026-08-30T15:24:49+01:00"
 
+[[implemented]]
+node_id = "CCA1N2G"
+commit_message = "refactor(core): select carrier grammar from registered catalog identity"
+commit_date = "2026-08-30T15:09:58+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

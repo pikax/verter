@@ -580,6 +580,20 @@ pub fn built_in_frontend_catalog(
     })
 }
 
+/// The unique frontend catalog row for one adapter × carrier-language
+/// identity, or `None` when no frontend is registered for it.
+fn frontend_row_for(
+    adapter_id: &FrameworkAdapterId,
+    carrier_language_id: &LanguageId,
+) -> Option<&'static CatalogRow<InstalledCarrierFrontend, (), (), (), ()>> {
+    built_in_frontend_catalog().iter().find(|row| {
+        let identity = row.identity();
+        identity.capability() == CatalogCapability::Frontend
+            && identity.adapter_id() == adapter_id
+            && identity.carrier_language_id() == carrier_language_id
+    })
+}
+
 /// Catalog lookup for a registered Vue/Svelte frontend. Unknown adapter or
 /// language returns `None` — no fallback parse.
 #[must_use]
@@ -587,27 +601,25 @@ pub fn registered_frontend_for(
     adapter_id: &FrameworkAdapterId,
     carrier_language_id: &LanguageId,
 ) -> Option<&'static InstalledCarrierFrontend> {
-    built_in_frontend_catalog().iter().find_map(|row| {
-        let identity = row.identity();
-        (identity.capability() == CatalogCapability::Frontend
-            && identity.adapter_id() == adapter_id
-            && identity.carrier_language_id() == carrier_language_id)
-            .then(|| row.frontend())
-            .flatten()
-    })
+    frontend_row_for(adapter_id, carrier_language_id).and_then(|row| row.frontend())
+}
+
+/// Catalog lookup for the registered carrier-grammar fact on a frontend
+/// row. Unknown identity, or a frontend row without a registered grammar
+/// fact, returns `None` — never another framework's grammar.
+#[must_use]
+pub fn registered_grammar_for(
+    adapter_id: &FrameworkAdapterId,
+    carrier_language_id: &LanguageId,
+) -> Option<&'static CarrierGrammarConfig> {
+    frontend_row_for(adapter_id, carrier_language_id).and_then(|row| row.registered_grammar())
 }
 
 fn frontend_epoch(
     adapter_id: &FrameworkAdapterId,
     carrier_language_id: &LanguageId,
 ) -> Option<FrameworkEpochId> {
-    built_in_frontend_catalog().iter().find_map(|row| {
-        let identity = row.identity();
-        (identity.capability() == CatalogCapability::Frontend
-            && identity.adapter_id() == adapter_id
-            && identity.carrier_language_id() == carrier_language_id)
-            .then(|| identity.epoch().clone())
-    })
+    frontend_row_for(adapter_id, carrier_language_id).map(|row| row.identity().epoch().clone())
 }
 
 /// Template facts plus the diagnostics their extraction produced.
