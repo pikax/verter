@@ -3413,6 +3413,60 @@ fn scc_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey 
     }
 }
 
+/// Mint the proof a re-staged member carries: the fenced-publish
+/// machinery tests stage members by hand, and the publish boundary is
+/// proof-typed — the member's payload must be a `CompleteFlowResult`
+/// naming the member's OWN key (the batch vetoes a proof minted for
+/// another key). Test-only mint; production proofs come from the
+/// finalizer alone.
+fn staged_flow_proof(
+    key: &FlowReturnKey,
+    value: crate::semantic_query::FlowReturnResult,
+) -> super::flow_solve::CompleteFlowResult {
+    use super::dispatch_txn::flow_obligation_state::{
+        FlowConvergenceEvidence, FlowEvaluationProvenance,
+    };
+    use super::flow_solve::{CompleteFlowResult, FlowConvergencePolicy, FlowDemandBasis};
+    let file_language = crate::LanguageRegistry::global()
+        .classify_static(SCC_CANONICAL)
+        .static_resolution();
+    let parse_key = verter_language::default_parse_identity_for(SCC_FIXTURE, &file_language)
+        .expect("the SCC fixture derives a parse identity")
+        .1;
+    let basis = FlowDemandBasis {
+        graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+            canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
+            function: verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: verter_semantic::analysis::function_program::FunctionDeclarationRef {
+                    owner: key.function.declaration_slot.owner,
+                    name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
+                    space: verter_semantic::facts::SymbolSpace::Value,
+                },
+                part: key.function.function_part.clone(),
+                overload_ordinal: key.function.overload_ordinal,
+            },
+            flow_body_stable_hash: [0; 16],
+            flow_body_exact_hash: [0; 16],
+            parse_env_hash: key.context.parse_env_hash,
+            parse_key,
+            file_language,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        },
+        query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+        input_basis: verter_identity::identity::InputBasisId::from_canonical(
+            &FlowEvaluationProvenance::new(1, 1),
+        ),
+        result_contract: key.result_contract.clone(),
+    };
+    CompleteFlowResult::for_tests(
+        basis,
+        value,
+        FlowConvergenceEvidence::for_tests(FlowConvergencePolicy { max_iterations: 16 }, 1, true),
+    )
+    .expect("a clean re-staged value mints a proof")
+}
+
 /// One PUBLIC-API demand: a fresh top-level dispatch per call, exactly as
 /// an external `SemanticQueryApi` consumer issues it.
 fn scc_public_demand(
@@ -3786,8 +3840,8 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 .cloned()
                 .map(|(_, key, _, result, materialized, flight)| {
                     crate::semantic_query_memo::PendingFlowReturnMember {
+                        result: staged_flow_proof(&key, result),
                         key,
-                        result,
                         materialized,
                         flight,
                     }
@@ -4587,4 +4641,598 @@ fn flow_return_nested_label_inherits_the_enclosing_suffix_return() {
         ),
         verter_type_expr::TypeExpr::union(vec![string_literal("a"), string_literal("b")])
     );
+}
+
+/// The `ReturnType<typeof f>["m"]` member rail is a PROBE with a
+/// structured fall-through: a spread-provisioned member is beyond the
+/// modeled member point, so the member-demand evaluation declines with a
+/// typed miss — and the DECLINE must leak nothing into the enclosing
+/// observation channels (the build-local taint frame, the
+/// per-cold-compute completeness scope, the request partial sticky),
+/// because the generic `Instantiate` unwrap fall-through re-derives the
+/// member cleanly from the whole return. A leaked decline collapsed the
+/// runtime constructor of a published prop derived through this shape to
+/// `Unknown` (`type: null`) even though its value resolved to `string`.
+///
+/// The rails stay FULLY visible to a direct member-demand consumer (the
+/// second half): the isolation lives at the rail's fall-through decision,
+/// never in the `FlowReturn` build's own output — stripping the build's
+/// rails instead would let a no-surface producer publish around.
+#[test]
+fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let canonical = "/ws/spread-member.ts";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(
+            "function base() { return { label: \"x\" } }\nfunction makeProps() { return { ...base(), n: 1 } }\n",
+        ),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(canonical), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let typeof_node =
+            dispatch
+                .graph()
+                .intern_node(crate::semantic_query::SemanticNodeData::new_typeof(
+                    crate::semantic_query::ValueRootKey {
+                        scope: crate::semantic_query::ScopeId {
+                            canonical_id: Arc::from(canonical),
+                            owner,
+                            local_scope: None,
+                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                                owner,
+                            ),
+                        },
+                        name: Arc::from("makeProps"),
+                    },
+                    Arc::from([]),
+                    Arc::from([]),
+                ));
+
+        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let observation = crate::project_semantic_dispatch::BuildLocalTaintGuard::push(
+            &dispatch.build_local_taint,
+        );
+        let projected = dispatch.flow_return_member_projection(
+            typeof_node,
+            &crate::semantic_query::PathSegment::Member(
+                crate::semantic_query::PropertyKey::identifier("label"),
+            ),
+        );
+        let observed = observation.finish();
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        completeness_scope.discard();
+
+        assert!(
+            projected.is_none(),
+            "the spread-provisioned member demand declines to the generic unwrap route"
+        );
+        assert!(
+            !observed.result_is_partial && !observed.cache_suppress,
+            "the declined probe folds nothing into the enclosing build frame: {observed:?}"
+        );
+        assert!(
+            !completeness.is_partial(),
+            "the declined probe leaves the enclosing cold-compute scope Complete: \
+             {completeness:?}"
+        );
+        assert!(
+            !crate::request_context::current_request_result_is_partial(),
+            "the declined probe never marks the request partial sticky"
+        );
+
+        // A DIRECT member-demand consumer still sees the full typed rails.
+        let mut key = flow_key(
+            dispatch,
+            "makeProps",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        key.function = dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            owner,
+            Arc::from("makeProps"),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        key.context = dispatch.flow_return_context_for(canonical);
+        key.demand = crate::semantic_query::ReturnProjectionDemand {
+            point: crate::semantic_query::demand::Demand::navigate(
+                crate::semantic_query::demand::ProjectionPath::from_segments([
+                    crate::semantic_query::PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier("label"),
+                    ),
+                ]),
+            ),
+        };
+        let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
+        assert!(
+            matches!(
+                read.value,
+                crate::semantic_query::QueryResult::Error(crate::semantic_query::QueryError::Miss)
+            ),
+            "the member demand itself fails closed with the typed miss, got {:?}",
+            read.value
+        );
+        assert!(
+            read.result_is_partial && read.cache_suppress,
+            "a direct member-demand consumer keeps the no-surface rails"
+        );
+        assert!(
+            read.partial_reasons
+                .contains(crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+            "the decline rides the no-surface class, got {:?}",
+            read.partial_reasons
+        );
+    });
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// The flow-proof admission boundary: root proof gate, missing-obligation
+// refusal, degraded-finalizer non-warming, and once-per-cold-demand
+// planning.
+// ────────────────────────────────────────────────────────────────────────
+
+/// The per-request cold-compute counter, read from the installed
+/// `RequestContext`.
+fn flow_cold_computes() -> u32 {
+    crate::request_context::current_request_context()
+        .expect("the test installs a RequestContext")
+        .flow_return_cold_computes
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Root warm admission of a `FlowReturn` result requires the finalizer's
+/// `CompleteFlowResult` proof token — the boolean rails alone are NOT the
+/// positive completeness authority. A clean raw value with both boolean
+/// flags clear but no proof yields ZERO candidates (the memo's flow-proof
+/// gate vetoes); the identical value with the finalizer token publishes,
+/// and the second request is a warm family hit. Deleting the proof check
+/// (`flow_proof_ok` at the memo admission) fails the negative leg.
+#[test]
+fn flow_root_publish_requires_complete_flow_proof() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        // Negative leg: the SAME clean value, flags clear, proof stripped.
+        {
+            let _strip = inject::Guard::arm(&inject::STRIP_ROOT_PROOF);
+            let result = flow_result_value(dispatch, key.clone());
+            assert_eq!(result.degradation(), None, "the value itself is clean");
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                        key.clone()
+                    ))),
+                0,
+                "a clean value WITHOUT the finalizer's proof token must not admit — \
+                 the boolean rails are not the positive completeness authority"
+            );
+        }
+
+        // Positive leg: the identical demand with the proof publishes.
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            1,
+            "the proof-bearing build admits exactly one candidate"
+        );
+        key
+    });
+    // The warm read runs against a FRESH view (the artifacts the cold
+    // build materialized are now visible to validation).
+    let warm_key = with_dispatch(&host, |dispatch| {
+        flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        )
+    });
+    with_dispatch(&host, |fresh| {
+        assert!(
+            fresh
+                .graph()
+                .get_flow_return_result(fresh.ctx, &warm_key)
+                .is_some(),
+            "the second request is a warm family hit"
+        );
+    });
+}
+
+/// A production plan whose discharge leaves ONE planned obligation
+/// pending finalizes Partial: the usable value still returns (twice), the
+/// cold-compute counter increments on BOTH demands (nothing warmed), and
+/// the family slot holds zero candidates. The injected fault only DROPS a
+/// discharge claim — it can refuse more, never mint — so a green negative
+/// leg here proves the seal discriminates a pending obligation rather
+/// than riding the report's say-so.
+#[test]
+fn production_missing_obligation_returns_only_and_recomputes() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use crate::request_context::{RequestContext, RequestContextGuard};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let _drop_claim = inject::Guard::arm(&inject::DROP_LAST_DISCHARGE_CLAIM);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        let first = flow_result_value(dispatch, key.clone());
+        assert_eq!(flow_cold_computes(), 1);
+        let second = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            flow_cold_computes(),
+            2,
+            "an unproven demand never warms, so the second request recomputes"
+        );
+        assert_eq!(
+            first.return_type(),
+            second.return_type(),
+            "both demands return the same usable value"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a pending planned obligation is ReturnOnly: zero candidates"
+        );
+    });
+}
+
+/// A NATURAL degraded success never warms — root and SCC legs. The root
+/// leg (a call on a non-callable binding) returns its usable payload
+/// twice with two cold computations and zero candidates; the SCC leg (a
+/// mutual component carrying an unapplied write effect) leaves ZERO
+/// candidates on BOTH member slots. The universal read funnel — not any
+/// consumer-side fold — carries the degradation class to the sealed
+/// consumer entry (the enclosing-component propagation is proven
+/// end-to-end by `flow_return_public_execute_releases_drained_members_
+/// both_orders`' degraded leg).
+#[test]
+fn degraded_flow_finalizer_never_warms_root_or_scc() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::semantic_query::PartialReasonSet;
+
+    // Root leg.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+        let _guard = RequestContextGuard::install(ctx);
+        let key = flow_key(
+            dispatch,
+            "subNonCallableCall",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let first = flow_result_value(dispatch, key.clone());
+        assert!(first.degradation().is_some(), "a natural degraded success");
+        assert_eq!(flow_cold_computes(), 1);
+        let second = flow_result_value(dispatch, key.clone());
+        assert_eq!(flow_cold_computes(), 2, "degraded never warms: recompute");
+        assert_eq!(first.return_type(), second.return_type());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                    key.clone()
+                ))),
+            0,
+            "zero root candidates"
+        );
+
+        // The universal rail: consuming the degraded value through the
+        // sealed consumer entry folds its class through the read funnel.
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let node = dispatch.execute_function_return_source(
+            &verter_type_expr::facts::FunctionReturnSource::Flow(
+                verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: Arc::from("subNonCallableCall"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+            ),
+            CANONICAL,
+        );
+        let observed = crate::request_context::current_cold_compute_completeness();
+        scope.discard();
+        assert!(
+            matches!(node, super::flow_return::FunctionReturnNode::Flow(_)),
+            "the degraded value stays usable at the consumer, got {node:?}"
+        );
+        assert!(
+            observed
+                .reasons()
+                .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            "the universal read funnel carries the degradation class to the \
+             consumer — no consumer-side fold exists to carry it; got {:?}",
+            observed.reasons()
+        );
+    });
+
+    // SCC leg: a degraded component publishes NEITHER member.
+    let scc_host = make_scc_host();
+    with_dispatch(&scc_host, |dispatch| {
+        let root = scc_key(dispatch, "scDegradedA");
+        let peer = scc_key(dispatch, "scDegradedB");
+        let result = flow_result_value(dispatch, root.clone());
+        assert!(
+            result.degradation().is_some(),
+            "the component's typed degradation reaches the root"
+        );
+        for (name, key) in [("scDegradedA", root), ("scDegradedB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: a degraded component member never enters the SCC publish batch"
+            );
+        }
+    });
+}
+
+/// One cold flow demand plans EXACTLY once (one demand plan, one graph
+/// build); a warm replay of the same demand adds zero of either; an
+/// ordinary non-flow query and both pending typed-gap roots
+/// (`FlowNarrowingAt` / `ContextualTypeAt`) add zero graph builds, zero
+/// plans, and touch no flow-demand storage (the zero-capacity half is
+/// pinned by `unused_flow_runtime_reserves_no_demand_storage`).
+#[test]
+fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
+    let host = make_host();
+    // Cold demand: exactly one plan over exactly one built graph.
+    with_dispatch(&host, |dispatch| {
+        let flow_slice = host.project_type_store().flow_slice();
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key);
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "one cold demand plans once"
+        );
+        assert_eq!(
+            flow_slice.graphs().build_count(),
+            1,
+            "one graph build per content version"
+        );
+    });
+
+    // Warm replay (against a fresh view, where the published artifacts
+    // validate): zero additional plans, zero additional builds — then the
+    // non-flow and pending typed-gap dispatches on the same view.
+    with_dispatch(&host, |dispatch| {
+        let flow_slice = host.project_type_store().flow_slice();
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key);
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "warm replay never re-plans"
+        );
+        assert_eq!(flow_slice.graphs().build_count(), 1);
+
+        // An ordinary non-flow query.
+        let member =
+            dispatch
+                .graph()
+                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                    crate::semantic_query::PrimitiveKind::Number,
+                ));
+        let _ = dispatch.execute(SemanticQueryKey::NormalizeUnion {
+            members: Arc::from(vec![member].into_boxed_slice()),
+        });
+
+        // The pending typed-gap roots: a typed refusal, never a graph or
+        // a plan.
+        let analysis_context = crate::semantic_query::ProgramAnalysisContext {
+            parse_env_hash: [0; 16],
+            resolve_env_hash: [0; 16],
+            type_env_hash: [0; 16],
+            lib_env_hash: [0; 16],
+            project_identity: 0,
+            substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
+        };
+        let pending_roots = [
+            SemanticQueryKey::FlowNarrowingAt {
+                point: crate::semantic_query::ProgramPointId {
+                    canonical_id: Arc::from(CANONICAL),
+                    offset: 0,
+                },
+                flow: crate::semantic_query::FlowNarrowingKey::empty(),
+                context: analysis_context,
+            },
+            SemanticQueryKey::ContextualTypeAt {
+                point: crate::semantic_query::ProgramPointId {
+                    canonical_id: Arc::from(CANONICAL),
+                    offset: 0,
+                },
+                contextual: crate::semantic_query::ContextualTypingKey::empty(),
+                context: analysis_context,
+            },
+        ];
+        for pending in pending_roots {
+            let result = dispatch.execute(pending);
+            assert!(
+                matches!(
+                    result,
+                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                ),
+                "a pending typed-gap root is a typed miss, got {result:?}"
+            );
+        }
+
+        assert_eq!(
+            flow_slice.demand_plan_count(),
+            1,
+            "non-flow queries and pending typed-gap roots never plan"
+        );
+        assert_eq!(
+            flow_slice.graphs().build_count(),
+            1,
+            "non-flow queries and pending typed-gap roots never build a graph"
+        );
+    });
+}
+
+/// A production build can obtain discharge/convergence evidence only
+/// from the private, one-shot evaluation outcome `evaluate_flow_return`
+/// mints: production finalization triangulates the evidence's
+/// provenance against the installed carrier and the dispatch's CURRENT
+/// mint, so evidence that did not originate from THIS evaluation is a
+/// typed partial and never publishes. Raw per-obligation mutators and
+/// test helpers cannot reach production finalization: the runtime the
+/// dispatch finalizes against is transaction-internal (a foreign
+/// runtime's handle fails closed —
+/// `flow_demand_handle_fails_closed_on_a_foreign_runtime`), and the
+/// sealed-witness / proof constructors are compile-time private (the
+/// `complete_flow_result_constructor_is_private` and
+/// `flow_solve_sealed_witnesses_not_constructible` compile-fail
+/// fixtures).
+#[test]
+fn production_flow_proof_has_evaluator_origin() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Negative leg: evidence whose provenance is not this evaluation's
+    // one-shot mint refuses finalization — the usable value still flows,
+    // nothing publishes.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _foreign = inject::Guard::arm(&inject::FOREIGN_EVALUATION_EVIDENCE);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "evidence not minted by this evaluation's outcome never publishes"
+        );
+    });
+
+    // Matched control: the evaluator-minted evidence publishes.
+    let control = make_host();
+    with_dispatch(&control, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let _ = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "the evaluator-minted proof is the one production admission source"
+        );
+    });
+}
+
+/// Value, discharge report, convergence, and demand handle share ONE
+/// opaque evaluation provenance (semantic-store identity + request
+/// generation). A demand carrier stamped with a provenance from another
+/// store or a stale generation makes the whole solve a typed
+/// partial/ReturnOnly: the usable value still flows, and NEITHER the
+/// root nor any SCC member produces a candidate.
+#[test]
+fn foreign_flow_value_provenance_is_rejected() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+
+    // Root leg.
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _stale = inject::Guard::arm(&inject::STALE_DEMAND_CARRIER);
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "a foreign-provenance demand carrier never yields a root candidate"
+        );
+    });
+
+    // SCC leg: a clean mutual component under a foreign-provenance
+    // carrier publishes NEITHER member.
+    let scc_host = make_scc_host();
+    with_dispatch(&scc_host, |dispatch| {
+        let _stale = inject::Guard::arm(&inject::STALE_DEMAND_CARRIER);
+        let root = scc_key(dispatch, "scCleanA");
+        let peer = scc_key(dispatch, "scCleanB");
+        let result = flow_result_value(dispatch, root.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the component value stays usable"
+        );
+        for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0,
+                "{name}: foreign provenance produces zero SCC candidates"
+            );
+        }
+    });
 }

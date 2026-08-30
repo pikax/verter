@@ -262,10 +262,9 @@ fn build_bundle(skeleton: FunctionBodySkeleton) -> FlowGraphBundle {
 /// are private and the sole constructors are [`FunctionFlowGraphStore`]
 /// methods, so a consumer can never plan over one graph while naming
 /// another's body identity. This is the completeness-proof layer's graph
-/// handle: production-compiled, but the only constructor today is the
-/// gated test mint below — the production admission seam is not yet
-/// wired.
-#[allow(dead_code)] // production admission wiring is not yet installed
+/// handle: the production demand preparation mints it from the memoized
+/// bundle ([`FunctionFlowGraphStore::bound_graph`]); the gated test mint
+/// below serves the hermetic fixtures.
 pub(crate) struct BoundFlowGraph {
     key: FlowSliceFunctionKey,
     bundle: Arc<FlowGraphBundle>,
@@ -327,6 +326,18 @@ impl FunctionFlowGraphStore {
                 Some(bundle)
             }
         }
+    }
+
+    /// Seal the ALREADY-MEMOIZED bundle for `key` into a bound graph —
+    /// the production admission seam for the demand planner. `None` when
+    /// no bundle is memoized for the key: the hash node's cold compute is
+    /// the only builder, so a miss here is a torn view between the hash
+    /// node and the graph store, never a reason to build.
+    pub(crate) fn bound_graph(&self, key: &FlowSliceFunctionKey) -> Option<BoundFlowGraph> {
+        self.peek(key).map(|bundle| BoundFlowGraph {
+            key: key.clone(),
+            bundle,
+        })
     }
 
     /// Mint the bound graph for `key` over `skeleton` — the hermetic
@@ -697,6 +708,10 @@ pub(crate) struct FlowSliceStores {
     skeletons: Arc<dyn FlowBodySkeletonSource>,
     hash_node: Arc<FlowSliceHashNode>,
     lowered_node: FlowSliceLoweredBodyNode,
+    /// Number of demand plans built against this store (observability;
+    /// the once-per-cold-demand fixture asserts warm replay and non-flow
+    /// dispatch add zero).
+    demand_plans: AtomicU64,
     /// The shared budget cell's store-side handle — held so a
     /// constrained test host can re-arm the budget the nodes read.
     #[cfg(test)]
@@ -728,9 +743,22 @@ impl FlowSliceStores {
             skeletons,
             hash_node,
             lowered_node,
+            demand_plans: AtomicU64::new(0),
             #[cfg(test)]
             budget,
         }
+    }
+
+    /// Record one demand plan built against this store.
+    pub(crate) fn note_demand_planned(&self) {
+        self.demand_plans.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Number of demand plans built (observability; the
+    /// once-per-cold-demand fixture asserts on it).
+    #[cfg(test)]
+    pub(crate) fn demand_plan_count(&self) -> u64 {
+        self.demand_plans.load(Ordering::Relaxed)
     }
 
     /// The memoized [`FunctionBodySkeleton`] of one function content
@@ -766,6 +794,14 @@ impl FlowSliceStores {
         self.graphs
             .peek(key)
             .map(|bundle| Arc::clone(&bundle.skeleton))
+    }
+
+    /// The store-minted bound graph of one function content version — the
+    /// completeness-proof layer's graph handle, sealed to the memoized
+    /// bundle. `None` when the bundle is not yet built (the caller's
+    /// hash-node lookup is the builder; a miss is a torn view).
+    pub(crate) fn bound_graph_for(&self, key: &FlowSliceFunctionKey) -> Option<BoundFlowGraph> {
+        self.graphs.bound_graph(key)
     }
 
     /// The slice-identity node (plan + hash; the fourth budget layer's

@@ -7193,6 +7193,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // Recursive / budget-exceeded sentinel — never warm-published,
                 // so it records nothing the §3.4 gate could reuse.
                 satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                flow_completion: None,
             };
         }
         // Emit a whole-path `ProjectPath` edge on the result so consumers
@@ -7259,6 +7260,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self_root_canonicals: Arc::from([]),
             pending_prefix_backfills,
             satisfied_projection,
+            flow_completion: None,
         }
     }
 

@@ -121,13 +121,10 @@ pub(crate) mod flow_return_positional_tests;
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_tests;
-// The completeness-proof layer for flow-bearing operations: compiled into
-// production (the `FlowReturnKey` constructor derives its result-contract
-// identity from this registry), but publicly unreachable — the demand
-// planning / finalization entry points have no production caller until the
-// proof admission is wired; the test surface reaches them through
-// `crate::for_tests`.
-#[allow(dead_code)]
+// The completeness-proof layer for flow-bearing operations: production-live
+// (the flow evaluator's demand preparation installs demands from here and
+// the component close finalizes through it), and the `FlowReturnKey`
+// constructor derives its result-contract identity from this registry.
 pub(crate) mod flow_solve;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
@@ -926,26 +923,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::request_context::mark_request_result_partial_from_read_with(reasons);
         }
         self.fold_into_top_build_local_taint_with(result_is_partial, cache_suppress, reasons);
-    }
-
-    /// [`Self::fold_cache_read_rails`] for the ONE sealed function-return
-    /// consumer: the same two rails, folded under the NAMED class the
-    /// outcome's own classification produced instead of the
-    /// boolean-bridge `PROPAGATED`.
-    ///
-    /// The classes have to be named because the consumers disagree about
-    /// what they mean, and a boolean cannot carry that: publishing the
-    /// inferred type makes any of them a genuine partial, while emitting
-    /// the authored declaration for an external checker leaves the output
-    /// complete, and emitting a runtime option object derived from the
-    /// value sits in between (safe for a faithful surface, unsafe for an
-    /// unverified one).
-    pub(super) fn fold_flow_return_consumer_rails(
-        &self,
-        reasons: crate::semantic_query::PartialReasonSet,
-    ) {
-        crate::request_context::mark_request_result_partial_with_reasons(reasons);
-        self.fold_into_top_build_local_taint_with(true, true, reasons);
     }
 
     /// Bump the per-request type-resolution audit counters (hop / mode /
@@ -2652,21 +2629,40 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 SemanticQueryKey::ApparentType { base, context } => {
                     self.build_apparent_type(*base, context)
                 }
-                // ResolveAmbientNamespace / ResolveEnum / FlowNarrowingAt /
-                // ContextualTypeAt —
+                // ResolveAmbientNamespace / ResolveEnum —
                 // non-producing: these variants have no execute-side reducer.
                 // The build returns `Opaque(Miss)` verbatim (mirroring the
                 // `Relate` arm above); an `Error` result is never
-                // warm-published, so nothing is admitted or cached. Returning
-                // a fabricated narrowed / contextual node for `FlowNarrowingAt`
-                // / `ContextualTypeAt` (whose flow / contextual engines land in
-                // U6) would be a stub; `Miss` is the honest non-result.
+                // warm-published, so nothing is admitted or cached.
                 SemanticQueryKey::ResolveAmbientNamespace { .. }
-                | SemanticQueryKey::ResolveEnum { .. }
-                | SemanticQueryKey::FlowNarrowingAt { .. }
-                | SemanticQueryKey::ContextualTypeAt { .. } => {
+                | SemanticQueryKey::ResolveEnum { .. } => {
                     let fence = self.project_generation_signature();
                     (QueryResult::Error(QueryError::Miss), fence).into()
+                }
+                // FlowNarrowingAt / ContextualTypeAt — flow roots whose
+                // reducers are pending (the registry's `PendingReducer`
+                // rows). The typed-gap route validates the registry row and
+                // surfaces the operation-specific `FlowGap` as a typed
+                // partial: `Error(Miss)` + partial/ReturnOnly rails, no
+                // graph, no plan, no demand. Returning a fabricated
+                // narrowed / contextual node would be a stub; `Miss` is the
+                // honest non-result.
+                SemanticQueryKey::FlowNarrowingAt { .. }
+                | SemanticQueryKey::ContextualTypeAt { .. } => {
+                    let fence = self.project_generation_signature();
+                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                        (QueryResult::Error(QueryError::Miss), fence).into();
+                    if flow_solve::typed_gap_for_pending_root(key_for_build.tag()).is_some() {
+                        // The reducer for this root does not exist yet:
+                        // the answer is genuinely absent — mark the
+                        // no-surface partial class so the universal read
+                        // funnel gates any enclosing warm admission.
+                        output.cache_suppress = true;
+                        output.result_is_partial = true;
+                        output.partial_reasons =
+                            crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+                    }
+                    output
                 }
                 // LowerLocator — LIVE producer. The two-phase locator-shape
                 // build: worker-side lease-only deref of the authored body,

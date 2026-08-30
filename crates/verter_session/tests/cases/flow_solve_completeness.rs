@@ -1122,12 +1122,18 @@ fn nested_flow_demands_have_independent_lifecycles() {
     );
 }
 
-/// `ResultContractId` is exact production identity on the key: the
-/// constructor-derived contract IS the registered contract of the
-/// `FlowReturn` registry row, and two otherwise identical keys carrying
-/// different contract ids compare — and hash — unequal.
+/// `ResultContractId` is EXACT identity, end to end: changing any
+/// registry contract column changes the id; two otherwise identical
+/// keys carrying different contract ids compare — and hash — unequal
+/// (the family key embeds the full key, so a contract mismatch is a key
+/// mismatch at every admission fence); and a proof finalized under one
+/// contract cannot finalize under another
+/// (`stale_basis_or_foreign_contract_cannot_complete`'s result-contract
+/// legs) nor publish under another (the memo's flow-proof gate compares
+/// the token's full key, `scc_batch_refuses_whole_on_a_proof_key_mismatch`
+/// at the SCC boundary).
 #[test]
-fn flow_return_key_result_contract_is_exact_identity() {
+fn flow_result_contract_is_exact_identity() {
     let SemanticQueryKey::FlowReturn(key) = flow_return_query(0) else {
         unreachable!()
     };
@@ -1154,6 +1160,83 @@ fn flow_return_key_result_contract_is_exact_identity() {
         hash_of(&foreign),
         "the contract axis participates in the key hash (the family key embeds the full key)"
     );
+
+    // Every registry contract column participates in the id: the same
+    // closed contract mints the same identity, and changing any single
+    // column changes it.
+    let base = flow_operation_contract(SemanticQueryKeyTag::FlowReturn)
+        .expect("FlowReturn is a registered flow operation")
+        .clone();
+    let base_id = flow_result_contract_id(&base);
+    assert_eq!(base_id, flow_result_contract_id(&base));
+
+    let mut reordered = base.closures.to_vec();
+    reordered.reverse();
+    let reordered: &'static [FlowDomainClosure] = Box::leak(reordered.into_boxed_slice());
+    let mut narrowed = base.closures.to_vec();
+    narrowed[0] = FlowDomainClosure {
+        families: &[FlowFactFamily::BindingSlot],
+        ..narrowed[0].clone()
+    };
+    let narrowed: &'static [FlowDomainClosure] = Box::leak(narrowed.into_boxed_slice());
+
+    let cases: Vec<(&str, FlowOperationContract)> = vec![
+        (
+            "role",
+            FlowOperationContract {
+                role: FlowOperationRole::SemanticSuboperation,
+                ..base.clone()
+            },
+        ),
+        (
+            "status",
+            FlowOperationContract {
+                status: FlowOperationStatus::PendingReducer,
+                ..base.clone()
+            },
+        ),
+        (
+            "domains",
+            FlowOperationContract {
+                closures: narrowed,
+                ..base.clone()
+            },
+        ),
+        (
+            "domain order",
+            FlowOperationContract {
+                closures: reordered,
+                ..base.clone()
+            },
+        ),
+        (
+            "finalizer",
+            FlowOperationContract {
+                result: FlowResultContractDescriptor {
+                    finalizer: FlowFinalizerKind::TypedGapOnly,
+                    ..base.result
+                },
+                ..base.clone()
+            },
+        ),
+        (
+            "accepted gaps",
+            FlowOperationContract {
+                result: FlowResultContractDescriptor {
+                    accepted_gaps: &[],
+                    ..base.result
+                },
+                ..base.clone()
+            },
+        ),
+    ];
+    for (name, contract) in &cases {
+        assert_ne!(
+            base_id,
+            flow_result_contract_id(contract),
+            "the result-contract identity must change when the {name} semantics change"
+        );
+    }
 }
 
 /// The central report applicator: a complete report discharges every
@@ -1381,86 +1464,6 @@ fn stale_basis_or_foreign_contract_cannot_complete() {
         ),
         "a foreign result contract must not complete: {outcome:?}"
     );
-}
-
-#[test]
-fn result_contract_id_tracks_the_complete_contract() {
-    let base = flow_operation_contract(SemanticQueryKeyTag::FlowReturn)
-        .expect("FlowReturn is a registered flow operation")
-        .clone();
-    let base_id = flow_result_contract_id(&base);
-    // Deterministic: the same closed contract mints the same identity.
-    assert_eq!(base_id, flow_result_contract_id(&base));
-
-    // A reordered closure list and a narrowed family list (the closed
-    // mapping is order-bearing identity).
-    let mut reordered = base.closures.to_vec();
-    reordered.reverse();
-    let reordered: &'static [FlowDomainClosure] = Box::leak(reordered.into_boxed_slice());
-    let mut narrowed = base.closures.to_vec();
-    narrowed[0] = FlowDomainClosure {
-        families: &[FlowFactFamily::BindingSlot],
-        ..narrowed[0].clone()
-    };
-    let narrowed: &'static [FlowDomainClosure] = Box::leak(narrowed.into_boxed_slice());
-
-    let cases: Vec<(&str, FlowOperationContract)> = vec![
-        (
-            "role",
-            FlowOperationContract {
-                role: FlowOperationRole::SemanticSuboperation,
-                ..base.clone()
-            },
-        ),
-        (
-            "status",
-            FlowOperationContract {
-                status: FlowOperationStatus::PendingReducer,
-                ..base.clone()
-            },
-        ),
-        (
-            "domains",
-            FlowOperationContract {
-                closures: narrowed,
-                ..base.clone()
-            },
-        ),
-        (
-            "domain order",
-            FlowOperationContract {
-                closures: reordered,
-                ..base.clone()
-            },
-        ),
-        (
-            "finalizer",
-            FlowOperationContract {
-                result: FlowResultContractDescriptor {
-                    finalizer: FlowFinalizerKind::TypedGapOnly,
-                    ..base.result
-                },
-                ..base.clone()
-            },
-        ),
-        (
-            "accepted gaps",
-            FlowOperationContract {
-                result: FlowResultContractDescriptor {
-                    accepted_gaps: &[],
-                    ..base.result
-                },
-                ..base.clone()
-            },
-        ),
-    ];
-    for (name, contract) in &cases {
-        assert_ne!(
-            base_id,
-            flow_result_contract_id(contract),
-            "the result-contract identity must change when the {name} semantics change"
-        );
-    }
 }
 
 #[test]
@@ -2241,12 +2244,25 @@ function no_capture(x) {
 }
 "#;
 
-/// A closure capturing a destructured parameter: the binding is real but
-/// the cross-frame inventory cannot name it — the family's accepted typed
-/// gap, never silence.
+/// A closure capturing a destructured parameter: the element has no
+/// whole-slot inventory entry, but its identity is REAL — the skeleton
+/// names the element, its kind, and its frame, and its slot is the
+/// skeleton's binding ordinal offset past the inventory's slot range —
+/// so the capture plans as a concrete dischargeable subject.
 const DESTRUCTURED_CAPTURE_FIXTURE_SOURCE: &str = r#"
 function destructured_capture({a}) {
   return () => a;
+}
+"#;
+
+/// A closure capturing a binding whose KIND is outside the cross-frame
+/// identity vocabulary (a class declaration): the binding is real but no
+/// cross-frame identity can name it — the family's accepted typed gap,
+/// never silence.
+const CLASS_CAPTURE_FIXTURE_SOURCE: &str = r#"
+function class_capture() {
+  class C {}
+  return () => C;
 }
 "#;
 
@@ -2303,6 +2319,39 @@ fn closure_expression_captures_are_concrete_subjects() {
     assert_eq!(captures[0].name.as_ref(), "x");
     assert_eq!(captures[0].kind, FunctionBindingKind::Param);
 
+    // A destructured parameter element has no whole-slot inventory entry,
+    // but its identity is REAL: the skeleton names the element, its kind,
+    // and its frame — the capture is a concrete subject, never the gap.
+    let captures = concrete_captures(
+        DESTRUCTURED_CAPTURE_FIXTURE_SOURCE,
+        25,
+        "destructured_capture",
+    );
+    assert_eq!(captures.len(), 1, "one destructured capture subject");
+    assert_eq!(captures[0].name.as_ref(), "a");
+    assert_eq!(captures[0].kind, FunctionBindingKind::Param);
+    assert_eq!(
+        captures[0].defining_function.declaration.name.as_ref(),
+        "destructured_capture",
+        "the capture identity names the defining frame"
+    );
+    let fixture = flow_graph_fixture_for_tests(DESTRUCTURED_CAPTURE_FIXTURE_SOURCE, 25);
+    let plan = fixture
+        .build_plan(request_named("destructured_capture"))
+        .expect("the destructured-capture fixture plans");
+    assert!(
+        plan.obligation_specs()
+            .iter()
+            .all(|spec| !matches!(spec.basis(), FlowObligationBasis::Capture { .. })),
+        "a destructured capture subject is concrete, never the family's typed gap"
+    );
+    let (runtime, handle, sealed) = drive_to_completion(&plan);
+    let outcome = finalize_flow_solve(&runtime, handle, &plan, sealed);
+    assert!(
+        outcome.warm_candidate().is_some(),
+        "the destructured capture subject discharges and completes: {outcome:?}"
+    );
+
     // The concrete subjects are dischargeable: the arrow-capture solve
     // drives to a sealed completion.
     let fixture = flow_graph_fixture_for_tests(ARROW_CAPTURE_FIXTURE_SOURCE, 21);
@@ -2347,27 +2396,27 @@ fn a_no_capture_closure_proves_the_family_empty() {
     );
 }
 
-/// A captured binding the cross-frame inventory cannot name (a
-/// destructured parameter) installs the family's accepted typed gap —
-/// anchored on the resolved lexical binding — never silence.
+/// A captured binding whose kind is outside the cross-frame identity
+/// vocabulary (a class declaration) installs the family's accepted typed
+/// gap — anchored on the resolved lexical binding — never silence.
 #[test]
 fn unnameable_captured_binding_installs_the_family_typed_gap() {
-    let fixture = flow_graph_fixture_for_tests(DESTRUCTURED_CAPTURE_FIXTURE_SOURCE, 25);
+    let fixture = flow_graph_fixture_for_tests(CLASS_CAPTURE_FIXTURE_SOURCE, 25);
     let plan = fixture
-        .build_plan(request_named("destructured_capture"))
-        .expect("the destructured-capture fixture plans");
+        .build_plan(request_named("class_capture"))
+        .expect("the class-capture fixture plans");
     let gaps: Vec<&FlowObligationSpec> = plan
         .obligation_specs()
         .iter()
         .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Capture { .. }))
         .collect();
-    assert_eq!(gaps.len(), 1, "exactly the destructured capture gaps");
+    assert_eq!(gaps.len(), 1, "exactly the class-capture gap");
     let FlowObligationBasis::Capture { identity, .. } = gaps[0].basis() else {
         unreachable!()
     };
     assert!(
         identity.is_none(),
-        "the destructured binding has no cross-frame identity"
+        "a class binding has no cross-frame identity"
     );
 
     let mut runtime = ObligationRuntime::default();

@@ -947,27 +947,77 @@ fn return_equation_identity_spans_flow_return_and_resolve_call() {
     ));
 }
 
-/// The flow-demand handle carriers: the in-flight flow frame and the
-/// deferred SCC member each gain a `flow_demand` slot the admission wiring will
-/// store the frame's / member's own demand handle in. The slot defaults to
-/// `None` (no production wiring installs one yet) and round-trips a
-/// handle when set.
+/// The flow-demand carriers: the in-flight flow frame and the deferred
+/// SCC member each carry the demand's `FlowDemandCarrier` (handle + plan +
+/// provenance) — the member's demand SURVIVES the pop so the component
+/// close finalizes the member against exactly its own demand. The slot
+/// defaults to `None` (a demand the planner refused installs nothing) and
+/// round-trips a carrier when set.
 #[test]
 fn flow_demand_carriers_default_none_and_round_trip() {
-    use super::flow_obligation_state::FlowDemandHandle;
+    use crate::for_tests::{
+        flow_graph_fixture_for_tests, flow_return_result_contract_id, FlowDemandRequest,
+        FlowResourcePolicy,
+    };
+    use crate::semantic_query::{
+        CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
+        FlowReturnKey, FlowReturnPolicy, ReturnProjectionDemand, SemanticQueryKey,
+    };
 
-    let handle = FlowDemandHandle::for_carrier_tests(3, 41);
+    let fixture = flow_graph_fixture_for_tests("function carry_me(x) { return x; }\n", 31);
+    let query = SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
+        function: FlowFunctionSlotIdentity {
+            declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(
+                Arc::from("/flow_solve_fixture.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("carry_me"),
+                0,
+                [0; 16],
+                [0; 16],
+            ),
+            function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+        normalized_type_args: Arc::from([]),
+        context: FlowReturnContext {
+            parse_env_hash: [0; 16],
+            resolve_env_hash: [0; 16],
+            type_env_hash: [0; 16],
+            lib_env_hash: [0; 16],
+            project_identity: [0; 16],
+            type_substitution: CanonicalTypeSubstitution::empty(),
+            policy: FlowReturnPolicy {},
+        },
+        demand: ReturnProjectionDemand::whole_return(),
+        input: FlowInputContext::empty(),
+        result_contract: flow_return_result_contract_id(),
+    }));
+    let provenance = super::flow_obligation_state::FlowEvaluationProvenance::new(7, 3);
+    let plan = fixture
+        .build_plan(FlowDemandRequest {
+            query,
+            input_basis: verter_identity::identity::InputBasisId::from_canonical(&provenance),
+            resources: FlowResourcePolicy::default(),
+            additional_requirements: Arc::from([]),
+        })
+        .expect("the carrier fixture plans");
+    let mut runtime = ObligationRuntime::default();
+    let carrier = super::flow_obligation_state::FlowDemandCarrier {
+        handle: runtime.install_flow_demand(&plan),
+        plan: Arc::new(plan),
+        provenance,
+    };
 
     // The in-flight frame carrier.
     let mut frame = FlowReturnFrameState::default();
     assert!(
         frame.flow_demand.is_none(),
-        "a fresh flow frame carries no demand handle"
+        "a fresh flow frame carries no demand carrier"
     );
-    frame.flow_demand = Some(handle);
+    frame.flow_demand = Some(carrier.clone());
     assert_eq!(
-        frame.flow_demand,
-        Some(handle),
+        frame.flow_demand.as_ref().map(|carrier| carrier.handle),
+        Some(carrier.handle),
         "the frame carrier round-trips its handle"
     );
 
@@ -985,15 +1035,16 @@ fn flow_demand_carriers_default_none_and_round_trip() {
         materialized: crate::semantic_query::demand::MaterializedSet::default(),
         fresh_seed: false,
         flow_demand: None,
+        discharge: None,
     };
     assert!(
         pending.flow_demand.is_none(),
-        "a deferred flow member carries no demand handle by default"
+        "a deferred flow member carries no demand carrier by default"
     );
-    pending.flow_demand = Some(handle);
+    pending.flow_demand = Some(carrier.clone());
     assert_eq!(
-        pending.flow_demand,
-        Some(handle),
+        pending.flow_demand.as_ref().map(|carrier| carrier.handle),
+        Some(carrier.handle),
         "the pending carrier round-trips its handle"
     );
 }

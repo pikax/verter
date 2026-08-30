@@ -94,41 +94,80 @@ fn flow_whole_return_projection() -> MaterializedSet {
     )))
 }
 
+/// Mint the proof one staged flow member carries: the publish boundary is
+/// proof-typed, so the member's payload must be a `CompleteFlowResult`
+/// naming the member's OWN key. The machinery tests stage members by
+/// hand; production proofs come from the finalizer alone.
+fn flow_proof_for_member(
+    key: &FlowReturnKey,
+    value: FlowReturnResult,
+) -> crate::project_semantic_dispatch::flow_solve::CompleteFlowResult {
+    use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowConvergenceEvidence;
+    use crate::project_semantic_dispatch::flow_solve::{CompleteFlowResult, FlowConvergencePolicy};
+    CompleteFlowResult::for_tests(
+        flow_demand_basis_for_member(key),
+        value,
+        FlowConvergenceEvidence::for_tests(FlowConvergencePolicy { max_iterations: 16 }, 1, true),
+    )
+    .expect("a clean staged value mints a proof")
+}
+
+/// The demand basis a staged member's proof names (the machinery tests'
+/// hand-staged mirror of the planner's basis mint).
+fn flow_demand_basis_for_member(
+    key: &FlowReturnKey,
+) -> crate::project_semantic_dispatch::flow_solve::FlowDemandBasis {
+    use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance;
+    use crate::project_semantic_dispatch::flow_solve::FlowDemandBasis;
+    let file_language =
+        verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
+    let parse_key = verter_language::default_parse_identity_for("export {};\n", &file_language)
+        .expect("a trivial source derives a parse identity")
+        .1;
+    FlowDemandBasis {
+        graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+            canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
+            function: verter_semantic::analysis::function_program::FunctionProgramKey {
+                declaration: verter_semantic::analysis::function_program::FunctionDeclarationRef {
+                    owner: key.function.declaration_slot.owner,
+                    name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
+                    space: verter_semantic::facts::SymbolSpace::Value,
+                },
+                part: key.function.function_part.clone(),
+                overload_ordinal: key.function.overload_ordinal,
+            },
+            flow_body_stable_hash: [0; 16],
+            flow_body_exact_hash: [0; 16],
+            parse_env_hash: key.context.parse_env_hash,
+            parse_key,
+            file_language,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        },
+        query: crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+        input_basis: verter_identity::identity::InputBasisId::from_canonical(
+            &FlowEvaluationProvenance::new(1, 1),
+        ),
+        result_contract: key.result_contract.clone(),
+    }
+}
+
 /// Stage `count` CLEAN flow-return members, each claiming its own vacant
-/// family flight.
+/// family flight and carrying a proof that names its own key.
 fn pending_flow_members(
     store: &SemanticGraphStore,
     keys: &[FlowReturnKey],
 ) -> Vec<PendingFlowReturnMember> {
-    pending_flow_members_with(store, keys, &vec![None; keys.len()])
-}
-
-/// Stage one flow-return member per key, the i-th carrying
-/// `degradations[i]` as its result's typed degradation.
-///
-/// The degradation axis is a real one: a DEGRADED SUCCESS is a usable
-/// value on the SUCCESS carrier, so nothing about the member's shape
-/// distinguishes it from a clean one — only `result.degradation` does.
-fn pending_flow_members_with(
-    store: &SemanticGraphStore,
-    keys: &[FlowReturnKey],
-    degradations: &[Option<crate::semantic_query::FlowReturnDegradation>],
-) -> Vec<PendingFlowReturnMember> {
-    assert_eq!(
-        keys.len(),
-        degradations.len(),
-        "one degradation slot per flow member key"
-    );
     let return_type = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     keys.iter()
-        .zip(degradations.iter())
-        .map(|(key, degradation)| {
+        .map(|key| {
             let flight = store
                 .begin_inline_flow_return_flight(key)
                 .expect("each flow member claims its vacant family flight");
+            let value = FlowReturnResult::new(store, return_type, false, None);
             PendingFlowReturnMember {
                 key: key.clone(),
-                result: FlowReturnResult::new(store, return_type, false, *degradation),
+                result: flow_proof_for_member(key, value),
                 materialized: flow_whole_return_projection(),
                 flight,
             }
@@ -145,18 +184,9 @@ fn pending_flow_members_with(
 /// so a relation-only batch leaves the flow loop unexercised and a leak
 /// there is invisible.
 fn run_batch(cap: usize, member_order: &[usize], flow_members: usize) -> (bool, Vec<String>) {
-    run_batch_with_degradations(cap, member_order, &vec![None; flow_members])
-}
-
-/// [`run_batch`] with an explicit per-flow-member degradation column.
-fn run_batch_with_degradations(
-    cap: usize,
-    member_order: &[usize],
-    flow_degradations: &[Option<crate::semantic_query::FlowReturnDegradation>],
-) -> (bool, Vec<String>) {
     let store = SemanticGraphStore::new_with_memo_budget_for_test(cap);
     let keys = distinct_keys(&store, member_order.len() + 1);
-    let flow_keys = distinct_flow_keys(flow_degradations.len());
+    let flow_keys = distinct_flow_keys(flow_members);
     let root_key = keys[0].clone();
     let witness = seed_root(&store, &root_key);
 
@@ -173,7 +203,7 @@ fn run_batch_with_degradations(
         });
     }
 
-    let pending_flow = pending_flow_members_with(&store, &flow_keys, flow_degradations);
+    let pending_flow = pending_flow_members(&store, &flow_keys);
 
     let published = store.publish_scc_members_fenced(
         None,
@@ -391,63 +421,106 @@ fn scc_batch_never_evicts_its_own_root_or_members_under_retention_pressure() {
     );
 }
 
-/// A DEGRADED flow-return member takes the WHOLE component to
-/// `ReturnOnly` — invariant #2 of the whole-batch admissibility contract.
+/// A flow member whose proof names ANOTHER key takes the WHOLE component
+/// to `ReturnOnly` — the proof-coherence veto of the whole-batch
+/// admissibility contract.
 ///
-/// A `FlowReturnResult` carrying `degradation: Some(_)` is a DEGRADED
-/// SUCCESS: a usable value that rides the SUCCESS carrier, so nothing
-/// structural distinguishes it from a clean member. It is `ReturnOnly` by
-/// contract — no memo entry, no fact signature, no reverse-index
-/// metadata. Under a MIXED component that cost is not local: a relation
-/// machinery root's verdict is binary and carries no degradation channel,
-/// so one degraded flow member must cost its CLEAN relation siblings
-/// their warmth too. Publishing the clean siblings is the torn component.
+/// The publish boundary is proof-typed: a `PendingFlowReturnMember`
+/// carries a `CompleteFlowResult`, so a degraded or unproven outcome is
+/// unrepresentable here (the close never queues it). What CAN go wrong at
+/// this boundary is a splice — a token minted for one demand staged under
+/// another key — so the batch refuses unless every flow member's proof
+/// names the member's own key. Under a MIXED component that cost is not
+/// local: a relation machinery root's verdict is binary and carries no
+/// flow channel, so one spliced flow member costs its CLEAN relation
+/// siblings their warmth too. Publishing the clean siblings is the torn
+/// component.
 ///
-/// This shape is live, not hypothetical: `FlowReturnResult.degradation`
-/// (a degraded SUCCESS) is orthogonal to `FlowReturnPendingOutcome::
-/// Degraded` (a no-value failure), and the flow evaluator pushes
-/// `Complete(result)` whose `result.degradation` may be `Some` — the
-/// `NonCallableBinding` shape used here is exactly one such.
-///
-/// Mutation recipe: deleting the degraded-flow clause from the
+/// Mutation recipe: deleting the proof-coherence clause from the
 /// admissibility predicate (`flow_members.iter().any(|m|
-/// m.result.degradation.is_some())`) publishes the DEGRADED leg — the
+/// m.result.key() != &m.key)`) publishes the SPLICED leg — the
 /// `must refuse WHOLE` assertion fails while the CONTROL leg stays green.
-/// The control leg is what pins the refusal to the degradation rather
-/// than to the retention footprint: the same component with an all-clean
-/// flow column publishes whole at the same cap.
+/// The control leg is what pins the refusal to the splice rather than to
+/// the retention footprint: the same component with coherent proofs
+/// publishes whole at the same cap.
 #[test]
-fn scc_batch_refuses_whole_on_a_degraded_flow_member() {
-    use crate::semantic_query::FlowReturnDegradation;
-
-    // DEGRADED — root + 2 relation + 2 flow members is a footprint of 5
+fn scc_batch_refuses_whole_on_a_proof_key_mismatch() {
+    // SPLICED — root + 2 relation + 2 flow members is a footprint of 5
     // against a cap of 8, so the retention gate cannot be what refuses.
-    // The second flow member is a degraded success.
-    let (published_degraded, resident_degraded) = run_batch_with_degradations(
-        8,
-        &[0, 1],
-        &[None, Some(FlowReturnDegradation::NonCallableBinding)],
-    );
+    // The second flow member's proof names the FIRST member's key.
+    let (published_spliced, resident_spliced) = {
+        let store = SemanticGraphStore::new_with_memo_budget_for_test(8);
+        let keys = distinct_keys(&store, 3);
+        let flow_keys = distinct_flow_keys(2);
+        let root_key = keys[0].clone();
+        let witness = seed_root(&store, &root_key);
+        let mut pending = Vec::new();
+        for index in 0..2usize {
+            let key = keys[index + 1].clone();
+            let flight = store
+                .begin_inline_relation_flight(&key)
+                .expect("each member claims its vacant family flight");
+            pending.push(PendingRelationMember {
+                key,
+                payload: store.relation_payload_for_tests(RelationOutcome::Assignable),
+                flight,
+            });
+        }
+        let mut pending_flow = pending_flow_members(&store, &flow_keys);
+        pending_flow[1].result = pending_flow[0].result.clone();
+        let published = store.publish_scc_members_fenced(
+            None,
+            &witness,
+            &crate::fact_signature_helpers::ReadSetSignature::empty(),
+            &Arc::from(Vec::<Arc<str>>::new()),
+            0,
+            pending,
+            pending_flow,
+            Vec::new(),
+        );
+        let mut resident = Vec::new();
+        if store.slot_candidate_count_for_tests(&root_key.to_query_key()) > 0 {
+            resident.push("root".to_string());
+        }
+        for index in 0..2usize {
+            if store.slot_candidate_count_for_tests(&keys[index + 1].to_query_key()) > 0 {
+                resident.push(format!("m{index}"));
+            }
+        }
+        for (index, key) in flow_keys.iter().enumerate() {
+            if store.slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(
+                key.clone(),
+            ))) > 0
+            {
+                resident.push(format!("f{index}"));
+            }
+        }
+        assert!(
+            store.retained_claimed_flight_keys_for_tests().is_empty(),
+            "every member flight must be released either way"
+        );
+        (published, resident)
+    };
     assert!(
-        !published_degraded,
-        "one DEGRADED flow member must take the whole component to \
-         ReturnOnly (published={published_degraded})"
+        !published_spliced,
+        "a flow member whose proof names another key must take the whole \
+         component to ReturnOnly (published={published_spliced})"
     );
     assert_eq!(
-        resident_degraded,
+        resident_spliced,
         vec!["root".to_string()],
-        "a component refused for a degraded flow member publishes NO member \
+        "a component refused for a spliced proof publishes NO member \
          — its CLEAN relation siblings included — and leaves its witnessed \
          root resident"
     );
 
-    // CONTROL — the identical component with an all-clean flow column
-    // publishes whole at the same cap. Without it the leg above would
-    // equally pass if the batch had refused for any other reason.
-    let (published_clean, resident_clean) = run_batch_with_degradations(8, &[0, 1], &[None, None]);
+    // CONTROL — the identical component with coherent proofs publishes
+    // whole at the same cap. Without it the leg above would equally pass
+    // if the batch had refused for any other reason.
+    let (published_clean, resident_clean) = run_batch(8, &[0, 1], 2);
     assert!(
         published_clean,
-        "the same component with a CLEAN flow column must publish WHOLE \
+        "the same component with COHERENT proofs must publish WHOLE \
          (published={published_clean})"
     );
     assert_eq!(
@@ -806,5 +879,55 @@ fn scc_batch_plans_member_eviction_invalid_first_against_the_callers_view() {
         store.resident_flight_keys_for_tests().is_empty(),
         "the member flight must be retired: {:?}",
         store.resident_flight_keys_for_tests()
+    );
+}
+
+/// The SCC publish boundary accepts flow members through the
+/// `CompleteFlowResult` proof token ONLY — a degraded or raw evaluated
+/// value has no representation at the boundary.
+///
+/// Three legs: (a) the proof mint itself refuses a degraded value, so a
+/// degraded member cannot even be STAGED (`PendingFlowReturnMember.result`
+/// is typed `CompleteFlowResult`, whose fields and sole production
+/// constructor are private to `flow_solve` — the compile-fail fixture
+/// `complete_flow_result_constructor_is_private.rs` proves external
+/// construction fails); (b) a proof-carrying member batch publishes
+/// whole; (c) a token naming another member's key is vetoed whole —
+/// pinned by `scc_batch_refuses_whole_on_a_proof_key_mismatch`.
+#[test]
+fn flow_scc_publish_accepts_proof_tokens_only() {
+    // (a) The mint mirrors the seal: a degraded value mints NO proof, so
+    // no degraded member is constructible at the publish boundary.
+    let store = SemanticGraphStore::new_with_memo_budget_for_test(8);
+    let keys = distinct_flow_keys(1);
+    let degraded_node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+    let degraded = FlowReturnResult::new(
+        &store,
+        degraded_node,
+        false,
+        Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding),
+    );
+    assert!(
+        crate::project_semantic_dispatch::flow_solve::CompleteFlowResult::for_tests(
+            flow_demand_basis_for_member(&keys[0]),
+            degraded,
+            crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowConvergenceEvidence::for_tests(
+                crate::project_semantic_dispatch::flow_solve::FlowConvergencePolicy { max_iterations: 16 },
+                1,
+                true,
+            ),
+        )
+        .is_none(),
+        "a degraded value mints no proof — a degraded member is unrepresentable \
+         at the SCC publish boundary"
+    );
+
+    // (b) A proof-carrying member batch publishes whole.
+    let (published, resident) = run_batch(8, &[], 2);
+    assert!(published, "a fully proof-typed batch publishes whole");
+    assert_eq!(
+        resident,
+        vec!["root".to_string(), "f0".to_string(), "f1".to_string()],
+        "the root and both proof-carrying flow members are resident"
     );
 }

@@ -2188,17 +2188,18 @@ import { obj } from './obj'
 /// the ONLY thing that says the answer is not complete is the
 /// degradation channel itself.
 ///
-/// The sealed consumer entry
-/// (`ProjectSemanticDispatch::execute_function_return_source`) is what
-/// carries that fact outward, by folding the cache-read rails. Without
-/// the fold the enclosing composition reports COMPLETE and WARMS around a
-/// degraded interior — which is the defect the fold was landed for, and
-/// which nothing in the suite discriminated until this row.
+/// The `FlowReturn` build itself carries that fact outward: the
+/// finalizer-outcome adapter translates the degraded verdict once into
+/// the build's own partial rails, and the universal read funnel folds
+/// them into every enclosing composition at the read boundary. Without
+/// that propagation the enclosing composition reports COMPLETE and WARMS
+/// around a degraded interior — the defect this row exists to
+/// discriminate.
 ///
-/// Mutation recipe: emptying the `consumer_fold` match arms at the sealed
-/// entry leaves the whole rest of the suite green and fails exactly this
-/// test — first on `synthesis_should_suppress`, and on the warm replay if
-/// that assertion is removed.
+/// Mutation recipe: clearing the partial rails on the degraded arm of
+/// `build_flow_return` leaves the whole rest of the suite green and
+/// fails exactly this test — first on `synthesis_should_suppress`, and
+/// on the warm replay if that assertion is removed.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result() {

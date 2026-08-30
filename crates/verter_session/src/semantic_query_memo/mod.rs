@@ -2721,6 +2721,7 @@ impl SemanticGraphStore {
             self_root_canonicals,
             pending_prefix_backfills,
             satisfied_projection,
+            flow_completion,
         } = build_output;
         let result = prepared::enforce_projection_value_shape(prepared.key(), result);
         // §3.4 default: a non-path build (`Instantiate`, `KeyOf`,
@@ -2832,8 +2833,23 @@ impl SemanticGraphStore {
             "§1 invariant violated at memo admission: result_is_partial \
              without cache_suppress would launder a partial into the family memo"
         );
+        // The flow-proof admission gate: a `FlowReturn` build admits ONLY
+        // with the finalizer's proof token, and the token must name THIS
+        // key (the key embeds the result contract, so a contract mismatch
+        // is a key mismatch) and THIS value. The token is the sole
+        // positive completeness authority; this fence may veto (a foreign
+        // or mismatched token refuses), never promote.
+        let flow_proof_ok = match prepared.key() {
+            SemanticQueryKey::FlowReturn(key) => match (&flow_completion, &result) {
+                (Some(proof), QueryResult::Value(SemanticQueryValue::FlowReturn(value))) => {
+                    proof.key() == key.as_ref() && proof.value() == value.as_ref()
+                }
+                _ => false,
+            },
+            _ => true,
+        };
         let publish_carrier: Option<&crate::fact_signature_helpers::ReadSetSignature> =
-            if cache_suppress || result_is_partial {
+            if cache_suppress || result_is_partial || !flow_proof_ok {
                 None
             } else {
                 Some(&broadcast_carrier)

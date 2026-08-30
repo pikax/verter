@@ -307,9 +307,9 @@ pub(super) struct DrainedRelationMember {
 
 /// A flow-return-domain view over a drained tagged pending member. The
 /// outcome is final at pop (a same-slot recursive backedge is a
-/// coinductive hold decided by the seed check); the close admits
-/// `Complete` outcomes or poisons the whole tagged component on a
-/// `Degraded` one.
+/// coinductive hold decided by the seed check); the close fails the whole
+/// tagged component on a `NoValue` outcome, and admits an evaluated member
+/// ONLY through its own finalizer proof.
 pub(super) struct DrainedFlowReturnMember {
     pub(super) key: crate::semantic_query::FlowReturnKey,
     pub(super) outcome: super::dispatch_txn::FlowReturnPendingOutcome,
@@ -327,6 +327,13 @@ pub(super) struct DrainedFlowReturnMember {
     /// Whether the member's own contributors were all FRESH literals —
     /// the post-convergence literal-widening input.
     pub(super) fresh_seed: bool,
+    /// The member's own installed demand carrier (handle + plan +
+    /// provenance), when its demand was prepared. The member finalizes
+    /// against EXACTLY this demand at the close.
+    pub(super) flow_demand: Option<super::dispatch_txn::flow_obligation_state::FlowDemandCarrier>,
+    /// The member's typed discharge report, produced once by its
+    /// evaluation and applied centrally at the close.
+    pub(super) discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
 }
 
 type DrainedCallResult = (
@@ -335,8 +342,15 @@ type DrainedCallResult = (
     crate::semantic_query::ResolvedCallResult,
 );
 
+/// The mixed component's discharge result: the prefix entries' outcomes,
+/// the call members' results, and the runtime-observed convergence of the
+/// joint fixed point (the flow-side passes the discharge actually ran).
 type MixedDischargeResult = Result<
-    (Vec<FlowReturnPendingOutcome>, Vec<DrainedCallResult>),
+    (
+        Vec<FlowReturnPendingOutcome>,
+        Vec<DrainedCallResult>,
+        super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence,
+    ),
     crate::semantic_query::ResolveCallFailure,
 >;
 
@@ -1197,6 +1211,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self_roots: state.self_roots,
                         materialized: state.materialized,
                         fresh_seed: state.fresh_seed,
+                        flow_demand: state.flow_demand,
+                        discharge: state.discharge,
                     });
                 }
                 PendingObligationDomain::ResolveCall(state) => {
@@ -1252,12 +1268,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // every flight aborts). The check runs post-discharge because the
         // fixed point resurrects hold-only empty cycles — poisoning on
         // the pre-discharge outcome condemns members the close recovers.
-        let (_prefix_outcomes, call_results) = match self.discharge_mixed_component_to_fixed_point(
-            Vec::new(),
-            &mut flow_members,
-            &mut call_members,
-            &initial_substitution,
-        ) {
+        let (_prefix_outcomes, call_results, flow_convergence) = match self
+            .discharge_mixed_component_to_fixed_point(
+                Vec::new(),
+                &mut flow_members,
+                &mut call_members,
+                &initial_substitution,
+            ) {
             Ok(ok) => ok,
             Err(failure) => {
                 self.relation_abort_inline_flight(inline_flight.as_ref());
@@ -1270,6 +1287,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if let Some(session) = member.staged_session {
                         self.abandon_session(session);
                     }
+                }
+                // Record the component failure on every installed flow
+                // demand (failure detection on the ledger — never an
+                // admission decision).
+                let flow_failure = match failure {
+                    crate::semantic_query::ResolveCallFailure::Budget => {
+                        crate::semantic_query::FlowReturnFailure::Budget(
+                            verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+                        )
+                    }
+                    _ => crate::semantic_query::FlowReturnFailure::Unresolved,
+                };
+                for member in &flow_members {
+                    let _ = self.fail_flow_demand(member.flow_demand.as_ref(), flow_failure);
                 }
                 return FramePop::RootClose(match failure {
                     crate::semantic_query::ResolveCallFailure::Budget => {
@@ -1318,6 +1349,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             self.flow_return_abort_drained_flights(&flow_members);
             self.resolve_call_abort_drained_flights(&call_results);
+            // Record the failure on every installed flow demand of the
+            // component (failure detection on the ledger — never an
+            // admission decision).
+            for member in &flow_members {
+                let failure = match &member.outcome {
+                    FlowReturnPendingOutcome::NoValue { failure, .. } => *failure,
+                    FlowReturnPendingOutcome::EvaluatedValue(_) => {
+                        crate::semantic_query::FlowReturnFailure::Unresolved
+                    }
+                };
+                let _ = self.fail_flow_demand(member.flow_demand.as_ref(), failure);
+            }
             // Release WITHOUT publish (no entry / fact signature /
             // backfill / reverse-index metadata). The machinery root
             // surfaces the public `BudgetExceeded` payload when a budget
@@ -1349,6 +1392,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             None,
             call_results,
             cyclic,
+            &flow_convergence,
         ) {
             Ok(outcome) => {
                 if let Some(step) = outcome.self_step {
@@ -1396,6 +1440,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// a poisoned relation member); `cap` carries the budget edge when
     /// one drove the abort. The helper aborts every flight it owns; the
     /// caller aborts its own root flight.
+    ///
+    /// Flow members are proof-gated HERE: each drained flow member
+    /// finalizes against its own installed demand (its typed discharge
+    /// report applied centrally, the component's observed convergence
+    /// replayed, the seal, the finalizer) and enters the publish queue
+    /// ONLY with its own `CompleteFlowResult`. One unproven member refuses
+    /// the WHOLE member batch — the torn-component rule — while the
+    /// root's own admission is unaffected.
     #[allow(clippy::type_complexity)]
     pub(super) fn relation_discharge_and_route(
         &self,
@@ -1422,6 +1474,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::ResolvedCallResult,
         )>,
         cyclic: bool,
+        flow_convergence: &super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence,
     ) -> Result<RelationDischargeOutcome, Option<RecursionOrBudgetCap>> {
         // Discharge verdicts — a member recorded POSITIVE that consumed
         // assumptions re-discharges against the converged state when ANY
@@ -1709,6 +1762,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 self.relation_abort_inline_flight(inline_flight.as_ref());
             }
         }
+        // The call sessions commit before the flow members finalize: the
+        // session state feeds this transaction's remaining work regardless
+        // of how the flow members close.
         let staged_call_sessions = call_members
             .iter()
             .filter_map(|(_, state, _)| state.staged_session)
@@ -1726,6 +1782,80 @@ impl<'a> ProjectSemanticDispatch<'a> {
             self.resolve_call_abort_drained_flights(&call_members);
             return Err(None);
         }
+        // Proof-gate the flow members BEFORE anything queues: each member
+        // finalizes against its OWN installed demand (its typed discharge
+        // report applied centrally, the component's observed convergence
+        // replayed, the seal, the finalizer) and enters the publish queue
+        // ONLY with its own `CompleteFlowResult`. One unproven member
+        // refuses the WHOLE member batch (the torn-component rule): every
+        // member flight aborts, nothing queues, and the root's own
+        // admission — already decided above — is unaffected.
+        let mut proven_flow_members = Vec::with_capacity(flow_members.len());
+        let mut flow_batch_unproven = false;
+        for member in flow_members {
+            // The VALUE channel: every member whose close produced an
+            // evaluated value records it for the shared return equation's
+            // override reads — proven or not. Admission is the proof
+            // typing below, never this channel.
+            if let FlowReturnPendingOutcome::EvaluatedValue(result) = &member.outcome {
+                self.dispatch_txn
+                    .borrow_mut()
+                    .flow
+                    .closed_values
+                    .push((member.key.clone(), result.clone()));
+            }
+            let verdict = match &member.outcome {
+                FlowReturnPendingOutcome::EvaluatedValue(result) => {
+                    let provenance = member
+                        .flow_demand
+                        .as_ref()
+                        .map(|carrier| carrier.provenance)
+                        .unwrap_or_else(|| self.current_flow_evaluation_provenance());
+                    self.finalize_flow_demand(
+                        member.flow_demand.as_ref(),
+                        member.discharge.as_ref(),
+                        flow_convergence,
+                        provenance,
+                        result,
+                    )
+                }
+                // A no-value member fails the component at the close
+                // (both close paths poison it before routing); it never
+                // enters the publish queue regardless.
+                FlowReturnPendingOutcome::NoValue { failure, .. } => {
+                    let _ = self.fail_flow_demand(member.flow_demand.as_ref(), *failure);
+                    None
+                }
+            };
+            match verdict {
+                Some(super::flow_solve::FlowSolveOutcome::Complete(proof)) => {
+                    proven_flow_members.push(super::dispatch_txn::CompletedFlowReturnMember {
+                        key: member.key,
+                        result: proof,
+                        inline_flight: member.inline_flight,
+                        self_roots: member.self_roots,
+                        materialized: member.materialized,
+                    });
+                }
+                _ => {
+                    flow_batch_unproven = true;
+                    self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
+                }
+            }
+        }
+        if flow_batch_unproven {
+            for member in &completed {
+                self.relation_abort_inline_flight(member.inline_flight.as_ref());
+            }
+            for member in &proven_flow_members {
+                self.flow_return_abort_inline_flight(member.inline_flight.as_ref());
+            }
+            self.resolve_call_abort_drained_flights(&call_members);
+            return Ok(RelationDischargeOutcome {
+                self_publish,
+                self_step,
+            });
+        }
         let mut rootless_flights = Vec::new();
         {
             let mut txn = self.dispatch_txn.borrow_mut();
@@ -1733,22 +1863,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let _ = txn.relation.session_admission.drain(session);
             }
             txn.relation.completed_members.extend(completed);
-            for member in flow_members {
-                let FlowReturnPendingOutcome::Complete(result) = member.outcome else {
-                    unreachable!(
-                        "a degraded flow member poisons the whole tagged component at the close"
-                    )
-                };
-                txn.flow
-                    .completed_members
-                    .push(super::dispatch_txn::CompletedFlowReturnMember {
-                        key: member.key,
-                        result,
-                        inline_flight: member.inline_flight,
-                        self_roots: member.self_roots,
-                        materialized: member.materialized,
-                    });
-            }
+            txn.flow.completed_members.extend(proven_flow_members);
             for (key, state, result) in call_members {
                 // A rootless winner has no stable occurrence to key a
                 // shared entry on: it stays transaction-local, so its
@@ -1986,6 +2101,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .map(|entry| entry.outcome.clone())
             .collect();
         let bound = prefix_entries.len() + flow_members.len() + call_members.len() + 1;
+        // The observed convergence of the joint fixed point: every
+        // flow-side pass the discharge runs, accumulated across the mixed
+        // passes. The loop exits only on a stable pass (the call results
+        // stopped moving, with the flow side already final against them).
+        let mut observed_iterations: u32 = 0;
         for _pass in 0..bound {
             if !prefix_entries.is_empty() || !flow_members.is_empty() {
                 let mut entries = prefix_entries.clone();
@@ -2000,7 +2120,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         fresh_seed: member.fresh_seed,
                     });
                 }
-                self.discharge_flow_component_to_fixed_point(&mut entries, &call_result_map);
+                let observed =
+                    self.discharge_flow_component_to_fixed_point(&mut entries, &call_result_map);
+                observed_iterations = observed_iterations.saturating_add(observed.iterations);
                 let split = entries.len() - flow_members.len();
                 prefix_outcomes = entries[..split]
                     .iter()
@@ -2011,7 +2133,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             if call_members.is_empty() {
-                return Ok((prefix_outcomes, Vec::new()));
+                return Ok((
+                    prefix_outcomes,
+                    Vec::new(),
+                    super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence {
+                        iterations: observed_iterations,
+                        stable: true,
+                    },
+                ));
             }
             // The overrides the call equation reads its flow hold targets
             // from: the JUST-discharged drained members AND any prefix
@@ -2024,14 +2153,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             > = flow_members
                 .iter()
                 .filter_map(|member| match &member.outcome {
-                    FlowReturnPendingOutcome::Complete(result) => {
+                    FlowReturnPendingOutcome::EvaluatedValue(result) => {
                         Some((member.key.clone(), result.return_type()))
                     }
                     FlowReturnPendingOutcome::NoValue { .. } => None,
                 })
                 .collect();
             for (entry, outcome) in prefix_entries.iter().zip(prefix_outcomes.iter()) {
-                if let FlowReturnPendingOutcome::Complete(result) = outcome {
+                if let FlowReturnPendingOutcome::EvaluatedValue(result) = outcome {
                     flow_overrides.insert(entry.key.clone(), result.return_type());
                 }
             }
@@ -2053,7 +2182,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 })
                 .collect();
             if new_map == call_result_map {
-                return Ok((prefix_outcomes, new_results));
+                return Ok((
+                    prefix_outcomes,
+                    new_results,
+                    super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence {
+                        iterations: observed_iterations,
+                        stable: true,
+                    },
+                ));
             }
             call_result_map = new_map;
         }
@@ -2133,6 +2269,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn relation_abort_completed_members(&self) {
         let (members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
+            txn.flow.closed_values.clear();
             (
                 std::mem::take(&mut txn.relation.completed_members),
                 std::mem::take(&mut txn.flow.completed_members),
@@ -2260,6 +2397,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) {
         let (members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
+            txn.flow.closed_values.clear();
             (
                 std::mem::take(&mut txn.relation.completed_members),
                 std::mem::take(&mut txn.flow.completed_members),

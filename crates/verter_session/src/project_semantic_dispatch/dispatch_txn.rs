@@ -304,10 +304,12 @@ pub(crate) struct FlowReturnFrameState {
     /// Tagged return dependencies discovered by indexed call evaluation
     /// while this flow frame is active.
     pub(crate) holds: Vec<ReturnObligationIdentity>,
-    /// The frame's own installed flow demand, when the proof layer is
-    /// wired. `None` until then — no production code installs one yet.
-    #[allow(dead_code)] // read by the admission wiring; the carrier lands first
-    pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandHandle>,
+    /// The frame's own installed flow demand carrier (handle + plan +
+    /// provenance), installed by the production demand-preparation step
+    /// (`prepare_flow_return_demand`) after the frame opens. `None` when
+    /// the demand could not be planned — the evaluation still runs, but
+    /// no proof can mint, so the close finalizes unproven.
+    pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandCarrier>,
 }
 
 /// The call-resolution-domain payload of one in-flight frame.
@@ -594,10 +596,16 @@ pub(crate) struct RelationPendingState {
 /// a same-slot recursive backedge is a coinductive hold, so the
 /// contributor set is complete when the frame closes — the seed check
 /// runs once, at pop.
+///
+/// `EvaluatedValue` is the PRE-PROOF value arm: the evaluator's computed
+/// value, never a completeness claim. Warm admission is claimed ONLY by
+/// the finalizer's proof token, minted at the component close from this
+/// arm's value.
 #[derive(Debug, Clone)]
 pub(crate) enum FlowReturnPendingOutcome {
-    /// Complete evaluation (the admitted shape).
-    Complete(FlowReturnResult),
+    /// The evaluated value (possibly a DEGRADED success — usable, but a
+    /// degraded value can never seal, so it never warms).
+    EvaluatedValue(FlowReturnResult),
     /// Typed failure — `ReturnOnly`, never admitted.
     NoValue {
         /// The typed no-value failure.
@@ -624,7 +632,7 @@ impl FlowReturnPendingOutcome {
     /// The outcome's OWN degradation, whichever arm carries it.
     pub(crate) fn degradation(&self) -> Option<crate::semantic_query::FlowReturnDegradation> {
         match self {
-            Self::Complete(result) => result.degradation(),
+            Self::EvaluatedValue(result) => result.degradation(),
             Self::NoValue { degradation, .. } => *degradation,
         }
     }
@@ -654,12 +662,15 @@ pub(crate) struct FlowReturnPendingState {
     /// component-wide literal-widening decision is made after the
     /// equation fixed point converges, so the bit must survive the pop.
     pub(crate) fresh_seed: bool,
-    /// The member's own installed flow demand, when the proof layer is
-    /// wired: the demand must SURVIVE the pop so the deferred member can
-    /// keep discharging against it. `None` until then — no production
-    /// code installs one yet.
-    #[allow(dead_code)] // read by the admission wiring; the carrier lands first
-    pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandHandle>,
+    /// The member's own installed flow demand carrier, surviving the pop
+    /// so the deferred member discharges and finalizes against EXACTLY its
+    /// own demand at the component close. `None` when the demand could not
+    /// be planned (an unproven member never publishes).
+    pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandCarrier>,
+    /// The member's typed discharge report — which planned obligations
+    /// its evaluation actually completed. Produced ONCE by the private
+    /// evaluation outcome; applied centrally at the component close.
+    pub(crate) discharge: Option<flow_obligation_state::FlowDischargeReport>,
 }
 
 /// The winning candidate's signature while the shared return equation is
@@ -1007,8 +1018,9 @@ impl ObligationRuntime {
 /// The typed flow-solve obligation state of the ONE obligation runtime:
 /// the completeness-proof layer's state machine and evidence carriers —
 /// records ON [`ObligationRuntime`] itself, never a peer ledger.
-/// Production-compiled but publicly unreachable: nothing outside the test
-/// surface installs a demand yet.
+/// Production-live: the flow evaluator's demand-preparation step installs
+/// one demand per cold flow frame, and the component close finalizes
+/// against it.
 ///
 /// Every installed demand runs the one-shot lifecycle
 /// `Discharging → ExpansionClosed → Converging → Converged → Sealed` on
@@ -1021,14 +1033,14 @@ impl ObligationRuntime {
 /// post-seal transition fails. One demand's lifecycle never gates
 /// another's — nested flow frames and deferred SCC members hold distinct
 /// handles.
-// The whole module is the completeness-proof substrate: production-compiled
-// but publicly unreachable until the production admission wiring installs
-// demands from the production evaluator; the test surface exercises every
-// item through `crate::for_tests`.
-#[allow(dead_code)]
+// The whole module is the completeness-proof substrate: production-live
+// (the evaluator's demand preparation installs demands and the component
+// close drives them), with the test surface exercising the same items
+// through `crate::for_tests`.
 pub(crate) mod flow_obligation_state {
     use std::sync::Arc;
 
+    use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
     use verter_identity::identity::{InputBasisId, ResultContractId};
     use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
     use verter_semantic::analysis::flow::{
@@ -1144,17 +1156,38 @@ pub(crate) mod flow_obligation_state {
     pub struct FlowConvergenceEvidence { policy: FlowConvergencePolicy, iterations: u32, stable: bool }
 
     impl FlowConvergenceEvidence {
+        /// A test-only mint: the fenced-publish machinery tests stage
+        /// members whose proofs need a convergence payload without a full
+        /// solve drive. Production evidence is minted ONLY by
+        /// `seal_flow_completion` from the runtime's observation log.
+        #[cfg(test)]
+        pub(crate) fn for_tests(
+            policy: FlowConvergencePolicy,
+            iterations: u32,
+            stable: bool,
+        ) -> Self {
+            Self {
+                policy,
+                iterations,
+                stable,
+            }
+        }
+
         /// The policy the solve converged under.
         #[must_use]
         pub fn policy(&self) -> FlowConvergencePolicy {
             self.policy
         }
         /// The iterations the runtime counted up to the stable point.
+        /// Read by the test surface; the finalizer consumes the policy.
+        #[allow(dead_code)]
         #[must_use]
         pub fn iterations(&self) -> u32 {
             self.iterations
         }
         /// Whether the runtime observed a stable final iteration.
+        /// Read by the test surface; the runtime's own log gates the seal.
+        #[allow(dead_code)]
         #[must_use]
         pub fn stable(&self) -> bool {
             self.stable
@@ -1211,13 +1244,69 @@ pub(crate) mod flow_obligation_state {
         identity: u64,
     }
 
-    impl FlowDemandHandle {
-        /// A test-only mint: the carrier round-trip tests need a handle
-        /// value without installing a full demand.
-        #[cfg(test)]
-        pub(crate) fn for_carrier_tests(index: u32, identity: u64) -> Self {
-            Self { index, identity }
+    /// The opaque evaluation provenance binding one flow demand to the
+    /// evaluation that serves it: the semantic store's instance identity
+    /// plus the request's project generation. Minted by the production
+    /// dispatch at demand-preparation time and carried — atomically, in
+    /// [`FlowDemandCarrier`] — with the demand's handle, plan, value, and
+    /// discharge report. The finalization driver accepts evidence only
+    /// when the carried provenance IS the dispatch's current mint: a value
+    /// or report from another demand, another store, or a stale generation
+    /// is a typed partial, never a proof.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct FlowEvaluationProvenance {
+        store_identity: u64,
+        request_generation: u64,
+    }
+
+    impl FlowEvaluationProvenance {
+        /// Mint a provenance token. The mint inputs are owned by the
+        /// caller (the production dispatch derives them from its own
+        /// store and the live project generation); the token is opaque
+        /// identity data, not a capability.
+        pub(crate) fn new(store_identity: u64, request_generation: u64) -> Self {
+            Self {
+                store_identity,
+                request_generation,
+            }
         }
+    }
+
+    impl CanonicalEncode for FlowEvaluationProvenance {
+        const DOMAIN_TAG: &'static str = "verter.session.flow.evaluation_provenance.v1";
+
+        fn encode_fields(&self, e: &mut CanonicalEncoder) {
+            e.field_u64(1, self.store_identity);
+            e.field_u64(2, self.request_generation);
+        }
+    }
+
+    /// The per-demand proof carrier: the installed demand's handle, its
+    /// plan, and the evaluation provenance, bound atomically at
+    /// preparation time. Carried by the in-flight frame state and — for a
+    /// deferred member — the pending ledger, so the SCC close finalizes
+    /// the member against EXACTLY its own demand.
+    #[derive(Debug, Clone)]
+    pub(crate) struct FlowDemandCarrier {
+        /// The installed demand's unforgeable handle.
+        pub(crate) handle: FlowDemandHandle,
+        /// The demand plan the runtime installed.
+        pub(crate) plan: Arc<FlowDemandPlan>,
+        /// The evaluation provenance minted at preparation.
+        pub(crate) provenance: FlowEvaluationProvenance,
+    }
+
+    /// The convergence the component fixed point actually RAN: the
+    /// iteration count (including the final stable pass) and whether a
+    /// stable point was reached. Produced by the discharge loop, replayed
+    /// into each demand's runtime-observed convergence log by the
+    /// finalization driver — never minted into evidence directly.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct ObservedFlowConvergence {
+        /// The fixed-point passes the discharge ran (≥ 1 when it ran).
+        pub(crate) iterations: u32,
+        /// Whether the fixed point reached a stable pass.
+        pub(crate) stable: bool,
     }
 
     /// One installed flow demand: its basis, its obligation records, its
@@ -1318,7 +1407,9 @@ pub(crate) mod flow_obligation_state {
         pub fn id(&self) -> FlowObligationId { self.id }
         /// The requirement this obligation proves.
         pub fn requirement(&self) -> &FlowRequirement { &self.requirement }
-        /// Where this obligation came from.
+        /// Where this obligation came from. Read by the test surface;
+        /// discharge validation consults the evidence-contract fields.
+        #[allow(dead_code)]
         pub fn origin(&self) -> &FlowObligationOrigin { &self.origin }
         /// The closed semantic identity of this obligation's subject.
         pub fn basis(&self) -> &FlowObligationBasis { &self.basis }
@@ -1531,7 +1622,9 @@ pub(crate) mod flow_obligation_state {
             demand.refresh_expansion_closure();
             Ok(())
         }
-        /// Transition Pending|Running → Gap.
+        /// Transition Pending|Running → Gap. Test surface: production
+        /// gaps install at plan-install time, never mid-solve.
+        #[allow(dead_code)]
         pub fn gap_flow_obligation(&mut self, handle: FlowDemandHandle, id: FlowObligationId, gap: FlowGap) -> Result<(), FlowTransitionError> {
             self.transition(handle, id, |state| matches!(state, ObligationState::Pending | ObligationState::Running).then_some(ObligationState::Gap(gap)))
         }
@@ -1648,11 +1741,14 @@ pub(crate) mod flow_obligation_state {
             self.flow_demand(handle).map(|demand| &demand.basis)
         }
 
-        /// The number of installed flow demands.
+        /// The number of installed flow demands. Test surface (the
+        /// no-flow allocation contract asserts on it).
+        #[allow(dead_code)]
         pub fn flow_demand_count(&self) -> usize { self.flow_demands.len() }
 
         /// The reserved capacity of the DEMAND storage — the
         /// no-reservation probe for a runtime that never served a demand.
+        #[allow(dead_code)] // test surface (the no-flow allocation contract)
         pub fn flow_demand_storage_capacity(&self) -> usize { self.flow_demands.capacity() }
 
         /// Resolve a handle to its demand's ledger slot: the handle must
@@ -2561,7 +2657,11 @@ pub(crate) struct SavedRedischargeContext {
 #[derive(Debug)]
 pub(crate) struct CompletedFlowReturnMember {
     pub(crate) key: FlowReturnKey,
-    pub(crate) result: FlowReturnResult,
+    /// The member's PROOF — the sole warm-admission authority. The
+    /// published payload is extracted from the token at the fenced batch
+    /// publish; a member whose finalization did not complete never enters
+    /// this queue at all.
+    pub(crate) result: super::flow_solve::CompleteFlowResult,
     pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineFlowReturnFlight>,
     /// The member's own file roots (the SCC-union carrier's self-roots
     /// include them even when the ROOT is a relation obligation).
@@ -2595,6 +2695,14 @@ pub(crate) struct FlowReturnDomainRuntime {
     /// SCC-closed flow members queued for the root's batched publish
     /// drain.
     pub(crate) completed_members: Vec<CompletedFlowReturnMember>,
+    /// The VALUE channel for closed flow members: every member (and every
+    /// inline SCC root) whose close produced an evaluated value records it
+    /// here — proven or not. The shared return equation reads closed
+    /// members' values as its just-discharged override source for hold
+    /// targets outside the solving component (never the store). This is a
+    /// VALUE-computation input, not an admission channel: admission is
+    /// `completed_members`' proof typing alone.
+    pub(crate) closed_values: Vec<(FlowReturnKey, FlowReturnResult)>,
     /// The typed failure of the in-flight machinery ROOT's close — the
     /// caller-return payload channel: the family memo admits only COMPLETE
     /// values, so a degraded root's typed failure rides the transaction to

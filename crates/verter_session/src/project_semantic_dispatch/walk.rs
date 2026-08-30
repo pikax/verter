@@ -327,6 +327,15 @@ pub struct QueryBuildOutput<T = SemanticNodeId> {
     /// [`crate::semantic_query_memo::MemoEntry`] and consulted by the
     /// warm-hit `cached_satisfies` gate.
     pub satisfied_projection: crate::semantic_query::demand::MaterializedSet,
+    /// The flow-completeness proof of a `FlowReturn` build: the sole
+    /// warm-admission authority for the `FlowReturn` family. `Some` ONLY
+    /// when the flow-solve finalizer minted a `Complete` outcome for this
+    /// build's exact demand; `None` for every non-flow build (no
+    /// allocation) and for every unproven flow build. The family memo
+    /// REQUIRES it whenever the prepared key is `FlowReturn` — storage
+    /// may veto a proof-bearing result, but never promotes a proofless
+    /// one.
+    pub flow_completion: Option<crate::project_semantic_dispatch::flow_solve::CompleteFlowResult>,
 }
 
 impl<T> From<(QueryResult<T>, DepSignature)> for QueryBuildOutput<T> {
@@ -345,6 +354,7 @@ impl<T> From<(QueryResult<T>, DepSignature)> for QueryBuildOutput<T> {
             self_root_canonicals: Arc::from([]),
             pending_prefix_backfills: Vec::new(),
             satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+            flow_completion: None,
         }
     }
 }
@@ -373,6 +383,7 @@ impl From<QueryBuildOutput<SemanticNodeId>>
             self_root_canonicals: output.self_root_canonicals,
             pending_prefix_backfills: output.pending_prefix_backfills,
             satisfied_projection: output.satisfied_projection,
+            flow_completion: output.flow_completion,
         }
     }
 }
@@ -395,6 +406,7 @@ impl<T> QueryBuildOutput<T> {
             self_root_canonicals: self.self_root_canonicals,
             pending_prefix_backfills: self.pending_prefix_backfills,
             satisfied_projection: self.satisfied_projection,
+            flow_completion: self.flow_completion,
         }
     }
 

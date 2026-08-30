@@ -179,10 +179,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .dispatch_txn
                     .borrow()
                     .flow
-                    .completed_members
+                    .closed_values
                     .iter()
-                    .find(|member| &member.key == key)
-                    .map(|member| member.result.return_type())
+                    .find(|(member_key, _)| member_key == key)
+                    .map(|(_, result)| result.return_type())
                 {
                     return Some((result, Vec::new()));
                 }

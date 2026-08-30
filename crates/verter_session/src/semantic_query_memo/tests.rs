@@ -3668,6 +3668,7 @@ fn prefix_backfill_loop_skips_all_backfills_when_winner_aborted_mid_loop() {
                         node: child_node,
                     }],
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )
@@ -6445,6 +6446,7 @@ fn prefix_backfill_carries_traced_facts() {
                 ),
             }],
             satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+            flow_completion: None,
         },
     );
 
@@ -6751,6 +6753,7 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: Vec::new(),
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )
@@ -6962,6 +6965,7 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                     self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )
@@ -7207,6 +7211,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
                     self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )
@@ -7418,6 +7423,7 @@ fn same_view_joiner_still_coalesces_onto_winner() {
                     self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )
@@ -7610,6 +7616,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: Vec::new(),
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )
@@ -7883,6 +7890,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: Vec::new(),
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )
@@ -8170,6 +8178,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
                     self_root_canonicals: Arc::from([]),
                     pending_prefix_backfills: Vec::new(),
                     satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    flow_completion: None,
                 }
             },
         )

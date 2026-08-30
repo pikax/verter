@@ -1,9 +1,10 @@
 //! The completeness-proof layer for flow-bearing semantic operations.
-//! Production-compiled but publicly unreachable: the demand planning and
-//! finalization entry points have no production caller until the proof
-//! admission is wired (the test surface reaches them through
-//! `crate::for_tests`), while the registry identity IS production-live —
-//! the `FlowReturnKey` constructor derives its result contract from it.
+//! Production-live: the flow evaluator's demand-preparation step installs
+//! one demand per cold flow frame, the component close applies the
+//! evaluator's typed discharge report and replays the runtime-observed
+//! convergence, and [`finalize_flow_solve`] mints the sole warm-admission
+//! proof. The registry identity is folded into every `FlowReturnKey` by
+//! the key constructor.
 //! The layer shares the ONE graph authority — the store-minted
 //! [`BoundFlowGraph`] seals each memoized `FlowGraphBundle` to the content
 //! key it was built for — and the ONE closed query registry
@@ -87,7 +88,11 @@ use self::FlowRequirementKind as RK;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FlowDomain {
     ReachingValue, ReachingType, Narrowing, Completion, ClosureCapture,
-    Freshness, Effects, CallResolution, Relation, ContextualTyping, Coverage,
+    Freshness, Effects, CallResolution, Relation, ContextualTyping,
+    // Deliberately declared by NO contract: the gap-installation tests
+    // assert an undeclared domain becomes a typed gap.
+    #[allow(dead_code)]
+    Coverage,
 }
 
 /// One fact family an operation may consume; `GraphEdge` reuses the shared
@@ -313,6 +318,33 @@ static FLOW_OPERATION_CONTRACTS: &[FlowOperationContract] = &[
 #[rustfmt::skip]
 pub fn flow_operation_contract(tag: SemanticQueryKeyTag) -> Option<&'static FlowOperationContract> {
     FLOW_OPERATION_CONTRACTS.iter().find(|c| c.tag == tag)
+}
+
+/// The typed-gap route of a PENDING flow root (`FlowNarrowingAt`,
+/// `ContextualTypeAt`): validates the registry row (a root whose status
+/// is `PendingReducer` and whose finalizer is `TypedGapOnly`) and returns
+/// the operation-specific [`FlowGap`] the production build surfaces as a
+/// typed partial (`Error(Miss)` + ReturnOnly rails). `None` for every
+/// other operation — a live root or a non-flow operation has no typed-gap
+/// route. Never builds a graph, a plan, or a demand.
+pub fn typed_gap_for_pending_root(tag: SemanticQueryKeyTag) -> Option<FlowGap> {
+    let contract = flow_operation_contract(tag)?;
+    if contract.role != R::Root
+        || contract.status != S::PendingReducer
+        || contract.result.finalizer != K::TypedGapOnly
+    {
+        return None;
+    }
+    // The operation-specific gap: the narrowing root's pending reducer
+    // means no guard narrowing was evaluated; the contextual root's means
+    // the contextual expression was never modelled. Exhaustive over the
+    // registered PendingReducer rows — a new pending root extends this
+    // match deliberately.
+    match tag {
+        SemanticQueryKeyTag::FlowNarrowingAt => Some(FlowGap::GuardNarrowing),
+        SemanticQueryKeyTag::ContextualTypeAt => Some(FlowGap::UnmodeledExpression),
+        _ => None,
+    }
 }
 
 /// The registered contract of `tag`, or the offending tag.
@@ -609,7 +641,11 @@ impl Default for FlowResourcePolicy {
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
 pub struct FlowDemandPlan {
-    basis: FlowDemandBasis, subject: FlowDemandSubject,
+    basis: FlowDemandBasis,
+    // Read by the test surface through the getter; production planning
+    // consumes it during construction.
+    #[allow(dead_code)]
+    subject: FlowDemandSubject,
     /// The structural selection (graph reachability result, planned once).
     structural_selection: ReturnSlicePlan,
     /// The contract-required domains, in domain-rank order.
@@ -634,6 +670,10 @@ pub struct FlowDemandPlan {
     obligation_specs: Vec<FlowObligationSpec>,
 }
 
+// The plan's immutable getters are the SEALED plan's whole API surface:
+// production planning reads the fields during construction and the
+// runtime; the tests exercise the getters as the contract evidence.
+#[allow(dead_code)]
 #[rustfmt::skip]
 impl FlowDemandPlan {
     /// The exact basis the demand was planned against.
@@ -739,13 +779,25 @@ pub fn derive_demand_subject(
 
 /// Resolve every skeleton binding's cross-frame identity ONCE, in skeleton
 /// order, against the frame's binding inventory. The inventory records the
-/// mappable, non-destructured subset of the skeleton's bindings in the
-/// same source order, so the zip consumes one inventory slot per mappable
-/// non-destructured skeleton binding; a record that does not correspond
-/// (a foreign inventory) yields NO identity, and kinds the cross-frame
-/// vocabulary cannot name yield NONE by construction. The planner turns
-/// `None` into an unmodelable obligation (a typed gap at install), never
-/// a fabricated slot.
+/// mappable subset of the skeleton's bindings in the same source order
+/// (params first), so the walk matches each skeleton binding to its record
+/// monotonically. Two production realities shape the matching:
+///
+/// - The inventory builder collapses ADJACENT same-name same-kind records
+///   (its own `dedup_by`), so a shadowed twin or a `var` redeclaration has
+///   no second slot: the collapsed binding reuses its twin's slot — the
+///   slot domain genuinely cannot distinguish them.
+/// - A destructured element has no whole-slot inventory entry BY
+///   CONSTRUCTION (the builder records only whole binding identifiers),
+///   but its identity is still REAL: the skeleton names the element, its
+///   kind, and its frame. Its slot is the skeleton's own binding ordinal
+///   offset past the inventory's slot range — never a fabricated
+///   inventory slot, never a collision with one.
+///
+/// A binding the inventory truly cannot name (no record of its name and
+/// kind anywhere) yields NO identity, and kinds the cross-frame vocabulary
+/// cannot name yield NONE by construction; the planner turns `None` into
+/// an unmodelable obligation (a typed gap at install).
 fn resolve_binding_identities(
     skeleton: &FunctionBodySkeleton,
     inventory: &FlowBindingInventory,
@@ -755,7 +807,8 @@ fn resolve_binding_identities(
     skeleton
         .bindings
         .iter()
-        .map(|binding| {
+        .enumerate()
+        .map(|(binding_ordinal, binding)| {
             let kind = match binding.kind {
                 SkeletonBindingKind::Param => FunctionBindingKind::Param,
                 SkeletonBindingKind::Const => FunctionBindingKind::Const,
@@ -770,17 +823,45 @@ fn resolve_binding_identities(
                 | SkeletonBindingKind::TypeAlias
                 | SkeletonBindingKind::Interface => return None,
             };
-            // A destructuring-pattern element is no whole-slot inventory
-            // entry; it consumes no slot.
             if binding.destructured {
-                return None;
+                return Some(FlowBindingIdentity {
+                    name: Arc::from(skeleton.name(binding.name)),
+                    kind,
+                    defining_function: function.clone(),
+                    binding_slot: u32::try_from(
+                        inventory.bindings.len().saturating_add(binding_ordinal),
+                    )
+                    .unwrap_or(u32::MAX),
+                });
             }
-            let slot = cursor;
-            cursor += 1;
-            let record = inventory.bindings.get(slot)?;
-            if record.name.as_ref() != skeleton.name(binding.name) || record.kind != kind {
-                return None;
-            }
+            let name = skeleton.name(binding.name);
+            // Forward from the cursor first (source order); a collapsed
+            // twin reuses the nearest earlier record of its name and kind.
+            let slot = match inventory
+                .bindings
+                .iter()
+                .enumerate()
+                .skip(cursor)
+                .find(|(_, record)| record.name.as_ref() == name && record.kind == kind)
+                .map(|(index, _)| index)
+            {
+                Some(slot) => {
+                    cursor = slot + 1;
+                    slot
+                }
+                None => match inventory
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .take(cursor)
+                    .rfind(|(_, record)| record.name.as_ref() == name && record.kind == kind)
+                    .map(|(index, _)| index)
+                {
+                    Some(slot) => slot,
+                    None => return None,
+                },
+            };
+            let record = &inventory.bindings[slot];
             Some(FlowBindingIdentity {
                 name: Arc::clone(&record.name),
                 kind,
@@ -1279,7 +1360,17 @@ pub(crate) fn build_flow_demand_plan(
 /// stale basis, a panic marker, or an internal failure.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlowFailureClass { Cancelled, BudgetExhausted, StaleBasis, Panic, Internal }
+pub enum FlowFailureClass {
+    // The full failure-class vocabulary: production currently mints
+    // BudgetExhausted and Internal; the rest are the typed classes the
+    // ledger distinguishes for the test surface and future producers.
+    #[allow(dead_code)]
+    Cancelled, BudgetExhausted,
+    #[allow(dead_code)]
+    StaleBasis,
+    #[allow(dead_code)]
+    Panic, Internal
+}
 
 /// A typed flow-solve failure.
 #[rustfmt::skip]
@@ -1288,21 +1379,54 @@ pub struct FlowFailure { pub class: FlowFailureClass }
 
 /// Why a solve is not complete: no installed demand, a stale basis, an
 /// unprovable operation, a foreign result contract, a non-exact obligation
-/// set, an unfinished obligation, a typed gap, a failure, or
-/// non-convergence.
+/// set, an unfinished obligation, a typed gap, a failure, foreign or stale
+/// evaluation provenance, or non-convergence.
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowPartialReason {
     NoDemandInstalled, StaleBasis, OperationNotProvable, ResultContractMismatch,
     ObligationSetMismatch, IncompleteObligations, Gap(FlowGap), Failed(FlowFailure),
     NonConverged, DegradedValue,
+    /// The evaluation evidence (value / report / convergence / handle) does
+    /// not carry the serving dispatch's current evaluation provenance — a
+    /// foreign store or a stale request generation.
+    ForeignProvenance,
 }
 
-/// A non-complete outcome: the basis plus the typed reason. NEVER a warm
-/// candidate.
+/// A non-complete outcome over a usable value: the basis, the typed
+/// reason, and the evaluated value. NEVER a warm candidate — the value
+/// stays usable by tolerant consumers, but admission requires the proof.
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PartialFlowResult { pub basis: FlowDemandBasis, pub reason: FlowPartialReason }
+pub struct PartialFlowResult {
+    /// The basis the partial solve ran against (proof-state evidence;
+    /// read by the test surface).
+    #[allow(dead_code)]
+    pub basis: FlowDemandBasis,
+    /// The typed reason the solve is not complete (proof-state evidence;
+    /// read by the test surface).
+    #[allow(dead_code)]
+    pub reason: FlowPartialReason,
+    /// The evaluated value — usable by tolerant consumers, never warm.
+    pub value: FlowReturnResult,
+}
+
+/// A no-value outcome: the typed evaluation failure, the basis, and the
+/// typed reason. NEVER a warm candidate.
+#[rustfmt::skip]
+#[derive(Debug, Clone)]
+pub struct NoValueFlowResult {
+    /// The basis the failed solve ran against (proof-state evidence; read
+    /// by the test surface).
+    #[allow(dead_code)]
+    pub basis: FlowDemandBasis,
+    /// The typed reason the solve is not complete (proof-state evidence;
+    /// read by the test surface).
+    #[allow(dead_code)]
+    pub reason: FlowPartialReason,
+    /// The typed no-value failure.
+    pub failure: crate::semantic_query::FlowReturnFailure,
+}
 
 /// The parts a [`CompleteFlowResult`] is minted from. Private to this
 /// module: only [`finalize_flow_solve`] assembles them.
@@ -1338,22 +1462,69 @@ impl CompleteFlowResult {
     pub fn value(&self) -> &FlowReturnResult {
         &self.value
     }
+
+    /// The flow-return key this proof was minted for — the admission
+    /// fence's coherence axis: a proof admits ONLY the demand identity it
+    /// was finalized under (the key embeds the result contract, so a
+    /// contract mismatch is a key mismatch).
+    #[must_use]
+    pub fn key(&self) -> &crate::semantic_query::FlowReturnKey {
+        let SemanticQueryKey::FlowReturn(key) = &self.basis.query else {
+            unreachable!("a flow-completeness proof is minted only for a FlowReturn demand")
+        };
+        key
+    }
+
+    /// A test-only mint for the fenced-publish MACHINERY tests (the SCC
+    /// batch's root-witness / atomicity / retention discipline), which
+    /// stage members by hand and need a proof whose key matches the
+    /// staged member. Mirrors the seal's refusal: a DEGRADED value mints
+    /// nothing. Never compiled into a production build; the sole
+    /// production mint is [`finalize_flow_solve`].
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        basis: FlowDemandBasis,
+        value: FlowReturnResult,
+        convergence: FlowConvergenceEvidence,
+    ) -> Option<Self> {
+        if value.degradation().is_some() {
+            return None;
+        }
+        Some(Self::new(CompleteFlowResultParts {
+            basis,
+            value,
+            convergence,
+            discharged: Arc::from([]),
+        }))
+    }
 }
 
-/// The outcome of one flow solve.
+/// The normative three-way outcome of one flow solve: the complete
+/// proof-bearing result, a partial carrying its usable value, or a
+/// no-value failure. Only [`FlowSolveOutcome::Complete`] is a warm
+/// candidate; the other two arms keep the evaluated payload usable by
+/// tolerant consumers without ever minting admission.
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
-pub enum FlowSolveOutcome { Complete(CompleteFlowResult), Partial(PartialFlowResult) }
+pub enum FlowSolveOutcome {
+    Complete(CompleteFlowResult),
+    Partial(PartialFlowResult),
+    NoValue(NoValueFlowResult),
+}
 
 impl FlowSolveOutcome {
     /// The warm-admission candidate: `Some` ONLY for a proof-bearing
-    /// complete result. No gap, failure, cancellation, stale basis, or
-    /// partial replay is ever a warm candidate.
+    /// complete result. No gap, failure, cancellation, stale basis,
+    /// foreign provenance, or partial replay is ever a warm candidate.
+    /// The test-surface and documentation accessor: production reads the
+    /// verdict by matching the arms (the adapter) or by proof-typed
+    /// carriers (the SCC batch).
+    #[allow(dead_code)]
     #[must_use]
     pub fn warm_candidate(&self) -> Option<&CompleteFlowResult> {
         match self {
             Self::Complete(complete) => Some(complete),
-            Self::Partial(_) => None,
+            Self::Partial(_) | Self::NoValue(_) => None,
         }
     }
 }
@@ -1375,7 +1546,8 @@ impl FlowSolveOutcome {
 pub fn finalize_flow_solve(
     runtime: &ObligationRuntime, handle: FlowDemandHandle, plan: &FlowDemandPlan, completion: SealedFlowCompletion,
 ) -> FlowSolveOutcome {
-    let partial = |reason: FlowPartialReason| FlowSolveOutcome::Partial(PartialFlowResult { basis: plan.basis().clone(), reason });
+    let value = completion.value().clone();
+    let partial = |reason: FlowPartialReason| FlowSolveOutcome::Partial(PartialFlowResult { basis: plan.basis().clone(), reason, value: value.clone() });
 
     let Some(installed) = runtime.flow_basis(handle) else { return partial(FlowPartialReason::NoDemandInstalled) };
     if installed != plan.basis() { return partial(FlowPartialReason::StaleBasis); }

@@ -785,11 +785,8 @@ impl MacroProjectionLane {
 
 /// Whether the observed completeness FAULTS `lane`'s projection.
 pub(super) fn macro_projection_faulted(lane: MacroProjectionLane) -> bool {
-    !macro_projection_residual(
-        crate::request_context::current_cold_compute_completeness(),
-        lane,
-    )
-    .is_empty()
+    let completeness = crate::request_context::current_cold_compute_completeness();
+    !macro_projection_residual(completeness, lane).is_empty()
 }
 
 /// The reasons of `completeness` that FAULT `lane` — the observed set

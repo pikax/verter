@@ -403,6 +403,7 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
         skeletons: Arc::clone(&skeletons),
         hash_node,
         lowered_node,
+        demand_plans: std::sync::atomic::AtomicU64::new(0),
         #[cfg(test)]
         budget,
     };

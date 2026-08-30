@@ -392,6 +392,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         self_roots: state.self_roots,
                         materialized: state.materialized,
                         fresh_seed: state.fresh_seed,
+                        flow_demand: state.flow_demand,
+                        discharge: state.discharge,
                     });
                 }
                 PendingObligationDomain::ResolveCall(state) => {
@@ -490,6 +492,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut root_result = None;
         let mut call_results = Vec::new();
         let mut converged = false;
+        // The observed convergence of the joint fixed point: every
+        // flow-side pass the discharge runs, accumulated across passes.
+        let mut observed_iterations: u32 = 0;
         for _pass in 0..bound {
             if !flow_members.is_empty() {
                 let mut entries: Vec<super::dispatch_txn::FlowDischargeEntry> =
@@ -502,7 +507,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         fresh_seed: member.fresh_seed,
                     });
                 }
-                self.discharge_flow_component_to_fixed_point(&mut entries, &call_value_map);
+                let observed =
+                    self.discharge_flow_component_to_fixed_point(&mut entries, &call_value_map);
+                observed_iterations = observed_iterations.saturating_add(observed.iterations);
                 for (member, entry) in flow_members.iter_mut().zip(entries) {
                     member.outcome = entry.outcome;
                 }
@@ -536,7 +543,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             > = flow_members
                 .iter()
                 .filter_map(|member| match &member.outcome {
-                    super::dispatch_txn::FlowReturnPendingOutcome::Complete(result) => {
+                    super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(result) => {
                         Some((member.key.clone(), result.return_type()))
                     }
                     super::dispatch_txn::FlowReturnPendingOutcome::NoValue { .. } => None,
@@ -673,6 +680,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             Some((root_key.clone(), root_result.clone(), root.staged_session)),
             call_results,
             cyclic,
+            &super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence {
+                iterations: observed_iterations,
+                stable: true,
+            },
         );
         if let Err(cap) = discharge {
             if let Some(session) = root.staged_session {

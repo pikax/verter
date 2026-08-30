@@ -228,6 +228,11 @@ node_id = "D2A"
 commit_message = "feat(session): canonical flow demand and proof substrate"
 commit_date = "2026-08-30T09:46:00+01:00"
 
+[[implemented]]
+node_id = "D2B"
+commit_message = "feat(session): route flow-return admission through the sole completeness proof"
+commit_date = "2026-08-30T17:32:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
