@@ -1521,3 +1521,15 @@ sync_to_github = true
 node_id = "VST1"
 gh_issue = 407
 sync_to_github = true
+[[github_issue]]
+node_id = "CCA1N2A"
+gh_issue = 445
+sync_to_github = true
+[[github_issue]]
+node_id = "CCA1N2B"
+gh_issue = 446
+sync_to_github = true
+[[github_issue]]
+node_id = "CCA1N2G"
+gh_issue = 447
+sync_to_github = true
