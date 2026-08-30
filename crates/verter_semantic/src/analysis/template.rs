@@ -147,8 +147,11 @@ pub enum TemplateDiagnosticSeverity {
 /// One diagnostic emitted by the template-facts extraction pass
 /// (a template expression parse error), carried on
 /// [`TemplateAnalysisSnapshot::expression_diagnostics`].
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// Serialized with the module's flat-span wire convention
+/// (`spanStart`/`spanEnd`, no nested `span` object) via the manual impls
+/// below.
+#[derive(Debug, Clone, PartialEq)]
 pub struct TemplateExpressionDiagnostic {
     /// Severity.
     pub severity: TemplateDiagnosticSeverity,
@@ -1526,6 +1529,42 @@ impl<'de> serde::Deserialize<'de> for TemplateComponentUsage {
             v_models: w.v_models,
             bindings: w.bindings,
             events: w.events,
+            span: Span::new(w.span_start, w.span_end),
+        })
+    }
+}
+
+impl serde::Serialize for TemplateExpressionDiagnostic {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("TemplateExpressionDiagnostic", 5)?;
+        s.serialize_field("severity", &self.severity)?;
+        s.serialize_field("code", &self.code)?;
+        s.serialize_field("message", &self.message)?;
+        s.serialize_field("spanStart", &self.span.start)?;
+        s.serialize_field("spanEnd", &self.span.end)?;
+        s.end()
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TemplateExpressionDiagnostic {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Wire {
+            severity: TemplateDiagnosticSeverity,
+            code: String,
+            message: String,
+            #[serde(default)]
+            span_start: u32,
+            #[serde(default)]
+            span_end: u32,
+        }
+        let w = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            severity: w.severity,
+            code: w.code,
+            message: w.message,
             span: Span::new(w.span_start, w.span_end),
         })
     }
@@ -3382,6 +3421,26 @@ mod tests {
             let j = json(&v);
             assert_flat_span(&j, 20, 25);
             assert_eq!(j["name"], "count");
+        }
+
+        #[test]
+        fn template_expression_diagnostic_uses_struct() {
+            let v = TemplateExpressionDiagnostic {
+                severity: TemplateDiagnosticSeverity::Error,
+                code: "XInvalidExpression".into(),
+                message: "invalid expression".into(),
+                span: Span::new(12, 34),
+            };
+            assert_uses_struct(&v);
+            let j = json(&v);
+            assert_flat_span(&j, 12, 34);
+            assert_eq!(j["severity"], "error");
+            assert_eq!(j["code"], "XInvalidExpression");
+            assert_eq!(j["message"], "invalid expression");
+            // Round-trip: the flat wire shape deserializes back to the value.
+            let back: TemplateExpressionDiagnostic =
+                serde_json::from_value(j).expect("flat wire shape round-trips");
+            assert_eq!(back, v);
         }
 
         #[test]

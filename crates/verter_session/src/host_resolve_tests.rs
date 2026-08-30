@@ -3947,7 +3947,37 @@ fn diagnostics_generation_increments_on_successful_recompile() {
 /// which consumer requested the template facts.
 #[test]
 fn template_expression_diagnostics_match_across_analysis_and_bundle_routes() {
-    use std::collections::BTreeSet;
+    /// Normalized diagnostic row: (severity, code, message, start, end).
+    /// A sorted `Vec` — a MULTISET, never a set — so a route that
+    /// duplicates or collapses entries fails the comparison, and severity
+    /// and message reclassification is caught alongside span drift.
+    type Row = (&'static str, String, String, u32, u32);
+    fn sorted(mut rows: Vec<Row>) -> Vec<Row> {
+        rows.sort();
+        rows
+    }
+    fn expression_rows(
+        diags: &[verter_semantic::analysis::template::TemplateExpressionDiagnostic],
+    ) -> Vec<Row> {
+        use verter_semantic::analysis::template::TemplateDiagnosticSeverity as S;
+        diags
+            .iter()
+            .filter(|d| d.code == "XInvalidExpression")
+            .map(|d| {
+                (
+                    match d.severity {
+                        S::Error => "error",
+                        S::Warning => "warning",
+                        S::Info => "info",
+                    },
+                    d.code.clone(),
+                    d.message.clone(),
+                    d.span.start,
+                    d.span.end,
+                )
+            })
+            .collect()
+    }
 
     let host = strict_host();
     let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
@@ -3963,14 +3993,9 @@ fn template_expression_diagnostics_match_across_analysis_and_bundle_routes() {
     let tpl = analysis
         .template
         .expect("template analysis computed on the analysis route");
-    let analysis_set: BTreeSet<(String, u32, u32)> = tpl
-        .expression_diagnostics
-        .iter()
-        .filter(|d| d.code == "XInvalidExpression")
-        .map(|d| (d.code.clone(), d.span.start, d.span.end))
-        .collect();
+    let analysis_rows = sorted(expression_rows(&tpl.expression_diagnostics));
     assert!(
-        !analysis_set.is_empty(),
+        !analysis_rows.is_empty(),
         "the analysis route must surface the malformed v-if expression: {:?}",
         tpl.expression_diagnostics
     );
@@ -3986,21 +4011,91 @@ fn template_expression_diagnostics_match_across_analysis_and_bundle_routes() {
     let bundle_diags = host
         .get_diagnostics("/src/Comp.vue", &ide_profile)
         .expect("compile publishes latest_diagnostics");
-    let bundle_set: BTreeSet<(String, u32, u32)> = bundle_diags
-        .diagnostics
-        .iter()
-        .filter(|d| d.code == "XInvalidExpression")
-        .map(|d| (d.code.clone(), d.span.start, d.span.end))
-        .collect();
+    let bundle_rows: Vec<Row> = sorted(
+        bundle_diags
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "XInvalidExpression")
+            .map(|d| {
+                (
+                    match d.severity {
+                        crate::HostSeverity::Error => "error",
+                        crate::HostSeverity::Warning => "warning",
+                        crate::HostSeverity::Info => "info",
+                    },
+                    d.code.clone(),
+                    d.message.clone(),
+                    d.span.start,
+                    d.span.end,
+                )
+            })
+            .collect(),
+    );
     assert!(
-        !bundle_set.is_empty(),
+        !bundle_rows.is_empty(),
         "the bundle route must publish the malformed v-if expression: {:?}",
         bundle_diags.diagnostics
     );
 
     assert_eq!(
-        analysis_set, bundle_set,
-        "both routes must surface the identical XInvalidExpression set"
+        analysis_rows, bundle_rows,
+        "both routes must surface the identical XInvalidExpression multiset \
+         (severity + message + span included)"
+    );
+}
+
+/// The COMPILE route's OWN template-snapshot conversion carries the
+/// expression diagnostics: compiling FIRST persists the compile-produced
+/// template into the shared raw-template slot, and the analysis read then
+/// serves THAT conversion (proven by the lazy-compute seam never firing) —
+/// so a compile-route conversion that dropped the diagnostics half could
+/// not hide behind the lazy analysis route recomputing them.
+#[test]
+fn compile_route_template_snapshot_carries_expression_diagnostics() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let host = strict_host();
+    let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
+                  <template><div v-if=\"count ===\">x</div></template>";
+    upsert_vue(&host, "/src/Comp.vue", source);
+
+    // Compile FIRST — the compile route converts the template facts and
+    // persists the snapshot into the shared slot.
+    let ide_profile = CompileProfile {
+        target: CompileTarget::TSX,
+        ..CompileProfile::default()
+    };
+    let _ = host.ensure_ide_compiled("/src/Comp.vue", &ide_profile);
+
+    // The lazy analysis-route computation must NOT run: the served template
+    // is the compile route's own conversion.
+    let lazy_ran = Arc::new(AtomicBool::new(false));
+    {
+        let lazy_ran = Arc::clone(&lazy_ran);
+        *host.template_persist_seam_hook.lock() = Some(Arc::new(move || {
+            lazy_ran.store(true, Ordering::SeqCst);
+        }));
+    }
+    let analysis = host
+        .get_analysis("/src/Comp.vue")
+        .expect("analysis snapshot");
+    *host.template_persist_seam_hook.lock() = None;
+    assert!(
+        !lazy_ran.load(Ordering::SeqCst),
+        "the compile-persisted template must serve without a lazy recompute"
+    );
+
+    let tpl = analysis
+        .template
+        .expect("compile-route template snapshot served on the analysis read");
+    assert!(
+        tpl.expression_diagnostics
+            .iter()
+            .any(|d| d.code == "XInvalidExpression"),
+        "the compile route's snapshot conversion must carry the expression \
+         diagnostics: {:?}",
+        tpl.expression_diagnostics
     );
 }
 

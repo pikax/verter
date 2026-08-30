@@ -73,13 +73,15 @@ impl<'a> UnusedDeclarationContext<'a> {
 
 /// Borrowed view of a [`TemplateFactsProduct`] for conversion: both halves
 /// must be supplied together, so no conversion site can take the data and
-/// silently drop the diagnostics half. Production callers build it from the
-/// product via `From`; test fixtures pair a bare `RawTemplateData` with an
-/// explicit (possibly empty) diagnostics slice.
+/// silently drop the diagnostics half. The fields are private — construction
+/// outside this module goes through the complete `From<&TemplateFactsProduct>`
+/// only, so no crate site can pair the data with a fabricated empty
+/// diagnostics slice. Test fixtures (a child module of this one) pair a bare
+/// `RawTemplateData` with an explicit (possibly empty) diagnostics slice.
 #[derive(Clone, Copy)]
 pub(crate) struct TemplateFactsRef<'a> {
-    pub data: &'a RawTemplateData,
-    pub diagnostics: &'a [RuntimeDiagnostic],
+    data: &'a RawTemplateData,
+    diagnostics: &'a [RuntimeDiagnostic],
 }
 
 impl<'a> From<&'a TemplateFactsProduct> for TemplateFactsRef<'a> {
