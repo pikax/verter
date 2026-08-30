@@ -1,18 +1,19 @@
 //! Svelte [`FrameworkSemanticAuthority`] adapter.
 //!
 //! Owns Svelte eval-source and template-fact interpretation over an
-//! already-admitted parse artifact. Eval-source is selected by catalog
-//! identity (adapter × epoch × Semantic).
+//! already-admitted parse artifact. Catalog lookup keys adapter × epoch
+//! × Semantic.
 
 use std::sync::Arc;
 
 use verter_language::{FrameworkAdapterId, LanguageId};
 
+use crate::compile::RawTemplateData;
 use crate::framework_common::capability::{FrameworkSemanticAuthority, Present};
 use crate::framework_common::catalog::{SemanticCap, TypedCapabilityRegistration};
 use crate::framework_common::CarrierCompiler;
 use crate::framework_common::FrameworkParseArtifact;
-use crate::framework_common::TemplateFacts;
+use crate::svelte::carrier::SvelteParseCarrier;
 
 use super::carrier::SvelteCarrierCompiler;
 use super::carrier_frontend::SvelteSfc5;
@@ -43,7 +44,7 @@ impl SvelteSemanticAuthority {
 
 impl FrameworkSemanticAuthority<SvelteSfc5> for SvelteSemanticAuthority {
     type EvalSource = Arc<str>;
-    type TemplateFacts = TemplateFacts;
+    type TemplateFacts = Option<RawTemplateData>;
     type StyleMeaning = ();
     type SemanticAdmission = SvelteSemanticAdmission;
     type ParseArtifact = FrameworkParseArtifact;
@@ -54,8 +55,23 @@ impl FrameworkSemanticAuthority<SvelteSfc5> for SvelteSemanticAuthority {
         )
     }
 
-    fn template_facts(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
-        SvelteCarrierCompiler.template_data(source, artifact)
+    fn template_facts(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Option<RawTemplateData> {
+        let carrier = artifact.carrier_ref::<SvelteParseCarrier>()?;
+        let parsed = carrier.parsed();
+        let mut data = RawTemplateData::default();
+        super::template_facts::collect_component_usages(
+            &parsed.template,
+            carrier.attribute_expressions(),
+            source,
+            &mut data,
+        );
+        super::template_facts::collect_snippet_definitions(&parsed.template, source, &mut data);
+        super::template_facts::collect_svelte_directives(&parsed.template, source, &mut data);
+        Some(data)
     }
 }
 

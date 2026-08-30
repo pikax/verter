@@ -268,6 +268,11 @@ node_id = "CCA1GE"
 commit_message = "feat(core): route eval-source through catalog semantic authorities"
 commit_date = "2026-08-29T20:53:53+01:00"
 
+[[implemented]]
+node_id = "CCA1GT"
+commit_message = "feat(core): route template facts through catalog semantic authorities"
+commit_date = "2026-08-30T01:06:43+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

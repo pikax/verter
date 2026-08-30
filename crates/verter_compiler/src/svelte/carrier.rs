@@ -3,7 +3,7 @@
 //! [`SvelteParseCarrier`] wraps [`ParsedSvelte`]. [`build_svelte_parse_artifact`]
 //! produces the unregistered artifact; the projector owns inventory
 //! geometry. [`SvelteCarrierCompiler`]: `parse` → neutral artifact;
-//! `template_data` extracts component-usage facts; `compile_ide` projects IDE TSX.
+//! `compile_ide` projects IDE TSX.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use verter_span::Span;
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
-    RuntimeOutputDescriptor, RuntimeSurfaceRefusal, SourceMapFidelity, TemplateFacts,
+    RuntimeOutputDescriptor, RuntimeSurfaceRefusal, SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
 
@@ -432,29 +432,6 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         Ok(ide)
     }
 
-    fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
-        // A foreign artifact (not a Svelte carrier) yields empty neutral facts.
-        let Some(carrier) = self.svelte_carrier(artifact) else {
-            return TemplateFacts::default();
-        };
-        let parsed = carrier.parsed();
-        let mut data = crate::compile::RawTemplateData::default();
-        // STRUCTURAL walk over the typed `ParsedSvelte.template` tree (mirrors
-        // `collect_slot_elements`' walk shape — recurse element children, block
-        // children, and each clause's children). The component-by-KIND
-        // classification reads the typed AST; expression TEXT is span-sliced from
-        // the carrier source. No structural source scan.
-        super::template_facts::collect_component_usages(
-            &parsed.template,
-            carrier.attribute_expressions(),
-            source,
-            &mut data,
-        );
-        super::template_facts::collect_snippet_definitions(&parsed.template, source, &mut data);
-        super::template_facts::collect_svelte_directives(&parsed.template, source, &mut data);
-        TemplateFacts { data }
-    }
-
     fn compile_bundle(
         &self,
         source: &str,
@@ -718,18 +695,19 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             bundle.diagnostics.append(&mut diagnostics);
         }
 
-        if opts.want_template_data {
-            let mut data = crate::compile::RawTemplateData::default();
-            super::template_facts::collect_component_usages(
-                &parsed.template,
-                carrier.attribute_expressions(),
-                source,
-                &mut data,
-            );
-            super::template_facts::collect_snippet_definitions(&parsed.template, source, &mut data);
-            super::template_facts::collect_svelte_directives(&parsed.template, source, &mut data);
-            bundle.template_data = Some(data);
-        }
+        bundle.template_data = if opts.want_template_data {
+            let basis = match opts.block_content.template.as_ref() {
+                Some(input) => crate::framework_common::registered_carrier_projection::TemplateFactsBasis::SelectedTemplate(
+                    input.code.as_ref(),
+                ),
+                None => crate::framework_common::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
+            };
+            crate::framework_common::registered_carrier_projection::template_facts_from_catalog(
+                artifact, source, basis,
+            )
+        } else {
+            None
+        };
 
         Ok(CarrierCompileOutcome::Produced(bundle))
     }
@@ -742,6 +720,9 @@ mod tests {
     use crate::framework_common::sourcemap_e2e_helpers::{
         assert_token_maps_to_source, assert_token_maps_to_source_line, build_lookup_table,
         parse_ide_output,
+    };
+    use crate::framework_common::{
+        FrameworkSemanticAuthority, RuntimeBlockContentInput, RuntimeBlockContentInputs,
     };
     use verter_language::ScriptRegionKind;
 
@@ -1552,9 +1533,157 @@ let count = $state(0);
     }
 
     fn facts_for(source: &str) -> crate::compile::RawTemplateData {
-        let compiler = SvelteCarrierCompiler;
         let artifact = artifact_for(source);
-        compiler.template_data(source, &artifact).data
+        crate::svelte::SvelteSemanticAuthority
+            .template_facts(source, &artifact)
+            .expect("a Svelte artifact must produce template facts")
+    }
+
+    #[test]
+    fn compile_bundle_template_facts_come_from_the_catalog() {
+        let source = concat!(
+            "<script lang=\"ts\">let value = 0;</script>\n",
+            "<Button size=\"sm\" bind:value />",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::default();
+        let opts = RuntimeCompileOptions {
+            want_runtime: false,
+            want_ide: false,
+            want_template_data: true,
+            ..Default::default()
+        };
+        let bundle = SvelteCarrierCompiler
+            .compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
+            .expect("Svelte compile_bundle produces a bundle");
+        let catalog =
+            crate::framework_common::registered_carrier_projection::template_facts_from_catalog(
+                &artifact,
+                source,
+                crate::framework_common::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
+            )
+            .expect("catalog must produce Svelte template facts");
+        let bundled = bundle
+            .template_data
+            .as_ref()
+            .expect("want_template_data must fill catalog facts");
+        assert_eq!(bundled.components.len(), catalog.components.len());
+        assert!(
+            bundled
+                .components
+                .iter()
+                .any(|component| component.tag_name == "Button"),
+            "bundle template facts must retain the <Button> usage"
+        );
+
+        let reminted = artifact.remint_epoch_for_tests("unknown-epoch");
+        let refused = SvelteCarrierCompiler
+            .compile_bundle_expect_produced(source, &reminted, &opts, &alloc)
+            .expect("runtime/IDE-free compile still produces a bundle");
+        assert!(
+            refused.template_data.is_none(),
+            "a catalog miss must leave template_data None, not independently extract"
+        );
+    }
+
+    fn projected_template(code: &str) -> RuntimeBlockContentInput {
+        RuntimeBlockContentInput {
+            code: Arc::from(code),
+            source_map: None,
+            lang: "html".to_string(),
+            content_artifact_token: "content:html".to_string(),
+            source_space_token: "space:html".to_string(),
+            parsed: None,
+        }
+    }
+
+    fn template_facts_opts(template: Option<&str>) -> RuntimeCompileOptions {
+        RuntimeCompileOptions {
+            want_runtime: false,
+            want_ide: false,
+            want_template_data: true,
+            block_content: RuntimeBlockContentInputs {
+                template: template.map(projected_template),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn compile_bundle_refuses_template_facts_when_selected_bytes_differ() {
+        let source = concat!(
+            "<script lang=\"ts\">let value = 0;</script>\n",
+            "<Button size=\"sm\" bind:value />",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::default();
+        let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
+        let bundle = SvelteCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &template_facts_opts(Some("<Replacement />")),
+                &alloc,
+            )
+            .expect("Svelte compile_bundle produces a bundle");
+        assert!(
+            bundle.template_data.is_none(),
+            "selected bytes that replace the admitted markup must refuse facts, never publish the superseded <Button>"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            0,
+            "a selected-content mismatch must not invoke the semantic producer"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_refuses_selected_template_facts_without_a_template_host() {
+        let source = concat!(
+            "<script lang=\"ts\">let value = 0;</script>\n",
+            "<Button size=\"sm\" bind:value />",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::default();
+        let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
+        let selected = SvelteCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &template_facts_opts(Some("<Button size=\"sm\" bind:value />")),
+                &alloc,
+            )
+            .expect("Svelte compile_bundle produces a bundle");
+        assert!(
+            selected.template_data.is_none(),
+            "selected template bytes cannot bind without an admitted template-host region"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            0,
+            "selected content without a template host must not invoke the semantic producer"
+        );
+
+        let admitted = SvelteCarrierCompiler
+            .compile_bundle_expect_produced(source, &artifact, &template_facts_opts(None), &alloc)
+            .expect("Svelte compile_bundle produces a bundle");
+        let facts = admitted
+            .template_data
+            .as_ref()
+            .expect("native admitted Svelte markup must keep catalog facts");
+        assert!(
+            facts
+                .components
+                .iter()
+                .any(|component| component.tag_name == "Button"),
+            "admitted-artifact Svelte facts must retain the <Button> usage"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            1,
+            "an admitted artifact query must invoke the semantic producer exactly once"
+        );
     }
 
     #[test]

@@ -87,6 +87,15 @@ generic selector has no Vue/Svelte match. Catalog miss is typed refusal
 before parse/lease/publication. The combined `CarrierCompiler::eval_source`
 method is gone.
 
+Session template facts are the same catalog lookup, then the selected row's
+template-fact payload. `compile_source` must bind the artifact `parse_key`
+(and adapter/language identity); a retained parse of another revision is
+typed refusal. Catalog miss, parse-key mismatch, and producer failure are
+typed refusal, never empty success. A valid template-free carrier is
+`Some` empty facts. `compile_bundle` fills `template_data` from that catalog
+payload when asked; it does not independently extract. The combined
+`CarrierCompiler::template_data` method and `TemplateFacts` wrapper are gone.
+
 Spelling/versioning, the per-kind equivalence matrix, demand kinds,
 reason-edge types, semantic namespaces, and the caller→owner table are in the
 bound contract.

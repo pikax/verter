@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use verter_compiler::framework_common::registered_carrier_projection::{
-    eval_source_from_catalog, registered_semantic_for,
+    eval_source_from_catalog, registered_semantic_for, take_template_facts_producer_invocations,
+    template_facts_from_catalog, TemplateFactsBasis,
 };
-use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
-    svelte_semantic_authority_registration, vue_semantic_authority_registration, CarrierCompiler,
+    svelte_semantic_authority_registration, vue_semantic_authority_registration,
     CarrierCompilerRegistry, CatalogCapability, CatalogRow, FrameworkEpoch, FrameworkParseArtifact,
     FrameworkSemanticAuthority, ImmutableCapabilityCatalog, VueSemanticAuthority, VueSfcV3,
 };
@@ -113,45 +113,159 @@ fn vue_semantic_eval_source_is_position_preserving() {
 }
 
 #[test]
-fn vue_semantic_template_facts_match_existing_compiler() {
+fn vue_semantic_template_facts_match_catalog_payload() {
     let source = SIMPLE;
     let artifact = registered_artifact("file:///facts.vue", source);
-    let via_authority = VueSemanticAuthority.template_facts(source, &artifact);
-    let via_compiler = VueCarrierCompiler.template_data(source, &artifact);
-    assert_eq!(
-        via_authority.data.components.len(),
-        via_compiler.data.components.len()
-    );
+    let via_authority = VueSemanticAuthority
+        .template_facts(source, &artifact)
+        .expect("Vue authority must produce template facts");
+    let via_catalog =
+        template_facts_from_catalog(&artifact, source, TemplateFactsBasis::AdmittedArtifact)
+            .expect("one semantic-catalog lookup must serve Vue template facts");
+    assert_eq!(via_authority.components.len(), via_catalog.components.len());
     for (left, right) in via_authority
-        .data
         .components
         .iter()
-        .zip(via_compiler.data.components.iter())
+        .zip(via_catalog.components.iter())
     {
         assert_eq!(left.tag_name, right.tag_name);
         assert_eq!(left.span, right.span);
         assert_eq!(left.props.len(), right.props.len());
     }
     assert_eq!(
-        via_authority.data.event_handlers.len(),
-        via_compiler.data.event_handlers.len()
+        via_authority.event_handlers.len(),
+        via_catalog.event_handlers.len()
     );
     for (left, right) in via_authority
-        .data
         .event_handlers
         .iter()
-        .zip(via_compiler.data.event_handlers.iter())
+        .zip(via_catalog.event_handlers.iter())
     {
         assert_eq!(left.span, right.span);
     }
     assert_eq!(
-        via_authority.data.binding_occurrences.len(),
-        via_compiler.data.binding_occurrences.len()
+        via_authority.binding_occurrences.len(),
+        via_catalog.binding_occurrences.len()
     );
     assert!(
-        !via_authority.data.components.is_empty(),
+        !via_authority.components.is_empty(),
         "simple fixture must retain a component usage"
     );
+    let reminted = artifact.remint_epoch_for_tests("unknown-epoch");
+    assert!(
+        template_facts_from_catalog(&reminted, source, TemplateFactsBasis::AdmittedArtifact)
+            .is_none(),
+        "an unknown epoch must refuse template facts, never empty success"
+    );
+}
+
+#[test]
+fn vue_template_facts_foreign_artifact_is_typed_refusal() {
+    let source = "<script>let name = 'world';</script>\n<h1>Hello {name}!</h1>\n";
+    let svelte = {
+        let language = verter_language::FileLanguage::svelte();
+        let source_authority = RegisteredSourceAuthority::new().expect("source authority");
+        let snapshot = source_authority
+            .register_source(
+                CanonicalFileId::new("file:///foreign.svelte"),
+                FileIncarnation::new(1),
+                SourceGeneration::new(1),
+                language.clone(),
+                Arc::from(source),
+            )
+            .expect("registered source");
+        let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
+        let config = CarrierGrammarConfig::Svelte;
+        grammar_authority
+            .register_carrier_grammar(
+                language,
+                FrameworkAdapterSemanticVersion::new(1).expect("adapter version"),
+                CarrierParserGrammarVersion::new(1).expect("grammar version"),
+                config.clone(),
+            )
+            .expect("grammar registration");
+        let accepted = grammar_authority
+            .accept_registered_source(&source_authority, &snapshot, &config)
+            .expect("accepted source");
+        CarrierCompilerRegistry::built_in()
+            .project_registered(&accepted)
+            .expect("registered projection")
+            .into_framework_parse_artifact()
+    };
+    assert!(
+        VueSemanticAuthority
+            .template_facts(source, &svelte)
+            .is_none(),
+        "a foreign artifact is producer failure, not Some(empty) success"
+    );
+}
+
+#[test]
+fn vue_template_facts_script_only_is_empty_success() {
+    let source = "<script setup lang=\"ts\">const n = 1;</script>";
+    let artifact = registered_artifact("file:///script-only.vue", source);
+    let facts = VueSemanticAuthority
+        .template_facts(source, &artifact)
+        .expect("a template-free Vue SFC is valid empty success, not refusal");
+    assert!(
+        facts.components.is_empty() && facts.event_handlers.is_empty(),
+        "script-only Vue facts must be empty, got {facts:?}"
+    );
+    let via_catalog =
+        template_facts_from_catalog(&artifact, source, TemplateFactsBasis::AdmittedArtifact)
+            .expect("catalog must keep template-free Vue as Some(empty)");
+    assert!(via_catalog.components.is_empty());
+}
+
+#[test]
+fn selected_template_facts_bind_only_when_bytes_equal_the_admitted_host() {
+    let src_source = concat!(
+        "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
+        "<template src=\"./view.html\"></template>",
+    );
+    let src_artifact = registered_artifact("file:///src.vue", src_source);
+    let _ = take_template_facts_producer_invocations();
+    assert!(
+        template_facts_from_catalog(
+            &src_artifact,
+            src_source,
+            TemplateFactsBasis::SelectedTemplate("<Child :foo=\"1\" />"),
+        )
+        .is_none(),
+        "non-empty selected content for an external template src must refuse, not Some(empty)"
+    );
+    assert_eq!(take_template_facts_producer_invocations(), 0);
+
+    let source = concat!(
+        "<script setup lang=\"ts\">import Original from './Original.vue'</script>\n",
+        "<template><Original /></template>",
+    );
+    let artifact = registered_artifact("file:///selected.vue", source);
+    assert!(
+        template_facts_from_catalog(
+            &artifact,
+            source,
+            TemplateFactsBasis::SelectedTemplate("<Replacement />"),
+        )
+        .is_none(),
+        "selected bytes that replace the admitted template must refuse"
+    );
+    assert_eq!(take_template_facts_producer_invocations(), 0);
+
+    let facts = template_facts_from_catalog(
+        &artifact,
+        source,
+        TemplateFactsBasis::SelectedTemplate("<Original />"),
+    )
+    .expect("byte-identical selected content must keep admitted carrier facts");
+    assert!(
+        facts
+            .components
+            .iter()
+            .any(|component| component.tag_name == "Original"),
+        "byte-identical selection must retain the admitted <Original /> usage"
+    );
+    assert_eq!(take_template_facts_producer_invocations(), 1);
 }
 
 #[test]
@@ -196,6 +310,12 @@ fn vue_semantic_catalog_lookup_is_adapter_and_epoch_identity() {
 fn combined_compiler_eval_source_is_unnameable() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/cases/compile-fail/carrier_compiler_eval_source_unnameable.rs");
+}
+
+#[test]
+fn combined_compiler_template_data_is_unnameable() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/cases/compile-fail/carrier_compiler_template_data_unnameable.rs");
 }
 
 #[test]

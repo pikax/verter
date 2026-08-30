@@ -1,9 +1,10 @@
 //! Carrier-compiler trait and framework-neutral I/O.
 //!
-//! One trait per carrier: parse, IDE codegen, template-fact extraction.
+//! One trait per carrier: parse, IDE codegen, runtime bundle.
 //! Vue is the reference (`vue_bridge::VueCarrierCompiler`). Eval-source
-//! belongs to [`super::capability::FrameworkSemanticAuthority`]. Script
-//! facts go through the host `ScriptFactProvider` seam — not this trait.
+//! and template facts belong to
+//! [`super::capability::FrameworkSemanticAuthority`]. Script facts go
+//! through the host `ScriptFactProvider` seam — not this trait.
 //!
 //! Each adapter's IDE codegen owns its own
 //! [`crate::code_transform::CodeTransform`]. The trait does not thread
@@ -342,20 +343,6 @@ pub enum CompileUnsupported {
     RequestExecutionRefused(crate::compile_request::CompileRequestError),
 }
 
-/// Framework-neutral template facts extracted from a carrier parse.
-///
-/// A thin neutral wrapper over the compiler-native [`RawTemplateData`]
-/// (component usages, bindings, elements, directives) so the host's
-/// template-analysis conversion reaches one shape regardless of
-/// framework. Vue populates it from the existing `TEMPLATE_DATA` codegen;
-/// an empty `data` is the honest answer for a carrier with no template.
-#[derive(Debug, Default)]
-pub struct TemplateFacts {
-    /// The extracted raw template data (default-empty when the carrier has
-    /// no template region).
-    pub data: RawTemplateData,
-}
-
 /// Runtime-codegen options threaded into [`CarrierCompiler::compile_bundle`].
 ///
 /// The neutral, framework-shared subset of the host's compile profile a
@@ -429,8 +416,8 @@ pub struct RuntimeCompileOptions {
     /// When true, ALSO request the IDE (`tsx`) artifact in the same pass so
     /// the host populates its `CachedTsx` slot from one compile.
     pub want_ide: bool,
-    /// When true, ALSO extract framework-neutral template facts in the same
-    /// pass (for template analysis).
+    /// When true, ALSO fill framework-neutral template facts in the same
+    /// pass from the catalog semantic authority (for template analysis).
     pub want_template_data: bool,
     /// Types module name for IDE/TSX helper imports (default `"$verter/types"`).
     pub types_module_name: Option<String>,
@@ -740,7 +727,9 @@ pub struct RuntimeCompileOutput {
     /// the carrier projects one.
     pub tsx: Option<IdeOutput>,
     /// Framework-neutral template facts, present when `want_template_data`
-    /// was requested AND the carrier extracts them.
+    /// was requested AND the catalog semantic authority produced them.
+    /// Catalog miss / parse-key mismatch / producer failure stay `None`
+    /// (typed refusal). A valid template-free carrier is `Some` empty facts.
     pub template_data: Option<RawTemplateData>,
     /// Diagnostics emitted during the runtime compile. The host lifts these
     /// into its `DiagnosticsSnapshot`; an error here fails the compile.
@@ -922,9 +911,6 @@ pub trait CarrierCompiler: Send + Sync {
         opts: &IdeCompileOptions,
     ) -> Result<IdeOutput, CompileUnsupported>;
 
-    /// Extract framework-neutral template facts from the carrier parse.
-    fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts;
-
     /// Produce the framework-neutral RUNTIME bundle for the carrier.
     ///
     /// `artifact` MUST match `source` plus the parse-affecting options the
@@ -942,10 +928,12 @@ pub trait CarrierCompiler: Send + Sync {
     ///
     /// The carrier produces exactly the products the request asked for: the
     /// runtime module and its side-files under `want_runtime`, the IDE artifact
-    /// under `want_ide`, template facts under `want_template_data`. It attempts
-    /// the runtime compile only under `want_runtime`, so a request that did not
-    /// ask for a runtime product can never be refused one — and a request that
-    /// IS refused publishes nothing at all.
+    /// under `want_ide`. Template facts under `want_template_data` are filled
+    /// from the catalog semantic authority — `compile_bundle` does not
+    /// independently extract them. It attempts the runtime compile only under
+    /// `want_runtime`, so a request that did not ask for a runtime product can
+    /// never be refused one — and a request that IS refused publishes nothing
+    /// at all.
     ///
     /// The adapter's codegen owns its own `CodeTransform` (the single
     /// source of truth for generated-code edits); the returned `code` /
@@ -1131,14 +1119,6 @@ mod contract_tests {
             Err(CompileUnsupported::NoIdeProjection {
                 adapter_id: self.adapter_id(),
             })
-        }
-
-        fn template_data(
-            &self,
-            _source: &str,
-            _artifact: &FrameworkParseArtifact,
-        ) -> TemplateFacts {
-            TemplateFacts::default()
         }
 
         fn compile_bundle(

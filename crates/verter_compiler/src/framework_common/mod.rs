@@ -10,8 +10,8 @@
 //! `verter_session` (unnameable from compiler-side producers).
 //!
 //! On top of the carrier wrappers it owns the compiler-side carrier
-//! framework substrate: the [`CarrierCompiler`] trait (parse / eval /
-//! IDE / template) and the [`CarrierCompilerRegistry`] the host's carrier
+//! framework substrate: the [`CarrierCompiler`] trait (parse / IDE /
+//! runtime) and the [`CarrierCompilerRegistry`] the host's carrier
 //! dispatch looks up. Vue is the reference implementation
 //! ([`vue_bridge::VueCarrierCompiler`]), delegating call-for-call to the
 //! existing Vue pipeline with ZERO edits to any Vue parser/codegen
@@ -49,8 +49,7 @@ pub use carrier_compiler::{
     RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOptions,
     RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
-    RuntimeSurfaceRefusal, RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
-    TemplateRenderExport,
+    RuntimeSurfaceRefusal, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
 };
 pub use catalog::{
     CatalogCapability, CatalogIdentity, CatalogRow, DuplicateCatalogIdentity, FrontendCap, HostCap,

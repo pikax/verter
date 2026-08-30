@@ -34,7 +34,7 @@ use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeCustomBlock, RuntimeDiagnostic,
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
-    RuntimeTemplateBlock, SourceMapFidelity, TemplateFacts,
+    RuntimeTemplateBlock, SourceMapFidelity,
 };
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
@@ -337,9 +337,6 @@ impl VueCarrierCompiler {
         }
         if opts.want_ide {
             carrier_target |= CompileTarget::TSX;
-        }
-        if opts.want_template_data {
-            carrier_target |= CompileTarget::TEMPLATE_DATA;
         }
         let carrier_result = compile_from_parsed_legacy(
             source,
@@ -690,39 +687,6 @@ impl CarrierCompiler for VueCarrierCompiler {
         }
     }
 
-    fn template_data(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
-        let Some(parsed) = self.parsed_sfc(artifact) else {
-            return TemplateFacts::default();
-        };
-        let core_opts = CodegenOptions {
-            target: CompileTarget::TEMPLATE_DATA,
-            ..Default::default()
-        };
-        let verter_opts = ResolvedVueCompileOptions {
-            source_map: false,
-            ..Default::default()
-        };
-        let alloc = oxc_allocator::Allocator::new();
-        // `CarrierCompiler::template_data` returns a bare `TemplateFacts`
-        // (its trait signature has no error channel), so a construction
-        // refusal fails closed to the empty facts the caller already
-        // treats as "nothing extracted" — the SAME fallback this function
-        // uses two lines up for a missing parsed artifact, never a panic.
-        let Ok(result) = compile_from_parsed_legacy(
-            source,
-            parsed,
-            &core_opts,
-            &verter_opts,
-            &VueMacroSemanticInput::Unavailable,
-            &alloc,
-        ) else {
-            return TemplateFacts::default();
-        };
-        TemplateFacts {
-            data: result.template_data.unwrap_or_default(),
-        }
-    }
-
     fn compile_bundle(
         &self,
         source: &str,
@@ -810,7 +774,18 @@ impl CarrierCompiler for VueCarrierCompiler {
                 // never fail-closes on an unsupported runtime surface.
                 return self
                     .compile_projected_script_bundle(source, parsed, input, true, opts, alloc)
-                    .map(CarrierCompileOutcome::Produced);
+                    .map(|bundle| {
+                        CarrierCompileOutcome::Produced(with_catalog_template_facts(
+                            bundle,
+                            artifact,
+                            source,
+                            opts.want_template_data,
+                            opts.block_content
+                                .template
+                                .as_ref()
+                                .map(|input| input.code.as_ref()),
+                        ))
+                    });
             }
             (None, None) => {}
         }
@@ -828,19 +803,17 @@ impl CarrierCompiler for VueCarrierCompiler {
 
         // The Vue target is composed from the REQUESTED-PRODUCT SET, starting
         // empty: the runtime bundler bits only under `want_runtime`, TSX only
-        // under `want_ide`, template data only under `want_template_data`. A
-        // successful compile therefore emits all and only the products the
-        // request asked for. `CompileTarget::IDE` is the TSX bit alone (see
-        // `compile::types`), so TSX codegen does not require the runtime bits.
+        // under `want_ide`. Template facts are catalog-owned: this pass never
+        // independently extracts them. A successful compile therefore emits
+        // all and only the products the request asked for.
+        // `CompileTarget::IDE` is the TSX bit alone (see `compile::types`),
+        // so TSX codegen does not require the runtime bits.
         let mut target = CompileTarget::empty();
         if opts.want_runtime {
             target |= CompileTarget::BUNDLER;
         }
         if opts.want_ide {
             target |= CompileTarget::TSX;
-        }
-        if opts.want_template_data {
-            target |= CompileTarget::TEMPLATE_DATA;
         }
 
         let core_opts = CodegenOptions {
@@ -976,11 +949,6 @@ impl CarrierCompiler for VueCarrierCompiler {
                         CompileTarget::TSX
                     } else {
                         CompileTarget::empty()
-                    }
-                    | if opts.want_template_data {
-                        CompileTarget::TEMPLATE_DATA
-                    } else {
-                        CompileTarget::empty()
                     },
                 ide_chunk_boundaries: opts.want_ide,
                 ..CodegenOptions::default()
@@ -1101,7 +1069,6 @@ impl CarrierCompiler for VueCarrierCompiler {
             } else {
                 bundle.template = selected.template;
             }
-            bundle.template_data = selected.template_data;
             bundle.diagnostics.extend(selected.diagnostics);
             if opts.want_ide {
                 let mut shell =
@@ -1374,8 +1341,40 @@ impl CarrierCompiler for VueCarrierCompiler {
         // Vue emits a runtime surface or a genuine compile error; it never
         // fail-closes on an unsupported runtime surface the way Svelte does, so
         // its outcome is always `Produced`.
-        Ok(CarrierCompileOutcome::Produced(bundle))
+        Ok(CarrierCompileOutcome::Produced(
+            with_catalog_template_facts(
+                bundle,
+                artifact,
+                source,
+                opts.want_template_data,
+                opts.block_content
+                    .template
+                    .as_ref()
+                    .map(|input| input.code.as_ref()),
+            ),
+        ))
     }
+}
+
+fn with_catalog_template_facts(
+    mut bundle: RuntimeCompileOutput,
+    artifact: &FrameworkParseArtifact,
+    source: &str,
+    want: bool,
+    selected_template: Option<&str>,
+) -> RuntimeCompileOutput {
+    bundle.template_data = if want {
+        let basis = match selected_template {
+            Some(bytes) => {
+                super::registered_carrier_projection::TemplateFactsBasis::SelectedTemplate(bytes)
+            }
+            None => super::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
+        };
+        super::registered_carrier_projection::template_facts_from_catalog(artifact, source, basis)
+    } else {
+        None
+    };
+    bundle
 }
 
 /// Re-express a Vue [`VerterCompileResult`] as the framework-neutral
@@ -1552,8 +1551,8 @@ mod tests {
     use super::*;
     use crate::framework_common::carrier_compiler::CompileBundleProducedExt;
     use crate::framework_common::{
-        carrier_compiler::OutputSourceSpaceKind, RuntimeBlockContentInput,
-        RuntimeBlockContentInputs,
+        carrier_compiler::OutputSourceSpaceKind, FrameworkSemanticAuthority,
+        RuntimeBlockContentInput, RuntimeBlockContentInputs,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -3437,13 +3436,172 @@ mod tests {
 
     #[test]
     fn vue_compiler_template_data_extracts_component_usages() {
-        let compiler = VueCarrierCompiler;
         let source = "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n<template><Child :foo=\"1\" /></template>";
         let artifact = artifact_for(source);
-        let facts = compiler.template_data(source, &artifact);
+        let facts = crate::framework_common::VueSemanticAuthority
+            .template_facts(source, &artifact)
+            .expect("a Vue artifact must produce template facts");
         assert!(
-            facts.data.components.iter().any(|c| c.tag_name == "Child"),
-            "template_data must surface the <Child> component usage"
+            facts.components.iter().any(|c| c.tag_name == "Child"),
+            "template facts must surface the <Child> component usage"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_template_facts_come_from_the_catalog() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
+            "<template><Child :foo=\"1\" /></template>",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let opts = RuntimeCompileOptions {
+            want_runtime: false,
+            want_ide: false,
+            want_template_data: true,
+            ..Default::default()
+        };
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(source, &artifact, &opts, &alloc)
+            .expect("Vue compile_bundle produces a bundle");
+        let catalog =
+            crate::framework_common::registered_carrier_projection::template_facts_from_catalog(
+                &artifact,
+                source,
+                crate::framework_common::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
+            )
+            .expect("catalog must produce Vue template facts");
+        let bundled = bundle
+            .template_data
+            .as_ref()
+            .expect("want_template_data must fill catalog facts");
+        assert_eq!(bundled.components.len(), catalog.components.len());
+        assert!(
+            bundled
+                .components
+                .iter()
+                .any(|component| component.tag_name == "Child"),
+            "bundle template facts must retain the <Child> usage"
+        );
+
+        let reminted = artifact.remint_epoch_for_tests("unknown-epoch");
+        let refused = VueCarrierCompiler
+            .compile_bundle_expect_produced(source, &reminted, &opts, &alloc)
+            .expect("runtime/IDE-free compile still produces a bundle");
+        assert!(
+            refused.template_data.is_none(),
+            "a catalog miss must leave template_data None, not independently extract"
+        );
+    }
+
+    fn template_facts_opts(template: Option<&str>) -> RuntimeCompileOptions {
+        RuntimeCompileOptions {
+            want_runtime: false,
+            want_ide: false,
+            want_template_data: true,
+            block_content: RuntimeBlockContentInputs {
+                template: template.map(|code| projected_script(code, "html")),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn compile_bundle_refuses_template_facts_for_external_src_selected_content() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
+            "<template src=\"./view.html\"></template>",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &template_facts_opts(Some("<Child :foo=\"1\" />")),
+                &alloc,
+            )
+            .expect("Vue compile_bundle produces a bundle");
+        assert!(
+            bundle.template_data.is_none(),
+            "non-empty selected content for an external template src must refuse facts, not Some(empty)"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            0,
+            "a selected-content mismatch must not invoke the semantic producer"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_refuses_template_facts_when_selected_bytes_differ() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Original from './Original.vue'</script>\n",
+            "<template><Original /></template>",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &template_facts_opts(Some("<Replacement />")),
+                &alloc,
+            )
+            .expect("Vue compile_bundle produces a bundle");
+        assert!(
+            bundle.template_data.is_none(),
+            "selected bytes that replace the admitted template must refuse facts, never publish the superseded <Original />"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            0,
+            "a selected-content mismatch must not invoke the semantic producer"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_keeps_admitted_template_facts_when_selected_bytes_match() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Original from './Original.vue'</script>\n",
+            "<template><Original /></template>",
+        );
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+        let _ = crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations();
+        let bundle = VueCarrierCompiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &template_facts_opts(Some("<Original />")),
+                &alloc,
+            )
+            .expect("Vue compile_bundle produces a bundle");
+        let facts = bundle
+            .template_data
+            .as_ref()
+            .expect("byte-identical selected content must keep admitted carrier facts");
+        assert!(
+            facts
+                .components
+                .iter()
+                .any(|component| component.tag_name == "Original"),
+            "byte-identical selection must retain the admitted <Original /> usage"
+        );
+        assert!(
+            facts
+                .components
+                .iter()
+                .all(|component| component.tag_name != "Replacement"),
+            "byte-identical selection must not invent a replacement component"
+        );
+        assert_eq!(
+            crate::framework_common::registered_carrier_projection::take_template_facts_producer_invocations(),
+            1,
+            "an admitted selected match must invoke the semantic producer exactly once"
         );
     }
 }

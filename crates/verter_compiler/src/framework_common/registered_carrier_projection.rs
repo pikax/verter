@@ -4,9 +4,12 @@ use std::sync::{Arc, OnceLock};
 use verter_language::carrier_grammar::{AcceptedRegisteredCarrierSource, CarrierGrammarConfig};
 use verter_language::parse_artifact::carrier_inventory::*;
 use verter_language::{
-    compute_carrier_structure_hash, CarrierParse, CarrierStructureHash, FrameworkAdapterId,
-    FrameworkParseCommon, LanguageDiagnostic, LanguageId, SyntaxReject,
-    UnregisteredFrameworkParseArtifact, UnsupportedSyntaxProfileReason,
+    compute_carrier_structure_hash, parse_key_for, CarrierParse, CarrierStructureHash,
+    FileLanguage, FrameworkAdapterId, FrameworkParseCommon, LanguageDiagnostic, LanguageId,
+    SyntaxReject, UnregisteredFrameworkParseArtifact, UnsupportedSyntaxProfileReason,
+    FRAMEWORK_SYNTAX_COMPATIBILITY_DOMAIN, FRAMEWORK_SYNTAX_COMPATIBILITY_EPOCH,
+    SVELTE_SYNTAX_COMPATIBILITY_DOMAIN, SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+    VUE_SYNTAX_COMPATIBILITY_DOMAIN, VUE_SYNTAX_COMPATIBILITY_EPOCH,
 };
 use verter_span::Span;
 
@@ -20,6 +23,7 @@ use super::vue_carrier_frontend::{
     vue_carrier_frontend_registration, VueCarrierFrontend, VueParseAdmission, VueSfcV3,
 };
 use super::vue_semantic_authority::{vue_semantic_authority_registration, VueSemanticAuthority};
+use crate::compile::RawTemplateData;
 use crate::svelte::carrier_frontend::SvelteParseAdmission;
 use crate::svelte::{
     svelte_carrier_frontend_registration, svelte_semantic_authority_registration,
@@ -592,18 +596,20 @@ fn frontend_epoch(
     })
 }
 
-/// Type-erased eval-source payload stored on a semantic catalog row.
+/// Type-erased semantic payload stored on a catalog row.
 ///
-/// Lookup invokes [`Self::eval_source`] directly. The generic selector
-/// has no Vue/Svelte match.
+/// Lookup invokes [`Self::eval_source`] / [`Self::template_facts`]
+/// directly. The generic selector has no Vue/Svelte match.
 #[derive(Clone, Copy)]
 pub struct InstalledSemanticAuthority {
     eval_source_fn: fn(&str, &FrameworkParseArtifact) -> Arc<str>,
+    template_facts_fn: fn(&str, &FrameworkParseArtifact) -> Option<RawTemplateData>,
 }
 
 impl PartialEq for InstalledSemanticAuthority {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::fn_addr_eq(self.eval_source_fn, other.eval_source_fn)
+            && std::ptr::fn_addr_eq(self.template_facts_fn, other.template_facts_fn)
     }
 }
 
@@ -617,8 +623,14 @@ impl std::fmt::Debug for InstalledSemanticAuthority {
 }
 
 impl InstalledSemanticAuthority {
-    const fn new(eval_source_fn: fn(&str, &FrameworkParseArtifact) -> Arc<str>) -> Self {
-        Self { eval_source_fn }
+    const fn new(
+        eval_source_fn: fn(&str, &FrameworkParseArtifact) -> Arc<str>,
+        template_facts_fn: fn(&str, &FrameworkParseArtifact) -> Option<RawTemplateData>,
+    ) -> Self {
+        Self {
+            eval_source_fn,
+            template_facts_fn,
+        }
     }
 
     /// Position-preserving eval source from the catalog-selected row.
@@ -626,10 +638,47 @@ impl InstalledSemanticAuthority {
     pub fn eval_source(&self, source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
         (self.eval_source_fn)(source, artifact)
     }
+
+    /// Template facts from the catalog-selected row.
+    ///
+    /// `None` is producer failure or identity refusal, never fabricated
+    /// empty success. A valid template-free carrier is `Some` empty facts.
+    #[must_use]
+    pub fn template_facts(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Option<RawTemplateData> {
+        #[cfg(any(test, feature = "test-support"))]
+        TEMPLATE_FACTS_PRODUCER_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+        (self.template_facts_fn)(source, artifact)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Per-thread count of catalog semantic-producer executions.
+    static TEMPLATE_FACTS_PRODUCER_INVOCATIONS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Catalog semantic-producer executions on the calling thread since the
+/// last take. Test observability only.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn take_template_facts_producer_invocations() -> u64 {
+    TEMPLATE_FACTS_PRODUCER_INVOCATIONS.with(std::cell::Cell::take)
 }
 
 fn vue_semantic_eval_source(source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
     FrameworkSemanticAuthority::<VueSfcV3>::eval_source(&VueSemanticAuthority, source, artifact)
+}
+
+fn vue_semantic_template_facts(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+) -> Option<RawTemplateData> {
+    FrameworkSemanticAuthority::<VueSfcV3>::template_facts(&VueSemanticAuthority, source, artifact)
 }
 
 fn svelte_semantic_eval_source(source: &str, artifact: &FrameworkParseArtifact) -> Arc<str> {
@@ -638,6 +687,44 @@ fn svelte_semantic_eval_source(source: &str, artifact: &FrameworkParseArtifact) 
         source,
         artifact,
     )
+}
+
+fn svelte_semantic_template_facts(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+) -> Option<RawTemplateData> {
+    FrameworkSemanticAuthority::<SvelteSfc5>::template_facts(
+        &SvelteSemanticAuthority,
+        source,
+        artifact,
+    )
+}
+
+fn source_binds_to_artifact_parse_key(source: &str, artifact: &FrameworkParseArtifact) -> bool {
+    let language = FileLanguage::Framework {
+        adapter_id: artifact.adapter_id().clone(),
+        language_id: artifact.language_id().clone(),
+    };
+    let (domain, epoch) = if language.is_vue() {
+        (
+            VUE_SYNTAX_COMPATIBILITY_DOMAIN,
+            VUE_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    } else if language.is_svelte() {
+        (
+            SVELTE_SYNTAX_COMPATIBILITY_DOMAIN,
+            SVELTE_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    } else {
+        (
+            FRAMEWORK_SYNTAX_COMPATIBILITY_DOMAIN,
+            FRAMEWORK_SYNTAX_COMPATIBILITY_EPOCH,
+        )
+    };
+    match parse_key_for(source, &language, domain, epoch, artifact.syntax_profile()) {
+        Ok(key) => key == *artifact.parse_key(),
+        Err(_) => false,
+    }
 }
 
 /// Frozen Vue + Svelte semantic catalog. Built once from the Vue/Svelte
@@ -650,14 +737,18 @@ pub fn built_in_semantic_catalog(
     > = OnceLock::new();
     CATALOG.get_or_init(|| {
         ImmutableCapabilityCatalog::try_from_rows([
-            CatalogRow::from(
-                vue_semantic_authority_registration()
-                    .map_semantic(|_| InstalledSemanticAuthority::new(vue_semantic_eval_source)),
-            ),
-            CatalogRow::from(
-                svelte_semantic_authority_registration()
-                    .map_semantic(|_| InstalledSemanticAuthority::new(svelte_semantic_eval_source)),
-            ),
+            CatalogRow::from(vue_semantic_authority_registration().map_semantic(|_| {
+                InstalledSemanticAuthority::new(
+                    vue_semantic_eval_source,
+                    vue_semantic_template_facts,
+                )
+            })),
+            CatalogRow::from(svelte_semantic_authority_registration().map_semantic(|_| {
+                InstalledSemanticAuthority::new(
+                    svelte_semantic_eval_source,
+                    svelte_semantic_template_facts,
+                )
+            })),
         ])
         .expect("built-in Vue and Svelte semantic identities are unique")
     })
@@ -701,6 +792,68 @@ pub fn eval_source_from_catalog(
 ) -> Option<Arc<str>> {
     registered_semantic_for(artifact.adapter_id(), artifact.epoch())
         .map(|authority| authority.eval_source(source, artifact))
+}
+
+/// Which template bytes a catalog template-fact query is bound to.
+///
+/// Selected content is not parse admission: it binds only when those
+/// bytes equal the unique admitted template-host region. Catalog
+/// extraction always uses the original carrier source and artifact so
+/// spans stay SFC-absolute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemplateFactsBasis<'a> {
+    /// The registered artifact already admits the template region.
+    AdmittedArtifact,
+    /// Bind only when these bytes equal the unique admitted TemplateHost.
+    SelectedTemplate(&'a str),
+}
+
+/// One `built_in_semantic_catalog` lookup keyed adapter × artifact epoch
+/// × Semantic, then the selected row's template-fact payload. Catalog
+/// miss, parse-key mismatch, selected-template mismatch, and producer
+/// failure are `None` — no frontend hop, no Vue/Svelte match, no empty
+/// success.
+#[must_use]
+pub fn template_facts_from_catalog(
+    artifact: &FrameworkParseArtifact,
+    source: &str,
+    basis: TemplateFactsBasis<'_>,
+) -> Option<RawTemplateData> {
+    if let TemplateFactsBasis::SelectedTemplate(bytes) = basis {
+        if !selected_template_equals_admitted_host(artifact, bytes) {
+            return None;
+        }
+    }
+    if !source_binds_to_artifact_parse_key(source, artifact) {
+        return None;
+    }
+    registered_semantic_for(artifact.adapter_id(), artifact.epoch())?
+        .template_facts(source, artifact)
+}
+
+fn selected_template_equals_admitted_host(artifact: &FrameworkParseArtifact, bytes: &str) -> bool {
+    let mut host = None;
+    for block in artifact.inventory().blocks() {
+        let CarrierBlock::Section {
+            role: SectionRole::TemplateHost,
+            syntax,
+            ..
+        } = block
+        else {
+            continue;
+        };
+        match host {
+            Some(_) => return false,
+            None => host = Some(syntax),
+        }
+    }
+    let Some(syntax) = host else {
+        return false;
+    };
+    matches!(
+        artifact.inventory().slice_span(syntax.content_span),
+        Ok(admitted) if admitted == bytes
+    )
 }
 
 fn catalog_miss_reject(

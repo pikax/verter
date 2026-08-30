@@ -14,7 +14,9 @@ use oxc_ast::ast::Program;
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType};
 
-use verter_compiler::framework_common::registered_carrier_projection::InstalledSemanticAuthority;
+use verter_compiler::framework_common::registered_carrier_projection::{
+    InstalledSemanticAuthority, TemplateFactsBasis,
+};
 use verter_compiler::parser::types::ParsedSfc;
 use verter_compiler::types::NodeProp;
 
@@ -2468,10 +2470,10 @@ pub(crate) fn build_carrier_snapshot_from_artifact_with_program(
     )
 }
 
-/// Whether a file's resolved carrier row has a registered carrier compiler that
-/// can extract template data — the REGISTRY-DISPATCHED ingestion gate that
-/// replaces the hardcoded `.vue` / `is_vue()` check. A plain script (no carrier
-/// row) or a carrier whose adapter has no registered compiler answers `false`.
+/// Whether a file's resolved carrier row has a registered semantic
+/// authority that can extract template facts. A plain script (no
+/// carrier row) or a carrier whose adapter has no semantic row answers
+/// `false`.
 #[must_use]
 pub(crate) fn file_language_has_template_data_compiler(
     file_language: &verter_language::FileLanguage,
@@ -2482,26 +2484,28 @@ pub(crate) fn file_language_has_template_data_compiler(
     let Some(carrier_language_id) = file_language.carrier_language_id() else {
         return false;
     };
-    carrier_compiler_registry()
-        .compiler_for_carrier_language(adapter_id, carrier_language_id)
-        .is_some()
+    verter_compiler::framework_common::registered_carrier_projection::registered_semantic_for_frontend(
+        adapter_id,
+        carrier_language_id,
+    )
+    .is_some()
 }
 
-/// The carrier-NEUTRAL template-data extraction half shared by
+/// The carrier-NEUTRAL template-fact extraction half shared by
 /// `build_template_analysis` / `compute_template_analysis_if_missing`.
 ///
-/// This is the SINGLE registry-dispatched template-data path: it interns the
-/// file's resolved carrier row and dispatches the extraction through that
-/// carrier's [`CarrierCompiler::template_data`](verter_compiler::framework_common::CarrierCompiler::template_data)
-/// (Vue's bridge runs the META-target `compile_from_parsed` for
-/// `referenced_bindings` / constness; Svelte's walks the typed template tree).
-/// There is no Vue-only branch here.
+/// One semantic-catalog lookup keyed adapter × artifact epoch ×
+/// Semantic, then the selected row's template-fact payload. There is no
+/// Vue/Svelte match and no combined-compiler fallback. Catalog miss,
+/// parse-key mismatch, and producer failure are `None` — never empty
+/// success. A valid template-free carrier is `Some` empty facts.
 ///
 /// When `reuse_carrier_parse` is set and `framework_parse` matches the file's
-/// carrier, the cached artifact's parse is reused; otherwise a fresh artifact is
-/// parsed from `compile_source` through the same registry (the external-src
-/// merge case, where the compile source differs from the file content). Returns
-/// `None` for a non-carrier file or a carrier row with no registered compiler.
+/// carrier AND `compile_source` binds that artifact's `parse_key`, the
+/// cached artifact is reused; otherwise this lane returns `None` rather
+/// than mixing current source bytes with a retained parse of another
+/// revision (including the external-src merge case). Returns `None` for a
+/// non-carrier file, a missing/foreign/stale artifact, or a catalog miss.
 pub(crate) fn compile_template_data(
     file_language: &verter_language::FileLanguage,
     compile_source: &str,
@@ -2511,13 +2515,12 @@ pub(crate) fn compile_template_data(
 ) -> Option<verter_compiler::compile::RawTemplateData> {
     let adapter_id = file_language.adapter_id()?;
     let carrier_language_id = file_language.carrier_language_id()?;
-    let compiler = carrier_compiler_registry()
-        .compiler_for_carrier_language(adapter_id, carrier_language_id)?;
 
     // Reuse the cached artifact only when the caller permits it AND the artifact
     // belongs to THIS carrier (adapter id + carrier language id match) — a
     // foreign / stale artifact forces a fresh parse rather than a misrouted
-    // dispatch.
+    // dispatch. Parse-key binding against `compile_source` lives in the
+    // catalog helper so a retained parse cannot mix with another revision.
     let reuse = reuse_carrier_parse
         && framework_parse.is_some_and(|artifact| {
             artifact.adapter_id() == adapter_id && artifact.language_id() == carrier_language_id
@@ -2528,7 +2531,11 @@ pub(crate) fn compile_template_data(
     }
     let artifact = framework_parse.expect("reuse implies a present artifact");
 
-    Some(compiler.template_data(compile_source, artifact).data)
+    verter_compiler::framework_common::registered_carrier_projection::template_facts_from_catalog(
+        artifact,
+        compile_source,
+        TemplateFactsBasis::AdmittedArtifact,
+    )
 }
 
 pub(crate) fn build_non_sfc_snapshot_from_program(
@@ -4143,6 +4150,117 @@ onMounted(() => { console.log('mounted') })
         assert!(
             hit.bindings.iter().any(|binding| binding.name == "n"),
             "catalog hit must retain the script binding"
+        );
+    }
+
+    #[test]
+    fn catalog_miss_template_facts_refuses_empty_success() {
+        let source = concat!(
+            "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
+            "<template><Child :foo=\"n\" /></template>",
+        );
+        let provenance = crate::types::MetaProvenance::default();
+        let artifact = build_vue_parse_artifact_from_source(source, &provenance);
+        let file_language = verter_language::FileLanguage::vue();
+        let hit = compile_template_data(
+            &file_language,
+            source,
+            Some(artifact.as_ref()),
+            true,
+            &provenance,
+        )
+        .expect("a Vue artifact must produce template facts through the semantic catalog");
+        assert!(
+            hit.components
+                .iter()
+                .any(|component| component.tag_name == "Child"),
+            "catalog hit must retain the <Child> usage so miss-None is distinct from empty success"
+        );
+
+        let miss_artifact = artifact.remint_epoch_for_tests("unknown-epoch");
+        let miss = compile_template_data(
+            &file_language,
+            source,
+            Some(&miss_artifact),
+            true,
+            &provenance,
+        );
+        assert!(
+            miss.is_none(),
+            "an unknown epoch must refuse template facts, never fabricate empty success"
+        );
+
+        assert!(
+            !file_language_has_template_data_compiler(&verter_language::FileLanguage::script_ts()),
+            "a plain script has no template-fact semantic authority"
+        );
+        assert!(
+            file_language_has_template_data_compiler(&file_language),
+            "Vue must expose a template-fact semantic authority"
+        );
+        assert!(
+            file_language_has_template_data_compiler(&verter_language::FileLanguage::svelte()),
+            "Svelte must expose a template-fact semantic authority"
+        );
+    }
+
+    #[test]
+    fn compile_template_data_refuses_stale_artifact_source_mismatch() {
+        let source_a = concat!(
+            "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
+            "<template><Child :foo=\"n\" /></template>",
+        );
+        let source_b = concat!(
+            "<script setup lang=\"ts\">import Other from './Other.vue'</script>\n",
+            "<template><Other :bar=\"m\" /></template>",
+        );
+        let provenance = crate::types::MetaProvenance::default();
+        let artifact = build_vue_parse_artifact_from_source(source_a, &provenance);
+        let file_language = verter_language::FileLanguage::vue();
+        let mixed = compile_template_data(
+            &file_language,
+            source_b,
+            Some(artifact.as_ref()),
+            true,
+            &provenance,
+        );
+        assert!(
+            mixed.is_none(),
+            "current source bytes must not reuse a retained parse of another revision"
+        );
+        let hit = compile_template_data(
+            &file_language,
+            source_a,
+            Some(artifact.as_ref()),
+            true,
+            &provenance,
+        )
+        .expect("matching source and parse_key must produce facts");
+        assert!(
+            hit.components
+                .iter()
+                .any(|component| component.tag_name == "Child"),
+            "matching reuse must keep the <Child> usage"
+        );
+    }
+
+    #[test]
+    fn compile_template_data_script_only_is_empty_success_not_refusal() {
+        let source = "<script setup lang=\"ts\">const n = 1;</script>";
+        let provenance = crate::types::MetaProvenance::default();
+        let artifact = build_vue_parse_artifact_from_source(source, &provenance);
+        let file_language = verter_language::FileLanguage::vue();
+        let hit = compile_template_data(
+            &file_language,
+            source,
+            Some(artifact.as_ref()),
+            true,
+            &provenance,
+        )
+        .expect("a template-free Vue SFC must be Some(empty), not None");
+        assert!(
+            hit.components.is_empty(),
+            "template-free facts are empty success, distinct from producer failure"
         );
     }
 }

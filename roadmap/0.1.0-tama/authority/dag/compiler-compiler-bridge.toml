@@ -390,11 +390,11 @@ verification_effort_default = "high"
 confirmation_effort_min = "high"
 confirmation_effort_default = "high"
 size = "S"
-max_production_loc = 600
-max_production_files = 5
+max_production_loc = 1200
+max_production_files = 8
 max_related_packages = 2
 rescope_loc = 1500
-rescope_files = 12
+rescope_files = 16
 rescope_unrelated_packages = 3
 
 [[node]]

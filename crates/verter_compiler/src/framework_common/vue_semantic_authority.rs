@@ -1,15 +1,20 @@
 //! Vue [`FrameworkSemanticAuthority`] adapter.
 //!
 //! Owns Vue eval-source and template-fact interpretation over an
-//! already-admitted parse artifact. Eval-source is selected by catalog
-//! identity (adapter × epoch × Semantic).
+//! already-admitted parse artifact. Catalog lookup keys adapter × epoch
+//! × Semantic.
 
 use std::sync::Arc;
 
 use verter_language::{FrameworkAdapterId, LanguageId};
 
+use crate::compile::types::{
+    CodegenOptions, CompileTarget, ResolvedVueCompileOptions, VueMacroSemanticInput,
+};
+use crate::compile::{compile_from_parsed_legacy, RawTemplateData};
+
 use super::capability::{FrameworkSemanticAuthority, Present};
-use super::carrier_compiler::{CarrierCompiler, TemplateFacts};
+use super::carrier_compiler::CarrierCompiler;
 use super::catalog::{SemanticCap, TypedCapabilityRegistration};
 use super::vue_bridge::VueCarrierCompiler;
 use super::vue_carrier_frontend::VueSfcV3;
@@ -68,7 +73,7 @@ impl VueSemanticAuthority {
 
 impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
     type EvalSource = Arc<str>;
-    type TemplateFacts = TemplateFacts;
+    type TemplateFacts = Option<RawTemplateData>;
     type StyleMeaning = ();
     type SemanticAdmission = VueSemanticAdmission;
     type ParseArtifact = FrameworkParseArtifact;
@@ -77,8 +82,35 @@ impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
         position_preserving_eval_source(source, artifact)
     }
 
-    fn template_facts(&self, source: &str, artifact: &FrameworkParseArtifact) -> TemplateFacts {
-        VueCarrierCompiler.template_data(source, artifact)
+    fn template_facts(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+    ) -> Option<RawTemplateData> {
+        let parsed = VueCarrierCompiler.parsed_sfc(artifact)?;
+        let core_opts = CodegenOptions {
+            target: CompileTarget::TEMPLATE_DATA,
+            ..Default::default()
+        };
+        let verter_opts = ResolvedVueCompileOptions {
+            source_map: false,
+            ..Default::default()
+        };
+        let alloc = oxc_allocator::Allocator::new();
+        let result = compile_from_parsed_legacy(
+            source,
+            parsed,
+            &core_opts,
+            &verter_opts,
+            &VueMacroSemanticInput::Unavailable,
+            &alloc,
+        )
+        .ok()?;
+        match result.template_data {
+            Some(data) => Some(data),
+            None if parsed.template_ast().is_none() => Some(RawTemplateData::default()),
+            None => None,
+        }
     }
 }
 
