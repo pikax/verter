@@ -139,6 +139,34 @@ impl FrameworkParseArtifact {
         &self.common.inventory
     }
 
+    /// The registered whole-carrier source bytes this artifact's geometry
+    /// was proven over: the registered inventory's own witnessed source
+    /// space — the same bytes the artifact's parse identity
+    /// ([`Self::parse_key`]) was computed from, validated against the
+    /// registered source snapshot at inventory construction. Execution
+    /// seams that hold an admitted artifact derive their compile source
+    /// from here, so the admitted artifact is the single authority for
+    /// both geometry and bytes — a caller-supplied byte payload that could
+    /// diverge from the admitted parse is unrepresentable.
+    #[must_use]
+    pub fn carrier_source(&self) -> &Arc<str> {
+        self.common
+            .inventory
+            .source_spaces()
+            .iter()
+            .find(|space| {
+                matches!(
+                    space.identity,
+                    SourceSpaceIdentity::RegisteredSnapshot { .. }
+                )
+            })
+            .map(SourceSpaceDescriptor::bytes)
+            .expect(
+                "a registered artifact's inventory holds its witnessed carrier source space \
+                 (new_registered consumes exactly one registered source witness)",
+            )
+    }
+
     /// Mapped parse diagnostics retained with the registered geometry.
     #[must_use]
     pub fn diagnostics(&self) -> &[LanguageDiagnostic] {

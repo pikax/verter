@@ -375,7 +375,6 @@ impl VueHostIntegrationBackend {
     pub fn compile_host_products(
         &self,
         admission: &VueCompileAdmission,
-        source: &str,
         artifact: &FrameworkParseArtifact,
         inputs: &VueHostExecutionInputs,
         alloc: &oxc_allocator::Allocator,
@@ -386,7 +385,7 @@ impl VueHostIntegrationBackend {
                 actual: admission.demand,
             });
         }
-        let bundle = self.execute(admission, source, artifact, inputs, alloc)?;
+        let bundle = self.execute(admission, artifact, inputs, alloc)?;
         Ok(VueHostCompiledProducts {
             admitted: admission.admitted_products(),
             bundle,
@@ -399,7 +398,6 @@ impl VueHostIntegrationBackend {
     pub fn compile_runtime_render(
         &self,
         admission: &VueCompileAdmission,
-        source: &str,
         artifact: &FrameworkParseArtifact,
         inputs: &VueHostExecutionInputs,
         alloc: &oxc_allocator::Allocator,
@@ -410,7 +408,7 @@ impl VueHostIntegrationBackend {
                 actual: admission.demand,
             });
         }
-        let mut bundle = self.execute(admission, source, artifact, inputs, alloc)?;
+        let mut bundle = self.execute(admission, artifact, inputs, alloc)?;
         // Diagnostics-only companion: a demanded template-fact pass has
         // already merged its producer diagnostics into the bundle's
         // channel; the fact payload never publishes on the render handoff.
@@ -420,13 +418,15 @@ impl VueHostIntegrationBackend {
 
     /// The one execution path both entry points share: verify the exact
     /// parse binding, derive the neutral options off the admitted request,
-    /// and drive the shared Vue bundle orchestration. Caller owns the
-    /// allocator scratch lifecycle; a dropped admission simply never
+    /// and drive the shared Vue bundle orchestration over the artifact's
+    /// OWN registered source bytes — the admitted artifact is the single
+    /// authority for both geometry and bytes, so a byte payload diverging
+    /// from the admitted parse is unrepresentable at this seam. Caller owns
+    /// the allocator scratch lifecycle; a dropped admission simply never
     /// executes — there is no partial publication channel.
     fn execute(
         &self,
         admission: &VueCompileAdmission,
-        source: &str,
         artifact: &FrameworkParseArtifact,
         inputs: &VueHostExecutionInputs,
         alloc: &oxc_allocator::Allocator,
@@ -435,6 +435,7 @@ impl VueHostIntegrationBackend {
         if artifact.parse_key() != admission.parse_key.as_ref() {
             return Err(VueHostCompileRefusal::AdmissionParseMismatch);
         }
+        let source = artifact.carrier_source();
         let opts = derive_admitted_runtime_options(&admission.request, inputs);
         match vue_carrier_bundle(source, artifact, &opts, alloc) {
             Ok(CarrierCompileOutcome::Produced(bundle)) => Ok(bundle),
@@ -1278,7 +1279,6 @@ mod tests {
         let products = VueHostIntegrationBackend
             .compile_host_products(
                 &admission,
-                SFC,
                 &artifact,
                 &VueHostExecutionInputs::default(),
                 &alloc,
@@ -1326,7 +1326,6 @@ mod tests {
         let rendered = VueHostIntegrationBackend
             .compile_runtime_render(
                 &admission,
-                SFC,
                 &artifact,
                 &VueHostExecutionInputs::default(),
                 &alloc,
@@ -1360,7 +1359,6 @@ mod tests {
         let refusal = VueHostIntegrationBackend
             .compile_host_products(
                 &render,
-                SFC,
                 &artifact,
                 &VueHostExecutionInputs::default(),
                 &alloc,
@@ -1386,7 +1384,6 @@ mod tests {
         let refusal = VueHostIntegrationBackend
             .compile_host_products(
                 &admission,
-                SFC,
                 &other,
                 &VueHostExecutionInputs::default(),
                 &alloc,
@@ -1416,7 +1413,6 @@ mod tests {
         let products = VueHostIntegrationBackend
             .compile_host_products(
                 &admission,
-                SFC,
                 &artifact,
                 &VueHostExecutionInputs::default(),
                 &alloc,
@@ -1456,7 +1452,7 @@ mod tests {
             ..Default::default()
         };
         let refusal = VueHostIntegrationBackend
-            .compile_host_products(&admission, SFC, &artifact, &inputs, &alloc)
+            .compile_host_products(&admission, &artifact, &inputs, &alloc)
             .expect_err("the transaction is all-or-none");
         assert!(matches!(
             refusal,
@@ -1491,7 +1487,6 @@ mod tests {
             .expect("admits");
         let _ = VueHostIntegrationBackend.compile_runtime_render(
             &admission,
-            SFC,
             &artifact,
             &VueHostExecutionInputs::default(),
             &alloc,
@@ -1531,7 +1526,6 @@ mod tests {
             VueHostIntegrationBackend
                 .compile_host_products(
                     &admission,
-                    SFC,
                     &artifact,
                     &VueHostExecutionInputs::default(),
                     &alloc,
@@ -1585,7 +1579,6 @@ mod tests {
         let refusal = VueHostIntegrationBackend
             .compile_runtime_render(
                 &multi,
-                SFC,
                 &artifact,
                 &VueHostExecutionInputs::default(),
                 &alloc,
@@ -1620,7 +1613,6 @@ mod tests {
         let rendered = VueHostIntegrationBackend
             .compile_runtime_render(
                 &admission,
-                SFC,
                 &artifact,
                 &VueHostExecutionInputs::default(),
                 &alloc,
@@ -1665,7 +1657,6 @@ mod tests {
         let rendered = VueHostIntegrationBackend
             .compile_runtime_render(
                 &admission,
-                MALFORMED_EXPR_SFC,
                 &artifact,
                 &VueHostExecutionInputs::default(),
                 &alloc,
@@ -1703,7 +1694,6 @@ mod tests {
         let alloc = oxc_allocator::Allocator::new();
         let _ = VueHostIntegrationBackend.compile_runtime_render(
             &admission,
-            MALFORMED_EXPR_SFC,
             &artifact,
             &VueHostExecutionInputs::default(),
             &alloc,
@@ -1713,6 +1703,34 @@ mod tests {
             0,
             "an undemanded companion never runs the fact producer"
         );
+    }
+
+    /// Source-byte binding is structural: the execution entries take no
+    /// independent source parameter, so an admission over parse A can never
+    /// execute against foreign bytes B — the artifact's own registered
+    /// carrier source (the bytes its parse identity was computed from) is
+    /// the only byte authority the seam can reach.
+    #[test]
+    fn execution_source_is_the_admitted_artifacts_own_registered_bytes() {
+        let artifact = vue_artifact(SFC);
+        assert_eq!(
+            artifact.carrier_source().as_ref(),
+            SFC,
+            "the artifact's carrier source is the exact registered bytes"
+        );
+        let admission = VueHostIntegrationBackend
+            .admit_host_products(&artifact, multi_demand())
+            .expect("admits");
+        let alloc = oxc_allocator::Allocator::new();
+        let products = VueHostIntegrationBackend
+            .compile_host_products(
+                &admission,
+                &artifact,
+                &VueHostExecutionInputs::default(),
+                &alloc,
+            )
+            .expect("executes over the artifact's own bytes");
+        assert!(products.runtime_client_bundle().is_some());
     }
 
     #[test]

@@ -36,7 +36,6 @@ use crate::framework_common::FrameworkParseArtifact;
 use super::attribute_expressions::SvelteAttributeExpressions;
 use super::parser::{parse_svelte, CloseTagViolationKind, ParsedSvelte, SvelteScript};
 use super::runtime::{SvelteFragments, SvelteNamespace};
-use super::svelte_runtime_backend::SvelteRuntimeBackend;
 
 /// Maps the canonical request's `svelte_namespace` string to the compiler's
 /// typed [`SvelteNamespace`]. Only the three official tokens are valid; an
@@ -483,8 +482,23 @@ pub(crate) fn svelte_carrier_bundle(
     // never be refused. SSR (`opts.ssr`) fails closed until the server
     // backend lands.
     if opts.want_runtime {
+        // The runtime leg is selected from the immutable catalog at
+        // execution, exactly like the projection and template-fact legs —
+        // the catalog is execution's authority, not just admission's
+        // boolean. A miss (no registered Svelte runtime row for this
+        // adapter × epoch) refuses typed: the component-runtime capability
+        // this request touches is not available, never a fallback emitter.
+        let Some(crate::standalone::InstalledRuntimeBackend::Svelte(backend)) =
+            crate::standalone::registered_runtime_for(artifact.adapter_id(), artifact.epoch())
+        else {
+            return Err(CompileUnsupported::RequestExecutionRefused(
+                crate::compile_request::CompileRequestError::CapabilityUnsupported(
+                    crate::compile_request::CapabilityCell::SvelteComponent,
+                ),
+            ));
+        };
         if let Err(refusal) =
-            SvelteRuntimeBackend.compile_bundle_runtime(source, parsed, opts, alloc, &mut bundle)
+            backend.compile_bundle_runtime(source, parsed, opts, alloc, &mut bundle)
         {
             return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(refusal));
         }
@@ -791,6 +805,38 @@ mod tests {
                 ))
             ),
             "expected a typed InlineSsrUnsupported refusal, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_leg_is_catalog_selected_a_catalog_miss_refuses_typed() {
+        // The runtime leg must be selected from the immutable catalog at
+        // execution, exactly like the projection and template-fact legs: an
+        // artifact whose epoch has no registered runtime row refuses typed
+        // instead of compiling through a concretely-constructed backend.
+        let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
+        let artifact = artifact_for(source).remint_epoch_for_tests("unknown-epoch");
+        let alloc = oxc_allocator::Allocator::default();
+        let before = crate::standalone::runtime_backend_delegation_count();
+        let result = SvelteCarrierCompiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions::default(),
+            &alloc,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CompileUnsupported::RequestExecutionRefused(
+                    crate::compile_request::CompileRequestError::CapabilityUnsupported(_)
+                ))
+            ),
+            "a runtime-catalog miss must refuse typed, got {result:?}"
+        );
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before,
+            "no runtime backend may execute on a catalog miss"
         );
     }
 

@@ -31,7 +31,6 @@ use crate::framework_common::carrier_compiler::{
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
     RuntimeTemplateBlock, SourceMapFidelity,
 };
-use crate::framework_common::vue_runtime_backend::VueRuntimeBackend;
 use crate::framework_common::FrameworkParseArtifact;
 use verter_language::ParseOptions;
 
@@ -494,7 +493,26 @@ pub(crate) fn vue_carrier_bundle(
     // actually required.
     let mut bundle = RuntimeCompileOutput::default();
     if opts.want_runtime {
-        bundle = VueRuntimeBackend.compile_bundle_runtime(source, parsed, opts, alloc)?;
+        // The runtime leg is selected from the immutable catalog at
+        // execution, exactly like the projection and template-fact legs —
+        // the catalog is execution's authority, not just admission's
+        // boolean. A miss (no registered Vue runtime row for this
+        // adapter × epoch) refuses typed: the runtime capability this
+        // request touches is not available, never a fallback emitter.
+        let Some(crate::standalone::InstalledRuntimeBackend::Vue(backend)) =
+            crate::standalone::registered_runtime_for(artifact.adapter_id(), artifact.epoch())
+        else {
+            return Err(CompileUnsupported::RequestExecutionRefused(
+                CompileRequestError::CapabilityUnsupported(if opts.ssr {
+                    crate::compile_request::CapabilityCell::VueSsr
+                } else if effective_vapor {
+                    crate::compile_request::CapabilityCell::VueVaporClient
+                } else {
+                    crate::compile_request::CapabilityCell::VueVdomClient
+                }),
+            ));
+        };
+        bundle = backend.compile_bundle_runtime(source, parsed, opts, alloc)?;
     }
 
     if opts.want_ide {
@@ -1313,6 +1331,41 @@ mod tests {
             result,
             Err(CompileUnsupported::BlockContentIdeUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn runtime_leg_is_catalog_selected_a_catalog_miss_refuses_typed() {
+        // The runtime leg must be selected from the immutable catalog at
+        // execution, exactly like the projection and template-fact legs: an
+        // artifact whose epoch has no registered runtime row refuses typed
+        // instead of compiling through a concretely-constructed backend.
+        let source = "<script setup>const n = 1</script><template><div>{{ n }}</div></template>";
+        let artifact = artifact_for(source).remint_epoch_for_tests("unknown-epoch");
+        let alloc = oxc_allocator::Allocator::new();
+        let before = crate::standalone::runtime_backend_delegation_count();
+        let result = VueCarrierCompiler.compile_bundle(
+            source,
+            &artifact,
+            &RuntimeCompileOptions {
+                want_runtime: true,
+                ..Default::default()
+            },
+            &alloc,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(CompileUnsupported::RequestExecutionRefused(
+                    CompileRequestError::CapabilityUnsupported(_)
+                ))
+            ),
+            "a runtime-catalog miss must refuse typed, got {result:?}"
+        );
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before,
+            "no runtime backend may execute on a catalog miss"
+        );
     }
 
     #[test]

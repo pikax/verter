@@ -391,7 +391,6 @@ impl SvelteHostIntegrationBackend {
     pub fn compile_host_products(
         &self,
         admission: &SvelteCompileAdmission,
-        source: &str,
         artifact: &FrameworkParseArtifact,
         inputs: &SvelteHostExecutionInputs,
         alloc: &oxc_allocator::Allocator,
@@ -402,7 +401,7 @@ impl SvelteHostIntegrationBackend {
                 actual: admission.demand,
             });
         }
-        let bundle = self.execute(admission, source, artifact, inputs, alloc)?;
+        let bundle = self.execute(admission, artifact, inputs, alloc)?;
         Ok(SvelteHostCompiledProducts {
             admitted: admission.admitted_products(),
             bundle,
@@ -415,7 +414,6 @@ impl SvelteHostIntegrationBackend {
     pub fn compile_runtime_render(
         &self,
         admission: &SvelteCompileAdmission,
-        source: &str,
         artifact: &FrameworkParseArtifact,
         inputs: &SvelteHostExecutionInputs,
         alloc: &oxc_allocator::Allocator,
@@ -426,7 +424,7 @@ impl SvelteHostIntegrationBackend {
                 actual: admission.demand,
             });
         }
-        let mut bundle = self.execute(admission, source, artifact, inputs, alloc)?;
+        let mut bundle = self.execute(admission, artifact, inputs, alloc)?;
         // Render-only handoff: no analysis product was admitted, so no
         // fact payload was produced; keep the invariant structural even if
         // the orchestration ever grows a fact side channel.
@@ -436,13 +434,15 @@ impl SvelteHostIntegrationBackend {
 
     /// The one execution path both entry points share: verify the exact
     /// parse binding, derive the neutral options off the admitted request,
-    /// and drive the shared Svelte bundle orchestration. Caller owns the
-    /// allocator scratch lifecycle; a dropped admission simply never
+    /// and drive the shared Svelte bundle orchestration over the artifact's
+    /// OWN registered source bytes — the admitted artifact is the single
+    /// authority for both geometry and bytes, so a byte payload diverging
+    /// from the admitted parse is unrepresentable at this seam. Caller owns
+    /// the allocator scratch lifecycle; a dropped admission simply never
     /// executes — there is no partial publication channel.
     fn execute(
         &self,
         admission: &SvelteCompileAdmission,
-        source: &str,
         artifact: &FrameworkParseArtifact,
         inputs: &SvelteHostExecutionInputs,
         alloc: &oxc_allocator::Allocator,
@@ -451,6 +451,7 @@ impl SvelteHostIntegrationBackend {
         if artifact.parse_key() != admission.parse_key.as_ref() {
             return Err(SvelteHostCompileRefusal::AdmissionParseMismatch);
         }
+        let source = artifact.carrier_source();
         let opts = derive_admitted_runtime_options(&admission.request, inputs);
         match svelte_carrier_bundle(source, artifact, &opts, alloc) {
             Ok(CarrierCompileOutcome::Produced(bundle)) => Ok(bundle),
@@ -898,7 +899,6 @@ mod tests {
         let refusal = SvelteHostIntegrationBackend
             .compile_runtime_render(
                 &admission,
-                COMPONENT,
                 &artifact,
                 &SvelteHostExecutionInputs::default(),
                 &alloc,
@@ -1201,7 +1201,6 @@ mod tests {
         let products = SvelteHostIntegrationBackend
             .compile_host_products(
                 &admission,
-                COMPONENT,
                 &artifact,
                 &SvelteHostExecutionInputs::default(),
                 &alloc,
@@ -1261,7 +1260,6 @@ mod tests {
         let rendered = SvelteHostIntegrationBackend
             .compile_runtime_render(
                 &admission,
-                COMPONENT,
                 &artifact,
                 &SvelteHostExecutionInputs::default(),
                 &alloc,
@@ -1305,7 +1303,6 @@ mod tests {
         let refusal = SvelteHostIntegrationBackend
             .compile_host_products(
                 &render,
-                COMPONENT,
                 &artifact,
                 &SvelteHostExecutionInputs::default(),
                 &alloc,
@@ -1325,7 +1322,6 @@ mod tests {
         let refusal = SvelteHostIntegrationBackend
             .compile_runtime_render(
                 &multi,
-                COMPONENT,
                 &artifact,
                 &SvelteHostExecutionInputs::default(),
                 &alloc,
@@ -1351,7 +1347,6 @@ mod tests {
         let refusal = SvelteHostIntegrationBackend
             .compile_host_products(
                 &admission,
-                COMPONENT,
                 &other,
                 &SvelteHostExecutionInputs::default(),
                 &alloc,
@@ -1381,7 +1376,6 @@ mod tests {
         let products = SvelteHostIntegrationBackend
             .compile_host_products(
                 &admission,
-                COMPONENT,
                 &artifact,
                 &SvelteHostExecutionInputs::default(),
                 &alloc,
@@ -1415,7 +1409,6 @@ mod tests {
         let refusal = SvelteHostIntegrationBackend
             .compile_host_products(
                 &admission,
-                SNIPPET_COMPONENT,
                 &artifact,
                 &SvelteHostExecutionInputs::default(),
                 &alloc,
@@ -1468,7 +1461,6 @@ mod tests {
             .expect("admits");
         let _ = SvelteHostIntegrationBackend.compile_runtime_render(
             &admission,
-            COMPONENT,
             &artifact,
             &SvelteHostExecutionInputs::default(),
             &alloc,
@@ -1509,7 +1501,6 @@ mod tests {
             SvelteHostIntegrationBackend
                 .compile_host_products(
                     &admission,
-                    COMPONENT,
                     &artifact,
                     &SvelteHostExecutionInputs::default(),
                     &alloc,
@@ -1560,7 +1551,6 @@ mod tests {
         let rendered = SvelteHostIntegrationBackend
             .compile_runtime_render(
                 &admission,
-                COMPONENT,
                 &artifact,
                 &SvelteHostExecutionInputs {
                     css_hash_override: Some("verter-override-1".to_string()),
@@ -1579,6 +1569,34 @@ mod tests {
             "the resolved cssHash override is the scope class, got: {}",
             style.code
         );
+    }
+
+    /// Source-byte binding is structural: the execution entries take no
+    /// independent source parameter, so an admission over parse A can never
+    /// execute against foreign bytes B — the artifact's own registered
+    /// carrier source (the bytes its parse identity was computed from) is
+    /// the only byte authority the seam can reach.
+    #[test]
+    fn execution_source_is_the_admitted_artifacts_own_registered_bytes() {
+        let artifact = svelte_artifact(COMPONENT);
+        assert_eq!(
+            artifact.carrier_source().as_ref(),
+            COMPONENT,
+            "the artifact's carrier source is the exact registered bytes"
+        );
+        let admission = SvelteHostIntegrationBackend
+            .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
+            .expect("admits");
+        let alloc = oxc_allocator::Allocator::new();
+        let rendered = SvelteHostIntegrationBackend
+            .compile_runtime_render(
+                &admission,
+                &artifact,
+                &SvelteHostExecutionInputs::default(),
+                &alloc,
+            )
+            .expect("executes over the artifact's own bytes");
+        assert!(rendered.runtime_bundle().has_runtime_surface());
     }
 
     #[test]
