@@ -33,6 +33,7 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
+use verter_semantic::facts::FactKey;
 use verter_session::resolver_core::{DerivedFactKind, FactVersionRef};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
@@ -80,11 +81,21 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
     )
     .expect("a ComponentMetaResultEntry must be published for /src/Comp.vue");
 
-    // The cross-file route dep's Route fact MUST be present — route
-    // facts for every walked DEP flow into the signature unfiltered
-    // and drive correct cross-file invalidation.
+    // The cross-file route dep's exact parse-owned route-interface fact
+    // MUST be present. The content-sensitive legacy Route fact must not be
+    // used by this route-only component-meta proof.
     assert!(
         sig.facts.iter().any(|f| matches!(
+            f,
+            FactVersionRef::Parse(parse) if
+                parse.canonical_id == "/src/types.ts"
+                    && parse.key == FactKey::SyntacticRouteInterface
+        )),
+        "the route source dep's `SyntacticRouteInterface` fact MUST be in the published facts rail. facts = {:#?}",
+        sig.facts,
+    );
+    assert!(
+        !sig.facts.iter().any(|f| matches!(
             f,
             FactVersionRef::DerivedFactHash {
                 canonical_id,
@@ -92,9 +103,7 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
                 ..
             } if canonical_id == "/src/types.ts"
         )),
-        "the route source dep's `DerivedFactHash{{Route}}` fact MUST \
-         be in the published `facts` rail — cross-file route facts \
-         are NOT filtered. facts = {:#?}",
+        "route-only component-meta proof must not retain the dep's legacy content-sensitive Route fact. facts = {:#?}",
         sig.facts,
     );
 

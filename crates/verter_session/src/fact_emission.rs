@@ -334,6 +334,15 @@ pub(crate) fn emit_parse_facts_counting_inventory(
     // ── `SyntacticExportSet` whole-file surface fingerprint ──
     emit_syntactic_export_set(&mut registry, &view);
 
+    // ── Exact authored import/export routing interface ──
+    let route_interface_hash =
+        crate::resolver_store::syntactic_route_interface_hash(indexed.shallow_state.as_ref());
+    registry.insert(Fact {
+        key: FactKey::SyntacticRouteInterface,
+        semantic_hash: route_interface_hash,
+        display_hash: route_interface_hash,
+    });
+
     // ── `ImportRef` per binding ──
     emit_import_refs(&mut registry, &view);
 

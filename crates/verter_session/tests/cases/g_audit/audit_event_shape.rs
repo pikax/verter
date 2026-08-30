@@ -322,7 +322,7 @@ fn r23_cache_subsystem_audit_event_variants_exist() {
     let _ = format!("{route}");
 }
 
-/// `FactKeyKindTag` enumerates the 17 parse-domain `FactKey`
+/// `FactKeyKindTag` enumerates the 18 parse-domain `FactKey`
 /// structural shapes. Compile-time enumeration check via
 /// exhaustive match.
 #[test]
@@ -333,6 +333,7 @@ fn fact_key_kind_tag_covers_parse_domain_factkey_shapes() {
             FactKeyKindTag::Export => "Export",
             FactKeyKindTag::ExportAlias => "ExportAlias",
             FactKeyKindTag::SyntacticExportSet => "SyntacticExportSet",
+            FactKeyKindTag::SyntacticRouteInterface => "SyntacticRouteInterface",
             FactKeyKindTag::LocalDecl => "LocalDecl",
             FactKeyKindTag::Member => "Member",
             FactKeyKindTag::MemberPresence => "MemberPresence",
@@ -357,6 +358,10 @@ fn fact_key_kind_tag_covers_parse_domain_factkey_shapes() {
     assert_eq!(
         classify(FactKeyKindTag::SyntacticExportSet),
         "SyntacticExportSet"
+    );
+    assert_eq!(
+        classify(FactKeyKindTag::SyntacticRouteInterface),
+        "SyntacticRouteInterface"
     );
     assert_eq!(classify(FactKeyKindTag::LocalDecl), "LocalDecl");
     assert_eq!(classify(FactKeyKindTag::Member), "Member");

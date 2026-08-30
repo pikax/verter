@@ -299,6 +299,10 @@ pub enum FactKey {
     /// Whole-file export set fingerprint. Adding/removing an export
     /// shifts this fact; renaming one shifts it too.
     SyntacticExportSet,
+    /// Authored module-routing interface, independent of file content that
+    /// does not participate in import/export routing. Covers exact local and
+    /// re-export targets, ordered wildcard re-exports, and import bindings.
+    SyntacticRouteInterface,
     /// One locally-declared, NOT-exported binding inside the file.
     /// Path-precise consumers observe these by name.
     LocalDecl {
@@ -533,6 +537,7 @@ impl FactKey {
             Self::Export { .. }
             | Self::ExportAlias { .. }
             | Self::SyntacticExportSet
+            | Self::SyntacticRouteInterface
             | Self::LocalDecl { .. }
             | Self::Member { .. }
             | Self::MemberPresence { .. }
@@ -800,6 +805,7 @@ mod registry_tests {
                 space: SymbolSpace::Type,
             },
             FactKey::SyntacticExportSet,
+            FactKey::SyntacticRouteInterface,
             FactKey::LocalDecl {
                 name: InternedName::from("X"),
                 space: SymbolSpace::Type,

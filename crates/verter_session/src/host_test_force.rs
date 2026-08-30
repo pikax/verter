@@ -149,6 +149,9 @@ pub(crate) enum TracerScope {
     /// cache producer: nested scopes stay cacheable while only the final
     /// resolved-meta publication is refused.
     ComponentMetaRequest,
+    /// The separately-finalized output-materialization read set used by a
+    /// reusable component public-contract projection witness.
+    ComponentMetaOutput,
     /// The framework script-fact entry-point's IMPORT-ROUTE resolution scope —
     /// the cacheability tracer that brackets `resolve_snapshot_imports`, whose
     /// verdict (fenced serve OR fact-signature overflow) is the ONLY thing that

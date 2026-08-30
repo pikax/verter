@@ -68,6 +68,13 @@ The official/native component-meta payload is the semantic authority. `@verter/c
 - Do not let JS become a second resolver, expander, or semantic authority. Compat must not reinterpret unresolved symbols, invent fallback semantics, or silently repair native payload gaps.
 - Do not weaken native TypeScript meaning to imitate Volar formatting. Example: keep native `boolean` as `boolean`; any `true | false` expansion belongs only in compat-specific display/schema logic if we choose to support it.
 - Indexed-access members may be resolved/expanded when that improves real type fidelity. Targeted compat expansion such as `Alert['variants']['color']` to the concrete color union is acceptable; blanket ref flattening is not.
+- Compat indexed-access expansion is producer-bounded. A non-generic registry
+  object may supply `Shape['member']` directly. A generic reference such as
+  `Box<string>['value']` stays shallow when the registry contains only the
+  unsubstituted `Box<T>` declaration; compat must not perform private generic
+  substitution. It may expand only from an exact producer-supplied
+  instantiated row such as `Box<string>`, and the registry visited guard stays
+  live through the recursive conversion before it is released.
 - Compat `exposed` parity should derive from a shared cached public-instance surface (e.g. a `ComponentPublicInstance` extraction owned by the host/public-instance path). Do not redefine native `exposed` to mean public-instance unless the public API is deliberately expanded.
 - Native-only extensions such as `models`, `acceptedProps`, `acceptedEvents`, `acceptedSurfaceCompleteness`, `rootReachability`, and `fallthroughSurface` are part of Verter's official API. Benchmark them separately from Volar-surface parity instead of treating them as regressions.
 - Component-meta type recovery must stay cache-owned. When changing `verter_session`, `verter_session::resolver_core`, or `packages/component-meta` type paths, rely on cached lookup/eval state and expand only on demand; do not rewalk AST/source as a fallback to recover missing types.
@@ -380,7 +387,11 @@ The NAPI/WASM/LSP wire boundary consumes the session-owned, fully-materialized
 - Cache rails: an output failure suppresses ONLY the encoded-payload admission
   (output deps are traced in their OWN tracer scope and joined onto the payload
   fact rail); the independently-complete analysis/resolved-meta cache entries
-  stay warm. The envelope is request-local — never stored in any semantic cache.
+  stay warm. Every resolved-meta cold request is self-rooted in the exact
+  captured owner `FileWholeHash` before resolution (the session-view hash for
+  overlays), so degraded/malformed results cannot survive an owner-content
+  repair merely because their route interface is unchanged. The envelope is
+  request-local — never stored in any semantic cache.
 - The session owns the resolved type-registry name-overlay finalize (before
   materialization). Cross-owner effective scope is TWO complementary rails:
   anchor-BEARING positions are normalized to SELF-ANCHORING sources at the
