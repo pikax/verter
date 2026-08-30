@@ -101,6 +101,15 @@ impl FrameworkSemanticAuthority<TestEpoch> for SemanticCapable {
 impl RuntimeCompilerBackend<TestEpoch> for RuntimeCapable {
     type RuntimeClient = ();
     type RuntimeServer = ();
+    type ParseArtifact = ();
+    type Request = ();
+    type ExecutionInputs = ();
+    type Error = ();
+    type Output = ();
+
+    fn compile_runtime(&self, _: &str, _: &(), _: &(), _: &()) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 impl FrameworkHostIntegrationBackend<TestEpoch, SessionHostEpoch> for HostCapable {

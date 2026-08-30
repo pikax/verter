@@ -43,8 +43,9 @@ use crate::parser::Syntax;
 use crate::script::prepared::PreparedScript;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style_planner::{
-    analyze_css_module_classes, complete_static_class_names, prepared_style_for_sealed_slot,
-    run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
+    analyze_css_module_classes, complete_static_class_names, generate_var_name,
+    prepared_style_for_sealed_slot, run_vue_style_cascade, AuthoredStyleInput, StyleRewriteFailure,
+    VBindVar,
 };
 use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
@@ -772,7 +773,18 @@ pub(crate) fn derive_legacy_vue_options(
     let resolved_flags = ResolvedVueCompileOptions {
         force_vapor: use_vapor,
         force_js: request.force_js(),
-        source_map: runtime.is_some_and(|r| r.runtime_source_map),
+        source_map: if ssr {
+            request.products().iter().find_map(|p| match p {
+                CompileProduct::RuntimeServer(r) => Some(r.runtime_source_map),
+                _ => None,
+            })
+        } else {
+            request.products().iter().find_map(|p| match p {
+                CompileProduct::RuntimeClient(r) => Some(r.runtime_source_map),
+                _ => None,
+            })
+        }
+        .unwrap_or(false),
         ide_source_map: ide.is_some_and(|i| i.want_source_map),
         ssr,
         prop_constness_overrides: execution_inputs.prop_constness_overrides.clone(),
@@ -1012,6 +1024,17 @@ fn compile_inner(
             }
         }
     } // end if needs_style
+
+    if all_v_bind_vars.is_empty() && !options.target.needs_style() {
+        all_v_bind_vars.extend(verter_options.style_v_bind_vars.iter().map(|expression| {
+            VBindVar {
+                expression: expression.clone(),
+                var_name: generate_var_name(scope_id_str, expression),
+                expr_start: 0,
+                expr_end: 0,
+            }
+        }));
+    }
 
     // ── 4. Script codegen ─────────────────────────────────────────
     // Script codegen is skipped when the target only needs TSX or TSC,

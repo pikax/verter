@@ -9,12 +9,10 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use verter_css_syntax::CssDialect;
 use verter_language::{
-    parse_key_for, syntax_profile_id_for, CarrierParse, ExternalLinkKind, FileLanguage,
-    FrameworkAdapterId, JsModuleKind, LanguageId, ScriptSourceType,
-    UnregisteredFrameworkParseArtifact, VUE_SYNTAX_COMPATIBILITY_DOMAIN,
-    VUE_SYNTAX_COMPATIBILITY_EPOCH,
+    parse_key_for, syntax_profile_id_for, CarrierParse, FileLanguage, FrameworkAdapterId,
+    JsModuleKind, LanguageId, ScriptSourceType, UnregisteredFrameworkParseArtifact,
+    VUE_SYNTAX_COMPATIBILITY_DOMAIN, VUE_SYNTAX_COMPATIBILITY_EPOCH,
 };
 use verter_span::Span;
 
@@ -25,10 +23,7 @@ use crate::compile::types::{
     CodegenOptions, CompileTarget, ResolvedVueCompileOptions, VueExecutionInputs,
     VueMacroSemanticInput,
 };
-use crate::compile::{
-    compile_from_parsed, compile_from_parsed_legacy, parse_script_block, parse_sfc,
-    parse_template_block, style_dialect, template_unit_used_vars,
-};
+use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
     IdeProductRequest, VueBackendRequest, VueCompileRequest,
@@ -39,14 +34,8 @@ use crate::framework_common::carrier_compiler::{
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
     RuntimeTemplateBlock, SourceMapFidelity,
 };
-use crate::framework_common::generated_chunk::{
-    compose_generated_chunk, GeneratedFragment, GeneratedUnit,
-};
 use crate::framework_common::FrameworkParseArtifact;
-use crate::style_planner::{
-    prepared_style_for_sealed_slot, run_vue_style_cascade, transform_vue_style, AuthoredStyleInput,
-    VerifiedPlainCss,
-};
+use crate::standalone::DirectCompileError;
 use verter_language::ParseOptions;
 
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
@@ -266,132 +255,6 @@ impl VueCarrierCompiler {
         verter_language::__carrier_downcast_ref::<VueParseCarrier>(artifact)
             .map(VueParseCarrier::parsed)
     }
-
-    fn compile_projected_script_bundle(
-        &self,
-        source: &str,
-        parsed: &ParsedSfc,
-        input: &crate::framework_common::RuntimeBlockContentInput,
-        is_setup: bool,
-        opts: &RuntimeCompileOptions,
-        alloc: &oxc_allocator::Allocator,
-    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
-        if (is_setup && parsed.script().is_some()) || (!is_setup && parsed.script_setup().is_some())
-        {
-            return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                adapter_id: self.adapter_id(),
-            });
-        }
-        let extras = opts.vue_facts.as_ref();
-        let macro_semantics = extras
-            .and_then(|extras| extras.macro_runtime.clone())
-            .map(VueMacroSemanticInput::Runtime)
-            .unwrap_or_default();
-        let script_parsed = parse_script_block(&input.code, &input.lang, is_setup);
-        let template_used_vars = template_unit_used_vars(
-            source,
-            parsed,
-            opts.delimiters.clone(),
-            opts.custom_elements.clone(),
-            alloc,
-        );
-        // This helper compiles the projected SCRIPT UNIT, so the `SCRIPT` bit is
-        // its own subject, not a requested product: the unit's bindings are what
-        // the runtime script block is built from. Whether that block is
-        // PUBLISHED onto the bundle is what `want_runtime` decides, further
-        // down. IDE projection is catalog-owned and never composed here.
-        let script_result = compile_from_parsed_legacy(
-            &input.code,
-            &script_parsed,
-            &CodegenOptions {
-                filename: opts.filename.clone(),
-                is_production: opts.is_production,
-                custom_element: opts.custom_element,
-                component_id: opts.component_id.clone(),
-                inline: Some(false),
-                runtime_module_name: opts.runtime_module_name.clone(),
-                types_module_name: opts.types_module_name.clone(),
-                target: CompileTarget::SCRIPT,
-                embed_ambient_types: opts.embed_ambient_types,
-                conditional_root_narrowing: opts.conditional_root_narrowing,
-                strict_slots: opts.strict_slots,
-                ..Default::default()
-            },
-            &ResolvedVueCompileOptions {
-                force_js: opts.force_js,
-                source_map: opts.source_map,
-                template_used_vars: Some(template_used_vars),
-                ..Default::default()
-            },
-            &macro_semantics,
-            alloc,
-        )
-        .map_err(CompileUnsupported::RequestExecutionRefused)?;
-        let binding_metadata = script_result.template_binding_metadata.clone();
-        let mut script_bundle =
-            vue_result_to_runtime_bundle(&input.code, &script_parsed, script_result);
-        let mut carrier_view = parsed.clone();
-        carrier_view.script_node = None;
-        carrier_view.script_setup_node = None;
-        let mut carrier_target = CompileTarget::empty();
-        if opts.want_runtime {
-            carrier_target |= CompileTarget::BUNDLER;
-        }
-        let carrier_result = compile_from_parsed_legacy(
-            source,
-            &carrier_view,
-            &CodegenOptions {
-                filename: opts.filename.clone(),
-                is_production: opts.is_production,
-                component_id: opts.component_id.clone(),
-                inline: Some(false),
-                delimiters: opts.delimiters.clone(),
-                custom_elements: opts.custom_elements.clone(),
-                comments: opts.comments,
-                runtime_module_name: opts.runtime_module_name.clone(),
-                types_module_name: opts.types_module_name.clone(),
-                target: carrier_target,
-                embed_ambient_types: opts.embed_ambient_types,
-                conditional_root_narrowing: opts.conditional_root_narrowing,
-                strict_slots: opts.strict_slots,
-                ..Default::default()
-            },
-            &ResolvedVueCompileOptions {
-                force_vapor: opts.force_vapor,
-                force_js: opts.force_js,
-                source_map: opts.source_map,
-                ssr: opts.ssr,
-                prop_constness_overrides: binding_metadata.const_props.clone(),
-                template_binding_metadata: Some(binding_metadata),
-                ..Default::default()
-            },
-            &VueMacroSemanticInput::default(),
-            alloc,
-        )
-        .map_err(CompileUnsupported::RequestExecutionRefused)?;
-        let mut bundle = vue_result_to_runtime_bundle(source, &carrier_view, carrier_result);
-        let mut script = script_bundle.script.take().ok_or(
-            CompileUnsupported::BlockContentRuntimeUnavailable {
-                adapter_id: self.adapter_id(),
-            },
-        )?;
-        script.output_descriptor = RuntimeOutputDescriptor::generated(
-            &script.code,
-            (!script.source_map.is_empty()).then_some(script.source_map.as_str()),
-            &[(
-                input.source_space_token.as_str(),
-                input.content_artifact_token.as_str(),
-            )],
-            SourceMapFidelity::Approximate,
-        );
-        // The runtime script block is PUBLISHED only when the request asked for
-        // a runtime product.
-        if opts.want_runtime {
-            bundle.script = Some(script);
-        }
-        bundle.diagnostics.extend(script_bundle.diagnostics);
-        Ok(bundle)
-    }
 }
 
 /// Compile a Vue artifact already elected by a registered publication store.
@@ -604,62 +467,13 @@ impl CarrierCompiler for VueCarrierCompiler {
             opts.block_content.script.as_ref(),
             opts.block_content.script_setup.as_ref(),
         ) {
-            (Some(_), Some(_)) if opts.want_ide => {
+            (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) if opts.want_ide => {
                 return Err(CompileUnsupported::BlockContentIdeUnavailable {
                     adapter_id: self.adapter_id(),
                 });
             }
-            (Some(_), Some(_)) => {
-                return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (Some(_), None) if opts.want_ide => {
-                return Err(CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (Some(_), None) => {
-                return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (None, Some(_)) if opts.want_ide => {
-                return Err(CompileUnsupported::BlockContentIdeUnavailable {
-                    adapter_id: self.adapter_id(),
-                });
-            }
-            (None, Some(input)) => {
-                // Vue emits a runtime surface or a genuine compile error; it
-                // never fail-closes on an unsupported runtime surface.
-                return self
-                    .compile_projected_script_bundle(source, parsed, input, true, opts, alloc)
-                    .map(|bundle| {
-                        CarrierCompileOutcome::Produced(with_catalog_template_facts(
-                            bundle,
-                            artifact,
-                            source,
-                            opts.want_template_data,
-                            opts.block_content
-                                .template
-                                .as_ref()
-                                .map(|input| input.code.as_ref()),
-                        ))
-                    });
-            }
-            (None, None) => {}
+            _ => {}
         }
-
-        let supplied_inline_template = opts.block_content.template.is_some()
-            && opts.inline.unwrap_or(opts.is_production)
-            && parsed.script_setup().is_some()
-            && !artifact
-                .common()
-                .external_links()
-                .iter()
-                .any(|link| link.kind == ExternalLinkKind::Template)
-            && !opts.force_vapor
-            && !opts.ssr;
 
         // Runtime products come from one bundler pass. IDE projection is
         // catalog-owned and never re-enters compile_inner as TSX on this
@@ -668,18 +482,15 @@ impl CarrierCompiler for VueCarrierCompiler {
         // actually required.
         let mut bundle = RuntimeCompileOutput::default();
         if opts.want_runtime {
-            let target = CompileTarget::BUNDLER;
-
+            let extras = opts.vue_facts.as_ref();
+            let macros = extras
+                .and_then(|extras| extras.macro_runtime.clone())
+                .map(VueMacroSemanticInput::Runtime)
+                .unwrap_or_default();
             let core_opts = CodegenOptions {
                 filename: opts.filename.clone(),
                 is_production: opts.is_production,
                 custom_element: opts.custom_element,
-                // Inline-template topology flows from the runtime options (`None`
-                // resolves to `is_production`, matching the official default:
-                // inline in prod builds). The compiler falls back to non-inline
-                // for Vapor / SSR / template-only / script-only SFCs; the bundle
-                // carries the RESOLVED topology (`inline`) so the host assembly
-                // never sniffs source text.
                 inline: opts.inline,
                 component_id: opts.component_id.clone(),
                 delimiters: opts.delimiters.clone(),
@@ -687,22 +498,15 @@ impl CarrierCompiler for VueCarrierCompiler {
                 comments: opts.comments,
                 runtime_module_name: opts.runtime_module_name.clone(),
                 types_module_name: opts.types_module_name.clone(),
-                target,
+                target: CompileTarget::BUNDLER,
                 embed_ambient_types: opts.embed_ambient_types,
                 conditional_root_narrowing: opts.conditional_root_narrowing,
                 strict_slots: opts.strict_slots,
                 ..CodegenOptions::default()
             };
-            // The Vue-private resolved inputs ride on the typed `vue_facts`
-            // carrier (a foreign / absent value yields defaults, so a generic
-            // caller that did not supply Vue extras still compiles).
-            let extras = opts.vue_facts.as_ref();
             let verter_opts = ResolvedVueCompileOptions {
                 force_vapor: opts.force_vapor,
                 force_js: opts.force_js,
-                // Decoupled — see the map-coupling fix note on the sibling
-                // sub-compiles in this file. This pass does not emit TSX; the
-                // catalog projection owns the IDE map.
                 source_map: opts.source_map,
                 ide_source_map: false,
                 ssr: opts.ssr,
@@ -722,7 +526,7 @@ impl CarrierCompiler for VueCarrierCompiler {
                     }),
                 template_binding_metadata: None,
                 template_used_vars: None,
-                runtime_template_hole: supplied_inline_template,
+                runtime_template_hole: false,
                 runtime_inline_template_chunk: false,
                 prepared_styles: if opts.prepared_styles.is_empty() {
                     extras
@@ -732,382 +536,35 @@ impl CarrierCompiler for VueCarrierCompiler {
                     opts.prepared_styles.clone()
                 },
             };
-
-            // Vue uses `VerterCompileResult` INTERNALLY here; the returned bundle
-            // re-expresses every field neutrally so session assembly never sees
-            // the Vue-shaped result.
-            let macro_semantics = extras
-                .and_then(|extras| extras.macro_runtime.clone())
-                .map(VueMacroSemanticInput::Runtime)
-                .unwrap_or_default();
-            let mut carrier_view = parsed.clone();
-            if opts.block_content.template.is_some() {
-                carrier_view.template_ast = None;
-            }
-            for (style, selected) in carrier_view
-                .style_nodes
-                .iter_mut()
-                .zip(opts.block_content.styles.iter())
-            {
-                if selected.is_some() {
-                    // The registered block-content projection owns these bytes.
-                    // Preserve the parser-owned slot and attributes, but do not
-                    // let the carrier-authored dialect enter either rewrite stage.
-                    style.content = None;
-                }
-            }
-            let selected_template = opts.block_content.template.as_ref().map(|input| {
-                let parsed_template = parse_template_block(
-                    &input.code,
-                    opts.delimiters
-                        .as_ref()
-                        .map(|(open, close)| (open.as_str(), close.as_str())),
-                    opts.custom_elements.as_deref(),
-                );
-                let used_vars = template_unit_used_vars(
-                    &input.code,
-                    &parsed_template,
-                    opts.delimiters.clone(),
-                    opts.custom_elements.clone(),
-                    alloc,
-                );
-                (input, parsed_template, used_vars)
-            });
-            let mut verter_opts = verter_opts;
-            verter_opts.template_used_vars = selected_template
-                .as_ref()
-                .map(|(_, _, used_vars)| used_vars.clone());
-            let result = compile_from_parsed_legacy(
+            bundle = crate::standalone::lower_vue_parsed_runtime(
                 source,
-                &carrier_view,
+                parsed,
                 &core_opts,
                 &verter_opts,
-                &macro_semantics,
+                &macros,
+                &opts.block_content,
+                &opts.prepared_styles,
                 alloc,
             )
-            .map_err(CompileUnsupported::RequestExecutionRefused)?;
-            let binding_metadata = result.template_binding_metadata.clone();
-            bundle = vue_result_to_runtime_bundle(source, &carrier_view, result);
-
-            if let Some((input, parsed_template, _)) = selected_template {
-                let template_core_opts = CodegenOptions {
-                    filename: opts.filename.clone(),
-                    is_production: opts.is_production,
-                    component_id: opts.component_id.clone(),
-                    delimiters: opts.delimiters.clone(),
-                    custom_elements: opts.custom_elements.clone(),
-                    comments: opts.comments,
-                    runtime_module_name: opts.runtime_module_name.clone(),
-                    target: CompileTarget::TEMPLATE,
-                    ..CodegenOptions::default()
-                };
-                let template_verter_opts = ResolvedVueCompileOptions {
-                    force_vapor: opts.force_vapor,
-                    force_js: opts.force_js,
-                    // Decoupled — see the map-coupling fix note above.
-                    source_map: opts.source_map,
-                    ssr: opts.ssr,
-                    prop_constness_overrides: binding_metadata.const_props.clone(),
-                    template_binding_metadata: Some(binding_metadata),
-                    runtime_inline_template_chunk: supplied_inline_template,
-                    ..Default::default()
-                };
-                let compiled = compile_from_parsed_legacy(
-                    &input.code,
-                    &parsed_template,
-                    &template_core_opts,
-                    &template_verter_opts,
-                    &VueMacroSemanticInput::default(),
-                    alloc,
-                )
-                .map_err(CompileUnsupported::RequestExecutionRefused)?;
-                let mut selected =
-                    vue_result_to_runtime_bundle(&input.code, &parsed_template, compiled);
-                if let Some(template) = selected.template.as_mut() {
-                    template.output_descriptor = RuntimeOutputDescriptor::generated(
-                        &template.code,
-                        (!template.source_map.is_empty()).then_some(template.source_map.as_str()),
-                        &[(
-                            input.source_space_token.as_str(),
-                            input.content_artifact_token.as_str(),
-                        )],
-                        SourceMapFidelity::Approximate,
-                    );
-                }
-                if supplied_inline_template {
-                    let mut shell = bundle.script.take().ok_or(
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        },
-                    )?;
-                    let template = selected.template.as_ref().ok_or(
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        },
-                    )?;
-                    let hole = shell.generated_template_hole.clone().ok_or(
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        },
-                    )?;
-                    let mut imports = template
-                        .imports
-                        .iter()
-                        .filter(|name| !shell.runtime_imports.contains(name))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    imports.sort_unstable();
-                    imports.dedup();
-                    let preamble = if imports.is_empty() {
-                        String::new()
-                    } else {
-                        let specifiers = imports
-                            .iter()
-                            .map(|name| crate::compile::format_import_specifier(name))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        format!(
-                            "import {{ {specifiers} }} from \"{}\"\n",
-                            opts.runtime_module_name.as_deref().unwrap_or("vue")
-                        )
-                    };
-                    let (carrier_space, carrier_artifact) =
-                        RuntimeOutputDescriptor::carrier_source(source);
-                    let composed = compose_generated_chunk(
-                        &preamble,
-                        GeneratedUnit {
-                            code: &shell.code,
-                            source_map: &shell.source_map,
-                            source_space: &carrier_space,
-                            source,
-                        },
-                        hole,
-                        GeneratedFragment {
-                            unit: GeneratedUnit {
-                                code: &template.code,
-                                source_map: &template.source_map,
-                                source_space: &input.source_space_token,
-                                source: &input.code,
-                            },
-                            range: 0..template.code.len() as u32,
-                        },
-                    )
-                    .ok_or(
-                        CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        },
-                    )?;
-                    shell.code = composed.code;
-                    shell.source_map = composed.source_map;
-                    shell.generated_template_hole = None;
-                    shell.output_descriptor = RuntimeOutputDescriptor::generated(
-                        &shell.code,
-                        Some(&shell.source_map),
-                        &[
-                            (carrier_space.as_str(), carrier_artifact.as_str()),
-                            (
-                                input.source_space_token.as_str(),
-                                input.content_artifact_token.as_str(),
-                            ),
-                        ],
-                        SourceMapFidelity::Approximate,
-                    );
-                    bundle.script = Some(shell);
-                    bundle.template = None;
-                    bundle.inline = true;
-                } else {
-                    bundle.template = selected.template;
-                }
-                bundle.diagnostics.extend(selected.diagnostics);
-            }
-
-            let style_scope = bundle
-                .scope_id
-                .strip_prefix("data-v-")
-                .unwrap_or(&bundle.scope_id)
-                .to_string();
-            for (style_index, ((slot, selected), node)) in opts
-                .block_content
-                .styles
-                .iter()
-                .zip(bundle.styles.iter_mut())
-                .zip(parsed.style_nodes())
-                .enumerate()
-            {
-                if let Some(input) = slot {
-                    let authored_dialect = style_dialect(node.lang);
-                    let selected_dialect = match input.lang.as_str() {
-                        "css" => CssDialect::Css,
-                        "scss" => CssDialect::Scss,
-                        "sass" => CssDialect::Sass,
-                        "less" => CssDialect::Less,
-                        "stylus" | "styl" => CssDialect::Stylus,
-                        _ => {
-                            return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                                adapter_id: self.adapter_id(),
-                            });
-                        }
-                    };
-                    let supplied_preprocessor_output = selected_dialect == CssDialect::Css
-                        && authored_dialect != Some(CssDialect::Css);
-                    if authored_dialect.is_none() && !supplied_preprocessor_output {
-                        return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                            adapter_id: self.adapter_id(),
-                        });
+            .map_err(|err| match err {
+                crate::standalone::VueParsedRuntimeError::BlockContentUnavailable => {
+                    CompileUnsupported::BlockContentRuntimeUnavailable {
+                        adapter_id: self.adapter_id(),
                     }
-                    let mut current = input.code.to_string();
-                    let mut current_map = if opts.source_map {
-                        input.source_map.as_deref().map(str::to_string)
-                    } else {
-                        None
-                    };
-                    let mut descriptor = RuntimeOutputDescriptor::identity(
-                        &current,
-                        &input.source_space_token,
-                        &input.content_artifact_token,
-                    );
-                    let mut applied_rewrite_stages = 0u8;
-
-                    if !supplied_preprocessor_output {
-                        // The common path: authored bytes, not already-preprocessed
-                        // output, so all 3 stages apply in one cascade — a stage
-                        // that produces no edits hands its retained IR to the next
-                        // instead of forcing a re-parse (A10i).
-                        let mut authored = AuthoredStyleInput::new(
-                            &current,
-                            selected_dialect,
-                            &input.source_space_token,
-                            &input.source_space_token,
-                            &input.content_artifact_token,
-                        );
-                        if let Some(prepared) = prepared_style_for_sealed_slot(
-                            input.parsed.as_ref(),
-                            &opts.prepared_styles,
-                            style_index,
-                            current.as_str(),
-                        ) {
-                            authored = authored.with_prepared(prepared.ir());
-                        }
-                        let cascade_module = node.module && selected_dialect == CssDialect::Css;
-                        let outcome = run_vue_style_cascade(
-                            authored,
-                            &style_scope,
-                            cascade_module,
-                            node.scoped,
-                            opts.source_map,
-                        );
-                        if !outcome.stage_failures.is_empty() {
-                            return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                                adapter_id: self.adapter_id(),
-                            });
-                        }
-                        let stage_count = [
-                            outcome.facts.rewrites.v_bind,
-                            outcome.facts.rewrites.css_modules,
-                            outcome.facts.rewrites.scoped_selector
-                                || outcome.facts.rewrites.keyframes
-                                || outcome.facts.rewrites.deep
-                                || outcome.facts.rewrites.slotted
-                                || outcome.facts.rewrites.global,
-                        ]
-                        .into_iter()
-                        .filter(|applied| *applied)
-                        .count();
-                        if stage_count > 0 {
-                            current = outcome.code;
-                            current_map = opts
-                                .source_map
-                                .then_some(outcome.source_map)
-                                .filter(|map| !map.is_empty());
-                            descriptor = RuntimeOutputDescriptor::generated(
-                                &current,
-                                current_map.as_deref(),
-                                &[(
-                                    input.source_space_token.as_str(),
-                                    input.content_artifact_token.as_str(),
-                                )],
-                                SourceMapFidelity::Exact,
-                            );
-                            applied_rewrite_stages =
-                                applied_rewrite_stages.saturating_add(stage_count as u8);
-                        }
-                    } else {
-                        // A completed external-preprocessor result is parsed once
-                        // at host admission. The retained IR is required here —
-                        // raw bytes are not a transform fallback.
-                        let prepared = prepared_style_for_sealed_slot(
-                            input.parsed.as_ref(),
-                            &opts.prepared_styles,
-                            style_index,
-                            current.as_str(),
-                        )
-                        .ok_or(
-                            CompileUnsupported::BlockContentRuntimeUnavailable {
-                                adapter_id: self.adapter_id(),
-                            },
-                        )?;
-                        let verified = VerifiedPlainCss::from_parsed_native_css(prepared.ir())
-                            .ok_or(CompileUnsupported::BlockContentRuntimeUnavailable {
-                                adapter_id: self.adapter_id(),
-                            })?;
-                        let cascade_module = node.module && selected_dialect == CssDialect::Css;
-                        let outcome = transform_vue_style(
-                            verified,
-                            &input.source_space_token,
-                            &input.source_space_token,
-                            &input.content_artifact_token,
-                            &style_scope,
-                            cascade_module,
-                            node.scoped,
-                            opts.source_map,
-                        );
-                        if !outcome.stage_failures.is_empty() {
-                            return Err(CompileUnsupported::BlockContentRuntimeUnavailable {
-                                adapter_id: self.adapter_id(),
-                            });
-                        }
-                        let stage_count = [
-                            outcome.facts.rewrites.v_bind,
-                            outcome.facts.rewrites.css_modules,
-                            outcome.facts.rewrites.scoped_selector
-                                || outcome.facts.rewrites.keyframes
-                                || outcome.facts.rewrites.deep
-                                || outcome.facts.rewrites.slotted
-                                || outcome.facts.rewrites.global,
-                        ]
-                        .into_iter()
-                        .filter(|applied| *applied)
-                        .count();
-                        if stage_count > 0 {
-                            current = outcome.code;
-                            current_map = opts
-                                .source_map
-                                .then_some(outcome.source_map)
-                                .filter(|map| !map.is_empty());
-                            descriptor = RuntimeOutputDescriptor::generated(
-                                &current,
-                                current_map.as_deref(),
-                                &[(
-                                    input.source_space_token.as_str(),
-                                    input.content_artifact_token.as_str(),
-                                )],
-                                SourceMapFidelity::Exact,
-                            );
-                            applied_rewrite_stages =
-                                applied_rewrite_stages.saturating_add(stage_count as u8);
-                        }
-                    }
-
-                    if applied_rewrite_stages > 1 {
-                        descriptor.source_map.fidelity = SourceMapFidelity::Approximate;
-                    }
-
-                    selected.code = current;
-                    selected.source_map = current_map;
-                    selected.lang = Some(input.lang.clone());
-                    selected.output_descriptor = descriptor;
                 }
-            }
+                crate::standalone::VueParsedRuntimeError::RequestExecutionRefused(error) => {
+                    CompileUnsupported::RequestExecutionRefused(error)
+                }
+                crate::standalone::VueParsedRuntimeError::Direct(DirectCompileError::Vue(
+                    error,
+                )) => CompileUnsupported::RequestExecutionRefused(error),
+                crate::standalone::VueParsedRuntimeError::Direct(_) => {
+                    CompileUnsupported::BlockContentRuntimeUnavailable {
+                        adapter_id: self.adapter_id(),
+                    }
+                }
+            })?
+            .bundle;
             for (slot, selected) in opts
                 .block_content
                 .custom_blocks
@@ -1437,6 +894,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use verter_css_syntax::CssDialect;
     use verter_language::{ExternalLinkKind, ScriptRegionKind};
 
     fn workspace_root() -> PathBuf {

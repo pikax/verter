@@ -29,6 +29,7 @@ pub mod registry;
 pub mod vue_bridge;
 pub mod vue_carrier_frontend;
 pub mod vue_projection_backend;
+pub mod vue_runtime_backend;
 pub mod vue_semantic_authority;
 
 #[cfg(test)]
@@ -66,5 +67,9 @@ pub use vue_carrier_frontend::{vue_carrier_frontend_registration, VueCarrierFron
 pub use vue_projection_backend::{
     vue_projection_backend_registration, VueIdeCompanion, VueProjectionBackend,
     VueProjectionDiagnostic, VueProjectionError, VueProjectionInputs,
+};
+pub use vue_runtime_backend::{
+    vue_runtime_backend_registration, VueRuntimeBackend, VueRuntimeError, VueRuntimeExecutionFacts,
+    VueRuntimeInputs,
 };
 pub use vue_semantic_authority::{vue_semantic_authority_registration, VueSemanticAuthority};

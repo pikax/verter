@@ -155,8 +155,30 @@ pub trait RuntimeCompilerBackend<E: FrameworkEpoch>: Send + Sync + 'static {
     type RuntimeClient: Send + Sync + 'static;
     /// Server runtime product.
     type RuntimeServer: Send + Sync + 'static;
+    /// Already-admitted parse artifact this backend consumes.
+    type ParseArtifact: Send + Sync + 'static;
+    /// Typed runtime request identity.
+    type Request: Send + Sync + 'static;
+    /// Execution inputs excluded from request identity.
+    type ExecutionInputs: Send + Sync + 'static;
+    /// Typed runtime refusal.
+    type Error: Send + Sync + 'static;
+    /// Atomic runtime publication for every requested runtime target.
+    type Output: Send + Sync + 'static;
     /// Epoch marker consumed only as a type parameter.
     const _EPOCH: PhantomData<E> = PhantomData;
+
+    /// Compile requested runtime products over an already-admitted parse.
+    /// Does not re-parse. One request shares parse, semantic, plan, and emit
+    /// prerequisites across selected runtime targets. Must not plan or
+    /// publish an IDE companion.
+    fn compile_runtime(
+        &self,
+        source: &str,
+        artifact: &Self::ParseArtifact,
+        request: &Self::Request,
+        inputs: &Self::ExecutionInputs,
+    ) -> Result<Self::Output, Self::Error>;
 }
 
 /// Host/unplugin/session integration; composes parse + semantic into compile admission.

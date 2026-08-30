@@ -47,20 +47,29 @@ use crate::assembly::vue_module::{
 };
 use crate::assembly::{ArtifactSet, AssemblyRefusal};
 use crate::compile::types::{
-    CompileDiagnostic, CompileTarget, VueExecutionInputs, VueMacroSemanticInput,
+    CodegenOptions, CompileDiagnostic, CompileTarget, ResolvedVueCompileOptions,
+    VueExecutionInputs, VueMacroSemanticInput,
 };
 use crate::compile::{
-    compile_from_parsed, compile_from_parsed_legacy, derive_legacy_vue_options,
-    parse_template_block, template_unit_used_vars,
+    compile_from_parsed, compile_from_parsed_legacy, derive_legacy_vue_options, parse_script_block,
+    parse_template_block, style_dialect, template_unit_used_vars,
 };
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, ProductKind,
 };
+use crate::framework_common::generated_chunk::{
+    compose_generated_chunk, GeneratedFragment, GeneratedUnit,
+};
 use crate::framework_common::{
     IdeOutput, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOutput,
-    RuntimeOutputDescriptor, RuntimeStyleBlock,
+    RuntimeOutputDescriptor, RuntimeStyleBlock, SourceMapFidelity,
 };
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
+use crate::style_planner::{
+    prepared_style_for_sealed_slot, run_vue_style_cascade, transform_vue_style,
+    transform_vue_v_bind, AuthoredStyleInput, PreparedStyleIr, StyleRewriteOutcome,
+    VerifiedPlainCss,
+};
 use crate::svelte::carrier::render_admitted_svelte_ide;
 use crate::svelte::ide::SvelteIdeUnsupportedDiagnostic;
 #[cfg(test)]
@@ -70,8 +79,10 @@ use crate::svelte::runtime::{
     SvelteNamespace, SvelteRuntimeOptions,
 };
 use crate::svelte::ParsedSvelte;
-use rustc_hash::FxHashMap;
+use oxc_sourcemap::{SourceMap, SourceMapBuilder};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
+use verter_css_syntax::CssDialect;
 
 /// Ephemeral, non-identity execution inputs for a Svelte compile — resolved
 /// framework facts threaded alongside a canonical
@@ -599,6 +610,989 @@ fn lower_selected_template_ide(
     })
 }
 
+/// Crate-private Vue parsed-runtime refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VueParsedRuntimeError {
+    /// Selected block content cannot be compiled truthfully.
+    BlockContentUnavailable,
+    /// Canonical request execution refused after parse.
+    RequestExecutionRefused(CompileRequestError),
+    /// Composition or publication refusal after runtime lowering.
+    Direct(DirectCompileError),
+}
+
+/// Runtime-bundle plus the original compile diagnostics captured before
+/// conversion remints carrier-owned descriptors.
+pub(crate) struct VueParsedRuntimeOutput {
+    pub bundle: RuntimeCompileOutput,
+    pub diagnostics: Vec<CompileDiagnostic>,
+}
+
+/// Canonical Vue parsed-runtime lowerer. Classifies topology before emission
+/// and is shared by the Vue runtime backend and `compile_bundle`'s runtime
+/// branch.
+pub(crate) fn lower_vue_parsed_runtime(
+    source: &str,
+    parsed: &ParsedSfc,
+    options: &CodegenOptions,
+    verter_options: &ResolvedVueCompileOptions,
+    macros: &VueMacroSemanticInput,
+    block_content: &RuntimeBlockContentInputs,
+    style_prepared: &[Option<PreparedStyleIr>],
+    alloc: &Allocator,
+) -> Result<VueParsedRuntimeOutput, VueParsedRuntimeError> {
+    match (
+        block_content.script.as_ref(),
+        block_content.script_setup.as_ref(),
+    ) {
+        (Some(_), Some(_)) | (Some(_), None) => Err(VueParsedRuntimeError::BlockContentUnavailable),
+        (None, Some(_)) if parsed.script().is_some() => {
+            Err(VueParsedRuntimeError::BlockContentUnavailable)
+        }
+        (None, Some(input)) => {
+            let mut output = compile_projected_setup(
+                source,
+                parsed,
+                input,
+                options,
+                verter_options,
+                macros,
+                block_content,
+                alloc,
+            )?;
+            apply_selected_runtime_styles(
+                &mut output.bundle,
+                parsed,
+                verter_options,
+                block_content,
+                style_prepared,
+            )?;
+            Ok(output)
+        }
+        (None, None) => compile_carrier_selected_template(
+            source,
+            parsed,
+            options,
+            verter_options,
+            macros,
+            block_content,
+            style_prepared,
+            alloc,
+        ),
+    }
+}
+
+fn compile_projected_setup(
+    source: &str,
+    parsed: &ParsedSfc,
+    input: &RuntimeBlockContentInput,
+    options: &CodegenOptions,
+    verter_options: &ResolvedVueCompileOptions,
+    macros: &VueMacroSemanticInput,
+    block_content: &RuntimeBlockContentInputs,
+    alloc: &Allocator,
+) -> Result<VueParsedRuntimeOutput, VueParsedRuntimeError> {
+    let script_parsed = parse_script_block(&input.code, &input.lang, true);
+    let selected_template = parse_selected_template(options, block_content, alloc);
+    let template_used_vars = match selected_template.as_ref() {
+        Some((_, _, used_vars)) => used_vars.clone(),
+        None => template_unit_used_vars(
+            source,
+            parsed,
+            options.delimiters.clone(),
+            options.custom_elements.clone(),
+            alloc,
+        ),
+    };
+    let mut style_v_bind_vars = verter_options.style_v_bind_vars.clone();
+    for expression in collect_style_v_bind_expressions(source, parsed, block_content) {
+        if !style_v_bind_vars
+            .iter()
+            .any(|existing| existing == &expression)
+        {
+            style_v_bind_vars.push(expression);
+        }
+    }
+    let script_result = compile_from_parsed_legacy(
+        &input.code,
+        &script_parsed,
+        &CodegenOptions {
+            filename: options.filename.clone(),
+            is_production: options.is_production,
+            custom_element: options.custom_element,
+            component_id: options.component_id.clone(),
+            inline: Some(false),
+            runtime_module_name: options.runtime_module_name.clone(),
+            types_module_name: options.types_module_name.clone(),
+            target: CompileTarget::SCRIPT,
+            embed_ambient_types: options.embed_ambient_types,
+            conditional_root_narrowing: options.conditional_root_narrowing,
+            strict_slots: options.strict_slots,
+            ..Default::default()
+        },
+        &ResolvedVueCompileOptions {
+            force_js: verter_options.force_js,
+            source_map: verter_options.source_map,
+            template_used_vars: Some(template_used_vars),
+            style_v_bind_vars,
+            ..Default::default()
+        },
+        macros,
+        alloc,
+    )
+    .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
+    let mut diagnostics = script_result.errors.clone();
+    let binding_metadata = script_result.template_binding_metadata.clone();
+    let mut script_bundle = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
+        &input.code,
+        &script_parsed,
+        script_result,
+    );
+    let mut carrier_view = parsed.clone();
+    carrier_view.script_node = None;
+    carrier_view.script_setup_node = None;
+    if selected_template.is_some() {
+        carrier_view.template_ast = None;
+    }
+    let carrier_result = compile_from_parsed_legacy(
+        source,
+        &carrier_view,
+        &CodegenOptions {
+            filename: options.filename.clone(),
+            is_production: options.is_production,
+            component_id: options.component_id.clone(),
+            inline: Some(false),
+            delimiters: options.delimiters.clone(),
+            custom_elements: options.custom_elements.clone(),
+            comments: options.comments,
+            runtime_module_name: options.runtime_module_name.clone(),
+            types_module_name: options.types_module_name.clone(),
+            target: CompileTarget::BUNDLER,
+            embed_ambient_types: options.embed_ambient_types,
+            conditional_root_narrowing: options.conditional_root_narrowing,
+            strict_slots: options.strict_slots,
+            ..Default::default()
+        },
+        &ResolvedVueCompileOptions {
+            force_vapor: verter_options.force_vapor,
+            force_js: verter_options.force_js,
+            source_map: verter_options.source_map,
+            ssr: verter_options.ssr,
+            prop_constness_overrides: binding_metadata.const_props.clone(),
+            template_binding_metadata: Some(binding_metadata.clone()),
+            ..Default::default()
+        },
+        &VueMacroSemanticInput::default(),
+        alloc,
+    )
+    .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
+    diagnostics.extend(carrier_result.errors.iter().cloned());
+    let mut bundle = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
+        source,
+        &carrier_view,
+        carrier_result,
+    );
+    let mut script = script_bundle
+        .script
+        .take()
+        .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+    script.output_descriptor = RuntimeOutputDescriptor::generated(
+        &script.code,
+        (!script.source_map.is_empty()).then_some(script.source_map.as_str()),
+        &[(
+            input.source_space_token.as_str(),
+            input.content_artifact_token.as_str(),
+        )],
+        SourceMapFidelity::Approximate,
+    );
+    bundle.script = Some(script);
+    bundle.diagnostics.extend(script_bundle.diagnostics);
+    if let Some((template_input, parsed_template, _)) = selected_template {
+        apply_selected_runtime_template(
+            &mut bundle,
+            &mut diagnostics,
+            source,
+            options,
+            verter_options,
+            binding_metadata,
+            template_input,
+            parsed_template,
+            false,
+            alloc,
+        )?;
+    }
+    Ok(VueParsedRuntimeOutput {
+        bundle,
+        diagnostics,
+    })
+}
+
+fn compile_carrier_selected_template(
+    source: &str,
+    parsed: &ParsedSfc,
+    options: &CodegenOptions,
+    verter_options: &ResolvedVueCompileOptions,
+    macros: &VueMacroSemanticInput,
+    block_content: &RuntimeBlockContentInputs,
+    style_prepared: &[Option<PreparedStyleIr>],
+    alloc: &Allocator,
+) -> Result<VueParsedRuntimeOutput, VueParsedRuntimeError> {
+    let supplied_inline_template =
+        wants_inline_selected_template(parsed, options, verter_options, block_content);
+
+    let mut carrier_view = parsed.clone();
+    if block_content.template.is_some() {
+        carrier_view.template_ast = None;
+    }
+    for (style, selected) in carrier_view
+        .style_nodes
+        .iter_mut()
+        .zip(block_content.styles.iter())
+    {
+        if selected.is_some() {
+            style.content = None;
+        }
+    }
+    let selected_template = parse_selected_template(options, block_content, alloc);
+    let carrier_verter = ResolvedVueCompileOptions {
+        force_vapor: verter_options.force_vapor,
+        force_js: verter_options.force_js,
+        source_map: verter_options.source_map,
+        ide_source_map: verter_options.ide_source_map,
+        ssr: verter_options.ssr,
+        prop_constness_overrides: verter_options.prop_constness_overrides.clone(),
+        style_v_bind_vars: verter_options.style_v_bind_vars.clone(),
+        style_v_bind_usage_complete: verter_options.style_v_bind_usage_complete,
+        template_binding_metadata: verter_options.template_binding_metadata.clone(),
+        template_used_vars: selected_template
+            .as_ref()
+            .map(|(_, _, used_vars)| used_vars.clone()),
+        runtime_template_hole: supplied_inline_template,
+        runtime_inline_template_chunk: false,
+        prepared_styles: verter_options.prepared_styles.clone(),
+    };
+    let result = compile_from_parsed_legacy(
+        source,
+        &carrier_view,
+        options,
+        &carrier_verter,
+        macros,
+        alloc,
+    )
+    .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
+    let mut diagnostics = result.errors.clone();
+    let binding_metadata = result.template_binding_metadata.clone();
+    let mut bundle = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
+        source,
+        &carrier_view,
+        result,
+    );
+
+    if let Some((input, parsed_template, _)) = selected_template {
+        apply_selected_runtime_template(
+            &mut bundle,
+            &mut diagnostics,
+            source,
+            options,
+            verter_options,
+            binding_metadata,
+            input,
+            parsed_template,
+            supplied_inline_template,
+            alloc,
+        )?;
+    }
+
+    apply_selected_runtime_styles(
+        &mut bundle,
+        parsed,
+        verter_options,
+        block_content,
+        style_prepared,
+    )?;
+    Ok(VueParsedRuntimeOutput {
+        bundle,
+        diagnostics,
+    })
+}
+
+fn wants_inline_selected_template(
+    parsed: &ParsedSfc,
+    options: &CodegenOptions,
+    verter_options: &ResolvedVueCompileOptions,
+    block_content: &RuntimeBlockContentInputs,
+) -> bool {
+    block_content.template.is_some()
+        && options.inline.unwrap_or(options.is_production)
+        && parsed.script_setup().is_some()
+        && !verter_options.force_vapor
+        && !verter_options.ssr
+}
+
+fn parse_selected_template<'a>(
+    options: &CodegenOptions,
+    block_content: &'a RuntimeBlockContentInputs,
+    alloc: &Allocator,
+) -> Option<(&'a RuntimeBlockContentInput, ParsedSfc, FxHashSet<String>)> {
+    block_content.template.as_ref().map(|input| {
+        let delimiters = options
+            .delimiters
+            .as_ref()
+            .map(|(open, close)| (open.as_str(), close.as_str()));
+        let parsed_template =
+            parse_template_block(&input.code, delimiters, options.custom_elements.as_deref());
+        let used_vars = template_unit_used_vars(
+            &input.code,
+            &parsed_template,
+            options.delimiters.clone(),
+            options.custom_elements.clone(),
+            alloc,
+        );
+        (input, parsed_template, used_vars)
+    })
+}
+
+fn apply_selected_runtime_template(
+    bundle: &mut RuntimeCompileOutput,
+    diagnostics: &mut Vec<CompileDiagnostic>,
+    source: &str,
+    options: &CodegenOptions,
+    verter_options: &ResolvedVueCompileOptions,
+    binding_metadata: crate::compile::types::TemplateBindingMetadata,
+    input: &RuntimeBlockContentInput,
+    parsed_template: ParsedSfc,
+    inline: bool,
+    alloc: &Allocator,
+) -> Result<(), VueParsedRuntimeError> {
+    let template_options = CodegenOptions {
+        filename: Some(input.source_space_token.clone()),
+        is_production: options.is_production,
+        component_id: options.component_id.clone(),
+        delimiters: options.delimiters.clone(),
+        custom_elements: options.custom_elements.clone(),
+        comments: options.comments,
+        runtime_module_name: options.runtime_module_name.clone(),
+        target: CompileTarget::TEMPLATE,
+        ..CodegenOptions::default()
+    };
+    let template_verter = ResolvedVueCompileOptions {
+        force_vapor: verter_options.force_vapor,
+        force_js: verter_options.force_js,
+        source_map: verter_options.source_map,
+        ssr: verter_options.ssr,
+        prop_constness_overrides: binding_metadata.const_props.clone(),
+        template_binding_metadata: Some(binding_metadata),
+        runtime_inline_template_chunk: inline,
+        ..Default::default()
+    };
+    let compiled = compile_from_parsed_legacy(
+        &input.code,
+        &parsed_template,
+        &template_options,
+        &template_verter,
+        &VueMacroSemanticInput::default(),
+        alloc,
+    )
+    .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
+    diagnostics.extend(compiled.errors.iter().cloned());
+    let mut selected = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
+        &input.code,
+        &parsed_template,
+        compiled,
+    );
+    if let Some(template) = selected.template.as_mut() {
+        let corrected_map = correct_selected_unit_map(
+            &template.source_map,
+            input.source_map.as_deref(),
+            verter_options.source_map,
+        )?;
+        template.source_map = corrected_map.clone();
+        template.output_descriptor = RuntimeOutputDescriptor::generated(
+            &template.code,
+            (!corrected_map.is_empty()).then_some(corrected_map.as_str()),
+            &[(
+                input.source_space_token.as_str(),
+                input.content_artifact_token.as_str(),
+            )],
+            SourceMapFidelity::Approximate,
+        );
+    }
+    if inline {
+        splice_inline_template(bundle, &selected, source, input, options)?;
+    } else {
+        bundle.template = selected.template;
+    }
+    bundle.diagnostics.extend(selected.diagnostics);
+    Ok(())
+}
+
+fn correct_selected_unit_map(
+    generated: &str,
+    supplied: Option<&str>,
+    want_source_map: bool,
+) -> Result<String, VueParsedRuntimeError> {
+    if !want_source_map {
+        return Ok(String::new());
+    }
+    match supplied.filter(|map| !map.is_empty()) {
+        Some(supplied) => chain_generated_map_json(generated, supplied)
+            .ok_or(VueParsedRuntimeError::BlockContentUnavailable),
+        None => Ok(generated.to_string()),
+    }
+}
+
+fn chain_generated_map_json(generated: &str, input: &str) -> Option<String> {
+    if generated.is_empty() {
+        return (!input.is_empty()).then(|| input.to_string());
+    }
+    if input.is_empty() {
+        return Some(generated.to_string());
+    }
+    let generated_map = SourceMap::from_json_string(generated).ok()?;
+    let input_map = SourceMap::from_json_string(input).ok()?;
+    let lookup = input_map.generate_lookup_table();
+    let mut builder = SourceMapBuilder::default();
+    let source_ids: Vec<u32> = input_map
+        .get_sources()
+        .enumerate()
+        .map(|(index, source)| {
+            let content = input_map.get_source_content(index as u32).unwrap_or("");
+            builder.add_source_and_content(source, content)
+        })
+        .collect();
+    for token in generated_map.get_tokens() {
+        let Some(original) =
+            input_map.lookup_token(&lookup, token.get_src_line(), token.get_src_col())
+        else {
+            continue;
+        };
+        let source_id = original
+            .get_source_id()
+            .and_then(|id| source_ids.get(id as usize).copied());
+        builder.add_token(
+            token.get_dst_line(),
+            token.get_dst_col(),
+            original.get_src_line(),
+            original.get_src_col(),
+            source_id,
+            None,
+        );
+    }
+    Some(builder.into_sourcemap().to_json_string())
+}
+
+fn collect_style_v_bind_expressions(
+    source: &str,
+    parsed: &ParsedSfc,
+    block_content: &RuntimeBlockContentInputs,
+) -> Vec<String> {
+    let mut expressions = Vec::new();
+    for (index, node) in parsed.style_nodes().iter().enumerate() {
+        let (css, dialect): (&str, CssDialect) =
+            if let Some(selected) = block_content.styles.get(index).and_then(Option::as_ref) {
+                let dialect = match selected.lang.as_str() {
+                    "css" => CssDialect::Css,
+                    "scss" => CssDialect::Scss,
+                    "sass" => CssDialect::Sass,
+                    "less" => CssDialect::Less,
+                    "stylus" | "styl" => CssDialect::Stylus,
+                    _ => continue,
+                };
+                (selected.code.as_ref(), dialect)
+            } else {
+                let Some(content) = node.content else {
+                    continue;
+                };
+                let Some(dialect) = style_dialect(node.lang) else {
+                    continue;
+                };
+                (
+                    &source[content.start as usize..content.end as usize],
+                    dialect,
+                )
+            };
+        if css.is_empty() {
+            continue;
+        }
+        let authored =
+            AuthoredStyleInput::new(css, dialect, "style", "style", "style").without_source_map();
+        let Ok(outcome) = transform_vue_v_bind(authored, "scope") else {
+            continue;
+        };
+        let facts = match outcome {
+            StyleRewriteOutcome::Unchanged { facts }
+            | StyleRewriteOutcome::Rewritten { facts, .. } => facts,
+        };
+        for var in facts.v_bind_vars {
+            if !expressions
+                .iter()
+                .any(|existing| existing == &var.expression)
+            {
+                expressions.push(var.expression);
+            }
+        }
+    }
+    expressions
+}
+
+fn splice_inline_template(
+    bundle: &mut RuntimeCompileOutput,
+    selected: &RuntimeCompileOutput,
+    source: &str,
+    input: &RuntimeBlockContentInput,
+    options: &CodegenOptions,
+) -> Result<(), VueParsedRuntimeError> {
+    let mut shell = bundle
+        .script
+        .take()
+        .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+    let template = selected
+        .template
+        .as_ref()
+        .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+    let hole = shell
+        .generated_template_hole
+        .clone()
+        .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+    let mut imports = template
+        .imports
+        .iter()
+        .filter(|name| !shell.runtime_imports.contains(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    imports.sort_unstable();
+    imports.dedup();
+    shell.runtime_imports.extend(imports.iter().cloned());
+    shell.runtime_imports.sort_unstable();
+    shell.runtime_imports.dedup();
+    let preamble = if imports.is_empty() {
+        String::new()
+    } else {
+        let specifiers = imports
+            .iter()
+            .map(|name| crate::compile::format_import_specifier(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "import {{ {specifiers} }} from \"{}\"\n",
+            options.runtime_module_name.as_deref().unwrap_or("vue")
+        )
+    };
+    let (carrier_space, carrier_artifact) = RuntimeOutputDescriptor::carrier_source(source);
+    let inserted_len = template.code.len() as u32 + 2;
+    let composed = compose_generated_chunk(
+        &preamble,
+        GeneratedUnit {
+            code: &shell.code,
+            source_map: &shell.source_map,
+            source_space: &carrier_space,
+            source,
+        },
+        hole.clone(),
+        GeneratedFragment {
+            unit: GeneratedUnit {
+                code: &template.code,
+                source_map: &template.source_map,
+                source_space: &input.source_space_token,
+                source: &input.code,
+            },
+            range: 0..template.code.len() as u32,
+        },
+    )
+    .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+    if let Some(placement) = shell.sfc_export_placement.as_mut() {
+        *placement =
+            shift_sfc_export_placement(placement, hole, preamble.len() as u32, inserted_len)
+                .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+    }
+    shell.code = composed.code;
+    shell.source_map = composed.source_map;
+    shell.generated_template_hole = None;
+    shell.output_descriptor = RuntimeOutputDescriptor::generated(
+        &shell.code,
+        Some(&shell.source_map),
+        &[
+            (carrier_space.as_str(), carrier_artifact.as_str()),
+            (
+                input.source_space_token.as_str(),
+                input.content_artifact_token.as_str(),
+            ),
+        ],
+        SourceMapFidelity::Approximate,
+    );
+    bundle.script = Some(shell);
+    bundle.template = None;
+    bundle.inline = true;
+    Ok(())
+}
+
+fn shift_sfc_export_placement(
+    placement: &crate::assembly::fragment::SfcExportPlacement,
+    hole: std::ops::Range<u32>,
+    preamble_len: u32,
+    inserted_len: u32,
+) -> Option<crate::assembly::fragment::SfcExportPlacement> {
+    let hole_len = hole.end.checked_sub(hole.start)?;
+    let shift = |range: std::ops::Range<u32>| -> Option<std::ops::Range<u32>> {
+        if range.end <= hole.start {
+            Some(range.start.checked_add(preamble_len)?..range.end.checked_add(preamble_len)?)
+        } else if range.start >= hole.end {
+            let delta = preamble_len
+                .checked_add(inserted_len)?
+                .checked_sub(hole_len)?;
+            Some(range.start.checked_add(delta)?..range.end.checked_add(delta)?)
+        } else {
+            None
+        }
+    };
+    let binding_ranges = placement
+        .binding_ranges
+        .iter()
+        .cloned()
+        .map(shift)
+        .collect::<Option<Vec<_>>>()?;
+    let export_statement_range = match placement.export_statement_range.clone() {
+        Some(range) => Some(shift(range)?),
+        None => None,
+    };
+    Some(crate::assembly::fragment::SfcExportPlacement {
+        binding_ranges,
+        export_statement_range,
+    })
+}
+
+fn apply_selected_runtime_styles(
+    bundle: &mut RuntimeCompileOutput,
+    parsed: &ParsedSfc,
+    verter_options: &ResolvedVueCompileOptions,
+    block_content: &RuntimeBlockContentInputs,
+    style_prepared: &[Option<PreparedStyleIr>],
+) -> Result<(), VueParsedRuntimeError> {
+    let style_scope = bundle
+        .scope_id
+        .strip_prefix("data-v-")
+        .unwrap_or(&bundle.scope_id)
+        .to_string();
+    for (style_index, ((slot, selected), node)) in block_content
+        .styles
+        .iter()
+        .zip(bundle.styles.iter_mut())
+        .zip(parsed.style_nodes())
+        .enumerate()
+    {
+        let Some(input) = slot else {
+            continue;
+        };
+        let authored_dialect = style_dialect(node.lang);
+        let selected_dialect = match input.lang.as_str() {
+            "css" => CssDialect::Css,
+            "scss" => CssDialect::Scss,
+            "sass" => CssDialect::Sass,
+            "less" => CssDialect::Less,
+            "stylus" | "styl" => CssDialect::Stylus,
+            _ => return Err(VueParsedRuntimeError::BlockContentUnavailable),
+        };
+        let supplied_preprocessor_output =
+            selected_dialect == CssDialect::Css && authored_dialect != Some(CssDialect::Css);
+        if authored_dialect.is_none() && !supplied_preprocessor_output {
+            return Err(VueParsedRuntimeError::BlockContentUnavailable);
+        }
+        let mut current = input.code.to_string();
+        let mut current_map = if verter_options.source_map {
+            input.source_map.as_deref().map(str::to_string)
+        } else {
+            None
+        };
+        let mut descriptor = RuntimeOutputDescriptor::identity(
+            &current,
+            &input.source_space_token,
+            &input.content_artifact_token,
+        );
+        let mut applied_rewrite_stages = 0u8;
+
+        if !supplied_preprocessor_output {
+            let mut authored = AuthoredStyleInput::new(
+                &current,
+                selected_dialect,
+                &input.source_space_token,
+                &input.source_space_token,
+                &input.content_artifact_token,
+            );
+            if let Some(prepared) = prepared_style_for_sealed_slot(
+                input.parsed.as_ref(),
+                style_prepared,
+                style_index,
+                current.as_str(),
+            ) {
+                authored = authored.with_prepared(prepared.ir());
+            }
+            let cascade_module = node.module && selected_dialect == CssDialect::Css;
+            let outcome = run_vue_style_cascade(
+                authored,
+                &style_scope,
+                cascade_module,
+                node.scoped,
+                verter_options.source_map,
+            );
+            if !outcome.stage_failures.is_empty() {
+                return Err(VueParsedRuntimeError::BlockContentUnavailable);
+            }
+            let stage_count = [
+                outcome.facts.rewrites.v_bind,
+                outcome.facts.rewrites.css_modules,
+                outcome.facts.rewrites.scoped_selector
+                    || outcome.facts.rewrites.keyframes
+                    || outcome.facts.rewrites.deep
+                    || outcome.facts.rewrites.slotted
+                    || outcome.facts.rewrites.global,
+            ]
+            .into_iter()
+            .filter(|applied| *applied)
+            .count();
+            if stage_count > 0 {
+                current = outcome.code;
+                current_map = compose_selected_style_map(
+                    verter_options.source_map,
+                    &outcome.source_map,
+                    input.source_map.as_deref(),
+                )?;
+                descriptor = RuntimeOutputDescriptor::generated(
+                    &current,
+                    current_map.as_deref(),
+                    &[(
+                        input.source_space_token.as_str(),
+                        input.content_artifact_token.as_str(),
+                    )],
+                    SourceMapFidelity::Exact,
+                );
+                applied_rewrite_stages = applied_rewrite_stages.saturating_add(stage_count as u8);
+            }
+        } else {
+            let prepared = prepared_style_for_sealed_slot(
+                input.parsed.as_ref(),
+                style_prepared,
+                style_index,
+                current.as_str(),
+            )
+            .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+            let verified = VerifiedPlainCss::from_parsed_native_css(prepared.ir())
+                .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?;
+            let cascade_module = node.module && selected_dialect == CssDialect::Css;
+            let outcome = transform_vue_style(
+                verified,
+                &input.source_space_token,
+                &input.source_space_token,
+                &input.content_artifact_token,
+                &style_scope,
+                cascade_module,
+                node.scoped,
+                verter_options.source_map,
+            );
+            if !outcome.stage_failures.is_empty() {
+                return Err(VueParsedRuntimeError::BlockContentUnavailable);
+            }
+            let stage_count = [
+                outcome.facts.rewrites.v_bind,
+                outcome.facts.rewrites.css_modules,
+                outcome.facts.rewrites.scoped_selector
+                    || outcome.facts.rewrites.keyframes
+                    || outcome.facts.rewrites.deep
+                    || outcome.facts.rewrites.slotted
+                    || outcome.facts.rewrites.global,
+            ]
+            .into_iter()
+            .filter(|applied| *applied)
+            .count();
+            if stage_count > 0 {
+                current = outcome.code;
+                current_map = compose_selected_style_map(
+                    verter_options.source_map,
+                    &outcome.source_map,
+                    input.source_map.as_deref(),
+                )?;
+                descriptor = RuntimeOutputDescriptor::generated(
+                    &current,
+                    current_map.as_deref(),
+                    &[(
+                        input.source_space_token.as_str(),
+                        input.content_artifact_token.as_str(),
+                    )],
+                    SourceMapFidelity::Exact,
+                );
+                applied_rewrite_stages = applied_rewrite_stages.saturating_add(stage_count as u8);
+            }
+        }
+
+        if applied_rewrite_stages > 1 {
+            descriptor.source_map.fidelity = SourceMapFidelity::Approximate;
+        }
+
+        selected.code = current;
+        selected.source_map = current_map;
+        selected.lang = Some(input.lang.clone());
+        selected.output_descriptor = descriptor;
+    }
+    Ok(())
+}
+
+fn compose_selected_style_map(
+    want_source_map: bool,
+    cascade_map: &str,
+    supplied: Option<&str>,
+) -> Result<Option<String>, VueParsedRuntimeError> {
+    if !want_source_map {
+        return Ok(None);
+    }
+    let composed = match supplied.filter(|map| !map.is_empty()) {
+        Some(supplied) => chain_generated_map_json(cascade_map, supplied)
+            .ok_or(VueParsedRuntimeError::BlockContentUnavailable)?,
+        None => cascade_map.to_string(),
+    };
+    Ok((!composed.is_empty()).then_some(composed))
+}
+
+/// Compile requested Vue runtime products over an already-parsed SFC through
+/// the canonical parsed-runtime core, then publish an atomic artifact set.
+pub(crate) fn compile_vue_parsed_runtime(
+    source: &str,
+    parsed: &ParsedSfc,
+    request: &CompileRequest,
+    execution_inputs: &VueExecutionInputs,
+    macros: &VueMacroSemanticInput,
+    block_content: &RuntimeBlockContentInputs,
+    style_prepared: &[Option<PreparedStyleIr>],
+) -> Result<DirectCompileOutput, VueParsedRuntimeError> {
+    refuse_unproducible_plan(request).map_err(map_direct_runtime_err)?;
+    let resolved_backend = request
+        .resolve_vue_backend(parsed.is_vapor())
+        .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
+    let (options, verter) = derive_legacy_vue_options(request, resolved_backend, execution_inputs);
+    let allocator = Allocator::new();
+    let primary = lower_vue_parsed_runtime(
+        source,
+        parsed,
+        &options,
+        &verter,
+        macros,
+        block_content,
+        style_prepared,
+        &allocator,
+    )?;
+
+    let plan = ProductPlan::from_request(request);
+    let wants_client = plan.wants(ProductKind::RuntimeClient);
+    let wants_server = plan.wants(ProductKind::RuntimeServer);
+    let primary_kind = if wants_server {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    };
+    let vue_request = request.vue().ok_or(VueParsedRuntimeError::Direct(
+        DirectCompileError::FrameworkMismatch {
+            expected: "Vue",
+            actual: "Svelte",
+        },
+    ))?;
+    let dialect = direct_vue_dialect(parsed, request.force_js());
+    let want_maps = runtime_source_map_wanted(request, primary_kind);
+    let mut diagnostics = primary.diagnostics.clone();
+    let composed = compose_vue_runtime(
+        source,
+        vue_request,
+        request.filename(),
+        dialect,
+        primary_kind,
+        &primary.bundle,
+        want_maps,
+    )
+    .map_err(map_direct_runtime_err)?;
+    let mut runtime_composed = vec![(composed, primary_kind, dialect, want_maps)];
+
+    let secondary_output;
+    if wants_client && wants_server {
+        let secondary_kind = ProductKind::RuntimeClient;
+        let secondary_request = single_runtime_product_request(request, secondary_kind)
+            .map_err(map_direct_runtime_err)?;
+        let secondary_resolved = secondary_request
+            .resolve_vue_backend(parsed.is_vapor())
+            .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
+        let (secondary_options, secondary_verter) =
+            derive_legacy_vue_options(&secondary_request, secondary_resolved, execution_inputs);
+        secondary_output = lower_vue_parsed_runtime(
+            source,
+            parsed,
+            &secondary_options,
+            &secondary_verter,
+            macros,
+            block_content,
+            style_prepared,
+            &allocator,
+        )?;
+        diagnostics.extend(secondary_output.diagnostics.iter().cloned());
+        let secondary_dialect = direct_vue_dialect(parsed, secondary_request.force_js());
+        let secondary_want_maps = runtime_source_map_wanted(&secondary_request, secondary_kind);
+        let secondary_vue = secondary_request
+            .vue()
+            .ok_or(VueParsedRuntimeError::Direct(
+                DirectCompileError::FrameworkMismatch {
+                    expected: "Vue",
+                    actual: "Svelte",
+                },
+            ))?;
+        let secondary_composed = compose_vue_runtime(
+            source,
+            secondary_vue,
+            secondary_request.filename(),
+            secondary_dialect,
+            secondary_kind,
+            &secondary_output.bundle,
+            secondary_want_maps,
+        )
+        .map_err(map_direct_runtime_err)?;
+        runtime_composed.push((
+            secondary_composed,
+            secondary_kind,
+            secondary_dialect,
+            secondary_want_maps,
+        ));
+    }
+
+    let mut contributions: Vec<ArtifactContribution<'_>> = Vec::new();
+    for (composed, kind, dialect, want_maps) in &runtime_composed {
+        let fragment_refs: Vec<_> = composed.fragments.iter().collect();
+        contributions.push(ArtifactContribution {
+            kind: *kind,
+            fragments: fragment_refs,
+            code: composed.code.clone(),
+            emitted_imports: composed.emitted_imports.clone(),
+            dialect: *dialect,
+            source_projection_map: None,
+            runtime_source_map: want_maps.then(|| composed.source_map.clone()),
+        });
+    }
+    for planned in plan.artifacts() {
+        if !contributions.iter().any(|c| c.kind == planned.kind) {
+            return Err(VueParsedRuntimeError::Direct(
+                DirectCompileError::UnsupportedProduct(planned.kind),
+            ));
+        }
+    }
+    let artifacts = publish(&plan, contributions)
+        .map_err(|err| VueParsedRuntimeError::Direct(DirectCompileError::Publish(err)))?;
+    Ok(DirectCompileOutput {
+        artifacts,
+        styles: primary.bundle.styles,
+        diagnostics,
+    })
+}
+
+fn map_direct_runtime_err(err: DirectCompileError) -> VueParsedRuntimeError {
+    match err {
+        DirectCompileError::Vue(error) => VueParsedRuntimeError::RequestExecutionRefused(error),
+        other => VueParsedRuntimeError::Direct(other),
+    }
+}
+
 /// Stateless compiler for callers that do not participate in a registered
 /// host.
 #[derive(Debug, Default, Clone, Copy)]
@@ -868,11 +1862,11 @@ impl StandaloneCompiler {
             if wants_client && wants_server {
                 let secondary_kind = ProductKind::RuntimeClient;
                 let secondary_request = single_runtime_product_request(request, secondary_kind)?;
-                let secondary_allocator = Allocator::new();
                 // Reuses the SAME `parsed` as the primary compile — proven
                 // behavior-preserving (see this module's own doc): both
                 // sub-requests parse the identical source under identical
                 // options, and `compile_inner` never re-parses internally.
+                let secondary_allocator = Allocator::new();
                 let secondary_result = crate::compile::compile_from_parsed(
                     source,
                     parsed,
@@ -1365,11 +2359,16 @@ fn compose_vue_runtime(
                 crate::assembly::ComposeRefusal::UncomposableMap,
             ))
         })?;
-    let template_map_json = bundle
-        .template
-        .as_ref()
-        .map(|t| t.source_map.clone())
-        .filter(|map| !map.is_empty());
+    let template_map_json = bundle.template.as_ref().and_then(|template| {
+        template
+            .output_descriptor
+            .source_map
+            .raw_map
+            .as_deref()
+            .filter(|map| !map.is_empty())
+            .map(str::to_string)
+            .or_else(|| (!template.source_map.is_empty()).then(|| template.source_map.clone()))
+    });
 
     let compose_request = VueMainModuleRequest {
         canonical_id: filename.unwrap_or(""),
