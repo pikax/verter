@@ -2246,3 +2246,42 @@ fn dual_runtime_compile_publishes_secondary_leg_diagnostics() {
          followed by the secondary (client) compile's own"
     );
 }
+
+/// A MIXED-product request (a non-runtime product co-planned beside dual
+/// client+server runtime legs) publishes the primary compile's diagnostics
+/// only: the secondary (client) leg's diagnostics are byte-identical
+/// re-reports of the same source findings, and appending them would
+/// double-publish every target-independent diagnostic.
+#[test]
+fn mixed_product_compile_publishes_primary_diagnostics_only() {
+    let compiler = StandaloneCompiler;
+    let server_only = compiler
+        .compile(
+            VUE_DUPLICATE_DIRECTIVE,
+            &vue_request(vec![CompileProduct::RuntimeServer(
+                RuntimeProductRequest::default(),
+            )]),
+            vue_inputs(),
+        )
+        .expect("server-only compile succeeds");
+    assert!(
+        !server_only.diagnostics.is_empty(),
+        "fixture must produce a primary-leg diagnostic for this test to discriminate"
+    );
+    let mixed = compiler
+        .compile(
+            VUE_DUPLICATE_DIRECTIVE,
+            &vue_request(vec![
+                CompileProduct::IdeCompanion(IdeProductRequest::default()),
+                CompileProduct::RuntimeClient(RuntimeProductRequest::default()),
+                CompileProduct::RuntimeServer(RuntimeProductRequest::default()),
+            ]),
+            vue_inputs(),
+        )
+        .expect("mixed IDE + dual-runtime compile succeeds");
+    assert_eq!(
+        mixed.diagnostics, server_only.diagnostics,
+        "a mixed-product compile must publish exactly the primary (server) \
+         compile's diagnostic set — never a duplicated secondary-leg copy"
+    );
+}

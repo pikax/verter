@@ -2358,7 +2358,7 @@ impl StandaloneCompiler {
         // `result.errors` rather than read back out of the bundle.
         let tsx = result.tsx.take();
         let tsc = result.tsc.take();
-        let mut diagnostics = std::mem::take(&mut result.errors);
+        let diagnostics = std::mem::take(&mut result.errors);
 
         let mut contributions: Vec<ArtifactContribution<'_>> = Vec::new();
         let mut styles: Vec<RuntimeStyleBlock> = Vec::new();
@@ -2445,7 +2445,10 @@ impl StandaloneCompiler {
                     &bundle,
                 )
                 .map_err(|err| vue_parsed_runtime_to_direct(err, &plan))?;
-            diagnostics.extend(composed.secondary_diagnostics);
+            // The mixed route publishes the primary compile's diagnostics
+            // only: the secondary leg's diagnostics are byte-identical
+            // re-reports of the same source findings, so appending them
+            // would double-publish every target-independent diagnostic.
             runtime_legs = Some(composed.legs);
         }
         for (composed, kind, dialect, want_maps) in runtime_legs.iter().flatten() {
