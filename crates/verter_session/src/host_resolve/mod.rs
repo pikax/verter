@@ -24,6 +24,9 @@
 //!   construction/derivation pair `compile_entry` /
 //!   `compile_entry_runtime_render` route every compile through.
 //! - [`frontier_helpers`] — route-cache and wildcard-ranking helpers.
+//! - [`native_host_binding`] — the sealed request-scoped
+//!   `BoundNativeHostRequest` binding substrate over the registered
+//!   framework host-integration catalog.
 //! - [`dependency_resolution`] — import-route + dependency canonical
 //!   resolution.
 //! - [`frontier_engine`] — named-type export route resolution.
@@ -40,6 +43,7 @@ mod external_type_resolution;
 pub(crate) mod fallthrough_props;
 mod frontier_engine;
 mod frontier_helpers;
+pub mod native_host_binding;
 mod route_surface;
 mod rune_ambient;
 mod virtual_file_pipeline;

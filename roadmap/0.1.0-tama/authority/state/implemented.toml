@@ -338,6 +338,11 @@ node_id = "CCA1N2"
 commit_message = "feat(core): add the svelte host-integration backend with demand-scoped admission"
 commit_date = "2026-08-30T21:45:00+01:00"
 
+[[implemented]]
+node_id = "CCA1N2A"
+commit_message = "feat(core): add the request-scoped native host binding substrate"
+commit_date = "2026-08-30T22:28:21+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

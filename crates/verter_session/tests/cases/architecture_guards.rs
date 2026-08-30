@@ -5676,6 +5676,14 @@ pub(crate) mod foundations_guards {
         // assembler's own signature, so a caller outside this crate cannot
         // name its return type without them.
         "pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment}",
+        // Sealed request-scoped native host binding substrate
+        // (`BoundNativeHostRequest` + its typed unavailable outcomes).
+        // Public so the out-of-crate seal is provable: the trybuild
+        // fixture `tests/cases/compile-fail/native_host_binding_sealed.rs`
+        // must NAME the type to prove it is not Clone/Copy/serializable
+        // and that the framework-specific host binding is unreachable
+        // outside the single by-value consumption seam.
+        "pub use host_resolve::native_host_binding::",
         // The exhaustive uncomposable-input-map taxonomy carried by
         // `AssembleMapFailure`, so a caller can discriminate the exact sub-code
         // and its family rather than matching on a rendered message. Also

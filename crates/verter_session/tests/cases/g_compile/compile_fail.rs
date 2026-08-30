@@ -494,6 +494,22 @@ fn deferred_callable_is_sealed_to_its_two_consumers() {
     t.compile_fail("tests/cases/compile-fail/deferred_callable_is_sealed_to_its_two_consumers.rs");
 }
 
+/// The request-scoped native host binding (`BoundNativeHostRequest`) is
+/// sealed: not `Clone`/`Copy`, not serializable/deserializable, and the
+/// opaque framework-specific host binding inside a variant payload is a
+/// private field — reachable only through the single by-value
+/// consumption seam. If any seal regressed, the corresponding fixture
+/// line would compile and trybuild would fail.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn native_host_binding_is_sealed_non_clonable_non_serializable() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/native_host_binding_sealed.rs");
+}
+
 /// `HostDiagnostic.span` is mandatory (`verter_span::Span`, not
 /// `Option`). A producer that cannot map a location must fail closed.
 /// If the field became `Option`, this fixture would compile.
