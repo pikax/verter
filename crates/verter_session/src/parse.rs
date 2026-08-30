@@ -2536,6 +2536,7 @@ pub(crate) fn compile_template_data(
         compile_source,
         TemplateFactsBasis::AdmittedArtifact,
     )
+    .map(|facts| facts.data)
 }
 
 pub(crate) fn build_non_sfc_snapshot_from_program(

@@ -610,6 +610,23 @@ fn frontend_epoch(
     })
 }
 
+/// Template facts plus the diagnostics their extraction produced.
+///
+/// The template-fact producer is the ONLY pass that parses template
+/// directive/interpolation expressions on the analysis route, so its
+/// diagnostics (e.g. an `XInvalidExpression` for a malformed `v-if`
+/// expression) are part of the product: a consumer that publishes the
+/// facts publishes these diagnostics alongside them. Dropping them
+/// silently erases the file's template expression errors.
+#[derive(Debug, Default)]
+pub struct TemplateFactsProduct {
+    /// The extracted raw template data.
+    pub data: RawTemplateData,
+    /// Diagnostics emitted while extracting the facts (deduplicated by
+    /// the consumer against its own parse-time channel).
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
 /// Type-erased semantic payload stored on a catalog row.
 ///
 /// Lookup invokes [`Self::eval_source`] / [`Self::template_facts`]
@@ -617,7 +634,7 @@ fn frontend_epoch(
 #[derive(Clone, Copy)]
 pub struct InstalledSemanticAuthority {
     eval_source_fn: fn(&str, &FrameworkParseArtifact) -> Arc<str>,
-    template_facts_fn: fn(&str, &FrameworkParseArtifact) -> Option<RawTemplateData>,
+    template_facts_fn: fn(&str, &FrameworkParseArtifact) -> Option<TemplateFactsProduct>,
 }
 
 impl PartialEq for InstalledSemanticAuthority {
@@ -639,7 +656,7 @@ impl std::fmt::Debug for InstalledSemanticAuthority {
 impl InstalledSemanticAuthority {
     const fn new(
         eval_source_fn: fn(&str, &FrameworkParseArtifact) -> Arc<str>,
-        template_facts_fn: fn(&str, &FrameworkParseArtifact) -> Option<RawTemplateData>,
+        template_facts_fn: fn(&str, &FrameworkParseArtifact) -> Option<TemplateFactsProduct>,
     ) -> Self {
         Self {
             eval_source_fn,
@@ -662,7 +679,7 @@ impl InstalledSemanticAuthority {
         &self,
         source: &str,
         artifact: &FrameworkParseArtifact,
-    ) -> Option<RawTemplateData> {
+    ) -> Option<TemplateFactsProduct> {
         #[cfg(any(test, feature = "test-support"))]
         TEMPLATE_FACTS_PRODUCER_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
         (self.template_facts_fn)(source, artifact)
@@ -691,7 +708,7 @@ fn vue_semantic_eval_source(source: &str, artifact: &FrameworkParseArtifact) -> 
 fn vue_semantic_template_facts(
     source: &str,
     artifact: &FrameworkParseArtifact,
-) -> Option<RawTemplateData> {
+) -> Option<TemplateFactsProduct> {
     FrameworkSemanticAuthority::<VueSfcV3>::template_facts(&VueSemanticAuthority, source, artifact)
 }
 
@@ -706,7 +723,7 @@ fn svelte_semantic_eval_source(source: &str, artifact: &FrameworkParseArtifact) 
 fn svelte_semantic_template_facts(
     source: &str,
     artifact: &FrameworkParseArtifact,
-) -> Option<RawTemplateData> {
+) -> Option<TemplateFactsProduct> {
     FrameworkSemanticAuthority::<SvelteSfc5>::template_facts(
         &SvelteSemanticAuthority,
         source,
@@ -832,7 +849,7 @@ pub fn template_facts_from_catalog(
     artifact: &FrameworkParseArtifact,
     source: &str,
     basis: TemplateFactsBasis<'_>,
-) -> Option<RawTemplateData> {
+) -> Option<TemplateFactsProduct> {
     if let TemplateFactsBasis::SelectedTemplate(bytes) = basis {
         if !selected_template_equals_admitted_host(artifact, bytes) {
             return None;

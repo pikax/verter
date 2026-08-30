@@ -11,6 +11,7 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 use crate::compile::RawTemplateData;
 use crate::framework_common::capability::{FrameworkSemanticAuthority, Present};
 use crate::framework_common::catalog::{SemanticCap, TypedCapabilityRegistration};
+use crate::framework_common::registered_carrier_projection::TemplateFactsProduct;
 use crate::framework_common::CarrierCompiler;
 use crate::framework_common::FrameworkParseArtifact;
 use crate::svelte::carrier::SvelteParseCarrier;
@@ -44,7 +45,7 @@ impl SvelteSemanticAuthority {
 
 impl FrameworkSemanticAuthority<SvelteSfc5> for SvelteSemanticAuthority {
     type EvalSource = Arc<str>;
-    type TemplateFacts = Option<RawTemplateData>;
+    type TemplateFacts = Option<TemplateFactsProduct>;
     type StyleMeaning = ();
     type SemanticAdmission = SvelteSemanticAdmission;
     type ParseArtifact = FrameworkParseArtifact;
@@ -59,7 +60,7 @@ impl FrameworkSemanticAuthority<SvelteSfc5> for SvelteSemanticAuthority {
         &self,
         source: &str,
         artifact: &FrameworkParseArtifact,
-    ) -> Option<RawTemplateData> {
+    ) -> Option<TemplateFactsProduct> {
         let carrier = artifact.carrier_ref::<SvelteParseCarrier>()?;
         let parsed = carrier.parsed();
         let mut data = RawTemplateData::default();
@@ -71,7 +72,10 @@ impl FrameworkSemanticAuthority<SvelteSfc5> for SvelteSemanticAuthority {
         );
         super::template_facts::collect_snippet_definitions(&parsed.template, source, &mut data);
         super::template_facts::collect_svelte_directives(&parsed.template, source, &mut data);
-        Some(data)
+        Some(TemplateFactsProduct {
+            data,
+            diagnostics: Vec::new(),
+        })
     }
 }
 

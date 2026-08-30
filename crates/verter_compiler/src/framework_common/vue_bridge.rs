@@ -708,6 +708,14 @@ fn with_catalog_template_facts(
             None => super::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
         };
         super::registered_carrier_projection::template_facts_from_catalog(artifact, source, basis)
+            .map(|facts| {
+                // The fact producer is the only pass that parses template
+                // expressions on this route — its diagnostics (e.g. a
+                // malformed `v-if` expression) are published with the
+                // bundle, deduplicated against the carrier's own channel.
+                extend_unique_diagnostics(&mut bundle.diagnostics, facts.diagnostics);
+                facts.data
+            })
     } else {
         None
     };
@@ -2778,7 +2786,8 @@ mod tests {
         let artifact = artifact_for(source);
         let facts = crate::framework_common::VueSemanticAuthority
             .template_facts(source, &artifact)
-            .expect("a Vue artifact must produce template facts");
+            .expect("a Vue artifact must produce template facts")
+            .data;
         assert!(
             facts.components.iter().any(|c| c.tag_name == "Child"),
             "template facts must surface the <Child> component usage"
@@ -2808,7 +2817,8 @@ mod tests {
                 source,
                 crate::framework_common::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
             )
-            .expect("catalog must produce Vue template facts");
+            .expect("catalog must produce Vue template facts")
+            .data;
         let bundled = bundle
             .template_data
             .as_ref()

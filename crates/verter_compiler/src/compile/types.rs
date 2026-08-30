@@ -386,6 +386,12 @@ pub struct VerterCompileResult {
     pub tsc: Option<VerterTsxBlock>,
     /// Raw template data for cross-file analysis. Present when `extract_template_data` is true.
     pub template_data: Option<super::template_data::RawTemplateData>,
+    /// Diagnostics attributable to the template-data extraction pass itself
+    /// (template expression parse errors). A subset of `errors`, carried
+    /// separately so the template-facts consumer can republish them with the
+    /// facts — no template codegen target parses these expressions, so
+    /// dropping this slice erases the file's template expression errors.
+    pub template_data_diagnostics: Vec<CompileDiagnostic>,
     /// Whether the render function was inlined into `setup()` (official
     /// production topology, `compileScript({ inlineTemplate: true })`). When
     /// true, `script` contains the complete component (render closure inside

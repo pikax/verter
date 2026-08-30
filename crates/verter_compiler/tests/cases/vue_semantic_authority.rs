@@ -118,10 +118,12 @@ fn vue_semantic_template_facts_match_catalog_payload() {
     let artifact = registered_artifact("file:///facts.vue", source);
     let via_authority = VueSemanticAuthority
         .template_facts(source, &artifact)
-        .expect("Vue authority must produce template facts");
+        .expect("Vue authority must produce template facts")
+        .data;
     let via_catalog =
         template_facts_from_catalog(&artifact, source, TemplateFactsBasis::AdmittedArtifact)
-            .expect("one semantic-catalog lookup must serve Vue template facts");
+            .expect("one semantic-catalog lookup must serve Vue template facts")
+            .data;
     assert_eq!(via_authority.components.len(), via_catalog.components.len());
     for (left, right) in via_authority
         .components
@@ -206,14 +208,16 @@ fn vue_template_facts_script_only_is_empty_success() {
     let artifact = registered_artifact("file:///script-only.vue", source);
     let facts = VueSemanticAuthority
         .template_facts(source, &artifact)
-        .expect("a template-free Vue SFC is valid empty success, not refusal");
+        .expect("a template-free Vue SFC is valid empty success, not refusal")
+        .data;
     assert!(
         facts.components.is_empty() && facts.event_handlers.is_empty(),
         "script-only Vue facts must be empty, got {facts:?}"
     );
     let via_catalog =
         template_facts_from_catalog(&artifact, source, TemplateFactsBasis::AdmittedArtifact)
-            .expect("catalog must keep template-free Vue as Some(empty)");
+            .expect("catalog must keep template-free Vue as Some(empty)")
+            .data;
     assert!(via_catalog.components.is_empty());
 }
 
@@ -257,7 +261,8 @@ fn selected_template_facts_bind_only_when_bytes_equal_the_admitted_host() {
         source,
         TemplateFactsBasis::SelectedTemplate("<Original />"),
     )
-    .expect("byte-identical selected content must keep admitted carrier facts");
+    .expect("byte-identical selected content must keep admitted carrier facts")
+    .data;
     assert!(
         facts
             .components
@@ -331,5 +336,35 @@ fn planted_vue_epoch_does_not_select_a_svelte_semantic_authority() {
         registered_semantic_for(&FrameworkAdapterId::vue(), svelte_row.identity().epoch())
             .is_none(),
         "a Svelte epoch must not select a Vue semantic row"
+    );
+}
+
+#[test]
+fn template_facts_carry_expression_parse_diagnostics() {
+    // A structurally valid template whose directive expression does not
+    // parse. The fact producer is the only pass that parses template
+    // expressions on the analysis route, so its diagnostics must ride
+    // with the facts — dropping them silently erases the file's
+    // template expression errors from the host snapshot.
+    let source = concat!(
+        "<script setup lang=\"ts\">\n",
+        "const count = 1;\n",
+        "</script>\n",
+        "<template>\n",
+        "  <div v-if=\"count ===\">{{ count }}</div>\n",
+        "</template>\n",
+    );
+    let artifact = registered_artifact("file:///malformed-expr.vue", source);
+    let facts =
+        template_facts_from_catalog(&artifact, source, TemplateFactsBasis::AdmittedArtifact)
+            .expect("a structurally valid template must still produce facts");
+    assert!(
+        facts
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "XInvalidExpression"),
+        "the malformed `v-if` expression must surface an XInvalidExpression \
+         diagnostic on the template-facts product, got {:?}",
+        facts.diagnostics
     );
 }

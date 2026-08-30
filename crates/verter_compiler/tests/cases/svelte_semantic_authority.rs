@@ -87,10 +87,12 @@ fn svelte_semantic_template_facts_match_catalog_payload() {
     let artifact = registered_artifact("file:///facts.svelte", source);
     let via_authority = SvelteSemanticAuthority
         .template_facts(source, &artifact)
-        .expect("Svelte authority must produce template facts");
+        .expect("Svelte authority must produce template facts")
+        .data;
     let via_catalog =
         template_facts_from_catalog(&artifact, source, TemplateFactsBasis::AdmittedArtifact)
-            .expect("one semantic-catalog lookup must serve Svelte template facts");
+            .expect("one semantic-catalog lookup must serve Svelte template facts")
+            .data;
     assert_eq!(via_authority.components.len(), via_catalog.components.len());
     for (left, right) in via_authority
         .components
@@ -191,14 +193,16 @@ fn svelte_template_facts_script_only_is_empty_success() {
     let artifact = registered_artifact("file:///script-only.svelte", source);
     let facts = SvelteSemanticAuthority
         .template_facts(source, &artifact)
-        .expect("a template-free Svelte file is valid empty success, not refusal");
+        .expect("a template-free Svelte file is valid empty success, not refusal")
+        .data;
     assert!(
         facts.components.is_empty() && facts.snippet_definitions.is_empty(),
         "script-only Svelte facts must be empty, got {facts:?}"
     );
     let via_catalog =
         template_facts_from_catalog(&artifact, source, TemplateFactsBasis::AdmittedArtifact)
-            .expect("catalog must keep template-free Svelte as Some(empty)");
+            .expect("catalog must keep template-free Svelte as Some(empty)")
+            .data;
     assert!(via_catalog.components.is_empty());
 }
 
@@ -220,7 +224,8 @@ fn selected_template_facts_require_an_admitted_template_host() {
 
     let facts =
         template_facts_from_catalog(&artifact, source, TemplateFactsBasis::AdmittedArtifact)
-            .expect("native admitted Svelte markup must keep catalog facts");
+            .expect("native admitted Svelte markup must keep catalog facts")
+            .data;
     assert!(
         facts
             .components

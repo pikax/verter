@@ -14,8 +14,9 @@ use crate::compile::types::{
 use crate::compile::{compile_from_parsed_legacy, RawTemplateData};
 
 use super::capability::{FrameworkSemanticAuthority, Present};
-use super::carrier_compiler::CarrierCompiler;
+use super::carrier_compiler::{CarrierCompiler, RuntimeDiagnostic};
 use super::catalog::{SemanticCap, TypedCapabilityRegistration};
+use super::registered_carrier_projection::TemplateFactsProduct;
 use super::vue_bridge::VueCarrierCompiler;
 use super::vue_carrier_frontend::VueSfcV3;
 use super::FrameworkParseArtifact;
@@ -73,7 +74,7 @@ impl VueSemanticAuthority {
 
 impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
     type EvalSource = Arc<str>;
-    type TemplateFacts = Option<RawTemplateData>;
+    type TemplateFacts = Option<TemplateFactsProduct>;
     type StyleMeaning = ();
     type SemanticAdmission = VueSemanticAdmission;
     type ParseArtifact = FrameworkParseArtifact;
@@ -86,7 +87,7 @@ impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
         &self,
         source: &str,
         artifact: &FrameworkParseArtifact,
-    ) -> Option<RawTemplateData> {
+    ) -> Option<TemplateFactsProduct> {
         let parsed = VueCarrierCompiler.parsed_sfc(artifact)?;
         let core_opts = CodegenOptions {
             target: CompileTarget::TEMPLATE_DATA,
@@ -106,9 +107,35 @@ impl FrameworkSemanticAuthority<VueSfcV3> for VueSemanticAuthority {
             &alloc,
         )
         .ok()?;
+        // The fact extraction is the only pass that parses template
+        // directive/interpolation expressions on this route, so its
+        // diagnostics (e.g. `XInvalidExpression` for a malformed `v-if`
+        // expression) travel WITH the facts — a consumer that drops them
+        // erases the file's template expression errors. Only the
+        // extraction's OWN slice rides along: this probe compile runs with
+        // `VueMacroSemanticInput::Unavailable`, so its other channels
+        // (macro-semantic validation in particular) describe the probe's
+        // inputs, not the file, and belong to the real compile.
+        let diagnostics: Vec<RuntimeDiagnostic> = result
+            .template_data_diagnostics
+            .into_iter()
+            .map(|d| RuntimeDiagnostic {
+                severity: d.severity.into(),
+                code: d.code,
+                message: d.message,
+                // A diagnostic with no mapped construct location is a
+                // whole-component result at this boundary.
+                span: d
+                    .span
+                    .unwrap_or_else(|| verter_span::Span::new(0, source.len() as u32)),
+            })
+            .collect();
         match result.template_data {
-            Some(data) => Some(data),
-            None if parsed.template_ast().is_none() => Some(RawTemplateData::default()),
+            Some(data) => Some(TemplateFactsProduct { data, diagnostics }),
+            None if parsed.template_ast().is_none() => Some(TemplateFactsProduct {
+                data: RawTemplateData::default(),
+                diagnostics,
+            }),
             None => None,
         }
     }

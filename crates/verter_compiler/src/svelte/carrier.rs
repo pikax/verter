@@ -710,6 +710,10 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             crate::framework_common::registered_carrier_projection::template_facts_from_catalog(
                 artifact, source, basis,
             )
+            .map(|facts| {
+                bundle.diagnostics.extend(facts.diagnostics);
+                facts.data
+            })
         } else {
             None
         };
@@ -1542,6 +1546,7 @@ let count = $state(0);
         crate::svelte::SvelteSemanticAuthority
             .template_facts(source, &artifact)
             .expect("a Svelte artifact must produce template facts")
+            .data
     }
 
     #[test]
@@ -1567,7 +1572,8 @@ let count = $state(0);
                 source,
                 crate::framework_common::registered_carrier_projection::TemplateFactsBasis::AdmittedArtifact,
             )
-            .expect("catalog must produce Svelte template facts");
+            .expect("catalog must produce Svelte template facts")
+            .data;
         let bundled = bundle
             .template_data
             .as_ref()

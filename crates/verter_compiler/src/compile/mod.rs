@@ -1574,6 +1574,10 @@ fn compile_inner(
 
     let needs_tpl_codegen = options.target.needs_template_codegen();
     let needs_tpl_data = options.target.needs_template_data();
+    // Diagnostics attributable to the template-data extraction pass itself
+    // (expression parse errors). A subset of `errors`, carried separately on
+    // the result so the template-facts consumer can publish them.
+    let mut template_data_diagnostics: Vec<CompileDiagnostic> = Vec::new();
 
     let (template_block, extracted_template_data) = if has_parse_errors
         || (!needs_tpl_codegen && !needs_tpl_data)
@@ -1608,8 +1612,22 @@ fn compile_inner(
                 false,
             );
 
-            // Collect OXC expression parse errors as XInvalidExpression diagnostics
+            // Collect OXC expression parse errors as XInvalidExpression diagnostics.
+            // The appended delta is ALSO recorded as the template-data
+            // extraction's own diagnostic slice: this pass is the only one
+            // that parses these expressions when no template codegen target
+            // is requested, so the template-facts consumer republishes the
+            // slice rather than re-running the pass (or inheriting unrelated
+            // channels such as macro-semantic validation).
+            let expr_diag_start = all_diagnostics.len();
+            let expr_failure_start = compile_failures.len();
             collect_expression_errors(oxc_ast, input, &mut all_diagnostics, &mut compile_failures);
+            if needs_tpl_data {
+                template_data_diagnostics =
+                    convert_diagnostics(&all_diagnostics[expr_diag_start..]);
+                template_data_diagnostics
+                    .extend_from_slice(&compile_failures[expr_failure_start..]);
+            }
 
             // Extract raw template data for cross-file analysis (before bindings are moved)
             let raw_template_data = if needs_tpl_data {
@@ -2279,6 +2297,7 @@ fn compile_inner(
         tsx: tsx_block,
         tsc: tsc_block,
         template_data: extracted_template_data,
+        template_data_diagnostics,
         // True when the render function was inlined into `setup()` (official
         // production topology) — the script block already contains the full
         // component, and no separate template block was emitted. Gated on the
