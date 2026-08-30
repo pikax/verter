@@ -1,32 +1,13 @@
-//! Discriminating tests for `strip_owner_route_fact` — the narrow
-//! owner-Route fact filter applied at the `ComponentMetaResultDb`
-//! cache-admission site.
+//! Discriminating tests for route observations admitted by the
+//! `ComponentMetaResultDb` cache.
 //!
 //! ## What is under test
 //!
-//! An earlier change made the component-meta cache signature
-//! tracer-owned and deleted the route-fact filter, on the premise that the
-//! finalised tracer read set never observes the owner's own
-//! `DerivedFactHash{Route}` fact. That premise is false: the cold
-//! compute's macro-root route walk observes the owner's Route fact
-//! whenever the owner is a route participant (see
-//! `tests/cases/g_component/component_meta_route_facts_flow_into_signature.rs`, which
-//! characterises that the owner's Route fact reaches the tracer).
-//!
-//! The owner's own Route fact is non-round-tripping on warm
-//! validation: a missing `(owner, Route)` entry on a later live
-//! `HostStoreView` rejects the published signature, so a repeated
-//! IDENTICAL `get_component_meta` query can miss the final-result
-//! cache with no edit — a steady-state warm-cache miss / perf
-//! regression. The owner's own export route is not a dependency
-//! of the owner's own component-meta result in the first place (the
-//! owner's `FileWholeHash` fact already covers owner-content edits),
-//! so the fix drops the fact unconditionally.
-//!
-//! `strip_owner_route_fact` drops exactly the owner's own
-//! `DerivedFactHash{Route}` fact before cache admission. Cross-file
-//! route facts (Route facts for OTHER canonicals the cold compute
-//! walked) round-trip correctly and stay.
+//! Route-only observations are parse-owned
+//! `FactKey::SyntacticRouteInterface` facts. Both owner and dependency
+//! observations round-trip through `FileFacts` and therefore remain in the
+//! final tracer-owned signature. The legacy whole-content Route fact remains
+//! available only to explicit compatibility consumers.
 //!
 //! ## Discrimination
 //!
@@ -36,14 +17,9 @@
 //! already has an `IndexedReady` from an earlier route-only read),
 //! then runs `get_component_meta` and asserts:
 //!
-//! 1. **Discriminator.** The published `ComponentMetaResultEntry`
-//!    signature does NOT contain `DerivedFactHash { canonical_id ==
-//!    owner, kind: Route }`. Without the owner-Route filter this fact IS
-//!    present (the publish site admits the raw tracer set verbatim) and
-//!    this assertion FAILS; `strip_owner_route_fact` removes it.
-//! 2. **Narrowness guard.** The published signature DOES still contain
-//!    the cross-file route dep's `DerivedFactHash{Route}` fact —
-//!    proving the filter is NARROW, not the broad route-fact removal.
+//! 1. **Discriminator.** The published signature contains the owner's
+//!    parse-owned syntactic route interface.
+//! 2. **Cross-file guard.** The dependency's same fact also remains.
 //! 3. **Behavioural non-regression.** A repeated IDENTICAL query is a
 //!    warm-cache HIT with no new miss. The fix must not break warm
 //!    reuse for the route-only-read-first scenario.
@@ -51,7 +27,7 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
-use crate::resolver_core::{DerivedFactKind, FactVersionRef};
+use crate::resolver_core::FactVersionRef;
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
 
@@ -62,8 +38,7 @@ const TYPES_TS: &str = "export interface RProps { a: number; b: string; }\n";
 
 /// Owner SFC: `defineProps<RProps>()` over the imported `RProps`.
 /// Resolving the macro root walks the named-type export route; the
-/// route walk observes `DerivedFactHash{Route}` participant facts —
-/// including the owner's own, as the importer is a route participant.
+/// route walk observes parse-owned syntactic route-interface facts.
 const OWNER_VUE: &str = "<script setup lang=\"ts\">\n\
      import type { RProps } from './types';\n\
      defineProps<RProps>();\n\
@@ -107,15 +82,13 @@ fn published_facts(host: &VerterHost, owner: &str) -> Vec<FactVersionRef> {
         .to_vec()
 }
 
-fn has_owner_route_fact(facts: &[FactVersionRef], owner: &str) -> bool {
+fn has_syntactic_route_fact(facts: &[FactVersionRef], owner: &str) -> bool {
     facts.iter().any(|f| {
         matches!(
             f,
-            FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: DerivedFactKind::Route,
-                ..
-            } if canonical_id == owner
+            FactVersionRef::Parse(parse)
+                if parse.canonical_id == owner
+                    && parse.key == verter_semantic::facts::FactKey::SyntacticRouteInterface
         )
     })
 }
@@ -151,42 +124,26 @@ fn repeated_query_after_route_only_indexed_read_is_warm_hit() {
     let prime = host.get_component_meta("/src/Comp.vue");
     assert!(prime.is_some(), "cold get_component_meta must resolve");
 
-    // Discriminator 1 — the published signature must NOT carry the
-    // owner's own `DerivedFactHash{Route}` fact. Without the owner-Route
-    // filter the publish site admits the finalised tracer set verbatim, so
-    // the owner's Route fact (observed by the macro-root route walk) IS
-    // present and this assertion FAILS; `strip_owner_route_fact` removes
-    // exactly this fact.
+    // Route-only component-meta observations use the parse-owned syntactic
+    // interface. It is exact, naturally round-trips through FileFacts, and
+    // therefore remains in the admitted signature for both owner and deps.
     let facts = published_facts(&host, "/src/Comp.vue");
     assert!(
-        !has_owner_route_fact(&facts, "/src/Comp.vue"),
-        "the owner's own `DerivedFactHash{{Route}}` fact MUST be \
-         filtered from the published signature — it is dual-sourced \
-         on `HostStoreView::derived_hashes` and does not round-trip \
-         on warm validation. facts = {facts:#?}",
+        has_syntactic_route_fact(&facts, "/src/Comp.vue"),
+        "the owner's parse-owned `SyntacticRouteInterface` fact must remain in the \
+         published signature. facts = {facts:#?}",
     );
 
-    // Discriminator 2 (narrowness) — the cross-file route dep's
-    // `DerivedFactHash{Route}` fact MUST still be present. A broad
-    // route-fact removal would strip this too.
+    // Cross-file route observations remain explicit and exact.
     assert!(
-        facts.iter().any(|f| matches!(
-            f,
-            FactVersionRef::DerivedFactHash {
-                canonical_id,
-                kind: DerivedFactKind::Route,
-                ..
-            } if canonical_id == "/src/types.ts"
-        )),
-        "the cross-file route dep `/src/types.ts` `DerivedFactHash{{Route}}` \
-         fact MUST remain in the published signature — `strip_owner_route_fact` \
-         filters ONLY the owner's own Route fact, not cross-file route \
-         facts. facts = {facts:#?}",
+        has_syntactic_route_fact(&facts, "/src/types.ts"),
+        "the cross-file route dep's parse-owned `SyntacticRouteInterface` fact \
+         must remain in the published signature. facts = {facts:#?}",
     );
 
     // Discriminator 3 (behavioural non-regression) — a repeated
     // IDENTICAL query is a warm-cache HIT with no new miss. With the
-    // owner-Route fact filtered, the published signature round-trips,
+    // parse-owned route facts round-trip through published FileFacts,
     // so the second query reuses the warm result. (The hard
     // discriminator is Discriminator 1. This assertion guards that the
     // filter does not regress warm reuse.)
@@ -258,10 +215,9 @@ fn editing_route_dep_still_invalidates_after_route_only_indexed_read() {
     let misses_after = prov.component_meta_result_cache_misses.load(Relaxed);
     assert!(
         misses_after > misses_before,
-        "editing the cross-file route dep MUST invalidate the owner's \
-         warm hit — the dep's `DerivedFactHash{{Route}}` fact survives \
-         `strip_owner_route_fact` (only the OWNER's own Route fact is \
-         filtered). misses {misses_before} -> {misses_after}",
+        "editing the cross-file route dep MUST invalidate the owner's warm hit \
+         through the dependency's exact parse-owned route fact. \
+         misses {misses_before} -> {misses_after}",
     );
 
     // The post-edit result reflects the NEW shape: `RProps` now has
@@ -800,23 +756,17 @@ fn meta_payload_under_recorded_signature_misses_after_project_mutation() {
          unchanged",
     );
 
-    // Land a project-shape mutation that bumps `project_generation`
-    // WITHOUT the wide derived-raw evict (the stamp-only
-    // `set_import_dependencies` route push on the DEP): the planted
-    // payload entry survives physically, so only the generation
-    // backstop can reject it.
+    // Land a real project-shape mutation. Route-table publication is a
+    // separate domain and intentionally does not move this stamp.
     let pre = host.project_type_store().current_project_generation();
-    host.set_import_dependencies(
-        "/src/types.ts",
-        vec![crate::types::DependencyResolution {
-            specifier: "./somewhere".to_string(),
-            resolved_canonical_id: Some("/src/elsewhere.ts".to_string()),
-            possible_canonical_ids: Vec::new(),
-        }],
-    );
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/src".to_string(),
+        "/src".to_string(),
+        Some("/src/tsconfig.json".to_string()),
+    )]);
     assert!(
         host.project_type_store().current_project_generation() > pre,
-        "anti-vacuity: the route push must have bumped project_generation",
+        "anti-vacuity: the project configuration reset must bump project_generation",
     );
 
     assert!(

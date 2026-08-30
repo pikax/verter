@@ -152,9 +152,9 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             "every_db_field_implements_invalidation_by_canonical",
             "surface_member_field_consults_member_shape_cache_before_round_trip",
             "surface_member_arch_guard_self_test_detects_inverted_order",
-            // Per-file admission + route guards in sibling test files.
+            // Per-file admission guard lives in a sibling test file. Project
+            // shape versus route publication is pinned behaviorally below.
             "admission_guard",
-            "route_generation_admission_guard",
             // R6 query-identity-keys content-free guards
             // (`Instantiate.base` / `ResolveMacroPayload.owner` mirror
             // on the `FamilyKey` memo identity).
@@ -1228,19 +1228,12 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // `resolver_store_view_read()` may never feed it — closing the
             // view+flag divergence the constructor-shape guards missed.
             "cold_seed_currentness_is_intrinsic_to_the_read",
-            // Mutate-without-bump completeness seam over the
-            // `project_generation` stamp discipline (the unified-path
-            // successor of the retired route-owned token-generation
-            // guard): every AUTO-DISCOVERED route-resolution mutator
-            // (syn-AST discovery over production source, comment-proof,
-            // with a documented no-bump allowlist) must advance the
-            // stamp the pre-publish fence reads, strictly AFTER the
-            // mutation it announces; plus the live ordering pin on the
-            // `set_exact_resolutions` wrapper and the discovery
-            // discriminator self-test.
-            "route_mutators_bump_project_generation_after_the_mutation",
-            "route_mutators_guard_discriminator_self_test",
-            "set_exact_resolutions_bumps_project_generation_after_the_workspace_mutation",
+            // Project-shape and exact-route publication are pinned by
+            // behavioral domain tests. Candidate source scanners are not
+            // architecture authority.
+            "set_exact_resolutions_preserves_project_generation_and_advances_route_witnesses",
+            "set_import_dependencies_routes_do_not_advance_project_generation",
+            "token_advances_on_configure_projects_project_generation",
         ],
     ),
 ];

@@ -2,6 +2,43 @@ schema = 4
 module = "rev11-cache-runtime"
 
 [[node]]
+id = "PGF0"
+name = "Project-shape and route-publication fence separation"
+predecessors = ["A6"]
+phase = "rev11"
+train = "rev11.cache-runtime"
+product = "rev11"
+kind = "implementation"
+semantic_role = "delivery"
+class = "foundational"
+owner = "rev11.cache-runtime:ProjectTypeStore project-shape generation domain, parse-owned syntactic route-interface fact, and exact route-publication fencing"
+conflict_domains = ["semantic_cache_store","ratified_rev11_contract"]
+resource_class = "rust-mixed"
+gate_profile = "targeted-domain"
+review_profile = "architecture-3"
+dispatchable = true
+optional = false
+release_gating = "none"
+gh_milestone = "0.0.2"
+external_requirements = []
+charter = "charters/rev11-cache-runtime/PGF0.md"
+implementation_effort_min = "high"
+implementation_effort_default = "high"
+review_effort_min = "high"
+review_effort_default = "high"
+verification_effort_min = "high"
+verification_effort_default = "high"
+confirmation_effort_min = "high"
+confirmation_effort_default = "high"
+size = "M"
+max_production_loc = 1000
+max_production_files = 13
+max_related_packages = 3
+rescope_loc = 1500
+rescope_files = 13
+rescope_unrelated_packages = 3
+
+[[node]]
 id = "G4"
 name = "Cache store convergence and bounded retention"
 predecessors = ["E4","G1","G2","G3"]

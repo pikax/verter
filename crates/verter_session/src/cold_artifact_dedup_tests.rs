@@ -1244,7 +1244,8 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
 }
 
 /// `set_import_dependencies` mutates per-canonical route state without a
-/// content change; it must be FENCE-VISIBLE. A flight that resolved its
+/// content or project-shape change; it must remain FENCE-VISIBLE through the
+/// dedicated route/store-view rails. A flight that resolved its
 /// routes against the pre-mutation table and reaches the pre-publish
 /// fence after the mutation landed must publish NOTHING (ReturnOnly) —
 /// otherwise a stale route surface is published that afterwards passes
@@ -1265,6 +1266,7 @@ fn import_dependency_mutation_mid_flight_trips_the_publish_fence() {
         "import type { P } from './dep';\nexport type Owner = P;\n",
     );
     host.provenance().reset();
+    let project_generation = host.project_type_store().current_project_generation();
 
     // Park the FIRST flight at its PRE-FENCE seam (the base materialise
     // fires the seam twice: post-stamp-capture = call 0, pre-fence =
@@ -1303,6 +1305,11 @@ fn import_dependency_mutation_mid_flight_trips_the_publish_fence() {
                 possible_canonical_ids: vec![dep2.to_string()],
             }],
         );
+        assert_eq!(
+            host.project_type_store().current_project_generation(),
+            project_generation,
+            "the mid-flight route mutation must not use project generation as its fence"
+        );
         release.store(true, Ordering::SeqCst);
         flight.join().unwrap().expect("flight must serve a result")
     });
@@ -1329,15 +1336,12 @@ fn import_dependency_mutation_mid_flight_trips_the_publish_fence() {
     );
 }
 
-/// `set_import_dependencies` is called by the bundler after EVERY upsert
-/// — the steady-state call re-supplies an IDENTICAL route snapshot. A
-/// no-op call must NOT bump `project_generation` (a bump read-invalidates
-/// every `validated_at_generation`-gated cache project-wide and stamps
-/// every cross-file-edge `IndexedReady` stale); an actually-changing call
-/// MUST bump (fence-visibility — see
-/// `import_dependency_mutation_mid_flight_trips_the_publish_fence`).
+/// Publishing or restoring one owner's route table is not a project-shape
+/// reset. Both a changed route and a value-identical steady-state re-push keep
+/// `project_generation` stable. A changed route still advances the dedicated
+/// resolution-fact and store-view witnesses.
 #[test]
-fn set_import_dependencies_bumps_only_on_actual_route_change() {
+fn set_import_dependencies_routes_do_not_advance_project_generation() {
     let host = make_host(&[]);
     let owner = "/workspace/src/owner.ts";
     let dep = "/workspace/src/dep.ts";
@@ -1353,14 +1357,24 @@ fn set_import_dependencies_bumps_only_on_actual_route_change() {
         possible_canonical_ids: vec![dep.to_string()],
     }];
 
-    // Changing call (empty table → routes): must be fence-visible.
+    // Changing call (empty table → routes): route-specific witnesses move,
+    // while project-shape identity stays stable.
     let pre = host.project_type_store().current_project_generation();
+    let resolution_before = host.workspace_read().resolution_fact_generation();
+    let epoch_before = host.store_view_epoch();
     host.set_import_dependencies(owner, routes.clone());
     let post_change = host.project_type_store().current_project_generation();
+    assert_eq!(
+        post_change, pre,
+        "an actually-changing route push must not reset project-shape identity",
+    );
     assert!(
-        post_change > pre,
-        "an actually-changing route push must bump project_generation \
-         (fence-visibility)",
+        host.workspace_read().resolution_fact_generation() > resolution_before,
+        "an actually-changing route push must advance resolution-fact currency",
+    );
+    assert!(
+        host.store_view_epoch() > epoch_before,
+        "an actually-changing route push must advance the request-view fence",
     );
 
     // Materialise under the admitted table, then re-push the IDENTICAL
@@ -1373,8 +1387,7 @@ fn set_import_dependencies_bumps_only_on_actual_route_change() {
     let post_noop = host.project_type_store().current_project_generation();
     assert_eq!(
         post_noop, post_change,
-        "a no-op route re-push must NOT bump project_generation \
-         (project-wide warm-cache wipe per bundler push)",
+        "a no-op route re-push must not reset project-shape identity",
     );
 
     // Warm state intact: the retained artifact is still current — the
@@ -1394,6 +1407,52 @@ fn set_import_dependencies_bumps_only_on_actual_route_change() {
     assert_eq!(
         provenance.indexed_ready_materializes, 0,
         "a no-op re-push must not force a re-materialise"
+    );
+}
+
+/// A source edit clears the owner's caller-supplied route mirror. Restoring the
+/// same resolved target after that edit is route publication, not a project
+/// configuration reset, so project-shaped caches keep their identity.
+#[test]
+fn restoring_unchanged_routes_after_source_edit_preserves_project_generation() {
+    let host = make_host(&[]);
+    let owner = "/workspace/src/owner.ts";
+    let dep = "/workspace/src/dep.ts";
+    upsert(&host, dep, "export interface P { ready: boolean }\n");
+    upsert(
+        &host,
+        owner,
+        "import type { P } from './dep';\nexport type Owner = P;\n",
+    );
+    let routes = vec![crate::types::DependencyResolution {
+        specifier: "./dep".to_string(),
+        resolved_canonical_id: Some(dep.to_string()),
+        possible_canonical_ids: vec![dep.to_string()],
+    }];
+    host.set_import_dependencies(owner, routes.clone());
+    let project_generation = host.project_type_store().current_project_generation();
+
+    upsert(
+        &host,
+        owner,
+        "import type { P } from './dep';\nexport type Owner = P;\nexport const edited = true;\n",
+    );
+    assert_eq!(
+        host.project_type_store().current_project_generation(),
+        project_generation,
+        "a source-content edit must not reset project-shape identity"
+    );
+    host.set_import_dependencies(owner, routes);
+    assert_eq!(
+        host.project_type_store().current_project_generation(),
+        project_generation,
+        "restoring the unchanged route after an edit must not reset project-shape identity"
+    );
+    assert_eq!(
+        host.resolve_type_dependency_canonical_shallow(owner, "./dep")
+            .as_deref(),
+        Some(dep),
+        "the restored route must be usable immediately"
     );
 }
 
@@ -1449,6 +1508,9 @@ fn overlay_mid_flight_mutation_trips_the_overlay_publish_fence() {
         spin_until("flight parked pre-fence", || {
             parked_pre_fence.load(Ordering::SeqCst)
         });
+        let project_generation = host.project_type_store().current_project_generation();
+        let store_view_epoch = host.store_view_epoch();
+        let resolution_fact_generation = host.workspace_read().resolution_fact_generation();
         // Land a route-resolution mutation while the overlay flight holds
         // its fully-built artifact, pre-publish. A GENUINE change is
         // required: the changed-gate skips the cascade (and the
@@ -1463,6 +1525,19 @@ fn overlay_mid_flight_mutation_trips_the_overlay_publish_fence() {
                 resolved_canonical_id: Some(canonical.to_string()),
                 possible_canonical_ids: vec![canonical.to_string()],
             }],
+        );
+        assert_eq!(
+            host.project_type_store().current_project_generation(),
+            project_generation,
+            "exact-route publication must preserve project-shape identity",
+        );
+        assert!(
+            host.store_view_epoch() > store_view_epoch,
+            "exact-route publication must advance the store-view fence",
+        );
+        assert!(
+            host.workspace_read().resolution_fact_generation() > resolution_fact_generation,
+            "exact-route publication must advance resolution-fact currency",
         );
         release.store(true, Ordering::SeqCst);
         flight
@@ -2048,22 +2123,16 @@ fn park_first_materialize_pre_fence(
     (parked_pre_fence, release)
 }
 
-/// The route-resolution mutation the fence tests land while a flight is
-/// parked pre-fence: an exact-resolution push on an UNRELATED canonical
-/// bumps `project_generation`, so the parked flight's fence trips while
-/// the flight owner's own facts stay live-valid — the poison shape the
-/// read-side fact rail cannot catch.
-fn land_unrelated_route_mutation(host: &VerterHost, other: &str, target: &str) {
-    host.set_exact_resolutions(
-        other,
-        vec![verter_workspace::ExactResolution {
-            specifier: "./fence_probe".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
-            resolved_canonical_id: Some(target.to_string()),
-            possible_canonical_ids: vec![target.to_string()],
-        }],
-    );
+/// Land a project-authority reset while a generic ReturnOnly test is parked.
+/// Exact-route publication has its own epoch/fact-generation fence and does
+/// not move project identity; these generic tests intentionally exercise the
+/// independent project-shape dimension.
+fn land_project_shape_reset(host: &VerterHost) {
+    host.configure_projects(vec![verter_workspace::ide_project_config(
+        "/workspace".to_string(),
+        "/workspace".to_string(),
+        Some("/workspace/tsconfig.json".to_string()),
+    )]);
 }
 
 /// ReturnOnly never publishes — prepared-decl-bundle arm. A bundle built
@@ -2083,9 +2152,7 @@ fn bundle_built_from_fenced_indexed_ready_is_served_but_not_admitted() {
     let host = make_host(&[]);
     let owner = "/workspace/src/owner.ts";
     let dep = "/workspace/src/dep.ts";
-    let other = "/workspace/src/other.ts";
     upsert(&host, dep, "export type P = { a: 1 };\n");
-    upsert(&host, other, "export type Other = { o: 1 };\n");
     upsert(
         &host,
         owner,
@@ -2106,10 +2173,7 @@ fn bundle_built_from_fenced_indexed_ready_is_served_but_not_admitted() {
         spin_until("flight parked pre-fence", || {
             parked_pre_fence.load(Ordering::SeqCst)
         });
-        // Land a route-resolution mutation (project_generation bump)
-        // while the IndexedReady flight holds its fully-built artifact
-        // pre-publish.
-        land_unrelated_route_mutation(&host, other, dep);
+        land_project_shape_reset(&host);
         release.store(true, Ordering::SeqCst);
         flight.join().unwrap()
     });
@@ -2185,9 +2249,7 @@ fn routed_shallow_bundle_built_from_fenced_indexed_ready_is_served_but_not_admit
     // `.or_else` fallback and must not run for this fixture).
     let owner = "/workspace/src/owner.d.ts";
     let dep = "/workspace/src/dep.ts";
-    let other = "/workspace/src/other.ts";
     upsert(&host, dep, "export type P = { a: 1 };\n");
-    upsert(&host, other, "export type Other = { o: 1 };\n");
     upsert(
         &host,
         owner,
@@ -2208,7 +2270,7 @@ fn routed_shallow_bundle_built_from_fenced_indexed_ready_is_served_but_not_admit
         spin_until("flight parked pre-fence", || {
             parked_pre_fence.load(Ordering::SeqCst)
         });
-        land_unrelated_route_mutation(&host, other, dep);
+        land_project_shape_reset(&host);
         release.store(true, Ordering::SeqCst);
         flight.join().unwrap()
     });
@@ -2278,9 +2340,7 @@ fn imported_root_fast_path_from_fenced_state_is_served_but_not_admitted() {
     let host = make_host(&[]);
     let barrel = "/workspace/src/index.ts";
     let leaf = "/workspace/src/p.ts";
-    let other = "/workspace/src/other.ts";
     upsert(&host, leaf, "export type P = { a: 1 };\n");
-    upsert(&host, other, "export type Other = { o: 1 };\n");
     upsert(&host, barrel, "export type { P } from './p';\n");
     host.provenance().reset();
 
@@ -2297,7 +2357,7 @@ fn imported_root_fast_path_from_fenced_state_is_served_but_not_admitted() {
         spin_until("flight parked pre-fence", || {
             parked_pre_fence.load(Ordering::SeqCst)
         });
-        land_unrelated_route_mutation(&host, other, leaf);
+        land_project_shape_reset(&host);
         release.store(true, Ordering::SeqCst);
         flight.join().unwrap()
     });
@@ -2374,9 +2434,7 @@ fn route_entry_built_from_fenced_participant_serves_with_empty_facts() {
     let host = make_host(&[]);
     let barrel = "/workspace/src/index.ts";
     let leaf = "/workspace/src/p.ts";
-    let other = "/workspace/src/other.ts";
     upsert(&host, leaf, "export type P = { a: 1 };\n");
-    upsert(&host, other, "export type Other = { o: 1 };\n");
     upsert(&host, barrel, "export type { P } from './p';\n");
     host.provenance().reset();
 
@@ -2390,7 +2448,7 @@ fn route_entry_built_from_fenced_participant_serves_with_empty_facts() {
         spin_until("flight parked pre-fence", || {
             parked_pre_fence.load(Ordering::SeqCst)
         });
-        land_unrelated_route_mutation(&host, other, leaf);
+        land_project_shape_reset(&host);
         release.store(true, Ordering::SeqCst);
         flight.join().unwrap()
     });
@@ -3453,6 +3511,9 @@ fn fenced_serve_baked_edges_reresolve_in_dependency_candidates() {
         spin_until("flight parked pre-fence", || {
             parked_pre_fence.load(Ordering::SeqCst)
         });
+        let project_generation = host.project_type_store().current_project_generation();
+        let store_view_epoch = host.store_view_epoch();
+        let resolution_fact_generation = host.workspace_read().resolution_fact_generation();
         host.set_exact_resolutions(
             owner,
             vec![verter_workspace::ExactResolution {
@@ -3462,6 +3523,19 @@ fn fenced_serve_baked_edges_reresolve_in_dependency_candidates() {
                 resolved_canonical_id: Some(dep2.to_string()),
                 possible_canonical_ids: vec![dep2.to_string()],
             }],
+        );
+        assert_eq!(
+            host.project_type_store().current_project_generation(),
+            project_generation,
+            "an owner retarget must preserve project-shape identity",
+        );
+        assert!(
+            host.store_view_epoch() > store_view_epoch,
+            "an owner retarget must advance the store-view fence",
+        );
+        assert!(
+            host.workspace_read().resolution_fact_generation() > resolution_fact_generation,
+            "an owner retarget must advance resolution-fact currency",
         );
         release.store(true, Ordering::SeqCst);
         flight.join().unwrap()

@@ -231,6 +231,9 @@ pub enum FactKeyKindTag {
     /// `FactKey::SyntacticExportSet` — whole-file export set
     /// fingerprint.
     SyntacticExportSet,
+    /// `FactKey::SyntacticRouteInterface` — authored import/export routing
+    /// interface, excluding unrelated content.
+    SyntacticRouteInterface,
     /// `FactKey::LocalDecl` — locally declared, non-exported
     /// binding.
     LocalDecl,

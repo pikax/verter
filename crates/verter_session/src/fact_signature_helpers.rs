@@ -282,11 +282,14 @@ fn note_basis_recheck_on_cell(
 
 /// Test-only fact-injection hook read at every tracer scope entry
 /// ([`install_fact_tracer`] and [`with_cacheability_scope`]). When a knob is
-/// non-zero, fan that many synthetic `FileWholeHash` observations into the
-/// freshly-installed tracer (and every enclosing one), so the scope
-/// deterministically reports overflow once the per-signature cap is exceeded —
-/// the in-process equivalent of a compute whose observation set genuinely
-/// exceeds [`FACT_SIGNATURE_CAP`], without a pathological workspace fixture.
+/// non-zero, fan up to one-over-cap synthetic observations across TWO fact
+/// domains into the freshly-installed tracer (and every enclosing one), so the
+/// scope deterministically reports overflow once the per-signature cap is
+/// exceeded. Splitting the observations keeps both per-domain buckets below
+/// their compaction threshold; a single wide `FileWholeHash` bucket would now
+/// compact to one terminal Content aggregate and would no longer exercise the
+/// refusal rail. This is the in-process equivalent of a genuinely wide
+/// multi-domain compute without a pathological workspace fixture.
 ///
 /// `scope` is the entering scope's ADDRESSABLE identity: `Some(_)` for a scope
 /// opened through [`named_cacheability_scope`] / [`named_fact_tracer`], `None`
@@ -336,11 +339,18 @@ fn force_tracer_overflow_observations(
         .force_fact_tracer_overflow_observations
         .load(std::sync::atomic::Ordering::Relaxed);
     let once = crate::host_test_force::claim_fact_tracer_overflow_once(scope);
-    for i in 0..sticky.max(once) {
-        crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::FileWholeHash {
-            canonical_id: format!("__force_tracer_overflow_{i}.ts"),
-            hash: [(i & 0xff) as u8; 16],
-        });
+    for i in 0..sticky.max(once).min(FACT_SIGNATURE_CAP + 1) {
+        let fact = if i % 2 == 0 {
+            FactVersionRef::FileWholeHash {
+                canonical_id: format!("__force_tracer_overflow_{i}.ts"),
+                hash: [(i & 0xff) as u8; 16],
+            }
+        } else {
+            FactVersionRef::ProjectGeneration {
+                generation: u64::MAX - i as u64,
+            }
+        };
+        crate::resolver_core::resolver_context::observe_fan_out(fact);
     }
 }
 

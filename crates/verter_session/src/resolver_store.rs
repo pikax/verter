@@ -2795,14 +2795,35 @@ pub(crate) fn hash_route_surface(state: &crate::resolver_core::ShallowFileState)
 }
 
 fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -> Hash16 {
+    let syntactic = syntactic_route_interface_hash(state);
     hash16_from_sorted(|hasher| {
-        // Hash sorted exports WITH their routing shape. Everything
-        // digested here is PARSE domain — authored specifiers, exported
-        // and original names, type-only-ness, local owners. No resolved
-        // canonical enters the digest: a dependency-set retarget moves
-        // no byte of the owner's authored routing surface, and the
-        // consumer that cares roots on the owner's resolve-domain
-        // import-route WITNESS instead.
+        b"verter:legacy-route-surface:v2".hash(hasher);
+        syntactic.hash(hasher);
+        state.whole_hash.hash(hasher);
+    })
+}
+
+/// Digest the exact authored import/export routing interface of a shallow
+/// state, excluding unrelated file content and all resolved/project state.
+///
+/// This is the single producer for `FactKey::SyntacticRouteInterface`.
+pub(crate) fn syntactic_route_interface_hash(
+    state: &crate::resolver_core::ShallowFileState,
+) -> Hash16 {
+    state
+        .syntactic_route_interface_hash_memo()
+        .get_or_init(|| syntactic_route_interface_hash_uncached(state))
+}
+
+fn syntactic_route_interface_hash_uncached(
+    state: &crate::resolver_core::ShallowFileState,
+) -> Hash16 {
+    hash16_from_sorted(|hasher| {
+        b"verter:syntactic-route-interface:v2".hash(hasher);
+        // The effective shallow export table includes framework-synthesised
+        // defaults and its collision policy. Hash it in name order so the
+        // fact covers the exact surface consumers traverse without retaining
+        // insertion-order noise.
         let mut exports: Vec<(
             &str,
             &crate::resolver_core::shallow_file_state::ExportTarget,
@@ -2836,32 +2857,35 @@ fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -
             }
         }
 
-        // Hash wildcard reexport source specifiers in declaration order.
-        for wildcard in &state.wildcard_reexports {
-            wildcard.source_specifier.hash(hasher);
-        }
-
-        // Hash sorted import targets — the authored specifier / imported
-        // name / namespace-ness the prepared-decl and bare-name chains
-        // traverse.
-        let mut import_targets: Vec<(
-            &str,
+        // Owner-qualified imports are the authoritative lookup geometry.
+        // The ordinary-file string table is only its compatibility
+        // projection and is deliberately not a second hash input.
+        let mut owner_import_targets: Vec<(
+            &verter_type_expr::DeclBindingKey,
             &crate::resolver_core::shallow_file_state::ImportTarget,
-        )> = state
-            .import_targets
-            .iter()
-            .map(|(name, target)| (name.as_str(), target))
-            .collect();
-        import_targets.sort_unstable_by_key(|(name, _)| *name);
-        for (name, target) in &import_targets {
-            name.hash(hasher);
+        )> = state.owner_import_targets.iter().collect();
+        owner_import_targets.sort_unstable_by_key(|(left, _)| *left);
+        for (binding, target) in owner_import_targets {
+            binding.hash(hasher);
             target.source_specifier.hash(hasher);
             target.imported_name.hash(hasher);
             target.is_namespace.hash(hasher);
         }
 
-        // Hash the file content hash.
-        state.whole_hash.hash(hasher);
+        state.export_assignment_target().hash(hasher);
+
+        // Retain the parser-authored typed vectors in source order. Their
+        // typed variants carry every owner, form, type/value capability,
+        // namespace spelling, side-effect import, and export-assignment
+        // coordinate. Counts, spans, statement totals, resolved canonicals,
+        // and environment/project state are intentionally absent.
+        let routes = state.route_inventory.as_ref();
+        routes.imports.hash(hasher);
+        routes.bindingless_imports.hash(hasher);
+        routes.reexports.hash(hasher);
+        routes.wildcard_reexports.hash(hasher);
+        routes.local_exports.hash(hasher);
+        routes.export_assignments.hash(hasher);
     })
 }
 

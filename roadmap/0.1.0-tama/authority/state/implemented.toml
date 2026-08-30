@@ -218,6 +218,11 @@ node_id = "B4R0"
 commit_message = "fix(core): keep source-unit identity stable across edits"
 commit_date = "2026-08-29T07:58:40+01:00"
 
+[[implemented]]
+node_id = "PGF0"
+commit_message = "fix(session): separate project-shape and route-publication fences"
+commit_date = "2026-08-30T14:48:45+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

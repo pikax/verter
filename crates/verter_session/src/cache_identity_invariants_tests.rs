@@ -301,9 +301,9 @@ impl WorkspaceAccess for CountingWs {
     }
 }
 
-/// Workspace shim that records the host's `project_generation` AT THE
-/// MOMENT the workspace `set_exact_resolutions` mutator runs — the probe
-/// for the bump-after-mutate ordering invariant on the host wrapper.
+/// Workspace shim that records the host's `project_generation` at the
+/// workspace exact-resolution mutation. It distinguishes route publication
+/// from project-shape reset without relying on a source scan.
 struct BumpOrderProbeWs {
     inner: StdArc<MemoryWorkspace>,
     store: Mutex<Option<StdArc<crate::project_type_store::ProjectTypeStore>>>,
@@ -404,16 +404,9 @@ impl WorkspaceAccess for BumpOrderProbeWs {
     }
 }
 
-// ─── Bump-after-mutate ordering on `set_exact_resolutions` ──────────────
-//
-// The pre-publish fence compares a flight's start-of-flight
-// `project_generation` capture against the live generation at publish
-// time. The bump therefore must STRICTLY FOLLOW the workspace mutation it
-// announces: with bump-BEFORE-mutate, a flight born between the bump and
-// the mutation captures the NEW stamp, resolves against the OLD
-// resolution table, passes the fence, and is served as current forever.
+// ─── Project-shape/route-publication generation split ──────────────
 #[test]
-fn set_exact_resolutions_bumps_project_generation_after_the_workspace_mutation() {
+fn set_exact_resolutions_preserves_project_generation_and_advances_route_witnesses() {
     let canonical = "/lib/bump_order_owner.ts";
     let ws = BumpOrderProbeWs::new();
     ws.inner
@@ -422,6 +415,8 @@ fn set_exact_resolutions_bumps_project_generation_after_the_workspace_mutation()
     *ws.store.lock() = Some(StdArc::clone(host.project_type_store()));
 
     let pre = host.project_type_store().current_project_generation();
+    let resolution_before = host.workspace_read().resolution_fact_generation();
+    let epoch_before = host.store_view_epoch();
     host.set_exact_resolutions(
         canonical,
         vec![verter_workspace::ExactResolution {
@@ -438,16 +433,21 @@ fn set_exact_resolutions_bumps_project_generation_after_the_workspace_mutation()
         .lock()
         .expect("the workspace mutator must have run");
 
-    assert!(
-        post > pre,
-        "set_exact_resolutions must bump project_generation (pre={pre}, post={post})",
+    assert_eq!(
+        post, pre,
+        "set_exact_resolutions must preserve project-shape identity (pre={pre}, post={post})",
     );
     assert_eq!(
         at_mutation, pre,
-        "the project_generation bump must land AFTER the workspace \
-         mutator (mutate-first): observed generation {at_mutation} at \
-         mutation time, pre-call generation {pre} — a premature bump \
-         opens the captured-new-stamp-over-old-table fence bypass",
+        "the workspace route mutation must observe the unchanged project-shape generation",
+    );
+    assert!(
+        host.workspace_read().resolution_fact_generation() > resolution_before,
+        "the exact-resolution transaction must advance resolution-fact currency",
+    );
+    assert!(
+        host.store_view_epoch() > epoch_before,
+        "the host-side route repair must advance the request-view fence",
     );
 }
 

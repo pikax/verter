@@ -989,6 +989,10 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
                     kind: crate::resolver_core::DerivedFactKind::Route,
                     ..
                 }
+                | crate::resolver_core::FactVersionRef::Parse(crate::resolver_core::ParseFactRef {
+                    key: verter_semantic::facts::FactKey::SyntacticRouteInterface,
+                    ..
+                })
                 | crate::resolver_core::FactVersionRef::ResolveImports(_)
         )),
         "dependency fact versions should only publish file, route, and \

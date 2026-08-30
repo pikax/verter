@@ -4,7 +4,7 @@ module = "rev11-core"
 [[node]]
 id = "G1"
 name = "Hermetic query facts and result contracts"
-predecessors = ["C4","D8","F2"]
+predecessors = ["C4","D8","F2","PGF0"]
 phase = "rev11"
 train = "rev11.core"
 product = "rev11"

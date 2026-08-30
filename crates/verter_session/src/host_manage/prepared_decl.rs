@@ -94,7 +94,85 @@ pub(crate) struct BundleReuseOutcome {
     pub(crate) reuse: crate::resolver_core::reuse::ReuseClass,
 }
 
+/// One generation-fenced source snapshot admitted by the upsert transaction
+/// for eager current-content route-interface publication.
+struct HeldIndexedSource {
+    snapshot: Arc<verter_scheduler::node::SourceSnapshot>,
+    expected_syntactic_route_interface_hash: Hash16,
+}
+
 impl VerterHost {
+    /// Eagerly publish fresh current-content parse facts after a carrier edit
+    /// that provably left the script routing envelope unchanged.
+    ///
+    /// The upsert transaction supplies both committed snapshots. This method
+    /// owns every eligibility check and converges on the ordinary indexed
+    /// materializer/publisher; the caller never constructs a fact or hash.
+    pub(crate) fn materialize_committed_unchanged_carrier_route_interface(
+        &self,
+        canonical_id: &str,
+        old_source: &Arc<verter_scheduler::node::SourceSnapshot>,
+        new_source: Arc<verter_scheduler::node::SourceSnapshot>,
+        committed_generation: u64,
+    ) -> bool {
+        let (Some(old_data), Some(new_data)) = (
+            old_source.downcast_data::<crate::host_executor::HostSourceData>(),
+            new_source.downcast_data::<crate::host_executor::HostSourceData>(),
+        ) else {
+            return false;
+        };
+        if new_source.generation != committed_generation
+            || old_data.file_language != new_data.file_language
+            || !new_data.file_language.is_framework_carrier()
+            || old_data.source_type != new_data.source_type
+            || old_data.parse.slices.script != new_data.parse.slices.script
+            || old_data.parse.descriptor.script_count != new_data.parse.descriptor.script_count
+            || old_data.parse.descriptor.script_attr_fingerprints
+                != new_data.parse.descriptor.script_attr_fingerprints
+        {
+            return false;
+        }
+
+        let parse_env_hash = self.host_view_env_hashes_for(canonical_id).parse_env_hash;
+        let Some(old_key) = crate::file_artifact_store::FileArtifactKey::for_source_identity(
+            Arc::from(canonical_id),
+            old_source.whole_hash,
+            old_source.source.as_ref(),
+            old_data.file_language.clone(),
+            old_data.framework_parse.as_deref(),
+            parse_env_hash,
+        ) else {
+            return false;
+        };
+        let Some(old_artifacts) = self.project_type_store.indexed().get_artifacts_for_content(
+            canonical_id,
+            old_source.whole_hash,
+            &old_key.parse_key,
+            &old_key.file_language_id,
+        ) else {
+            return false;
+        };
+        let Some(old_fact) = old_artifacts
+            .facts
+            .lookup(&verter_semantic::facts::registry::FactKey::SyntacticRouteInterface)
+        else {
+            return false;
+        };
+
+        let held = HeldIndexedSource {
+            snapshot: new_source,
+            expected_syntactic_route_interface_hash: old_fact.semantic_hash,
+        };
+        self.ensure_indexed_ready_serve_uninstrumented(canonical_id, Some(&held))
+            .is_some_and(|serve| {
+                serve.store_published
+                    && serve.indexed.whole_hash == held.snapshot.whole_hash
+                    && crate::resolver_store::syntactic_route_interface_hash(
+                        serve.indexed.shallow_state.as_ref(),
+                    ) == held.expected_syntactic_route_interface_hash
+            })
+    }
+
     // -----------------------------------------------------------------------
     // Fact-validated PreparedDeclBundle cache
     // -----------------------------------------------------------------------
@@ -905,7 +983,8 @@ impl VerterHost {
     /// the ACTIVE fact tracer AT DEMAND TIME — so the CONSUMING cache entry
     /// (the `LowerLocator` shape memo, an `Instantiate` memo, a
     /// component-meta proof) carries the barrel/re-export participants'
-    /// `FileWholeHash` + `Route` facts in its OWN read-set and a retarget or
+    /// `FileWholeHash` + parse-owned syntactic/exact resolution facts in its
+    /// OWN read-set and a retarget or
     /// leaf edit anywhere on the chain misses that warm read. The demand
     /// sites: the locator-shape ref-head re-canonicalization
     /// (`resolve_locator_ref_head`), the prepared-decl final-hop retry
@@ -1079,10 +1158,10 @@ impl VerterHost {
         // promotion the overlay knows the canonical's authoritative
         // hashes and the next warm read matches.
         //
-        // `route_hash` is `None` when the shallow state has no
-        // resolvable surface — mirrors
-        // `current_derived_fact_hash(Route)` (only
-        // computes the hash when `has_resolvable_surface()` is true).
+        // `route_hash` is the legacy request-overlay compatibility digest and
+        // is `None` when the shallow state has no resolvable surface. Shared
+        // route-only cache observations use the parse-owned
+        // `SyntacticRouteInterface` fact instead.
         // The host view's snapshot uses the same predicate, so the
         // overlay stays in sync with what the request-entry view
         // would have carried had the canonical been published before
@@ -1835,7 +1914,7 @@ impl VerterHost {
     ) -> Option<IndexedReadyServe> {
         verter_workspace::probe_scope!(ENSURE_INDEXED_READY);
         verter_audit::attribute_scope!(IndexedReadyBuild);
-        let serve = self.ensure_indexed_ready_serve_uninstrumented(canonical_id);
+        let serve = self.ensure_indexed_ready_serve_uninstrumented(canonical_id, None);
         // Test-only deterministic fenced-serve override: convert a would-be
         // PUBLISHED serve into a FENCED one (fire the non-cacheability fan-out +
         // `store_published = false`) WITHOUT a `project_generation` bump, so a
@@ -1862,9 +1941,10 @@ impl VerterHost {
             }
             return None;
         }
-        // Demand-time ROUTE-fact observation: a traced compute that consumes
-        // this canonical's indexed route surface depends on it — record the
-        // `DerivedFactHash{Route}` fact into every active tracer so the
+        // Demand-time route-interface observation: a traced compute that
+        // consumes this canonical's indexed route surface depends on its
+        // exact authored interface. Record the parse-owned fact so unrelated
+        // file bytes do not invalidate route-only consumers.
         // consuming cache entry's read-set (a component-meta proof, a
         // semantic-memo build, a compile-tier signature) revalidates when
         // the file's export route surface moves. Observed ONLY when the
@@ -1879,17 +1959,14 @@ impl VerterHost {
         if crate::resolver_core::resolver_context::fact_tracer_installed() {
             if let Some(serve) = serve.as_ref() {
                 if serve.store_published {
-                    if let Some(route_hash) = serve.indexed.route_surface_hash() {
-                        let normalized = self.normalized_analysis_canonical(canonical_id);
-                        if serve.indexed.shallow_state.has_resolvable_surface()
-                            && self.indexed_surface_is_current(normalized.as_ref(), &serve.indexed)
-                        {
+                    let normalized = self.normalized_analysis_canonical(canonical_id);
+                    if self.indexed_surface_is_current(normalized.as_ref(), &serve.indexed) {
+                        if let Some(fact) = self.syntactic_route_interface_fact_for_indexed(
+                            normalized.as_ref(),
+                            &serve.indexed,
+                        ) {
                             crate::resolver_core::resolver_context::observe_fan_out(
-                                crate::resolver_core::FactVersionRef::DerivedFactHash {
-                                    canonical_id: normalized.as_ref().to_string(),
-                                    kind: crate::resolver_core::DerivedFactKind::Route,
-                                    hash: route_hash,
-                                },
+                                crate::resolver_core::FactVersionRef::Parse(fact),
                             );
                         }
                     }
@@ -1902,6 +1979,7 @@ impl VerterHost {
     fn ensure_indexed_ready_serve_uninstrumented(
         &self,
         canonical_id: &str,
+        held_source: Option<&HeldIndexedSource>,
     ) -> Option<IndexedReadyServe> {
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
         let canonical_id = normalized_canonical_id.as_ref();
@@ -1993,6 +2071,8 @@ impl VerterHost {
             // artifact carries.
             let flight_workspace_generation = self.ws().content_generation();
             let flight_project_generation = self.project_type_store.current_project_generation();
+            let flight_store_view_epoch = self.current_store_view_epoch();
+            let flight_resolution_fact_generation = self.ws().resolution_fact_generation();
             // The R21 parse dimension the parse below runs under — the
             // value-side stamp the reuse gates compare against the live
             // per-canonical parse env.
@@ -2006,34 +2086,45 @@ impl VerterHost {
             // the scheduler — the canonical way to materialize a file. If
             // the scheduler still misses after `ensure_loaded`, return None
             // (file doesn't exist in the workspace).
-            let (raw_source, file_language, framework_parse, whole_hash) = {
-                let state = match self.effective_file_state(canonical_id, None) {
-                    Some(state) => state,
-                    None => {
-                        // On scheduler miss, call ensure_loaded once — the
-                        // canonical way to materialize a file into the
-                        // scheduler + current request view's extension store.
-                        // Raw import specifiers and empty canonicals are
-                        // never loadable.
-                        if canonical_id.is_empty()
-                            || is_raw_import_specifier_id(canonical_id)
-                            || !self.ensure_loaded(canonical_id)
-                        {
-                            return None;
+            let (raw_source, file_language, framework_parse, whole_hash) =
+                if let Some(held) = held_source {
+                    let data = held
+                        .snapshot
+                        .downcast_data::<crate::host_executor::HostSourceData>()?;
+                    (
+                        Arc::clone(&held.snapshot.source),
+                        data.file_language.clone(),
+                        data.framework_parse.clone(),
+                        held.snapshot.whole_hash,
+                    )
+                } else {
+                    let state = match self.effective_file_state(canonical_id, None) {
+                        Some(state) => state,
+                        None => {
+                            // On scheduler miss, call ensure_loaded once — the
+                            // canonical way to materialize a file into the
+                            // scheduler + current request view's extension store.
+                            // Raw import specifiers and empty canonicals are
+                            // never loadable.
+                            if canonical_id.is_empty()
+                                || is_raw_import_specifier_id(canonical_id)
+                                || !self.ensure_loaded(canonical_id)
+                            {
+                                return None;
+                            }
+                            self.effective_file_state(canonical_id, None)?
                         }
-                        self.effective_file_state(canonical_id, None)?
+                    };
+                    if !self.store_view_allows_current_whole_hash(canonical_id, state.whole_hash) {
+                        return None;
                     }
+                    (
+                        state.source,
+                        state.file_language,
+                        state.framework_parse,
+                        state.whole_hash,
+                    )
                 };
-                if !self.store_view_allows_current_whole_hash(canonical_id, state.whole_hash) {
-                    return None;
-                }
-                (
-                    state.source,
-                    state.file_language,
-                    state.framework_parse,
-                    state.whole_hash,
-                )
-            };
 
             // A carrier canonical (`.vue`, `.svelte`, …) the scheduler has not
             // parsed yet runs the carrier parser ONCE here through the counted
@@ -2059,8 +2150,15 @@ impl VerterHost {
             // The authoritative `source_type` is resolved ONCE (scheduler
             // value first) and feeds the single eval-program parse below;
             // per-call recomputation diverged for `.vue` `lang="tsx"`.
-            let source_type =
-                self.imported_eval_source_type_for(canonical_id, framework_parse.as_deref());
+            let source_type = held_source
+                .and_then(|held| {
+                    held.snapshot
+                        .downcast_data::<crate::host_executor::HostSourceData>()
+                        .map(|data| data.source_type)
+                })
+                .unwrap_or_else(|| {
+                    self.imported_eval_source_type_for(canonical_id, framework_parse.as_deref())
+                });
             // THE single eval-program parse for this cold canonical
             // build — performed AND RETAINED on the lazy lowering
             // service's worker (keyed by the content-generation
@@ -2076,12 +2174,24 @@ impl VerterHost {
                 parse_env_hash: flight_parse_env_hash,
             };
 
-            let scheduler_snapshot = self.build_snapshot_from_scheduler(canonical_id).map(|s| {
+            let scheduler_snapshot = if let Some(held) = held_source {
+                let data = held
+                    .snapshot
+                    .downcast_data::<crate::host_executor::HostSourceData>()?;
                 self.provenance
                     .indexed_ready_scheduler_snapshot_reuse
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Arc::new(s)
-            });
+                Some(Arc::new(Self::build_snapshot_from_parse(
+                    data.parse.clone(),
+                )))
+            } else {
+                self.build_snapshot_from_scheduler(canonical_id).map(|s| {
+                    self.provenance
+                        .indexed_ready_scheduler_snapshot_reuse
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Arc::new(s)
+                })
+            };
 
             struct ColdIndexProducts {
                 header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
@@ -2350,6 +2460,17 @@ impl VerterHost {
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
             });
 
+            if held_source.is_some_and(|held| {
+                crate::resolver_store::syntactic_route_interface_hash(
+                    indexed.shallow_state.as_ref(),
+                ) != held.expected_syntactic_route_interface_hash
+            }) {
+                return Some(crate::project_type_store::IndexedFlightOutcome {
+                    indexed,
+                    published: false,
+                });
+            }
+
             // PRE-PUBLISH FENCE. A workspace content mutation or a
             // route-resolution mutation that landed during this build
             // means the artifact was produced against superseded state:
@@ -2389,8 +2510,22 @@ impl VerterHost {
             // correctness remains read-side authoritative.
             #[cfg(test)]
             self.fire_materialize_seam();
+            let held_source_is_current = held_source.is_none_or(|held| {
+                self.scheduler
+                    .try_get_source(canonical_id)
+                    .is_some_and(|current| {
+                        current.generation == held.snapshot.generation
+                            && current.whole_hash == held.snapshot.whole_hash
+                            && Arc::ptr_eq(&current.data, &held.snapshot.data)
+                    })
+            });
             if self.ws().content_generation() != flight_workspace_generation
                 || self.project_type_store.current_project_generation() != flight_project_generation
+                || self.current_store_view_epoch() != flight_store_view_epoch
+                || self.ws().resolution_fact_generation() != flight_resolution_fact_generation
+                || self.host_view_env_hashes_for(canonical_id).parse_env_hash
+                    != flight_parse_env_hash
+                || !held_source_is_current
             {
                 return Some(crate::project_type_store::IndexedFlightOutcome {
                     indexed,
@@ -2652,43 +2787,15 @@ impl VerterHost {
             }
         }
 
-        // Live-host probe. Prefer the caller-supplied shallow state, then
-        // fall back to the WARM route-surface read
-        // (`current_derived_fact_hash(Route)` — a pure store read). The ROUTE
-        // arm of fact capture never materialises (the whole-hash arm
-        // above may `ensure_loaded` a scheduler miss — a load, not an
-        // artifact build): a dependency the compute never touched has
-        // no route surface to record — its `FileWholeHash` fact above
-        // already invalidates on any change to the owner's OWN content,
-        // and the route movements that do NOT touch owner content (a
-        // cross-file edge retarget — wildcard, named reexport, or import
-        // target) are caught by the edge-gated warm read declining.
-        // Materialising here would breadth-walk unrelated imports just to
-        // sign the result.
-        let route_hash = known_shallow
-            .filter(|state| state.has_resolvable_surface())
-            // A bare caller-supplied surface carries no edge-resolution
-            // generation, so one with SHALLOW cross-file edges cannot be
-            // proven edge-current — re-derive it through the edge-gated
-            // warm read rather than hashing a possibly-stale baked edge.
-            // The shallow COMPONENT predicate is the right gate here (not
-            // the complete `IndexedReady` authority): `hash_route_surface`
-            // digests only shallow-inventory data, so import-route-only
-            // edges — invisible to this hash — cannot stale it.
-            .filter(|state| !state.has_shallow_cross_file_edges())
-            .map(crate::resolver_store::hash_route_surface)
-            .or_else(|| {
-                self.current_derived_fact_hash(
-                    canonical_id,
-                    crate::resolver_core::DerivedFactKind::Route,
-                )
-            });
-        if let Some(hash) = route_hash {
-            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: canonical_id.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::Route,
-                hash,
-            };
+        let artifacts = self.current_content_pinned_artifacts(canonical_id);
+        let indexed = artifacts.as_ref().map(|artifacts| &artifacts.indexed);
+        let indexed = indexed.filter(|indexed| {
+            known_shallow.is_none_or(|known| std::ptr::eq(indexed.shallow_state.as_ref(), known))
+        });
+        if let Some(parse_fact) = indexed.and_then(|indexed| {
+            self.syntactic_route_interface_fact_for_indexed(canonical_id, indexed)
+        }) {
+            let fact = crate::resolver_core::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {
                 facts.push(fact);
             }
@@ -2716,25 +2823,46 @@ impl VerterHost {
             }
         }
 
-        let route_hash = known_shallow
-            .filter(|state| state.has_resolvable_surface())
-            .filter(|state| !state.has_shallow_cross_file_edges())
-            .map(crate::resolver_store::hash_route_surface)
-            .or_else(|| {
-                ctx.indexed_for_current_content(canonical_id)
-                    .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
-                    .and_then(|indexed| indexed.route_surface_hash())
-            });
-        if let Some(hash) = route_hash {
-            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
-                canonical_id: canonical_id.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::Route,
-                hash,
-            };
+        let indexed = ctx.indexed_for_current_content(canonical_id);
+        let indexed = indexed.as_ref().filter(|indexed| {
+            known_shallow.is_none_or(|known| std::ptr::eq(indexed.shallow_state.as_ref(), known))
+        });
+        if let Some(parse_fact) = indexed.and_then(|indexed| {
+            Self::syntactic_route_interface_fact_for_indexed_with_context(
+                ctx,
+                canonical_id,
+                indexed,
+            )
+        }) {
+            let fact = crate::resolver_core::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {
                 facts.push(fact);
             }
         }
+    }
+
+    fn syntactic_route_interface_fact_for_indexed_with_context(
+        ctx: &dyn crate::resolver_core::ResolverContext,
+        canonical_id: &str,
+        indexed: &Arc<crate::project_type_store::IndexedReady>,
+    ) -> Option<crate::resolver_core::ParseFactRef> {
+        if !indexed.shallow_state.has_resolvable_surface() {
+            return None;
+        }
+        let key = ctx.artifact_key_for_current_content(canonical_id)?;
+        let artifacts = ctx.project_type_store().indexed().get_artifacts(&key)?;
+        if !Arc::ptr_eq(&artifacts.indexed, indexed) {
+            return None;
+        }
+        let fact = artifacts
+            .facts
+            .lookup(&verter_semantic::facts::FactKey::SyntacticRouteInterface)?;
+        Some(crate::resolver_core::ParseFactRef {
+            canonical_id: canonical_id.to_string(),
+            key: verter_semantic::facts::FactKey::SyntacticRouteInterface,
+            lane: verter_semantic::facts::FactLane::Semantic,
+            expected_hash: fact.semantic_hash,
+        })
     }
 
     pub(crate) fn resolve_direct_imported_type_root_fast_path_with_context(
@@ -2825,15 +2953,16 @@ impl VerterHost {
                                 if self.indexed_surface_is_current(dep_canonical, &indexed)
                                     && indexed.shallow_state.has_resolvable_surface()
                                 {
-                                    facts.push(
-                                        crate::resolver_core::FactVersionRef::DerivedFactHash {
-                                            canonical_id: dep_canonical.to_string(),
-                                            kind: crate::resolver_core::DerivedFactKind::Route,
-                                            hash: crate::resolver_store::hash_route_surface(
-                                                &indexed.shallow_state,
-                                            ),
-                                        },
-                                    );
+                                    if let Some(parse_fact) = self
+                                        .syntactic_route_interface_fact_for_indexed(
+                                            dep_canonical,
+                                            &indexed,
+                                        )
+                                    {
+                                        facts.push(crate::resolver_core::FactVersionRef::Parse(
+                                            parse_fact,
+                                        ));
+                                    }
                                 }
                             }
                             return Some((

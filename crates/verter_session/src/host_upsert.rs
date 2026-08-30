@@ -928,6 +928,14 @@ impl VerterHost {
                 .unwrap_or_default(),
             parse_duration_ms,
         );
+        if let Some(old_source_snap) = old_source_snap.as_ref() {
+            let _ = self.materialize_committed_unchanged_carrier_route_interface(
+                &canonical_id,
+                old_source_snap,
+                Arc::clone(&new_source_snap),
+                committed_generation,
+            );
+        }
         self.bump_store_view_epoch();
         crate::host_manage::push_cache_drained_at_upsert("store_view_epoch", &canonical_id);
         result
