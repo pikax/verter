@@ -14,7 +14,7 @@
 //! snapshot triple, the generation counter, and the per-profile
 //! artifact slots.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use verter_language::FileLanguage;
@@ -224,6 +224,12 @@ pub struct FileNode {
     generation: LiveGenerationCounter,
     /// Current source snapshot (None if not yet loaded).
     pub(crate) source: ArcSwap<Option<Arc<SourceSnapshot>>>,
+    /// Generation whose Source completion has been integrated into scheduler
+    /// dependency/blocker state. Snapshot publication happens first on a
+    /// worker; only the driver advances this fence under the scheduler lock.
+    source_integrated_generation: AtomicU64,
+    /// Disambiguates "not integrated" from integrated generation zero.
+    source_integration_ready: AtomicBool,
     /// Current analysis snapshot (None if not yet analyzed).
     pub(crate) analysis: ArcSwap<Option<Arc<AnalysisSnapshot>>>,
     /// Per-profile artifact slots. DashMap provides concurrent per-key access.
@@ -272,6 +278,8 @@ impl FileNode {
             file_language,
             generation: LiveGenerationCounter::new(generation),
             source: ArcSwap::new(Arc::new(None)),
+            source_integrated_generation: AtomicU64::new(0),
+            source_integration_ready: AtomicBool::new(false),
             analysis: ArcSwap::new(Arc::new(None)),
             artifacts: DashMap::new(),
             pending_source: ArcSwap::new(Arc::new(None)),
@@ -296,6 +304,8 @@ impl FileNode {
     /// which exists only inside [`crate::source_root::SchedulerSourceDirectory::publish_transition`].
     /// A bare atomic bump from outside that hold does not compile.
     pub(crate) fn bump_generation(&self, proof: &crate::source_root::SourcePublication) -> u64 {
+        self.source_integration_ready
+            .store(false, Ordering::Release);
         self.generation.advance(proof)
     }
 
@@ -307,6 +317,31 @@ impl FileNode {
             Some(s) if s.generation == node_gen => Some(Arc::clone(s)),
             _ => None,
         }
+    }
+
+    /// Returns the current Source only after its completion has integrated all
+    /// dependency facts under the scheduler lock.
+    pub fn current_integrated_source(&self) -> Option<Arc<SourceSnapshot>> {
+        let node_gen = self.generation.read();
+        if !self.source_integration_ready.load(Ordering::Acquire)
+            || self.source_integrated_generation.load(Ordering::Relaxed) != node_gen
+        {
+            return None;
+        }
+        self.current_source()
+    }
+
+    /// Publish the integration fence for `generation` after dependency state
+    /// has been integrated under the scheduler lock. Returns false for a
+    /// stale/missing snapshot.
+    pub(crate) fn mark_source_integrated(&self, generation: u64) -> bool {
+        if self.generation.read() != generation || self.current_source().is_none() {
+            return false;
+        }
+        self.source_integrated_generation
+            .store(generation, Ordering::Relaxed);
+        self.source_integration_ready.store(true, Ordering::Release);
+        true
     }
 
     /// Returns the current analysis snapshot if generation-coherent.
@@ -379,6 +414,18 @@ mod tests {
         let result = node.current_source();
         assert!(result.is_some());
         assert_eq!(&*result.unwrap().source, "hello");
+    }
+
+    #[test]
+    fn generation_zero_source_is_not_integrated_until_marked() {
+        let node = FileNode::new("test.vue".into(), FileLanguage::vue());
+        let snap = Arc::new(SourceSnapshot::new_empty(Arc::from("hello"), 0));
+        node.source.store(Arc::new(Some(snap)));
+
+        assert!(node.current_source().is_some());
+        assert!(node.current_integrated_source().is_none());
+        assert!(node.mark_source_integrated(0));
+        assert!(node.current_integrated_source().is_some());
     }
 
     #[test]

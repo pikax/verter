@@ -653,6 +653,12 @@ pub struct SchedulerDag {
     /// mutation outside the typed API is intentionally not
     /// exposed.
     pub(in crate::dag) artifact_blocker_deps: FxHashMap<(Arc<str>, u64), PendingBlockerSet>,
+    /// Reverse demand refcount for live blocker deps. A dep can be named by
+    /// many owner generations, so values are counts rather than booleans.
+    /// Every mutation is owned by the typed blocker-registry funnel.
+    pub(in crate::dag) analysis_blocker_demand: FxHashMap<DepKey, usize>,
+    #[cfg(test)]
+    analysis_demand_probe_count: std::cell::Cell<usize>,
     /// Persistent record of terminal producer failures, keyed by the
     /// failed prerequisite's [`DepKey`]. A waiter admission consulting
     /// the dead-producer matrix BEFORE the matching producer
@@ -977,6 +983,9 @@ impl SchedulerDag {
             waiters: FxHashMap::default(),
             file_waiters: FxHashMap::default(),
             artifact_blocker_deps: FxHashMap::default(),
+            analysis_blocker_demand: FxHashMap::default(),
+            #[cfg(test)]
+            analysis_demand_probe_count: std::cell::Cell::new(0),
             terminal_dep_failures: FxHashMap::default(),
             canonical_index: CanonicalReverseIndex::default(),
             retirement_floor: FxHashMap::default(),
@@ -1633,9 +1642,7 @@ impl SchedulerDag {
             .canonical_index
             .blocker_owner_gens_below(canonical, floor)
         {
-            let key = (Arc::clone(canonical), gen);
-            self.artifact_blocker_deps.remove(&key);
-            self.canonical_index.remove_blocker_owner(canonical, gen);
+            self.clear_artifact_blockers(canonical, gen);
         }
 
         // 5. Stale terminal-dep-failure records, which would otherwise
@@ -2359,6 +2366,9 @@ impl SchedulerDag {
             }
         }
         self.artifact_blocker_deps.clear();
+        self.analysis_blocker_demand.clear();
+        #[cfg(test)]
+        self.analysis_demand_probe_count.set(0);
         self.terminal_dep_failures.clear();
         self.canonical_index.clear();
         // Drop every ready-lane entry and reset the credit
@@ -2751,11 +2761,23 @@ impl SchedulerDag {
                     .is_some_and(|node| !node.cancelled && node.deps_remaining.contains(&dep))
             })
         });
-        admitted_consumer
-            || self
-                .artifact_blocker_deps
-                .values()
-                .any(|set| set.deps.contains(&dep))
+        if admitted_consumer {
+            return true;
+        }
+        #[cfg(test)]
+        self.analysis_demand_probe_count
+            .set(self.analysis_demand_probe_count.get() + 1);
+        self.analysis_blocker_demand.contains_key(&dep)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_reset_analysis_demand_probe_count(&self) {
+        self.analysis_demand_probe_count.set(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_analysis_demand_probe_count(&self) -> usize {
+        self.analysis_demand_probe_count.get()
     }
 
     // The Artifact blocker-dep registry's typed API lives in the

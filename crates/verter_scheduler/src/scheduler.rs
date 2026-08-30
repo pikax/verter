@@ -1269,6 +1269,12 @@ enum BlockerStatus {
     Failed(crate::dag::FailedDepRecord),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnalysisDemandKind {
+    DirectRequest,
+    ArtifactBlocker,
+}
+
 /// Record planted in [`Scheduler::auto_ingested_recent`] when
 /// [`Scheduler::register_resolved_deps`] auto-ingests a dep blocker by
 /// enqueueing a `Submission::NewRequest` to the inbox. The record makes
@@ -2365,7 +2371,7 @@ impl Scheduler {
             None => return,
         };
         let generation = node.generation();
-        if generation == 0 || node.current_source().is_none() {
+        if generation == 0 || node.current_integrated_source().is_none() {
             return; // Source hasn't committed yet — deferred replay will handle it
         }
 
@@ -2517,7 +2523,13 @@ impl Scheduler {
                 // is reached.)
                 BlockerStatus::Gating
             } else {
-                self.file_stage_analysis_blocker_status(&dag, &dep_canonical, dep_gen)
+                self.ensure_analysis_for_demand(
+                    &mut dag,
+                    &dep_canonical,
+                    dep_gen,
+                    std::cmp::min(inherited_priority, Priority::Interactive),
+                    AnalysisDemandKind::ArtifactBlocker,
+                )
             };
             match status {
                 BlockerStatus::Satisfied => continue,
@@ -3761,7 +3773,7 @@ impl Scheduler {
         // generation-coherent, so after a source-update bump these
         // return `None` and the request always admits a fresh Source.
         let already_satisfied = match &target {
-            TargetStage::Source => node.current_source().is_some(),
+            TargetStage::Source => node.current_integrated_source().is_some(),
             TargetStage::Analysis => node.current_analysis().is_some(),
             TargetStage::Artifact { profile_hash } => {
                 node.current_artifact(*profile_hash).is_some()
@@ -3769,7 +3781,9 @@ impl Scheduler {
         };
         if already_satisfied {
             let result = match &target {
-                TargetStage::Source => RequestResult::Source(node.current_source().unwrap()),
+                TargetStage::Source => {
+                    RequestResult::Source(node.current_integrated_source().unwrap())
+                }
                 TargetStage::Analysis => RequestResult::Analysis(node.current_analysis().unwrap()),
                 TargetStage::Artifact { profile_hash } => {
                     RequestResult::Artifact(node.current_artifact(*profile_hash).unwrap())
@@ -3786,7 +3800,7 @@ impl Scheduler {
         // once admission has run. (See `CompletionTarget` docs for the
         // Request-shape fallback that covers the race window before
         // this stamp lands.)
-        let first_missing = if node.current_source().is_none() {
+        let first_missing = if node.current_integrated_source().is_none() {
             TaskKind::Load
         } else if node.current_analysis().is_none() {
             TaskKind::Analysis
@@ -3875,6 +3889,22 @@ impl Scheduler {
                 // nothing will ever produce this identity. Terminalize
                 // the group instead of leaving it parked.
                 Self::terminalize_refused_admission(dag, &canonical, generation);
+            }
+            return;
+        }
+
+        if matches!(first_missing, TaskKind::Analysis) {
+            match self.ensure_analysis_for_demand(
+                dag,
+                &canonical,
+                generation,
+                effective_priority,
+                AnalysisDemandKind::DirectRequest,
+            ) {
+                BlockerStatus::Gating | BlockerStatus::Satisfied => {}
+                BlockerStatus::Failed(_) => unreachable!(
+                    "direct Analysis demand retries the producer and never consumes blocker failure state"
+                ),
             }
             return;
         }
@@ -4136,6 +4166,94 @@ impl Scheduler {
                 stage: FileStageKey::Analysis,
             } => self.file_stage_analysis_blocker_status(dag, canonical, *generation),
             _ => BlockerStatus::Satisfied,
+        }
+    }
+
+    /// Atomically ensure the producer pipeline needed by one Analysis demand.
+    /// Callers hold the scheduler-state mutex, so observing the integrated Source fence,
+    /// checking existing identities, and admitting Analysis are one state
+    /// transition. Blockers preserve terminal failure; direct requests may
+    /// retry Analysis at the same generation.
+    fn ensure_analysis_for_demand(
+        &self,
+        dag: &mut SchedulerDag,
+        canonical: &Arc<str>,
+        generation: u64,
+        priority: Priority,
+        kind: AnalysisDemandKind,
+    ) -> BlockerStatus {
+        let Some(node) = self
+            .nodes
+            .get(canonical.as_ref())
+            .map(|entry| entry.clone())
+        else {
+            return if self.auto_ingest_tracking_gates(canonical, generation) {
+                BlockerStatus::Gating
+            } else {
+                BlockerStatus::Satisfied
+            };
+        };
+        if generation == 0 || node.generation() != generation {
+            return BlockerStatus::Satisfied;
+        }
+        if node.current_analysis().is_some() {
+            return BlockerStatus::Satisfied;
+        }
+
+        let analysis_dep = DepKey::FileStage {
+            canonical: Arc::clone(canonical),
+            generation,
+            stage: FileStageKey::Analysis,
+        };
+        if kind == AnalysisDemandKind::ArtifactBlocker {
+            if let Some(record) = dag.lookup_terminal_dep_failure(&analysis_dep) {
+                return BlockerStatus::Failed(record);
+            }
+        }
+
+        let analysis_identity = WorkNodeIdentity::FileStage {
+            canonical: Arc::clone(canonical),
+            generation,
+            stage: FileStageKey::Analysis,
+        };
+        if dag.token_for(&analysis_identity).is_some() {
+            return BlockerStatus::Gating;
+        }
+
+        if node.current_integrated_source().is_some() {
+            if kind == AnalysisDemandKind::DirectRequest {
+                dag.clear_terminal_dep_failure_for_gen(canonical, generation);
+            }
+            return if admit_work(
+                dag,
+                canonical,
+                generation,
+                TaskKind::Analysis,
+                priority,
+                None,
+            )
+            .is_some()
+            {
+                BlockerStatus::Gating
+            } else {
+                if kind == AnalysisDemandKind::DirectRequest {
+                    Self::terminalize_refused_admission(dag, canonical, generation);
+                }
+                BlockerStatus::Satisfied
+            };
+        }
+
+        let source_identity = WorkNodeIdentity::FileStage {
+            canonical: Arc::clone(canonical),
+            generation,
+            stage: FileStageKey::Source,
+        };
+        if dag.token_for(&source_identity).is_some()
+            || self.auto_ingest_tracking_gates(canonical, generation)
+        {
+            BlockerStatus::Gating
+        } else {
+            BlockerStatus::Satisfied
         }
     }
 
@@ -4742,10 +4860,12 @@ impl Scheduler {
                                     let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
                                     let dep_gen =
                                         self.nodes.get(dep_id).map(|n| n.generation()).unwrap_or(0);
-                                    let status = self.file_stage_analysis_blocker_status(
-                                        &dag,
+                                    let status = self.ensure_analysis_for_demand(
+                                        &mut dag,
                                         &dep_canonical,
                                         dep_gen,
+                                        std::cmp::min(inherited_priority, Priority::Interactive),
+                                        AnalysisDemandKind::ArtifactBlocker,
                                     );
                                     match status {
                                         BlockerStatus::Satisfied => continue,
@@ -4801,14 +4921,24 @@ impl Scheduler {
                                 }
                             }
                         }
+                        // The worker publishes snapshot bytes before this
+                        // completion is drained. Advance the explicit
+                        // integration fence only after every dependency fact
+                        // and blocker registration above is complete under
+                        // this same scheduler-state hold.
+                        verter_debug_assert!(
+                            node.mark_source_integrated(generation),
+                            "current Source completion must publish its integration fence",
+                        );
+
                         // Resolve Source-targeted waiters only after this
                         // transition has published and consumed all dependency
                         // facts. Signalling from the worker immediately after
                         // storing the Source snapshot let callers observe a
                         // half-integrated generation.
-                        let source = node
-                            .current_source()
-                            .expect("current Source completion must retain its snapshot");
+                        let source = node.current_integrated_source().expect(
+                            "current Source completion must retain its integrated snapshot",
+                        );
                         let result = RequestResult::Source(source);
                         dag.signal_stage_complete(
                             &canonical_arc,
@@ -4832,13 +4962,16 @@ impl Scheduler {
                             .highest_priority_for_file(&canonical_arc, generation)
                             .unwrap_or(inherited_priority);
                         if requires_analysis {
-                            admit_work(
+                            let status = self.ensure_analysis_for_demand(
                                 &mut dag,
                                 &canonical_arc,
                                 generation,
-                                TaskKind::Analysis,
                                 std::cmp::min(effective_priority, inherited_priority),
-                                None,
+                                AnalysisDemandKind::DirectRequest,
+                            );
+                            verter_debug_assert!(
+                                matches!(status, BlockerStatus::Gating | BlockerStatus::Satisfied),
+                                "direct Analysis demand must not consume blocker failure state",
                             );
                         }
                         // When a later stage is required, admit Analysis
@@ -14953,6 +15086,150 @@ mod tests {
                  a_gen={a_gen}, dep_gen_observed={dep_gen_observed}",
             ),
         }
+    }
+
+    /// A Source snapshot is published by its worker before the driver integrates
+    /// dependency facts from the matching completion. Requests arriving in that
+    /// window must join the live Source identity rather than treating the raw
+    /// snapshot bytes as a completed stage.
+    #[test]
+    fn published_source_is_not_request_ready_until_completion_is_integrated() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/paused.vue".to_string(), Arc::from("<template />"));
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
+
+        let initial = sched.submit_request(Request {
+            file_id: "/paused.vue".to_string(),
+            target: TargetStage::Source,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        sched.drain_inbox();
+        assert!(sched.drive_one(), "the Source work must dispatch");
+
+        let canonical: Arc<str> = Arc::from("/paused.vue");
+        let node = sched
+            .nodes
+            .get("/paused.vue")
+            .expect("published FileNode")
+            .clone();
+        let generation = node.generation();
+        assert!(
+            node.current_source().is_some(),
+            "precondition: the worker published snapshot bytes before StageComplete is drained",
+        );
+        let source_identity = WorkNodeIdentity::FileStage {
+            canonical: Arc::clone(&canonical),
+            generation,
+            stage: FileStageKey::Source,
+        };
+        assert!(
+            sched.dag.lock().token_for(&source_identity).is_some(),
+            "precondition: the dispatched Source identity stays live until integration",
+        );
+
+        let (source_joiner, source_sender) = completion_pair::<RequestResult>();
+        sched.handle_new_request(
+            "/paused.vue".to_string(),
+            TargetStage::Source,
+            Priority::Interactive,
+            None,
+            None,
+            source_sender,
+            sched.removal_epoch.load(Ordering::Acquire),
+            None,
+        );
+        let (analysis_joiner, analysis_sender) = completion_pair::<RequestResult>();
+        sched.handle_new_request(
+            "/paused.vue".to_string(),
+            TargetStage::Analysis,
+            Priority::Interactive,
+            None,
+            None,
+            analysis_sender,
+            sched.removal_epoch.load(Ordering::Acquire),
+            None,
+        );
+
+        assert!(
+            source_joiner.try_get().is_none(),
+            "published snapshot bytes must not satisfy a Source request before dependency integration",
+        );
+        let analysis_identity = WorkNodeIdentity::FileStage {
+            canonical,
+            generation,
+            stage: FileStageKey::Analysis,
+        };
+        assert!(
+            sched.dag.lock().token_for(&analysis_identity).is_none(),
+            "Analysis must not admit before the live Source identity integrates its completion",
+        );
+
+        sched.drain_inbox();
+        sched.drive_all();
+        assert!(initial.try_get().is_some_and(|state| state.is_ready()));
+        assert!(source_joiner
+            .try_get()
+            .is_some_and(|state| state.is_ready()));
+        assert!(analysis_joiner
+            .try_get()
+            .is_some_and(|state| state.is_ready()));
+    }
+
+    /// A legitimate Source-only producer has no live Source identity after
+    /// completion. Registering a later Artifact blocker must atomically start
+    /// its Analysis stage instead of classifying that producer as moot.
+    #[test]
+    fn late_blocker_starts_analysis_for_source_complete_dependency() {
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/owner.vue".to_string(), Arc::from("<template />"));
+        loader.insert("/dep.ts".to_string(), Arc::from("export type T = string"));
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
+
+        for file_id in ["/owner.vue", "/dep.ts"] {
+            let handle = sched.submit_request(Request {
+                file_id: file_id.to_string(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: None,
+                file_language: None,
+                request_context: None,
+            });
+            assert!(
+                sched.wait_or_drive(&handle).is_ready(),
+                "Source-only precondition for {file_id}",
+            );
+        }
+
+        let dep_generation = sched.nodes.get("/dep.ts").unwrap().generation();
+        sched.register_resolved_deps(
+            "/owner.vue",
+            vec!["/dep.ts".to_string()],
+            vec!["/dep.ts".to_string()],
+        );
+
+        let dep_canonical: Arc<str> = Arc::from("/dep.ts");
+        let dep_analysis = WorkNodeIdentity::FileStage {
+            canonical: Arc::clone(&dep_canonical),
+            generation: dep_generation,
+            stage: FileStageKey::Analysis,
+        };
+        assert!(
+            sched.dag.lock().token_for(&dep_analysis).is_some(),
+            "late blocker demand must admit Analysis for an already Source-complete dependency",
+        );
+
+        sched.drive_all();
+        assert!(
+            sched
+                .nodes
+                .get("/dep.ts")
+                .and_then(|node| node.current_analysis())
+                .is_some(),
+            "the Analysis admitted for late blocker demand must complete",
+        );
     }
 
     /// Analysis short-circuit on a failed blocker dep: without

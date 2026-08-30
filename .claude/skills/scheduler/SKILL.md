@@ -53,6 +53,30 @@ missing stage normally. Checking only direct request waiters is incorrect:
 an auto-ingested macro dependency may be required by an Artifact blocker
 before it owns a direct waiter or an admitted downstream node.
 
+Source snapshot publication and Source-stage readiness are distinct. The
+worker may publish generation-coherent snapshot bytes before the driver has
+integrated extracted dependencies and late blockers. `FileNode` therefore
+carries an explicit ready flag plus integrated-generation fence (generation
+zero is valid): request admission and the Source already-satisfied short
+circuit consult `current_integrated_source`, while completion processing reads
+the raw current snapshot and advances the fence only after dependency
+integration under the scheduler state lock. A
+request arriving in that window joins the still-live Source identity; it must
+not admit Analysis early or receive an early Source result.
+
+Late Analysis demand is handled by one lock-held
+`ensure_analysis_for_demand` transition. Direct Analysis admission and both
+blocker-registration paths use it. A dependency that legitimately completed a
+Source-only request can therefore acquire Analysis later; the absence of a
+live Source identity is not mistaken for a dead producer. Terminal producer
+failure remains typed for blocker demand, while a direct request retains the
+same-generation recovery path.
+
+The blocker registry maintains a `DepKey`-keyed reverse demand refcount at
+every record/replace/drain/clear/scrub/owner-removal/retirement/reset funnel.
+`has_analysis_demand` probes that index directly instead of scanning all owner
+blocker sets under the global scheduler state lock.
+
 **The test for "by construction" is an enumeration, not an intuition.**
 The one structural claim in this area that held — `submit` being the sole
 admission primitive — held only because every writer of `by_identity` was
