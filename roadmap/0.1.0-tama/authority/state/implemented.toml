@@ -273,6 +273,11 @@ node_id = "CCA1GT"
 commit_message = "feat(core): route template facts through catalog semantic authorities"
 commit_date = "2026-08-30T01:06:43+01:00"
 
+[[implemented]]
+node_id = "CCA1G"
+commit_message = "docs(core): record eval-source and template-fact catalog convergence"
+commit_date = "2026-08-30T02:29:21+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
