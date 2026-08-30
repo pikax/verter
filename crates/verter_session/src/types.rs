@@ -1523,7 +1523,7 @@ pub struct CompileProfile {
     /// Svelte `ModuleCompileOptions.generate`. Settable here (a
     /// `supported canonical` option row in isolation), but there is no
     /// Verter product for Svelte's `ModuleJavaScript` output family
-    /// today: setting this refuses `build_compile_request` with a typed
+    /// today: setting this refuses `build_svelte_compile_request` with a typed
     /// `UnsupportedOption` naming the `SvelteModule` capability cell,
     /// `unsupported fail-closed` per `capability-matrix.tsv` — the same
     /// "option admits fine, the capability it depends on does not"
@@ -4882,6 +4882,11 @@ mod tests {
     /// * `HOST_NO_CARRIER_ARTIFACT` / `HOST_NO_CARRIER_COMPILER` — no parse
     ///   artifact for these bytes / no compiler registered for the adapter;
     ///   neither is waiting on a file;
+    /// * `HOST_NATIVE_BINDING_UNAVAILABLE` — the registered host-integration
+    ///   catalog holds no bindable row for the artifact's identity; the
+    ///   catalog is built-in and static per build, so identical bytes cannot
+    ///   bind later (a superseded snapshot maps to `HostError::Superseded`
+    ///   instead and never carries this code);
     /// * `HOST_COMPILE_TARGET_MISSING_IDE` / `HOST_COMPILE_UNSUPPORTED` — the
     ///   carrier refused to produce the demanded surface for these bytes;
     /// * `script-owner-index` — an owner-table invariant over the file's OWN
@@ -5032,6 +5037,7 @@ mod tests {
             // The host-side compile-routing refusals.
             "HOST_NO_CARRIER_ARTIFACT",
             "HOST_NO_CARRIER_COMPILER",
+            "HOST_NATIVE_BINDING_UNAVAILABLE",
             "HOST_COMPILE_TARGET_MISSING_IDE",
             "HOST_COMPILE_UNSUPPORTED",
             "script-owner-index",

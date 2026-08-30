@@ -349,7 +349,7 @@ fn svelte_runes_component_emits_a_runtime_main() {
 /// Session-level Svelte option wiring: setting `svelte_disclose_version` on a
 /// REAL `CompileProfile` and driving it through the actual production
 /// session route (`get_virtual_file` -> `compile_entry` ->
-/// `host_resolve::compile_request_build::build_compile_request` /
+/// `host_resolve::compile_request_build::build_svelte_compile_request` /
 /// `derive_runtime_compile_options`) must reach the compiled output.
 /// Discriminating from the carrier-level tests already covering this
 /// option (`svelte/carrier.rs`, `svelte/runtime` tests), which construct
@@ -655,7 +655,7 @@ fn session_profile_svelte_dev_reaches_the_carrier() {
     );
 }
 
-/// Spot-check: `svelte_compatibility` reaches `build_compile_request`
+/// Spot-check: `svelte_compatibility` reaches `build_svelte_compile_request`
 /// without refusing (the ONLY thing currently testable for this option —
 /// `SvelteCompatibilityRequest` is presence-only with no live sub-field
 /// once `componentApi` is excluded as unsupported, so there is no

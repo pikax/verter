@@ -144,7 +144,7 @@ fn request_from_target(
         ..Default::default()
     };
     // Routes through the SAME admission surface the session route
-    // (`host_resolve::compile_request_build::build_compile_request`)
+    // (`host_resolve::compile_request_build::build_vue_compile_request`)
     // uses, rather than constructing `VueCompileRequest` directly:
     // `CompileAuditOverrides` has no field mapping onto any of the 12
     // unsupported-fail-closed slots today, so this can never actually

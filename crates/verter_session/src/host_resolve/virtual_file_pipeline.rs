@@ -10,8 +10,11 @@ use rustc_hash::FxHashMap;
 use crate::instant::Instant;
 
 use super::compile_request_build::{
-    build_compile_request, derive_runtime_compile_options, request_construction_refused_diagnostics,
+    build_bound_compile_request, compile_unsupported_code, derive_runtime_compile_options,
+    no_carrier_artifact_diagnostics, no_carrier_compiler_diagnostics,
+    render_lane_vue_compile_request, request_construction_refused_diagnostics,
 };
+use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
 use crate::compile::{assemble_vue_main_module, VueMainAssemblyFailure};
 use crate::hash::compile_profile_hash;
@@ -22,7 +25,7 @@ use crate::VerterHost;
 use oxc_allocator::Allocator;
 use verter_compiler::compile::format_import_specifier;
 use verter_compiler::framework_common::{
-    CarrierCompileOutcome, CompileUnsupported, RuntimeDiagnosticSeverity, RuntimeTemplateBlock,
+    CarrierCompileOutcome, RuntimeDiagnosticSeverity, RuntimeTemplateBlock,
 };
 
 /// Fail-closed Main-module assembly outcome as a compile error — every
@@ -1318,11 +1321,22 @@ impl VerterHost {
 
         validate_registered_carrier_inputs(&compile_input, profile)?;
 
+        // The request-scoped binding for this render compile ATTEMPT — the
+        // same common binding point as the host-backed route; the render
+        // lane has no warm serve, so every render binds exactly once.
+        let native_host_binding = self.bind_native_host_compile_attempt(
+            compile_input.framework_parse.as_deref(),
+            &compile_input.canonical_id,
+            compile_input.source.len() as u32,
+            &source_snap,
+            profile.requested_mode,
+        )?;
+
         // The render-only compile: the SAME shared substrate + host-side
         // `Main` assembly as `compile_entry`, without the per-file wrapper
         // overhead, and with the imported-macro-resolution fatality softened
         // to a warning.
-        self.compile_entry_runtime_render(&compile_input, profile)
+        self.compile_entry_runtime_render(&compile_input, profile, native_host_binding)
     }
 
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
@@ -1813,6 +1827,19 @@ impl VerterHost {
         };
         drop(block_content_capture_fence);
 
+        // The request-scoped native host binding for this compile ATTEMPT:
+        // bound AFTER the warm-hit consult (a warm hit performs no compile
+        // and creates no binding) and BEFORE the cold compute, over the
+        // request's ONE coherent scheduler snapshot. A supersession-driven
+        // re-snapshot re-enters this path and binds anew.
+        let native_host_binding = self.bind_native_host_compile_attempt(
+            cache_miss.compile_input.framework_parse.as_deref(),
+            &cache_miss.compile_input.canonical_id,
+            cache_miss.compile_input.source.len() as u32,
+            &source_snap,
+            requested_mode,
+        )?;
+
         // Test-only seam after the coherent owner + block-content capture and
         // before cold compute. A source/content mutation landed here must make
         // the post-compute publication stamp decline.
@@ -1957,7 +1984,7 @@ impl VerterHost {
                             );
                         }
                     }
-                    self.compile_entry(&compile_input, profile)
+                    self.compile_entry(&compile_input, profile, native_host_binding)
                 });
             // `Cacheable(sig)` → publish the compile-output slot through
             // the typed session node under the path-precise signature.
@@ -1985,7 +2012,7 @@ impl VerterHost {
             (result, Some(admission))
         } else {
             // `Content` / `Stateless`: no tracer, no fact signature.
-            let result = self.compile_entry(&compile_input, profile);
+            let result = self.compile_entry(&compile_input, profile, native_host_binding);
             (result, None)
         };
         // The committed products of this transaction, plus the diagnostics it
@@ -3105,6 +3132,7 @@ impl VerterHost {
         &self,
         snapshot: &CompileInput,
         profile: &CompileProfile,
+        binding: Option<BoundNativeHostRequest>,
     ) -> Result<CompileEntryOutcome, DiagnosticsSnapshot> {
         let mut diagnostics = snapshot.parse_diagnostics.clone();
 
@@ -3134,12 +3162,11 @@ impl VerterHost {
             .unwrap_or(
                 crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
             );
-        let is_vue = self
-            .language_classifier()
-            .classify(&snapshot.canonical_id)
-            .is_vue();
-        let macro_output =
-            is_vue.then(|| self.produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand));
+        // Framework identity comes from the request-scoped binding — the
+        // catalog-selected registered identity — never from language
+        // classification of the canonical path.
+        let macro_output = matches!(binding, Some(BoundNativeHostRequest::Vue(_)))
+            .then(|| self.produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand));
         let macro_dependency_diagnostics = macro_output
             .as_ref()
             .map(|output| super::vue_macro_dependency_diagnostics::collect(self, snapshot, output))
@@ -3190,15 +3217,33 @@ impl VerterHost {
         let want_template_data =
             scope.needs_template_analysis() || profile.target.needs_template_data();
 
+        // The consumed request-scoped binding is the SOLE framework-identity
+        // authority for this compile attempt; the carrier-registry dispatch
+        // below still routes by the artifact identity (the retained
+        // compatibility route's own dispatch). An input with no carrier
+        // artifact (e.g. a plain script that reached this path) has no
+        // registered identity, so no binding exists and there is no runtime
+        // surface to produce.
+        let (artifact, binding) = match (snapshot.framework_parse.as_ref(), binding) {
+            (Some(artifact), Some(binding)) => (artifact, binding),
+            _ => {
+                return Err(diagnostics.merge(no_carrier_artifact_diagnostics(
+                    &snapshot.canonical_id,
+                    snapshot.source.len() as u32,
+                )));
+            }
+        };
+
         // The canonical, admission-checked request. This is the session's
         // per-file/virtual-product request-construction authority: an
         // unsupported option, a malformed Svelte namespace/fragments token,
         // or an SSR x Vapor / inline x SSR combination refuses HERE, before
-        // any codegen input is built — see `build_compile_request`.
-        let request = match build_compile_request(
+        // any codegen input is built — see `compile_request_build`. The
+        // constructor is selected by the binding's catalog arm.
+        let request = match build_bound_compile_request(
+            &binding,
             profile,
             &snapshot.canonical_id,
-            is_vue,
             want_runtime,
             want_ide,
             want_template_data,
@@ -3225,41 +3270,13 @@ impl VerterHost {
             snapshot.prepared_styles.clone(),
         );
 
-        // Route the runtime compile through the carrier registry, selected
-        // by the file's framework-neutral parse artifact. The artifact is
-        // the SINGLE dispatch authority — there is no per-framework branch.
-        // A canonical with no carrier artifact (e.g. a plain script that
-        // reached this path) has no runtime surface to produce.
-        let Some(artifact) = snapshot.framework_parse.as_ref() else {
-            return Err(
-                diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-                    severity: HostSeverity::Error,
-                    code: "HOST_NO_CARRIER_ARTIFACT".to_string(),
-                    message: format!(
-                        "no framework parse artifact for '{}' — cannot route the runtime compile",
-                        snapshot.canonical_id
-                    ),
-                    arguments: Vec::new(),
-                    span: verter_span::Span::new(0, snapshot.source.len() as u32),
-                }])),
-            );
-        };
         let Some(compiler) = crate::parse::carrier_compiler_registry()
             .compiler_for_carrier_language(artifact.adapter_id(), artifact.language_id())
         else {
-            return Err(
-                diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
-                    severity: HostSeverity::Error,
-                    code: "HOST_NO_CARRIER_COMPILER".to_string(),
-                    message: format!(
-                        "no carrier compiler for adapter '{}' / language '{}'",
-                        artifact.adapter_id().as_str(),
-                        artifact.language_id().as_str()
-                    ),
-                    arguments: Vec::new(),
-                    span: verter_span::Span::new(0, snapshot.source.len() as u32),
-                }])),
-            );
+            return Err(diagnostics.merge(no_carrier_compiler_diagnostics(
+                artifact,
+                snapshot.source.len() as u32,
+            )));
         };
 
         // The host OWNS the cached-parse validity decision: a cached
@@ -3285,6 +3302,19 @@ impl VerterHost {
             );
         }
 
+        // Consume the binding exactly once, by value; the attribution is
+        // held across the retained compat call for identity coherence with
+        // the dispatched artifact (see `into_attribution`).
+        let bound_attribution = binding.into_attribution();
+        verter_debug_assert_eq!(
+            bound_attribution.catalog_identity().adapter_id(),
+            artifact.adapter_id(),
+        );
+        verter_debug_assert_eq!(
+            bound_attribution.snapshot().canonical_id(),
+            snapshot.canonical_id,
+        );
+
         let outcome = match compiler.compile_bundle(
             snapshot.source.as_ref(),
             artifact,
@@ -3293,19 +3323,7 @@ impl VerterHost {
         ) {
             Ok(outcome) => outcome,
             Err(unsupported) => {
-                let code = match unsupported {
-                    CompileUnsupported::TargetMissingIde => "HOST_COMPILE_TARGET_MISSING_IDE",
-                    CompileUnsupported::NoIdeProjection { .. } => "HOST_COMPILE_UNSUPPORTED",
-                    CompileUnsupported::BlockContentRuntimeUnavailable { .. } => {
-                        "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE"
-                    }
-                    CompileUnsupported::BlockContentIdeUnavailable { .. } => {
-                        "HOST_BLOCK_CONTENT_IDE_UNAVAILABLE"
-                    }
-                    CompileUnsupported::RequestExecutionRefused(_) => {
-                        "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"
-                    }
-                };
+                let code = compile_unsupported_code(&unsupported);
                 return Err(diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
                     HostDiagnostic {
                         severity: HostSeverity::Error,
@@ -3659,6 +3677,7 @@ impl VerterHost {
         &self,
         snapshot: &CompileInput,
         profile: &CompileProfile,
+        binding: Option<BoundNativeHostRequest>,
     ) -> Result<RenderOnlyMain, HostError> {
         let diagnostics = snapshot.parse_diagnostics.clone();
 
@@ -3691,24 +3710,19 @@ impl VerterHost {
             prepared_styles: snapshot.prepared_styles.clone(),
         };
 
-        // The render lane's whole subject is the runtime `Main` module, so
-        // it always asks for the runtime products regardless of the
-        // caller's target bits — mirroring the lane's own contract
-        // (`CompileManyTarget::RuntimeRender`), not the profile's.
-        let want_runtime = true;
         let want_ide = profile.target.needs_tsx();
         let want_template_data =
             scope.needs_template_analysis() || profile.target.needs_template_data();
 
-        // The canonical, admission-checked request — same construction
-        // authority as `compile_entry` (this lane is Vue-only, matching its
-        // own module contract). A refusal here is FATAL, matching every
+        // The canonical, admission-checked request — the render lane's OWN
+        // fixed-Vue constructor (the characterized transitional request
+        // shape; see `render_lane_vue_compile_request`). The binding
+        // supplies this route's identity/audit coherence; it does not
+        // select the request shape. A refusal here is FATAL, matching every
         // other construction-time site this lane already treats as fatal.
-        let request = match build_compile_request(
+        let request = match render_lane_vue_compile_request(
             profile,
             &snapshot.canonical_id,
-            true,
-            want_runtime,
             want_ide,
             want_template_data,
         ) {
@@ -3740,21 +3754,14 @@ impl VerterHost {
 
         // Route through the carrier registry (the single dispatch authority)
         // — identical to `compile_entry`. Sites 3 (no artifact) and 4 (no
-        // compiler) stay FATAL.
-        let Some(artifact) = snapshot.framework_parse.as_ref() else {
+        // compiler) stay FATAL. An input with no carrier artifact has no
+        // registered identity, so no binding exists either.
+        let (Some(artifact), Some(binding)) = (snapshot.framework_parse.as_ref(), binding) else {
             return Err(HostError::CompileError(CompileFailure {
-                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
-                    HostDiagnostic {
-                        severity: HostSeverity::Error,
-                        code: "HOST_NO_CARRIER_ARTIFACT".to_string(),
-                        message: format!(
-                        "no framework parse artifact for '{}' — cannot route the runtime compile",
-                        snapshot.canonical_id
-                    ),
-                        arguments: Vec::new(),
-                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
-                    },
-                ])),
+                diagnostics: diagnostics.merge(no_carrier_artifact_diagnostics(
+                    &snapshot.canonical_id,
+                    snapshot.source.len() as u32,
+                )),
                 requested_mode: profile.requested_mode,
                 actual_mode: profile.requested_mode,
                 downgrade_reason: None,
@@ -3764,19 +3771,10 @@ impl VerterHost {
             .compiler_for_carrier_language(artifact.adapter_id(), artifact.language_id())
         else {
             return Err(HostError::CompileError(CompileFailure {
-                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
-                    HostDiagnostic {
-                        severity: HostSeverity::Error,
-                        code: "HOST_NO_CARRIER_COMPILER".to_string(),
-                        message: format!(
-                            "no carrier compiler for adapter '{}' / language '{}'",
-                            artifact.adapter_id().as_str(),
-                            artifact.language_id().as_str()
-                        ),
-                        arguments: Vec::new(),
-                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
-                    },
-                ])),
+                diagnostics: diagnostics.merge(no_carrier_compiler_diagnostics(
+                    artifact,
+                    snapshot.source.len() as u32,
+                )),
                 requested_mode: profile.requested_mode,
                 actual_mode: profile.requested_mode,
                 downgrade_reason: None,
@@ -3809,6 +3807,18 @@ impl VerterHost {
             }));
         }
 
+        // Consume the binding exactly once, by value — identical
+        // discipline to `compile_entry` (see `into_attribution`).
+        let bound_attribution = binding.into_attribution();
+        verter_debug_assert_eq!(
+            bound_attribution.catalog_identity().adapter_id(),
+            artifact.adapter_id(),
+        );
+        verter_debug_assert_eq!(
+            bound_attribution.snapshot().canonical_id(),
+            snapshot.canonical_id,
+        );
+
         let compiled = match compiler.compile_bundle(
             snapshot.source.as_ref(),
             artifact,
@@ -3828,19 +3838,7 @@ impl VerterHost {
             Ok(CarrierCompileOutcome::Produced(bundle)) => bundle,
             // Site 5 (`CompileUnsupported`) stays FATAL.
             Err(unsupported) => {
-                let code = match unsupported {
-                    CompileUnsupported::TargetMissingIde => "HOST_COMPILE_TARGET_MISSING_IDE",
-                    CompileUnsupported::NoIdeProjection { .. } => "HOST_COMPILE_UNSUPPORTED",
-                    CompileUnsupported::BlockContentRuntimeUnavailable { .. } => {
-                        "HOST_BLOCK_CONTENT_RUNTIME_UNAVAILABLE"
-                    }
-                    CompileUnsupported::BlockContentIdeUnavailable { .. } => {
-                        "HOST_BLOCK_CONTENT_IDE_UNAVAILABLE"
-                    }
-                    CompileUnsupported::RequestExecutionRefused(_) => {
-                        "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"
-                    }
-                };
+                let code = compile_unsupported_code(&unsupported);
                 return Err(HostError::CompileError(CompileFailure {
                     diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
                         HostDiagnostic {

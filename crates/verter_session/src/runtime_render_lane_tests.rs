@@ -564,8 +564,8 @@ fn runtime_render_refuses_ssr_and_force_vapor() {
 
 /// The IMPLICIT half of the same rule, through the same real production
 /// route: no `force_vapor`, but the source's own `<template vapor>` marker
-/// resolves the backend to Vapor once parsed. `build_compile_request`
-/// cannot see this at construction time (parsing has not happened yet) —
+/// resolves the backend to Vapor once parsed. The compile-request
+/// constructors cannot see this at construction time (parsing has not happened yet) —
 /// this is `compile_bundle`'s own post-parse guard, proven reachable
 /// through the FULL session route `compile_many` -> `render_only_main` ->
 /// `compile_entry_runtime_render` (the exact chain NAPI's `compileMany`,
@@ -1848,7 +1848,7 @@ fn runtime_render_builds_a_vue_shaped_request_for_a_svelte_carrier() {
     let canonical = "/proj/Shape.svelte";
     upsert_sibling(&host, canonical, SVELTE_RUNES_SRC);
 
-    // `svelte_generate_module` refuses `build_compile_request` under a
+    // `svelte_generate_module` refuses `build_svelte_compile_request` under a
     // Svelte-shaped request (typed `UnsupportedOption` naming the
     // `SvelteModule` capability cell — see `compile_request_build.rs`).
     let mut profile = CompileProfile {

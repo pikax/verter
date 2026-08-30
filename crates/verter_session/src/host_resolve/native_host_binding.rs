@@ -43,7 +43,10 @@ use verter_compiler::framework_common::{
 use verter_language::{FrameworkAdapterId, LanguageId};
 use verter_scheduler::node::SourceSnapshot;
 
-use crate::types::Hash16;
+use crate::types::{
+    CompileCacheMode, CompileFailure, DiagnosticsSnapshot, Hash16, HostDiagnostic, HostSeverity,
+};
+use crate::HostError;
 
 // The binding is request-scoped and consumed exactly once by value: it
 // must never be duplicated (Clone/Copy) nor round-tripped through a
@@ -372,12 +375,99 @@ impl BoundNativeHostRequest {
     }
 }
 
+impl BoundNativeHostRequest {
+    /// Consumes the binding by value for a retained compatibility route:
+    /// yields the attribution and drops the bound backend arm UNEXECUTED —
+    /// execution stays with the route's registry-dispatched
+    /// `compile_bundle` call; a route that executes through its bound
+    /// backend consumes the backend itself instead of this seam. Both
+    /// arms route through their single per-arm consumption points.
+    #[must_use]
+    pub(crate) fn into_attribution(self) -> NativeHostRequestAttribution {
+        match self {
+            Self::Vue(vue) => vue.into_host_backend().1,
+            Self::Svelte(svelte) => svelte.into_host_backend().1,
+        }
+    }
+}
+
+impl crate::VerterHost {
+    /// The ONE common production binding point for host compile attempts:
+    /// every compile attempt — host-backed `compile_entry` and the
+    /// runtime-render `compile_entry_runtime_render` compatibility route —
+    /// creates exactly one [`BoundNativeHostRequest`] here, from its
+    /// immutable request snapshot, and threads the binding into the route.
+    /// A warm hit performs no compile and never reaches this point.
+    ///
+    /// Framework identity derives SOLELY from the registered parse
+    /// artifact's identity row (`adapter_id()`/`language_id()`) through the
+    /// host-integration catalog — never from path text or language
+    /// classification. `canonical_id` and the source snapshot come from
+    /// the request's ONE coherent scheduler read; the live source
+    /// generation is re-read from the scheduler authority at bind time (a
+    /// best-effort staleness witness — the durable rail stays the
+    /// publish-time completion fence).
+    ///
+    /// `Ok(None)` means the input has no carrier parse artifact, so no
+    /// registered identity exists to bind; the routes' own
+    /// no-carrier-artifact arm reports that characterized typed refusal.
+    /// Every bind failure is fail-closed and typed: a superseded snapshot
+    /// maps to [`HostError::Superseded`], a vanished live source to
+    /// [`HostError::MissingSource`], and a catalog identity failure to a
+    /// [`HostError::CompileError`] carrying the
+    /// `HOST_NATIVE_BINDING_UNAVAILABLE` diagnostic — never a fallback
+    /// framework, never a silent skip, and nothing is published.
+    pub(crate) fn bind_native_host_compile_attempt(
+        &self,
+        artifact: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
+        canonical_id: &str,
+        source_len: u32,
+        source_snap: &verter_scheduler::node::SourceSnapshot,
+        requested_mode: CompileCacheMode,
+    ) -> Result<Option<BoundNativeHostRequest>, HostError> {
+        use verter_compiler::framework_common::NativeHostEpoch;
+
+        let Some(artifact) = artifact else {
+            return Ok(None);
+        };
+        let Some(live) = self.scheduler.try_get_source(canonical_id) else {
+            return Err(HostError::MissingSource {
+                canonical_id: canonical_id.to_string(),
+            });
+        };
+        match BoundNativeHostRequest::bind::<NativeHostEpoch>(
+            artifact.adapter_id(),
+            artifact.language_id(),
+            canonical_id,
+            source_snap,
+            live.generation,
+        ) {
+            Ok(bound) => Ok(Some(bound)),
+            Err(NativeHostBindingUnavailable::StaleSnapshot { .. }) => Err(HostError::Superseded),
+            Err(unavailable) => Err(HostError::CompileError(CompileFailure {
+                diagnostics: DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_NATIVE_BINDING_UNAVAILABLE".to_string(),
+                    message: format!(
+                        "native host binding unavailable for '{canonical_id}': {unavailable:?}"
+                    ),
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, source_len),
+                }]),
+                requested_mode,
+                actual_mode: requested_mode,
+                downgrade_reason: None,
+            })),
+        }
+    }
+}
+
 #[cfg(test)]
 static BINDING_CONSTRUCTION_ATTEMPTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Process-wide count of constructor entries, so tests can prove the
-/// production compile/serve routes never reach the binding substrate.
+/// Process-wide count of constructor entries, so tests can pin the
+/// per-attempt binding cardinality of the production compile routes.
 #[cfg(test)]
 pub(crate) fn binding_construction_attempts() -> usize {
     BINDING_CONSTRUCTION_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst)
@@ -599,32 +689,133 @@ mod tests {
         ));
     }
 
-    /// No production route consumes the binding substrate: driving the
-    /// real host compile/serve path end to end (upsert → compile → serve
-    /// a virtual node) reaches the guarded constructor zero times. The
-    /// counter is process-wide and this holds under the canonical
-    /// per-test-process runner (nextest), where no sibling test can
-    /// increment it concurrently.
-    #[test]
-    fn production_compile_route_constructs_no_binding() {
-        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    fn upsert_vue(host: &crate::VerterHost, source: &str) {
         let _ = host
             .upsert(crate::UpsertRequest {
                 canonical_id: None,
                 input_id: CANONICAL.to_string(),
-                source: Arc::from(
-                    "<script setup lang=\"ts\">const a: number = 1</script>\n<template><div>{{ a }}</div></template>",
-                ),
+                source: Arc::from(source),
                 file_language: crate::types::FileLanguage::vue(),
                 aliases: Vec::new(),
             })
             .expect("upsert must succeed");
+    }
+
+    const VUE_SRC: &str = "<script setup lang=\"ts\">const a: number = 1</script>\n<template><div>{{ a }}</div></template>";
+
+    /// Per-route binding cardinality on the host-backed compile route: a
+    /// COLD compile attempt creates exactly ONE binding through the common
+    /// binding point, and a WARM hit — which performs no compile — creates
+    /// none. The counter is process-wide and this holds under the
+    /// canonical per-test-process runner (nextest), where no sibling test
+    /// can increment it concurrently.
+    #[test]
+    fn cold_compile_binds_exactly_once_and_warm_hit_binds_none() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        upsert_vue(&host, VUE_SRC);
         host.ensure_compiled(CANONICAL, &crate::types::CompileProfile::default())
             .expect("the production compile route serves this component");
         assert_eq!(
             super::binding_construction_attempts(),
-            0,
-            "the production compile route must not construct a native host binding"
+            1,
+            "a cold host-backed compile attempt must bind exactly once"
+        );
+        host.ensure_compiled(CANONICAL, &crate::types::CompileProfile::default())
+            .expect("the warm serve of the same component succeeds");
+        assert_eq!(
+            super::binding_construction_attempts(),
+            1,
+            "a warm hit performs no compile and must create no binding"
+        );
+    }
+
+    /// A supersession-driven re-snapshot binds ANEW for its own attempt:
+    /// re-upserting new content and compiling again is a second compile
+    /// attempt with its own binding over its own immutable snapshot.
+    #[test]
+    fn supersession_re_snapshot_binds_anew() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        upsert_vue(&host, VUE_SRC);
+        host.ensure_compiled(CANONICAL, &crate::types::CompileProfile::default())
+            .expect("the first revision compiles");
+        assert_eq!(super::binding_construction_attempts(), 1);
+        upsert_vue(
+            &host,
+            "<script setup lang=\"ts\">const b: string = 'x'</script>\n<template><div>{{ b }}</div></template>",
+        );
+        host.ensure_compiled(CANONICAL, &crate::types::CompileProfile::default())
+            .expect("the superseding revision compiles");
+        assert_eq!(
+            super::binding_construction_attempts(),
+            2,
+            "a superseding re-snapshot must bind anew for its own attempt"
+        );
+    }
+
+    /// Per-route binding cardinality on the runtime-render compatibility
+    /// route: every render is a compile attempt (the lane has no warm
+    /// serve) and binds exactly once through the same common binding
+    /// point.
+    #[test]
+    fn render_route_binds_exactly_once() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        upsert_vue(&host, VUE_SRC);
+        let render = host
+            .render_only_main(CANONICAL, &crate::types::CompileProfile::default())
+            .expect("the render route serves this component");
+        assert!(
+            !render.code.is_empty(),
+            "the render route must produce the runtime Main module"
+        );
+        assert_eq!(
+            super::binding_construction_attempts(),
+            1,
+            "a render compile attempt must bind exactly once"
+        );
+    }
+
+    /// Fail-closed: a request snapshot superseded by a newer live source
+    /// generation refuses the bind at the common binding point with the
+    /// typed [`crate::HostError::Superseded`] outcome — no fallback, no
+    /// compile, nothing published.
+    #[test]
+    fn stale_request_snapshot_fails_closed_as_superseded() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        upsert_vue(&host, VUE_SRC);
+        let stale_snap = host
+            .scheduler
+            .try_get_source(CANONICAL)
+            .expect("the upserted source is live");
+        let efs = host
+            .effective_file_state_from_snapshot(&stale_snap, CANONICAL, None)
+            .expect("the upserted source carries host data");
+        assert!(
+            efs.framework_parse.is_some(),
+            "a Vue carrier registers a framework parse artifact"
+        );
+        // Supersede the captured snapshot with a new live revision.
+        upsert_vue(
+            &host,
+            "<script setup lang=\"ts\">const c: number = 2</script>\n<template><div>{{ c }}</div></template>",
+        );
+        let err = host
+            .bind_native_host_compile_attempt(
+                efs.framework_parse.as_deref(),
+                CANONICAL,
+                stale_snap.source.len() as u32,
+                &stale_snap,
+                crate::types::CompileCacheMode::Session,
+            )
+            .expect_err("a superseded request snapshot must not bind");
+        assert!(
+            matches!(err, crate::HostError::Superseded),
+            "a stale bind must surface as the typed Superseded host error, got: {err:?}"
+        );
+        assert!(
+            host.compile_cache()
+                .get(CANONICAL)
+                .is_none_or(|state| state.compile_slots.is_empty()),
+            "a refused bind publishes no compile output"
         );
     }
 
