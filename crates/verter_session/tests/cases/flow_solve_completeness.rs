@@ -39,7 +39,7 @@ use verter_session::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowGap, FlowInputContext,
     FlowReturnContext, FlowReturnKey, FlowReturnPolicy, FlowReturnResult, PathSegment,
     PrimitiveKind, PropertyKey, ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData,
-    SemanticQueryKey, SemanticQueryKeyTag,
+    SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace,
 };
 
 /// The fixture body: one parameter, one local, one object-literal return
@@ -100,10 +100,17 @@ fn foreign_result_contract(tag: u64) -> ResultContractId {
 fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
     SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
         function: FlowFunctionSlotIdentity {
-            declaration_slot: ResolvedDeclSlotIdentity::type_slot_unscoped(
+            // The bound graph's program key is VALUE-space (a function
+            // declaration), so the query's slot must name the value-space
+            // slot — the planner proves the query identifies the bound
+            // graph's function on every shared axis.
+            declaration_slot: ResolvedDeclSlotIdentity::value_slot(
                 Arc::from("/flow_solve_fixture.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from(name),
+                0,
+                [0; 16],
+                [0; 16],
             ),
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
@@ -1825,4 +1832,267 @@ fn parse_key_and_language_axes_rebind_the_demand_basis() {
         "a proof cannot finalize across a language boundary: {outcome:?}"
     );
     assert!(outcome.warm_candidate().is_none());
+}
+
+// ── Query/graph identity coherence ──────────────────────────────────────
+
+/// The query must NAME the bound graph's function and parse environment:
+/// every identity axis present in both the query's `FlowReturnKey` and the
+/// bound graph's `FlowSliceFunctionKey` — canonical identity, owner,
+/// merged-symbol name, symbol space, function part, overload ordinal, and
+/// the parse-environment hash — must match. A mismatch on ANY one axis is
+/// a typed planning error: a demand planned over a graph its query does
+/// not name would discharge graph A's obligations against a query naming
+/// function B and seal a `Complete` for the wrong body.
+#[test]
+fn planning_rejects_a_query_that_does_not_name_the_bound_graph() {
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+
+    // The matched control plans.
+    assert!(
+        fixture.build_plan(base_request()).is_ok(),
+        "the query naming the bound graph's function plans"
+    );
+
+    let mismatched = |mutate: &dyn Fn(&mut FlowReturnKey)| {
+        let mut request = base_request();
+        let SemanticQueryKey::FlowReturn(key) = &mut request.query else {
+            unreachable!()
+        };
+        mutate(key);
+        fixture.build_plan(request)
+    };
+
+    assert!(
+        matches!(
+            mismatched(
+                &|key| key.function.declaration_slot.defining_canonical = Arc::from("/foreign.ts")
+            ),
+            Err(FlowDemandPlanError::BasisKeyMismatch)
+        ),
+        "a foreign canonical identity must not plan"
+    );
+    assert!(
+        matches!(
+            mismatched(&|key| key.function.declaration_slot.owner =
+                verter_type_expr::TopLevelOwnerId::module(1)),
+            Err(FlowDemandPlanError::BasisKeyMismatch)
+        ),
+        "a foreign owner must not plan"
+    );
+    assert!(
+        matches!(
+            mismatched(&|key| key.function.declaration_slot.merged_symbol_name = Arc::from("other")),
+            Err(FlowDemandPlanError::BasisKeyMismatch)
+        ),
+        "a foreign merged-symbol name must not plan"
+    );
+    assert!(
+        matches!(
+            mismatched(
+                &|key| key.function.declaration_slot.symbol_space = SemanticSymbolSpace::Type
+            ),
+            Err(FlowDemandPlanError::BasisKeyMismatch)
+        ),
+        "a foreign symbol space must not plan"
+    );
+    assert!(
+        matches!(
+            mismatched(&|key| key.function.function_part =
+                verter_type_expr::facts::FunctionPartIdentity::Initializer),
+            Err(FlowDemandPlanError::BasisKeyMismatch)
+        ),
+        "a foreign function part must not plan"
+    );
+    assert!(
+        matches!(
+            mismatched(&|key| key.function.overload_ordinal = 1),
+            Err(FlowDemandPlanError::BasisKeyMismatch)
+        ),
+        "a foreign overload ordinal must not plan"
+    );
+    assert!(
+        matches!(
+            mismatched(&|key| key.context.parse_env_hash = [9; 16]),
+            Err(FlowDemandPlanError::BasisKeyMismatch)
+        ),
+        "a foreign parse environment must not plan"
+    );
+}
+
+// ── Closure-expression capture subjects ─────────────────────────────────
+
+/// An arrow returning an outer parameter: the skeleton authority records
+/// the capture on the closure's expression site.
+const ARROW_CAPTURE_FIXTURE_SOURCE: &str = r#"
+function arrow_capture(x) {
+  return () => x;
+}
+"#;
+
+/// A function expression capturing an outer `let`.
+const EXPRESSION_CAPTURE_FIXTURE_SOURCE: &str = r#"
+function expression_capture(x) {
+  let y = x;
+  return function () { return y; };
+}
+"#;
+
+/// A nested double closure: the inner arrow's free read is a capture of
+/// the outer arrow's frame too, so the enclosing function's closure site
+/// captures the parameter transitively.
+const DOUBLE_CLOSURE_FIXTURE_SOURCE: &str = r#"
+function double_capture(x) {
+  return () => () => x;
+}
+"#;
+
+/// A closure that captures nothing: the capture family stays proved-empty.
+const NO_CAPTURE_FIXTURE_SOURCE: &str = r#"
+function no_capture(x) {
+  return () => 1;
+}
+"#;
+
+/// A closure capturing a destructured parameter: the binding is real but
+/// the cross-frame inventory cannot name it — the family's accepted typed
+/// gap, never silence.
+const DESTRUCTURED_CAPTURE_FIXTURE_SOURCE: &str = r#"
+function destructured_capture({a}) {
+  return () => a;
+}
+"#;
+
+/// The concrete capture subjects of one fixture's plan: the real
+/// cross-frame identities of the captured bindings.
+fn concrete_captures(
+    source: &str,
+    body_hash_tag: u8,
+    name: &str,
+) -> Vec<verter_semantic::analysis::function_program::FlowBindingIdentity> {
+    let fixture = flow_graph_fixture_for_tests(source, body_hash_tag);
+    let plan = fixture
+        .build_plan(request_named(name))
+        .expect("the capture fixture plans");
+    plan.obligation_specs()
+        .iter()
+        .filter_map(|spec| match spec.basis() {
+            FlowObligationBasis::CapturedBinding { identity, .. } => Some(identity.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Closure expressions are CONCRETE capture subjects: one capture
+/// obligation per (closure site, captured binding), carrying the captured
+/// binding's real cross-frame identity — never the falsely-empty family
+/// the old planner "proved" by examining no closure site at all.
+#[test]
+fn closure_expression_captures_are_concrete_subjects() {
+    use verter_semantic::analysis::function_program::FunctionBindingKind;
+
+    // An arrow returning the outer parameter captures exactly `x`.
+    let captures = concrete_captures(ARROW_CAPTURE_FIXTURE_SOURCE, 21, "arrow_capture");
+    assert_eq!(captures.len(), 1, "one (closure site, binding) subject");
+    assert_eq!(captures[0].name.as_ref(), "x");
+    assert_eq!(captures[0].kind, FunctionBindingKind::Param);
+    assert_eq!(
+        captures[0].defining_function.declaration.name.as_ref(),
+        "arrow_capture",
+        "the capture identity names the defining frame"
+    );
+
+    // A function expression captures the outer `let`, not the parameter
+    // it was initialized from.
+    let captures = concrete_captures(EXPRESSION_CAPTURE_FIXTURE_SOURCE, 22, "expression_capture");
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].name.as_ref(), "y");
+    assert_eq!(captures[0].kind, FunctionBindingKind::Let);
+
+    // A nested double closure captures the outer parameter transitively:
+    // the inner arrow's free read is free in the middle frame too.
+    let captures = concrete_captures(DOUBLE_CLOSURE_FIXTURE_SOURCE, 23, "double_capture");
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].name.as_ref(), "x");
+    assert_eq!(captures[0].kind, FunctionBindingKind::Param);
+
+    // The concrete subjects are dischargeable: the arrow-capture solve
+    // drives to a sealed completion.
+    let fixture = flow_graph_fixture_for_tests(ARROW_CAPTURE_FIXTURE_SOURCE, 21);
+    let plan = fixture
+        .build_plan(request_named("arrow_capture"))
+        .expect("the capture fixture plans");
+    let (runtime, sealed) = drive_to_completion(&plan);
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
+    assert!(
+        outcome.warm_candidate().is_some(),
+        "a solve whose capture subjects are concrete discharges and completes: {outcome:?}"
+    );
+}
+
+/// A no-capture closure yields the family's explicit empty-coverage
+/// marker ONLY — no concrete subject, no gap — and the solve completes.
+#[test]
+fn a_no_capture_closure_proves_the_family_empty() {
+    let fixture = flow_graph_fixture_for_tests(NO_CAPTURE_FIXTURE_SOURCE, 24);
+    let plan = fixture
+        .build_plan(request_named("no_capture"))
+        .expect("the no-capture fixture plans");
+    assert!(
+        plan.obligation_specs().iter().all(|spec| !matches!(
+            spec.basis(),
+            FlowObligationBasis::CapturedBinding { .. } | FlowObligationBasis::Capture { .. }
+        )),
+        "a no-capture closure has no concrete capture subject and no gap"
+    );
+    assert!(
+        plan.obligation_specs().iter().any(|spec| matches!(
+            spec.basis(),
+            FlowObligationBasis::FamilyCoverage { family } if *family == FlowFactFamily::Capture
+        )),
+        "the capture family's coverage obligation is the explicit proved-empty marker"
+    );
+    let (runtime, sealed) = drive_to_completion(&plan);
+    let outcome = finalize_flow_solve(&runtime, &plan, sealed);
+    assert!(
+        outcome.warm_candidate().is_some(),
+        "the proved-empty capture family never blocks completion: {outcome:?}"
+    );
+}
+
+/// A captured binding the cross-frame inventory cannot name (a
+/// destructured parameter) installs the family's accepted typed gap —
+/// anchored on the resolved lexical binding — never silence.
+#[test]
+fn unnameable_captured_binding_installs_the_family_typed_gap() {
+    let fixture = flow_graph_fixture_for_tests(DESTRUCTURED_CAPTURE_FIXTURE_SOURCE, 25);
+    let plan = fixture
+        .build_plan(request_named("destructured_capture"))
+        .expect("the destructured-capture fixture plans");
+    let gaps: Vec<&FlowObligationSpec> = plan
+        .obligation_specs()
+        .iter()
+        .filter(|spec| matches!(spec.basis(), FlowObligationBasis::Capture { .. }))
+        .collect();
+    assert_eq!(gaps.len(), 1, "exactly the destructured capture gaps");
+    let FlowObligationBasis::Capture { identity, .. } = gaps[0].basis() else {
+        unreachable!()
+    };
+    assert!(
+        identity.is_none(),
+        "the destructured binding has no cross-frame identity"
+    );
+
+    let mut runtime = ObligationRuntime::default();
+    runtime.install_flow_demand(&plan).expect("install");
+    let record = runtime
+        .flow_obligations()
+        .iter()
+        .find(|record| record.spec.id() == gaps[0].id())
+        .expect("installed");
+    assert_eq!(
+        record.state,
+        ObligationState::Gap(FlowGap::ClosureCapture),
+        "the unnameable captured binding installs the family's accepted typed gap"
+    );
 }

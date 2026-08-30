@@ -1058,12 +1058,21 @@ pub(crate) mod flow_obligation_state {
         /// A dynamic semantic relation anchored on the registered
         /// call-expansion event that produced it (the call occurrence).
         SemanticRelation { node: FlowNodeId, site: SkeletonExprSiteId, call_ordinal: u32 },
-        /// A capture subject anchored on the nested function's binding
-        /// identity. The capture SET of a nested body is beyond this
-        /// skeleton's authority (nested bodies carry no reads here), so
-        /// the obligation installs directly in the family's accepted
-        /// typed gap.
+        /// A capture subject the structural authority cannot name: the
+        /// nested function DECLARATION's binding identity (the capture
+        /// SET of a nested declaration body is beyond this skeleton's
+        /// authority — nested bodies carry no reads here), or a closure
+        /// expression's captured binding the cross-frame inventory cannot
+        /// name (`identity: None`, e.g. a destructured parameter). The
+        /// obligation installs directly in the family's accepted typed
+        /// gap.
         Capture { node: FlowNodeId, binding: SkeletonBindingId, identity: Option<FlowBindingIdentity> },
+        /// A concrete capture subject: ONE binding the closure expression
+        /// at this graph node captures, with its real cross-frame identity
+        /// — one obligation per (closure site, captured binding). The
+        /// structural authority named the subject exactly, so the
+        /// obligation is dischargeable, never a gap.
+        CapturedBinding { node: FlowNodeId, site: SkeletonExprSiteId, identity: FlowBindingIdentity },
     }
     /// Evidence that one live semantic suboperation was consumed. This is
     /// a discharge INPUT: the runtime validates it against the specific

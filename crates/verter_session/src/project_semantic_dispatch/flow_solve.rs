@@ -45,7 +45,9 @@ use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
 use verter_semantic::analysis::flow::peeker::{
     FlowSliceBudget, FlowSliceBudgetExceeded, ReturnPathPeeker, SliceDemand,
 };
-use verter_semantic::analysis::flow::{FunctionBodySkeleton, SkeletonBindingKind};
+use verter_semantic::analysis::flow::{
+    FunctionBodySkeleton, SkeletonBindingId, SkeletonBindingKind,
+};
 use verter_semantic::analysis::function_program::{
     FlowBindingIdentity, FunctionBindingKind, FunctionBindingRecord, FunctionProgramKey,
 };
@@ -648,13 +650,15 @@ impl FlowDemandPlan {
 
 /// Why a demand could not be planned: no registered contract, not a
 /// proof-enabled root, a demand the flow planner cannot represent, the
-/// slice budget tripped, or the obligation budget tripped.
+/// slice budget tripped, the obligation budget tripped, or the query does
+/// not name the bound graph's function and parse environment.
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowDemandPlanError {
     UnregisteredOperation, NotAnEnabledRoot, UnrepresentableDemand,
     SliceBudget(FlowSliceBudgetExceeded),
     ObligationBudget { limit: u32, observed: u32 },
+    BasisKeyMismatch,
 }
 
 /// Derive the demand subject EXHAUSTIVELY from the operation-specific
@@ -752,6 +756,47 @@ fn resolve_binding_identities(
         .collect()
 }
 
+/// The query↔graph coherence proof: planning rejects unless every
+/// identity axis present in BOTH the query's `FlowReturnKey` and the
+/// bound graph's `FlowSliceFunctionKey` matches — the canonical identity,
+/// the owner, the merged-symbol name, the symbol space, the function
+/// part, the overload ordinal, and the parse-environment hash. Without
+/// this check a harness could supply graph A with a query naming function
+/// B, discharge A's obligations, and seal a `Complete` the query never
+/// addressed; the splice is a typed planning error, never a plan.
+fn require_query_names_bound_graph(
+    query: &SemanticQueryKey,
+    bound: &FlowSliceFunctionKey,
+) -> Result<(), FlowDemandPlanError> {
+    let SemanticQueryKey::FlowReturn(key) = query else {
+        return Err(FlowDemandPlanError::NotAnEnabledRoot);
+    };
+    let slot = &key.function.declaration_slot;
+    let query_space = match slot.symbol_space {
+        crate::semantic_query::SemanticSymbolSpace::Type => {
+            verter_semantic::facts::SymbolSpace::Type
+        }
+        crate::semantic_query::SemanticSymbolSpace::Value => {
+            verter_semantic::facts::SymbolSpace::Value
+        }
+        crate::semantic_query::SemanticSymbolSpace::Namespace => {
+            verter_semantic::facts::SymbolSpace::Namespace
+        }
+    };
+    let coherent = slot.defining_canonical.as_ref() == bound.canonical_id.as_ref()
+        && slot.owner == bound.function.declaration.owner
+        && slot.merged_symbol_name.as_ref() == bound.function.declaration.name.as_ref()
+        && query_space == bound.function.declaration.space
+        && key.function.function_part == bound.function.part
+        && key.function.overload_ordinal == bound.function.overload_ordinal
+        && key.context.parse_env_hash == bound.parse_env_hash;
+    if coherent {
+        Ok(())
+    } else {
+        Err(FlowDemandPlanError::BasisKeyMismatch)
+    }
+}
+
 /// Build the demand plan of `request` over the store-minted `bound` graph.
 /// The demand planner runs EXACTLY ONCE over the bound graph — this
 /// function never builds or reacquires a graph — the plan's body identity
@@ -776,6 +821,7 @@ pub(crate) fn build_flow_demand_plan(
         return Err(FlowDemandPlanError::NotAnEnabledRoot);
     }
     let subject = derive_demand_subject(&request.query)?;
+    require_query_names_bound_graph(&request.query, bound.key())?;
     let bundle = bound.bundle();
     let max_obligations = request.resources.max_obligations;
     let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
@@ -963,11 +1009,12 @@ pub(crate) fn build_flow_demand_plan(
                 }
             }
             F::Capture => {
-                // Captures anchor on the nested function's binding
-                // identity. The capture SET of a nested body is beyond
-                // this skeleton's authority (nested bodies carry no reads
-                // here), so each nested-function subject installs as the
-                // family's accepted typed gap — never an omission.
+                // Nested function DECLARATIONS anchor on the nested
+                // function's binding identity. The capture SET of a
+                // nested body is beyond this skeleton's authority (nested
+                // bodies carry no reads here), so each nested-function
+                // subject installs as the family's accepted typed gap —
+                // never an omission.
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
                     if bundle.skeleton.binding(binding).kind != SkeletonBindingKind::NestedFunction { continue; }
@@ -978,6 +1025,52 @@ pub(crate) fn build_flow_demand_plan(
                         Arc::from([]), Arc::from([]),
                     )?;
                     expanded.push(id);
+                }
+                // Closure EXPRESSIONS (arrow / function expression sites):
+                // the skeleton authority records the exact captured names
+                // on the closure's own site — one concrete capture
+                // obligation per (closure site, captured binding),
+                // resolved through the frame's lexical binding authority
+                // and carrying the binding's real cross-frame identity. A
+                // captured name the frame does not bind is a free/global
+                // read, not a capture; a captured binding the cross-frame
+                // inventory cannot name (a destructured parameter)
+                // installs the family's accepted typed gap — never
+                // silence.
+                for node in &selected {
+                    let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
+                    let site_record = bundle.skeleton.expr_site(site);
+                    let mut seen: Vec<SkeletonBindingId> = Vec::new();
+                    for name in site_record.captures.iter() {
+                        for binding in bundle.skeleton.bindings_of_name_in_scope(*name, site_record.region) {
+                            if seen.contains(&binding) { continue; }
+                            seen.push(binding);
+                            let (basis, dischargeable) = match &identities[binding.index()] {
+                                Some(identity) => (
+                                    FlowObligationBasis::CapturedBinding { node: *node, site, identity: identity.clone() },
+                                    true,
+                                ),
+                                None => (
+                                    FlowObligationBasis::Capture { node: *node, binding, identity: None },
+                                    false,
+                                ),
+                            };
+                            let id = push(
+                                FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
+                                FlowObligationOrigin::Expansion(E::CaptureFacts),
+                                basis,
+                                Arc::from([]), Arc::from([]),
+                            )?;
+                            // A concrete capture subject discharges, so it
+                            // may anchor the node's out-edge facts; the
+                            // gap path never anchors (a gap discharges
+                            // nothing a dependent could wait on).
+                            if dischargeable {
+                                note_node_obligation(&mut node_obligations, *node, id);
+                            }
+                            expanded.push(id);
+                        }
+                    }
                 }
             }
             F::SemanticRelation => {
