@@ -29,20 +29,21 @@ use crate::compile_request::{
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
-    RuntimeOutputDescriptor, RuntimeSurfaceRefusal, SourceMapFidelity,
+    RuntimeOutputDescriptor, SourceMapFidelity,
 };
 use crate::framework_common::FrameworkParseArtifact;
 
 use super::attribute_expressions::SvelteAttributeExpressions;
 use super::parser::{parse_svelte, CloseTagViolationKind, ParsedSvelte, SvelteScript};
 use super::runtime::{SvelteFragments, SvelteNamespace};
+use super::svelte_runtime_backend::SvelteRuntimeBackend;
 
 /// Maps the canonical request's `svelte_namespace` string to the compiler's
 /// typed [`SvelteNamespace`]. Only the three official tokens are valid; an
 /// unrecognized token is a decode-boundary concern (transport validation),
 /// not something this carrier silently guesses at — it resolves to `None`
 /// (the request's own default), never fabricates a value.
-fn parse_svelte_namespace(token: &str) -> Option<SvelteNamespace> {
+pub(crate) fn parse_svelte_namespace(token: &str) -> Option<SvelteNamespace> {
     match token {
         "html" => Some(SvelteNamespace::Html),
         "svg" => Some(SvelteNamespace::Svg),
@@ -54,7 +55,7 @@ fn parse_svelte_namespace(token: &str) -> Option<SvelteNamespace> {
 /// Maps the canonical request's `svelte_fragments` string to the compiler's
 /// typed [`SvelteFragments`]. See [`parse_svelte_namespace`] for the
 /// unrecognized-token rationale.
-fn parse_svelte_fragments(token: &str) -> Option<SvelteFragments> {
+pub(crate) fn parse_svelte_fragments(token: &str) -> Option<SvelteFragments> {
     match token {
         "html" => Some(SvelteFragments::Html),
         "tree" => Some(SvelteFragments::Tree),
@@ -454,74 +455,28 @@ impl CarrierCompiler for SvelteCarrierCompiler {
 
         // The Svelte native RUNTIME compiler (source `.svelte` → JS importing
         // `svelte/internal/client`), attempted ONLY when the request asked for
-        // a runtime product. A SUPPORTED component populates `main.body_code`
-        // (the host emits the `Main` virtual node from it,
+        // a runtime product, and reached ONLY through the typed Svelte runtime
+        // backend's bundle entry. A SUPPORTED component populates
+        // `main.body_code` (the host emits the `Main` virtual node from it,
         // `has_runtime_surface()` becoming true through registry routing); an
         // UNSUPPORTED runtime surface FAILS CLOSED, returning a product-free
         // refusal carrying the precise surface + owning vertical. The refusal
         // returns BEFORE the IDE projection below, so a request refused its
         // runtime surface publishes no sibling product either. A request that
-        // asked for NO runtime product never reaches here and so can never be
-        // refused. SSR (`opts.ssr`) fails closed until the server backend lands.
-        let runtime_opts = super::runtime::SvelteRuntimeOptions {
-            filename: opts.filename.clone(),
-            name: None,
-            runes: opts.svelte_runes,
-            is_production: opts.is_production,
-            // `dev` (`ModuleCompileOptions.dev`) now threads through from the
-            // canonical request; an explicit `true` reaches the EXISTING
-            // `UnsupportedSvelteRuntimeSurface::DevMode` typed refusal
-            // downstream rather than being silently dropped to `false` —
-            // dev-mode codegen output liveness is a separate, tracked gap,
-            // not this carrier's to close.
-            dev_codegen: opts.svelte_dev.unwrap_or(false),
-            // Explicit carrier profile axis. An in-source
-            // `<svelte:options customElement>` value still wins over this
-            // compile option, matching official precedence.
-            custom_element: opts.custom_element,
-            // The RESOLVED Svelte cssHash override (from the host/session boundary,
-            // preserved byte-exact) threads verbatim into the style-plan scope class.
-            css_hash_override: opts.svelte_css_hash_override.clone(),
-            // The neutral `RuntimeCompileOptions` now carries a channel for
-            // each of these — an in-source `<svelte:options namespace /
-            // preserveWhitespace>` still wins via the resolver's INLINE-WINS
-            // fold, matching official precedence.
-            namespace: opts
-                .svelte_namespace
-                .as_deref()
-                .and_then(parse_svelte_namespace),
-            fragments: opts
-                .svelte_fragments
-                .as_deref()
-                .and_then(parse_svelte_fragments),
-            preserve_whitespace: opts.svelte_preserve_whitespace,
-            preserve_comments: opts.svelte_preserve_comments,
-            disclose_version: opts.svelte_disclose_version,
-            // Unsupported fail-closed rows (`accessors`, `immutable`, `hmr`,
-            // `compatibility.componentApi`) have no canonical-request field —
-            // structurally unrepresentable, per the compile-request module.
-            accessors: None,
-            immutable: None,
-            hmr: None,
-            compatibility_component_api: None,
-            css: None,
-            custom_element_descriptor: None,
-            prepared_styles: opts.prepared_styles.clone(),
-        };
-        // `opts.source_map` is the neutral OUTPUT-axis map demand: it reaches
-        // the css RENDER through `compile_client`'s `want_source_map` (never
-        // a lowering option on `SvelteRuntimeOptions`).
-        let runtime_result = opts.want_runtime.then(|| {
-            super::runtime::compile_client(
+        // asked for NO runtime product never reaches the backend and so can
+        // never be refused. SSR (`opts.ssr`) fails closed until the server
+        // backend lands.
+        if opts.want_runtime {
+            if let Err(refusal) = SvelteRuntimeBackend.compile_bundle_runtime(
                 source,
                 parsed,
-                &runtime_opts,
+                opts,
                 alloc,
-                opts.ssr,
-                opts.source_map,
-            )
-        });
-        match runtime_result {
+                &mut bundle,
+            ) {
+                return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(refusal));
+            }
+        } else if let Some(rejection) = super::runtime::official_reject_gate(source, parsed) {
             // No runtime product was requested, so no runtime attempt and no
             // refusal. The OFFICIAL-REJECT gate still runs: it is an
             // ANALYSIS-domain source-validity oracle over the typed parse (see
@@ -532,145 +487,20 @@ impl CarrierCompiler for SvelteCarrierCompiler {
             // Losing it here would silently drop malformed-source reporting for
             // every IDE-only consumer. It stays NON-FATAL, so the IDE
             // projection below still compiles (it owns its own error recovery).
-            None => {
-                if let Some(rejection) = super::runtime::official_reject_gate(source, parsed) {
-                    bundle.diagnostics.push(RuntimeDiagnostic {
-                        severity: RuntimeDiagnosticSeverity::Warning,
-                        code: rejection.rule.diagnostic_code().to_string(),
-                        message: format!(
-                            "{} (official `{}`)",
-                            rejection.rule.message(),
-                            rejection.official_code
-                        ),
-                        // The OFFICIAL-REJECT oracle is a whole-component
-                        // validity judgment, not a located defect — the
-                        // whole-source span IS this diagnostic's own span,
-                        // decided here where `source` is known, not defaulted
-                        // downstream.
-                        span: verter_span::Span::new(0, source.len() as u32),
-                    });
-                }
-            }
-            Some(Ok(module)) => {
-                bundle.main.body_code = Some(module.code);
-                bundle.main.source_map = module.source_map.unwrap_or_default();
-                bundle.main.lang = Some("js".to_string());
-                // The EXTERNAL scoped-css artifact (the official `compiled.css`
-                // — `{ code, map, hasGlobal }` + the scope hash): it publishes
-                // as the bundle's style block (the Svelte analogue of the Vue
-                // styles population). Injected-mode css is inlined in the
-                // module (no artifact), and a style-less component has none.
-                if let Some(css) = module.css {
-                    let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
-                    let output_descriptor = RuntimeOutputDescriptor::generated(
-                        &css.code,
-                        css.source_map.as_deref(),
-                        &[(space.as_str(), artifact.as_str())],
-                        SourceMapFidelity::Approximate,
-                    );
-                    bundle.styles.push(
-                        crate::framework_common::carrier_compiler::RuntimeStyleBlock {
-                            code: css.code,
-                            source_map: css.source_map,
-                            lang: None,
-                            scope_hash: Some(css.hash),
-                            has_global: css.has_global,
-                            output_descriptor,
-                        },
-                    );
-                }
-            }
-            Some(Err(super::runtime::ClientCompileError::Unsupported(surface))) => {
-                // Fail closed on a REQUESTED runtime surface: return a
-                // product-free refusal carrying the precise
-                // `svelte-runtime-unsupported-<surface>` reason structurally.
-                // Returning here — before the IDE projection below — is what
-                // makes the request atomic: no `tsx`, no styles, no template
-                // data accompany the refusal.
-                return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(
-                    RuntimeSurfaceRefusal {
-                        diagnostic_code: surface.diagnostic_code().to_string(),
-                        message: surface.message(),
-                        span: surface.span(),
-                        diagnostics: std::mem::take(&mut bundle.diagnostics),
-                    },
-                ));
-            }
-            Some(Err(super::runtime::ClientCompileError::Lowering(errors))) => {
-                // A genuine lowering failure (a malformed construct) ALSO
-                // produces no `Main`, so it is a runtime refusal too. The first
-                // recorded problem is the structural reason; the rest ride
-                // along as non-fatal diagnostics. `RuntimeLoweringErrors` is
-                // non-empty by construction (`lower_parsed_svelte_to_ir` only
-                // returns `Err` behind an `!ctx.errors.is_empty()` guard), so
-                // `first()` is always `Some` here.
-                let mut diagnostics = std::mem::take(&mut bundle.diagnostics);
-                let (first, rest) = errors
-                    .diagnostics
-                    .split_first()
-                    .expect("RuntimeLoweringErrors is non-empty by construction");
-                let (code, message, span) =
-                    (first.code.to_string(), first.message.clone(), first.span);
-                for diag in rest {
-                    diagnostics.push(RuntimeDiagnostic {
-                        severity: RuntimeDiagnosticSeverity::Warning,
-                        code: diag.code.to_string(),
-                        message: diag.message.clone(),
-                        span: diag.span,
-                    });
-                }
-                return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(
-                    RuntimeSurfaceRefusal {
-                        diagnostic_code: code,
-                        message,
-                        span,
-                        diagnostics,
-                    },
-                ));
-            }
-            Some(Err(super::runtime::ClientCompileError::GeneratedModuleInvalid { .. })) => {
-                return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(
-                    RuntimeSurfaceRefusal {
-                        diagnostic_code: "svelte-runtime-generated-module-invalid".to_string(),
-                        message: "The native Svelte backend generated invalid JavaScript; runtime output was refused."
-                            .to_string(),
-                        span: Span::new(0, 0),
-                        diagnostics: std::mem::take(&mut bundle.diagnostics),
-                    },
-                ));
-            }
-            Some(Err(super::runtime::ClientCompileError::GeneratedSourceMapInvalid { .. })) => {
-                return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(
-                    RuntimeSurfaceRefusal {
-                        diagnostic_code: "svelte-runtime-generated-source-map-invalid".to_string(),
-                        message: "The native Svelte backend could not safely generate the client source map; runtime output was refused."
-                            .to_string(),
-                        span: Span::new(0, 0),
-                        diagnostics: std::mem::take(&mut bundle.diagnostics),
-                    },
-                ));
-            }
-            Some(Err(super::runtime::ClientCompileError::OfficialReject(rejection))) => {
-                // The component is MALFORMED Svelte official ALSO compile-errors
-                // — fail closed with the typed official-reject reason (the
-                // rule's stable code + a message naming the EXACT official code
-                // the rejection mirrors). The OFFICIAL-REJECT oracle judges the
-                // whole component, not a located construct, so the whole-source
-                // span IS this refusal's own span — decided here, not defaulted
-                // downstream.
-                return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(
-                    RuntimeSurfaceRefusal {
-                        diagnostic_code: rejection.rule.diagnostic_code().to_string(),
-                        message: format!(
-                            "{} (official `{}`)",
-                            rejection.rule.message(),
-                            rejection.official_code
-                        ),
-                        span: Span::new(0, source.len() as u32),
-                        diagnostics: std::mem::take(&mut bundle.diagnostics),
-                    },
-                ));
-            }
+            bundle.diagnostics.push(RuntimeDiagnostic {
+                severity: RuntimeDiagnosticSeverity::Warning,
+                code: rejection.rule.diagnostic_code().to_string(),
+                message: format!(
+                    "{} (official `{}`)",
+                    rejection.rule.message(),
+                    rejection.official_code
+                ),
+                // The OFFICIAL-REJECT oracle is a whole-component validity
+                // judgment, not a located defect — the whole-source span IS
+                // this diagnostic's own span, decided here where `source` is
+                // known, not defaulted downstream.
+                span: verter_span::Span::new(0, source.len() as u32),
+            });
         }
 
         // The IDE projection is produced for a request that asked for it and
@@ -946,6 +776,77 @@ mod tests {
                 ))
             ),
             "expected a typed InlineSsrUnsupported refusal, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn compile_bundle_runtime_branch_delegates_to_the_typed_runtime_backend() {
+        // The bundle route reaches its runtime product only through the typed
+        // Svelte runtime backend; the per-thread delegation counter is the
+        // witness that no route-private runtime emitter remains. Refusal
+        // classification travels through the same delegation.
+        let compiler = SvelteCarrierCompiler;
+        let source = "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::default();
+
+        let before = crate::standalone::runtime_backend_delegation_count();
+        compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions::default(),
+                &alloc,
+            )
+            .expect("svelte runtime bundle");
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before + 1,
+            "the bundle runtime branch must delegate exactly once to the typed Svelte runtime backend"
+        );
+
+        // An unsupported runtime surface still refuses through the backend.
+        let refused_source =
+            "<script>let c = $state(true);</script>\n{#snippet foo()}<p>{c}</p>{/snippet}\n";
+        let refused_artifact = artifact_for(refused_source);
+        let before_refused = crate::standalone::runtime_backend_delegation_count();
+        let outcome = compiler
+            .compile_bundle(
+                refused_source,
+                &refused_artifact,
+                &RuntimeCompileOptions::default(),
+                &alloc,
+            )
+            .expect("the outcome is produced-or-refused, never an Err");
+        assert!(
+            matches!(outcome, CarrierCompileOutcome::RuntimeSurfaceRefused(_)),
+            "the snippet component must refuse its runtime surface"
+        );
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before_refused + 1,
+            "a refused runtime surface must still classify through the typed backend"
+        );
+
+        let before_ide_only = crate::standalone::runtime_backend_delegation_count();
+        compiler
+            .compile_bundle(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_runtime: false,
+                    want_ide: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("the outcome is produced-or-refused, never an Err")
+            .into_produced()
+            .expect("an IDE-only request produces");
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before_ide_only,
+            "a bundle request planning no runtime product must not touch the runtime backend"
         );
     }
 

@@ -68,8 +68,9 @@ use crate::framework_common::vue_runtime_backend::{
     vue_runtime_backend_registration, VueRuntimeBackend,
 };
 use crate::framework_common::{
-    IdeOutput, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOutput,
-    RuntimeOutputDescriptor, RuntimeStyleBlock, SourceMapFidelity,
+    CompileUnsupported, IdeOutput, RuntimeBlockContentInput, RuntimeBlockContentInputs,
+    RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
+    RuntimeOutputDescriptor, RuntimeStyleBlock, RuntimeSurfaceRefusal, SourceMapFidelity,
 };
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
 use crate::style_planner::{
@@ -77,7 +78,9 @@ use crate::style_planner::{
     transform_vue_v_bind, AuthoredStyleInput, PreparedStyleIr, StyleRewriteOutcome,
     VerifiedPlainCss,
 };
-use crate::svelte::carrier::render_admitted_svelte_ide;
+use crate::svelte::carrier::{
+    parse_svelte_fragments, parse_svelte_namespace, render_admitted_svelte_ide,
+};
 use crate::svelte::ide::SvelteIdeUnsupportedDiagnostic;
 use crate::svelte::parser::{
     validate_custom_element_tag, CustomElementDescriptor, CustomElementProp, CustomElementShadow,
@@ -653,8 +656,8 @@ pub(crate) struct VueParsedRuntimeOutput {
 }
 
 /// Canonical Vue parsed-runtime lowerer. Classifies topology before emission
-/// and is shared by the Vue runtime backend and `compile_bundle`'s runtime
-/// branch.
+/// and is shared by every Vue runtime-backend entry (trait, parsed-route,
+/// and bundle).
 pub(crate) fn lower_vue_parsed_runtime(
     source: &str,
     parsed: &ParsedSfc,
@@ -1816,11 +1819,303 @@ impl SvelteRuntimeBackend {
     }
 }
 
+impl VueRuntimeBackend {
+    /// Runtime-bundle construction over a carrier-admitted parse — the
+    /// compatibility `compile_bundle` entry into this backend. Drives the
+    /// SAME parsed runtime core as the other backend entries
+    /// ([`lower_vue_parsed_runtime`]); only the option derivation differs
+    /// (the neutral carrier option set rather than a canonical request), and
+    /// the product is the per-block runtime bundle rather than an assembled
+    /// artifact set — no composition or publication runs on this entry.
+    pub(crate) fn compile_bundle_runtime(
+        &self,
+        source: &str,
+        parsed: &ParsedSfc,
+        opts: &RuntimeCompileOptions,
+        alloc: &Allocator,
+    ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+        record_runtime_backend_delegation();
+        let extras = opts.vue_facts.as_ref();
+        let macros = extras
+            .and_then(|extras| extras.macro_runtime.clone())
+            .map(VueMacroSemanticInput::Runtime)
+            .unwrap_or_default();
+        let core_opts = CodegenOptions {
+            filename: opts.filename.clone(),
+            is_production: opts.is_production,
+            custom_element: opts.custom_element,
+            inline: opts.inline,
+            component_id: opts.component_id.clone(),
+            delimiters: opts.delimiters.clone(),
+            custom_elements: opts.custom_elements.clone(),
+            comments: opts.comments,
+            runtime_module_name: opts.runtime_module_name.clone(),
+            types_module_name: opts.types_module_name.clone(),
+            target: CompileTarget::BUNDLER,
+            embed_ambient_types: opts.embed_ambient_types,
+            conditional_root_narrowing: opts.conditional_root_narrowing,
+            strict_slots: opts.strict_slots,
+            ..CodegenOptions::default()
+        };
+        let verter_opts = ResolvedVueCompileOptions {
+            force_vapor: opts.force_vapor,
+            force_js: opts.force_js,
+            source_map: opts.source_map,
+            ide_source_map: false,
+            ssr: opts.ssr,
+            prop_constness_overrides: extras.and_then(|e| e.prop_constness_overrides.clone()),
+            style_v_bind_vars: extras
+                .map(|e| e.style_v_bind_vars.clone())
+                .unwrap_or_default(),
+            style_v_bind_usage_complete: opts
+                .block_content
+                .styles
+                .iter()
+                .any(Option::is_some)
+                .then(|| {
+                    extras
+                        .and_then(|e| e.style_v_bind_usage_complete)
+                        .unwrap_or(false)
+                }),
+            template_binding_metadata: None,
+            template_used_vars: None,
+            runtime_template_hole: false,
+            runtime_inline_template_chunk: false,
+            prepared_styles: if opts.prepared_styles.is_empty() {
+                extras
+                    .map(|facts| facts.prepared_styles.clone())
+                    .unwrap_or_default()
+            } else {
+                opts.prepared_styles.clone()
+            },
+        };
+        let mut bundle = lower_vue_parsed_runtime(
+            source,
+            parsed,
+            &core_opts,
+            &verter_opts,
+            &macros,
+            &opts.block_content,
+            &opts.prepared_styles,
+            alloc,
+        )
+        .map_err(|err| match err {
+            VueParsedRuntimeError::BlockContentUnavailable => {
+                CompileUnsupported::BlockContentRuntimeUnavailable {
+                    adapter_id: self.adapter_id(),
+                }
+            }
+            VueParsedRuntimeError::RequestExecutionRefused(error) => {
+                CompileUnsupported::RequestExecutionRefused(error)
+            }
+            VueParsedRuntimeError::Direct(DirectCompileError::Vue(error)) => {
+                CompileUnsupported::RequestExecutionRefused(error)
+            }
+            VueParsedRuntimeError::Direct(_) => {
+                CompileUnsupported::BlockContentRuntimeUnavailable {
+                    adapter_id: self.adapter_id(),
+                }
+            }
+        })?
+        .bundle;
+        for (slot, selected) in opts
+            .block_content
+            .custom_blocks
+            .iter()
+            .zip(bundle.custom_blocks.iter_mut())
+        {
+            if let Some(input) = slot {
+                selected.content = input.code.to_string();
+            }
+        }
+        Ok(bundle)
+    }
+}
+
+impl SvelteRuntimeBackend {
+    /// Runtime-bundle construction over a carrier-admitted parse — the
+    /// compatibility `compile_bundle` entry into this backend, driving the
+    /// same client compile as the other backend entries. A SUPPORTED
+    /// component populates `bundle`'s main module and external scoped-css
+    /// artifact; an unsupported, lowering-failed, codegen-invalid, or
+    /// official-rejected runtime surface FAILS CLOSED with the typed
+    /// product-free refusal, absorbing any diagnostics already collected on
+    /// `bundle`.
+    pub(crate) fn compile_bundle_runtime(
+        &self,
+        source: &str,
+        parsed: &ParsedSvelte,
+        opts: &RuntimeCompileOptions,
+        alloc: &Allocator,
+        bundle: &mut RuntimeCompileOutput,
+    ) -> Result<(), RuntimeSurfaceRefusal> {
+        record_runtime_backend_delegation();
+        let runtime_opts = SvelteRuntimeOptions {
+            filename: opts.filename.clone(),
+            name: None,
+            runes: opts.svelte_runes,
+            is_production: opts.is_production,
+            // `dev` (`ModuleCompileOptions.dev`) threads through from the
+            // canonical request; an explicit `true` reaches the EXISTING
+            // `UnsupportedSvelteRuntimeSurface::DevMode` typed refusal
+            // downstream rather than being silently dropped to `false` —
+            // dev-mode codegen output liveness is a separate, tracked gap,
+            // not this backend's to close.
+            dev_codegen: opts.svelte_dev.unwrap_or(false),
+            // Explicit carrier profile axis. An in-source
+            // `<svelte:options customElement>` value still wins over this
+            // compile option, matching official precedence.
+            custom_element: opts.custom_element,
+            // The RESOLVED Svelte cssHash override (from the host/session
+            // boundary, preserved byte-exact) threads verbatim into the
+            // style-plan scope class.
+            css_hash_override: opts.svelte_css_hash_override.clone(),
+            // The neutral `RuntimeCompileOptions` carries a channel for each
+            // of these — an in-source `<svelte:options namespace /
+            // preserveWhitespace>` still wins via the resolver's INLINE-WINS
+            // fold, matching official precedence.
+            namespace: opts
+                .svelte_namespace
+                .as_deref()
+                .and_then(parse_svelte_namespace),
+            fragments: opts
+                .svelte_fragments
+                .as_deref()
+                .and_then(parse_svelte_fragments),
+            preserve_whitespace: opts.svelte_preserve_whitespace,
+            preserve_comments: opts.svelte_preserve_comments,
+            disclose_version: opts.svelte_disclose_version,
+            // Unsupported fail-closed rows (`accessors`, `immutable`, `hmr`,
+            // `compatibility.componentApi`) have no canonical-request field —
+            // structurally unrepresentable, per the compile-request module.
+            accessors: None,
+            immutable: None,
+            hmr: None,
+            compatibility_component_api: None,
+            css: None,
+            custom_element_descriptor: None,
+            prepared_styles: opts.prepared_styles.clone(),
+        };
+        // `opts.source_map` is the neutral OUTPUT-axis map demand: it reaches
+        // the css RENDER through `compile_client`'s `want_source_map` (never
+        // a lowering option on `SvelteRuntimeOptions`).
+        match compile_client(source, parsed, &runtime_opts, alloc, opts.ssr, opts.source_map) {
+            Ok(module) => {
+                bundle.main.body_code = Some(module.code);
+                bundle.main.source_map = module.source_map.unwrap_or_default();
+                bundle.main.lang = Some("js".to_string());
+                // The EXTERNAL scoped-css artifact (the official
+                // `compiled.css` — `{ code, map, hasGlobal }` + the scope
+                // hash): it publishes as the bundle's style block (the Svelte
+                // analogue of the Vue styles population). Injected-mode css is
+                // inlined in the module (no artifact), and a style-less
+                // component has none.
+                if let Some(css) = module.css {
+                    let (space, artifact) = RuntimeOutputDescriptor::carrier_source(source);
+                    let output_descriptor = RuntimeOutputDescriptor::generated(
+                        &css.code,
+                        css.source_map.as_deref(),
+                        &[(space.as_str(), artifact.as_str())],
+                        SourceMapFidelity::Approximate,
+                    );
+                    bundle.styles.push(RuntimeStyleBlock {
+                        code: css.code,
+                        source_map: css.source_map,
+                        lang: None,
+                        scope_hash: Some(css.hash),
+                        has_global: css.has_global,
+                        output_descriptor,
+                    });
+                }
+                Ok(())
+            }
+            Err(ClientCompileError::Unsupported(surface)) => {
+                // Fail closed on a REQUESTED runtime surface: return a
+                // product-free refusal carrying the precise
+                // `svelte-runtime-unsupported-<surface>` reason structurally.
+                Err(RuntimeSurfaceRefusal {
+                    diagnostic_code: surface.diagnostic_code().to_string(),
+                    message: surface.message(),
+                    span: surface.span(),
+                    diagnostics: std::mem::take(&mut bundle.diagnostics),
+                })
+            }
+            Err(ClientCompileError::Lowering(errors)) => {
+                // A genuine lowering failure (a malformed construct) ALSO
+                // produces no `Main`, so it is a runtime refusal too. The
+                // first recorded problem is the structural reason; the rest
+                // ride along as non-fatal diagnostics.
+                // `RuntimeLoweringErrors` is non-empty by construction
+                // (`lower_parsed_svelte_to_ir` only returns `Err` behind an
+                // `!ctx.errors.is_empty()` guard), so `first()` is always
+                // `Some` here.
+                let mut diagnostics = std::mem::take(&mut bundle.diagnostics);
+                let (first, rest) = errors
+                    .diagnostics
+                    .split_first()
+                    .expect("RuntimeLoweringErrors is non-empty by construction");
+                let (code, message, span) =
+                    (first.code.to_string(), first.message.clone(), first.span);
+                for diag in rest {
+                    diagnostics.push(RuntimeDiagnostic {
+                        severity: RuntimeDiagnosticSeverity::Warning,
+                        code: diag.code.to_string(),
+                        message: diag.message.clone(),
+                        span: diag.span,
+                    });
+                }
+                Err(RuntimeSurfaceRefusal {
+                    diagnostic_code: code,
+                    message,
+                    span,
+                    diagnostics,
+                })
+            }
+            Err(ClientCompileError::GeneratedModuleInvalid { .. }) => Err(RuntimeSurfaceRefusal {
+                diagnostic_code: "svelte-runtime-generated-module-invalid".to_string(),
+                message: "The native Svelte backend generated invalid JavaScript; runtime output was refused."
+                    .to_string(),
+                span: verter_span::Span::new(0, 0),
+                diagnostics: std::mem::take(&mut bundle.diagnostics),
+            }),
+            Err(ClientCompileError::GeneratedSourceMapInvalid { .. }) => {
+                Err(RuntimeSurfaceRefusal {
+                    diagnostic_code: "svelte-runtime-generated-source-map-invalid".to_string(),
+                    message: "The native Svelte backend could not safely generate the client source map; runtime output was refused."
+                        .to_string(),
+                    span: verter_span::Span::new(0, 0),
+                    diagnostics: std::mem::take(&mut bundle.diagnostics),
+                })
+            }
+            Err(ClientCompileError::OfficialReject(rejection)) => {
+                // The component is MALFORMED Svelte official ALSO
+                // compile-errors — fail closed with the typed official-reject
+                // reason (the rule's stable code + a message naming the EXACT
+                // official code the rejection mirrors). The OFFICIAL-REJECT
+                // oracle judges the whole component, not a located construct,
+                // so the whole-source span IS this refusal's own span —
+                // decided here, not defaulted downstream.
+                Err(RuntimeSurfaceRefusal {
+                    diagnostic_code: rejection.rule.diagnostic_code().to_string(),
+                    message: format!(
+                        "{} (official `{}`)",
+                        rejection.rule.message(),
+                        rejection.official_code
+                    ),
+                    span: verter_span::Span::new(0, source.len() as u32),
+                    diagnostics: std::mem::take(&mut bundle.diagnostics),
+                })
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
-    /// Per-thread count of route → catalog-selected runtime backend
-    /// delegations, so tests can prove a runtime request actually routed
-    /// through the catalog row rather than a route-private emitter.
+    /// Per-thread count of route → typed runtime backend delegations
+    /// (catalog-selected or compatibility-internal), so tests can prove a
+    /// runtime request actually routed through the typed backend rather
+    /// than a route-private emitter.
     static RUNTIME_BACKEND_DELEGATIONS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
@@ -2224,7 +2519,7 @@ impl StandaloneCompiler {
             // The EXTERNAL scoped-css artifact — the Svelte analogue of
             // Vue's own `<style>` blocks — mirrors the production host
             // route's identical conversion
-            // (`svelte::carrier::VueCarrierCompiler::compile_bundle`'s
+            // (`SvelteRuntimeBackend::compile_bundle_runtime`'s
             // `RuntimeStyleBlock` population). Style content does not vary
             // between client/server compiles of the SAME source, so it is
             // taken from whichever kind's compile produces it first.

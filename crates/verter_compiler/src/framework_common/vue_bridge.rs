@@ -19,10 +19,7 @@ use verter_span::Span;
 use verter_parser::parser::types::ParsedSfc;
 use verter_parser::types::NodeProp;
 
-use crate::compile::types::{
-    CodegenOptions, CompileTarget, ResolvedVueCompileOptions, VueExecutionInputs,
-    VueMacroSemanticInput,
-};
+use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
 use crate::compile::{compile_from_parsed, parse_sfc};
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest,
@@ -34,8 +31,8 @@ use crate::framework_common::carrier_compiler::{
     RuntimeMainModule, RuntimeOutputDescriptor, RuntimeScriptBlock, RuntimeStyleBlock,
     RuntimeTemplateBlock, SourceMapFidelity,
 };
+use crate::framework_common::vue_runtime_backend::VueRuntimeBackend;
 use crate::framework_common::FrameworkParseArtifact;
-use crate::standalone::DirectCompileError;
 use verter_language::ParseOptions;
 
 /// The concrete Vue carrier: the full parsed SFC behind the erasure
@@ -482,99 +479,7 @@ impl CarrierCompiler for VueCarrierCompiler {
         // actually required.
         let mut bundle = RuntimeCompileOutput::default();
         if opts.want_runtime {
-            let extras = opts.vue_facts.as_ref();
-            let macros = extras
-                .and_then(|extras| extras.macro_runtime.clone())
-                .map(VueMacroSemanticInput::Runtime)
-                .unwrap_or_default();
-            let core_opts = CodegenOptions {
-                filename: opts.filename.clone(),
-                is_production: opts.is_production,
-                custom_element: opts.custom_element,
-                inline: opts.inline,
-                component_id: opts.component_id.clone(),
-                delimiters: opts.delimiters.clone(),
-                custom_elements: opts.custom_elements.clone(),
-                comments: opts.comments,
-                runtime_module_name: opts.runtime_module_name.clone(),
-                types_module_name: opts.types_module_name.clone(),
-                target: CompileTarget::BUNDLER,
-                embed_ambient_types: opts.embed_ambient_types,
-                conditional_root_narrowing: opts.conditional_root_narrowing,
-                strict_slots: opts.strict_slots,
-                ..CodegenOptions::default()
-            };
-            let verter_opts = ResolvedVueCompileOptions {
-                force_vapor: opts.force_vapor,
-                force_js: opts.force_js,
-                source_map: opts.source_map,
-                ide_source_map: false,
-                ssr: opts.ssr,
-                prop_constness_overrides: extras.and_then(|e| e.prop_constness_overrides.clone()),
-                style_v_bind_vars: extras
-                    .map(|e| e.style_v_bind_vars.clone())
-                    .unwrap_or_default(),
-                style_v_bind_usage_complete: opts
-                    .block_content
-                    .styles
-                    .iter()
-                    .any(Option::is_some)
-                    .then(|| {
-                        extras
-                            .and_then(|e| e.style_v_bind_usage_complete)
-                            .unwrap_or(false)
-                    }),
-                template_binding_metadata: None,
-                template_used_vars: None,
-                runtime_template_hole: false,
-                runtime_inline_template_chunk: false,
-                prepared_styles: if opts.prepared_styles.is_empty() {
-                    extras
-                        .map(|facts| facts.prepared_styles.clone())
-                        .unwrap_or_default()
-                } else {
-                    opts.prepared_styles.clone()
-                },
-            };
-            bundle = crate::standalone::lower_vue_parsed_runtime(
-                source,
-                parsed,
-                &core_opts,
-                &verter_opts,
-                &macros,
-                &opts.block_content,
-                &opts.prepared_styles,
-                alloc,
-            )
-            .map_err(|err| match err {
-                crate::standalone::VueParsedRuntimeError::BlockContentUnavailable => {
-                    CompileUnsupported::BlockContentRuntimeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    }
-                }
-                crate::standalone::VueParsedRuntimeError::RequestExecutionRefused(error) => {
-                    CompileUnsupported::RequestExecutionRefused(error)
-                }
-                crate::standalone::VueParsedRuntimeError::Direct(DirectCompileError::Vue(
-                    error,
-                )) => CompileUnsupported::RequestExecutionRefused(error),
-                crate::standalone::VueParsedRuntimeError::Direct(_) => {
-                    CompileUnsupported::BlockContentRuntimeUnavailable {
-                        adapter_id: self.adapter_id(),
-                    }
-                }
-            })?
-            .bundle;
-            for (slot, selected) in opts
-                .block_content
-                .custom_blocks
-                .iter()
-                .zip(bundle.custom_blocks.iter_mut())
-            {
-                if let Some(input) = slot {
-                    selected.content = input.code.to_string();
-                }
-            }
+            bundle = VueRuntimeBackend.compile_bundle_runtime(source, parsed, opts, alloc)?;
         }
 
         if opts.want_ide {
@@ -1242,6 +1147,51 @@ mod tests {
             result,
             Err(CompileUnsupported::BlockContentRuntimeUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn compile_bundle_runtime_branch_delegates_to_the_typed_runtime_backend() {
+        // The bundle route reaches its runtime product only through the typed
+        // Vue runtime backend; the per-thread delegation counter is the
+        // witness that no route-private runtime emitter remains.
+        let compiler = VueCarrierCompiler;
+        let source = "<script setup>const n = 1</script><template><div>{{ n }}</div></template>";
+        let artifact = artifact_for(source);
+        let alloc = oxc_allocator::Allocator::new();
+
+        let before = crate::standalone::runtime_backend_delegation_count();
+        compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions::default(),
+                &alloc,
+            )
+            .expect("vue runtime bundle");
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before + 1,
+            "the bundle runtime branch must delegate exactly once to the typed Vue runtime backend"
+        );
+
+        let before_ide_only = crate::standalone::runtime_backend_delegation_count();
+        compiler
+            .compile_bundle_expect_produced(
+                source,
+                &artifact,
+                &RuntimeCompileOptions {
+                    want_runtime: false,
+                    want_ide: true,
+                    ..Default::default()
+                },
+                &alloc,
+            )
+            .expect("vue ide-only bundle");
+        assert_eq!(
+            crate::standalone::runtime_backend_delegation_count(),
+            before_ide_only,
+            "a bundle request planning no runtime product must not touch the runtime backend"
+        );
     }
 
     /// @ai-generated - Proves external template lowering receives the inline
