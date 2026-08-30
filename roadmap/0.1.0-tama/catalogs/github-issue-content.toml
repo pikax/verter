@@ -52,14 +52,14 @@ acceptance = ["Compiler bytes, maps, diagnostics, and text-only behavior remain 
 [[issue]]
 node_id = "CCA1M2"
 title = "Delegate compatibility bundle runtime construction to typed runtime backends"
-problem = "The Vue and Svelte compatibility bundle compilers still construct runtime output through their own internal code paths even though typed per-framework runtime backends now exist. Two parallel runtime constructions for the same framework can drift in output, refusal classification, and diagnostics, and every runtime fix must be applied twice. Maintainers cannot yet trust the typed backends as the single runtime implementation."
+problem = "The Vue and Svelte compatibility bundle compilers still construct runtime output through their own internal code paths even though typed per-framework runtime backends now exist. Two parallel runtime constructions for the same framework risk drifting apart in output, refusal classification, and diagnostics, and every runtime fix must be applied twice. Maintainers cannot yet trust the typed backends as the single runtime implementation."
 expected_outcome = "Both compatibility bundle compilers delegate runtime construction to their framework's typed runtime backend, making it the only runtime implementation behind the existing host routes, while the two host entry calls themselves remain unchanged."
 acceptance = ["The Vue compatibility bundle implementation produces runtime output through the typed Vue runtime backend.", "The Svelte compatibility bundle implementation produces runtime output through the typed Svelte runtime backend, including its runtime refusal outcomes.", "Runtime bytes, source maps, diagnostics, and refusal classification remain equivalent for both frameworks.", "Both existing host bundle entry calls remain present and unchanged.", "No legacy internal runtime construction remains in either compatibility implementation."]
 
 [[issue]]
 node_id = "CCA1M3"
 title = "Characterize the fixed-Vue runtime-render route on delegated backends"
-problem = "The runtime-render host route builds a Vue-shaped compile request unconditionally, so a Svelte component on that route silently loses its Svelte-specific options while still compiling through the Svelte carrier. This degraded behavior is currently unpinned by tests, so a later routing change could alter it invisibly, and render parity after the backend delegation change is unproven."
+problem = "The runtime-render host route builds a Vue-shaped compile request unconditionally, so a Svelte component on that route silently loses its Svelte-specific options while still compiling through the Svelte carrier. This degraded behavior is currently unpinned by tests, so a later routing change risks altering it invisibly, and render parity after the backend delegation change is unproven."
 expected_outcome = "The runtime-render route is proven equivalent on top of the delegated compatibility backends, keeps its single host entry call, and the current Svelte degradation is pinned by characterization tests as explicitly transitional behavior."
 acceptance = ["Render output, source maps, diagnostics, and refusal classification remain equivalent through the delegated Vue compatibility implementation.", "Characterization tests pin the current Svelte behavior on the render route, including the collapsed Svelte options.", "Exactly one runtime-render host bundle entry call remains and the host-backed entry call is untouched.", "No new framework selector or compatibility-backend change is introduced."]
 
@@ -73,55 +73,55 @@ acceptance = ["Direct, prepared, and batch compiler routes use typed runtime bac
 [[issue]]
 node_id = "CCA1N1"
 title = "Add the Vue host-integration backend with demand-specific admission"
-problem = "Vue host compilation is coordinated by generic session code that assembles Vue-specific prerequisites, macro input, diagnostics, and publication inline. There is no Vue-owned integration point that can admit a request for a specific demand, so per-demand capability checks and atomic refusal rules are spread across the session and cannot be reused by new routes."
+problem = "Vue host compilation is coordinated by generic session code that assembles Vue-specific prerequisites, macro input, diagnostics, and publication inline. There is no Vue-owned integration point that can admit a request for a specific demand, so per-demand capability checks and atomic refusal rules stay spread across the session, causing duplicated coordination that new routes cannot reuse."
 expected_outcome = "A Vue host-integration backend owns Vue request topology and issues demand-specific compile admission for both the multi-product and render-only demands, behind the existing routes, without becoming the production selector yet."
 acceptance = ["The Vue backend issues distinct admissions for the multi-product and render-only demands, and product backends only consume them.", "A render-only demand does not require projection capability, and a missing runtime capability yields a typed unavailability rather than any fallback.", "One admitted request shares one prerequisite population with no duplicate parse, semantic, projection, or emit pass.", "Refusal remains atomic: no sibling product publishes after a runtime refusal.", "Both existing production routes still use their current adapters in this change."]
 
 [[issue]]
 node_id = "CCA1N2"
 title = "Add the Svelte host-integration backend with demand-specific admission"
-problem = "Svelte host compilation has no framework-owned integration point: generic session code coordinates its prerequisites, self-contained module handoff, style side-products, and refusal classification. Demand-specific admission and typed capability checks cannot be expressed for Svelte, which blocks giving Svelte a first-class render route."
+problem = "Svelte host compilation has no framework-owned integration point: generic session code coordinates its prerequisites, self-contained module handoff, style side-products, and refusal classification. Demand-specific admission and typed capability checks cannot be expressed for Svelte, which prevents giving Svelte a first-class render route."
 expected_outcome = "A Svelte host-integration backend owns Svelte request topology symmetrically with Vue — multi-product and render-only demands, self-contained Main, and requested style side-products from one admitted population — while remaining unused by the production render route until its cutover."
 acceptance = ["The Svelte backend issues distinct admissions for the multi-product and render-only demands, and product backends only consume them.", "Main plus requested style side-products come from one admitted population without a second compile.", "A missing runtime capability yields a typed unavailability rather than a fallback to another lane or framework.", "Refusal remains atomic and diagnostics keep deterministic classification and order.", "The production Svelte render behavior is unchanged in this change."]
 
 [[issue]]
 node_id = "CCA1N2A"
 title = "Add a sealed request-scoped native host binding"
-problem = "Host compile routes classify a file's framework independently at several points — request construction and macro preparation each re-derive it. Repeated classification can disagree across one request's lifetime, and nothing ties a request's framework identity to the exact source snapshot and catalog row it was derived from."
+problem = "Host compile routes classify a file's framework independently at several points — request construction and macro preparation each re-derive it. Repeated classification risks disagreeing across one request's lifetime, and nothing ties a request's framework identity to the exact source snapshot and catalog row it was derived from."
 expected_outcome = "A sealed request-scoped binding type maps registered catalog identity to exactly one framework-specific host binding for one immutable source snapshot, with guarded construction and typed unavailability, ready for later production adoption but unused by any route yet."
 acceptance = ["One guarded constructor derives the binding solely from registered catalog identity and an immutable snapshot witness.", "The binding cannot be cloned, serialized, or stored, and carries no general capability or service access.", "Cross-framework, stale-snapshot, and epoch-mismatched construction fail closed with typed outcomes.", "No production route consumes the binding in this change."]
 
 [[issue]]
 node_id = "CCA1N2B"
 title = "Bind framework identity once per host compile request"
-problem = "Each host compile request still selects its framework more than once: an is-Vue classification in the pipeline and a framework fork in request construction. These independent selections can disagree, are impossible to audit as one decision, and block any route from trusting a single framework identity."
+problem = "Each host compile request still selects its framework more than once: an is-Vue classification in the pipeline and a framework fork in request construction. These independent selections risk disagreeing, are impossible to audit as one decision, and prevent any route from trusting a single framework identity."
 expected_outcome = "Every host compile request creates exactly one sealed framework binding from its immutable snapshot at one production site, both existing routes consume that binding, and the displaced downstream classifier branches are deleted while both host bundle entry calls remain."
 acceptance = ["Exactly one production site binds framework identity per host compile request.", "The displaced is-Vue classification and request-construction fork are gone.", "Both existing host bundle entry calls remain and route behavior stays equivalent for both frameworks.", "Stale-generation, identity-mismatch, epoch-mismatch, and duplicate-consumption cases fail closed without publishing.", "Binding adds no parse, semantic, runtime, assembly, or copy work."]
 
 [[issue]]
 node_id = "CCA1N3"
 title = "Cut host-backed compilation over to bound framework backends"
-problem = "The generic host-backed compile transaction still executes through the combined compatibility bundle call instead of the framework's host-integration backend. Demand-specific admission and framework-owned request topology therefore cannot govern the main multi-product route, and its committed route records describe the legacy call rather than the executed path."
+problem = "The generic host-backed compile transaction still executes through the combined compatibility bundle call instead of the framework's host-integration backend. Demand-specific admission and framework-owned request topology therefore cannot govern the main multi-product route, leaving its committed route records describing the legacy call rather than the executed path."
 expected_outcome = "The host-backed transaction consumes the request-scoped framework binding, executes through the selected host-integration backend under demand-specific admission, deletes its outer compatibility bundle call, and its route records describe the executed bound topology, with runtime-render untouched."
 acceptance = ["The host-backed compatibility bundle call is gone and the lane executes through the bound framework host backend.", "Cache, fact, publication, refusal atomicity, and fresh/warm/incremental behavior remain equivalent.", "No framework selector remains on the host-backed lane.", "Route and audit records match the executed route, including the host-backed batch route.", "Runtime-render behavior is not modified."]
 
 [[issue]]
 node_id = "CCA1N4"
 title = "Cut runtime-render over to bound framework backends"
-problem = "The runtime-render route is hardcoded to build Vue-shaped requests, so a Svelte component on that route silently loses its Svelte options, and the route executes through the compatibility bundle call rather than a framework-owned backend. Render consumers cannot get correct Svelte output, typed unavailability, or truthful route records from this lane."
+problem = "The runtime-render route is hardcoded to build Vue-shaped requests, so a Svelte component on that route silently loses its Svelte options, and the route executes through the compatibility bundle call rather than a framework-owned backend. Render consumers receive incorrect Svelte output instead of typed unavailability, and the lane's route records stay untruthful."
 expected_outcome = "The runtime-render lane consumes the request-scoped framework binding and executes both Vue and Svelte through their host-integration backends under demand-specific admission, deleting its outer compatibility bundle call and the fixed-Vue construction, with truthful render route and audit records."
 acceptance = ["Vue render output, maps, and diagnostics remain equivalent; Svelte render output honors the exact requested style policy.", "The runtime-render compatibility bundle call and every fixed-framework selection on the lane are gone.", "A missing runtime or host capability yields typed unavailability with no fallback to the host-backed lane.", "One render request performs one admitted population; Main plus requested style side-products need no second compile.", "The host-backed entry call is untouched and render route/audit records match the executed route."]
 
 [[issue]]
 node_id = "CCA1N"
 title = "Confirm native host routes converge on single-binding backends"
-problem = "Two separate cutovers move the host-backed and runtime-render lanes onto bound framework host backends. Without one convergence check, a leftover compatibility call, a residual framework selector, or an absorbed third route could survive both landings and silently keep a second execution path alive."
+problem = "Two separate cutovers move the host-backed and runtime-render lanes onto bound framework host backends. Without one convergence check, a leftover compatibility call, a residual framework selector, or an absorbed third route risks surviving both landings and silently keeping a second execution path alive."
 expected_outcome = "One verification pass confirms both former compatibility bundle calls are gone, framework identity binds exactly once per request, host backends alone own framework topology and admission, and no fallback or third route was absorbed."
 acceptance = ["Zero session compatibility bundle calls remain in the two migrated populations.", "Exactly one framework binding occurs per host compile request and neither lane contains a framework selector.", "Vue and Svelte host backends are the only admission issuers and product backends only consume admission.", "No compatibility fallback remains and route records describe the executed topology."]
 
 [[issue]]
 node_id = "CCA1N2G"
 title = "Select carrier grammar from registered identity"
-problem = "The shared source-ingestion stage picks a carrier's template grammar with a hardcoded Vue-else-Svelte fallthrough. Any carrier that is not Vue silently receives Svelte grammar, so a future registered adapter would be mis-parsed by default, and the branch duplicates framework knowledge that the registered catalog already owns."
+problem = "Shared source ingestion picks a carrier's template grammar with a hardcoded Vue-else-Svelte fallthrough. Any carrier that is not Vue silently receives Svelte grammar, so a future registered adapter would be parsed incorrectly by default, and the branch duplicates framework knowledge that the registered catalog already owns."
 expected_outcome = "Source ingestion derives each carrier's grammar from its registered catalog/descriptor row, so every parse uses the grammar its adapter registered and an unregistered or grammar-less carrier fails closed instead of inheriting another framework's grammar."
 acceptance = ["No framework fallthrough remains in source-ingestion grammar selection.", "Vue and Svelte parses keep byte-identical grammar behavior, output, and diagnostics.", "An unregistered carrier or a row without grammar facts fails closed with a typed outcome.", "The lookup is a registered-fact read that adds no parse or resolve work."]
