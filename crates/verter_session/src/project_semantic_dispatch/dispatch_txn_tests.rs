@@ -992,7 +992,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
         input: FlowInputContext::empty(),
         result_contract: flow_return_result_contract_id(),
     }));
-    let provenance = super::flow_obligation_state::FlowEvaluationProvenance::new(7, 3);
+    let provenance = super::flow_obligation_state::FlowEvaluationProvenance::new(7, 3, 0);
     let plan = fixture
         .build_plan(FlowDemandRequest {
             query,
@@ -1036,6 +1036,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
         fresh_seed: false,
         flow_demand: None,
         discharge: None,
+        provenance,
     };
     assert!(
         pending.flow_demand.is_none(),

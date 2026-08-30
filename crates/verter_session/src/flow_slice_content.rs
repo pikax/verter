@@ -156,6 +156,21 @@ pub struct SliceContent {
     /// reachability filter. The evaluator subtracts them from unapplied write
     /// effects exactly as it subtracts writes it applies in source order.
     pub inert_write_spans: FxHashSet<FrameSpan>,
+    /// The authored call / construct spans this lowering DECIDED ABOVE
+    /// the call: a call folded into a surviving decided leaf
+    /// ([`SliceExpr::Type`] — the fabricated-value gate proves the leaf's
+    /// type does not derive from any call inside it, e.g. a
+    /// type-replacing `as T` / `<T>x` carrier or a form the shallow pass
+    /// models without the call's return), and a call in a CONTROL
+    /// position (an `if` / ternary test — the demanded value never
+    /// consumes its return; the guard fact narrows, or both arms join
+    /// conservatively). Each span is a call occurrence whose type
+    /// position this run decided without the call — the containment
+    /// evidence the discharge-report producer accepts for a call
+    /// obligation the evaluator's call sink never reached. Absolute
+    /// spans: the report rebases them onto the frame anchor when pairing
+    /// against the skeleton footprint.
+    pub decided_above_call_spans: Vec<verter_span::Span>,
 }
 
 /// One formal parameter.
@@ -1532,6 +1547,7 @@ pub(crate) fn build_flow_slice_content(
                 },
                 budget_failure: Some(reason),
                 inert_write_spans: FxHashSet::default(),
+                decided_above_call_spans: Vec::new(),
             });
         }
     };
@@ -1568,6 +1584,7 @@ pub(crate) fn build_flow_slice_content(
         program,
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
+        decided_above_call_spans: Vec::new(),
         unsafe_invoked_closure_effects: FxHashSet::default(),
         nested_free_writes: FxHashSet::default(),
         active_guard_bindings: Vec::new(),
@@ -1614,6 +1631,7 @@ pub(crate) fn build_flow_slice_content(
     };
     let budget_failure = lowerer.budget_failure;
     let inert_write_spans = lowerer.inert_write_spans;
+    let decided_above_call_spans = lowerer.decided_above_call_spans;
     Some(SliceContent {
         can_fall_through: region.can_fall_through,
         params: Arc::from(params.into_boxed_slice()),
@@ -1622,6 +1640,7 @@ pub(crate) fn build_flow_slice_content(
         body: region,
         budget_failure,
         inert_write_spans,
+        decided_above_call_spans,
     })
 }
 
@@ -2368,6 +2387,9 @@ struct Lowerer<'a> {
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
     /// Write effects proven unreachable by a literal control edge.
     inert_write_spans: FxHashSet<FrameSpan>,
+    /// Call / construct spans of decided-above positions — see
+    /// [`SliceContent::decided_above_call_spans`].
+    decided_above_call_spans: Vec<verter_span::Span>,
     unsafe_invoked_closure_effects: FxHashSet<FrameSpan>,
     nested_free_writes: FxHashSet<SkeletonBindingId>,
     active_guard_bindings: Vec<SkeletonBindingId>,
@@ -3497,6 +3519,11 @@ impl Lowerer<'_> {
                     // through the ONE guard authority both control
                     // spellings share.
                     let guard = self.lower_guard(&if_stmt.test);
+                    // A call in the TEST is a control-position call: the
+                    // demanded value never consumes its return (the guard
+                    // fact narrows, or both arms join conservatively), so
+                    // the position is decided above the call.
+                    self.record_decided_above_calls(&if_stmt.test);
                     let active_guard_base = self.active_guard_bindings.len();
                     let active_guard_name_base = self.active_guard_names.len();
                     let guard_bindings = self.guard_bindings(&guard, if_stmt.test.span());
@@ -4369,9 +4396,18 @@ impl Lowerer<'_> {
                     Some(root) if self.optional_chain_root_has_prior_flow_change(root) => {
                         SliceExpr::Gap(crate::semantic_query::FlowGap::UnmodeledExpression)
                     }
-                    Some(root) => SliceExpr::OptionalAnyChain {
-                        root: Box::new(self.lower_identifier_read(root, mode)),
-                    },
+                    Some(root) => {
+                        // The chain's value derives from the ROOT's
+                        // `any`-ness (the evaluator admits it only while
+                        // the reaching root is still `any`), never from
+                        // resolving the chain's terminal call: decided
+                        // above. A non-`any` root degrades at evaluation,
+                        // which blocks the seal regardless.
+                        self.record_decided_above_calls(expr);
+                        SliceExpr::OptionalAnyChain {
+                            root: Box::new(self.lower_identifier_read(root, mode)),
+                        }
+                    }
                     None => self.lower_leaf(expr, mode),
                 }
             }
@@ -4511,6 +4547,11 @@ impl Lowerer<'_> {
                     .expressions
                     .last()
                     .expect("the guard proved a last operand");
+                // The DISCARDED operands' calls never feed the sequence's
+                // value (it is the last operand's): decided above.
+                for discarded in &sequence.expressions[..sequence.expressions.len() - 1] {
+                    self.record_decided_above_calls(discarded);
+                }
                 self.lower_expr(last, mode)
             }
             // ── THE shared value-structural descent ──────────────────
@@ -4574,6 +4615,9 @@ impl Lowerer<'_> {
                 // warm.
                 ValueDescent::Branches(conditional) => {
                     let guard = self.lower_guard(&conditional.test);
+                    // The ternary's TEST is a control position exactly as
+                    // the `if` twin's: its calls are decided above.
+                    self.record_decided_above_calls(&conditional.test);
                     let consequent = self.lower_expr(&conditional.consequent, mode);
                     let alternate = self.lower_expr(&conditional.alternate, mode);
                     SliceExpr::Union {
@@ -4975,6 +5019,7 @@ impl Lowerer<'_> {
             program: self.program,
             budget_failure: None,
             inert_write_spans: FxHashSet::default(),
+            decided_above_call_spans: Vec::new(),
             unsafe_invoked_closure_effects: FxHashSet::default(),
             nested_free_writes: FxHashSet::default(),
             active_guard_bindings: Vec::new(),
@@ -5044,6 +5089,11 @@ impl Lowerer<'_> {
         if let Some(reason) = nested.budget_failure {
             self.budget_failure.get_or_insert(reason);
         }
+        // Absolute spans concatenate across frames: a call a NESTED
+        // body's lowering decided above is still a decided call of this
+        // run.
+        self.decided_above_call_spans
+            .append(&mut nested.decided_above_call_spans);
         SliceExpr::NestedFunctionValue {
             gap,
             params: Arc::from(params.into_boxed_slice()),
@@ -5089,12 +5139,43 @@ impl Lowerer<'_> {
                 SliceExpr::UnreducedCallValue
             }
             LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::SemanticAny,
-            LeafLowering::Free(ty) => SliceExpr::Type(GatedLeaf(ty)),
-            LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
-                inner: Box::new(SliceExpr::Type(GatedLeaf(ty))),
-                shadowed,
-            },
+            LeafLowering::Free(ty) => {
+                self.record_decided_above_calls(expr);
+                SliceExpr::Type(GatedLeaf(ty))
+            }
+            LeafLowering::FrameShadowed { ty, shadowed } => {
+                self.record_decided_above_calls(expr);
+                SliceExpr::FrameShadowed {
+                    inner: Box::new(SliceExpr::Type(GatedLeaf(ty))),
+                    shadowed,
+                }
+            }
         }
+    }
+
+    /// Record the authored call / construct spans of one DECIDED-ABOVE
+    /// position — see [`SliceContent::decided_above_call_spans`]. Called
+    /// only by the leaf arms that passed the fabricated-value gate and by
+    /// the two control-position (test) lowerings: in both, the produced
+    /// type does not derive from any call inside the expression.
+    fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
+        struct CallSpans<'s> {
+            spans: &'s mut Vec<verter_span::Span>,
+        }
+        impl<'a> Visit<'a> for CallSpans<'_> {
+            fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+                self.spans.push(call.span.into());
+                walk::walk_call_expression(self, call);
+            }
+            fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
+                self.spans.push(new.span.into());
+                walk::walk_new_expression(self, new);
+            }
+        }
+        let mut scanner = CallSpans {
+            spans: &mut self.decided_above_call_spans,
+        };
+        scanner.visit_expression(expr);
     }
 
     /// THE root-identifier gate, half one: the names in the leaf

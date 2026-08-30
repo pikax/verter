@@ -184,6 +184,15 @@ pub enum ShallowDiagnostic {
         owner_canonical: Arc<str>,
         owner: verter_type_expr::TopLevelOwnerId,
     },
+    /// A flow-bearing root whose reducer is still pending
+    /// (`FlowNarrowingAt` / `ContextualTypeAt`) answered with its
+    /// OPERATION-SPECIFIC typed gap: the recorded reason the answer is
+    /// absent, surfaced alongside the `Error(Miss)` + partial/ReturnOnly
+    /// rails. Never a fabricated value.
+    PendingFlowRoot {
+        /// The operation-specific gap the pending root surfaces.
+        gap: crate::semantic_query::FlowGap,
+    },
 }
 
 /// Build output threaded through `build_project_path` so the dispatch

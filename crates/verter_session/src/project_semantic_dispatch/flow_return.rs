@@ -198,10 +198,32 @@ pub(crate) mod flow_admission_fault_injection {
     /// evidence that did not originate from `evaluate_flow_return`.
     pub(crate) static FOREIGN_EVALUATION_EVIDENCE: AtomicBool = AtomicBool::new(false);
 
+    /// When armed, `finalize_flow_demand` sees evaluation evidence whose
+    /// provenance carries the carrier's OWN store/generation but a
+    /// DIFFERENT demand ordinal — modelling a same-store, same-generation
+    /// value or report produced by ANOTHER demand.
+    pub(crate) static FOREIGN_DEMAND_PROVENANCE: AtomicBool = AtomicBool::new(false);
+
     /// When armed, `prepare_flow_return_demand` stamps the installed
     /// demand carrier with a provenance from another store/generation —
     /// modelling a demand handle and value pair minted elsewhere.
     pub(crate) static STALE_DEMAND_CARRIER: AtomicBool = AtomicBool::new(false);
+
+    /// When armed, `finalize_flow_demand` sees convergence evidence with
+    /// ZERO observed iterations — modelling a caller-fabricated claim the
+    /// discharge driver never produced.
+    pub(crate) static UNOBSERVED_CONVERGENCE: AtomicBool = AtomicBool::new(false);
+
+    /// When armed, `evaluate_flow_return` assembles its execution witness
+    /// with the evaluator's recorded call evidence dropped — modelling an
+    /// evaluation that claims call obligations whose work it never
+    /// performed.
+    pub(crate) static SUPPRESS_CALL_EVIDENCE: AtomicBool = AtomicBool::new(false);
+
+    /// When armed, `evaluate_flow_return` assembles its execution witness
+    /// with every recorded call marked relation-undecided — modelling a
+    /// call whose consumed relation outcomes were never decided.
+    pub(crate) static UNDECIDED_RELATION_EVIDENCE: AtomicBool = AtomicBool::new(false);
 
     /// RAII arm/disarm for one slot.
     // Constructed by the in-crate admission tests only; the lib-only
@@ -1350,7 +1372,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// result — the instantiation transfer for a body-derived callee
     /// demanded under a call's final ordered mapping. Empty substitution
     /// (the canonical production key) is a no-op.
-    fn apply_frame_key_substitution(
+    pub(super) fn apply_frame_key_substitution(
         &self,
         key: &FlowReturnKey,
         result: FlowReturnResult,
@@ -1380,6 +1402,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         outcome: FlowReturnPendingOutcome,
         holds: Vec<super::dispatch_txn::ReturnObligationIdentity>,
     ) -> FlowReturnStep {
+        self.flow_frame_close_with_evidence_for_tests(idx, outcome, holds, None)
+    }
+
+    /// Test seam: [`Self::flow_frame_close_for_tests`] carrying the
+    /// evaluation's discharge report as well — the proof-layer evidence a
+    /// staged member finalizes against at the component close.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)] // exercised by the return-equation close tests
+    pub(super) fn flow_frame_close_with_evidence_for_tests(
+        &self,
+        idx: usize,
+        outcome: FlowReturnPendingOutcome,
+        holds: Vec<super::dispatch_txn::ReturnObligationIdentity>,
+        discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
+    ) -> FlowReturnStep {
         let holds = holds
             .into_iter()
             .filter_map(|identity| match identity {
@@ -1389,6 +1426,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 super::dispatch_txn::ReturnObligationIdentity::FlowReturn(_) => None,
             })
             .collect();
+        // The staged close's evaluation provenance: the frame's installed
+        // demand carrier's own token when one exists (the seam stages the
+        // close of an evaluation that carrier served), else the bare
+        // freshness mint, which can never match a real carrier.
+        let provenance = {
+            let txn = self.dispatch_txn.borrow();
+            txn.reentry()
+                .frame(idx)
+                .and_then(|frame| match &frame.domain {
+                    ObligationFrameDomain::FlowReturn(state) => state.flow_demand.clone(),
+                    _ => None,
+                })
+                .map(|carrier| carrier.provenance)
+                .unwrap_or_else(|| self.current_flow_evaluation_provenance())
+        };
         self.flow_frame_close(
             idx,
             FlowEvaluationOutcome {
@@ -1397,8 +1449,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 holds,
                 materialized: crate::semantic_query::demand::MaterializedSet::empty(),
                 fresh_seed: false,
-                discharge: None,
-                provenance: self.current_flow_evaluation_provenance(),
+                discharge,
+                provenance,
             },
         )
     }
@@ -1417,19 +1469,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
     // The flow-solve proof wiring
     // ──────────────────────────────────────────────────────────────────
 
-    /// The dispatch's current evaluation provenance: the semantic store's
-    /// instance identity plus the live project generation. The ONE mint —
-    /// demand preparation stamps it onto the installed demand's carrier,
-    /// the evaluation stamps it onto its outcome, and the finalization
-    /// driver accepts evidence only when every carried token equals a
-    /// FRESH mint: a value, report, or convergence claim from another
-    /// store or a stale request generation is a typed partial, never a
-    /// proof.
+    /// The dispatch's current evaluation FRESHNESS mint: the semantic
+    /// store's instance identity plus the live project generation. The
+    /// demand-unique axis is NOT knowable here — the mint carries the
+    /// sentinel ordinal no installed demand ever bears, and only
+    /// [`FlowEvaluationProvenance::freshness_axes`] of a minted token may
+    /// be compared against it. Demand preparation derives the real token
+    /// (freshness axes + the demand's ledger ordinal) from this mint; the
+    /// finalization driver accepts evidence only when the evidence token
+    /// IS the demand carrier's own token and the carrier's freshness axes
+    /// equal a FRESH mint's: a value, report, or convergence claim from
+    /// another demand, another store, or a stale request generation is a
+    /// typed partial, never a proof.
     pub(super) fn current_flow_evaluation_provenance(&self) -> FlowEvaluationProvenance {
         let store_identity = Arc::as_ptr(self.graph()) as *const () as usize as u64;
         FlowEvaluationProvenance::new(
             store_identity,
             self.ctx.project_type_store().project_generation(),
+            // The sentinel ordinal: no installed demand bears it (ledger
+            // ordinals are small counting numbers), so a bare freshness
+            // mint can never pose as one demand's evidence.
+            u64::MAX,
         )
     }
 
@@ -1463,21 +1523,27 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // An over-budget plan or a torn view installs no demand: the
             // evaluation's own hash-node lookup reaches the same outcome
             // and fails closed with the typed failure.
-            // An over-budget plan or a torn view installs no demand: the
-            // evaluation's own hash-node lookup reaches the same outcome
-            // and fails closed with the typed failure.
             _ => return,
         };
         let Some(bound) = flow_slice.bound_graph_for(&site.slice_key_function) else {
             return;
         };
-        let provenance = self.current_flow_evaluation_provenance();
+        // The demand-unique axis of this demand's provenance: the ledger
+        // ordinal the install below receives (installation appends, so the
+        // peek IS the ordinal; the assertion after install pins it).
+        let demand_ordinal = self.dispatch_txn.borrow().obligations.flow_demand_count() as u64;
+        let provenance = {
+            let freshness = self.current_flow_evaluation_provenance();
+            let (store_identity, request_generation) = freshness.freshness_axes();
+            FlowEvaluationProvenance::new(store_identity, request_generation, demand_ordinal)
+        };
         #[cfg(any(test, feature = "test-support"))]
         let provenance = if flow_admission_fault_injection::STALE_DEMAND_CARRIER
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
                 u64::MAX - 1,
+                0,
                 0,
             )
         } else {
@@ -1499,6 +1565,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let plan = Arc::new(plan);
         let mut txn = self.dispatch_txn.borrow_mut();
         let handle = txn.obligations.install_flow_demand(&plan);
+        verter_debug_assert!(
+            handle.slot_index() == demand_ordinal,
+            "the peeked ledger ordinal must be the installed demand's slot: \
+             the provenance binds to exactly this demand"
+        );
         if let Some(state) = txn
             .reentry_mut()
             .frame_mut_for_update(frame_idx)
@@ -1514,7 +1585,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
     /// The open frame's installed demand carrier for `key`, when this
     /// frame was prepared.
-    fn flow_demand_carrier_of(&self, key: &FlowReturnKey) -> Option<FlowDemandCarrier> {
+    pub(super) fn flow_demand_carrier_of(&self, key: &FlowReturnKey) -> Option<FlowDemandCarrier> {
         let txn = self.dispatch_txn.borrow();
         let idx = txn
             .reentry()
@@ -1528,50 +1599,120 @@ impl<'a> ProjectSemanticDispatch<'a> {
     }
 
     /// The evaluator's typed discharge report for one evaluated frame:
-    /// which planned obligations the evaluation ACTUALLY completed. Built
-    /// ONCE, at the successful end of the evaluation — never through
-    /// scattered per-obligation calls. The claim covers exactly the
-    /// demand's dischargeable obligations (an obligation installed as a
-    /// typed gap is never claimed): the evaluation ran over the retained
-    /// selection the obligations expand from, and the value's own
-    /// degradation verdict — read once, by the seal — is the evaluator's
-    /// completeness claim for the content it modelled. The runtime
-    /// re-validates every claim against the obligation's spec at
-    /// application time.
+    /// which planned obligations the evaluation ACTUALLY completed,
+    /// claimed from the run's own execution witness — never from the
+    /// plan's expectations. Built ONCE, at the end of the evaluation.
+    ///
+    /// Per-basis evidence sources:
+    /// - STRUCTURAL bases (sites, bindings, guards, contextual targets,
+    ///   captured bindings, edges) claim from the retained selection whose
+    ///   lowered IR the evaluation executed — a node the executed
+    ///   selection does not hold is never claimed;
+    /// - the WHOLE-SLICE bases (family coverage, contract domains) claim
+    ///   only when the executed selection IS the plan's retained selection
+    ///   (the enumeration input and the executed content are one);
+    /// - CALL bases claim only from a recorded decided call occurrence
+    ///   (the evaluator's call-sink evidence — a value or a coinductive
+    ///   hold, never an unmodelled or degraded outcome);
+    /// - RELATION bases additionally require every relation outcome the
+    ///   occurrence's resolution consumed to be DECIDED (`Unknown` /
+    ///   `BudgetExceeded` are not evidence);
+    /// - gap-installed bases (`UnmodeledBinding` / `Capture`) are never
+    ///   claimed.
+    ///
+    /// An obligation without evaluator-produced evidence stays unclaimed,
+    /// so the demand cannot seal and finalizes unproven (`ReturnOnly`).
+    /// The runtime still re-validates every claim against the obligation's
+    /// spec at application time.
     fn flow_evaluation_discharge_report(
         &self,
         carrier: &FlowDemandCarrier,
+        witness: &FlowExecutionWitness<'_>,
     ) -> super::dispatch_txn::flow_obligation_state::FlowDischargeReport {
         use super::dispatch_txn::flow_obligation_state::{
-            FlowDischargeEntry, FlowDischargeReport, FlowSuboperationEvidence, ObligationState,
+            FlowDischargeEntry, FlowDischargeReport, FlowObligationBasis, FlowSuboperationEvidence,
+            ObligationState,
         };
         let txn = self.dispatch_txn.borrow();
-        let entries = match txn.obligations.flow_obligations(carrier.handle) {
-            Some(records) => carrier
-                .plan
-                .obligation_specs()
-                .iter()
-                .filter(|spec| {
-                    records.iter().any(|record| {
-                        record.spec.id() == spec.id()
-                            && matches!(record.state, ObligationState::Pending)
-                    })
-                })
-                .map(|spec| FlowDischargeEntry {
-                    obligation: spec.id(),
-                    dependencies: Arc::from(spec.expected_dependencies()),
-                    suboperations: spec
-                        .expected_suboperations()
-                        .iter()
-                        .map(|operation| FlowSuboperationEvidence {
-                            operation: *operation,
-                            result_contract: carrier.plan.basis().result_contract.clone(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-            None => Vec::new(),
+        let Some(records) = txn.obligations.flow_obligations(carrier.handle) else {
+            return FlowDischargeReport::new(Vec::new());
         };
+        // The whole-slice witness: the selection the evaluation executed
+        // is exactly the retained selection the plan's obligations
+        // expanded from (a torn view between the two lookups executes a
+        // DIFFERENT slice and must not claim exhaustive enumeration).
+        let whole_selection_executed =
+            witness.executed_selection == carrier.plan.structural_selection();
+        // The decided call evidence of one planned call occurrence:
+        // `None` = the evaluation never evaluated it; `Some(decided)` =
+        // it did, with `decided` the conjunction of every recorded
+        // occurrence's relation-decided bit.
+        let call_evidence_for = |site: verter_semantic::analysis::flow::SkeletonExprSiteId,
+                                 call_ordinal: u32| {
+            let call = witness
+                .skeleton
+                .expr_site(site)
+                .calls
+                .get(call_ordinal as usize)?;
+            let mut relations_decided: Option<bool> = None;
+            for evidence in witness.calls {
+                let evaluated = verter_semantic::analysis::flow::FrameSpan::rebase(
+                    witness.anchor,
+                    evidence.span,
+                );
+                if evaluated == call.span {
+                    let decided = relations_decided.get_or_insert(true);
+                    *decided &= evidence.relations_decided;
+                }
+            }
+            relations_decided
+        };
+        let entries = carrier
+            .plan
+            .obligation_specs()
+            .iter()
+            .filter(|spec| {
+                records.iter().any(|record| {
+                    record.spec.id() == spec.id()
+                        && matches!(record.state, ObligationState::Pending)
+                })
+            })
+            .filter(|spec| match spec.basis() {
+                FlowObligationBasis::FamilyCoverage { .. }
+                | FlowObligationBasis::DemandRoot { .. } => whole_selection_executed,
+                FlowObligationBasis::Site { node, .. }
+                | FlowObligationBasis::Binding { node, .. }
+                | FlowObligationBasis::Guard { node, .. }
+                | FlowObligationBasis::ContextualTarget { node, .. }
+                | FlowObligationBasis::CapturedBinding { node, .. } => {
+                    witness.executed_selection.is_selected(*node)
+                }
+                FlowObligationBasis::Edge { from, to, .. } => {
+                    witness.executed_selection.is_selected(*from)
+                        && witness.executed_selection.is_selected(*to)
+                }
+                FlowObligationBasis::CallSite {
+                    site, call_ordinal, ..
+                } => call_evidence_for(*site, *call_ordinal).is_some(),
+                FlowObligationBasis::SemanticRelation {
+                    site, call_ordinal, ..
+                } => call_evidence_for(*site, *call_ordinal) == Some(true),
+                FlowObligationBasis::UnmodeledBinding { .. }
+                | FlowObligationBasis::Capture { .. } => false,
+            })
+            .map(|spec| FlowDischargeEntry {
+                obligation: spec.id(),
+                dependencies: Arc::from(spec.expected_dependencies()),
+                suboperations: spec
+                    .expected_suboperations()
+                    .iter()
+                    .map(|operation| FlowSuboperationEvidence {
+                        operation: *operation,
+                        result_contract: carrier.plan.basis().result_contract.clone(),
+                    })
+                    .collect(),
+            })
+            .collect();
         FlowDischargeReport::new(entries)
     }
 
@@ -1602,9 +1743,35 @@ impl<'a> ProjectSemanticDispatch<'a> {
             super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
                 u64::MAX,
                 u64::MAX,
+                u64::MAX,
+            )
+        } else if flow_admission_fault_injection::FOREIGN_DEMAND_PROVENANCE
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            // A same-store, same-generation token of ANOTHER demand: the
+            // freshness axes pass; the demand ordinal betrays it.
+            let (store_identity, request_generation) = carrier.provenance.freshness_axes();
+            super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
+                store_identity,
+                request_generation,
+                carrier.provenance.demand_ordinal() ^ 1,
             )
         } else {
             provenance
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        let unobserved_convergence;
+        #[cfg(any(test, feature = "test-support"))]
+        let convergence = if flow_admission_fault_injection::UNOBSERVED_CONVERGENCE
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            unobserved_convergence = ObservedFlowConvergence {
+                iterations: 0,
+                stable: true,
+            };
+            &unobserved_convergence
+        } else {
+            convergence
         };
         let plan = &carrier.plan;
         let basis = plan.basis().clone();
@@ -1615,13 +1782,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 value: result.clone(),
             }))
         };
-        // Provenance triangulation: the evaluation's evidence, the
-        // installed demand's carrier, and the dispatch's CURRENT mint must
-        // agree — a value, report, or convergence claim from another
-        // store, another demand, or a stale request generation is a typed
-        // partial, never a proof.
+        // Provenance triangulation: the evaluation's evidence token must
+        // BE the installed demand carrier's own token (the demand-unique
+        // ordinal included), and the carrier's freshness axes must equal
+        // the dispatch's CURRENT mint — a value, report, or convergence
+        // claim from another demand, another store, or a stale request
+        // generation is a typed partial, never a proof.
         let current = self.current_flow_evaluation_provenance();
-        if provenance != carrier.provenance || carrier.provenance != current {
+        if provenance != carrier.provenance
+            || carrier.provenance.freshness_axes() != current.freshness_axes()
+        {
             return partial(FlowPartialReason::ForeignProvenance);
         }
         let mut txn = self.dispatch_txn.borrow_mut();
@@ -1656,11 +1826,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         // Replay the observed component convergence: the runtime counts
         // the iterations itself, so the sealed evidence comes from the
-        // runtime's own log, never from the caller. A solo demand (no
-        // component fixed point ran for it) observes its single stable
-        // point directly.
-        let iterations = convergence.iterations.max(1);
-        for _ in 1..iterations {
+        // runtime's own log, never from the caller. The count itself must
+        // come from the discharge driver's real observation — every close
+        // routes its root through the fixed point, so a zero here is not
+        // evidence at all: refuse it rather than fabricate an iteration.
+        if convergence.iterations == 0 {
+            return partial(FlowPartialReason::NonConverged);
+        }
+        for _ in 1..convergence.iterations {
             if runtime
                 .observe_flow_iteration(carrier.handle, true)
                 .is_err()
@@ -1844,6 +2017,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     fresh_seed,
                     flow_demand,
                     discharge,
+                    provenance,
                 }),
             });
             return FlowFramePop::Provisional(step);
@@ -1900,6 +2074,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         fresh_seed: state.fresh_seed,
                         flow_demand: state.flow_demand,
                         discharge: state.discharge,
+                        provenance: state.provenance,
                     });
                 }
             }
@@ -1933,15 +2108,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             })
             .collect();
-        let mut prefix_entries = Vec::new();
-        if !flow_members.is_empty() || !holds.is_empty() {
-            prefix_entries.push(super::dispatch_txn::FlowDischargeEntry {
-                key: root_key.clone(),
-                outcome: outcome.clone(),
-                holds: holds.clone(),
-                fresh_seed,
-            });
-        }
+        // The root ALWAYS enters the fixed-point input — a hold-free solo
+        // root included: its convergence evidence then comes from the real
+        // discharge driver (one observed no-progress pass for a solo
+        // entry), never from a caller-fabricated zero-iteration claim.
+        let prefix_entries = vec![super::dispatch_txn::FlowDischargeEntry {
+            key: root_key.clone(),
+            outcome: outcome.clone(),
+            holds: holds.clone(),
+            fresh_seed,
+        }];
         let (prefix_outcomes, call_results, convergence) = match self
             .discharge_mixed_component_to_fixed_point(
                 prefix_entries,
@@ -2156,6 +2332,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         }
                         _ => {
                             self.flow_return_abort_inline_flight(inline_flight.as_ref());
+                            // The inline path produces NO memo read, so the
+                            // universal read funnel never sees this refusal:
+                            // fold it into the ENCLOSING build's rails here
+                            // (the same funnel primitives the consumer-side
+                            // hold arm uses) — an answer composed around an
+                            // unproven flow value must not warm.
+                            let reasons = match &verdict {
+                                Some(FlowSolveOutcome::Partial(partial)) => {
+                                    match partial.value.degradation() {
+                                        Some(degradation) => degradation_reason_class(degradation),
+                                        None => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                                    }
+                                }
+                                _ => PartialReasonSet::FLOW_RETURN_UNVERIFIED,
+                            };
+                            self.fold_cache_read_rails(true, true, reasons);
                         }
                     }
                     FlowFramePop::Provisional(FlowReturnStep::Complete(result))
@@ -2630,11 +2822,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
         verter_audit::attribute_scope!(FlowSliceCompute);
         use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
-        // The evaluation provenance is minted HERE, at the evaluation's
-        // start: the value, the discharge report, and the convergence
-        // evidence of THIS evaluation carry it, and the finalization
-        // driver accepts nothing else.
-        let provenance = self.current_flow_evaluation_provenance();
+        // The frame's installed demand carrier (installed by
+        // `prepare_flow_return_demand` at frame open): the report at the
+        // end of this evaluation claims against exactly this demand.
+        let demand_carrier = self.flow_demand_carrier_of(key);
+        // The evaluation provenance is bound HERE, at the evaluation's
+        // start: the installed demand's OWN token when one is installed —
+        // so the value, the discharge report, and the convergence evidence
+        // of THIS evaluation carry exactly THIS demand's identity — and
+        // otherwise the bare freshness mint (sentinel ordinal), which can
+        // never match a real carrier at finalization.
+        let provenance = demand_carrier
+            .as_ref()
+            .map(|carrier| carrier.provenance)
+            .unwrap_or_else(|| self.current_flow_evaluation_provenance());
         // Every call site of this closure fails BEFORE the evaluator
         // runs, so no degradation has been observed yet: `None` is the
         // honest value, not a dropped one.
@@ -2662,10 +2863,6 @@ impl<'a> ProjectSemanticDispatch<'a> {
             &key.function.declaration_slot.defining_canonical,
             &key.function.declaration_slot.merged_symbol_name,
         );
-        // The frame's installed demand carrier (installed by
-        // `prepare_flow_return_demand` at frame open): the report at the
-        // end of this evaluation claims against exactly this demand.
-        let demand_carrier = self.flow_demand_carrier_of(key);
         // The evaluation models the whole-return point and the
         // single-named-member projection point (the `ReturnType<typeof
         // f>['b']` demand rail), both at the empty input point. Any
@@ -2723,7 +2920,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // on top of the planner's typed refusal, the hash node's
         // `ReturnOnly`, and the unaddressable lowered store).
         let flow_slice = self.ctx.project_type_store().flow_slice();
-        let lowered =
+        let (planned, lowered) =
             match crate::cache_runtime::lookup(flow_slice.hash_node(), slice_key.clone(), self.ctx)
             {
                 None => {
@@ -2771,7 +2968,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         None => {
                             return degraded(FlowReturnFailure::Unresolved, self_roots);
                         }
-                        Some(lowered) => lowered,
+                        Some(lowered) => (planned, lowered),
                     }
                 }
             };
@@ -2795,13 +2992,18 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let Some(skeleton) = flow_slice.skeleton_for(&slice_key_function, self.ctx) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
-        let Some(ir) = indexed
-            .shallow_state
-            .decl_bodies()
-            .flow_slice_content(entry, selection, skeleton)
-        else {
+        let Some(ir) = indexed.shallow_state.decl_bodies().flow_slice_content(
+            entry,
+            selection,
+            Arc::clone(&skeleton),
+        ) else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
+        // The frame anchor the skeleton's call footprint was rebased onto
+        // (the function node's own start) — the witness pairs the
+        // evaluator's absolute call spans with the skeleton's
+        // frame-relative twins through it.
+        let frame_anchor = entry.span.start;
         // A budget edge in one SELECTED leaf's expression lowering stops
         // the whole evaluation with the typed reason.
         if let Some(reason) = ir.budget_failure {
@@ -2996,11 +3198,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             throw_points: Vec::new(),
             collect_throw_points: false,
             scope_shadows: Vec::new(),
+            call_evidence: Vec::new(),
         };
         let holds;
         let degradation;
         let bare_return_seen;
         let implicit_undefined_seen;
+        let mut call_evidence;
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
@@ -3009,7 +3213,49 @@ impl<'a> ProjectSemanticDispatch<'a> {
             degradation = evaluator.degradation;
             bare_return_seen = evaluator.bare_return_seen;
             implicit_undefined_seen = evaluator.implicit_undefined_seen;
+            call_evidence = std::mem::take(&mut evaluator.call_evidence);
             (outcome, body_falls_through)
+        };
+        // A call the lowering DECIDED ABOVE (folded into a surviving
+        // decided leaf, or sitting in a control position) never feeds the
+        // demanded value its return, and no relation was consumed for it:
+        // containment evidence, same ledger.
+        call_evidence.extend(
+            ir.decided_above_call_spans
+                .iter()
+                .map(|span| FlowCallEvidence {
+                    span: *span,
+                    relations_decided: true,
+                }),
+        );
+        #[cfg(any(test, feature = "test-support"))]
+        let call_evidence = if flow_admission_fault_injection::SUPPRESS_CALL_EVIDENCE
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            Vec::new()
+        } else if flow_admission_fault_injection::UNDECIDED_RELATION_EVIDENCE
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            call_evidence
+                .into_iter()
+                .map(|evidence| FlowCallEvidence {
+                    relations_decided: false,
+                    ..evidence
+                })
+                .collect()
+        } else {
+            call_evidence
+        };
+        // The evaluation's execution witness: what THIS run actually did —
+        // the retained selection whose lowered IR it executed, the frame
+        // identity to pair call spans through, and the per-occurrence call
+        // evidence. The discharge-report producer claims obligations from
+        // it, never from the plan's own expectations.
+        let witness = FlowExecutionWitness {
+            executed_selection: planned.selection(),
+            skeleton: &skeleton,
+            anchor: frame_anchor,
+            calls: &call_evidence,
         };
         // Both failure exits carry the degradation the evaluation had
         // ALREADY observed, and both classify freshness identically: an
@@ -3053,7 +3299,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     discharge: if matches!(failure, FlowReturnFailure::EmptyCycle) {
                         demand_carrier
                             .as_ref()
-                            .map(|carrier| self.flow_evaluation_discharge_report(carrier))
+                            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness))
                     } else {
                         None
                     },
@@ -3092,7 +3338,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     discharge: if matches!(failure, FlowReturnFailure::EmptyCycle) {
                         demand_carrier
                             .as_ref()
-                            .map(|carrier| self.flow_evaluation_discharge_report(carrier))
+                            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness))
                     } else {
                         None
                     },
@@ -3112,7 +3358,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the sole evidence producer of the proof layer.
         let discharge = demand_carrier
             .as_ref()
-            .map(|carrier| self.flow_evaluation_discharge_report(carrier));
+            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness));
         FlowEvaluationOutcome {
             outcome: FlowReturnPendingOutcome::EvaluatedValue(result),
             self_roots,
@@ -3812,6 +4058,38 @@ struct FlowEvaluator<'d, 'b> {
     /// is the reaching-definitions rule a wholesale layer restore cannot
     /// express.
     scope_shadows: Vec<ScopeShadow>,
+    /// The call occurrences this evaluation ACTUALLY evaluated to a
+    /// decided value or coinductive hold, recorded at the one call sink
+    /// (`eval_call`) — the evaluator-origin evidence the discharge-report
+    /// producer claims call and relation obligations from. A call the
+    /// evaluation never performed, or one it could only degrade, records
+    /// nothing, so its obligations stay unclaimed and the demand
+    /// finalizes unproven.
+    call_evidence: Vec<FlowCallEvidence>,
+}
+
+/// One evaluated call occurrence's evidence: the authored call
+/// expression's span (the identity the skeleton's call footprint shares)
+/// and whether every relation outcome the call's resolution consumed was
+/// DECIDED (`Unknown` / `BudgetExceeded` are not evidence).
+#[derive(Clone, Copy)]
+struct FlowCallEvidence {
+    span: verter_span::Span,
+    relations_decided: bool,
+}
+
+/// One evaluation run's execution witness — what the run ACTUALLY did:
+/// the retained selection whose lowered IR it executed, the frame
+/// identity its call evidence pairs against the skeleton footprint
+/// through (`anchor` is the function node's own start — the same ingress
+/// the skeleton's `FrameSpan`s were rebased with), and the call-sink
+/// evidence ledger. The discharge-report producer consumes it once; the
+/// plan's own expectations never substitute for it.
+struct FlowExecutionWitness<'w> {
+    executed_selection: &'w verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan,
+    skeleton: &'w verter_semantic::analysis::flow::FunctionBodySkeleton,
+    anchor: u32,
+    calls: &'w [FlowCallEvidence],
 }
 
 /// One return-site contribution: the evaluated node plus whether it came
@@ -7879,6 +8157,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 throw_points: Vec::new(),
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
+                call_evidence: Vec::new(),
             };
             nested_evaluator.seed_hoisted_var_declarations(body);
             let (outcome, nested_body_falls_through) = nested_evaluator.eval_region(body);
@@ -7888,6 +8167,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             nested_bare_return_seen = nested_evaluator.bare_return_seen;
             nested_implicit_undefined_seen = nested_evaluator.implicit_undefined_seen;
             self.holds.append(&mut nested_evaluator.holds);
+            // A call the NESTED body evaluated is still an evaluated call
+            // of this evaluation run: the evidence rides the enclosing
+            // ledger exactly as the nested holds do.
+            self.call_evidence
+                .append(&mut nested_evaluator.call_evidence);
             (outcome, nested_body_falls_through)
         };
         // A degraded nested body degrades the enclosing value that
@@ -8622,15 +8906,48 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
 
     /// Evaluate one CALL to the value it contributes to this frame.
     ///
-    /// The ONE place a callee's return becomes a caller's value. Every
-    /// arm returns a [`CallValue`], whose constructors each decide what
-    /// happens to the CALLEE's own type-parameter clause — the rule
-    /// cannot be silently skipped at a new arm, only chosen.
+    /// The ONE place a callee's return becomes a caller's value — which
+    /// makes it the ONE place the evaluation's call evidence is recorded:
+    /// a call that evaluates to a value or a coinductive hold, without
+    /// minting a fresh degradation, deposits its span (plus whether every
+    /// relation outcome the resolution consumed was decided) onto the
+    /// evidence ledger the discharge-report producer claims call and
+    /// relation obligations from. An unmodelled or freshly-degraded call
+    /// deposits nothing — its obligations stay unclaimed.
+    fn eval_call(
+        &mut self,
+        call: &crate::flow_slice_content::SliceCall,
+        site: crate::flow_slice_content::SliceCallSite,
+    ) -> Positional<CallValue> {
+        let undecided_before = self.dispatch.dispatch_txn.borrow().call.undecided_relations;
+        let degradation_before = self.degradation;
+        let value = self.eval_call_value(call, site);
+        // A call whose evaluation minted the frame's FIRST degradation
+        // did not decide its occurrence (an already-degraded frame never
+        // seals, so evidence accuracy past the first degradation cannot
+        // affect admission).
+        let newly_degraded = degradation_before.is_none() && self.degradation.is_some();
+        if !matches!(value, Positional::Unmodeled) && !newly_degraded {
+            let relations_decided =
+                self.dispatch.dispatch_txn.borrow().call.undecided_relations == undecided_before;
+            self.call_evidence.push(FlowCallEvidence {
+                span: site.span(),
+                relations_decided,
+            });
+        }
+        value
+    }
+
+    /// The call sink's value computation ([`Self::eval_call`] records the
+    /// evidence around it). Every arm returns a [`CallValue`], whose
+    /// constructors each decide what happens to the CALLEE's own
+    /// type-parameter clause — the rule cannot be silently skipped at a
+    /// new arm, only chosen.
     ///
     /// [`Positional`], exactly as in [`Self::eval_expr`]: a call this
     /// substrate cannot resolve is an unmodelled POSITION, and the type
     /// leaves no way to say otherwise.
-    fn eval_call(
+    fn eval_call_value(
         &mut self,
         call: &crate::flow_slice_content::SliceCall,
         site: crate::flow_slice_content::SliceCallSite,

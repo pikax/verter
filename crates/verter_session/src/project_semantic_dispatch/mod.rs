@@ -2652,15 +2652,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     let fence = self.project_generation_signature();
                     let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
                         (QueryResult::Error(QueryError::Miss), fence).into();
-                    if flow_solve::typed_gap_for_pending_root(key_for_build.tag()).is_some() {
+                    if let Some(gap) = flow_solve::typed_gap_for_pending_root(key_for_build.tag())
+                    {
                         // The reducer for this root does not exist yet:
                         // the answer is genuinely absent — mark the
                         // no-surface partial class so the universal read
-                        // funnel gates any enclosing warm admission.
+                        // funnel gates any enclosing warm admission, and
+                        // surface the OPERATION-SPECIFIC typed gap on the
+                        // read's diagnostic rail (the recorded reason, not
+                        // just its presence).
                         output.cache_suppress = true;
                         output.result_is_partial = true;
                         output.partial_reasons =
                             crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE;
+                        output
+                            .walker_diagnostics
+                            .push(crate::project_semantic_dispatch::walk::ShallowDiagnostic::PendingFlowRoot { gap });
                     }
                     output
                 }

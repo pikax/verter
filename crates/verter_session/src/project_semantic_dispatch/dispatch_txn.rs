@@ -671,6 +671,12 @@ pub(crate) struct FlowReturnPendingState {
     /// its evaluation actually completed. Produced ONCE by the private
     /// evaluation outcome; applied centrally at the component close.
     pub(crate) discharge: Option<flow_obligation_state::FlowDischargeReport>,
+    /// The evaluation provenance of the MEMBER'S OWN evaluation, carried
+    /// through the deferral so the component close finalizes the member
+    /// against the evidence its evaluation actually minted — never
+    /// reconstructed from the demand carrier (that comparison would be
+    /// tautological).
+    pub(crate) provenance: flow_obligation_state::FlowEvaluationProvenance,
 }
 
 /// The winning candidate's signature while the shared return equation is
@@ -1244,40 +1250,74 @@ pub(crate) mod flow_obligation_state {
         identity: u64,
     }
 
+    impl FlowDemandHandle {
+        /// The demand's slot in the owning runtime's ledger — the
+        /// demand-unique axis the preparation mints into the demand's
+        /// evaluation provenance.
+        pub(crate) fn slot_index(&self) -> u64 {
+            u64::from(self.index)
+        }
+    }
+
     /// The opaque evaluation provenance binding one flow demand to the
-    /// evaluation that serves it: the semantic store's instance identity
-    /// plus the request's project generation. Minted by the production
-    /// dispatch at demand-preparation time and carried — atomically, in
+    /// evaluation that serves it: the semantic store's instance identity,
+    /// the request's project generation, and the demand's OWN ordinal in
+    /// the serving runtime's ledger. Minted by the production dispatch at
+    /// demand-preparation time and carried — atomically, in
     /// [`FlowDemandCarrier`] — with the demand's handle, plan, value, and
-    /// discharge report. The finalization driver accepts evidence only
-    /// when the carried provenance IS the dispatch's current mint: a value
-    /// or report from another demand, another store, or a stale generation
-    /// is a typed partial, never a proof.
+    /// discharge report; the demand ordinal makes the token DEMAND-unique,
+    /// so a value or report produced by ANOTHER demand of the same store
+    /// and generation fails the finalization triangulation. The
+    /// finalization driver accepts evidence only when the carried
+    /// provenance IS the demand carrier's own and the carrier's freshness
+    /// axes ARE the dispatch's current mint: a value or report from
+    /// another demand, another store, or a stale generation is a typed
+    /// partial, never a proof.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct FlowEvaluationProvenance {
         store_identity: u64,
         request_generation: u64,
+        demand_ordinal: u64,
     }
 
     impl FlowEvaluationProvenance {
         /// Mint a provenance token. The mint inputs are owned by the
         /// caller (the production dispatch derives them from its own
-        /// store and the live project generation); the token is opaque
-        /// identity data, not a capability.
-        pub(crate) fn new(store_identity: u64, request_generation: u64) -> Self {
+        /// store, the live project generation, and the demand's ledger
+        /// ordinal); the token is opaque identity data, not a capability.
+        pub(crate) fn new(
+            store_identity: u64,
+            request_generation: u64,
+            demand_ordinal: u64,
+        ) -> Self {
             Self {
                 store_identity,
                 request_generation,
+                demand_ordinal,
             }
+        }
+
+        /// The freshness axes — the store identity and the request
+        /// generation. The demand ordinal is per-demand and never part of
+        /// a freshness comparison.
+        pub(crate) fn freshness_axes(&self) -> (u64, u64) {
+            (self.store_identity, self.request_generation)
+        }
+
+        /// The demand's ordinal in the serving runtime's ledger.
+        #[allow(dead_code)] // read by the veto-side fault injection's foreign-demand mint
+        pub(crate) fn demand_ordinal(&self) -> u64 {
+            self.demand_ordinal
         }
     }
 
     impl CanonicalEncode for FlowEvaluationProvenance {
-        const DOMAIN_TAG: &'static str = "verter.session.flow.evaluation_provenance.v1";
+        const DOMAIN_TAG: &'static str = "verter.session.flow.evaluation_provenance.v2";
 
         fn encode_fields(&self, e: &mut CanonicalEncoder) {
             e.field_u64(1, self.store_identity);
             e.field_u64(2, self.request_generation);
+            e.field_u64(3, self.demand_ordinal);
         }
     }
 
@@ -1741,9 +1781,10 @@ pub(crate) mod flow_obligation_state {
             self.flow_demand(handle).map(|demand| &demand.basis)
         }
 
-        /// The number of installed flow demands. Test surface (the
-        /// no-flow allocation contract asserts on it).
-        #[allow(dead_code)]
+        /// The number of installed flow demands — also the ordinal the
+        /// NEXT install receives, which is how demand preparation mints
+        /// the demand-unique provenance axis (production) — and the test
+        /// surface for the no-flow allocation contract.
         pub fn flow_demand_count(&self) -> usize { self.flow_demands.len() }
 
         /// The reserved capacity of the DEMAND storage — the
@@ -2719,6 +2760,13 @@ pub(crate) struct ResolveCallDomainRuntime {
     /// Typed failure channel for a machinery-root call whose family value is
     /// suppressed.
     pub(crate) last_root_failure: Option<ResolveCallFailure>,
+    /// Monotonic count of UNDECIDED relation outcomes (`Unknown` /
+    /// `BudgetExceeded`) the call applicability machinery consumed on this
+    /// transaction. The flow evaluator snapshots it around each call it
+    /// evaluates: a delta means a relation the call depended on was never
+    /// decided, so the call's relation obligations have no decided
+    /// evidence to claim.
+    pub(crate) undecided_relations: u64,
 }
 
 /// The per-obligation-root cold-compute frame (design §2.1 /

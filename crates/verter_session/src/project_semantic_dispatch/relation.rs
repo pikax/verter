@@ -334,6 +334,12 @@ pub(super) struct DrainedFlowReturnMember {
     /// The member's typed discharge report, produced once by its
     /// evaluation and applied centrally at the close.
     pub(super) discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
+    /// The member's OWN evaluation provenance, carried through the
+    /// deferral: finalization triangulates it against the carrier (a
+    /// same-store, same-generation FOREIGN demand's evidence is refused)
+    /// rather than reconstructing it from the carrier — that comparison
+    /// would be tautological.
+    pub(super) provenance: super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance,
 }
 
 type DrainedCallResult = (
@@ -1213,6 +1219,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         fresh_seed: state.fresh_seed,
                         flow_demand: state.flow_demand,
                         discharge: state.discharge,
+                        provenance: state.provenance,
                     });
                 }
                 PendingObligationDomain::ResolveCall(state) => {
@@ -1793,29 +1800,42 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut proven_flow_members = Vec::with_capacity(flow_members.len());
         let mut flow_batch_unproven = false;
         for member in flow_members {
+            // The member's per-key substitution applies BEFORE its value
+            // leaves the component: the pop substituted only the
+            // caller-return clone, so the value channel, the finalizer's
+            // proof, and the publish all carry the INSTANTIATED value —
+            // exactly as the root's own close substitutes before it
+            // finalizes.
+            let outcome = match member.outcome {
+                FlowReturnPendingOutcome::EvaluatedValue(result) => {
+                    FlowReturnPendingOutcome::EvaluatedValue(
+                        self.apply_frame_key_substitution(&member.key, result),
+                    )
+                }
+                no_value => no_value,
+            };
             // The VALUE channel: every member whose close produced an
             // evaluated value records it for the shared return equation's
             // override reads — proven or not. Admission is the proof
             // typing below, never this channel.
-            if let FlowReturnPendingOutcome::EvaluatedValue(result) = &member.outcome {
+            if let FlowReturnPendingOutcome::EvaluatedValue(result) = &outcome {
                 self.dispatch_txn
                     .borrow_mut()
                     .flow
                     .closed_values
                     .push((member.key.clone(), result.clone()));
             }
-            let verdict = match &member.outcome {
+            let verdict = match &outcome {
                 FlowReturnPendingOutcome::EvaluatedValue(result) => {
-                    let provenance = member
-                        .flow_demand
-                        .as_ref()
-                        .map(|carrier| carrier.provenance)
-                        .unwrap_or_else(|| self.current_flow_evaluation_provenance());
+                    // The member's OWN evaluation provenance, carried
+                    // through the deferral — never reconstructed from the
+                    // demand carrier, which would trivialize the
+                    // triangulation.
                     self.finalize_flow_demand(
                         member.flow_demand.as_ref(),
                         member.discharge.as_ref(),
                         flow_convergence,
-                        provenance,
+                        member.provenance,
                         result,
                     )
                 }

@@ -146,7 +146,7 @@ fn flow_demand_basis_for_member(
         },
         query: crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key.clone())),
         input_basis: verter_identity::identity::InputBasisId::from_canonical(
-            &FlowEvaluationProvenance::new(1, 1),
+            &FlowEvaluationProvenance::new(1, 1, 0),
         ),
         result_contract: key.result_contract.clone(),
     }

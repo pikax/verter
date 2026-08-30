@@ -2848,6 +2848,24 @@ impl SemanticGraphStore {
             },
             _ => true,
         };
+        // A vetoed value is UNPROVEN, not merely unpublished: force the
+        // partial/suppression rails onto the read so the winner's returned
+        // `CacheRead` — and every joiner's inherited in-flight state —
+        // propagates the taint instead of the build's original clean
+        // flags. Without this a parent memo could warm around the veto.
+        // A build that already admitted partiality keeps its OWN precise
+        // reason classes — the veto adds nothing to say over them.
+        let (cache_suppress, result_is_partial, partial_reasons) =
+            if !flow_proof_ok && !result_is_partial && matches!(result, QueryResult::Value(_)) {
+                (
+                    true,
+                    true,
+                    partial_reasons
+                        .union(crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+                )
+            } else {
+                (cache_suppress, result_is_partial, partial_reasons)
+            };
         let publish_carrier: Option<&crate::fact_signature_helpers::ReadSetSignature> =
             if cache_suppress || result_is_partial || !flow_proof_ok {
                 None

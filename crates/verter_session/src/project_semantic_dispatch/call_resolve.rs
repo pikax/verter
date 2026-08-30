@@ -394,6 +394,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         fresh_seed: state.fresh_seed,
                         flow_demand: state.flow_demand,
                         discharge: state.discharge,
+                        provenance: state.provenance,
                     });
                 }
                 PendingObligationDomain::ResolveCall(state) => {
@@ -2112,6 +2113,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         excess_property_check: bool,
     ) -> RelationStep {
         if !budget.relation() {
+            self.dispatch_txn.borrow_mut().call.undecided_relations += 1;
             return RelationStep::BudgetExceeded(crate::semantic_query::RecursionOrBudgetCap {
                 kind: crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
                 limit: MAX_APPLICABILITY_RELATIONS as u32,
@@ -2121,14 +2123,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key.source_freshness = self.freshness_for_source_node(freshness_origin);
         key.policy.excess_property_check =
             excess_property_check && key.source_freshness == FreshnessKey::Fresh;
-        if binding_enabled {
+        let step = if binding_enabled {
             self.execute_relate(key)
         } else {
             self.dispatch_txn.borrow_mut().begin_binding_disabled();
             let step = self.execute_relate(key);
             self.dispatch_txn.borrow_mut().end_binding_disabled();
             step
+        };
+        // An undecided relation outcome the call consumed: the flow
+        // evaluator's per-call snapshot reads this to refuse claiming a
+        // relation obligation whose judgement was never decided.
+        if matches!(
+            step,
+            RelationStep::Unknown | RelationStep::BudgetExceeded(_)
+        ) {
+            self.dispatch_txn.borrow_mut().call.undecided_relations += 1;
         }
+        step
     }
 
     /// The transaction's monotonic accepted-deposit counter (bumped at
