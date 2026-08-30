@@ -227,7 +227,18 @@ function convertType(
         registryResolutionDepth,
       );
       if (resolved) {
-        return convertType(resolved, options, typeRegistry, visited, registryResolutionDepth + 1);
+        visited?.add(resolved.registryKey);
+        try {
+          return convertType(
+            resolved.descriptor,
+            options,
+            typeRegistry,
+            visited,
+            registryResolutionDepth + 1,
+          );
+        } finally {
+          visited?.delete(resolved.registryKey);
+        }
       }
       // Indexed-access types (`T['K']`) carry a structural shape but
       // require host-side resolution to materialise the underlying
@@ -255,19 +266,30 @@ function resolveIndexedAccessForSchema(
   typeRegistry?: Map<string, TypeDescriptor>,
   visited: Set<string> = new Set(),
   registryResolutionDepth = 0,
-): TypeDescriptor | undefined {
+): { descriptor: TypeDescriptor; registryKey: string } | undefined {
+  const objectType = td.objectType;
+  const registryKey =
+    objectType.kind === "ref" && objectType.typeArguments?.length
+      ? typeDescriptorToString(objectType)
+      : objectType.kind === "ref"
+        ? objectType.name
+        : "";
   if (
     !typeRegistry ||
     registryResolutionDepth >= MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH ||
     td.indexType.kind !== "literal" ||
     typeof td.indexType.value !== "string" ||
-    td.objectType.kind !== "ref" ||
-    visited.has(td.objectType.name)
+    objectType.kind !== "ref" ||
+    visited.has(registryKey)
   ) {
     return undefined;
   }
 
-  const object = typeRegistry.get(td.objectType.name);
+  // A bare generic declaration such as `Box<T>` is not the meaning of
+  // `Box<string>`. Compat has no substitution authority, so a generic indexed
+  // access resolves only from an exact producer-supplied instantiated row
+  // (`Box<string>`), while non-generic refs keep their existing name lookup.
+  const object = typeRegistry.get(registryKey);
   if (object?.kind !== "object") {
     return undefined;
   }
@@ -277,11 +299,14 @@ function resolveIndexedAccessForSchema(
     return undefined;
   }
   if (!property.optional) {
-    return property.type;
+    return { descriptor: property.type, registryKey };
   }
   return {
-    kind: "union",
-    types: [property.type, { kind: "primitive", name: "undefined" }],
+    descriptor: {
+      kind: "union",
+      types: [property.type, { kind: "primitive", name: "undefined" }],
+    },
+    registryKey,
   };
 }
 
