@@ -13,8 +13,8 @@ use verter_compiler::framework_common::{
     vue_projection_backend_registration, CarrierCompiler, CatalogCapability, CatalogRow,
     CompileUnsupported, FrameworkEpoch, FrameworkParseArtifact, IdeCompileOptions,
     ImmutableCapabilityCatalog, ProjectionBackend, RuntimeBlockContentInput,
-    RuntimeBlockContentInputs, RuntimeOutputDescriptor, VueProjectionBackend, VueProjectionError,
-    VueProjectionInputs, VueSfcV3,
+    RuntimeBlockContentInputs, RuntimeCompileOptions, RuntimeOutputDescriptor,
+    VueProjectionBackend, VueProjectionError, VueProjectionInputs, VueSfcV3,
 };
 use verter_compiler::standalone::StandaloneCompiler;
 use verter_language::carrier_grammar::{
@@ -351,6 +351,84 @@ fn vue_ide_projection_binds_request_syntax_profile_to_admitted_artifact() {
                 other => panic!("{}: expected NoIdeProjection, got {other:?}", case.name),
             }
         }
+    }
+}
+
+#[test]
+fn compile_ide_accepts_an_admitted_nondefault_delimiter_artifact() {
+    let artifact = registered_artifact_with_grammar(
+        "file:///delimiters.vue",
+        CUSTOM_PROFILE,
+        "[[",
+        "]]",
+        std::iter::empty::<&str>(),
+    );
+    let output = VueCarrierCompiler
+        .compile_ide(
+            CUSTOM_PROFILE,
+            &artifact,
+            &IdeCompileOptions {
+                filename: Some("Delimiters.vue".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("compile_ide must honor the admitted [[ ]] syntax profile");
+    assert!(!output.code.is_empty());
+}
+
+#[test]
+fn compile_ide_accepts_an_admitted_nondefault_custom_element_artifact() {
+    let artifact = registered_artifact_with_grammar(
+        "file:///custom-elements.vue",
+        CUSTOM_PROFILE,
+        "{{",
+        "}}",
+        ["ion-"],
+    );
+    let output = VueCarrierCompiler
+        .compile_ide(
+            CUSTOM_PROFILE,
+            &artifact,
+            &IdeCompileOptions {
+                filename: Some("CustomElements.vue".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("compile_ide must honor the admitted custom-element syntax profile");
+    assert!(!output.code.is_empty());
+}
+
+#[test]
+fn compile_bundle_ide_request_uses_admitted_artifact_syntax_profile() {
+    let artifact = registered_artifact_with_grammar(
+        "file:///bundle-profile.vue",
+        CUSTOM_PROFILE,
+        "[[",
+        "]]",
+        ["ion-"],
+    );
+    let outcome = VueCarrierCompiler.compile_bundle(
+        CUSTOM_PROFILE,
+        &artifact,
+        &RuntimeCompileOptions {
+            filename: Some("BundleProfile.vue".to_string()),
+            want_runtime: false,
+            want_ide: true,
+            ..Default::default()
+        },
+        &oxc_allocator::Allocator::new(),
+    );
+    match outcome {
+        Ok(verter_compiler::framework_common::CarrierCompileOutcome::Produced(bundle)) => {
+            assert!(
+                bundle.tsx.is_some(),
+                "IDE product must be present for a matching admitted profile"
+            );
+        }
+        Ok(other) => panic!("expected produced IDE bundle, got {other:?}"),
+        Err(error) => panic!(
+            "compile_bundle IDE must not refuse an admitted [[ ]] / ion- artifact, got {error:?}"
+        ),
     }
 }
 

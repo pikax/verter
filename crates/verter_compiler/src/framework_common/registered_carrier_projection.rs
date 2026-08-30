@@ -15,19 +15,33 @@ use verter_span::Span;
 
 use verter_language::ParseOptions;
 
-use super::capability::{CarrierFrontend, FrameworkEpochId, FrameworkSemanticAuthority};
-use super::carrier_compiler::CarrierCompiler;
+use super::capability::{
+    CarrierFrontend, FrameworkEpochId, FrameworkSemanticAuthority, ProjectionBackend,
+};
+use super::carrier_compiler::{
+    CarrierCompiler, CompileUnsupported, RuntimeBlockContentInputs, RuntimeDiagnostic,
+    RuntimeDiagnosticSeverity,
+};
 use super::catalog::{CatalogCapability, CatalogRow, ImmutableCapabilityCatalog};
 use super::vue_bridge::VueCarrierCompiler;
 use super::vue_carrier_frontend::{
     vue_carrier_frontend_registration, VueCarrierFrontend, VueParseAdmission, VueSfcV3,
 };
+use super::vue_projection_backend::{
+    vue_projection_backend_registration, VueProjectionBackend, VueProjectionError,
+    VueProjectionInputs,
+};
 use super::vue_semantic_authority::{vue_semantic_authority_registration, VueSemanticAuthority};
+use crate::compile::types::{VueExecutionInputs, VueMacroSemanticInput};
 use crate::compile::RawTemplateData;
+use crate::compile_request::CompileRequest;
+use crate::standalone::DirectCompileError;
 use crate::svelte::carrier_frontend::SvelteParseAdmission;
 use crate::svelte::{
-    svelte_carrier_frontend_registration, svelte_semantic_authority_registration,
-    SvelteCarrierCompiler, SvelteCarrierFrontend, SvelteSemanticAuthority, SvelteSfc5,
+    svelte_carrier_frontend_registration, svelte_projection_backend_registration,
+    svelte_semantic_authority_registration, SvelteCarrierCompiler, SvelteCarrierFrontend,
+    SvelteProjectionBackend, SvelteProjectionError, SvelteProjectionInputs,
+    SvelteSemanticAuthority, SvelteSfc5,
 };
 
 /// Opaque in-process carrier retained by the registered projector.
@@ -854,6 +868,239 @@ fn selected_template_equals_admitted_host(artifact: &FrameworkParseArtifact, byt
         artifact.inventory().slice_span(syntax.content_span),
         Ok(admitted) if admitted == bytes
     )
+}
+
+/// Execution inputs excluded from projection-request identity.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectionCatalogInputs {
+    /// Host-selected block bytes for multi-unit IDE composition.
+    pub block_content: RuntimeBlockContentInputs,
+    /// Resolved Vue facts threaded beside the request.
+    pub vue_execution: VueExecutionInputs,
+    /// Authoritative Vue macro semantics, when supplied.
+    pub vue_macros: VueMacroSemanticInput,
+}
+
+/// IDE companion plus compile diagnostics from a catalog-selected backend.
+#[derive(Debug, Clone)]
+pub struct InstalledIdeCompanion {
+    /// Generated TSX/JSX companion.
+    pub ide: super::carrier_compiler::IdeOutput,
+    /// Non-fatal compile diagnostics tagged by the selected backend.
+    pub diagnostics: Vec<RuntimeDiagnostic>,
+}
+
+/// Type-erased projection payload stored on a catalog row.
+///
+/// Lookup invokes [`Self::project_ide`] directly. The generic selector has
+/// no Vue/Svelte match.
+#[derive(Clone, Copy)]
+pub struct InstalledProjectionBackend {
+    project_ide_fn: fn(
+        &str,
+        &FrameworkParseArtifact,
+        &CompileRequest,
+        &ProjectionCatalogInputs,
+    ) -> Result<InstalledIdeCompanion, CompileUnsupported>,
+}
+
+impl PartialEq for InstalledProjectionBackend {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::fn_addr_eq(self.project_ide_fn, other.project_ide_fn)
+    }
+}
+
+impl Eq for InstalledProjectionBackend {}
+
+impl std::fmt::Debug for InstalledProjectionBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstalledProjectionBackend")
+            .finish_non_exhaustive()
+    }
+}
+
+impl InstalledProjectionBackend {
+    const fn new(
+        project_ide_fn: fn(
+            &str,
+            &FrameworkParseArtifact,
+            &CompileRequest,
+            &ProjectionCatalogInputs,
+        ) -> Result<InstalledIdeCompanion, CompileUnsupported>,
+    ) -> Self {
+        Self { project_ide_fn }
+    }
+
+    /// Project the IDE companion from the catalog-selected row.
+    pub fn project_ide(
+        &self,
+        source: &str,
+        artifact: &FrameworkParseArtifact,
+        request: &CompileRequest,
+        inputs: &ProjectionCatalogInputs,
+    ) -> Result<InstalledIdeCompanion, CompileUnsupported> {
+        #[cfg(any(test, feature = "test-support"))]
+        PROJECTION_PRODUCER_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+        (self.project_ide_fn)(source, artifact, request, inputs)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Per-thread count of catalog projection-producer executions.
+    static PROJECTION_PRODUCER_INVOCATIONS: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Catalog projection-producer executions on the calling thread since the
+/// last take. Test observability only.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn take_projection_producer_invocations() -> u64 {
+    PROJECTION_PRODUCER_INVOCATIONS.with(std::cell::Cell::take)
+}
+
+fn vue_project_ide(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+    request: &CompileRequest,
+    inputs: &ProjectionCatalogInputs,
+) -> Result<InstalledIdeCompanion, CompileUnsupported> {
+    match VueProjectionBackend.project_ide(
+        source,
+        artifact,
+        request,
+        &VueProjectionInputs {
+            block_content: inputs.block_content.clone(),
+            execution: inputs.vue_execution.clone(),
+            macros: inputs.vue_macros.clone(),
+        },
+    ) {
+        Ok(companion) => Ok(InstalledIdeCompanion {
+            ide: companion.ide,
+            diagnostics: companion
+                .diagnostics
+                .into_iter()
+                .map(|tagged| RuntimeDiagnostic {
+                    severity: tagged.diagnostic.severity.into(),
+                    code: tagged.diagnostic.code,
+                    message: tagged.diagnostic.message,
+                    span: tagged
+                        .diagnostic
+                        .span
+                        .unwrap_or_else(|| verter_span::Span::new(0, source.len() as u32)),
+                })
+                .collect(),
+        }),
+        Err(error) => Err(map_vue_projection_error(error)),
+    }
+}
+
+fn svelte_project_ide(
+    source: &str,
+    artifact: &FrameworkParseArtifact,
+    request: &CompileRequest,
+    _inputs: &ProjectionCatalogInputs,
+) -> Result<InstalledIdeCompanion, CompileUnsupported> {
+    match SvelteProjectionBackend.project_ide(source, artifact, request, &SvelteProjectionInputs) {
+        Ok(companion) => Ok(InstalledIdeCompanion {
+            ide: companion.ide,
+            diagnostics: companion
+                .diagnostics
+                .into_iter()
+                .map(|tagged| RuntimeDiagnostic {
+                    severity: match tagged.diagnostic.severity {
+                        crate::svelte::ide::DiagnosticSeverity::Error => {
+                            RuntimeDiagnosticSeverity::Error
+                        }
+                        crate::svelte::ide::DiagnosticSeverity::Information => {
+                            RuntimeDiagnosticSeverity::Info
+                        }
+                    },
+                    code: tagged.diagnostic.code.to_string(),
+                    message: tagged.diagnostic.message,
+                    span: tagged.diagnostic.span,
+                })
+                .collect(),
+        }),
+        Err(error) => Err(map_svelte_projection_error(error)),
+    }
+}
+
+fn map_vue_projection_error(error: VueProjectionError) -> CompileUnsupported {
+    match error {
+        VueProjectionError::Unsupported(unsupported) => unsupported,
+        VueProjectionError::NotIdeOnly { .. } => CompileUnsupported::TargetMissingIde,
+        VueProjectionError::Direct(DirectCompileError::Vue(error)) => {
+            CompileUnsupported::RequestExecutionRefused(error)
+        }
+        VueProjectionError::Direct(_) => CompileUnsupported::TargetMissingIde,
+    }
+}
+
+fn map_svelte_projection_error(error: SvelteProjectionError) -> CompileUnsupported {
+    match error {
+        SvelteProjectionError::Unsupported(unsupported) => unsupported,
+        SvelteProjectionError::NotIdeOnly { .. } => CompileUnsupported::TargetMissingIde,
+        SvelteProjectionError::Direct(_) => CompileUnsupported::TargetMissingIde,
+    }
+}
+
+/// Frozen Vue + Svelte projection catalog. Built once from the Vue/Svelte
+/// projection registration constructors; no insert after.
+#[must_use]
+pub fn built_in_projection_catalog(
+) -> &'static ImmutableCapabilityCatalog<(), InstalledProjectionBackend, (), (), ()> {
+    static CATALOG: OnceLock<
+        ImmutableCapabilityCatalog<(), InstalledProjectionBackend, (), (), ()>,
+    > = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        ImmutableCapabilityCatalog::try_from_rows([
+            CatalogRow::from(
+                vue_projection_backend_registration()
+                    .map_projection(|_| InstalledProjectionBackend::new(vue_project_ide)),
+            ),
+            CatalogRow::from(
+                svelte_projection_backend_registration()
+                    .map_projection(|_| InstalledProjectionBackend::new(svelte_project_ide)),
+            ),
+        ])
+        .expect("built-in Vue and Svelte projection identities are unique")
+    })
+}
+
+/// Catalog lookup for a registered projection backend by adapter × epoch.
+/// Unknown or mismatched identity returns `None` — no framework fallback.
+#[must_use]
+pub fn registered_projection_for(
+    adapter_id: &FrameworkAdapterId,
+    epoch: &FrameworkEpochId,
+) -> Option<&'static InstalledProjectionBackend> {
+    built_in_projection_catalog().iter().find_map(|row| {
+        let identity = row.identity();
+        (identity.capability() == CatalogCapability::Projection
+            && identity.adapter_id() == adapter_id
+            && identity.epoch() == epoch)
+            .then(|| row.projection())
+            .flatten()
+    })
+}
+
+/// One `built_in_projection_catalog` lookup keyed adapter × artifact epoch
+/// × Projection, then the selected row's IDE payload. Catalog miss is
+/// [`CompileUnsupported::NoIdeProjection`] — no frontend hop, no Vue/Svelte
+/// match, no silent empty companion.
+pub fn project_ide_from_catalog(
+    artifact: &FrameworkParseArtifact,
+    source: &str,
+    request: &CompileRequest,
+    inputs: &ProjectionCatalogInputs,
+) -> Result<InstalledIdeCompanion, CompileUnsupported> {
+    registered_projection_for(artifact.adapter_id(), artifact.epoch())
+        .ok_or_else(|| CompileUnsupported::NoIdeProjection {
+            adapter_id: artifact.adapter_id().clone(),
+        })?
+        .project_ide(source, artifact, request, inputs)
 }
 
 fn catalog_miss_reject(

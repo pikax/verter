@@ -459,6 +459,18 @@ impl<P> TypedCapabilityRegistration<ProjectionCap<P>> {
     pub fn projection(&self) -> &P {
         &self.capability.0 .0
     }
+
+    /// Re-wrap the present projection backend, keeping this row's identity.
+    #[must_use]
+    pub fn map_projection<Q>(
+        self,
+        map: impl FnOnce(P) -> Q,
+    ) -> TypedCapabilityRegistration<ProjectionCap<Q>> {
+        TypedCapabilityRegistration {
+            identity: self.identity,
+            capability: ProjectionCap(Present(map(self.capability.0 .0))),
+        }
+    }
 }
 
 impl<S> TypedCapabilityRegistration<SemanticCap<S>> {

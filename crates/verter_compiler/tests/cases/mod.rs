@@ -13,6 +13,7 @@ mod no_session_dependency;
 mod official_parse_manifest_guard;
 mod parse_diagnostic_determinism;
 mod pending_nav_request_compile_fail;
+mod projection_catalog;
 mod registered_geometry_compile_fail;
 mod segmented_overwrite_compile_fail;
 mod style_codetransform_map_coverage;

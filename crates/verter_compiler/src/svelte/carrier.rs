@@ -22,6 +22,10 @@ use verter_language::{
 };
 use verter_span::Span;
 
+use crate::compile_request::{
+    CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
+    SvelteCompileRequest,
+};
 use crate::framework_common::carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,
     RuntimeCompileOptions, RuntimeCompileOutput, RuntimeDiagnostic, RuntimeDiagnosticSeverity,
@@ -279,48 +283,6 @@ impl SvelteCarrierCompiler {
     ) -> Option<&'a SvelteParseCarrier> {
         artifact.carrier_ref::<SvelteParseCarrier>()
     }
-
-    /// Run the Svelte IDE projection once and return BOTH the rendered
-    /// [`IdeOutput`] and the neutral diagnostics it produced.
-    ///
-    /// The Svelte IDE codegen owns its OWN `CodeTransform` (the single source
-    /// of truth for generated-code edits): the projection is a pure syntactic
-    /// transform, NO type lowering (the thin-adapters guard). The output is a
-    /// `.svelte.tsx` that type-checks clean through TSGO.
-    ///
-    /// This is the SINGLE projection entry the carrier reaches; both
-    /// `compile_ide` (drops the diagnostics — the trait method has no
-    /// diagnostic channel) and `compile_bundle` (LIFTS them into the bundle)
-    /// route through it.
-    fn project_ide(
-        parsed: &ParsedSvelte,
-        source: &str,
-        opts: &IdeCompileOptions,
-    ) -> (IdeOutput, Vec<RuntimeDiagnostic>) {
-        let (ide, diagnostics) = render_admitted_svelte_ide(
-            source,
-            parsed,
-            opts.filename.as_deref(),
-            opts.skip_source_map,
-        );
-        let diagnostics = diagnostics
-            .into_iter()
-            .map(|d| RuntimeDiagnostic {
-                severity: match d.severity {
-                    crate::svelte::ide::DiagnosticSeverity::Error => {
-                        RuntimeDiagnosticSeverity::Error
-                    }
-                    crate::svelte::ide::DiagnosticSeverity::Information => {
-                        RuntimeDiagnosticSeverity::Info
-                    }
-                },
-                code: d.code.to_string(),
-                message: d.message,
-                span: d.span,
-            })
-            .collect();
-        (ide, diagnostics)
-    }
 }
 
 /// Project an already-parsed Svelte component into IDE bytes and maps.
@@ -359,6 +321,22 @@ pub(crate) fn render_admitted_svelte_ide(
         generated_template_chunk: None,
     };
     (ide, projection.diagnostics)
+}
+
+fn svelte_ide_only_request(
+    filename: Option<String>,
+    ide: IdeProductRequest,
+) -> Result<CompileRequest, CompileUnsupported> {
+    CompileRequest::new(
+        vec![CompileProduct::IdeCompanion(ide)],
+        FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
+        None,
+        filename,
+        None,
+        false,
+        false,
+    )
+    .map_err(CompileUnsupported::RequestExecutionRefused)
 }
 
 impl CarrierCompiler for SvelteCarrierCompiler {
@@ -426,23 +404,24 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         artifact: &FrameworkParseArtifact,
         opts: &IdeCompileOptions,
     ) -> Result<IdeOutput, CompileUnsupported> {
-        // A foreign artifact (not a Svelte carrier) declines with the typed
-        // answer — never a silent empty output.
-        let Some(parsed) = self.parsed_svelte(artifact) else {
-            return Err(CompileUnsupported::NoIdeProjection {
-                adapter_id: self.adapter_id(),
-            });
-        };
-
-        // The trait `compile_ide` surface has no framework-neutral diagnostic
-        // channel — the projection's typed-unsupported diagnostics are LIFTED
-        // by `compile_bundle` instead (the host's IDE-ensure path), where the
-        // `RuntimeCompileOutput.diagnostics` channel reaches the host
-        // `DiagnosticsSnapshot`. Here they are produced-and-dropped (matching
-        // the Vue carrier `compile_ide`, whose IDE diagnostics flow through the
-        // parse artifact's `common.diagnostics`, not `IdeOutput`).
-        let (ide, _diagnostics) = Self::project_ide(parsed, source, opts);
-        Ok(ide)
+        let request = svelte_ide_only_request(
+            opts.filename.clone(),
+            IdeProductRequest {
+                want_source_map: !opts.skip_source_map,
+                embed_ambient_types: opts.embed_ambient_types,
+                ..Default::default()
+            },
+        )?;
+        crate::framework_common::registered_carrier_projection::project_ide_from_catalog(
+            artifact,
+            source,
+            &request,
+            &crate::framework_common::registered_carrier_projection::ProjectionCatalogInputs {
+                block_content: opts.block_content.clone(),
+                ..Default::default()
+            },
+        )
+        .map(|companion| companion.ide)
     }
 
     fn compile_bundle(
@@ -697,15 +676,26 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         // refusal returned above without reaching here. Its typed-unsupported
         // diagnostics are lifted alongside the runtime ones.
         if opts.want_ide {
-            let ide_opts = IdeCompileOptions {
-                filename: opts.filename.clone(),
-                skip_source_map: !opts.source_map,
-                embed_ambient_types: opts.embed_ambient_types,
-                block_content: opts.block_content.clone(),
-            };
-            let (ide, mut diagnostics) = Self::project_ide(parsed, source, &ide_opts);
-            bundle.tsx = Some(ide);
-            bundle.diagnostics.append(&mut diagnostics);
+            let request = svelte_ide_only_request(
+                opts.filename.clone(),
+                IdeProductRequest {
+                    want_source_map: opts.source_map,
+                    embed_ambient_types: opts.embed_ambient_types,
+                    ..Default::default()
+                },
+            )?;
+            let companion =
+                crate::framework_common::registered_carrier_projection::project_ide_from_catalog(
+                    artifact,
+                    source,
+                    &request,
+                    &crate::framework_common::registered_carrier_projection::ProjectionCatalogInputs {
+                        block_content: opts.block_content.clone(),
+                        ..Default::default()
+                    },
+                )?;
+            bundle.tsx = Some(companion.ide);
+            bundle.diagnostics.extend(companion.diagnostics);
         }
 
         bundle.template_data = if opts.want_template_data {
