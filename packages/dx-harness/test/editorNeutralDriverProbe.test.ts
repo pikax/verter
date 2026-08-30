@@ -1,7 +1,7 @@
 /**
- * Control suite for the editor-neutral driver's tsserver plugin-probe preflight.
+ * Control suite for the shared tsserver plugin-probe preflight.
  *
- * The driver hands its `pluginPath` to `verter-lsp` as `--plugin-path`, which
+ * Each raw harness hands its `pluginPath` to `verter-lsp` as `--plugin-path`, which
  * reaches tsserver as `--pluginProbeLocations <dir>` alongside
  * `--globalPlugins @verter/typescript-plugin`. tsserver resolves the package NAME
  * out of `<dir>/node_modules`, so the probe must be a directory CONTAINING
@@ -10,7 +10,7 @@
  * This suite exists because a wrong probe is INVISIBLE at runtime: Node's resolver
  * walks ancestor `node_modules`, so tsserver still finds the plugin — through
  * pnpm's private `.pnpm/node_modules` hoist directory — and the whole
- * editor-neutral contract goes green while the probe it declared does no work. The
+ * raw contract goes green while the probe it declared does no work. The
  * preflight is the only thing standing between that and a silently vacuous gate,
  * and nothing else in CI exercises it: the contract suite never passes an explicit
  * `pluginPath`, so a regression to a probe-blind check would be caught by nobody.
@@ -28,7 +28,12 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { resolvePluginProbeLocation } from "../src/editor-neutral/rawLspDriver.js";
+import {
+  repositoryTypescriptPluginProbe,
+  resolvePluginProbeLocation,
+} from "../src/core/typescriptPluginProbe.js";
+import { REPO_ROOT as CORPUS_GATE_REPO_ROOT } from "../src/corpus-gate/spawn.js";
+import { REPO_ROOT as ENDURANCE_REPO_ROOT } from "../src/endurance/spawn.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..", "..", "..");
@@ -69,7 +74,21 @@ function unbuiltProbeLocation(): string {
   return root;
 }
 
-describe("editor-neutral driver plugin-probe preflight", () => {
+describe("TypeScript plugin-probe preflight", () => {
+  it.each([
+    ["raw editor-neutral", REPO_ROOT],
+    ["endurance", ENDURANCE_REPO_ROOT],
+    ["corpus gate", CORPUS_GATE_REPO_ROOT],
+  ])("gives the %s consumer the repository's real probe location", (_consumer, repoRoot) => {
+    const resolved = repositoryTypescriptPluginProbe(repoRoot);
+
+    expect(resolved.probeLocation).toBe(path.join(repoRoot, "packages", "vue-vscode"));
+    expect(resolved.packageDirectory).toBe(
+      path.join(repoRoot, "packages", "vue-vscode", "node_modules", "@verter", "typescript-plugin"),
+    );
+    expect(existsSync(resolved.entry)).toBe(true);
+  });
+
   it("accepts a directory that really holds the package under node_modules", () => {
     // The POSITIVE control, asserted by what it resolves. `packages/vue-vscode` is
     // the driver's default: pnpm links the workspace package into its

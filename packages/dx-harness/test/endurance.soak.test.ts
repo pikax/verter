@@ -27,7 +27,7 @@ for (const lane of ENDURANCE_LANES) {
     const workspace = soakWorkspace(4, lane);
 
     beforeAll(async () => {
-      rig = await materializeRig(workspace.files, config);
+      rig = await materializeRig(workspace.files, config, lane);
       rig.session.openFile(workspace.childPath);
       rig.session.openFile(workspace.appPath);
       for (const carrier of workspace.carriers) rig.session.openFile(carrier);

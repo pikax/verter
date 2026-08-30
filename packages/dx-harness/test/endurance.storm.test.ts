@@ -26,7 +26,7 @@ for (const lane of ENDURANCE_LANES) {
     const workspace = stormWorkspace(undefined, lane);
 
     beforeAll(async () => {
-      rig = await materializeRig(workspace.files, config);
+      rig = await materializeRig(workspace.files, config, lane);
       for (const carrier of workspace.carriers) rig.session.openFile(carrier);
     });
     afterAll(async () => {

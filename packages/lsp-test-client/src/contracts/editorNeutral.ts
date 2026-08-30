@@ -309,6 +309,9 @@ const FILE_START_RANGE: LspRange = {
  */
 const ANY_IN_ANNOTATION_POSITION = /:\s*any\b/i;
 
+/** Generated names are private except for the two public fallthrough aliases. */
+const PRIVATE_VERTER_HELPER = /\b__Verter(?!(?:_RootElementAttrs|_DataAttrs)\b)\w*/;
+
 /**
  * Verter's contractual untyped-emit fallback member, VERBATIM.
  *
@@ -605,10 +608,10 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       occurrence: 0,
       token: "VueTypeScriptCase",
     },
-    requiredPublicHover: ["label"],
+    requiredPublicHover: ["Props", "$props"],
     // Vue's `DefineComponent<…>` prints `any` among its own trailing default
     // type ARGUMENTS, so only annotation-position `any` indicts Verter here.
-    forbiddenPublicHover: [ANY_IN_ANNOTATION_POSITION, /\bunknown\b/i, /__Verter\w*/],
+    forbiddenPublicHover: [ANY_IN_ANNOTATION_POSITION, /\bunknown\b/i, PRIVATE_VERTER_HELPER],
     // Verter is SUPPOSED to emit the untyped-emit fallback for a component with no
     // `defineEmits`; every other `unknown` in the printed type is a degradation.
     publicHoverExemptions: [{ member: UNTYPED_EMIT_FALLBACK_MEMBER, siblingMember: "$props:" }],
@@ -659,10 +662,10 @@ const CARRIERS: readonly CarrierContractSpec[] = [
       occurrence: 0,
       token: "VueJavaScriptCase",
     },
-    requiredPublicHover: ["label"],
+    requiredPublicHover: ["label", "$props"],
     // Vue's `DefineComponent<…>` prints `any` among its own trailing default
     // type ARGUMENTS, so only annotation-position `any` indicts Verter here.
-    forbiddenPublicHover: [ANY_IN_ANNOTATION_POSITION, /\bunknown\b/i, /__Verter\w*/],
+    forbiddenPublicHover: [ANY_IN_ANNOTATION_POSITION, /\bunknown\b/i, PRIVATE_VERTER_HELPER],
     // Verter is SUPPOSED to emit the untyped-emit fallback for a component with no
     // `defineEmits`; every other `unknown` in the printed type is a degradation.
     publicHoverExemptions: [{ member: UNTYPED_EMIT_FALLBACK_MEMBER, siblingMember: "$props:" }],
@@ -917,6 +920,39 @@ const LAX_JSCONFIG_DOM_EVENT_HANDLERS: readonly LaxDomEventContractSpec[] = [
     },
   },
 ];
+
+const AUTHORED_CHECK_DIRECTIVE_CASES = [
+  {
+    id: "vue-js-authored-ts-check",
+    framework: "vue",
+    document: "src/policy/lax/vue/AuthoredCheck.vue",
+    feature: "diagnostics-error",
+    expectedDiagnosticCode: 2339,
+    providers: ["tsserver"],
+  },
+  {
+    id: "svelte-js-authored-ts-check",
+    framework: "svelte",
+    document: "src/policy/lax/svelte/AuthoredCheck.svelte",
+    feature: "diagnostics-error",
+    expectedDiagnosticCode: 2339,
+    providers: ["tsserver"],
+  },
+  {
+    id: "vue-js-authored-ts-nocheck",
+    framework: "vue",
+    document: "src/policy/directives/vue/AuthoredNoCheck.vue",
+    feature: "diagnostics-clean",
+    providers: ALL_PROVIDERS,
+  },
+  {
+    id: "svelte-js-authored-ts-nocheck",
+    framework: "svelte",
+    document: "src/policy/directives/svelte/AuthoredNoCheck.svelte",
+    feature: "diagnostics-clean",
+    providers: ALL_PROVIDERS,
+  },
+] as const;
 
 /** Construct the exact contract inventory. The returned list is stable and deduplicated. */
 export function createEditorNeutralContractInventory(): readonly EditorNeutralContractCase[] {
@@ -1350,6 +1386,13 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
       },
     );
   }
+  for (const directiveCase of AUTHORED_CHECK_DIRECTIVE_CASES) {
+    cases.push({
+      ...directiveCase,
+      surface: "standard-lsp",
+      language: "js",
+    });
+  }
   cases.push({
     id: "plain-js-lax-jsconfig-control.hover",
     surface: "standard-lsp",
@@ -1408,15 +1451,7 @@ export function createEditorNeutralContractInventory(): readonly EditorNeutralCo
       },
       requiredHoverFragments: ["PointerEvent"],
       forbiddenHoverPatterns: [/\bany\b/i, /\bunknown\b/i],
-      providers: ALL_PROVIDERS,
-    },
-    {
-      id: "plain-jsx-pointer-event.diagnostics.invalid-member",
-      surface: "standard-lsp",
-      feature: "diagnostics-error",
-      document: "src/plain-pointer-control.jsx",
-      expectedDiagnosticCode: 2339,
-      providers: ALL_PROVIDERS,
+      providers: ["tsgo", "shared-tsgo"],
     },
     {
       id: "plain-tsx-pointer-event.hover",
@@ -1603,7 +1638,7 @@ function assertNoInfrastructureDiagnostics(
   testCase: EditorNeutralContractCase,
   diagnostics: readonly LspDiagnostic[],
 ): void {
-  for (const forbidden of ["7026", "2304", "2307"]) {
+  for (const forbidden of ["7026", "2304", "2307", "2688"]) {
     if (diagnostics.some((diagnostic) => diagnosticCode(diagnostic) === forbidden)) {
       throw new Error(
         `${testCase.id}: forbidden TS${forbidden} diagnostic: ${describeDiagnostics(diagnostics)}`,

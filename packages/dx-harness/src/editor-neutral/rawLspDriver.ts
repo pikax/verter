@@ -26,6 +26,10 @@ import {
 import { extractQuiescenceCounters, pollUntilQuiesced } from "../core/quiescence.js";
 import { awaitRawLspStartup, GET_STATISTICS_METHOD } from "../core/startupGate.js";
 import { resolvePlatformBinary } from "../core/rustHostTriple.js";
+import {
+  repositoryTypescriptPluginProbe,
+  resolvePluginProbeLocation,
+} from "../core/typescriptPluginProbe.js";
 
 const DIAGNOSTICS_METHOD = "textDocument/publishDiagnostics";
 const TYPE_PROVIDER_STATUS_METHOD = "$/verter/typeProviderStatus";
@@ -95,59 +99,6 @@ function requireFile(label: string, candidate: string): string {
     throw new Error(`${label} is required and must be a file: ${resolved}`);
   }
   return resolved;
-}
-
-/** A validated tsserver plugin probe location and the entry it will load. */
-export interface ResolvedPluginProbe {
-  /** The directory handed to `verter-lsp` as `--plugin-path`. */
-  readonly probeLocation: string;
-  /** The package directory tsserver resolves under it. */
-  readonly packageDirectory: string;
-  /** The built entry that package's `main` points at. */
-  readonly entry: string;
-}
-
-/**
- * Validate a tsserver plugin PROBE LOCATION, returning what tsserver will resolve.
- *
- * The value travels to tsserver as `--pluginProbeLocations <dir>` alongside
- * `--globalPlugins @verter/typescript-plugin`, and tsserver resolves the package
- * NAME out of `<dir>/node_modules`. A probe is therefore a directory CONTAINING
- * `node_modules/@verter/typescript-plugin` — not the package's own `dist` output
- * directory, and not the package root.
- *
- * The check is a DIRECT hit under the probe, deliberately not a `require.resolve`:
- * Node's resolver walks ANCESTOR `node_modules`, so a wrong probe still resolves —
- * through pnpm's private `.pnpm/node_modules` hoist dir, an unguaranteed layout
- * detail — and a resolve-based check would pass while the declared probe
- * contributed nothing. Checking only `<probe>/index.js` is the same blind spot from
- * the other side: it passes whenever the package happens to be built and says
- * nothing about the probe.
- *
- * Exported so the preflight can be tested for SUCCESS as well as refusal. A control
- * that merely observes the absence of two error strings still passes when the
- * preflight rejects a valid probe for a third reason, which makes it no control at
- * all; returning the resolved paths lets a test assert acceptance positively.
- *
- * @throws {Error} if the probe holds no such package, or the package is unbuilt.
- */
-export function resolvePluginProbeLocation(candidate: string): ResolvedPluginProbe {
-  const probeLocation = path.resolve(candidate);
-  const packageDirectory = path.join(probeLocation, "node_modules", "@verter", "typescript-plugin");
-  if (!existsSync(packageDirectory)) {
-    throw new Error(
-      `plugin probe location holds no @verter/typescript-plugin: ${packageDirectory} does not ` +
-        `exist, so tsserver cannot resolve the plugin from ${probeLocation}. Run: pnpm install`,
-    );
-  }
-  const entry = path.join(packageDirectory, "dist", "index.js");
-  if (!existsSync(entry)) {
-    throw new Error(
-      `@verter/typescript-plugin build is missing its entry: ${entry}. Produce it with: ` +
-        "pnpm --filter @verter/language-shared --filter @verter/typescript-plugin build",
-    );
-  }
-  return { probeLocation, packageDirectory, entry };
 }
 
 function platformBinary(root: string, stem: string): string {
@@ -334,8 +285,10 @@ export class RawEditorNeutralLspDriver implements EditorNeutralContractDriver {
     if (!existsSync(path.join(tsdk, "tsserver.js"))) {
       throw new Error(`tsserver SDK is missing tsserver.js: ${tsdk}`);
     }
-    const pluginPath = resolvePluginProbeLocation(
-      options.pluginPath ?? path.join(repoRoot, "packages", "vue-vscode"),
+    const pluginPath = (
+      options.pluginPath
+        ? resolvePluginProbeLocation(options.pluginPath)
+        : repositoryTypescriptPluginProbe(repoRoot)
     ).probeLocation;
 
     const rootUri = pathToFileURL(workspaceRoot).href;
