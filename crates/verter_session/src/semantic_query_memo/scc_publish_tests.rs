@@ -80,6 +80,8 @@ fn distinct_flow_keys(count: usize) -> Vec<FlowReturnKey> {
             },
             demand: ReturnProjectionDemand::whole_return(),
             input: FlowInputContext::empty(),
+            result_contract:
+                crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
         })
         .collect()
 }

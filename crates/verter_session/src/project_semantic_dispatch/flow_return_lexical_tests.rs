@@ -1846,6 +1846,7 @@ fn r5_key_part(
         context: dispatch.flow_return_context_for(R5_CANONICAL),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
 
@@ -6184,6 +6185,7 @@ fn r1_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             context: dispatch.flow_return_context_for(R1_CANONICAL),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),
@@ -6513,6 +6515,7 @@ fn r2_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             context: dispatch.flow_return_context_for(R2_CANONICAL),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),

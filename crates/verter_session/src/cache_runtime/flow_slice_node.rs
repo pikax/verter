@@ -8,9 +8,10 @@
 //! so no caller can reach the lowered store without the slice hash
 //! having been computed first. The hash node's compute runs the demand
 //! planner (graph reachability over the shared per-function
-//! [`FunctionFlowGraph`]) and hashes the selected subgraph; the lowered
-//! node's compute re-plans (cheap, deterministic over the same pinned
-//! content) and lowers ONLY the plan — it never computes a slice hash.
+//! [`FunctionFlowGraph`]) ONCE per cold demand, hashes the selected
+//! subgraph, and RETAINS the plan on the published outcome
+//! ([`PlannedFlowSlice`]); the lowered node's compute lowers exactly that
+//! retained plan — it never re-plans and never computes a slice hash.
 //!
 //! Both nodes are CONTENT-ADDRESSED memory-side [`ArtifactNode`]s: the
 //! key pins the canonical, the five-axis function identity, the
@@ -56,7 +57,7 @@ use dashmap::DashMap;
 
 use verter_language::{FileLanguage, ParseKey};
 use verter_semantic::analysis::flow::flow_graph::{build_function_flow_graph, FunctionFlowGraph};
-use verter_semantic::analysis::flow::flow_ir::FlowSliceIR;
+use verter_semantic::analysis::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
 use verter_semantic::analysis::flow::hashing::{compute_flow_slice_hash, FlowSliceHash};
 use verter_semantic::analysis::flow::lower::lower_slice_plan;
 use verter_semantic::analysis::flow::peeker::{
@@ -260,15 +261,16 @@ fn build_bundle(skeleton: FunctionBodySkeleton) -> FlowGraphBundle {
 /// A flow graph bundle SEALED to the store key it was built for. Fields
 /// are private and the sole constructors are [`FunctionFlowGraphStore`]
 /// methods, so a consumer can never plan over one graph while naming
-/// another's body identity. This is the hermetic completeness-proof
-/// layer's graph handle; it is compile-absent from production builds.
-#[cfg(any(test, feature = "test-support"))]
+/// another's body identity. This is the completeness-proof layer's graph
+/// handle: production-compiled, but the only constructor today is the
+/// gated test mint below — the production admission seam is not yet
+/// wired.
+#[allow(dead_code)] // production admission wiring is not yet installed
 pub(crate) struct BoundFlowGraph {
     key: FlowSliceFunctionKey,
     bundle: Arc<FlowGraphBundle>,
 }
 
-#[cfg(any(test, feature = "test-support"))]
 impl BoundFlowGraph {
     /// The content-pinned function identity the bundle was built for.
     pub(crate) fn key(&self) -> &FlowSliceFunctionKey {
@@ -381,16 +383,39 @@ impl FunctionFlowGraphStore {
 
 // ── Hash node ─────────────────────────────────────────────────────────
 
+/// The one retained structural plan of a cold demand: the minted slice
+/// identity plus the [`ReturnSlicePlan`] it was minted from. Planning runs
+/// exactly once per cold demand (the hash node's compute); the lowered
+/// node and the demand-plan assembly both consume THIS retained plan
+/// instead of re-planning. Fields are private — immutable views only.
+pub(crate) struct PlannedFlowSlice {
+    /// The planner-produced slice identity (the lowered-lookup key input).
+    hash: FlowSliceHash,
+    /// The structural selection the hash covers.
+    selection: ReturnSlicePlan,
+}
+
+impl PlannedFlowSlice {
+    /// The minted slice identity.
+    pub(crate) fn hash(&self) -> FlowSliceHash {
+        self.hash
+    }
+
+    /// The retained structural selection (planned once).
+    pub(crate) fn selection(&self) -> &ReturnSlicePlan {
+        &self.selection
+    }
+}
+
 /// The hash node's caller-visible value. Only [`Self::Planned`] is ever
 /// admitted; a budget trip rides `ReturnOnly` and is never published.
-/// The planned arm carries EXACTLY the slice identity — the plan itself
-/// is not retained on the artifact (the lowered node re-plans
-/// deterministically over the same pinned content; hash-then-lower).
+/// The planned arm carries the minted slice identity AND the retained
+/// plan it was minted from, so lowering and demand planning share the one
+/// cold planning run (hash-then-lower without a re-plan).
 #[derive(Clone)]
 pub(crate) enum FlowSliceHashOutcome {
-    /// The planned slice's minted identity — the lowered-lookup key
-    /// input.
-    Planned(FlowSliceHash),
+    /// The planned slice: minted identity plus the retained plan.
+    Planned(Arc<PlannedFlowSlice>),
     /// The typed budget refusal — a genuine partial: returned, never
     /// admitted, and carrying NO slice hash, so the lowered store cannot
     /// even be addressed for it.
@@ -454,6 +479,24 @@ impl FlowSliceHashNode {
     ) -> Option<Arc<CacheEntry<FlowSliceHashOutcome>>> {
         self.entries.get(key).map(|entry| Arc::clone(entry.value()))
     }
+
+    /// The retained plan of the published `Planned` outcome for `key`,
+    /// when its minted hash still matches `slice_hash`. `None` when the
+    /// entry is absent, evicted (`remove_canonical`), or names another
+    /// plan — the lowered node fails closed on each, never re-planning.
+    pub(crate) fn retained_plan(
+        &self,
+        key: &FlowSliceHashKey,
+        slice_hash: FlowSliceHash,
+    ) -> Option<Arc<PlannedFlowSlice>> {
+        let entry = self.entries.get(key)?;
+        match &entry.value {
+            FlowSliceHashOutcome::Planned(planned) if planned.hash == slice_hash => {
+                Some(Arc::clone(planned))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl ArtifactNode for FlowSliceHashNode {
@@ -489,7 +532,10 @@ impl ArtifactNode for FlowSliceHashNode {
             Ok(plan) => {
                 let slice_hash = compute_flow_slice_hash(&plan, &bundle.graph, &bundle.skeleton);
                 CacheAdmission::Cacheable {
-                    value: FlowSliceHashOutcome::Planned(slice_hash),
+                    value: FlowSliceHashOutcome::Planned(Arc::new(PlannedFlowSlice {
+                        hash: slice_hash,
+                        selection: plan,
+                    })),
                     // Content-addressed: the key pins every input, so the
                     // fact rail stays EMPTY — no slice identity ever
                     // enters `ReadSetSignature.facts`.
@@ -521,32 +567,34 @@ impl ArtifactNode for FlowSliceHashNode {
 
 /// The lowered-slice node: lowers ONLY the planned slice into
 /// [`FlowSliceIR`]. Keyed additionally on the opaque slice hash, so it
-/// is unreachable until the hash node produced one; its compute
-/// re-plans over the memoized graph (never a rebuild) and NEVER
-/// computes a slice hash.
+/// is unreachable until the hash node produced one; its compute lowers
+/// the hash node's RETAINED plan (the one cold planning run — it never
+/// re-plans) and NEVER computes a slice hash.
 pub(crate) struct FlowSliceLoweredBodyNode {
     entries: DashMap<FlowSliceLoweredKey, Arc<CacheEntry<Arc<FlowSliceIR>>>>,
     inflight: InflightTable<QueryFlightKey<FlowSliceLoweredKey>>,
     graphs: Arc<FunctionFlowGraphStore>,
     skeletons: Arc<dyn FlowBodySkeletonSource>,
-    budget: FlowSliceBudgetCell,
+    /// The hash node: the retained plan of the one cold planning run lives
+    /// on its published outcome, keyed by this node's `hash_key`.
+    hash_node: Arc<FlowSliceHashNode>,
 }
 
 impl FlowSliceLoweredBodyNode {
     /// A node over the SAME `graphs` store as its hash sibling (one
-    /// graph build serves both) and the same shared budget cell (the
-    /// re-plan is deterministic over the pinned content).
+    /// graph build serves both) and the SAME hash node (its retained
+    /// plans are this node's lowering input).
     pub(crate) fn new(
         graphs: Arc<FunctionFlowGraphStore>,
         skeletons: Arc<dyn FlowBodySkeletonSource>,
-        budget: FlowSliceBudgetCell,
+        hash_node: Arc<FlowSliceHashNode>,
     ) -> Self {
         Self {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             graphs,
             skeletons,
-            budget,
+            hash_node,
         }
     }
 
@@ -585,26 +633,25 @@ impl ArtifactNode for FlowSliceLoweredBodyNode {
                 reason: NonAdmissionReason::ComputeFailed,
             };
         };
-        let demand = SliceDemand::for_return_projection(
-            &bundle.skeleton,
-            &key.hash_key.demand.projection_path,
-        );
-        // Re-plan reachability over the memoized graph. The key's
-        // content pins (flow_body_stable_hash + parse env + parser
-        // version) guarantee the same plan the hash covered; no slice
-        // hash is computed here (hash-then-lower).
-        let peeker = ReturnPathPeeker::new(&bundle.graph);
-        let budget = *self.budget.read();
-        match peeker.plan(&demand, &budget) {
-            Err(_) => CacheAdmission::Failed {
-                reason: NonAdmissionReason::BudgetExceeded,
-            },
-            Ok(plan) => CacheAdmission::Cacheable {
-                value: Arc::new(lower_slice_plan(&plan, &bundle.graph, &bundle.skeleton)),
-                signature: ReadSetSignature::empty(),
-                self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
-                validated_at_generation: cx.generation(),
-            },
+        // Lower EXACTLY the plan the hash node planned and retained on its
+        // published outcome: planning runs once per cold demand, so this
+        // node never re-plans and never computes a slice hash. An absent
+        // or evicted retained plan is a torn view — a typed miss, never a
+        // re-plan under a different demand.
+        let Some(planned) = self.hash_node.retained_plan(&key.hash_key, key.slice_hash) else {
+            return CacheAdmission::Failed {
+                reason: NonAdmissionReason::ComputeFailed,
+            };
+        };
+        CacheAdmission::Cacheable {
+            value: Arc::new(lower_slice_plan(
+                planned.selection(),
+                &bundle.graph,
+                &bundle.skeleton,
+            )),
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            validated_at_generation: cx.generation(),
         }
     }
 
@@ -635,7 +682,7 @@ pub(crate) struct FlowSliceStores {
     /// can read the SAME memoized skeleton the plan resolved against
     /// (one lexical authority, one build per content version).
     skeletons: Arc<dyn FlowBodySkeletonSource>,
-    hash_node: FlowSliceHashNode,
+    hash_node: Arc<FlowSliceHashNode>,
     lowered_node: FlowSliceLoweredBodyNode,
     /// The shared budget cell's store-side handle — held so a
     /// constrained test host can re-arm the budget the nodes read.
@@ -651,13 +698,16 @@ impl FlowSliceStores {
         let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::new(RetainedSnapshotSkeletonSource);
         let budget: FlowSliceBudgetCell =
             Arc::new(parking_lot::RwLock::new(FlowSliceBudget::default()));
-        let hash_node = FlowSliceHashNode::new(
+        let hash_node = Arc::new(FlowSliceHashNode::new(
             Arc::clone(&graphs),
             Arc::clone(&skeletons),
             Arc::clone(&budget),
+        ));
+        let lowered_node = FlowSliceLoweredBodyNode::new(
+            Arc::clone(&graphs),
+            Arc::clone(&skeletons),
+            Arc::clone(&hash_node),
         );
-        let lowered_node =
-            FlowSliceLoweredBodyNode::new(graphs.clone(), Arc::clone(&skeletons), budget.clone());
         #[cfg(not(test))]
         drop(budget);
         Self {

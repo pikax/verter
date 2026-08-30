@@ -121,10 +121,13 @@ pub(crate) mod flow_return_positional_tests;
 pub(crate) mod flow_return_root_gate_tests;
 #[cfg(test)]
 pub(crate) mod flow_return_tests;
-// The private completeness-proof layer for flow-bearing operations: a
-// hermetic candidate reachable only from test code. Compile-absent from
-// every production build.
-#[cfg(any(test, feature = "test-support"))]
+// The completeness-proof layer for flow-bearing operations: compiled into
+// production (the `FlowReturnKey` constructor derives its result-contract
+// identity from this registry), but publicly unreachable — the demand
+// planning / finalization entry points have no production caller until the
+// proof admission is wired; the test surface reaches them through
+// `crate::for_tests`.
+#[allow(dead_code)]
 pub(crate) mod flow_solve;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
@@ -3456,6 +3459,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
         key: crate::component_meta_materialize::MaterializeRuntimeKey,
     ) -> CacheRead<crate::component_meta_materialize::MaterializeOutcome> {
         crate::component_meta_materialize::materialize_component_meta_structure(self.ctx, key)
+    }
+
+    /// Test seam: the flow-demand ledger footprint of this dispatch —
+    /// `(installed demand count, reserved demand storage capacity)`. The
+    /// no-flow allocation contract: an ordinary query and every pending
+    /// typed-gap root install zero demands and reserve zero capacity (a
+    /// default `Vec` holds no heap storage).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn flow_demand_footprint_for_tests(&self) -> (usize, usize) {
+        let txn = self.dispatch_txn.borrow();
+        (
+            txn.obligations.flow_demand_count(),
+            txn.obligations.flow_demand_storage_capacity(),
+        )
     }
 
     /// `Pick<base, members>` via the existing builtin

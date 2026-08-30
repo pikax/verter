@@ -257,6 +257,11 @@ struct FlowEvaluationOutcome {
     /// FRESH literal (and no bare-return / fallthrough arm joined) — the
     /// post-convergence literal-widening input.
     fresh_seed: bool,
+    /// The extension point for the evaluator's typed discharge report:
+    /// which planned obligations the evaluation actually completed. The
+    /// evaluator does not emit reports yet — `None` until the proof
+    /// admission wiring produces and applies one.
+    discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
 }
 
 /// The §3.4 materialised point set a FAILED frame evaluation records.
@@ -369,7 +374,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Demand-parameterised half of [`Self::flow_return_key_for`].
     /// Input axis stays the canonical empty point: no production
     /// contextual-input producer exists. A non-empty point is a
-    /// distinct cache/re-entry identity.
+    /// distinct cache/re-entry identity. The result contract is derived
+    /// HERE — the ONLY derivation point — from the closed flow-operation
+    /// registry; no caller ever selects it.
     pub(crate) fn flow_return_key_with_demand(
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
@@ -387,6 +394,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             context: self.flow_return_context_for(identity.anchor.canonical_id.as_ref()),
             demand,
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         }
     }
 
@@ -1224,6 +1232,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 holds,
                 materialized: crate::semantic_query::demand::MaterializedSet::empty(),
                 fresh_seed: false,
+                discharge: None,
             },
         )
     }
@@ -1256,6 +1265,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             mut holds,
             materialized,
             fresh_seed,
+            // Carried through to the frame's pending state once the
+            // admission wiring applies reports; the evaluator emits no
+            // report yet.
+            discharge: _discharge,
         } = evaluated;
         let popped = self.dispatch_txn.borrow_mut().reentry_mut().pop();
         let self_cycle = popped.assumption_targets.contains(&idx);
@@ -1938,6 +1951,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     holds: Vec::new(),
                     materialized: MaterializedSet::empty(),
                     fresh_seed: false,
+                    discharge: None,
                 }
             };
         // Cold-path start event: every cold whole-function evaluation
@@ -2081,16 +2095,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     );
                 }
                 Some(crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome::Planned(
-                    slice_hash,
+                    planned,
                 )) => {
                     // Hash-then-lower: the minted slice identity keys the
                     // lowered-slice artifact (the key is unconstructible
                     // without it), and the lowered node lowers ONLY the
-                    // planned slice. A lowered miss on the pinned content is
+                    // retained plan. A lowered miss on the pinned content is
                     // a torn view — undecided, never a fabricated slice.
                     let lowered_key = crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey {
                         hash_key: slice_key,
-                        slice_hash,
+                        slice_hash: planned.hash(),
                     };
                     match crate::cache_runtime::lookup(
                         flow_slice.lowered_node(),
@@ -2374,6 +2388,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     holds,
                     materialized: failure_materialized_set(failure, key),
                     fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
+                    discharge: None,
                 };
             }
         };
@@ -2400,6 +2415,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     holds,
                     materialized: failure_materialized_set(failure, key),
                     fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
+                    discharge: None,
                 };
             }
         };
@@ -2415,6 +2431,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             holds,
             materialized,
             fresh_seed,
+            discharge: None,
         }
     }
 

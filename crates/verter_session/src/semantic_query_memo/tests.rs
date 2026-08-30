@@ -10628,6 +10628,8 @@ mod prepared_identity_bijection {
             },
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract:
+                crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
         }))
     }
 

@@ -197,6 +197,7 @@ fn key_for(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str, name: &str) 
         context: dispatch.flow_return_context_for(canonical),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
 

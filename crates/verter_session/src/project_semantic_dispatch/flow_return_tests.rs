@@ -324,6 +324,7 @@ fn flow_result_for_file(
         context: dispatch.flow_return_context_for(canonical),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     };
     flow_result(dispatch, host, key)
 }
@@ -346,6 +347,7 @@ fn flow_key(
         context: dispatch.flow_return_context_for(CANONICAL),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
 
@@ -1207,6 +1209,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             context: dispatch.flow_return_context_for("/ws/mixed_c.ts"),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let roots = dispatch
             .graph()
@@ -2603,6 +2606,59 @@ fn flow_return_warm_read_consults_no_slice_state() {
     );
 }
 
+/// Plan-once: ONE cold FlowReturn demand runs the demand planner exactly
+/// once — the lowered-body node lowers the hash node's RETAINED plan (no
+/// re-plan, no demand-plan replan) — and a clean warm replay plans nothing
+/// at all.
+#[test]
+fn flow_return_cold_demand_plans_the_slice_once_and_warm_replay_never_plans() {
+    use verter_semantic::analysis::flow::peeker::return_path_peeker_plan_thread_invocations;
+
+    let host = make_host();
+    let plans_before = return_path_peeker_plan_thread_invocations();
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let result = flow_result_value(dispatch, key);
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the clean literal body completes"
+        );
+    });
+    let store = host.project_type_store();
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before + 1,
+        "one cold FlowReturn demand plans its slice exactly once: the hash \
+         node plans, the lowered node lowers the RETAINED plan"
+    );
+    assert_eq!(store.flow_slice().hash_node().entry_count(), 1);
+    assert_eq!(store.flow_slice().lowered_node().entry_count(), 1);
+
+    // A clean warm replay (a fresh dispatch over the same store) adds
+    // zero plans.
+    with_dispatch(&host, |dispatch| {
+        let key = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let warm = flow_result_value(dispatch, key);
+        assert_eq!(warm.degradation(), None);
+    });
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before + 1,
+        "a clean warm replay adds zero plans"
+    );
+}
+
 /// §3.4 recorded-point identity: a published `FlowReturn` entry's
 /// `satisfied_projection` is the point set the compute ACTUALLY produced
 /// — the whole-return demand point — never an empty set and never a
@@ -2941,6 +2997,7 @@ fn flow_return_member_demand_never_lowers_elided_sibling_content() {
             context: dispatch.flow_return_context_for("/ws/member-sibling-content.ts"),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         key.demand = crate::semantic_query::ReturnProjectionDemand {
             point: crate::semantic_query::demand::Demand::navigate(
@@ -3352,6 +3409,7 @@ fn scc_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey 
         context: dispatch.flow_return_context_for(SCC_CANONICAL),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
 
@@ -3820,6 +3878,7 @@ fn flow_expr_for_script(
             context: dispatch.flow_return_context_for(canonical),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let result = flow_result_value(dispatch, key);
         let expr = host

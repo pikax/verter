@@ -1,10 +1,13 @@
-//! The private completeness-proof layer for flow-bearing semantic
-//! operations. Hermetic: reachable only from test code, never from a
-//! production entry point, and sharing the ONE graph authority — the
-//! store-minted [`BoundFlowGraph`] seals each memoized `FlowGraphBundle`
-//! to the content key it was built for — and the ONE closed query
-//! registry ([`SemanticQueryKeyTag`]): no second graph, planner, or
-//! resolver.
+//! The completeness-proof layer for flow-bearing semantic operations.
+//! Production-compiled but publicly unreachable: the demand planning and
+//! finalization entry points have no production caller until the proof
+//! admission is wired (the test surface reaches them through
+//! `crate::for_tests`), while the registry identity IS production-live —
+//! the `FlowReturnKey` constructor derives its result contract from it.
+//! The layer shares the ONE graph authority — the store-minted
+//! [`BoundFlowGraph`] seals each memoized `FlowGraphBundle` to the content
+//! key it was built for — and the ONE closed query registry
+//! ([`SemanticQueryKeyTag`]): no second graph, planner, or resolver.
 //!
 //! - The flow-operation contract registry projects the flow-contract
 //!   columns over the closed query tags; an undeclared requirement is NEVER
@@ -42,9 +45,7 @@ use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
 use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
-use verter_semantic::analysis::flow::peeker::{
-    FlowSliceBudget, FlowSliceBudgetExceeded, ReturnPathPeeker, SliceDemand,
-};
+use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
 use verter_semantic::analysis::flow::{
     FunctionBodySkeleton, SkeletonBindingId, SkeletonBindingKind,
 };
@@ -53,8 +54,9 @@ use verter_semantic::analysis::function_program::{
 };
 
 use super::dispatch_txn::flow_obligation_state::{
-    FlowBindingBasis, FlowConvergenceEvidence, FlowObligationBasis, FlowObligationId,
-    FlowObligationOrigin, FlowObligationSpec, ObligationState, SealedFlowCompletion,
+    FlowBindingBasis, FlowConvergenceEvidence, FlowDemandHandle, FlowObligationBasis,
+    FlowObligationId, FlowObligationOrigin, FlowObligationSpec, ObligationState,
+    SealedFlowCompletion,
 };
 use super::dispatch_txn::ObligationRuntime;
 use crate::cache_runtime::flow_slice_node::{BoundFlowGraph, FlowSliceFunctionKey};
@@ -166,7 +168,7 @@ pub enum FlowOperationRole { Root, SemanticSuboperation }
 /// `Live` suboperations keep their own production admission rails.
 #[rustfmt::skip]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlowOperationStatus { EnabledHermetic, PendingReducer, Live }
+pub enum FlowOperationStatus { Enabled, PendingReducer, Live }
 
 /// The finalizer kind an operation's result passes through.
 #[rustfmt::skip]
@@ -262,7 +264,7 @@ const RELATION_ONLY_FAMILIES: &[F] = &[F::SemanticRelation];
 #[rustfmt::skip]
 static FLOW_OPERATION_CONTRACTS: &[FlowOperationContract] = &[
     // The whole-function return producer: the one proof-enabled root.
-    row(SemanticQueryKeyTag::FlowReturn, R::Root, S::EnabledHermetic,
+    row(SemanticQueryKeyTag::FlowReturn, R::Root, S::Enabled,
         &[
             closure(D::ReachingValue, REACHING_VALUE_FAMILIES),
             closure(D::ReachingType, REACHING_TYPE_FAMILIES),
@@ -412,7 +414,7 @@ const fn role_discriminant(role: FlowOperationRole) -> u32 {
 #[rustfmt::skip]
 const fn status_discriminant(status: FlowOperationStatus) -> u32 {
     match status {
-        FlowOperationStatus::EnabledHermetic => 1, FlowOperationStatus::PendingReducer => 2,
+        FlowOperationStatus::Enabled => 1, FlowOperationStatus::PendingReducer => 2,
         FlowOperationStatus::Live => 3,
     }
 }
@@ -506,16 +508,30 @@ pub fn flow_result_contract_id(contract: &FlowOperationContract) -> ResultContra
     ResultContractId::from_canonical(&ResultContractDescriptor(contract))
 }
 
+/// The result-contract identity of the `FlowReturn` operation, derived
+/// ONLY here from the closed registry row (the registry is static, so
+/// this is a deterministic constant of the registry revision). The single
+/// production `FlowReturnKey` constructor folds it into every key — a
+/// caller-selected contract is unrepresentable on a production request.
+#[must_use]
+pub fn flow_return_result_contract_id() -> ResultContractId {
+    flow_result_contract_id(
+        flow_operation_contract(SemanticQueryKeyTag::FlowReturn)
+            .expect("FlowReturn is a registered flow operation"),
+    )
+}
+
 /// One flow demand: the full query identity (function, demand, input,
-/// profile axes), the observation basis, the result contract, and the
-/// policies. The demand carries NO graph axis and NO subject axis: the
-/// store-minted [`BoundFlowGraph`] pins the body identity, and the
-/// subject derives EXHAUSTIVELY from the operation-specific query
-/// payload.
+/// profile axes), the observation basis, and the policies. The demand
+/// carries NO graph axis, NO subject axis, and NO result-contract axis:
+/// the store-minted [`BoundFlowGraph`] pins the body identity, the subject
+/// derives EXHAUSTIVELY from the operation-specific query payload, and the
+/// result contract IS the `FlowReturnKey`'s own key-derived contract —
+/// never caller-selected.
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
 pub struct FlowDemandRequest {
-    pub query: SemanticQueryKey, pub input_basis: InputBasisId, pub result_contract: ResultContractId,
+    pub query: SemanticQueryKey, pub input_basis: InputBasisId,
     pub resources: FlowResourcePolicy,
     pub additional_requirements: Arc<[FlowRequirement]>,
 }
@@ -667,7 +683,7 @@ pub enum FlowDemandPlanError {
 /// named-member projection path; every other demand (widened signature,
 /// facet, or policy axes; numeric / symbol / index path segments) is a
 /// typed planning error, never a silent default subject.
-fn derive_demand_subject(
+pub fn derive_demand_subject(
     query: &SemanticQueryKey,
 ) -> Result<FlowDemandSubject, FlowDemandPlanError> {
     let SemanticQueryKey::FlowReturn(key) = query else {
@@ -797,37 +813,44 @@ fn require_query_names_bound_graph(
     }
 }
 
-/// Build the demand plan of `request` over the store-minted `bound` graph.
-/// The demand planner runs EXACTLY ONCE over the bound graph — this
-/// function never builds or reacquires a graph — the plan's body identity
-/// IS the bound graph's key, the subject derives from the query's own
-/// demand axis, and obligations expand only through the registered
-/// [`FlowExpansionRule`]s, in domain rank, ascending node index, edge
-/// class and source ordinal order. Every obligation spec carries its
-/// closed semantic identity (populated from the skeleton/graph and the
-/// frame's binding inventory) and its exact evidence contract. Obligation
-/// insertion is budget-checked BEFORE each append: the first excess
-/// returns the typed budget error and the remaining population is never
-/// constructed or scanned.
+/// Build the demand plan of `request` over the store-minted `bound` graph,
+/// assembling obligations from the ALREADY-PLANNED structural selection —
+/// the one plan the hash node's cold compute produced and retained
+/// (`PlannedFlowSlice`); this function never builds or reacquires a graph
+/// and never re-plans. The
+/// plan's body identity IS the bound graph's key, the subject derives from
+/// the query's own demand axis, the result contract IS the key's
+/// constructor-derived contract, and obligations expand only through the
+/// registered [`FlowExpansionRule`]s, in domain rank, ascending node
+/// index, edge class and source ordinal order. Every obligation spec
+/// carries its closed semantic identity (populated from the skeleton/graph
+/// and the frame's binding inventory) and its exact evidence contract.
+/// Obligation insertion is budget-checked BEFORE each append: the first
+/// excess returns the typed budget error and the remaining population is
+/// never constructed or scanned.
 #[rustfmt::skip]
 pub(crate) fn build_flow_demand_plan(
     request: FlowDemandRequest,
     bound: &BoundFlowGraph,
+    structural_selection: ReturnSlicePlan,
     inventory: &FlowBindingInventory,
 ) -> Result<FlowDemandPlan, FlowDemandPlanError> {
     let tag = request.query.tag();
     let contract = require_flow_operation_contract(tag).map_err(|_| FlowDemandPlanError::UnregisteredOperation)?;
-    if contract.role != R::Root || contract.status != S::EnabledHermetic {
+    if contract.role != R::Root || contract.status != S::Enabled {
         return Err(FlowDemandPlanError::NotAnEnabledRoot);
     }
     let subject = derive_demand_subject(&request.query)?;
     require_query_names_bound_graph(&request.query, bound.key())?;
+    let SemanticQueryKey::FlowReturn(key) = &request.query else {
+        return Err(FlowDemandPlanError::NotAnEnabledRoot);
+    };
+    // The result contract is the KEY's — derived by the single production
+    // key constructor from the closed registry row; the request carries no
+    // caller-selected contract axis.
+    let result_contract = key.result_contract.clone();
     let bundle = bound.bundle();
     let max_obligations = request.resources.max_obligations;
-    let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
-    let structural_selection = ReturnPathPeeker::new(&bundle.graph)
-        .plan(&demand, &request.resources.slice_budget)
-        .map_err(FlowDemandPlanError::SliceBudget)?;
 
     let mut specs: Vec<FlowObligationSpec> = Vec::new();
     let mut push = |requirement: FlowRequirement, origin: FlowObligationOrigin, basis: FlowObligationBasis,
@@ -1118,7 +1141,7 @@ pub(crate) fn build_flow_demand_plan(
     work_order.extend(expanded.iter().copied());
     let basis = FlowDemandBasis {
         graph_body: bound.key().clone(), query: request.query,
-        input_basis: request.input_basis, result_contract: request.result_contract,
+        input_basis: request.input_basis, result_contract,
     };
     Ok(FlowDemandPlan {
         basis, subject, structural_selection,
@@ -1223,7 +1246,8 @@ impl FlowSolveOutcome {
 /// finalization owns it outright — never a separate value or
 /// caller-authored convergence evidence — and verifies the three-way
 /// binding of artifact, runtime, and plan: the artifact's basis IS the
-/// plan's basis IS the installed basis, the operation contract is coherent
+/// plan's basis IS the installed basis (the demand named by `handle`),
+/// the operation contract is coherent
 /// (registered, proof-enabled root, matching result contract), the
 /// artifact's discharge proofs equal the plan's exact spec set and the
 /// runtime's current records with every obligation `Discharged`, and the
@@ -1232,23 +1256,23 @@ impl FlowSolveOutcome {
 /// failure, non-convergence, or degraded value is a typed partial.
 #[rustfmt::skip]
 pub fn finalize_flow_solve(
-    runtime: &ObligationRuntime, plan: &FlowDemandPlan, completion: SealedFlowCompletion,
+    runtime: &ObligationRuntime, handle: FlowDemandHandle, plan: &FlowDemandPlan, completion: SealedFlowCompletion,
 ) -> FlowSolveOutcome {
     let partial = |reason: FlowPartialReason| FlowSolveOutcome::Partial(PartialFlowResult { basis: plan.basis().clone(), reason });
 
-    let Some(installed) = runtime.flow_basis() else { return partial(FlowPartialReason::NoDemandInstalled) };
+    let Some(installed) = runtime.flow_basis(handle) else { return partial(FlowPartialReason::NoDemandInstalled) };
     if installed != plan.basis() { return partial(FlowPartialReason::StaleBasis); }
     if completion.basis() != plan.basis() { return partial(FlowPartialReason::StaleBasis); }
     let Some(contract) = flow_operation_contract(plan.basis().query.tag()) else {
         return partial(FlowPartialReason::OperationNotProvable);
     };
-    if contract.role != R::Root || contract.status != S::EnabledHermetic {
+    if contract.role != R::Root || contract.status != S::Enabled {
         return partial(FlowPartialReason::OperationNotProvable);
     }
     if plan.basis().result_contract != flow_result_contract_id(contract) {
         return partial(FlowPartialReason::ResultContractMismatch);
     }
-    let records = runtime.flow_obligations();
+    let Some(records) = runtime.flow_obligations(handle) else { return partial(FlowPartialReason::NoDemandInstalled) };
     let proofs = completion.proofs();
     let specs = plan.obligation_specs();
     let exact_set = records.len() == specs.len() && proofs.len() == specs.len()

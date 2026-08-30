@@ -150,7 +150,7 @@ fn parse_key_and_language_are_function_key_axes() {
     );
     let ctx: &dyn ResolverContext = &rig.host;
     for key in [&baseline, &parse_key_changed, &language_changed] {
-        lookup(&rig.hash_node, hash_key(key.clone(), &["b"]), ctx).expect("build");
+        lookup(rig.hash_node.as_ref(), hash_key(key.clone(), &["b"]), ctx).expect("build");
     }
     assert_eq!(
         rig.graphs.build_count(),
@@ -276,8 +276,9 @@ fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
         FlowSliceBudget::default(),
     );
     let ctx: &dyn ResolverContext = &rig.host;
-    lookup(&rig.hash_node, hash_key(baseline, &["b"]), ctx).expect("baseline build");
-    lookup(&rig.hash_node, hash_key(changed, &["b"]), ctx).expect("fingerprint-changed build");
+    lookup(rig.hash_node.as_ref(), hash_key(baseline, &["b"]), ctx).expect("baseline build");
+    lookup(rig.hash_node.as_ref(), hash_key(changed, &["b"]), ctx)
+        .expect("fingerprint-changed build");
     assert_eq!(
         rig.graphs.build_count(),
         2,
@@ -306,7 +307,7 @@ struct Rig {
     host: VerterHost,
     graphs: Arc<FunctionFlowGraphStore>,
     source: Arc<FixtureSkeletonSource>,
-    hash_node: FlowSliceHashNode,
+    hash_node: Arc<FlowSliceHashNode>,
     lowered_node: FlowSliceLoweredBodyNode,
 }
 
@@ -316,13 +317,16 @@ fn rig(fixtures: Vec<(FlowSliceFunctionKey, &'static str)>, budget: FlowSliceBud
     let source = Arc::new(FixtureSkeletonSource::new(fixtures));
     let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::clone(&source) as _;
     let budget: FlowSliceBudgetCell = Arc::new(parking_lot::RwLock::new(budget));
-    let hash_node = FlowSliceHashNode::new(
+    let hash_node = Arc::new(FlowSliceHashNode::new(
         Arc::clone(&graphs),
         Arc::clone(&skeletons),
         Arc::clone(&budget),
+    ));
+    let lowered_node = FlowSliceLoweredBodyNode::new(
+        Arc::clone(&graphs),
+        Arc::clone(&skeletons),
+        Arc::clone(&hash_node),
     );
-    let lowered_node =
-        FlowSliceLoweredBodyNode::new(Arc::clone(&graphs), Arc::clone(&skeletons), budget);
     Rig {
         host,
         graphs,
@@ -384,15 +388,15 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
     let skeletons: Arc<dyn FlowBodySkeletonSource> = Arc::clone(&source) as _;
     let budget: FlowSliceBudgetCell =
         Arc::new(parking_lot::RwLock::new(FlowSliceBudget::default()));
-    let hash_node = FlowSliceHashNode::new(
+    let hash_node = Arc::new(FlowSliceHashNode::new(
         Arc::clone(&graphs),
         Arc::clone(&skeletons),
         Arc::clone(&budget),
-    );
+    ));
     let lowered_node = FlowSliceLoweredBodyNode::new(
         Arc::clone(&graphs),
         Arc::clone(&skeletons),
-        Arc::clone(&budget),
+        Arc::clone(&hash_node),
     );
     let stores = FlowSliceStores {
         graphs: Arc::clone(&graphs),
@@ -424,7 +428,7 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
 
 fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
     match outcome {
-        FlowSliceHashOutcome::Planned(slice_hash) => slice_hash,
+        FlowSliceHashOutcome::Planned(planned) => planned.hash(),
         FlowSliceHashOutcome::BudgetExceeded(exceeded) => {
             panic!("expected a planned slice, got budget refusal {exceeded:?}")
         }
@@ -452,6 +456,7 @@ fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
 #[test]
 pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash_thread_invocations;
+    use verter_semantic::analysis::flow::peeker::return_path_peeker_plan_thread_invocations;
 
     let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
@@ -462,7 +467,8 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
 
     let key = hash_key(function, &["b"]);
     let invocations_before_hash = compute_flow_slice_hash_thread_invocations();
-    let outcome = lookup(&rig.hash_node, key.clone(), ctx).expect("hash lookup");
+    let plans_before_hash = return_path_peeker_plan_thread_invocations();
+    let outcome = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash lookup");
     let planned = planned(outcome);
     assert_eq!(
         compute_flow_slice_hash_thread_invocations(),
@@ -470,19 +476,31 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
         "the hash node's cold compute performs exactly one slice-hash \
          computation (the counter binding is live, not vacuous)"
     );
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before_hash + 1,
+        "the hash node's cold compute plans the demand slice exactly once"
+    );
 
     let lowered_key = FlowSliceLoweredKey {
         hash_key: key.clone(),
         slice_hash: planned,
     };
     let invocations_before_lowered = compute_flow_slice_hash_thread_invocations();
+    let plans_before_lowered = return_path_peeker_plan_thread_invocations();
     let ir = lookup(&rig.lowered_node, lowered_key, ctx).expect("lowered lookup");
     assert_eq!(
         compute_flow_slice_hash_thread_invocations(),
         invocations_before_lowered,
         "the lowered-body compute performs ZERO slice-hash computations \
-         (hash-then-lower: it re-plans and lowers only — it never \
+         (hash-then-lower: it lowers the retained plan — it never \
          re-derives the slice identity)"
+    );
+    assert_eq!(
+        return_path_peeker_plan_thread_invocations(),
+        plans_before_lowered,
+        "the lowered-body compute performs ZERO re-plans: the hash node's \
+         retained plan IS the plan it lowers"
     );
 
     // The IR covers exactly the demanded member: one `b` entry, one
@@ -529,8 +547,8 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
 
     let key_a = hash_key(function.clone(), &["a"]);
     let key_b = hash_key(function, &["b"]);
-    let planned_a = planned(lookup(&rig.hash_node, key_a.clone(), ctx).expect("a"));
-    let planned_b = planned(lookup(&rig.hash_node, key_b.clone(), ctx).expect("b"));
+    let planned_a = planned(lookup(rig.hash_node.as_ref(), key_a.clone(), ctx).expect("a"));
+    let planned_b = planned(lookup(rig.hash_node.as_ref(), key_b.clone(), ctx).expect("b"));
     assert_ne!(
         planned_a, planned_b,
         "distinct demands select distinct slices"
@@ -587,7 +605,7 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
 
     let key = hash_key(function, &["b"]);
     for _ in 0..2 {
-        let outcome = lookup(&rig.hash_node, key.clone(), ctx)
+        let outcome = lookup(rig.hash_node.as_ref(), key.clone(), ctx)
             .expect("a budget refusal is RETURNED, never a silent None");
         let FlowSliceHashOutcome::BudgetExceeded(exceeded) = outcome else {
             panic!("a one-node budget cannot hold this slice");
@@ -621,8 +639,8 @@ fn warm_hash_hit_reuses_planned_value_without_recompute() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let first = planned(lookup(&rig.hash_node, key.clone(), ctx).expect("cold"));
-    let second = planned(lookup(&rig.hash_node, key, ctx).expect("warm"));
+    let first = planned(lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("cold"));
+    let second = planned(lookup(rig.hash_node.as_ref(), key, ctx).expect("warm"));
     assert_eq!(
         first, second,
         "the warm hit serves the published slice identity, not a recompute"
@@ -665,8 +683,8 @@ pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
 
     let key_v1 = hash_key(v1, &["b"]);
     let key_v2 = hash_key(v2, &["b"]);
-    let planned_v1 = planned(lookup(&rig.hash_node, key_v1.clone(), ctx).expect("v1"));
-    let planned_v2 = planned(lookup(&rig.hash_node, key_v2.clone(), ctx).expect("v2"));
+    let planned_v1 = planned(lookup(rig.hash_node.as_ref(), key_v1.clone(), ctx).expect("v1"));
+    let planned_v2 = planned(lookup(rig.hash_node.as_ref(), key_v2.clone(), ctx).expect("v2"));
 
     // The slice SELECTION is identical across the literal edit — the
     // content difference is pinned by `flow_body_stable_hash` in the
@@ -702,7 +720,7 @@ fn published_entries_carry_empty_fact_rail() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let _ = lookup(&rig.hash_node, key.clone(), ctx).expect("hash");
+    let _ = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash");
     let entry = rig.hash_node.published_entry(&key).expect("published");
     assert!(
         entry.signature.facts.is_empty(),
@@ -723,13 +741,13 @@ fn graph_store_remove_canonical_evicts_bundles() {
     let ctx: &dyn ResolverContext = &rig.host;
 
     let key = hash_key(function, &["b"]);
-    let _ = lookup(&rig.hash_node, key.clone(), ctx).expect("cold");
+    let _ = lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("cold");
     assert_eq!(rig.graphs.build_count(), 1);
     rig.graphs.remove_canonical("/fixtures/my-type.ts");
     // A different demand misses the hash store and rebuilds the bundle
     // once more.
     let key2 = hash_key(key.function.clone(), &["a"]);
-    let _ = lookup(&rig.hash_node, key2, ctx).expect("recold");
+    let _ = lookup(rig.hash_node.as_ref(), key2, ctx).expect("recold");
     assert_eq!(rig.graphs.build_count(), 2);
 }
 
@@ -1117,7 +1135,7 @@ pub(crate) fn flow_slice_ir_detaches_from_oxc_arena() {
     );
     let ctx: &dyn ResolverContext = &rig.host;
     let key = hash_key(function, &["b"]);
-    let slice_hash = planned(lookup(&rig.hash_node, key.clone(), ctx).expect("hash"));
+    let slice_hash = planned(lookup(rig.hash_node.as_ref(), key.clone(), ctx).expect("hash"));
     let ir = lookup(
         &rig.lowered_node,
         FlowSliceLoweredKey {
@@ -1188,6 +1206,8 @@ fn flow_return_of(
         context: dispatch.flow_return_context_for(canonical),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract:
+            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
     };
     match dispatch.execute(crate::semantic_query::SemanticQueryKey::FlowReturn(
         Box::new(key),

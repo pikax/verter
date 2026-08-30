@@ -776,9 +776,19 @@ impl FlowGraphFixtureForTests {
     /// Plan `request` over this fixture's store-bound graph and binding
     /// inventory. The request carries no graph axis and no subject axis:
     /// the basis takes the body identity from the bound graph's key and
-    /// the subject from the query's own demand payload.
+    /// the subject from the query's own demand payload. The fixture runs
+    /// the ONE structural plan the production hash node would retain for
+    /// this demand and hands it to the demand planner, which assembles
+    /// obligations without re-planning.
     pub fn build_plan(&self, request: FlowDemandRequest) -> Result<FlowDemandPlan, FlowDemandPlanError> {
-        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, &self.inventory)
+        use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+        let subject = crate::project_semantic_dispatch::flow_solve::derive_demand_subject(&request.query)?;
+        let bundle = self.bound.bundle();
+        let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
+        let structural_selection = ReturnPathPeeker::new(&bundle.graph)
+            .plan(&demand, &request.resources.slice_budget)
+            .map_err(FlowDemandPlanError::SliceBudget)?;
+        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, structural_selection, &self.inventory)
     }
 }
 
@@ -855,4 +865,23 @@ pub fn flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: cra
 #[rustfmt::skip]
 pub fn degraded_flow_return_result_for_tests(graph: &SemanticGraphStore, return_type: crate::semantic_query::SemanticNodeId) -> crate::semantic_query::FlowReturnResult {
     crate::semantic_query::FlowReturnResult::new(graph, return_type, false, Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding))
+}
+
+/// Probe the no-flow allocation contract through the REAL production
+/// dispatch: execute `key` through the one canonical
+/// `ProjectSemanticDispatch` (the same choke point
+/// [`dispatch_execute_type_node_for_tests`] forwards to) and report the
+/// dispatch's flow-demand ledger footprint afterwards — `(installed
+/// demand count, reserved demand storage capacity)`. An ordinary query
+/// and every pending typed-gap root install zero demands and reserve
+/// zero capacity.
+#[rustfmt::skip]
+pub fn dispatch_flow_demand_footprint_for_tests(
+    host: &crate::VerterHost,
+    key: crate::semantic_query::SemanticQueryKey,
+) -> (usize, usize) {
+    use crate::semantic_query::SemanticQueryApi;
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let _ = dispatch.execute(key);
+    dispatch.flow_demand_footprint_for_tests()
 }

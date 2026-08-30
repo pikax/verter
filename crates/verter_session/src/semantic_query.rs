@@ -33,6 +33,7 @@
 use std::sync::Arc;
 
 use static_assertions::assert_not_impl_any;
+use verter_identity::identity::ResultContractId;
 use verter_semantic::analysis::Hash16;
 
 // Re-export the solver's primitive enum so semantic nodes and the type
@@ -1542,6 +1543,13 @@ pub struct FlowReturnKey {
     /// The contextual input point (empty is the canonical production
     /// point).
     pub input: FlowInputContext,
+    /// The result contract this demand's result must satisfy. Derived
+    /// ONLY by the single production key constructor
+    /// (`ProjectSemanticDispatch::flow_return_key_with_demand`) from the
+    /// closed flow-operation registry — never caller-selected — so the
+    /// contract participates in cross-snapshot query identity like the
+    /// identity crate's rule requires.
+    pub result_contract: ResultContractId,
 }
 
 /// A detected flow-model gap whose final semantic owner remains external to
