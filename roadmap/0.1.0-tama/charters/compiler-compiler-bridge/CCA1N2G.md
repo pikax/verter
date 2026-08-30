@@ -27,8 +27,8 @@ optional=false
 release_gating=none
 external_requirements=
 charter=charters/compiler-compiler-bridge/CCA1N2G.md
-max_production_loc=350
-max_production_files=7
+max_production_loc=300
+max_production_files=6
 max_related_packages=2
 rescope_loc=1500
 rescope_files=12
@@ -43,7 +43,7 @@ Carrier grammar selection at the shared source-ingestion stage derives from the 
 
 ## Concrete surfaces and boundary
 
-- Surfaces: the grammar-selection branches in `crates/verter_session/src/host_executor.rs` and `crates/verter_session/src/host_manage/overlay_materialize.rs` (the overlay source-registration site carries the same displaced fallthrough class), the catalog-seeded registration in `crates/verter_session/src/host_construction.rs` (the live grammar registry mints from the catalog fact, never a second spelling), the registered grammar column on the immutable compiler catalog row, and focused tests.
+- Surfaces: the grammar-selection branches in `crates/verter_session/src/host_executor.rs` and `crates/verter_session/src/host_manage/overlay_materialize.rs` (the overlay source-registration site carries the same displaced fallthrough class), the registered grammar column on the immutable compiler catalog row, and focused tests.
 - Grammar identity is registered carrier geometry: its sole authority is the `CarrierFrontend` registration row in the immutable compiler catalog. The session consumes that fact through catalog lookup (a session-side descriptor may project it but is never an alternative authority).
 - The lookup is a registered-identity fact read available to every parse; it must not construct, forge, store, or widen any request-scoped binding, and it must not add a framework predicate — an unregistered or grammar-less row fails closed with a typed outcome instead of defaulting to another framework's grammar.
 - Compile-lane routing, request construction, admission, and both outer `compile_bundle` calls are excluded.
@@ -61,4 +61,4 @@ Carrier grammar selection at the shared source-ingestion stage derives from the 
 
 ## Deletions, budget, and verification
 
-Delete only the displaced grammar fallthrough. Ceiling: 350 production LOC, 7 files, 2 crates; abort if compile-lane routing or binding work enters. Run source-ingestion/parse suites for both frameworks and `targeted-domain`. The native host-integration convergence join consumes this fact.
+Delete only the displaced grammar fallthrough. Ceiling: 300 production LOC, 6 files, 2 crates; abort if compile-lane routing or binding work enters. Run source-ingestion/parse suites for both frameworks and `targeted-domain`. The native host-integration convergence join consumes this fact.
