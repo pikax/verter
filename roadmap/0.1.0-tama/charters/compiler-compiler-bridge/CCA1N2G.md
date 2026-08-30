@@ -54,7 +54,7 @@ Carrier grammar selection at the shared source-ingestion stage derives from the 
 
 ## Invariants and acceptance
 
-- No Vue-else-Svelte grammar fallthrough remains at any source-registration site (host ingestion and overlay registration); a third registered adapter receives its own registered grammar rather than an implicit Svelte default.
+- No Vue-else-Svelte grammar fallthrough remains at any source-registration site (host ingestion and overlay registration); a third registered adapter never receives another framework's grammar: it carries its registered grammar fact where the representation admits one and otherwise fails closed with a typed outcome; opening the grammar representation to further adapters is owned by the framework-adapter substrate.
 - Grammar for Vue and Svelte carriers is byte-identical to the current behavior; parse output, diagnostics, and ordering are unchanged.
 - An unregistered carrier or a row without grammar facts fails closed with a typed outcome; no silent cross-framework grammar substitution.
 - The change adds no parse, resolve, or copy work; the lookup is a registered-fact read.
