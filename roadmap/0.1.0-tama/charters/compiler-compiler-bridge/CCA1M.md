@@ -39,18 +39,21 @@ rescope_unrelated_packages=3
 
 ## Independently acceptable outcome
 
-Confirm that direct/prepared/batch runtime consumers use CCA1M1, the host-backed temporary adapter uses CCA1M2, and the runtime-render temporary adapter uses CCA1M3. This node changes no production file.
+Confirm that direct/prepared/batch runtime consumers use CCA1M1's typed delegation, that CCA1M2 alone delegated both compatibility bundle implementations' internal runtime construction, and that CCA1M3 preserved and characterized the fixed-Vue runtime-render compatibility route. This node changes no production file.
 
 ## Exact predecessor contracts
 
 - **CCA1M1:** all compiler-local direct/prepared/batch routes use `RuntimeCompilerBackend`.
-- **CCA1M2:** the host-backed adapter delegates runtime work but retains its outer `compile_bundle` call.
-- **CCA1M3:** the runtime-render adapter delegates runtime work but retains its separate outer `compile_bundle` call.
+- **CCA1M2:** both Vue and Svelte compatibility bundle implementations delegate runtime construction to their typed runtime backends; CCA1M2 is the sole owner of that internal deletion population.
+- **CCA1M3:** the fixed-Vue runtime-render route retains its separate outer `compile_bundle` call with parity evidence and the transitional Svelte degradation characterized.
 
 ## Acceptance and deletion ownership
 
-- Repository-wide evidence proves exactly two production session `compile_bundle` calls remain: host-backed `compile_entry` and fixed-Vue `compile_entry_runtime_render`.
-- CCA1N3 exclusively owns deletion of the first call; CCA1N4 exclusively owns deletion of the second.
+- Repository-wide evidence proves compatibility-internal runtime construction has exactly one deletion owner (CCA1M2) and no legacy internal runtime branch remains in either compatibility implementation.
+- The generic host-backed `compile_entry` outer `compile_bundle` call remains.
+- The fixed-Vue `compile_entry_runtime_render` outer `compile_bundle` call remains.
+- No third production session outer `compile_bundle` call exists.
+- This join makes no claim of final RuntimeRender ownership; the bound host-integration cutover nodes own that later.
 - No route performs duplicate parse, semantic, projection, runtime, assembly, or copy work; public DTO and host-selector changes are forbidden here.
 
 ## Budget and verification
