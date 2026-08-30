@@ -12,6 +12,7 @@ import {
   ref,
   unknown,
   recursiveRef,
+  indexedAccess,
 } from "@verter/type-ir";
 import type { PropertyMetaSchema } from "./types.js";
 
@@ -315,5 +316,51 @@ describe("typeDescriptorToSchema", () => {
         },
       ],
     });
+  });
+
+  // @ai-generated - Distinguishes producer-expanded indexed access from an unsubstituted generic body.
+  it("expands non-generic indexed access from the producer registry", () => {
+    const schema = typeDescriptorToSchema(
+      indexedAccess(ref("RecordShape"), literal("value")),
+      undefined,
+      new Map([
+        ["RecordShape", object([{ name: "value", type: primitive("string"), optional: false }])],
+      ]),
+    );
+
+    expect(schema).toBe("string");
+  });
+
+  // @ai-generated - A generic registry declaration is not an instantiated descriptor.
+  it("keeps generic indexed access shallow when only an unsubstituted declaration is registered", () => {
+    const schema = typeDescriptorToSchema(
+      indexedAccess(ref("Box", [primitive("string")]), literal("value")),
+      undefined,
+      new Map([
+        [
+          "Box",
+          object([{ name: "value", type: { kind: "typeParameter", name: "T" }, optional: false }]),
+        ],
+      ]),
+    );
+
+    expect(schema).toEqual({
+      kind: "object",
+      type: 'Box<string>["value"]',
+      schema: {},
+    });
+  });
+
+  // @ai-generated - Exact instantiated producer rows may be expanded without compat-side substitution.
+  it("uses an exact producer-supplied instantiated descriptor for generic indexed access", () => {
+    const schema = typeDescriptorToSchema(
+      indexedAccess(ref("Box", [primitive("string")]), literal("value")),
+      undefined,
+      new Map([
+        ["Box<string>", object([{ name: "value", type: primitive("string"), optional: false }])],
+      ]),
+    );
+
+    expect(schema).toBe("string");
   });
 });
