@@ -47,7 +47,8 @@ use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, Flo
 use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
 use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
 use verter_semantic::analysis::flow::peeker::{
-    DemandSegment, FlowSliceBudget, FlowSliceBudgetExceeded, SliceDemand, SliceOrigin,
+    DemandSegment, FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded, SliceDemand,
+    SliceOrigin,
 };
 use verter_semantic::analysis::flow::{
     FunctionBodySkeleton, SkeletonBindingId, SkeletonBindingKind,
@@ -841,10 +842,18 @@ fn require_query_names_bound_graph(
 /// minted slice identity must equal the identity recomputed from the
 /// selection over the bound graph — the same fail-closed hash check the
 /// lowered node performs through the store's retained-plan lookup,
-/// replayed here against the bound graph itself.
+/// replayed here against the bound graph itself. Finally the selection's
+/// observable counts must satisfy the REQUEST's slice budget (the budget
+/// is runtime configuration, never identity): a selection retained under
+/// a permissive budget served against a stricter request would otherwise
+/// pass every provenance axis unchanged, so the planner re-derives the
+/// two budget axes the demand planner enforces — demand-origin return
+/// sites and selected (value + effect-only) nodes — from the retained
+/// selection and fails closed on the typed budget error.
 fn require_retained_selection_of_bound_graph(
     bound: &BoundFlowGraph,
     subject: &FlowDemandSubject,
+    budget: &FlowSliceBudget,
     retained: &PlannedFlowSlice,
 ) -> Result<(), FlowDemandPlanError> {
     let bundle = bound.bundle();
@@ -885,6 +894,32 @@ fn require_retained_selection_of_bound_graph(
     if compute_flow_slice_hash(selection, &bundle.graph, &bundle.skeleton) != retained.hash() {
         return Err(FlowDemandPlanError::SelectionProvenanceMismatch);
     }
+    // The selection must satisfy the REQUEST's slice budget: the retained
+    // plan was minted under the budget armed at planning time, so a
+    // stricter incoming request revalidates the selection's observable
+    // counts — the same two axes `ReturnPathPeeker::plan` enforces —
+    // against its own budget. The final selection's node sets are
+    // disjoint by construction, so the lengths ARE the selected count.
+    let return_sites = selection
+        .origins
+        .iter()
+        .filter(|origin| matches!(origin, SliceOrigin::Return(_)))
+        .count();
+    if return_sites > budget.max_return_sites as usize {
+        return Err(FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::ReturnSites,
+            limit: budget.max_return_sites,
+            observed: u32::try_from(return_sites).unwrap_or(u32::MAX),
+        }));
+    }
+    let selected_nodes = selection.value_nodes.len() + selection.effect_only_nodes.len();
+    if selected_nodes > budget.max_selected_nodes as usize {
+        return Err(FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::SelectedNodes,
+            limit: budget.max_selected_nodes,
+            observed: u32::try_from(selected_nodes).unwrap_or(u32::MAX),
+        }));
+    }
     Ok(())
 }
 
@@ -895,8 +930,9 @@ fn require_retained_selection_of_bound_graph(
 /// and never re-plans. The retained selection is PROVENANCE-SEALED to the
 /// bound graph and the query's demand
 /// ([`require_retained_selection_of_bound_graph`]): a selection retained
-/// for another graph or demand is a typed planning error, and every
-/// referenced id is bounds-checked before use. The
+/// for another graph or demand is a typed planning error, every
+/// referenced id is bounds-checked before use, and the selection's
+/// observable counts must satisfy the request's own slice budget. The
 /// plan's body identity IS the bound graph's key, the subject derives from
 /// the query's own demand axis, the result contract IS the key's
 /// constructor-derived contract, and obligations expand only through the
@@ -921,7 +957,7 @@ pub(crate) fn build_flow_demand_plan(
     }
     let subject = derive_demand_subject(&request.query)?;
     require_query_names_bound_graph(&request.query, bound.key())?;
-    require_retained_selection_of_bound_graph(bound, &subject, retained)?;
+    require_retained_selection_of_bound_graph(bound, &subject, &request.resources.slice_budget, retained)?;
     let structural_selection = retained.selection();
     let SemanticQueryKey::FlowReturn(key) = &request.query else {
         return Err(FlowDemandPlanError::NotAnEnabledRoot);

@@ -22,6 +22,9 @@ use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_language::{FileLanguage, ScriptSourceType};
 use verter_semantic::analysis::flow::flow_graph::FlowEdgeClass;
 use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
+use verter_semantic::analysis::flow::peeker::{
+    FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded,
+};
 use verter_session::for_tests::{
     degraded_flow_return_result_for_tests, dispatch_flow_demand_footprint_for_tests,
     finalize_flow_solve, flow_family_route, flow_graph_fixture_for_tests,
@@ -2601,6 +2604,84 @@ fn demand_planner_rejects_an_out_of_range_selection_node() {
             Err(FlowDemandPlanError::SelectionOutOfRange)
         ),
         "an out-of-range selection node is a typed planning error, not a panic"
+    );
+}
+
+/// The retained selection must also satisfy the INCOMING request's slice
+/// budget: a selection minted under a permissive budget served against a
+/// stricter request (same graph, same query, same demand — every
+/// provenance axis matches) is a typed budget error, never a plan
+/// mislabeled as satisfying the stricter policy. The gate compares the
+/// selection's OBSERVABLE counts against the request's budget — exactly
+/// the two axes the demand planner enforces — never the budget values
+/// themselves, so a stricter-but-satisfied request still plans.
+#[test]
+fn demand_planner_rejects_a_selection_over_the_requests_slice_budget() {
+    let fixture = flow_graph_fixture_for_tests(RICH_FIXTURE_SOURCE, 9);
+    // Minted under the permissive default budget: the rich demand has two
+    // return sites and a non-empty selection.
+    let loose = fixture
+        .retained_plan(&request_named("rich"))
+        .expect("the rich demand plans under the default budget");
+    let selected = loose.selection().value_nodes.len() + loose.selection().effect_only_nodes.len();
+    assert!(selected > 0, "the rich selection is non-empty");
+
+    // Matched control: the selection served against the budget it was
+    // minted under plans.
+    assert!(
+        fixture
+            .build_plan_with_retained(request_named("rich"), &loose)
+            .is_ok(),
+        "the retained selection satisfying the request budget plans"
+    );
+
+    // A stricter return-site budget with the same graph, query and demand:
+    // provenance passes; only the resource policy is stricter.
+    let mut strict_sites = request_named("rich");
+    strict_sites.resources.slice_budget = FlowSliceBudget {
+        max_return_sites: 1,
+        ..FlowSliceBudget::default()
+    };
+    assert_eq!(
+        fixture
+            .build_plan_with_retained(strict_sites, &loose)
+            .unwrap_err(),
+        FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::ReturnSites,
+            limit: 1,
+            observed: 2,
+        }),
+        "a selection over the request's return-site budget is a typed planning error"
+    );
+
+    // The same rule on the selected-node axis.
+    let mut strict_nodes = request_named("rich");
+    strict_nodes.resources.slice_budget = FlowSliceBudget {
+        max_selected_nodes: u32::try_from(selected).expect("in range") - 1,
+        ..FlowSliceBudget::default()
+    };
+    assert_eq!(
+        fixture
+            .build_plan_with_retained(strict_nodes, &loose)
+            .unwrap_err(),
+        FlowDemandPlanError::SliceBudget(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::SelectedNodes,
+            limit: u32::try_from(selected).expect("in range") - 1,
+            observed: u32::try_from(selected).expect("in range"),
+        }),
+        "a selection over the request's selected-node budget is a typed planning error"
+    );
+
+    // A stricter-but-satisfied budget still plans: the check compares the
+    // selection's counts, never the budget VALUES.
+    let mut tighter = request_named("rich");
+    tighter.resources.slice_budget = FlowSliceBudget {
+        max_return_sites: 2,
+        max_selected_nodes: u32::try_from(selected).expect("in range"),
+    };
+    assert!(
+        fixture.build_plan_with_retained(tighter, &loose).is_ok(),
+        "a stricter budget the selection still satisfies plans"
     );
 }
 
