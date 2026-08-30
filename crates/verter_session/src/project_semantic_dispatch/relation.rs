@@ -939,6 +939,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let idx = self.relation_frame_open(key, InferenceOccurrence::ARGUMENT_COVARIANT);
         let mut bindings: Vec<InferBinding> = Vec::new();
         let verdict = self.reduce_relation(key, &mut bindings);
+        #[cfg(any(test, feature = "test-support"))]
+        self.inject_unproven_flow_member_for_tests(idx);
         match self.relation_frame_close_root(idx, verdict, bindings) {
             RootClose::Decided(payload) => {
                 let observed_self_roots = self.relation_completed_publication_roots(key);

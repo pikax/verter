@@ -164,8 +164,11 @@ pub struct SliceContent {
     /// models without the call's return), and a call in a CONTROL
     /// position (an `if` / ternary test) ONLY when its result provably
     /// cannot control the arms' narrowing — a `new` construct, or a
-    /// same-file single-declaration callee with an authored non-predicate
-    /// return annotation. A predicate call in a test CONTROLS narrowing
+    /// module-local, unexported, single-declaration same-file callee
+    /// with an authored non-predicate return annotation (the provably
+    /// closed callee: a script global's or an exported binding's
+    /// checker-visible signature set may hold a predicate overload this
+    /// file never shows). A predicate call in a test CONTROLS narrowing
     /// and is never recorded here: it takes real evaluator evidence at
     /// guard application, or its obligations stay unclaimed. Each span is
     /// a call occurrence whose type position this run decided without the
@@ -593,11 +596,14 @@ pub enum SliceGuard {
         /// Whether the test is negated.
         negated: bool,
     },
-    /// `predicate(subject)` — a same-file, single-declaration function
-    /// whose declared return is `x is T`. The target type lowers through
+    /// `predicate(subject)` — a module-local, unexported,
+    /// single-declaration same-file function whose declared return is
+    /// `x is T` (the provably closed callee: a module-scoped file, one
+    /// declaration, no export spelling). The target type lowers through
     /// the frame gate exactly like a declarator annotation; a cross-file
-    /// callee, an overloaded group, or a callee without the predicate
-    /// spelling lowers to [`SliceGuard::None`].
+    /// callee, a script global, an exported binding, an overloaded group,
+    /// or a callee without the predicate spelling lowers to
+    /// [`SliceGuard::None`].
     TypePredicate {
         /// The argument the predicate talks about.
         subject: SliceNarrowSubject,
@@ -1516,7 +1522,9 @@ pub(crate) fn build_flow_slice_content(
     entry: &FunctionProgramEntry,
     selection: &FlowSliceSelection,
     skeleton: &FunctionBodySkeleton,
+    carrier_module: bool,
 ) -> Option<SliceContent> {
+    let module_scope = carrier_module || program_has_module_syntax(program);
     let resolved = resolve_function_node(program, &entry.locator)?;
     let node = resolved.node;
     let self_name = resolved.self_name;
@@ -1591,6 +1599,7 @@ pub(crate) fn build_flow_slice_content(
         control: Arc::clone(&entry.control),
         direct_calls: &entry.direct_calls,
         program,
+        module_scope,
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
         decided_above_call_spans: Vec::new(),
@@ -1662,6 +1671,29 @@ pub(crate) fn build_flow_slice_content(
         budget_failure,
         inert_write_spans,
         decided_above_call_spans,
+    })
+}
+
+/// Whether the retained program carries top-level MODULE syntax: an
+/// `import` / `export` declaration of any spelling (including the empty
+/// `export {}`), an `export =` assignment, or an `import x = require(…)`
+/// external-module reference. The proof is ONE-DIRECTIONAL: module syntax
+/// proves module scope; its absence proves nothing (`import.meta`, a
+/// project's module-detection setting, or a carrier projection can still
+/// make the file a module), so a caller treats absence as "not provable"
+/// — never as "script".
+fn program_has_module_syntax(program: &Program<'_>) -> bool {
+    program.body.iter().any(|statement| match statement {
+        Statement::ImportDeclaration(_)
+        | Statement::ExportAllDeclaration(_)
+        | Statement::ExportDefaultDeclaration(_)
+        | Statement::ExportNamedDeclaration(_)
+        | Statement::TSExportAssignment(_) => true,
+        Statement::TSImportEqualsDeclaration(import) => matches!(
+            import.module_reference,
+            oxc_ast::ast::TSModuleReference::ExternalModuleReference(_)
+        ),
+        _ => false,
     })
 }
 
@@ -2404,6 +2436,17 @@ struct Lowerer<'a> {
     /// site); a cross-file callee is beyond this channel and lowers to
     /// [`SliceGuard::None`].
     program: &'a Program<'a>,
+    /// Whether the frame's file is PROVABLY module-scoped: the carrier
+    /// projects its script block as a module (a `.vue` / `.svelte` script
+    /// block compiles to one), or the retained program carries top-level
+    /// module syntax. This is the one-directional proof the callee
+    /// closure gate ([`Self::closed_callee_declaration`]) needs: a file
+    /// that is not provably a module is treated as a SCRIPT, whose
+    /// top-level functions are GLOBAL symbols merging with every other
+    /// script's and every `declare global` block's same-name declarations
+    /// — a set this snapshot cannot enumerate — so no callee of such a
+    /// file is ever certified or selected as a predicate.
+    module_scope: bool,
     /// The first budget edge a SELECTED leaf's expression lowering hit.
     budget_failure: Option<verter_type_expr::facts::InferenceUnavailableReason>,
     /// Write effects proven unreachable by a literal control edge.
@@ -4206,10 +4249,13 @@ impl Lowerer<'_> {
 
     /// The user-defined type predicate form: `isStr(u)`, where the
     /// narrowing fact lives in the CALLEE's declared return (`x is T`),
-    /// not at the use site. Only a same-file function declaration carries
-    /// its authored signature through this channel — a frame-local shadow
-    /// names a different function, and a cross-file callee's annotation
-    /// is beyond the retained snapshot this half reads.
+    /// not at the use site. Only a callee with a PROVABLY CLOSED
+    /// same-file declaration ([`Self::closed_callee_declaration`])
+    /// carries its authored signature through this channel — a
+    /// frame-local shadow names a different function, a cross-file
+    /// callee's annotation is beyond the retained snapshot this half
+    /// reads, and a script global or an exported binding has a
+    /// checker-visible signature set this file cannot enumerate.
     fn lower_predicate_guard(&mut self, call: &oxc_ast::ast::CallExpression<'_>) -> SliceGuard {
         let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
             return SliceGuard::None;
@@ -4242,10 +4288,10 @@ impl Lowerer<'_> {
     }
 
     /// Every same-file top-level function DECLARATION with `name`, in
-    /// source order — the direct spelling and the `export function`
-    /// spelling both count, because the group SIZE is a semantic fact
-    /// (an overload group's signature selection) that must not depend on
-    /// export syntax.
+    /// source order — the direct spelling, the `export function` spelling,
+    /// and the `export default function` spelling all count, because the
+    /// group SIZE is a semantic fact (an overload group's signature
+    /// selection) that must not depend on export syntax.
     fn same_file_function_declarations(&self, name: &str) -> Vec<&oxc_ast::ast::Function<'_>> {
         self.program
             .body
@@ -4258,10 +4304,93 @@ impl Lowerer<'_> {
                     }
                     _ => None,
                 },
+                Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                    oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                        Some(&**function)
+                    }
+                    _ => None,
+                },
                 _ => None,
             })
             .filter(|function| function.id.as_ref().map(|id| id.name.as_str()) == Some(name))
             .collect()
+    }
+
+    /// Whether ANY top-level export spelling exposes the module-local
+    /// binding `name` on the module's export surface: `export function
+    /// name`, `export default function name`, a local specifier `export {
+    /// name }` / `export { name as other }` (never a re-export from
+    /// another module, whose specifiers name that module's bindings),
+    /// `export default name`, or `export = name`. An exposed binding is
+    /// AUGMENTABLE — a `declare module "…"` block in any file merges
+    /// further declarations into the export symbol, and the checker
+    /// resolves even a same-file reference to an `export`-modified
+    /// declaration through that merged symbol — so its declaration
+    /// closure is not provable from this file's text.
+    fn top_level_name_is_exported(&self, name: &str) -> bool {
+        let names_binding = |expression: &Expression<'_>| matches!(unwrap_parenthesized(expression), Expression::Identifier(id) if id.name.as_str() == name);
+        self.program.body.iter().any(|statement| match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                let declares = match &export.declaration {
+                    Some(oxc_ast::ast::Declaration::FunctionDeclaration(function)) => {
+                        function.id.as_ref().map(|id| id.name.as_str()) == Some(name)
+                    }
+                    _ => false,
+                };
+                declares
+                    || (export.source.is_none()
+                        && export
+                            .specifiers
+                            .iter()
+                            .any(|specifier| specifier.local.name().as_str() == name))
+            }
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                oxc_ast::ast::ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                    function.id.as_ref().map(|id| id.name.as_str()) == Some(name)
+                }
+                declaration => declaration.as_expression().is_some_and(names_binding),
+            },
+            Statement::TSExportAssignment(export) => names_binding(&export.expression),
+            _ => false,
+        })
+    }
+
+    /// THE callee-closure gate shared by the predicate channel and the
+    /// control-call certification: the ONE same-file function declaration
+    /// of `name` when the callee's CHECKER-VISIBLE declaration set is
+    /// provably that single declaration from this file's text alone —
+    /// `None` whenever the closure cannot be proven, which establishes no
+    /// fact (the caller emits the typed `GuardNarrowing` gap instead).
+    ///
+    /// The proof needs all three of:
+    /// - the file is provably MODULE-scoped ([`Self::module_scope`]): a
+    ///   script's top-level function is a global symbol merging with
+    ///   every other script's and every `declare global` block's
+    ///   same-name declarations, a set no single snapshot enumerates;
+    /// - EXACTLY ONE same-file declaration: an overload group's
+    ///   signature selection is overload/applicability resolution this
+    ///   half does not perform, and the first declaration's annotation
+    ///   can be the WRONG one;
+    /// - the binding is NOT exported by any spelling
+    ///   ([`Self::top_level_name_is_exported`]): an exported binding is
+    ///   augmentable through `declare module`, so further signatures can
+    ///   merge into it from any file.
+    ///
+    /// A module-local, unexported binding is closed: augmentations merge
+    /// only into a module's exports, and a module's locals shadow every
+    /// global — so the file's own text is the whole declaration set.
+    fn closed_callee_declaration(&self, name: &str) -> Option<&oxc_ast::ast::Function<'_>> {
+        if !self.module_scope {
+            return None;
+        }
+        let group = self.same_file_function_declarations(name);
+        let [function] = group.as_slice() else {
+            return None;
+        };
+        if self.top_level_name_is_exported(name) {
+            return None;
+        }
+        Some(function)
     }
 
     /// Read a SAME-FILE function declaration's return-type predicate:
@@ -4273,17 +4402,18 @@ impl Lowerer<'_> {
     /// is `None` for the targetless assertion spelling. `None` for the
     /// whole read for any other signature spelling.
     ///
-    /// The channel serves EXACTLY ONE declaration. An overload group
-    /// (two or more same-name declarations) is refused outright: which
-    /// signature applies is overload/applicability resolution, which
-    /// this half does not perform, and the first declaration's predicate
-    /// target can be the WRONG one — narrowing on it would publish a
-    /// checker-divergent type. A refused group establishes no fact.
+    /// The channel serves EXACTLY ONE PROVABLY CLOSED declaration
+    /// ([`Self::closed_callee_declaration`]). An overload group (two or
+    /// more same-name declarations) is refused outright: which signature
+    /// applies is overload/applicability resolution, which this half does
+    /// not perform, and the first declaration's predicate target can be
+    /// the WRONG one — narrowing on it would publish a checker-divergent
+    /// type. A script global or an exported binding is refused for the
+    /// same reason one level up: its checker-visible signature set may
+    /// hold overloads this file never shows. A refused callee establishes
+    /// no fact.
     fn same_file_predicate(&self, name: &str, asserts: bool) -> Option<(usize, Option<GatedType>)> {
-        let group = self.same_file_function_declarations(name);
-        let [function] = group.as_slice() else {
-            return None;
-        };
+        let function = self.closed_callee_declaration(name)?;
         let annotation = function.return_type.as_ref()?;
         let TSType::TSTypePredicate(predicate) = &annotation.type_annotation else {
             return None;
@@ -5093,6 +5223,7 @@ impl Lowerer<'_> {
             control,
             direct_calls: self.direct_calls,
             program: self.program,
+            module_scope: self.module_scope,
             budget_failure: None,
             inert_write_spans: FxHashSet::default(),
             decided_above_call_spans: Vec::new(),
@@ -5273,12 +5404,16 @@ impl Lowerer<'_> {
     /// when the callee provably establishes no narrowing:
     /// - a `new` construct (a construct signature cannot be a type
     ///   predicate, and the checker derives no narrowing from one);
-    /// - a bare-identifier callee resolving FREE to a same-file function
-    ///   group with EXACTLY ONE declaration whose authored return
-    ///   annotation exists and is NOT a type predicate (an inferred
-    ///   boolean return can be an inferred predicate, so an unannotated
-    ///   declaration never qualifies; an overload group's signature
-    ///   selection is beyond this half).
+    /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
+    ///   same-file declaration ([`Self::closed_callee_declaration`]: a
+    ///   module-scoped file, exactly one declaration, not exported by any
+    ///   spelling) whose authored return annotation exists and is NOT a
+    ///   type predicate (an inferred boolean return can be an inferred
+    ///   predicate, so an unannotated declaration never qualifies; an
+    ///   overload group's signature selection is beyond this half; a
+    ///   script global's or an exported binding's checker-visible
+    ///   signature set may hold a predicate overload this file never
+    ///   shows).
     ///
     /// A call that minted a [`SliceGuard::TypePredicate`] fact takes
     /// REAL evaluator evidence at guard application instead. Every OTHER
@@ -5331,17 +5466,16 @@ impl Lowerer<'_> {
                     }
                     let certified = callee.as_ref().is_some_and(|(name, callee_span)| {
                         matches!(self.resolve_name(name, *callee_span), NameBinding::Free)
-                            && match self.same_file_function_declarations(name).as_slice() {
-                                [function] => {
+                            && self
+                                .closed_callee_declaration(name)
+                                .is_some_and(|function| {
                                     function.return_type.as_ref().is_some_and(|annotation| {
                                         !matches!(
                                             annotation.type_annotation,
                                             TSType::TSTypePredicate(_)
                                         )
                                     })
-                                }
-                                _ => false,
-                            }
+                                })
                     });
                     if !certified {
                         unprovable = true;

@@ -538,7 +538,12 @@ pub(crate) fn drive_expect_boundary(
         );
     }
     let canonical = format!("{dir}/{id}.ts");
-    upsert(&host, &canonical, script, FileLanguage::script_ts());
+    upsert(
+        &host,
+        &canonical,
+        &crate::u6_flow_shape_corpus_tests::module_script(script),
+        FileLanguage::script_ts(),
+    );
     let ident = identity(&canonical, function);
 
     let first =
@@ -703,7 +708,12 @@ pub(crate) fn with_live_flow_node<R>(
         );
     }
     let canonical = format!("{dir}/{id}.ts");
-    upsert(&host, &canonical, script, FileLanguage::script_ts());
+    upsert(
+        &host,
+        &canonical,
+        &crate::u6_flow_shape_corpus_tests::module_script(script),
+        FileLanguage::script_ts(),
+    );
     let carrier = host.get_flow_return_type_with_audit(
         &identity(&canonical, function),
         ReturnProjectionDemand::whole_return(),

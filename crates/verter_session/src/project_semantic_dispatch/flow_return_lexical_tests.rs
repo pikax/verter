@@ -6434,7 +6434,10 @@ fn flow_return_destructured_default_strips_aliased_undefined() {
 const R2_CANONICAL: &str = "/ws/flow-r2fix.ts";
 const R2_FIXTURE: &str = r#"
 export declare function mayThrow(): void;
-export declare function maybeOk(): boolean;
+// The control-test callee stays UNEXPORTED: an exported binding is
+// augmentable, so only a module-local single declaration is a provably
+// closed (certifiable) callee of an `if` test.
+declare function maybeOk(): boolean;
 
 export function r2SwitchFallthroughChain(x: "a" | "b" | "c") {
   switch (x) { case "a": case "b": return x; default: return "z" }

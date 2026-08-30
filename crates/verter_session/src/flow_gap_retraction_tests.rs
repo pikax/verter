@@ -114,7 +114,12 @@ fn run_on(host: &Arc<VerterHost>, canonical: &str, function: &str) -> Trace {
 fn run(id: &str, script: &str, function: &str) -> Trace {
     let host = make_audit_host();
     let canonical = format!("/flow-gap-retraction/{id}.ts");
-    upsert(&host, &canonical, script, FileLanguage::script_ts());
+    upsert(
+        &host,
+        &canonical,
+        &super::module_script(script),
+        FileLanguage::script_ts(),
+    );
     run_on(&host, &canonical, function)
 }
 
@@ -633,7 +638,9 @@ fn flow_gap_partial_propagates_through_consumer_and_scc_gates() {
     upsert(
         &host,
         canonical,
-        "function left(flag: boolean) { if (flag) return right(flag); return (0, () => \"a\" as const) } function right(flag: boolean) { return left(flag) }",
+        &super::module_script(
+            "function left(flag: boolean) { if (flag) return right(flag); return (0, () => \"a\" as const) } function right(flag: boolean) { return left(flag) }",
+        ),
         FileLanguage::script_ts(),
     );
     for function in ["left", "right"] {

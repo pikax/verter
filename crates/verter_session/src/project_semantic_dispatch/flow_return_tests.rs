@@ -3913,7 +3913,7 @@ fn flow_expr_for_script(
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
-        source: Arc::from(script),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
         file_language: crate::LanguageRegistry::global()
             .classify_static(canonical)
             .static_resolution(),
@@ -4253,7 +4253,7 @@ fn flow_source_probe(script: &str) -> FlowSourceProbe {
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(canonical.to_string()),
         input_id: canonical.to_string(),
-        source: Arc::from(script),
+        source: Arc::from(crate::u6_flow_shape_corpus_tests::module_script(script)),
         file_language: crate::LanguageRegistry::global()
             .classify_static(canonical)
             .static_resolution(),
@@ -5696,17 +5696,20 @@ export function makeProps(x: string | number) {
 }
 
 /// The positive control for the control-position call certification: a
-/// call in an `if` test whose callee is a same-file, SINGLE-declaration
-/// function with an authored NON-predicate return annotation provably
-/// establishes no narrowing (there is exactly one signature and its
-/// return is not a type predicate), so both arms join conservatively —
-/// which IS the checker's answer — and the call is decided above:
-/// the demand still proves and warms.
+/// call in an `if` test whose callee is a MODULE-LOCAL, NON-EXPORTED,
+/// SINGLE-declaration function with an authored NON-predicate return
+/// annotation provably establishes no narrowing — the file is a module
+/// (top-level `export` syntax), so the callee is not a script global; the
+/// binding is not exported, so no module augmentation can merge a further
+/// signature into it; and its one signature's return is not a type
+/// predicate. Both arms join conservatively — which IS the checker's
+/// answer — and the call is decided above: the demand still proves and
+/// warms.
 #[test]
 fn annotated_non_predicate_control_call_stays_decided_above_and_warm() {
     const CHECK_CANONICAL: &str = "/ws/boolean-check-control.ts";
     const CHECK_FIXTURE: &str = r#"
-export function check(x: string | number): boolean {
+function check(x: string | number): boolean {
   return typeof x === "number";
 }
 
@@ -5756,6 +5759,187 @@ export function makeChecked(x: string | number) {
             1,
             "a provably non-narrowing control call stays decided above and warms"
         );
+    });
+}
+
+/// Upsert one plain-TS file into `host`.
+fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+}
+
+/// The whole-return `FlowReturnKey` of a top-level function of `canonical`.
+fn whole_return_key(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    canonical: &str,
+    name: &str,
+) -> FlowReturnKey {
+    FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(name),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(canonical),
+        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    }
+}
+
+/// Assert that a control-test callee whose declaration closure is NOT
+/// provable from the file establishes no narrowing and never warms: the
+/// join keeps BOTH arms of the unnarrowed `string | number` parameter,
+/// the demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[track_caller]
+fn assert_control_callee_gaps_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: no narrow is established for a callee whose checker-visible \
+             signature set this file cannot enumerate — the {primitive:?} arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "{name}: the control test degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable control callee never warms"
+    );
+}
+
+/// Control-call certification and predicate selection are proofs over
+/// the callee's CHECKER-VISIBLE declaration set, which is not the current
+/// file's text: a file with no top-level module syntax is a SCRIPT whose
+/// top-level functions are GLOBAL symbols, merging with every other
+/// script's and every `declare global` block's same-name declarations —
+/// a set no single parse snapshot can enumerate. Here a sibling
+/// declaration file contributes a PREDICATE overload to both callees:
+/// the checker narrows the consequent through the merged overload group,
+/// while the current file alone shows exactly one declaration —
+/// `check`'s a non-predicate `boolean`, `isNum`'s an `x is number`
+/// predicate whose target the merged group need not select. Neither
+/// route may self-certify from the local declaration: both demands keep
+/// the unnarrowed join, carry the typed gap, and hold zero candidates.
+#[test]
+fn script_file_control_callee_never_self_certifies_against_global_merge() {
+    const GLOBALS_CANONICAL: &str = "/ws/script-merge/globals.d.ts";
+    const GLOBALS_FIXTURE: &str = r#"
+declare function check(x: string | number): x is number;
+declare function isNum(x: string | number): x is string;
+"#;
+    const MAIN_CANONICAL: &str = "/ws/script-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+function check(x: string | number): boolean {
+  return true;
+}
+
+function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+
+function make(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+
+function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, GLOBALS_CANONICAL, GLOBALS_FIXTURE);
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "make");
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
+    });
+}
+
+/// A MODULE file's EXPORTED function is augmentable: a `declare module
+/// "./main"` block in any file merges further call signatures into the
+/// export symbol, and the checker resolves even the SAME-FILE call of an
+/// `export`-modified declaration through that merged symbol. The
+/// augmenter here adds a predicate overload to both exported callees.
+/// The lowering context cannot enumerate augmenters, so an exported
+/// callee is never a certified control call and never a selected
+/// predicate: both demands keep the unnarrowed join, carry the typed
+/// gap, and hold zero candidates.
+#[test]
+fn exported_module_function_control_callee_never_self_certifies() {
+    const MAIN_CANONICAL: &str = "/ws/module-merge/main.ts";
+    const MAIN_FIXTURE: &str = r#"
+export function check(x: string | number): boolean {
+  return true;
+}
+
+export function isNum(x: string | number): x is number {
+  return typeof x === "number";
+}
+
+export function make(x: string | number) {
+  if (check(x)) return x;
+  return false;
+}
+
+export function pick(x: string | number) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    const AUG_CANONICAL: &str = "/ws/module-merge/augment.ts";
+    const AUG_FIXTURE: &str = r#"
+import "./main";
+
+declare module "./main" {
+  export function check(x: string | number): x is number;
+  export function isNum(x: string | number): x is string;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, MAIN_CANONICAL, MAIN_FIXTURE);
+    upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "make");
+        assert_control_callee_gaps_unwarmed(dispatch, &host, MAIN_CANONICAL, "pick");
     });
 }
 
@@ -5885,6 +6069,296 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
         assert!(
             outcome.self_publish.is_some() && !outcome.flow_batch_unproven,
             "a component without a refused member batch keeps the root admissible"
+        );
+    });
+}
+
+/// Set the per-host one-shot slot that leaves `member` as an UNPROVEN
+/// provisional flow member beneath the next machinery root's close.
+fn arm_unproven_member(host: &VerterHost, member: &FlowReturnKey) {
+    *host
+        .flow_fault_injection
+        .unproven_flow_member
+        .lock()
+        .expect("the unproven-member fault slot is never poisoned") = Some(member.clone());
+}
+
+/// Whether the one-shot slot was consumed — i.e. a machinery-root build
+/// actually ran and drained the injected member.
+fn unproven_member_slot_consumed(host: &VerterHost) -> bool {
+    host.flow_fault_injection
+        .unproven_flow_member
+        .lock()
+        .expect("the unproven-member fault slot is never poisoned")
+        .is_none()
+}
+
+/// The ReturnOnly rails a build folds around an unproven flow value:
+/// partial, cache-suppressed, under the flow-unverified reason class.
+#[track_caller]
+fn assert_flow_unverified_rails(
+    result_is_partial: bool,
+    cache_suppress: bool,
+    reasons: crate::semantic_query::PartialReasonSet,
+    what: &str,
+) {
+    assert!(
+        result_is_partial && cache_suppress,
+        "{what}: the build folds the ReturnOnly rails (partial: {result_is_partial}, \
+         suppressed: {cache_suppress})"
+    );
+    assert!(
+        reasons.contains(crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+        "{what}: the refusal rides the flow-unverified class, got {reasons:?}"
+    );
+}
+
+/// SEAM — the RELATION machinery root. An unproven flow member drained
+/// at the root's close turns the decided verdict into
+/// `DecidedReturnOnly`: the payload still reaches the caller, the build
+/// folds the flow-unverified ReturnOnly rails, the relation family slot
+/// admits NOTHING, and the next request runs the build again (the slot
+/// is consumed a second time). The unarmed control admits once. The
+/// member enters through the real provisional pop path beneath the open
+/// root frame, so the close drains it exactly as an organic torn
+/// component would.
+#[test]
+fn unproven_flow_member_makes_relation_root_decided_return_only() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let query_key = dispatch.relate_key_for(number, number).to_query_key();
+        let member = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        for request in 1..=2 {
+            arm_unproven_member(&host, &member);
+            let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+            assert!(
+                unproven_member_slot_consumed(&host),
+                "request {request}: the relation root build ran and drained the injected member"
+            );
+            assert!(
+                matches!(
+                    read.value,
+                    QueryResult::Value(SemanticQueryValue::Relation(_))
+                ),
+                "request {request}: the decided verdict still flows to the caller, got {:?}",
+                read.value
+            );
+            assert_flow_unverified_rails(
+                read.result_is_partial,
+                read.cache_suppress,
+                read.partial_reasons,
+                &format!("request {request}: relation root"),
+            );
+            assert_eq!(
+                graph.slot_candidate_count_for_tests(&query_key),
+                0,
+                "request {request}: the relation memo admits nothing composed around an \
+                 unproven flow value — the second request recomputes"
+            );
+        }
+
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::Relation(_))
+            ),
+            "control: the decided verdict flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            1,
+            "control: an unpoisoned relation root admits once"
+        );
+    });
+}
+
+/// SEAM — the CALL machinery root. An unproven flow member drained at
+/// the root's close turns the complete result into `CompleteReturnOnly`:
+/// the resolved call still reaches the caller, the build is
+/// cache-suppressed under the flow-unverified class, the call family
+/// slot admits nothing, and NOTHING is queued to the completed-member
+/// batches of either domain. The unarmed control admits once.
+#[test]
+fn unproven_flow_member_makes_call_root_complete_return_only() {
+    use crate::semantic_query::{CallKind, FunctionParam, SignatureKind};
+
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let declared = super::call_resolve_tests::signature(
+            dispatch,
+            "poisonedCallRoot",
+            0,
+            SignatureKind::Call,
+            vec![FunctionParam::synthetic(None, number, false, false)],
+            Vec::new(),
+            number,
+        );
+        let callee = super::call_resolve_tests::callable(dispatch, vec![declared], Vec::new());
+        let query_key =
+            SemanticQueryKey::ResolveCall(Box::new(super::call_resolve_tests::call_key(
+                dispatch,
+                callee,
+                CallKind::Call,
+                None,
+                vec![super::call_resolve_tests::eager(number)],
+            )));
+        let member = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+
+        arm_unproven_member(&host, &member);
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            unproven_member_slot_consumed(&host),
+            "the call root build ran and drained the injected member"
+        );
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::ResolveCall(_))
+            ),
+            "the resolved call still flows to the caller, got {:?}",
+            read.value
+        );
+        assert_flow_unverified_rails(
+            read.result_is_partial,
+            read.cache_suppress,
+            read.partial_reasons,
+            "call root",
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            0,
+            "the call memo admits nothing composed around an unproven flow value"
+        );
+        {
+            let txn = dispatch.dispatch_txn.borrow();
+            assert!(
+                txn.call.completed_members.is_empty(),
+                "the poisoned root is never queued as a completed call member"
+            );
+            assert!(
+                txn.flow.completed_members.is_empty(),
+                "the refused member batch queues no completed flow member"
+            );
+        }
+
+        let read = dispatch.execute_via_cold_build_helper(query_key.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::ResolveCall(_))
+            ),
+            "control: the resolved call flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&query_key),
+            1,
+            "control: an unpoisoned call root admits once"
+        );
+    });
+}
+
+/// SEAM — the FLOW machinery root. An unproven flow member drained at
+/// the root's close withholds the root's OWN verdict: no proof token
+/// mints, the usable value still flows, the build folds the
+/// flow-unverified ReturnOnly rails, and neither the root's nor the
+/// member's family slot admits a candidate. The unarmed control proves
+/// and admits once.
+#[test]
+fn unproven_flow_member_withholds_flow_root_verdict() {
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let root = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let member = flow_key(
+            dispatch,
+            "subParam",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let root_query = SemanticQueryKey::FlowReturn(Box::new(root));
+        let member_query = SemanticQueryKey::FlowReturn(Box::new(member.clone()));
+
+        arm_unproven_member(&host, &member);
+        let read = dispatch.execute_via_cold_build_helper(root_query.clone());
+        assert!(
+            unproven_member_slot_consumed(&host),
+            "the flow root build ran and drained the injected member"
+        );
+        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = &read.value else {
+            panic!(
+                "the root's evaluated value still flows, got {:?}",
+                read.value
+            );
+        };
+        assert_eq!(
+            result.degradation(),
+            None,
+            "the root's own value is usable — only its proof is withheld"
+        );
+        assert_flow_unverified_rails(
+            read.result_is_partial,
+            read.cache_suppress,
+            read.partial_reasons,
+            "flow root",
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&root_query),
+            0,
+            "no proof token: the root never warms"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&member_query),
+            0,
+            "the refused member never warms"
+        );
+
+        let read = dispatch.execute_via_cold_build_helper(root_query.clone());
+        assert!(
+            matches!(
+                read.value,
+                QueryResult::Value(SemanticQueryValue::FlowReturn(_))
+            ),
+            "control: the root's value flows, got {:?}",
+            read.value
+        );
+        assert!(
+            !read.result_is_partial && !read.cache_suppress,
+            "control: an unpoisoned root keeps the clean rails"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&root_query),
+            1,
+            "control: an unpoisoned flow root proves and admits once"
         );
     });
 }

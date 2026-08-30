@@ -23,7 +23,7 @@ fn host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
-fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
+pub(super) fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
     SignatureNodeOccurrence {
         function: FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
@@ -39,7 +39,7 @@ fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
     }
 }
 
-fn signature(
+pub(super) fn signature(
     dispatch: &ProjectSemanticDispatch<'_>,
     name: &str,
     ordinal: u32,
@@ -217,7 +217,7 @@ fn abandon_provisional_call_members(dispatch: &ProjectSemanticDispatch<'_>) {
     }
 }
 
-fn callable(
+pub(super) fn callable(
     dispatch: &ProjectSemanticDispatch<'_>,
     calls: Vec<SemanticNodeId>,
     constructs: Vec<SemanticNodeId>,
@@ -234,7 +234,7 @@ fn callable(
     ))
 }
 
-fn call_key(
+pub(super) fn call_key(
     dispatch: &ProjectSemanticDispatch<'_>,
     callee: SemanticNodeId,
     kind: CallKind,
@@ -271,7 +271,7 @@ fn call_key(
     }
 }
 
-fn eager(ty: SemanticNodeId) -> CallArgKey {
+pub(super) fn eager(ty: SemanticNodeId) -> CallArgKey {
     CallArgKey::Eager {
         ty,
         spread: false,

@@ -219,6 +219,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
         let idx = self.resolve_call_frame_open(key);
         let outcome = self.run_resolve_call(key);
+        #[cfg(any(test, feature = "test-support"))]
+        self.inject_unproven_flow_member_for_tests(idx);
         match self.resolve_call_frame_pop(idx, outcome, true) {
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, self_roots)) => {
                 // A rootless winner has no stable occurrence to key a

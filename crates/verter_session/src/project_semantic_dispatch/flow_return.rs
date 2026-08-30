@@ -244,6 +244,18 @@ pub(crate) mod flow_admission_fault_injection {
         /// modelling an evaluation whose structural walk did not run to
         /// completion (an early exit leaving the ledger short).
         pub(crate) short_execution_ledger: AtomicBool,
+
+        /// When set, the next MACHINERY-ROOT close of ANY domain (a
+        /// relation, call, or flow root build) drains one extra flow
+        /// member: this key's REAL prepared demand, popped provisionally
+        /// beneath the open root with an evaluated value but NO discharge
+        /// report, so its planned obligations stay pending and the
+        /// component close finalizes it UNPROVEN — the torn mixed
+        /// component the production pipeline is built never to leave
+        /// behind. Consumed by the injection (one shot); see
+        /// `ProjectSemanticDispatch::inject_unproven_flow_member_for_tests`.
+        pub(crate) unproven_flow_member:
+            std::sync::Mutex<Option<crate::semantic_query::FlowReturnKey>>,
     }
 
     /// RAII arm/disarm for one slot of one host's knobs.
@@ -1255,6 +1267,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let idx = self.flow_frame_open(key);
         self.prepare_flow_return_demand(key, idx);
         let evaluated = self.evaluate_flow_return(key);
+        #[cfg(any(test, feature = "test-support"))]
+        self.inject_unproven_flow_member_for_tests(idx);
         #[allow(unused_mut)]
         let mut built: QueryBuildOutput<SemanticQueryValue> = match self
             .flow_frame_close_root(idx, evaluated)
@@ -1488,6 +1502,75 @@ impl<'a> ProjectSemanticDispatch<'a> {
                  empty below it, so no open assumption can target a deeper frame"
             ),
         }
+    }
+
+    /// Test-only: leave ONE unproven provisional flow member on the
+    /// pending ledger beneath the OPEN machinery-root frame `root_idx`,
+    /// so the root's close drains it exactly as an organic torn component
+    /// would. Fires once per set
+    /// [`flow_admission_fault_injection::FlowAdmissionFaultKnobs::unproven_flow_member`]
+    /// slot (the slot is consumed) and is a no-op while the slot is empty.
+    ///
+    /// The member takes the REAL provisional path — frame push, demand
+    /// preparation over the key's actual function, an assumption edge to
+    /// the root, and the non-root pop — with an evaluated value but NO
+    /// discharge report: its planned obligations stay pending, so the
+    /// component close finalizes it unproven. The pipeline is built never
+    /// to produce this member on its own; the slot presents it so each
+    /// root-close consumer can be proven to refuse warming around it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn inject_unproven_flow_member_for_tests(&self, root_idx: usize) {
+        let key = self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .unproven_flow_member
+            .lock()
+            .expect("the unproven-member fault slot is never poisoned")
+            .take();
+        let Some(key) = key else {
+            return;
+        };
+        let idx = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            let watermark = txn.obligations.pending().pending_len();
+            txn.reentry_mut().push_flow_return(key.clone(), watermark)
+        };
+        self.prepare_flow_return_demand(&key, idx);
+        let provenance = match self.flow_demand_carrier_of(&key) {
+            Some(carrier) => carrier.provenance,
+            None => self.current_flow_evaluation_provenance(),
+        };
+        // The member ASSUMES the root: that back-edge is what makes its
+        // pop provisional (a deposit at or above the root's drain
+        // watermark) instead of a root close of its own.
+        self.dispatch_txn
+            .borrow_mut()
+            .obligations
+            .record_assumption(root_idx);
+        let number = self
+            .graph()
+            .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::Number,
+            ));
+        let value = crate::semantic_query::FlowReturnResult::new(self.graph(), number, false, None);
+        let pop = self.flow_frame_pop(
+            idx,
+            FlowEvaluationOutcome {
+                outcome: FlowReturnPendingOutcome::EvaluatedValue(value),
+                self_roots: Vec::new(),
+                holds: Vec::new(),
+                materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+                fresh_seed: false,
+                discharge: None,
+                provenance,
+            },
+            false,
+        );
+        assert!(
+            matches!(pop, FlowFramePop::Provisional(_)),
+            "the injected member assumes the open root, so its pop is provisional"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────

@@ -516,6 +516,18 @@ fn make_host() -> Arc<VerterHost> {
     ))
 }
 
+/// The plain-`.ts` materialization of a row's script for the flow lanes:
+/// an ES MODULE — exactly the scope the row's other lanes give the same
+/// text. The runtime lane splices the script into a `<script setup>`
+/// block (a module by construction) and the checker probe program
+/// exports its probes, so a bare `.ts` script would be the ONE lane
+/// reading the text as a global-scope file — where a same-file helper
+/// is never a provably closed callee for control-call certification and
+/// predicate selection, and the lanes would measure different programs.
+pub(crate) fn module_script(script: &str) -> String {
+    format!("{script}\nexport {{}};\n")
+}
+
 pub(crate) fn upsert(host: &VerterHost, id: &str, source: &str, language: FileLanguage) {
     let _ = host
         .upsert(UpsertRequest {
@@ -779,7 +791,12 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
         );
     }
     let canonical = format!("{dir}/{}.ts", row.id);
-    upsert(&host, &canonical, row.script, FileLanguage::script_ts());
+    upsert(
+        &host,
+        &canonical,
+        &module_script(row.script),
+        FileLanguage::script_ts(),
+    );
 
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -1870,7 +1887,12 @@ mod corpus_suite {
                 );
             }
             let canonical = format!("{dir}/{id}.ts");
-            upsert(&host, &canonical, row.script, FileLanguage::script_ts());
+            upsert(
+                &host,
+                &canonical,
+                &module_script(row.script),
+                FileLanguage::script_ts(),
+            );
             let ident = identity(&canonical, function);
 
             let first = host.get_flow_return_type_with_audit(

@@ -108,7 +108,8 @@ fn content_for(source: &str, name: &str) -> Arc<SliceContent> {
 #[test]
 fn optional_chain_after_active_type_predicate_lowers_to_gap() {
     let node = content_for(
-        "type T = { length: number };\n\
+        "export {};\n\
+         type T = { length: number };\n\
          function isT(x: any): x is T { return true }\n\
          function makeProps(x: any) { if (isT(x)) return x?.length; return 0 }",
         "makeProps",
@@ -384,7 +385,7 @@ fn selected_loop_transfers_are_unsupported_but_inert_loops_stay_transparent() {
 #[test]
 fn logical_guards_preserve_unmodelled_operands_for_both_edge_readings() {
     let and_node = content_for(
-        "declare function opaque(): boolean\nfunction makeProps(x: string | number) { if (typeof x === \"string\" && opaque()) throw 0; return { v: x } }",
+        "export {};\ndeclare function opaque(): boolean\nfunction makeProps(x: string | number) { if (typeof x === \"string\" && opaque()) throw 0; return { v: x } }",
         "makeProps",
     );
     let Some(guard) = and_node
@@ -404,7 +405,7 @@ fn logical_guards_preserve_unmodelled_operands_for_both_edge_readings() {
     );
 
     let or_node = content_for(
-        "declare function opaque(): boolean\nfunction makeProps(x: string | number) { if (typeof x === \"string\" || opaque()) throw 0; return { v: x } }",
+        "export {};\ndeclare function opaque(): boolean\nfunction makeProps(x: string | number) { if (typeof x === \"string\" || opaque()) throw 0; return { v: x } }",
         "makeProps",
     );
     let Some(guard) = or_node
@@ -424,7 +425,7 @@ fn logical_guards_preserve_unmodelled_operands_for_both_edge_readings() {
     );
 
     let negated = content_for(
-        "function isStr(v: string | number): v is string { return typeof v === \"string\" }\nfunction makeProps(x: string | number, n: number) { if (!(isStr(x) && n > 0)) throw 0; return { v: x } }",
+        "export {};\nfunction isStr(v: string | number): v is string { return typeof v === \"string\" }\nfunction makeProps(x: string | number, n: number) { if (!(isStr(x) && n > 0)) throw 0; return { v: x } }",
         "makeProps",
     );
     let Some(guard) = negated
@@ -442,6 +443,120 @@ fn logical_guards_preserve_unmodelled_operands_for_both_edge_readings() {
         matches!(guard, SliceGuard::Or(parts) if parts.iter().any(|part| matches!(part, SliceGuard::TypePredicate { .. }))),
         "negating a conjunction must retain the predicate leaf for the opposite edge: {guard:?}"
     );
+}
+
+/// The guard channel and the control-call certification serve ONLY a
+/// callee whose checker-visible declaration set is provably the one
+/// same-file declaration: the file must be module-scoped (top-level
+/// module syntax — a script's top-level functions are globals merging
+/// with every other script's and every `declare global` block's
+/// same-name declarations) and the binding must not be exported by any
+/// spelling (an exported binding is augmentable through `declare module`).
+/// Anything else lowers the test to an unmodelled guard behind the typed
+/// `GuardNarrowing` gap — never a locally selected predicate target, never
+/// a certified call.
+#[test]
+fn control_callee_certification_requires_provable_module_local_closure() {
+    const PREDICATE: &str =
+        "function isStr(v: string | number): v is string { return typeof v === \"string\" }";
+    const BOOLEAN: &str = "function check(v: string | number): boolean { return true }";
+    const BODY: &str =
+        "function makeProps(x: string | number) { if (isStr(x)) return x; if (check(x)) return x; return 0 }";
+    let guarded_if_count = |node: &SliceContent| {
+        node.body
+            .statements
+            .iter()
+            .filter(|statement| {
+                matches!(
+                    statement,
+                    SliceStatement::If {
+                        guard: SliceGuard::TypePredicate { .. },
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let gap_count = |node: &SliceContent| {
+        node.body
+            .statements
+            .iter()
+            .filter(|statement| {
+                matches!(
+                    statement,
+                    SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing)
+                )
+            })
+            .count()
+    };
+
+    // Module-scoped, unexported callees: the closure is provable — the
+    // predicate mints its guard and the annotated boolean call is
+    // certified (no gap at all).
+    let closed = content_for(
+        &format!("export {{}};\n{PREDICATE}\n{BOOLEAN}\n{BODY}"),
+        "makeProps",
+    );
+    assert_eq!(
+        guarded_if_count(&closed),
+        1,
+        "the unexported module-local predicate mints its guard: {closed:?}"
+    );
+    assert_eq!(
+        gap_count(&closed),
+        0,
+        "the unexported module-local boolean callee is certified: {closed:?}"
+    );
+    assert_eq!(
+        closed.decided_above_call_spans.len(),
+        1,
+        "exactly the certified boolean call is decided above: {closed:?}"
+    );
+
+    // A SCRIPT (no module syntax) with the same declarations: neither
+    // closure is provable — the predicate call lowers as an unmodelled
+    // guard and the boolean call is not certified; each control test
+    // drains its own gap.
+    let script = content_for(&format!("{PREDICATE}\n{BOOLEAN}\n{BODY}"), "makeProps");
+    assert_eq!(
+        guarded_if_count(&script),
+        0,
+        "a script's top-level predicate is a global whose declaration set the \
+         file cannot enumerate: {script:?}"
+    );
+    assert_eq!(
+        gap_count(&script),
+        2,
+        "both control tests gap in a script: {script:?}"
+    );
+    assert!(
+        script.decided_above_call_spans.is_empty(),
+        "nothing is certified in a script: {script:?}"
+    );
+
+    // A module whose callees are EXPORTED (declaration spelling and
+    // specifier spelling): augmentable, so neither closure is provable.
+    for exported in [
+        format!("export {PREDICATE}\nexport {BOOLEAN}\n{BODY}"),
+        format!("{PREDICATE}\n{BOOLEAN}\nexport {{ isStr, check as verify }};\n{BODY}"),
+        format!("{PREDICATE}\n{BOOLEAN}\nexport default isStr;\nexport {{ check }};\n{BODY}"),
+    ] {
+        let node = content_for(&exported, "makeProps");
+        assert_eq!(
+            guarded_if_count(&node),
+            0,
+            "an exported predicate is never locally selected: {exported}"
+        );
+        assert_eq!(
+            gap_count(&node),
+            2,
+            "both control tests gap for exported callees: {exported}"
+        );
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "nothing is certified for exported callees: {exported}"
+        );
+    }
 }
 
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region

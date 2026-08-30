@@ -1132,6 +1132,10 @@ impl DeclBodyMemo {
         // LEASE-ONLY run below reuses it.
         self.ensure_lease();
         let entry = entry.clone();
+        // A carrier's script block (`.vue` / `.svelte`) compiles to a
+        // module by construction; a plain script file proves module scope
+        // only through its own top-level syntax.
+        let carrier_module = self.framework_parse.is_some();
         let Some(node) = service.run_leased(&self.key, move |program| {
             program.and_then(|p| {
                 crate::flow_slice_content::build_flow_slice_content(
@@ -1140,6 +1144,7 @@ impl DeclBodyMemo {
                     &entry,
                     &selection,
                     &skeleton,
+                    carrier_module,
                 )
             })
         }) else {
