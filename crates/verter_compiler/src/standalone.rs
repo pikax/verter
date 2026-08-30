@@ -58,8 +58,14 @@ use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, FrameworkOption,
     ProductKind, SvelteOption,
 };
+use crate::framework_common::capability::FrameworkEpochId;
+use crate::framework_common::catalog::{CatalogCapability, CatalogRow, ImmutableCapabilityCatalog};
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
+};
+use crate::framework_common::vue_carrier_frontend::VueSfcV3;
+use crate::framework_common::vue_runtime_backend::{
+    vue_runtime_backend_registration, VueRuntimeBackend,
 };
 use crate::framework_common::{
     IdeOutput, RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOutput,
@@ -82,11 +88,15 @@ use crate::svelte::runtime::{
     compile_client, refuse_unproducible_runtime_surface, ClientCompileError, SvelteFragments,
     SvelteNamespace, SvelteRuntimeOptions,
 };
-use crate::svelte::ParsedSvelte;
+use crate::svelte::{
+    svelte_runtime_backend_registration, ParsedSvelte, SvelteRuntimeBackend, SvelteSfc5,
+};
 use oxc_sourcemap::{SourceMap, SourceMapBuilder};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
+use std::sync::OnceLock;
 use verter_css_syntax::CssDialect;
+use verter_language::FrameworkAdapterId;
 
 /// Ephemeral, non-identity execution inputs for a Svelte compile — resolved
 /// framework facts threaded alongside a canonical
@@ -854,20 +864,29 @@ fn compile_carrier_selected_template(
     let supplied_inline_template =
         wants_inline_selected_template(parsed, options, verter_options, block_content);
 
-    let mut carrier_view = parsed.clone();
-    if block_content.template.is_some() {
-        carrier_view.template_ast = None;
-    }
-    for (style, selected) in carrier_view
-        .style_nodes
-        .iter_mut()
-        .zip(block_content.styles.iter())
-    {
-        if selected.is_some() {
-            style.content = None;
+    let selects_template = block_content.template.is_some();
+    let selects_style = block_content.styles.iter().any(Option::is_some);
+    // Clone the parsed carrier only when a selected block actually blanks a
+    // field on it; a compile with no selected block content borrows the
+    // caller's parse untouched.
+    let carrier_view: std::borrow::Cow<'_, ParsedSfc> = if selects_template || selects_style {
+        let mut view = parsed.clone();
+        if selects_template {
+            view.template_ast = None;
         }
-    }
+        for (style, selected) in view.style_nodes.iter_mut().zip(block_content.styles.iter()) {
+            if selected.is_some() {
+                style.content = None;
+            }
+        }
+        std::borrow::Cow::Owned(view)
+    } else {
+        std::borrow::Cow::Borrowed(parsed)
+    };
     let selected_template = parse_selected_template(options, block_content, alloc);
+    // A selected template block owns the template-derived fields; with no
+    // selected block content the caller's execution-derived values pass
+    // through untouched.
     let carrier_verter = ResolvedVueCompileOptions {
         force_vapor: verter_options.force_vapor,
         force_js: verter_options.force_js,
@@ -880,9 +899,14 @@ fn compile_carrier_selected_template(
         template_binding_metadata: verter_options.template_binding_metadata.clone(),
         template_used_vars: selected_template
             .as_ref()
-            .map(|(_, _, used_vars)| used_vars.clone()),
-        runtime_template_hole: supplied_inline_template,
-        runtime_inline_template_chunk: false,
+            .map(|(_, _, used_vars)| used_vars.clone())
+            .or_else(|| verter_options.template_used_vars.clone()),
+        runtime_template_hole: supplied_inline_template || verter_options.runtime_template_hole,
+        runtime_inline_template_chunk: if selects_template {
+            false
+        } else {
+            verter_options.runtime_inline_template_chunk
+        },
         prepared_styles: verter_options.prepared_styles.clone(),
     };
     let result = compile_from_parsed_legacy(
@@ -1465,6 +1489,120 @@ fn compose_selected_style_map(
     Ok((!composed.is_empty()).then_some(composed))
 }
 
+/// The composed runtime artifact legs one Vue request plans — the primary
+/// target's composition plus, when the request plans BOTH runtime kinds, the
+/// secondary client compile and composition. The SINGLE runtime-product
+/// construction every route shares: the runtime backend's parsed core and the
+/// direct co-planned publication both consume it; neither owns a private
+/// composition sibling.
+struct ComposedVueRuntimeLegs {
+    /// Publication-ordered `(composed, kind, dialect, want_maps)` legs —
+    /// server-first when both runtime kinds are planned.
+    legs: Vec<(ComposedFragments, ProductKind, FragmentDialect, bool)>,
+    /// The secondary (client) compile's own diagnostics, when it ran.
+    secondary_diagnostics: Vec<CompileDiagnostic>,
+}
+
+/// Compose every planned runtime leg from an already-produced primary
+/// bundle. The primary compile already ran under the request's own
+/// `ssr = ANY RuntimeServer present` derivation; a dual-kind request gets
+/// its SECOND compile here, driven by a narrowed single-product sub-request
+/// that forces the opposite `ssr` derivation.
+#[allow(clippy::too_many_arguments)]
+fn compose_vue_runtime_legs(
+    source: &str,
+    parsed: &ParsedSfc,
+    request: &CompileRequest,
+    execution_inputs: &VueExecutionInputs,
+    macros: &VueMacroSemanticInput,
+    block_content: &RuntimeBlockContentInputs,
+    style_prepared: &[Option<PreparedStyleIr>],
+    primary_bundle: &RuntimeCompileOutput,
+) -> Result<ComposedVueRuntimeLegs, VueParsedRuntimeError> {
+    let plan = ProductPlan::from_request(request);
+    let wants_client = plan.wants(ProductKind::RuntimeClient);
+    let wants_server = plan.wants(ProductKind::RuntimeServer);
+    let primary_kind = if wants_server {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    };
+    let vue_request = request.vue().ok_or(VueParsedRuntimeError::Direct(
+        DirectCompileError::FrameworkMismatch {
+            expected: "Vue",
+            actual: "Svelte",
+        },
+    ))?;
+    let dialect = direct_vue_dialect(parsed, request.force_js());
+    let want_maps = runtime_source_map_wanted(request, primary_kind);
+    let composed = compose_vue_runtime(
+        source,
+        vue_request,
+        request.filename(),
+        dialect,
+        primary_kind,
+        primary_bundle,
+        want_maps,
+    )
+    .map_err(map_direct_runtime_err)?;
+    let mut legs = vec![(composed, primary_kind, dialect, want_maps)];
+    let mut secondary_diagnostics = Vec::new();
+
+    if wants_client && wants_server {
+        let secondary_kind = ProductKind::RuntimeClient;
+        let secondary_request = single_runtime_product_request(request, secondary_kind)
+            .map_err(map_direct_runtime_err)?;
+        let secondary_resolved = secondary_request
+            .resolve_vue_backend(parsed.is_vapor())
+            .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
+        let (secondary_options, secondary_verter) =
+            derive_legacy_vue_options(&secondary_request, secondary_resolved, execution_inputs);
+        let allocator = Allocator::new();
+        let secondary_output = lower_vue_parsed_runtime(
+            source,
+            parsed,
+            &secondary_options,
+            &secondary_verter,
+            macros,
+            block_content,
+            style_prepared,
+            &allocator,
+        )?;
+        secondary_diagnostics = secondary_output.diagnostics;
+        let secondary_dialect = direct_vue_dialect(parsed, secondary_request.force_js());
+        let secondary_want_maps = runtime_source_map_wanted(&secondary_request, secondary_kind);
+        let secondary_vue = secondary_request
+            .vue()
+            .ok_or(VueParsedRuntimeError::Direct(
+                DirectCompileError::FrameworkMismatch {
+                    expected: "Vue",
+                    actual: "Svelte",
+                },
+            ))?;
+        let secondary_composed = compose_vue_runtime(
+            source,
+            secondary_vue,
+            secondary_request.filename(),
+            secondary_dialect,
+            secondary_kind,
+            &secondary_output.bundle,
+            secondary_want_maps,
+        )
+        .map_err(map_direct_runtime_err)?;
+        legs.push((
+            secondary_composed,
+            secondary_kind,
+            secondary_dialect,
+            secondary_want_maps,
+        ));
+    }
+
+    Ok(ComposedVueRuntimeLegs {
+        legs,
+        secondary_diagnostics,
+    })
+}
+
 /// Compile requested Vue runtime products over an already-parsed SFC through
 /// the canonical parsed-runtime core, then publish an atomic artifact set.
 pub(crate) fn compile_vue_parsed_runtime(
@@ -1493,86 +1631,22 @@ pub(crate) fn compile_vue_parsed_runtime(
         &allocator,
     )?;
 
-    let plan = ProductPlan::from_request(request);
-    let wants_client = plan.wants(ProductKind::RuntimeClient);
-    let wants_server = plan.wants(ProductKind::RuntimeServer);
-    let primary_kind = if wants_server {
-        ProductKind::RuntimeServer
-    } else {
-        ProductKind::RuntimeClient
-    };
-    let vue_request = request.vue().ok_or(VueParsedRuntimeError::Direct(
-        DirectCompileError::FrameworkMismatch {
-            expected: "Vue",
-            actual: "Svelte",
-        },
-    ))?;
-    let dialect = direct_vue_dialect(parsed, request.force_js());
-    let want_maps = runtime_source_map_wanted(request, primary_kind);
     let mut diagnostics = primary.diagnostics.clone();
-    let composed = compose_vue_runtime(
+    let composed = compose_vue_runtime_legs(
         source,
-        vue_request,
-        request.filename(),
-        dialect,
-        primary_kind,
+        parsed,
+        request,
+        execution_inputs,
+        macros,
+        block_content,
+        style_prepared,
         &primary.bundle,
-        want_maps,
-    )
-    .map_err(map_direct_runtime_err)?;
-    let mut runtime_composed = vec![(composed, primary_kind, dialect, want_maps)];
+    )?;
+    diagnostics.extend(composed.secondary_diagnostics);
 
-    let secondary_output;
-    if wants_client && wants_server {
-        let secondary_kind = ProductKind::RuntimeClient;
-        let secondary_request = single_runtime_product_request(request, secondary_kind)
-            .map_err(map_direct_runtime_err)?;
-        let secondary_resolved = secondary_request
-            .resolve_vue_backend(parsed.is_vapor())
-            .map_err(VueParsedRuntimeError::RequestExecutionRefused)?;
-        let (secondary_options, secondary_verter) =
-            derive_legacy_vue_options(&secondary_request, secondary_resolved, execution_inputs);
-        secondary_output = lower_vue_parsed_runtime(
-            source,
-            parsed,
-            &secondary_options,
-            &secondary_verter,
-            macros,
-            block_content,
-            style_prepared,
-            &allocator,
-        )?;
-        diagnostics.extend(secondary_output.diagnostics.iter().cloned());
-        let secondary_dialect = direct_vue_dialect(parsed, secondary_request.force_js());
-        let secondary_want_maps = runtime_source_map_wanted(&secondary_request, secondary_kind);
-        let secondary_vue = secondary_request
-            .vue()
-            .ok_or(VueParsedRuntimeError::Direct(
-                DirectCompileError::FrameworkMismatch {
-                    expected: "Vue",
-                    actual: "Svelte",
-                },
-            ))?;
-        let secondary_composed = compose_vue_runtime(
-            source,
-            secondary_vue,
-            secondary_request.filename(),
-            secondary_dialect,
-            secondary_kind,
-            &secondary_output.bundle,
-            secondary_want_maps,
-        )
-        .map_err(map_direct_runtime_err)?;
-        runtime_composed.push((
-            secondary_composed,
-            secondary_kind,
-            secondary_dialect,
-            secondary_want_maps,
-        ));
-    }
-
+    let plan = ProductPlan::from_request(request);
     let mut contributions: Vec<ArtifactContribution<'_>> = Vec::new();
-    for (composed, kind, dialect, want_maps) in &runtime_composed {
+    for (composed, kind, dialect, want_maps) in &composed.legs {
         let fragment_refs: Vec<_> = composed.fragments.iter().collect();
         contributions.push(ArtifactContribution {
             kind: *kind,
@@ -1605,6 +1679,160 @@ fn map_direct_runtime_err(err: DirectCompileError) -> VueParsedRuntimeError {
         DirectCompileError::Vue(error) => VueParsedRuntimeError::RequestExecutionRefused(error),
         other => VueParsedRuntimeError::Direct(other),
     }
+}
+
+/// Installed Vue/Svelte runtime row stored in the immutable runtime catalog.
+///
+/// The payloads are the SAME registered backend values the typed
+/// [`crate::framework_common::capability::RuntimeCompilerBackend`] rows carry
+/// — the closed set of runtime emitters. Direct, prepared, and batch routes
+/// select their runtime emitter from this catalog; they never construct a
+/// framework runtime product through a route-private emitter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstalledRuntimeBackend {
+    /// Vue runtime compiler backend.
+    Vue(VueRuntimeBackend),
+    /// Svelte runtime compiler backend.
+    Svelte(SvelteRuntimeBackend),
+}
+
+/// Frozen Vue + Svelte runtime catalog. Built once from the Vue/Svelte
+/// runtime registration constructors; no insert after.
+#[must_use]
+pub(crate) fn built_in_runtime_catalog(
+) -> &'static ImmutableCapabilityCatalog<(), (), (), InstalledRuntimeBackend, ()> {
+    static CATALOG: OnceLock<ImmutableCapabilityCatalog<(), (), (), InstalledRuntimeBackend, ()>> =
+        OnceLock::new();
+    CATALOG.get_or_init(|| {
+        ImmutableCapabilityCatalog::try_from_rows([
+            CatalogRow::from(
+                vue_runtime_backend_registration().map_runtime(InstalledRuntimeBackend::Vue),
+            ),
+            CatalogRow::from(
+                svelte_runtime_backend_registration().map_runtime(InstalledRuntimeBackend::Svelte),
+            ),
+        ])
+        .expect("built-in Vue and Svelte runtime identities are unique")
+    })
+}
+
+/// Catalog lookup for a registered runtime backend by adapter × epoch.
+/// Unknown or mismatched identity returns `None` — no framework fallback.
+#[must_use]
+pub(crate) fn registered_runtime_for(
+    adapter_id: &FrameworkAdapterId,
+    epoch: &FrameworkEpochId,
+) -> Option<&'static InstalledRuntimeBackend> {
+    built_in_runtime_catalog().iter().find_map(|row| {
+        let identity = row.identity();
+        (identity.capability() == CatalogCapability::Runtime
+            && identity.adapter_id() == adapter_id
+            && identity.epoch() == epoch)
+            .then(|| row.runtime())
+            .flatten()
+    })
+}
+
+/// Whether every planned artifact is a runtime target — the request shape
+/// the catalog-selected runtime backend serves whole.
+fn plan_is_runtime_only(plan: &ProductPlan) -> bool {
+    plan.artifacts().iter().all(|planned| {
+        matches!(
+            planned.kind,
+            ProductKind::RuntimeClient | ProductKind::RuntimeServer
+        )
+    })
+}
+
+/// The runtime kind a refusal names when the catalog holds no runtime row
+/// for the request's framework: the primary planned runtime target.
+fn primary_planned_runtime_kind(plan: &ProductPlan) -> ProductKind {
+    if plan.wants(ProductKind::RuntimeServer) {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    }
+}
+
+/// [`VueParsedRuntimeError`] → [`DirectCompileError`], the direct-route
+/// projection of the parsed-runtime refusal channel. Inverse of
+/// [`map_direct_runtime_err`] on the two shared variants.
+fn vue_parsed_runtime_to_direct(
+    err: VueParsedRuntimeError,
+    plan: &ProductPlan,
+) -> DirectCompileError {
+    match err {
+        VueParsedRuntimeError::RequestExecutionRefused(error) => DirectCompileError::Vue(error),
+        VueParsedRuntimeError::Direct(error) => error,
+        // The direct route supplies no selected block content, so the
+        // selected-content refusal cannot arise on this projection; if it
+        // ever does, the plan's primary runtime artifact is what this route
+        // could not supply.
+        VueParsedRuntimeError::BlockContentUnavailable => {
+            DirectCompileError::UnsupportedProduct(primary_planned_runtime_kind(plan))
+        }
+    }
+}
+
+impl VueRuntimeBackend {
+    /// Runtime compile over a route-retained parse — the direct/prepared/
+    /// batch entry into this backend. Drives the SAME parsed runtime core as
+    /// [`crate::framework_common::capability::RuntimeCompilerBackend::compile_runtime`];
+    /// only the parse-identity evidence differs: an admitted artifact there,
+    /// the route's own digest-revalidated parse here.
+    pub(crate) fn compile_runtime_from_parse(
+        &self,
+        source: &str,
+        parsed: &ParsedSfc,
+        request: &CompileRequest,
+        execution_inputs: &VueExecutionInputs,
+        macros: &VueMacroSemanticInput,
+    ) -> Result<DirectCompileOutput, DirectCompileError> {
+        compile_vue_parsed_runtime(
+            source,
+            parsed,
+            request,
+            execution_inputs,
+            macros,
+            &RuntimeBlockContentInputs::default(),
+            &[],
+        )
+        .map_err(|err| vue_parsed_runtime_to_direct(err, &ProductPlan::from_request(request)))
+    }
+}
+
+impl SvelteRuntimeBackend {
+    /// Runtime compile over a route-retained parse — the direct/prepared/
+    /// batch entry into this backend, driving the same parsed runtime core
+    /// as the admitted-artifact trait route.
+    pub(crate) fn compile_runtime_from_parse(
+        &self,
+        source: &str,
+        parsed: &ParsedSvelte,
+        request: &CompileRequest,
+        execution_inputs: &SvelteExecutionInputs,
+    ) -> Result<DirectCompileOutput, DirectCompileError> {
+        StandaloneCompiler.compile_svelte_from_parsed(source, parsed, request, execution_inputs)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread count of route → catalog-selected runtime backend
+    /// delegations, so tests can prove a runtime request actually routed
+    /// through the catalog row rather than a route-private emitter.
+    static RUNTIME_BACKEND_DELEGATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_backend_delegation_count() -> usize {
+    RUNTIME_BACKEND_DELEGATIONS.with(std::cell::Cell::get)
+}
+
+fn record_runtime_backend_delegation() {
+    #[cfg(test)]
+    RUNTIME_BACKEND_DELEGATIONS.with(|count| count.set(count.get() + 1));
 }
 
 /// Stateless compiler for callers that do not participate in a registered
@@ -1761,6 +1989,31 @@ impl StandaloneCompiler {
         execution_inputs: &VueExecutionInputs,
         macro_semantics: &VueMacroSemanticInput,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
+        let plan = ProductPlan::from_request(request);
+
+        // A runtime-only request IS the typed runtime request: it delegates
+        // whole to the catalog-selected runtime backend. Only a request that
+        // co-plans a non-runtime product stays on this route's own composing
+        // publication below.
+        if plan_is_runtime_only(&plan) {
+            let epoch = FrameworkEpochId::from_type::<VueSfcV3>();
+            let Some(InstalledRuntimeBackend::Vue(backend)) =
+                registered_runtime_for(&VueRuntimeBackend.adapter_id(), &epoch)
+            else {
+                return Err(DirectCompileError::UnsupportedProduct(
+                    primary_planned_runtime_kind(&plan),
+                ));
+            };
+            record_runtime_backend_delegation();
+            return backend.compile_runtime_from_parse(
+                source,
+                parsed,
+                request,
+                execution_inputs,
+                macro_semantics,
+            );
+        }
+
         let mut result = self
             .lower_vue_from_parsed(
                 source,
@@ -1772,8 +2025,6 @@ impl StandaloneCompiler {
             )?
             .result;
 
-        let plan = ProductPlan::from_request(request);
-
         // Taken out BEFORE the framework-neutral runtime-bundle conversion
         // below (which consumes `result`) — `RuntimeCompileOutput` carries
         // no `.tsc` slot, its own `.tsx` is redundant with the one already
@@ -1781,7 +2032,7 @@ impl StandaloneCompiler {
         // `result.errors` rather than read back out of the bundle.
         let tsx = result.tsx.take();
         let tsc = result.tsc.take();
-        let diagnostics = std::mem::take(&mut result.errors);
+        let mut diagnostics = std::mem::take(&mut result.errors);
 
         let mut contributions: Vec<ArtifactContribution<'_>> = Vec::new();
         let mut styles: Vec<RuntimeStyleBlock> = Vec::new();
@@ -1828,97 +2079,40 @@ impl StandaloneCompiler {
 
         let wants_client = plan.wants(ProductKind::RuntimeClient);
         let wants_server = plan.wants(ProductKind::RuntimeServer);
-        let mut runtime_composed: Vec<(ComposedFragments, ProductKind, FragmentDialect, bool)> =
-            Vec::new();
+        let mut runtime_legs = None;
 
         if wants_client || wants_server {
-            // `compile_with_parsed`'s own `ssr` derivation
-            // (`derive_legacy_vue_options`) is `ANY RuntimeServer present`,
-            // so the compile already performed above already matches
-            // whichever kind this picks as PRIMARY — never re-derived
-            // independently of that assumption.
-            let primary_kind = if wants_server {
-                ProductKind::RuntimeServer
-            } else {
-                ProductKind::RuntimeClient
-            };
-            let vue_request = request.vue().expect("dispatch already matched Vue");
-            let dialect = direct_vue_dialect(parsed, request.force_js());
-            let want_maps = runtime_source_map_wanted(request, primary_kind);
-
+            // Runtime legs co-planned beside a non-runtime product: the
+            // compile already performed above ran under the request's own
+            // `ssr = ANY RuntimeServer present` derivation
+            // (`derive_legacy_vue_options`), so its bundle IS the primary
+            // runtime bundle; composition — and the dual-kind secondary
+            // compile — is the SAME shared runtime-leg construction the
+            // catalog runtime backend's parsed core drives. This route owns
+            // only the co-planned atomic publication around it.
             let bundle = crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
                 source, parsed, result,
             );
             // Style content is ssr-mode-independent — taken from this
             // (primary) bundle only, never duplicated from a secondary
-            // compile below.
+            // compile.
             styles.extend(bundle.styles.iter().cloned());
 
-            let composed = compose_vue_runtime(
+            let composed = compose_vue_runtime_legs(
                 source,
-                vue_request,
-                request.filename(),
-                dialect,
-                primary_kind,
+                parsed,
+                request,
+                execution_inputs,
+                macro_semantics,
+                &RuntimeBlockContentInputs::default(),
+                &[],
                 &bundle,
-                want_maps,
-            )?;
-            runtime_composed.push((composed, primary_kind, dialect, want_maps));
-
-            // Both `RuntimeClient` and `RuntimeServer` were planned
-            // together — independent, co-requestable products
-            // (`compile_request/mod.rs`'s own doc). `compile_inner`
-            // resolves exactly ONE `ssr` mode per call
-            // (`derive_legacy_vue_options`'s `ssr = ANY RuntimeServer
-            // present`), so the SECOND kind needs its OWN compile, driven
-            // by a narrowed single-product sub-request that forces the
-            // opposite `ssr` derivation.
-            if wants_client && wants_server {
-                let secondary_kind = ProductKind::RuntimeClient;
-                let secondary_request = single_runtime_product_request(request, secondary_kind)?;
-                // Reuses the SAME `parsed` as the primary compile — proven
-                // behavior-preserving (see this module's own doc): both
-                // sub-requests parse the identical source under identical
-                // options, and `compile_inner` never re-parses internally.
-                let secondary_allocator = Allocator::new();
-                let secondary_result = crate::compile::compile_from_parsed(
-                    source,
-                    parsed,
-                    &secondary_request,
-                    execution_inputs,
-                    macro_semantics,
-                    &secondary_allocator,
-                )
-                .map_err(DirectCompileError::Vue)?;
-                let secondary_dialect = direct_vue_dialect(parsed, secondary_request.force_js());
-                let secondary_want_maps =
-                    runtime_source_map_wanted(&secondary_request, secondary_kind);
-                let secondary_vue_request =
-                    secondary_request.vue().expect("secondary request is Vue");
-                let secondary_bundle =
-                    crate::framework_common::vue_bridge::vue_result_to_runtime_bundle(
-                        source,
-                        parsed,
-                        secondary_result,
-                    );
-                let secondary_composed = compose_vue_runtime(
-                    source,
-                    secondary_vue_request,
-                    secondary_request.filename(),
-                    secondary_dialect,
-                    secondary_kind,
-                    &secondary_bundle,
-                    secondary_want_maps,
-                )?;
-                runtime_composed.push((
-                    secondary_composed,
-                    secondary_kind,
-                    secondary_dialect,
-                    secondary_want_maps,
-                ));
-            }
+            )
+            .map_err(|err| vue_parsed_runtime_to_direct(err, &plan))?;
+            diagnostics.extend(composed.secondary_diagnostics);
+            runtime_legs = Some(composed.legs);
         }
-        for (composed, kind, dialect, want_maps) in &runtime_composed {
+        for (composed, kind, dialect, want_maps) in runtime_legs.iter().flatten() {
             let fragment_refs: Vec<_> = composed.fragments.iter().collect();
             contributions.push(ArtifactContribution {
                 kind: *kind,
@@ -1953,12 +2147,37 @@ impl StandaloneCompiler {
     ) -> Result<DirectCompileOutput, DirectCompileError> {
         refuse_unproducible_plan(request)?;
         let parsed = crate::svelte::parse_svelte(source);
-        self.compile_svelte_from_parsed(source, &parsed, request, execution_inputs)
+        self.delegate_svelte_runtime(source, &parsed, request, execution_inputs)
     }
 
-    /// The parsed-input core [`Self::compile_svelte`] delegates to once it
-    /// has a [`ParsedSvelte`] in hand — also [`Self::compile_prepared`]'s
-    /// Svelte dispatch target. Direct and batch entry points refuse
+    /// Route a Svelte compile to the catalog-selected runtime backend. Every
+    /// producible Svelte product is a runtime target, so the whole request is
+    /// the typed runtime request — there is no co-planned publication arm.
+    fn delegate_svelte_runtime(
+        &self,
+        source: &str,
+        parsed: &ParsedSvelte,
+        request: &CompileRequest,
+        execution_inputs: &SvelteExecutionInputs,
+    ) -> Result<DirectCompileOutput, DirectCompileError> {
+        let epoch = FrameworkEpochId::from_type::<SvelteSfc5>();
+        let Some(InstalledRuntimeBackend::Svelte(backend)) =
+            registered_runtime_for(&SvelteRuntimeBackend.adapter_id(), &epoch)
+        else {
+            return Err(DirectCompileError::UnsupportedProduct(
+                primary_planned_runtime_kind(&ProductPlan::from_request(request)),
+            ));
+        };
+        record_runtime_backend_delegation();
+        backend.compile_runtime_from_parse(source, parsed, request, execution_inputs)
+    }
+
+    /// The parsed-input Svelte runtime core — the single emission substrate
+    /// behind the catalog-selected Svelte runtime backend. Every route
+    /// reaches it THROUGH that backend: [`Self::compile_svelte`],
+    /// [`Self::compile_prepared`], and [`Self::compile_batch`] delegate via
+    /// [`Self::delegate_svelte_runtime`], and the admitted-artifact trait
+    /// route drives the same core. Direct and batch entry points refuse
     /// unproducible products/capabilities BEFORE this parse; an explicit
     /// [`Self::prepare`] call may still parse, because preparation was then
     /// the requested operation. This core still re-runs the same preflight
@@ -2195,7 +2414,7 @@ impl StandaloneCompiler {
                         reason: StalePreparedReason::SourceChanged,
                     });
                 }
-                self.compile_svelte_from_parsed(source, &carrier.parsed, request, execution)
+                self.delegate_svelte_runtime(source, &carrier.parsed, request, execution)
             }
             (FrameworkCompileRequest::Vue(_), DirectExecutionInputs::Svelte { .. }) => {
                 Err(DirectCompileError::FrameworkMismatch {

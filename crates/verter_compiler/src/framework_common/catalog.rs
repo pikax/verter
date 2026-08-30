@@ -511,6 +511,18 @@ impl<R> TypedCapabilityRegistration<RuntimeCap<R>> {
     pub fn runtime(&self) -> &R {
         &self.capability.0 .0
     }
+
+    /// Re-wrap the present runtime backend, keeping this row's identity.
+    #[must_use]
+    pub fn map_runtime<S>(
+        self,
+        map: impl FnOnce(R) -> S,
+    ) -> TypedCapabilityRegistration<RuntimeCap<S>> {
+        TypedCapabilityRegistration {
+            identity: self.identity,
+            capability: RuntimeCap(Present(map(self.capability.0 .0))),
+        }
+    }
 }
 
 impl<H> TypedCapabilityRegistration<HostCap<H>> {
