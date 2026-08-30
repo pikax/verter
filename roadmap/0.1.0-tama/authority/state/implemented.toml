@@ -278,6 +278,11 @@ node_id = "CCA1G"
 commit_message = "docs(core): record eval-source and template-fact catalog convergence"
 commit_date = "2026-08-30T02:29:21+01:00"
 
+[[implemented]]
+node_id = "CCA1H"
+commit_message = "feat(core): register Vue IDE projection backend"
+commit_date = "2026-08-30T03:02:21+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

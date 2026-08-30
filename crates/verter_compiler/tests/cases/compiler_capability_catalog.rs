@@ -38,6 +38,14 @@ impl ProjectionBackend for ProjectionOnly {
     type IdeCompanion = ();
     type PublicApi = ();
     type Declarations = ();
+    type ParseArtifact = ();
+    type Request = ();
+    type ExecutionInputs = ();
+    type Error = ();
+
+    fn project_ide(&self, _: &str, _: &(), _: &(), _: &()) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 struct TestEpoch;
@@ -518,6 +526,7 @@ fn walk_rs(dir: &std::path::Path, hits: &mut Vec<String>) {
             || rel_str.ends_with("framework_common/mod.rs")
             || rel_str.ends_with("framework_common/vue_carrier_frontend.rs")
             || rel_str.ends_with("framework_common/vue_semantic_authority.rs")
+            || rel_str.ends_with("framework_common/vue_projection_backend.rs")
             || rel_str.ends_with("svelte/semantic_authority.rs")
             || rel_str.ends_with("framework_common/registered_carrier_projection.rs")
             || rel_str.ends_with("svelte/carrier_frontend.rs")

@@ -9,6 +9,14 @@ impl ProjectionBackend for ProjectionOnly {
     type IdeCompanion = ();
     type PublicApi = ();
     type Declarations = ();
+    type ParseArtifact = ();
+    type Request = ();
+    type ExecutionInputs = ();
+    type Error = ();
+
+    fn project_ide(&self, _: &str, _: &(), _: &(), _: &()) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 fn main() {

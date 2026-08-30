@@ -129,6 +129,24 @@ pub trait ProjectionBackend: Send + Sync + 'static {
     type PublicApi: Send + Sync + 'static;
     /// Declaration / TSC splice shape.
     type Declarations: Send + Sync + 'static;
+    /// Already-admitted parse artifact this backend consumes.
+    type ParseArtifact: Send + Sync + 'static;
+    /// Typed projection request identity.
+    type Request: Send + Sync + 'static;
+    /// Execution inputs excluded from request identity (selected block bytes).
+    type ExecutionInputs: Send + Sync + 'static;
+    /// Typed projection refusal.
+    type Error: Send + Sync + 'static;
+
+    /// Project the IDE companion over an already-admitted parse. Does not
+    /// re-parse. Must not plan or publish a runtime product.
+    fn project_ide(
+        &self,
+        source: &str,
+        artifact: &Self::ParseArtifact,
+        request: &Self::Request,
+        inputs: &Self::ExecutionInputs,
+    ) -> Result<Self::IdeCompanion, Self::Error>;
 }
 
 /// Runtime emit with statically selected targets; emits admitted facts only.

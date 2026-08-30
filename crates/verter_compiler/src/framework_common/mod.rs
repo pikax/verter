@@ -28,6 +28,7 @@ mod registered_geometry_state;
 pub mod registry;
 pub mod vue_bridge;
 pub mod vue_carrier_frontend;
+pub mod vue_projection_backend;
 pub mod vue_semantic_authority;
 
 #[cfg(test)]
@@ -62,4 +63,8 @@ pub use registered_carrier_projection::FrameworkParseArtifact;
 pub use registered_carrier_projection::RegisteredCarrierPayload;
 pub use registry::CarrierCompilerRegistry;
 pub use vue_carrier_frontend::{vue_carrier_frontend_registration, VueCarrierFrontend, VueSfcV3};
+pub use vue_projection_backend::{
+    vue_projection_backend_registration, VueIdeCompanion, VueProjectionBackend,
+    VueProjectionDiagnostic, VueProjectionError, VueProjectionInputs,
+};
 pub use vue_semantic_authority::{vue_semantic_authority_registration, VueSemanticAuthority};

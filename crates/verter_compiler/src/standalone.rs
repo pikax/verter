@@ -46,12 +46,20 @@ use crate::assembly::vue_module::{
     compose_fragments, ComposedFragments, VueMainCompositionFailure, VueMainModuleRequest,
 };
 use crate::assembly::{ArtifactSet, AssemblyRefusal};
-use crate::compile::types::{CompileDiagnostic, VueExecutionInputs};
-use crate::compile::VueMacroSemanticInput;
+use crate::compile::types::{
+    CompileDiagnostic, CompileTarget, VueExecutionInputs, VueMacroSemanticInput,
+};
+use crate::compile::{
+    compile_from_parsed, compile_from_parsed_legacy, derive_legacy_vue_options,
+    parse_template_block, template_unit_used_vars,
+};
 use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, ProductKind,
 };
-use crate::framework_common::{RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeStyleBlock};
+use crate::framework_common::{
+    RuntimeBlockContentInput, RuntimeBlockContentInputs, RuntimeCompileOutput,
+    RuntimeOutputDescriptor, RuntimeStyleBlock,
+};
 use crate::parser::types::{sfc_script_dialect, ParsedSfc, SfcScriptDialect};
 #[cfg(test)]
 use crate::svelte::runtime::UnsupportedSvelteRuntimeSurface;
@@ -473,6 +481,114 @@ pub struct BatchCompileOutput {
     pub report: CompileBatchReport,
 }
 
+/// Parsed Vue lowering: carrier compile result plus the selected-template
+/// diagnostic batch. Selected diagnostics stay a separate batch and are
+/// never merged into `result.errors`.
+pub(crate) struct VueParsedLowering {
+    pub result: crate::compile::VerterCompileResult,
+    pub selected_diagnostics: Vec<CompileDiagnostic>,
+}
+
+/// Selected-template IDE lowering: parse the extra template space, compile
+/// the carrier shell with a generated hole, compile the selected chunk with
+/// transferred script bindings, and return both on one TSX result.
+///
+/// Script bindings and chunk boundaries are internal prerequisites of
+/// IDE + selected template. They are never added as request products.
+fn lower_selected_template_ide(
+    source: &str,
+    parsed: &ParsedSfc,
+    request: &CompileRequest,
+    execution_inputs: &VueExecutionInputs,
+    macro_semantics: &VueMacroSemanticInput,
+    selected: &RuntimeBlockContentInput,
+) -> Result<VueParsedLowering, DirectCompileError> {
+    let vue = request.vue().ok_or(DirectCompileError::FrameworkMismatch {
+        expected: "Vue",
+        actual: "Svelte",
+    })?;
+    let delimiters = vue
+        .delimiters
+        .as_ref()
+        .map(|(open, close)| (open.as_str(), close.as_str()));
+    let custom_elements = if vue.is_custom_element.is_empty() {
+        None
+    } else {
+        Some(vue.is_custom_element.as_slice())
+    };
+    let parsed_template = parse_template_block(&selected.code, delimiters, custom_elements);
+    let allocator = Allocator::new();
+    let used_vars = template_unit_used_vars(
+        &selected.code,
+        &parsed_template,
+        vue.delimiters.clone(),
+        if vue.is_custom_element.is_empty() {
+            None
+        } else {
+            Some(vue.is_custom_element.clone())
+        },
+        &allocator,
+    );
+
+    let mut carrier_view = parsed.clone();
+    carrier_view.template_ast = None;
+    let mut carrier_execution = execution_inputs.clone();
+    carrier_execution.template_used_vars = Some(used_vars);
+
+    let resolved_backend = request
+        .resolve_vue_backend(parsed.is_vapor())
+        .map_err(DirectCompileError::Vue)?;
+    let (mut carrier_options, carrier_verter) =
+        derive_legacy_vue_options(request, resolved_backend, &carrier_execution);
+    carrier_options.ide_chunk_boundaries = true;
+    carrier_options.target |= CompileTarget::SCRIPT;
+
+    let mut carrier_result = compile_from_parsed_legacy(
+        source,
+        &carrier_view,
+        &carrier_options,
+        &carrier_verter,
+        macro_semantics,
+        &allocator,
+    )
+    .map_err(DirectCompileError::Vue)?;
+
+    let selected_execution = VueExecutionInputs {
+        prop_constness_overrides: carrier_result.template_binding_metadata.const_props.clone(),
+        template_binding_metadata: Some(carrier_result.template_binding_metadata.clone()),
+        ..VueExecutionInputs::default()
+    };
+    let (mut chunk_options, chunk_verter) =
+        derive_legacy_vue_options(request, resolved_backend, &selected_execution);
+    chunk_options.ide_chunk_boundaries = true;
+
+    let mut selected_result = compile_from_parsed_legacy(
+        &selected.code,
+        &parsed_template,
+        &chunk_options,
+        &chunk_verter,
+        &VueMacroSemanticInput::default(),
+        &allocator,
+    )
+    .map_err(DirectCompileError::Vue)?;
+
+    let Some(shell) = carrier_result.tsx.as_mut() else {
+        return Err(DirectCompileError::UnsupportedProduct(
+            ProductKind::IdeCompanion,
+        ));
+    };
+    let Some(fragment) = selected_result.tsx.as_mut() else {
+        return Err(DirectCompileError::UnsupportedProduct(
+            ProductKind::IdeCompanion,
+        ));
+    };
+    shell.generated_template_chunk = fragment.generated_template_chunk.take();
+    Ok(VueParsedLowering {
+        result: carrier_result,
+        selected_diagnostics: selected_result.errors,
+    })
+}
+
 /// Stateless compiler for callers that do not participate in a registered
 /// host.
 #[derive(Debug, Default, Clone, Copy)]
@@ -542,6 +658,53 @@ impl StandaloneCompiler {
         self.compile_vue_from_parsed(source, &parsed, request, execution_inputs, macro_semantics)
     }
 
+    /// Lower an already-parsed Vue SFC through the same codegen
+    /// [`Self::compile_vue_from_parsed`] uses, without publishing artifacts.
+    /// Callers that already hold a [`ParsedSfc`] must use this instead of
+    /// re-parsing.
+    ///
+    /// `block_content` is execution input excluded from request identity.
+    /// A selected template is an internal IDE prerequisite: script bindings
+    /// and the generated template chunk are computed here and never added
+    /// as request products.
+    pub(crate) fn lower_vue_from_parsed(
+        &self,
+        source: &str,
+        parsed: &ParsedSfc,
+        request: &CompileRequest,
+        execution_inputs: &VueExecutionInputs,
+        macro_semantics: &VueMacroSemanticInput,
+        block_content: &RuntimeBlockContentInputs,
+    ) -> Result<VueParsedLowering, DirectCompileError> {
+        refuse_unproducible_plan(request)?;
+        match block_content.template.as_ref() {
+            Some(selected) => lower_selected_template_ide(
+                source,
+                parsed,
+                request,
+                execution_inputs,
+                macro_semantics,
+                selected,
+            ),
+            None => {
+                let allocator = Allocator::new();
+                compile_from_parsed(
+                    source,
+                    parsed,
+                    request,
+                    execution_inputs,
+                    macro_semantics,
+                    &allocator,
+                )
+                .map(|result| VueParsedLowering {
+                    result,
+                    selected_diagnostics: Vec::new(),
+                })
+                .map_err(DirectCompileError::Vue)
+            }
+        }
+    }
+
     /// The parsed-input core [`Self::compile_vue`] delegates to once it has
     /// a [`ParsedSfc`] in hand — also [`Self::compile_prepared`]'s Vue
     /// dispatch target, so a direct, prepared-first, prepared-repeat, or
@@ -557,17 +720,16 @@ impl StandaloneCompiler {
         execution_inputs: &VueExecutionInputs,
         macro_semantics: &VueMacroSemanticInput,
     ) -> Result<DirectCompileOutput, DirectCompileError> {
-        refuse_unproducible_plan(request)?;
-        let allocator = Allocator::new();
-        let mut result = crate::compile::compile_from_parsed(
-            source,
-            parsed,
-            request,
-            execution_inputs,
-            macro_semantics,
-            &allocator,
-        )
-        .map_err(DirectCompileError::Vue)?;
+        let mut result = self
+            .lower_vue_from_parsed(
+                source,
+                parsed,
+                request,
+                execution_inputs,
+                macro_semantics,
+                &RuntimeBlockContentInputs::default(),
+            )?
+            .result;
 
         let plan = ProductPlan::from_request(request);
 

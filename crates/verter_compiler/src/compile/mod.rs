@@ -657,16 +657,14 @@ pub(crate) fn compile_from_parsed(
 /// Crate-internal escape hatch: drives [`compile_inner`] directly from
 /// already-legacy-shaped options, bypassing `CompileRequest` derivation.
 ///
-/// Used ONLY by `framework_common::vue_bridge`'s block-content composition
-/// sub-calls, which decompose ONE top-level `RuntimeCompileOptions`-shaped
-/// request into 2-3 fine-grained sub-compiles over SELECTED SFC fragments
-/// (a projected script unit, a selected template block) that do not
-/// themselves correspond to an independent top-level product request — they
-/// are internal plumbing for one external `CarrierCompiler::compile_bundle`
-/// call, not a second production request-construction point. `compile_bundle`
-/// itself (fed by `RuntimeCompileOptions`, the actual external boundary) is
-/// converted to build a canonical `CompileRequest` separately. NOT reachable
-/// outside this crate.
+/// Used by `framework_common::vue_bridge`'s block-content composition
+/// sub-calls and by [`crate::standalone::StandaloneCompiler`]'s selected-
+/// template IDE prerequisite. Those decompose one external request into
+/// fine-grained sub-compiles over selected SFC fragments (a projected
+/// script unit, a selected template block) that do not themselves
+/// correspond to an independent top-level product request — internal
+/// plumbing, not a second production request-construction point. NOT
+/// reachable outside this crate.
 ///
 /// Infallible in practice: it bypasses `CompileRequest::resolve_vue_backend`
 /// entirely (there is no top-level `CompileRequest` at this decomposition
@@ -700,7 +698,7 @@ pub(crate) fn compile_from_parsed_legacy(
 /// fail-closed rule already ran in `CompileRequest::new`; `resolved_backend`
 /// already ran the post-parse half (`resolve_vue_backend`) — this function
 /// only translates, never re-decides, semantics.
-fn derive_legacy_vue_options(
+pub(crate) fn derive_legacy_vue_options(
     request: &crate::compile_request::CompileRequest,
     resolved_backend: crate::compile_request::ResolvedVueBackend,
     execution_inputs: &VueExecutionInputs,
