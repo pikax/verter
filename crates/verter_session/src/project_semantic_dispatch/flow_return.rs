@@ -1338,6 +1338,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     self_roots,
                     materialized,
                     fresh_seed,
+                    flow_demand: None,
                 }),
             });
             return FlowFramePop::Provisional(step);

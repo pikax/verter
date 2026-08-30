@@ -946,3 +946,54 @@ fn return_equation_identity_spans_flow_return_and_resolve_call() {
         ReturnDomainMetadata::FlowReturn { .. }
     ));
 }
+
+/// The flow-demand handle carriers: the in-flight flow frame and the
+/// deferred SCC member each gain a `flow_demand` slot the admission wiring will
+/// store the frame's / member's own demand handle in. The slot defaults to
+/// `None` (no production wiring installs one yet) and round-trips a
+/// handle when set.
+#[test]
+fn flow_demand_carriers_default_none_and_round_trip() {
+    use super::flow_obligation_state::FlowDemandHandle;
+
+    let handle = FlowDemandHandle::for_carrier_tests(3, 41);
+
+    // The in-flight frame carrier.
+    let mut frame = FlowReturnFrameState::default();
+    assert!(
+        frame.flow_demand.is_none(),
+        "a fresh flow frame carries no demand handle"
+    );
+    frame.flow_demand = Some(handle);
+    assert_eq!(
+        frame.flow_demand,
+        Some(handle),
+        "the frame carrier round-trips its handle"
+    );
+
+    // The deferred SCC member carrier.
+    let mut pending = FlowReturnPendingState {
+        outcome: FlowReturnPendingOutcome::NoValue {
+            failure: FlowReturnFailure::Budget(
+                verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
+            ),
+            degradation: None,
+        },
+        inline_flight: None,
+        holds: Vec::new(),
+        self_roots: Vec::new(),
+        materialized: crate::semantic_query::demand::MaterializedSet::default(),
+        fresh_seed: false,
+        flow_demand: None,
+    };
+    assert!(
+        pending.flow_demand.is_none(),
+        "a deferred flow member carries no demand handle by default"
+    );
+    pending.flow_demand = Some(handle);
+    assert_eq!(
+        pending.flow_demand,
+        Some(handle),
+        "the pending carrier round-trips its handle"
+    );
+}

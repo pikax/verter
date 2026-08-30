@@ -304,6 +304,10 @@ pub(crate) struct FlowReturnFrameState {
     /// Tagged return dependencies discovered by indexed call evaluation
     /// while this flow frame is active.
     pub(crate) holds: Vec<ReturnObligationIdentity>,
+    /// The frame's own installed flow demand, when the proof layer is
+    /// wired. `None` until then — no production code installs one yet.
+    #[allow(dead_code)] // read by the admission wiring; the carrier lands first
+    pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandHandle>,
 }
 
 /// The call-resolution-domain payload of one in-flight frame.
@@ -650,6 +654,12 @@ pub(crate) struct FlowReturnPendingState {
     /// component-wide literal-widening decision is made after the
     /// equation fixed point converges, so the bit must survive the pop.
     pub(crate) fresh_seed: bool,
+    /// The member's own installed flow demand, when the proof layer is
+    /// wired: the demand must SURVIVE the pop so the deferred member can
+    /// keep discharging against it. `None` until then — no production
+    /// code installs one yet.
+    #[allow(dead_code)] // read by the admission wiring; the carrier lands first
+    pub(crate) flow_demand: Option<flow_obligation_state::FlowDemandHandle>,
 }
 
 /// The winning candidate's signature while the shared return equation is
@@ -881,12 +891,38 @@ pub(crate) fn provisional_resolve_call_result<'a>(
 /// so nested flow frames and deferred SCC members each hold their own
 /// demand. A default `Vec` reserves no heap storage — the no-flow path
 /// allocates nothing.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ObligationRuntime {
+    /// The instance identity minted at construction: every
+    /// [`FlowDemandHandle`](flow_obligation_state::FlowDemandHandle) this
+    /// runtime mints carries it, and every resolution verifies it, so a
+    /// handle of one runtime fails closed on another — even a populated
+    /// one. A plain `Copy` scalar: the no-flow path allocates nothing.
+    instance_identity: u64,
     stack: ObligationReentryStack,
     pending: ObligationPendingLedger,
     substitution: ProvisionalSubstitution,
     flow_demands: Vec<flow_obligation_state::InstalledFlowDemand>,
+}
+
+/// The identity-nonce minter for [`ObligationRuntime`] instances: every
+/// construction mints a DISTINCT identity, so a flow-demand handle's
+/// runtime axis is unique per runtime. Content-free and transient — never
+/// a cache key, never a fact, never persisted.
+static OBLIGATION_RUNTIME_IDENTITY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+impl Default for ObligationRuntime {
+    fn default() -> Self {
+        Self {
+            instance_identity: OBLIGATION_RUNTIME_IDENTITY
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            stack: ObligationReentryStack::default(),
+            pending: ObligationPendingLedger::default(),
+            substitution: ProvisionalSubstitution::default(),
+            flow_demands: Vec::new(),
+        }
+    }
 }
 
 impl ObligationRuntime {
@@ -1160,14 +1196,29 @@ pub(crate) mod flow_obligation_state {
     }
 
     /// The unforgeable handle of one installed flow demand: an index into
-    /// the runtime's demand ledger, minted ONLY by
-    /// [`super::ObligationRuntime::install_flow_demand`]. The field is
+    /// the runtime's demand ledger plus the owning runtime's instance
+    /// identity, minted ONLY by
+    /// [`super::ObligationRuntime::install_flow_demand`]. The fields are
     /// private, so no caller fabricates a handle; a handle of one runtime
-    /// fails closed on another (an out-of-range index is
-    /// `NoDemandInstalled`, and a foreign in-range index mismatches the
-    /// installed spec identities and basis).
+    /// fails closed on another — the identity is verified at EVERY
+    /// resolution, so a foreign handle is `NoDemandInstalled` even against
+    /// a populated runtime whose slot index matches.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct FlowDemandHandle(u32);
+    pub struct FlowDemandHandle {
+        /// The demand's slot in the owning runtime's ledger.
+        index: u32,
+        /// The owning runtime's instance identity.
+        identity: u64,
+    }
+
+    impl FlowDemandHandle {
+        /// A test-only mint: the carrier round-trip tests need a handle
+        /// value without installing a full demand.
+        #[cfg(test)]
+        pub(crate) fn for_carrier_tests(index: u32, identity: u64) -> Self {
+            Self { index, identity }
+        }
+    }
 
     /// One installed flow demand: its basis, its obligation records, its
     /// convergence observation log, and its one-shot lifecycle phase.
@@ -1323,6 +1374,10 @@ pub(crate) mod flow_obligation_state {
     pub enum FlowTransitionError {
         NoDemandInstalled, UnknownObligation, IllegalTransition,
         UnplannedDependency, UndischargedDependency, NonSuboperationEvidence, ConvergenceBudget,
+        /// The caller-supplied plan's basis is not the installed demand's
+        /// basis — a report built for another demand is refused before
+        /// any obligation is touched.
+        BasisMismatch,
     }
     /// Why the runtime refuses to seal a completion artifact: the demand
     /// was already sealed (the artifact is one-shot), no demand is
@@ -1405,7 +1460,10 @@ pub(crate) mod flow_obligation_state {
             } else {
                 FlowDemandPhase::Discharging
             };
-            let handle = FlowDemandHandle(u32::try_from(self.flow_demands.len()).unwrap_or(u32::MAX));
+            let handle = FlowDemandHandle {
+                index: u32::try_from(self.flow_demands.len()).unwrap_or(u32::MAX),
+                identity: self.instance_identity,
+            };
             self.flow_demands.push(InstalledFlowDemand {
                 basis: plan.basis().clone(),
                 obligations: records,
@@ -1435,8 +1493,8 @@ pub(crate) mod flow_obligation_state {
             dependencies: Arc<[FlowObligationId]>,
             suboperations: Arc<[FlowSuboperationEvidence]>,
         ) -> Result<(), FlowTransitionError> {
-            let index = handle.0 as usize;
-            let Some(demand) = self.flow_demands.get(index) else { return Err(FlowTransitionError::NoDemandInstalled) };
+            let Some(index) = self.flow_demand_index(handle) else { return Err(FlowTransitionError::NoDemandInstalled) };
+            let demand = &self.flow_demands[index];
             demand.ensure_obligations_mutable()?;
             let basis = demand.basis.clone();
             let record = demand.record(id)?;
@@ -1468,7 +1526,7 @@ pub(crate) mod flow_obligation_state {
                 input_basis: basis.input_basis, result_contract: basis.result_contract,
                 dependencies, suboperations,
             };
-            let demand = self.flow_demands.get_mut(index).expect("a resolved demand handle stays in range");
+            let demand = &mut self.flow_demands[index];
             demand.record_mut(id)?.state = ObligationState::Discharged(evidence);
             demand.refresh_expansion_closure();
             Ok(())
@@ -1485,7 +1543,11 @@ pub(crate) mod flow_obligation_state {
         /// Apply one evaluator discharge report CENTRALLY, in the plan's
         /// deterministic work order: for every obligation the report claims
         /// (in work order, never in the report's own order), start it and
-        /// discharge it against the exact evidence the claim carries. Every
+        /// discharge it against the exact evidence the claim carries. The
+        /// plan must carry the INSTALLED demand's exact basis — a report
+        /// iterated under a foreign basis is refused before any obligation
+        /// is touched, so two demands with matching local obligation shapes
+        /// can never accept each other's report. Every
         /// entry is re-validated against the obligation's spec by
         /// [`Self::discharge_flow_obligation`] — a claim naming an
         /// obligation this demand never installed, or carrying wrong
@@ -1496,11 +1558,15 @@ pub(crate) mod flow_obligation_state {
         pub fn apply_flow_discharge_report(&mut self, handle: FlowDemandHandle, plan: &FlowDemandPlan, report: &FlowDischargeReport) -> Result<(), FlowTransitionError> {
             let by_obligation: rustc_hash::FxHashMap<FlowObligationId, &FlowDischargeEntry> =
                 report.entries().iter().map(|entry| (entry.obligation, entry)).collect();
-            // Every claim must name an obligation installed for THIS
-            // demand — a foreign claim fails closed instead of being
-            // silently dropped.
+            // The report applies to the INSTALLED demand only: the plan
+            // the caller iterates must carry the installed demand's exact
+            // basis — two demands with matching local obligation shapes
+            // can never accept each other's report. And every claim must
+            // name an obligation installed for THIS demand — a foreign
+            // claim fails closed instead of being silently dropped.
             {
                 let Some(demand) = self.flow_demand(handle) else { return Err(FlowTransitionError::NoDemandInstalled) };
+                if demand.basis != *plan.basis() { return Err(FlowTransitionError::BasisMismatch); }
                 for entry in report.entries() {
                     demand.record(entry.obligation)?;
                 }
@@ -1589,11 +1655,24 @@ pub(crate) mod flow_obligation_state {
         /// no-reservation probe for a runtime that never served a demand.
         pub fn flow_demand_storage_capacity(&self) -> usize { self.flow_demands.capacity() }
 
+        /// Resolve a handle to its demand's ledger slot: the handle must
+        /// carry THIS runtime's instance identity and an in-range index —
+        /// a foreign or out-of-range handle resolves to nothing, so every
+        /// operation on it fails closed.
+        fn flow_demand_index(&self, handle: FlowDemandHandle) -> Option<usize> {
+            if handle.identity != self.instance_identity {
+                return None;
+            }
+            let index = handle.index as usize;
+            (index < self.flow_demands.len()).then_some(index)
+        }
         fn flow_demand(&self, handle: FlowDemandHandle) -> Option<&InstalledFlowDemand> {
-            self.flow_demands.get(handle.0 as usize)
+            self.flow_demand_index(handle)
+                .map(|index| &self.flow_demands[index])
         }
         fn flow_demand_mut(&mut self, handle: FlowDemandHandle) -> Option<&mut InstalledFlowDemand> {
-            self.flow_demands.get_mut(handle.0 as usize)
+            self.flow_demand_index(handle)
+                .map(|index| &mut self.flow_demands[index])
         }
 
         fn transition(&mut self, handle: FlowDemandHandle, id: FlowObligationId, next: impl FnOnce(&ObligationState) -> Option<ObligationState>) -> Result<(), FlowTransitionError> {

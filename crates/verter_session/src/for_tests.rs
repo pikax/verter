@@ -758,6 +758,10 @@ pub mod projection_bench_support {
 // ── Private flow-solve completeness-proof surface (hermetic) ────────────
 // The fixtures' content keys stay `pub(crate)`; construction/planning go
 // through the wrapper below.
+/// The store-retained structural plan carrier the demand planner consumes:
+/// the slice identity minted over the bound graph plus the selection it
+/// covers. Tests pass it around as an opaque provenance token.
+pub use crate::cache_runtime::flow_slice_node::PlannedFlowSlice;
 pub use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::*;
 pub use crate::project_semantic_dispatch::dispatch_txn::ObligationRuntime;
 pub use crate::project_semantic_dispatch::flow_solve::*;
@@ -773,6 +777,24 @@ pub struct FlowGraphFixtureForTests {
 
 #[rustfmt::skip]
 impl FlowGraphFixtureForTests {
+    /// The ONE structural plan the production hash node would retain for
+    /// this demand over this fixture's bound graph: planned once by graph
+    /// reachability and sealed with the slice identity minted over the
+    /// SAME graph — the exact `PlannedFlowSlice` shape the production
+    /// hash node's compute retains on its published outcome.
+    pub fn retained_plan(&self, request: &FlowDemandRequest) -> Result<PlannedFlowSlice, FlowDemandPlanError> {
+        use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
+        use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+        let subject = crate::project_semantic_dispatch::flow_solve::derive_demand_subject(&request.query)?;
+        let bundle = self.bound.bundle();
+        let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
+        let selection = ReturnPathPeeker::new(&bundle.graph)
+            .plan(&demand, &request.resources.slice_budget)
+            .map_err(FlowDemandPlanError::SliceBudget)?;
+        let hash = compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton);
+        Ok(PlannedFlowSlice::new(hash, selection))
+    }
+
     /// Plan `request` over this fixture's store-bound graph and binding
     /// inventory. The request carries no graph axis and no subject axis:
     /// the basis takes the body identity from the bound graph's key and
@@ -781,14 +803,16 @@ impl FlowGraphFixtureForTests {
     /// this demand and hands it to the demand planner, which assembles
     /// obligations without re-planning.
     pub fn build_plan(&self, request: FlowDemandRequest) -> Result<FlowDemandPlan, FlowDemandPlanError> {
-        use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
-        let subject = crate::project_semantic_dispatch::flow_solve::derive_demand_subject(&request.query)?;
-        let bundle = self.bound.bundle();
-        let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
-        let structural_selection = ReturnPathPeeker::new(&bundle.graph)
-            .plan(&demand, &request.resources.slice_budget)
-            .map_err(FlowDemandPlanError::SliceBudget)?;
-        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, structural_selection, &self.inventory)
+        let retained = self.retained_plan(&request)?;
+        self.build_plan_with_retained(request, &retained)
+    }
+
+    /// Plan `request` over this fixture's bound graph against an EXPLICIT
+    /// retained selection — the adversarial seam: a selection retained
+    /// for another graph or another demand must be a typed planning
+    /// error, never a proof plan.
+    pub fn build_plan_with_retained(&self, request: FlowDemandRequest, retained: &PlannedFlowSlice) -> Result<FlowDemandPlan, FlowDemandPlanError> {
+        crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan(request, &self.bound, retained, &self.inventory)
     }
 }
 

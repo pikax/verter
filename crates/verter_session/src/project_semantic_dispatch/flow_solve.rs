@@ -45,7 +45,10 @@ use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
 use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
-use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
+use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
+use verter_semantic::analysis::flow::peeker::{
+    DemandSegment, FlowSliceBudget, FlowSliceBudgetExceeded, SliceDemand, SliceOrigin,
+};
 use verter_semantic::analysis::flow::{
     FunctionBodySkeleton, SkeletonBindingId, SkeletonBindingKind,
 };
@@ -59,7 +62,9 @@ use super::dispatch_txn::flow_obligation_state::{
     SealedFlowCompletion,
 };
 use super::dispatch_txn::ObligationRuntime;
-use crate::cache_runtime::flow_slice_node::{BoundFlowGraph, FlowSliceFunctionKey};
+use crate::cache_runtime::flow_slice_node::{
+    BoundFlowGraph, FlowSliceFunctionKey, PlannedFlowSlice,
+};
 use crate::semantic_query::demand::Demand;
 use crate::semantic_query::{
     FlowGap, FlowReturnResult, PathSegment, SemanticQueryKey, SemanticQueryKeyTag,
@@ -666,8 +671,11 @@ impl FlowDemandPlan {
 
 /// Why a demand could not be planned: no registered contract, not a
 /// proof-enabled root, a demand the flow planner cannot represent, the
-/// slice budget tripped, the obligation budget tripped, or the query does
-/// not name the bound graph's function and parse environment.
+/// slice budget tripped, the obligation budget tripped, the query does
+/// not name the bound graph's function and parse environment, or the
+/// retained structural selection is not sealed to the bound graph and
+/// this demand (a foreign id, a foreign demand, or a foreign slice
+/// identity).
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowDemandPlanError {
@@ -675,6 +683,16 @@ pub enum FlowDemandPlanError {
     SliceBudget(FlowSliceBudgetExceeded),
     ObligationBudget { limit: u32, observed: u32 },
     BasisKeyMismatch,
+    /// The retained selection references an id outside the bound graph's
+    /// or skeleton's index space — a typed error, never a panic.
+    SelectionOutOfRange,
+    /// The retained selection's origins and demand path are not the
+    /// demand the query derives — a selection retained for ANOTHER demand
+    /// of the same graph.
+    SelectionDemandMismatch,
+    /// The retained selection's minted slice identity does not recompute
+    /// over the bound graph — a selection retained for ANOTHER graph.
+    SelectionProvenanceMismatch,
 }
 
 /// Derive the demand subject EXHAUSTIVELY from the operation-specific
@@ -813,11 +831,72 @@ fn require_query_names_bound_graph(
     }
 }
 
+/// The retained-selection provenance proof: planning rejects unless the
+/// retained selection addresses THIS demand over THIS bound graph. Every
+/// id the selection references is bounds-checked against the bound
+/// graph's and skeleton's index spaces BEFORE any indexing (a foreign
+/// selection fails closed, never panics); the selection's origins and
+/// demand path must BE the demand the query derives (a selection retained
+/// for another demand of the same graph is not this demand's); and the
+/// minted slice identity must equal the identity recomputed from the
+/// selection over the bound graph — the same fail-closed hash check the
+/// lowered node performs through the store's retained-plan lookup,
+/// replayed here against the bound graph itself.
+fn require_retained_selection_of_bound_graph(
+    bound: &BoundFlowGraph,
+    subject: &FlowDemandSubject,
+    retained: &PlannedFlowSlice,
+) -> Result<(), FlowDemandPlanError> {
+    let bundle = bound.bundle();
+    let selection = retained.selection();
+    // Bounds FIRST: nothing below may index the graph or the skeleton
+    // with a foreign id.
+    let nodes_in_range = selection
+        .value_nodes
+        .iter()
+        .chain(selection.effect_only_nodes.iter())
+        .all(|node| node.index() < bundle.graph.node_count());
+    if !nodes_in_range {
+        return Err(FlowDemandPlanError::SelectionOutOfRange);
+    }
+    let origins_in_range = selection.origins.iter().all(|origin| match origin {
+        SliceOrigin::Return(site) => site.index() < bundle.skeleton.return_sites.len(),
+        SliceOrigin::Expr(site) => site.index() < bundle.skeleton.expr_sites.len(),
+    });
+    if !origins_in_range {
+        return Err(FlowDemandPlanError::SelectionOutOfRange);
+    }
+    let names_in_range = selection.demand_path.iter().all(|segment| match segment {
+        DemandSegment::Named(name) => name.index() < bundle.skeleton.names.len(),
+        DemandSegment::Foreign(_) => true,
+    });
+    if !names_in_range {
+        return Err(FlowDemandPlanError::SelectionOutOfRange);
+    }
+    // The selection must address the demand the QUERY derives: the
+    // demand's origins and projection path are recomputed from the
+    // query's own demand axis, never re-planned.
+    let expected = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
+    if expected.origins != selection.origins || expected.path != selection.demand_path {
+        return Err(FlowDemandPlanError::SelectionDemandMismatch);
+    }
+    // The minted slice identity must be THIS selection over THIS graph:
+    // a selection retained for another graph fails closed here.
+    if compute_flow_slice_hash(selection, &bundle.graph, &bundle.skeleton) != retained.hash() {
+        return Err(FlowDemandPlanError::SelectionProvenanceMismatch);
+    }
+    Ok(())
+}
+
 /// Build the demand plan of `request` over the store-minted `bound` graph,
 /// assembling obligations from the ALREADY-PLANNED structural selection —
 /// the one plan the hash node's cold compute produced and retained
-/// (`PlannedFlowSlice`); this function never builds or reacquires a graph
-/// and never re-plans. The
+/// ([`PlannedFlowSlice`]); this function never builds or reacquires a graph
+/// and never re-plans. The retained selection is PROVENANCE-SEALED to the
+/// bound graph and the query's demand
+/// ([`require_retained_selection_of_bound_graph`]): a selection retained
+/// for another graph or demand is a typed planning error, and every
+/// referenced id is bounds-checked before use. The
 /// plan's body identity IS the bound graph's key, the subject derives from
 /// the query's own demand axis, the result contract IS the key's
 /// constructor-derived contract, and obligations expand only through the
@@ -832,7 +911,7 @@ fn require_query_names_bound_graph(
 pub(crate) fn build_flow_demand_plan(
     request: FlowDemandRequest,
     bound: &BoundFlowGraph,
-    structural_selection: ReturnSlicePlan,
+    retained: &PlannedFlowSlice,
     inventory: &FlowBindingInventory,
 ) -> Result<FlowDemandPlan, FlowDemandPlanError> {
     let tag = request.query.tag();
@@ -842,6 +921,8 @@ pub(crate) fn build_flow_demand_plan(
     }
     let subject = derive_demand_subject(&request.query)?;
     require_query_names_bound_graph(&request.query, bound.key())?;
+    require_retained_selection_of_bound_graph(bound, &subject, retained)?;
+    let structural_selection = retained.selection();
     let SemanticQueryKey::FlowReturn(key) = &request.query else {
         return Err(FlowDemandPlanError::NotAnEnabledRoot);
     };
@@ -1144,7 +1225,7 @@ pub(crate) fn build_flow_demand_plan(
         input_basis: request.input_basis, result_contract,
     };
     Ok(FlowDemandPlan {
-        basis, subject, structural_selection,
+        basis, subject, structural_selection: structural_selection.clone(),
         required_domains: Arc::from(domains.into_boxed_slice()),
         required_fact_families: Arc::from(families.into_boxed_slice()),
         registry_closure: Arc::from(contract.closures.to_vec().into_boxed_slice()),

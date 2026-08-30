@@ -388,7 +388,11 @@ impl FunctionFlowGraphStore {
 /// exactly once per cold demand (the hash node's compute); the lowered
 /// node and the demand-plan assembly both consume THIS retained plan
 /// instead of re-planning. Fields are private — immutable views only.
-pub(crate) struct PlannedFlowSlice {
+///
+/// `pub` only so the hermetic test surface (`crate::for_tests`) can name
+/// the carrier; the module path stays crate-private, so production code
+/// outside this module tree cannot reach it.
+pub struct PlannedFlowSlice {
     /// The planner-produced slice identity (the lowered-lookup key input).
     hash: FlowSliceHash,
     /// The structural selection the hash covers.
@@ -396,13 +400,23 @@ pub(crate) struct PlannedFlowSlice {
 }
 
 impl PlannedFlowSlice {
+    /// Seal a minted slice identity to the selection it was minted from.
+    /// The hash itself is unforgeable (only `compute_flow_slice_hash`
+    /// mints one); pairing an identity with a selection it does not cover
+    /// is exactly the adversarial input the demand planner and the
+    /// lowered node reject.
+    #[must_use]
+    pub fn new(hash: FlowSliceHash, selection: ReturnSlicePlan) -> Self {
+        Self { hash, selection }
+    }
+
     /// The minted slice identity.
-    pub(crate) fn hash(&self) -> FlowSliceHash {
+    pub fn hash(&self) -> FlowSliceHash {
         self.hash
     }
 
     /// The retained structural selection (planned once).
-    pub(crate) fn selection(&self) -> &ReturnSlicePlan {
+    pub fn selection(&self) -> &ReturnSlicePlan {
         &self.selection
     }
 }
@@ -532,10 +546,9 @@ impl ArtifactNode for FlowSliceHashNode {
             Ok(plan) => {
                 let slice_hash = compute_flow_slice_hash(&plan, &bundle.graph, &bundle.skeleton);
                 CacheAdmission::Cacheable {
-                    value: FlowSliceHashOutcome::Planned(Arc::new(PlannedFlowSlice {
-                        hash: slice_hash,
-                        selection: plan,
-                    })),
+                    value: FlowSliceHashOutcome::Planned(Arc::new(PlannedFlowSlice::new(
+                        slice_hash, plan,
+                    ))),
                     // Content-addressed: the key pins every input, so the
                     // fact rail stays EMPTY — no slice identity ever
                     // enters `ReadSetSignature.facts`.

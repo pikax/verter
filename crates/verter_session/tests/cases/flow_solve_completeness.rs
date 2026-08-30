@@ -21,6 +21,7 @@ use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_language::{FileLanguage, ScriptSourceType};
 use verter_semantic::analysis::flow::flow_graph::FlowEdgeClass;
+use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
 use verter_session::for_tests::{
     degraded_flow_return_result_for_tests, dispatch_flow_demand_footprint_for_tests,
     finalize_flow_solve, flow_family_route, flow_graph_fixture_for_tests,
@@ -33,7 +34,7 @@ use verter_session::for_tests::{
     FlowOperationRole, FlowOperationStatus, FlowPartialReason, FlowRequirement,
     FlowRequirementKind, FlowResourcePolicy, FlowResultContractDescriptor, FlowSealError,
     FlowSolveOutcome, FlowSuboperationEvidence, FlowTransitionError, ObligationRuntime,
-    ObligationState, SealedFlowCompletion, SemanticGraphStore,
+    ObligationState, PlannedFlowSlice, SealedFlowCompletion, SemanticGraphStore,
 };
 use verter_session::semantic_query::demand::{ProjectionPath, SurfaceFacet, SurfaceFacetSet};
 use verter_session::semantic_query::{
@@ -2378,5 +2379,309 @@ fn unnameable_captured_binding_installs_the_family_typed_gap() {
         record.state,
         ObligationState::Gap(FlowGap::ClosureCapture),
         "the unnameable captured binding installs the family's accepted typed gap"
+    );
+}
+
+// ── Demand-handle runtime scoping ───────────────────────────────────────
+
+/// A `FlowDemandHandle` is scoped to the `ObligationRuntime` that minted
+/// it: a handle of runtime A used against a POPULATED runtime B fails
+/// closed on EVERY operation — a bare slot index can never resolve a
+/// foreign runtime's demand, so foreign evidence or convergence can never
+/// land on another runtime's demand. The owning runtime's handle keeps
+/// working (the matched control).
+#[test]
+fn flow_demand_handle_fails_closed_on_a_foreign_runtime() {
+    let (_fixture, plan) = planned();
+
+    let mut runtime_a = ObligationRuntime::default();
+    let handle_a = runtime_a.install_flow_demand(&plan);
+    let mut runtime_b = ObligationRuntime::default();
+    let handle_b = runtime_b.install_flow_demand(&plan);
+    // Both demands sit at slot 0 of their runtimes: an index-only handle
+    // WOULD resolve against the foreign runtime, so every refusal below
+    // is attributable to runtime scoping alone.
+    let first = plan.work_order()[0];
+
+    assert_eq!(
+        runtime_b.start_flow_obligation(handle_a, first),
+        Err(FlowTransitionError::NoDemandInstalled),
+        "a foreign handle starts nothing"
+    );
+    assert_eq!(
+        runtime_b.gap_flow_obligation(handle_a, first, FlowGap::UnmodeledExpression),
+        Err(FlowTransitionError::NoDemandInstalled),
+        "a foreign handle gaps nothing"
+    );
+    assert_eq!(
+        runtime_b.fail_flow_obligation(
+            handle_a,
+            first,
+            FlowFailure {
+                class: FlowFailureClass::Internal
+            },
+        ),
+        Err(FlowTransitionError::NoDemandInstalled),
+        "a foreign handle fails nothing"
+    );
+    assert_eq!(
+        runtime_b.discharge_flow_obligation(handle_a, first, Arc::from([]), Arc::from([])),
+        Err(FlowTransitionError::NoDemandInstalled),
+        "a foreign handle discharges nothing"
+    );
+    assert_eq!(
+        runtime_b.apply_flow_discharge_report(handle_a, &plan, &FlowDischargeReport::new(vec![])),
+        Err(FlowTransitionError::NoDemandInstalled),
+        "a foreign handle applies no report"
+    );
+    assert_eq!(
+        runtime_b.observe_flow_iteration(handle_a, true),
+        Err(FlowTransitionError::NoDemandInstalled),
+        "a foreign handle observes no convergence"
+    );
+    assert!(
+        matches!(
+            runtime_b.seal_flow_completion(handle_a, solve_value()),
+            Err(FlowSealError::NoDemandInstalled)
+        ),
+        "a foreign handle seals nothing"
+    );
+    assert!(
+        runtime_b.flow_obligations(handle_a).is_none(),
+        "a foreign handle reads no obligations"
+    );
+    assert!(
+        runtime_b.flow_basis(handle_a).is_none(),
+        "a foreign handle reads no basis"
+    );
+    assert_eq!(
+        runtime_b.flow_demand_count(),
+        1,
+        "the foreign runtime's ledger is untouched"
+    );
+    assert!(
+        matches!(
+            runtime_b.flow_obligations(handle_b),
+            Some(records) if records.iter().all(|record| record.state == ObligationState::Pending)
+                || records
+                    .iter()
+                    .all(|record| !matches!(record.state, ObligationState::Running))
+        ),
+        "the foreign runtime's own demand was never transitioned"
+    );
+
+    // The owning runtime's handle keeps working: the matched control.
+    runtime_a
+        .start_flow_obligation(handle_a, first)
+        .expect("the owning runtime accepts its own handle");
+    runtime_b
+        .start_flow_obligation(handle_b, first)
+        .expect("runtime B's own handle still resolves");
+}
+
+// ── Retained-selection provenance ───────────────────────────────────────
+
+/// A smaller matched-demand foreign body: its retained selection's node
+/// ids stay in range of the richer fixture's graph, so a foreign-graph
+/// selection fails on PROVENANCE (the minted slice identity), never on
+/// bounds and never on a panic.
+const SMALLER_FIXTURE_SOURCE: &str = r#"
+function smaller(a) {
+  return a;
+}
+"#;
+
+/// The retained structural selection is SEALED to the graph it was
+/// planned over: the demand planner re-derives the slice identity over
+/// the BOUND graph and refuses a retained selection of another graph —
+/// the same fail-closed provenance the lowered node enforces through the
+/// store's retained-plan lookup.
+#[test]
+fn demand_planner_rejects_a_selection_of_another_graph() {
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let foreign = flow_graph_fixture_for_tests(SMALLER_FIXTURE_SOURCE, 11);
+
+    // Matched control: the fixture's own retained selection plans.
+    let own = fixture
+        .retained_plan(&base_request())
+        .expect("the fixture's own demand plans");
+    assert!(
+        fixture
+            .build_plan_with_retained(base_request(), &own)
+            .is_ok(),
+        "the retained selection of the bound graph plans"
+    );
+
+    // The foreign graph's retained selection — in-range node ids, same
+    // demand — still fails closed on the slice identity.
+    let foreign_retained = foreign
+        .retained_plan(&base_request())
+        .expect("the foreign demand plans");
+    assert!(
+        matches!(
+            fixture.build_plan_with_retained(base_request(), &foreign_retained),
+            Err(FlowDemandPlanError::SelectionProvenanceMismatch)
+        ),
+        "a selection retained for another graph is a typed planning error"
+    );
+}
+
+/// The retained selection is also sealed to the DEMAND it addresses: a
+/// selection retained for a member-projection demand of the SAME graph is
+/// not the whole-return demand's selection.
+#[test]
+fn demand_planner_rejects_a_selection_of_another_demand() {
+    let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+
+    let mut named = base_request();
+    let SemanticQueryKey::FlowReturn(key) = &mut named.query else {
+        unreachable!()
+    };
+    key.demand.point.projection.path = ProjectionPath::from_segments([PathSegment::Member(
+        PropertyKey::String(Arc::from("value")),
+    )]);
+    let retained_named = fixture
+        .retained_plan(&named)
+        .expect("the member-projection demand plans");
+
+    // Matched control: the named demand plans against its own selection.
+    assert!(
+        fixture
+            .build_plan_with_retained(named, &retained_named)
+            .is_ok(),
+        "the retained selection of the query's own demand plans"
+    );
+
+    // The member-projection selection served against the whole-return
+    // demand is a typed planning error.
+    assert!(
+        matches!(
+            fixture.build_plan_with_retained(base_request(), &retained_named),
+            Err(FlowDemandPlanError::SelectionDemandMismatch)
+        ),
+        "a selection retained for another demand is a typed planning error"
+    );
+}
+
+/// A selection referencing a node id outside the bound graph is a typed
+/// planning error — never a panic on the graph-local id space. (The
+/// smaller fixture's graph has 4 nodes; the richer fixture's selection
+/// reaches node 6.)
+#[test]
+fn demand_planner_rejects_an_out_of_range_selection_node() {
+    let fixture = flow_graph_fixture_for_tests(SMALLER_FIXTURE_SOURCE, 11);
+    let richer = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let rich_retained = richer
+        .retained_plan(&base_request())
+        .expect("the richer demand plans");
+    let out_of_range = *rich_retained
+        .selection()
+        .value_nodes
+        .last()
+        .expect("the richer selection is non-empty");
+
+    let own = fixture
+        .retained_plan(&request_named("smaller"))
+        .expect("the fixture's own demand plans");
+    // The forged pair carries the OWN selection's minted identity, so only
+    // the out-of-range node distinguishes it: the refusal is the bounds
+    // check, not the identity check.
+    let forged = PlannedFlowSlice::new(
+        own.hash(),
+        ReturnSlicePlan {
+            origins: Arc::clone(&own.selection().origins),
+            demand_path: Arc::clone(&own.selection().demand_path),
+            value_nodes: Arc::from(vec![out_of_range].into_boxed_slice()),
+            effect_only_nodes: Arc::from([]),
+        },
+    );
+    assert!(
+        matches!(
+            fixture.build_plan_with_retained(request_named("smaller"), &forged),
+            Err(FlowDemandPlanError::SelectionOutOfRange)
+        ),
+        "an out-of-range selection node is a typed planning error, not a panic"
+    );
+}
+
+// ── Discharge-report basis binding ──────────────────────────────────────
+
+/// A discharge report is bound to the INSTALLED demand's basis: applying
+/// it through a plan whose basis differs from the installed demand's is
+/// refused BEFORE any obligation is touched — two demands with matching
+/// local obligation shapes can never accept each other's report.
+#[test]
+fn discharge_report_is_bound_to_the_installed_demands_basis() {
+    // Same source, different content tag: identical obligation shapes,
+    // distinct bases.
+    let fixture_a = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
+    let plan_a = fixture_a.build_plan(base_request()).expect("plans");
+    let fixture_b = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 8);
+    let plan_b = fixture_b.build_plan(base_request()).expect("plans");
+    assert_ne!(
+        plan_a.basis(),
+        plan_b.basis(),
+        "the two demands differ only in basis"
+    );
+    assert_eq!(
+        plan_a.obligation_specs(),
+        plan_b.obligation_specs(),
+        "the obligation shapes match exactly"
+    );
+
+    // The report's claims are spec-valid for BOTH shapes.
+    let report = FlowDischargeReport::new(
+        plan_a
+            .work_order()
+            .iter()
+            .map(|id| {
+                let obligation = spec(&plan_a, *id);
+                FlowDischargeEntry {
+                    obligation: *id,
+                    dependencies: declared_dependencies(obligation),
+                    suboperations: expected_suboperations(&plan_a, obligation),
+                }
+            })
+            .collect(),
+    );
+
+    // Demand B installed; the report applied through plan A's lens is
+    // refused before any transition — plan A's basis is not the installed
+    // demand's basis.
+    let mut runtime = ObligationRuntime::default();
+    let handle_b = runtime.install_flow_demand(&plan_b);
+    assert_eq!(
+        runtime.apply_flow_discharge_report(handle_b, &plan_a, &report),
+        Err(FlowTransitionError::BasisMismatch),
+        "a report under a foreign basis fails closed"
+    );
+    assert!(
+        runtime
+            .flow_obligations(handle_b)
+            .expect("the demand is installed")
+            .iter()
+            .all(|record| !matches!(
+                record.state,
+                ObligationState::Running | ObligationState::Discharged(_)
+            )),
+        "no obligation was touched"
+    );
+
+    // Matched control: the report applies under the installed demand's own
+    // basis and completes the solve.
+    let mut runtime = ObligationRuntime::default();
+    let handle_b = runtime.install_flow_demand(&plan_b);
+    runtime
+        .apply_flow_discharge_report(handle_b, &plan_b, &report)
+        .expect("the matched report applies");
+    observe_convergence(&mut runtime, handle_b);
+    let sealed = runtime
+        .seal_flow_completion(handle_b, solve_value())
+        .expect("a fully applied, runtime-converged solve seals");
+    assert!(
+        finalize_flow_solve(&runtime, handle_b, &plan_b, sealed)
+            .warm_candidate()
+            .is_some(),
+        "the matched report completes"
     );
 }
