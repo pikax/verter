@@ -12,6 +12,12 @@ impl CarrierStructureHash {
 }
 
 pub fn compute_carrier_structure_hash(inventory: &CarrierBlockInventory) -> CarrierStructureHash {
+    inventory.carrier_structure_hash_with(|| compute_carrier_structure_hash_uncached(inventory))
+}
+
+fn compute_carrier_structure_hash_uncached(
+    inventory: &CarrierBlockInventory,
+) -> CarrierStructureHash {
     let mut out = Vec::new();
     out.extend_from_slice(b"verter.carrier-structure.v1\0");
     push_u32(&mut out, inventory.blocks().len() as u32);

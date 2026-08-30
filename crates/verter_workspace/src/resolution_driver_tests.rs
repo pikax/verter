@@ -519,7 +519,7 @@ fn transient_load_failure_retries_and_completes() {
             if fail_first_load {
                 fail_first_load = false;
                 return Err(AttemptFailure::TransientInputLoadFailure {
-                    key: reservation.keys()[0].clone(),
+                    key: Box::new(reservation.keys()[0].clone()),
                 });
             }
             workspace.load_preflighted_resolution_inputs(reservation)
@@ -573,7 +573,7 @@ fn transient_preflight_failure_retries_and_completes() {
             preflight_attempts += 1;
             if preflight_attempts == 1 {
                 return Err(AttemptFailure::TransientInputLoadFailure {
-                    key: keys[0].clone(),
+                    key: Box::new(keys[0].clone()),
                 });
             }
             workspace.preflight_resolution_inputs_bounded(keys, basis)
@@ -625,7 +625,7 @@ fn permanent_input_load_unavailable_is_immediate_terminal_and_not_retried() {
         |reservation| {
             load_attempts += 1;
             Err(AttemptFailure::InputLoadUnavailable {
-                key: reservation.keys()[0].clone(),
+                key: Box::new(reservation.keys()[0].clone()),
             })
         },
         |_, _| true,
@@ -638,7 +638,7 @@ fn permanent_input_load_unavailable_is_immediate_terminal_and_not_retried() {
 
     assert!(matches!(
         failure.as_ref(),
-        AttemptFailure::InputLoadUnavailable { key } if key == &requested_key
+        AttemptFailure::InputLoadUnavailable { key } if key.as_ref() == &requested_key
     ));
     assert_eq!(
         load_attempts, 1,
@@ -669,7 +669,7 @@ fn permanent_preflight_unavailable_is_immediate_terminal_and_not_retried() {
         |keys, _basis| {
             preflight_attempts += 1;
             Err(AttemptFailure::InputLoadUnavailable {
-                key: keys[0].clone(),
+                key: Box::new(keys[0].clone()),
             })
         },
         |_| {
@@ -686,7 +686,7 @@ fn permanent_preflight_unavailable_is_immediate_terminal_and_not_retried() {
 
     assert!(matches!(
         failure.as_ref(),
-        AttemptFailure::InputLoadUnavailable { key } if key == &requested_key
+        AttemptFailure::InputLoadUnavailable { key } if key.as_ref() == &requested_key
     ));
     assert_eq!(preflight_attempts, 1);
     assert_eq!(load_attempts, 0);
@@ -1002,12 +1002,10 @@ fn real_transaction_holds_completed_output_through_final_fence_then_releases_on_
         .resolve_import_outcome_for_published_in_operation(
             &workspace,
             crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
-            &published,
             "/proj/src/main.ts",
             "./published",
             CONTEXT,
-            &mut published_ledger,
-            &|| true,
+            crate::engine::ResolutionOperation::pinned(&published, &mut published_ledger, &|| true),
         );
     assert!(outcome.is_cacheable());
     assert!(outcome.trace().published());
@@ -1033,12 +1031,12 @@ fn real_transaction_holds_completed_output_through_final_fence_then_releases_on_
         .resolve_import_outcome_for_published_in_operation(
             &workspace,
             crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
-            &published,
             "/proj/src/main.ts",
             "./abandoned",
             CONTEXT,
-            &mut abandoned_ledger,
-            &|| false,
+            crate::engine::ResolutionOperation::pinned(&published, &mut abandoned_ledger, &|| {
+                false
+            }),
         );
     assert_eq!(
         abandoned.non_admission_reason(),
@@ -1196,7 +1194,7 @@ fn byte_budget_charges_key_and_reservation_before_loading_without_refund() {
             if !failed_once {
                 failed_once = true;
                 Err(AttemptFailure::TransientInputLoadFailure {
-                    key: reservation.keys()[0].clone(),
+                    key: Box::new(reservation.keys()[0].clone()),
                 })
             } else {
                 workspace.load_preflighted_resolution_inputs(reservation)

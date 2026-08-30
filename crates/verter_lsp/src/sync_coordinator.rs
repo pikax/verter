@@ -98,6 +98,10 @@ struct PendingSignal {
     uri: String,
     requires_sync: bool,
     force_diagnostics: bool,
+    /// One bounded fresh transaction after an admission refusal. The
+    /// admission gate advances an under-counted source rail before returning
+    /// `Superseded`; retrying once is what consumes that repaired identity.
+    sync_retries_remaining: u8,
     /// When the change this signal describes REACHED the server, not when the
     /// coordinator got round to draining it out of the inbox.
     ///
@@ -122,6 +126,7 @@ impl SyncCoordinatorHandle {
             .and_modify(|pending| {
                 pending.uri = uri_str.clone();
                 pending.requires_sync = true;
+                pending.sync_retries_remaining = 1;
                 // Newest receipt wins, and `max` rather than assignment: LSP
                 // notification handlers run concurrently, so an older change can
                 // deposit its signal after a newer one has already deposited
@@ -133,6 +138,7 @@ impl SyncCoordinatorHandle {
                 uri: uri_str,
                 requires_sync: true,
                 force_diagnostics: false,
+                sync_retries_remaining: 1,
                 received_at,
             });
         // Full means a wake is already queued, which is exactly the desired
@@ -169,6 +175,7 @@ impl SyncCoordinatorHandle {
                 uri: uri_str,
                 requires_sync: false,
                 force_diagnostics: true,
+                sync_retries_remaining: 0,
                 received_at,
             });
         let _ = self.wake_tx.try_send(());
@@ -502,6 +509,9 @@ async fn coordinator_loop(
                                     pending.uri = signal.uri.clone();
                                     pending.requires_sync |= signal.requires_sync;
                                     pending.force_diagnostics |= signal.force_diagnostics;
+                                    pending.sync_retries_remaining = pending
+                                        .sync_retries_remaining
+                                        .max(signal.sync_retries_remaining);
                                 })
                                 .or_insert((received_at, signal));
                         }
@@ -554,6 +564,7 @@ async fn coordinator_loop(
                                         uri: ready.uri,
                                         requires_sync: false,
                                         force_diagnostics: true,
+                                        sync_retries_remaining: 0,
                                         received_at,
                                     },
                                 ));
@@ -578,6 +589,7 @@ async fn coordinator_loop(
                                         uri,
                                         requires_sync: false,
                                         force_diagnostics: true,
+                                        sync_retries_remaining: 0,
                                         received_at,
                                     },
                                 ),
@@ -651,7 +663,29 @@ async fn coordinator_loop(
                             .parse::<Uri>()
                             .ok()
                             .and_then(|uri| deps.documents.get(&uri).map(|document| document.version));
-                        sync_file(&deps, &canonical_id, &signal.uri).await;
+                        let sync_outcome = sync_file(&deps, &canonical_id, &signal.uri).await;
+                        if sync_outcome == SyncFileOutcome::Retry
+                            && signal.sync_retries_remaining > 0
+                        {
+                            deps.needs_provider_sync.insert(canonical_id.clone());
+                            let received_at = Instant::now();
+                            pending_files.insert(
+                                canonical_id,
+                                (
+                                    received_at,
+                                    PendingSignal {
+                                        uri: signal.uri,
+                                        requires_sync: true,
+                                        force_diagnostics: true,
+                                        sync_retries_remaining: signal
+                                            .sync_retries_remaining
+                                            .saturating_sub(1),
+                                        received_at,
+                                    },
+                                ),
+                            );
+                            continue;
+                        }
                         // A new editor revision can land while the non-cancellable
                         // provider-state commit is in flight. Fence diagnostics on
                         // the actual LSP version—not `needs_provider_sync`, which is
@@ -820,6 +854,7 @@ fn arm_open_importer_republish(
                         uri: importer_uri.clone(),
                         requires_sync: false,
                         force_diagnostics: true,
+                        sync_retries_remaining: 0,
                         received_at,
                     },
                 ));
@@ -904,9 +939,19 @@ fn refresh_carrier_ide_surface(deps: &SyncCoordinatorDeps, canonical_id: &str) {
 /// provider-less route (`deps.project_sync == None`) therefore has nothing to
 /// do here at all; the tick still publishes Verter-owned diagnostics
 /// afterwards.
-async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &str) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncFileOutcome {
+    Settled,
+    Retry,
+}
+
+async fn sync_file(
+    deps: &SyncCoordinatorDeps,
+    canonical_id: &str,
+    _uri_str: &str,
+) -> SyncFileOutcome {
     let Some(project_sync) = deps.project_sync.as_ref() else {
-        return;
+        return SyncFileOutcome::Settled;
     };
     tracing::info!("sync_coordinator: SYNC_START {canonical_id}");
     // Re-readable: the self-file sync below revalidates the published snapshot
@@ -931,7 +976,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
         );
         deps.pending_snapshot_provider_sync
             .insert(canonical_id.to_string());
-        return;
+        return SyncFileOutcome::Settled;
     };
 
     // A self-file document (a `.svelte.ts` / `.svelte.js` rune module OR a
@@ -968,7 +1013,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             )
             .await;
         }
-        return;
+        return SyncFileOutcome::Settled;
     }
 
     // Pin the open document's exact revision BEFORE compiling, if any is
@@ -1078,6 +1123,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             {
                 deps.pending_snapshot_provider_sync
                     .insert(canonical_id.to_string());
+                return SyncFileOutcome::Retry;
             }
         }
         crate::external_ts::CarrierSyncDecision::DirectOpen {
@@ -1155,7 +1201,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                         canonical_id,
                         &error,
                     );
-                    return;
+                    return SyncFileOutcome::Settled;
                 }
             };
             if let Some(api) = api {
@@ -1220,6 +1266,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
                 {
                     deps.pending_snapshot_provider_sync
                         .insert(canonical_id.to_string());
+                    return SyncFileOutcome::Retry;
                 } else {
                     close_stale_paths(
                         project_sync,
@@ -1280,6 +1327,7 @@ async fn sync_file(deps: &SyncCoordinatorDeps, canonical_id: &str, _uri_str: &st
             .await;
     }
     tracing::info!("sync_coordinator: SYNC_DONE {canonical_id}");
+    SyncFileOutcome::Settled
 }
 
 /// Preserve (or create) an OPEN Vue document's unresolved provider state when

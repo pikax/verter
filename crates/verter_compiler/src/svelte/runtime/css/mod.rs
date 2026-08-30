@@ -177,6 +177,7 @@ pub struct AnalyzedStyleBody {
 /// (absolute offsets into `source`) ONCE and run the scoping analysis. Runs
 /// BEFORE template lowering, so a css parse/analysis failure is the FIRST
 /// diagnostic a style component reports.
+#[cfg(any(test, feature = "test-support"))]
 pub fn analyze_style_body(
     source: &str,
     content: Span,

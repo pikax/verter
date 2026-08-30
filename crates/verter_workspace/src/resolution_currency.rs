@@ -1974,7 +1974,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
                             Some(crate::resolver::LoadedResolutionInput::PackageManifest {
                                 value,
                                 ..
-                            }) => Ok(value.clone()),
+                            }) => Ok(value.as_deref().cloned()),
                             _ => Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
                                 reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,

@@ -580,10 +580,13 @@ defineProps<Props>()
       deps.map((dep) => ({ specifier: dep, resolvedCanonicalId: dep })),
     );
 
-    const main = host.getVirtualFile({
-      rawId: app.filename,
-      compileProfile: profile,
-    });
+    const main = requireVirtualFile(
+      host.getVirtualFile({
+        rawId: app.filename,
+        compileProfile: profile,
+      }),
+      app.filename,
+    );
 
     expect(main.diagnostics.diagnostics).toEqual([]);
     expect(main.code).toContain("name");
@@ -610,7 +613,10 @@ describe("svelte WASM smoke", () => {
     });
     expect(upsert.moduleReferences).toBeDefined();
 
-    const main = host.getVirtualFile({ rawId: "App.svelte", compileProfile: profile });
+    const main = requireVirtualFile(
+      host.getVirtualFile({ rawId: "App.svelte", compileProfile: profile }),
+      "App.svelte",
+    );
     expect(main.code.length).toBeGreaterThan(0);
     expect(main.diagnostics.diagnostics).toEqual([]);
   });
@@ -641,7 +647,8 @@ describe("svelte WASM smoke", () => {
     }
   });
 
-  it("fails closed for a .svelte.ts adapter module without runtime-module lowering", async () => {
+  // @ai-generated - Verifies standalone rune modules stay off component-only virtual-file surfaces.
+  it("does not publish a component virtual file for a .svelte.ts rune module", async () => {
     const host = await loadWasmHost();
     const profile = { sourceMap: true, target: "ide", forceJs: true };
     const source = `export function createCounter() {\n  let v = $state(0)\n  return { get value() { return v } }\n}\n`;
@@ -653,9 +660,11 @@ describe("svelte WASM smoke", () => {
       aliases: [],
       compileProfile: profile,
     });
-    expect(() =>
-      host.getVirtualFile({ rawId: "counter.svelte.ts", compileProfile: profile }),
-    ).toThrow(/runtime surface refused|runtime-surface-refused/);
+    const componentVirtualFile = host.getVirtualFile({
+      rawId: "counter.svelte.ts",
+      compileProfile: profile,
+    });
+    expect(componentVirtualFile).toBeNull();
   });
 });
 
@@ -859,7 +868,10 @@ interface WasmHost {
     aliases: string[];
     compileProfile: Record<string, unknown>;
   }): WasmHostUpsertResult;
-  getVirtualFile(query: { rawId: string; compileProfile?: Record<string, unknown> }): VirtualFile;
+  getVirtualFile(query: {
+    rawId: string;
+    compileProfile?: Record<string, unknown>;
+  }): VirtualFile | null;
   listVirtualFiles(canonicalId: string): Array<{ kind: string; index?: number }>;
   setImportDependencies(
     canonicalOrAlias: string,
@@ -869,6 +881,13 @@ interface WasmHost {
       possibleCanonicalIds?: string[];
     }>,
   ): void;
+}
+
+function requireVirtualFile(file: VirtualFile | null, rawId: string): VirtualFile {
+  if (file === null) {
+    throw new Error(`expected a virtual file for ${rawId}`);
+  }
+  return file;
 }
 
 async function loadWasmHost(): Promise<WasmHost> {
@@ -974,20 +993,26 @@ async function compileWithCombinedSourceMap(vueSource: string): Promise<{
   let templateSourceMap = "";
 
   if (nodeKinds.has("script")) {
-    const script = host.getVirtualFile({
-      rawId: "App.vue?vue&type=script",
-      compileProfile: profile,
-    });
+    const script = requireVirtualFile(
+      host.getVirtualFile({
+        rawId: "App.vue?vue&type=script",
+        compileProfile: profile,
+      }),
+      "App.vue?vue&type=script",
+    );
     scriptCode = script.code;
     scriptSourceMap = script.sourceMap ?? "";
     assembledJs += script.code;
   }
 
   if (nodeKinds.has("template")) {
-    const template = host.getVirtualFile({
-      rawId: "App.vue?vue&type=template",
-      compileProfile: profile,
-    });
+    const template = requireVirtualFile(
+      host.getVirtualFile({
+        rawId: "App.vue?vue&type=template",
+        compileProfile: profile,
+      }),
+      "App.vue?vue&type=template",
+    );
     if (assembledJs) assembledJs += "\n";
     assembledJs += template.code;
     templateCode = template.code;
@@ -995,10 +1020,13 @@ async function compileWithCombinedSourceMap(vueSource: string): Promise<{
   }
 
   if (!assembledJs && nodeKinds.has("main")) {
-    const main = host.getVirtualFile({
-      rawId: "App.vue",
-      compileProfile: profile,
-    });
+    const main = requireVirtualFile(
+      host.getVirtualFile({
+        rawId: "App.vue",
+        compileProfile: profile,
+      }),
+      "App.vue",
+    );
     assembledJs = main.code;
   }
 

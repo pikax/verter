@@ -262,6 +262,10 @@ fn analysis_level_none_skips_all_analysis_in_upsert() {
         );
         let empty_styles: Vec<verter_semantic::analysis::StyleBlockAnalysis> = Vec::new();
         let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
+        assert!(
+            analysis_snap.is_none(),
+            "AnalysisLevel::None upsert must stop at the committed Source stage"
+        );
         let style_analyses = analysis_snap
             .as_ref()
             .and_then(|a| a.downcast_data::<HostAnalysisData>())

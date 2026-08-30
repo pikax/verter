@@ -729,12 +729,33 @@ function requirePublishedType(
   return row.type;
 }
 
+/**
+ * Decode the producer-ratified publication exactly as carried on the wire.
+ *
+ * Publication may replay same-file helpers, but it must stop at the external
+ * type frontier. The filtered registry allows that local hop without feeding
+ * imported registry bodies back into shallow `ref` / `indexedAccess`
+ * carriers; the full registry remains available to explicit compat/schema
+ * consumer demand.
+ */
+function publishedTypeExprToDescriptor(
+  row: {
+    type?: NativeTypeExprLike;
+    publication: NativeTypePublication;
+  },
+  label: string,
+  publicationRegistry?: Map<string, NativeTypeExprLike>,
+): TypeDescriptor {
+  return typeExprToDescriptor(requirePublishedType(row, label), publicationRegistry);
+}
+
 function compatRawType(display: NativeTerminalTypeDisplay): { rawType?: string } {
   return typeof display.text === "string" ? { rawType: display.text } : {};
 }
 
 export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResult): ComponentMeta {
   const nativeRegistry = buildNativeTypeRegistry(meta);
+  const publicationRegistry = buildNativePublicationRegistry(meta);
   return {
     filePath: meta.filePath,
     componentName: deriveComponentName(meta.filePath),
@@ -742,7 +763,7 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     componentPublicContract: meta.componentPublicContract,
     props: meta.props.map((prop) => ({
       name: prop.name,
-      type: typeExprToDescriptor(requirePublishedType(prop, `prop ${prop.name}`), nativeRegistry),
+      type: publishedTypeExprToDescriptor(prop, `prop ${prop.name}`, publicationRegistry),
       ...(prop.typeExpansion !== undefined ? { typeExpansion: prop.typeExpansion } : {}),
       required: prop.required,
       hasDefault: prop.hasDefault,
@@ -761,12 +782,10 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
     })),
     events: meta.events.map((event) => ({
       name: event.name,
-      payload: typeExprToDescriptor(
-        requirePublishedType(
-          { type: event.payload, publication: event.publication },
-          `event ${event.name}`,
-        ),
-        nativeRegistry,
+      payload: publishedTypeExprToDescriptor(
+        { type: event.payload, publication: event.publication },
+        `event ${event.name}`,
+        publicationRegistry,
       ),
       ...(event.payloadExpansion !== undefined ? { payloadExpansion: event.payloadExpansion } : {}),
       hasValidator: false,
@@ -780,9 +799,10 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
       isScoped: slot.isScoped,
       bindings: slot.bindings.map((binding) => ({
         name: binding.name,
-        type: typeExprToDescriptor(
-          requirePublishedType(binding, `slot binding ${slot.name}.${binding.name}`),
-          nativeRegistry,
+        type: publishedTypeExprToDescriptor(
+          binding,
+          `slot binding ${slot.name}.${binding.name}`,
+          publicationRegistry,
         ),
         ...(binding.typeExpansion !== undefined ? { typeExpansion: binding.typeExpansion } : {}),
         ...compatRawType(binding.terminalDisplay),
@@ -908,12 +928,16 @@ export function nativeComponentMetaToComponentMeta(meta: NativeComponentMetaResu
         specificity: selector.specificity,
       })),
     })),
-    acceptedProps: mapNativeAcceptedProps(meta.acceptedProps, nativeRegistry),
+    acceptedProps: mapNativeAcceptedProps(meta.acceptedProps, publicationRegistry),
     acceptedEvents: mapNativeAcceptedEvents(meta.acceptedEvents, nativeRegistry),
     acceptedSurfaceCompleteness: meta.acceptedSurfaceCompleteness as AcceptedSurfaceCompleteness,
     rootInfo: mapNativeRootInfo(meta.rootInfo ?? deriveRootInfo(meta.rootReachability)),
     rootReachability: meta.rootReachability as RootReachability,
-    fallthroughSurface: mapNativeFallthroughSurface(meta.fallthroughSurface, nativeRegistry),
+    fallthroughSurface: mapNativeFallthroughSurface(
+      meta.fallthroughSurface,
+      nativeRegistry,
+      publicationRegistry,
+    ),
     flags: meta.flags,
     ...(meta.origin !== undefined ? { origin: meta.origin } : {}),
   };
@@ -957,11 +981,11 @@ function deriveRootInfo(reachability: NativeRootReachability): NativeRootInfo {
 
 function mapNativeAcceptedProps(
   props: NativeAcceptedPropMeta[],
-  nativeRegistry?: Map<string, NativeTypeExprLike>,
+  publicationRegistry?: Map<string, NativeTypeExprLike>,
 ): AcceptedPropMeta[] {
   return props.map((p) => ({
     name: p.name,
-    type: typeExprToDescriptor(requirePublishedType(p, `accepted prop ${p.name}`), nativeRegistry),
+    type: publishedTypeExprToDescriptor(p, `accepted prop ${p.name}`, publicationRegistry),
     ...compatRawType(p.terminalDisplay),
     required: p.required,
     provenance: p.provenance,
@@ -987,29 +1011,30 @@ function mapNativeAcceptedEvents(
 function mapNativeFallthroughSurface(
   surface: NativeFallthroughSurface,
   nativeRegistry?: Map<string, NativeTypeExprLike>,
+  publicationRegistry?: Map<string, NativeTypeExprLike>,
 ): FallthroughSurface {
   if (surface.kind === "none") {
     return surface;
   }
   return {
     kind: "branches",
-    branches: surface.branches.map((branch) => mapNativeFallthroughBranch(branch, nativeRegistry)),
+    branches: surface.branches.map((branch) =>
+      mapNativeFallthroughBranch(branch, nativeRegistry, publicationRegistry),
+    ),
   };
 }
 
 function mapNativeFallthroughBranch(
   branch: NativeFallthroughBranch,
   nativeRegistry?: Map<string, NativeTypeExprLike>,
+  publicationRegistry?: Map<string, NativeTypeExprLike>,
 ): FallthroughBranch {
   return {
     branchKey: branch.branchKey,
     ...(branch.conditionText !== undefined ? { conditionText: branch.conditionText } : {}),
     props: branch.props.map((p) => ({
       name: p.name,
-      type: typeExprToDescriptor(
-        requirePublishedType(p, `fallthrough prop ${p.name}`),
-        nativeRegistry,
-      ),
+      type: publishedTypeExprToDescriptor(p, `fallthrough prop ${p.name}`, publicationRegistry),
       ...compatRawType(p.terminalDisplay),
       sources: p.sources,
     })),
@@ -1050,4 +1075,17 @@ function buildNativeTypeRegistry(
     registry.set(entry.name, entry.type);
   }
   return registry;
+}
+
+function buildNativePublicationRegistry(
+  meta: NativeComponentMetaResult,
+): Map<string, NativeTypeExprLike> | undefined {
+  const componentSource = meta.filePath.replaceAll("\\", "/");
+  const localEntries = (meta.typeRegistry ?? []).filter(
+    (entry) => entry.declaration?.canonicalSource.replaceAll("\\", "/") === componentSource,
+  );
+  if (localEntries.length === 0) {
+    return undefined;
+  }
+  return new Map(localEntries.map((entry) => [entry.name, entry.type]));
 }

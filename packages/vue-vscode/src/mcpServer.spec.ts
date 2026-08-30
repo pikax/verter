@@ -192,7 +192,10 @@ describe("mcpSpawnRefusalReason", () => {
   it("fails closed when the launcher is already active, even for an on-disk candidate", () => {
     process.env.VERTER_LAUNCHER_ACTIVE = launcher.toolName;
 
-    const reason = mcpSpawnRefusalReason({ path: "/fake/dev-build/verter-mcp", source: "dev-build" });
+    const reason = mcpSpawnRefusalReason({
+      path: "/fake/dev-build/verter-mcp",
+      source: "dev-build",
+    });
 
     expect(reason).toBeDefined();
     expect(reason).toMatch(/already active/i);
@@ -201,7 +204,10 @@ describe("mcpSpawnRefusalReason", () => {
   it("does not refuse an already-verified non-path candidate (no regression)", () => {
     delete process.env.VERTER_LAUNCHER_ACTIVE;
 
-    const reason = mcpSpawnRefusalReason({ path: "/fake/dev-build/verter-mcp", source: "dev-build" });
+    const reason = mcpSpawnRefusalReason({
+      path: "/fake/dev-build/verter-mcp",
+      source: "dev-build",
+    });
 
     expect(reason).toBeUndefined();
   });
@@ -212,9 +218,13 @@ describe("mcpSpawnRefusalReason", () => {
     scratchDirs.push(binDir);
     // A native binary has no node shebang — arbitrary non-shebang bytes stand
     // in for it; `assertNotSelfSpawn` only inspects the leading bytes.
-    writeFileSync(join(binDir, launcher.toolName), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 0, 0, 0]), {
-      mode: 0o755,
-    });
+    writeFileSync(
+      join(binDir, launcher.toolName),
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0, 0, 0, 0]),
+      {
+        mode: 0o755,
+      },
+    );
     process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
 
     const reason = mcpSpawnRefusalReason({ path: launcher.toolName, source: "path" });
@@ -259,7 +269,12 @@ describe("startMcpServerProcess", { timeout: 30_000 }, () => {
          console.log(JSON.stringify({ verterMcpHttpReady: { port: 43220, url: "http://127.0.0.1:43220/mcp" } }));
          setInterval(() => {}, 1000);`,
       );
-      const handle = startMcpServerProcess({ command, args, log: silentLog, readyTimeoutMs: 15_000 });
+      const handle = startMcpServerProcess({
+        command,
+        args,
+        log: silentLog,
+        readyTimeoutMs: 15_000,
+      });
       await handle.ready;
       handle.dispose();
       expect(readFileSync(marker, "utf8")).toBe(launcher.toolName);
@@ -290,6 +305,24 @@ describe("startMcpServerProcess", { timeout: 30_000 }, () => {
     } finally {
       handle.dispose();
     }
+  });
+
+  it("can be disposed before an unspawnable child reports its async error", async () => {
+    const handle = startMcpServerProcess({
+      command: "/nonexistent/verter-mcp-binary",
+      args: [],
+      log: silentLog,
+      readyTimeoutMs: 15_000,
+    });
+
+    // `spawn()` has returned, but its ENOENT event has not run yet. Disposal
+    // must never translate the absent child pid into Unix pid 0 (the current
+    // process group).
+    handle.dispose();
+
+    await expect(handle.ready).rejects.toThrow(/disposed/);
+    await handle.terminated;
+    expect(handle.isRunning()).toBe(false);
   });
 
   it("rejects on readiness timeout and kills the child", async () => {

@@ -18,7 +18,9 @@ use verter_session::component_meta_host::{
     ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
 };
 
-use crate::{buffer_to_string, catch_panic, NapiHostConfig, NapiIdeProjectConfig};
+use crate::{
+    buffer_to_string, catch_panic, scheduler_config_from_napi, NapiHostConfig, NapiIdeProjectConfig,
+};
 
 fn meta_err(e: ComponentMetaHostError) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
@@ -110,11 +112,16 @@ impl NapiMetaProject {
     #[napi(constructor)]
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let ffi_config: verter_ffi::types::FfiHostConfig = config.unwrap_or_default().into();
+            let config = config.unwrap_or_default();
+            let scheduler_config = scheduler_config_from_napi(&config);
+            let ffi_config: verter_ffi::types::FfiHostConfig = config.into();
             let host_config =
                 verter_ffi::convert::ffi_config_to_host(ffi_config).map_err(crate::ffi_err)?;
             Ok(NapiMetaProject {
-                inner: Arc::new(ComponentMetaHost::new_standalone(host_config)),
+                inner: Arc::new(ComponentMetaHost::new_standalone_with_scheduler_config(
+                    host_config,
+                    scheduler_config,
+                )),
             })
         }))?
     }
@@ -125,12 +132,18 @@ impl NapiMetaProject {
         workspace: &crate::NapiWorkspace,
     ) -> Result<Self> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let ffi_config: verter_ffi::types::FfiHostConfig = config.unwrap_or_default().into();
+            let config = config.unwrap_or_default();
+            let scheduler_config = scheduler_config_from_napi(&config);
+            let ffi_config: verter_ffi::types::FfiHostConfig = config.into();
             let host_config =
                 verter_ffi::convert::ffi_config_to_host(ffi_config).map_err(crate::ffi_err)?;
             let ws: Arc<dyn verter_workspace::WorkspaceAccess> = workspace.workspace();
             Ok(NapiMetaProject {
-                inner: Arc::new(ComponentMetaHost::new(host_config, ws)),
+                inner: Arc::new(ComponentMetaHost::new_with_scheduler_config(
+                    host_config,
+                    ws,
+                    scheduler_config,
+                )),
             })
         }))?
     }

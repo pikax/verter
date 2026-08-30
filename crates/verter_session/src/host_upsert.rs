@@ -168,8 +168,9 @@ impl VerterHost {
     /// [`HostUpdateResult`] describing which virtual nodes changed or were removed.
     ///
     /// On native (scheduler-backed): the scheduler is the sole parser. `upsert()`
-    /// submits to the scheduler, waits for Source+Analysis to commit, then reads
-    /// back the result and populates the compile cache. The `files` map is also
+    /// submits to the scheduler, waits for the requested commit fence, then reads
+    /// back the result and populates the compile cache. Hosts whose effective
+    /// analysis scope is empty stop at Source; all others wait for Analysis. The `files` map is also
     /// populated for the WASM path (non-scheduler).
     ///
     /// `upsert` is a thin forwarder onto `upsert_with_priority` at
@@ -283,7 +284,8 @@ impl VerterHost {
     ///    priority observable is recorded, the pre-submit source snapshot
     ///    is captured (a cloned `Arc`, never a live shard `Ref` — no
     ///    DashMap guard crosses `submit_batch_atomic`), and one
-    ///    `Request { target: Analysis, .. }` is built.
+    ///    `Request` is built for Source when the effective analysis scope is
+    ///    empty, or Analysis otherwise.
     /// 5. Exactly ONE `submit_batch_atomic` + exactly ONE `wait_batch`.
     /// 6. `wait_batch` returns completion states in INPUT order; `state[i]`
     ///    is zipped with `prepared[i]` and mapped to one outcome each. A
@@ -368,6 +370,11 @@ impl VerterHost {
         let mut prepared: Vec<PreparedUpsertCommit> = Vec::with_capacity(requests.len());
         let mut scheduler_requests: Vec<verter_scheduler::scheduler::Request> =
             Vec::with_capacity(requests.len());
+        let target = if self.config.effective_scope().is_empty() {
+            verter_scheduler::stage::TargetStage::Source
+        } else {
+            verter_scheduler::stage::TargetStage::Analysis
+        };
         for (req, canonical_id) in requests.into_iter().zip(canonicals) {
             // R4 producer: drop the prior parse-domain `FileSemantic` for
             // this canonical so the next resolver pass rebuilds the fact
@@ -398,7 +405,7 @@ impl VerterHost {
 
             scheduler_requests.push(verter_scheduler::scheduler::Request {
                 file_id: canonical_id.clone(),
-                target: verter_scheduler::stage::TargetStage::Analysis,
+                target: target.clone(),
                 priority,
                 source: Some(req.source.clone()),
                 file_language: Some(req.file_language.clone()),
@@ -537,14 +544,18 @@ impl VerterHost {
             old_source_snap,
         } = prepared;
 
-        // The batch target was `Analysis`, so the Ready payload is the
-        // Analysis snapshot. Its generation is the commit fence.
-        let RequestResult::Analysis(analysis_snap) = ready else {
-            return Err(HostError::MissingSource {
-                canonical_id: canonical_id.clone(),
-            });
+        // The committed stage's generation is the fence. Empty-analysis
+        // hosts stop at Source; analysis-bearing hosts retain the Analysis
+        // fence. Artifact is never an upsert target.
+        let committed_generation = match ready {
+            RequestResult::Source(source_snap) => source_snap.generation,
+            RequestResult::Analysis(analysis_snap) => analysis_snap.generation,
+            RequestResult::Artifact(_) => {
+                return Err(HostError::MissingSource {
+                    canonical_id: canonical_id.clone(),
+                });
+            }
         };
-        let committed_generation = analysis_snap.generation;
 
         let old_host_data = old_source_snap
             .as_ref()

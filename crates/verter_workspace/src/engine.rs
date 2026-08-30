@@ -86,6 +86,41 @@ struct LazyResolutionCacheEntry {
     signature: crate::ReadSetSignature,
 }
 
+/// Admission state shared by one bounded resolution operation. Keeping the
+/// pinned publication, its budget ledger, and its final validation fence
+/// together prevents callers from accidentally mixing lifecycle state from
+/// different captured worlds.
+pub(crate) struct ResolutionOperation<'a> {
+    expected_published: Option<&'a Arc<crate::published_state::PublishedRoot>>,
+    input_ledger: &'a mut crate::resolver::InputResolutionLedger,
+    final_validate: &'a dyn Fn() -> bool,
+}
+
+impl<'a> ResolutionOperation<'a> {
+    pub(crate) fn pinned(
+        expected_published: &'a Arc<crate::published_state::PublishedRoot>,
+        input_ledger: &'a mut crate::resolver::InputResolutionLedger,
+        final_validate: &'a dyn Fn() -> bool,
+    ) -> Self {
+        Self {
+            expected_published: Some(expected_published),
+            input_ledger,
+            final_validate,
+        }
+    }
+
+    fn unpinned(
+        input_ledger: &'a mut crate::resolver::InputResolutionLedger,
+        final_validate: &'a dyn Fn() -> bool,
+    ) -> Self {
+        Self {
+            expected_published: None,
+            input_ledger,
+            final_validate,
+        }
+    }
+}
+
 /// One bounded multi-candidate resolution slot.
 ///
 /// Concurrent base/session/world resolutions of the same
@@ -2705,12 +2740,10 @@ impl Engine {
         self.resolve_import_outcome_in_published(
             reader,
             crate::resolution_currency::ResolutionEvidenceSource::ReaderAuthoritative,
-            None,
             importer_id,
             specifier,
             ctx,
-            &mut input_ledger,
-            &|| true,
+            ResolutionOperation::unpinned(&mut input_ledger, &|| true),
         )
     }
 
@@ -2748,12 +2781,10 @@ impl Engine {
         self.resolve_import_outcome_in_published(
             reader,
             evidence,
-            None,
             importer_id,
             specifier,
             ctx,
-            &mut input_ledger,
-            &|| true,
+            ResolutionOperation::unpinned(&mut input_ledger, &|| true),
         )
     }
 
@@ -2775,12 +2806,10 @@ impl Engine {
         self.resolve_import_outcome_for_published_in_operation(
             reader,
             evidence,
-            expected_published,
             importer_id,
             specifier,
             ctx,
-            &mut input_ledger,
-            &|| true,
+            ResolutionOperation::pinned(expected_published, &mut input_ledger, &|| true),
         )
     }
 
@@ -2788,22 +2817,18 @@ impl Engine {
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
-        expected_published: &Arc<crate::published_state::PublishedRoot>,
         importer_id: &str,
         specifier: &str,
         ctx: verter_semantic::resolver_core::ResolutionContext,
-        input_ledger: &mut crate::resolver::InputResolutionLedger,
-        final_validate: &dyn Fn() -> bool,
+        operation: ResolutionOperation<'_>,
     ) -> ResolutionOutcome {
         self.resolve_import_outcome_in_published(
             reader,
             evidence,
-            Some(expected_published),
             importer_id,
             specifier,
             ctx,
-            input_ledger,
-            final_validate,
+            operation,
         )
     }
 
@@ -3188,13 +3213,16 @@ impl Engine {
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
-        expected_published: Option<&Arc<crate::published_state::PublishedRoot>>,
         importer_id: &str,
         specifier: &str,
         ctx: verter_semantic::resolver_core::ResolutionContext,
-        input_ledger: &mut crate::resolver::InputResolutionLedger,
-        final_validate: &dyn Fn() -> bool,
+        operation: ResolutionOperation<'_>,
     ) -> ResolutionOutcome {
+        let ResolutionOperation {
+            expected_published,
+            input_ledger,
+            final_validate,
+        } = operation;
         crate::probe_scope!(RESOLVE_IN_PUBLISHED);
         let population = reader.resolution_population();
         let cache_key = LazyResolutionCacheKey {

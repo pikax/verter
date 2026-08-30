@@ -500,6 +500,13 @@ impl StageExecutor for HostStageExecutor {
         source: &SourceSnapshot,
         generation: u64,
     ) -> Result<AnalysisSnapshot, StageError> {
+        // `AnalysisScope::NONE` deliberately carries no analysis payload.
+        // Avoid materialising the Arc-wrapped read views for the empty
+        // snapshot: bundler/stateless hosts still cross the scheduler's
+        // Analysis commit fence, but have no analysis facts to publish.
+        if self.config.effective_scope().is_empty() {
+            return Ok(AnalysisSnapshot::new_empty(generation));
+        }
         // In the current host architecture, analysis is computed during parse.
         // Extract the real data from HostSourceData and commit it in the
         // AnalysisSnapshot so read-side consumers get real payloads.

@@ -88,6 +88,19 @@ pub enum CompileRequestError {
     EmptyProductSet,
     /// The same product kind was requested more than once.
     DuplicateProduct(ProductKind),
+    /// Runtime client and server products in one request must agree on which
+    /// layer owns post-preprocessor style stages. Choosing the first product
+    /// would make product ordering change compilation semantics.
+    ConflictingRuntimeStyleProcessing {
+        first: RuntimeStyleProcessing,
+        conflicting: RuntimeStyleProcessing,
+    },
+    /// Authored-only style processing is currently a Vue bundler boundary.
+    /// A Svelte request cannot silently carry and ignore that ownership mode.
+    RuntimeStyleProcessingUnsupported {
+        framework: &'static str,
+        requested: RuntimeStyleProcessing,
+    },
     /// The request's framework does not match the framework-specific
     /// execution path it was handed to (e.g. a `Svelte` request reaching
     /// the Vue-only internal compile driver). The request itself
@@ -161,6 +174,34 @@ impl CompileRequest {
             if !seen.insert(product.kind()) {
                 return Err(CompileRequestError::DuplicateProduct(product.kind()));
             }
+        }
+
+        let mut runtime_style_processing = None;
+        for style_processing in products.iter().filter_map(|product| match product {
+            CompileProduct::RuntimeClient(runtime) | CompileProduct::RuntimeServer(runtime) => {
+                Some(runtime.style_processing)
+            }
+            _ => None,
+        }) {
+            if let Some(first) = runtime_style_processing {
+                if first != style_processing {
+                    return Err(CompileRequestError::ConflictingRuntimeStyleProcessing {
+                        first,
+                        conflicting: style_processing,
+                    });
+                }
+            } else {
+                runtime_style_processing = Some(style_processing);
+            }
+        }
+
+        if matches!(framework, FrameworkCompileRequest::Svelte(_))
+            && runtime_style_processing == Some(RuntimeStyleProcessing::AuthoredOnly)
+        {
+            return Err(CompileRequestError::RuntimeStyleProcessingUnsupported {
+                framework: "svelte",
+                requested: RuntimeStyleProcessing::AuthoredOnly,
+            });
         }
 
         let ssr_requested = products
@@ -449,6 +490,18 @@ mod tests {
             ..Default::default()
         })
     }
+    fn runtime_client_with_style(style_processing: RuntimeStyleProcessing) -> CompileProduct {
+        CompileProduct::RuntimeClient(RuntimeProductRequest {
+            style_processing,
+            ..Default::default()
+        })
+    }
+    fn runtime_server_with_style(style_processing: RuntimeStyleProcessing) -> CompileProduct {
+        CompileProduct::RuntimeServer(RuntimeProductRequest {
+            style_processing,
+            ..Default::default()
+        })
+    }
     fn vue_req(backend: VueBackendRequest) -> FrameworkCompileRequest {
         FrameworkCompileRequest::Vue(VueCompileRequest {
             backend,
@@ -591,6 +644,57 @@ mod tests {
         assert_eq!(
             err,
             CompileRequestError::DuplicateProduct(ProductKind::RuntimeClient)
+        );
+    }
+
+    #[test]
+    fn conflicting_runtime_style_ownership_is_refused() {
+        let result = new_request(
+            vec![
+                runtime_client_with_style(RuntimeStyleProcessing::AuthoredOnly),
+                runtime_server_with_style(RuntimeStyleProcessing::Complete),
+            ],
+            vue_req(VueBackendRequest::Vdom),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            CompileRequestError::ConflictingRuntimeStyleProcessing {
+                first: RuntimeStyleProcessing::AuthoredOnly,
+                conflicting: RuntimeStyleProcessing::Complete,
+            }
+        );
+    }
+
+    #[test]
+    fn matching_runtime_style_ownership_is_accepted() {
+        let request = new_request(
+            vec![
+                runtime_client_with_style(RuntimeStyleProcessing::AuthoredOnly),
+                runtime_server_with_style(RuntimeStyleProcessing::AuthoredOnly),
+            ],
+            vue_req(VueBackendRequest::Vdom),
+        )
+        .expect("matching client/server style ownership must construct");
+        assert_eq!(
+            request.runtime_style_processing(),
+            RuntimeStyleProcessing::AuthoredOnly
+        );
+    }
+
+    #[test]
+    fn svelte_authored_only_style_ownership_is_refused() {
+        let result = new_request(
+            vec![runtime_client_with_style(
+                RuntimeStyleProcessing::AuthoredOnly,
+            )],
+            FrameworkCompileRequest::Svelte(SvelteCompileRequest::default()),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            CompileRequestError::RuntimeStyleProcessingUnsupported {
+                framework: "svelte",
+                requested: RuntimeStyleProcessing::AuthoredOnly,
+            }
         );
     }
 

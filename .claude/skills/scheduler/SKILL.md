@@ -43,6 +43,16 @@ returns `Option<DedupJoinerEvent>` (fired post-unlock via
 DAG lock — the callback may re-enter the scheduler, so it must not run
 while admission holds the mutex.
 
+Source completion advances to Analysis only when Analysis is demanded.
+Demand is the union of (1) direct Analysis or Artifact request groups,
+(2) admitted DAG consumers gated on that file-generation's Analysis
+identity, and (3) pre-admission Artifact blocker-registry entries carrying
+that identity. A Source-only request is signalled after dependency facts are
+integrated and then stops; a later Analysis/Artifact request admits the
+missing stage normally. Checking only direct request waiters is incorrect:
+an auto-ingested macro dependency may be required by an Artifact blocker
+before it owns a direct waiter or an admitted downstream node.
+
 **The test for "by construction" is an enumeration, not an intuition.**
 The one structural claim in this area that held — `submit` being the sole
 admission primitive — held only because every writer of `by_identity` was
@@ -156,7 +166,8 @@ generation. So the ONLY thing outside the lock is that executor call
 (pure computation, unbounded host cost). Everything the Source completion
 publishes AND everything it CONSUMES — forward edges, the destructive
 deferred-blocker drain, dependency auto-ingest + admission, the Artifact
-blocker registry write, the Analysis admission, `complete(Source-G)` —
+blocker registry write, Source-waiter signalling, conditional Analysis
+admission, `complete(Source-G)` —
 happens under ONE `dag.lock()` hold gated on `stage_completion_is_current`.
 Consumption matters as much as publication: a stale completion draining a
 LATER generation's deferred blockers discards them and lets that
@@ -169,10 +180,12 @@ process-unique monotonic id, and it MUST be carried from dispatch on
 `Submission::StageComplete { incarnation }`. Re-deriving it by map lookup
 compares the live node with itself and passes vacuously — two node
 objects for the same canonical can sit at the SAME generation, so the
-generation check cannot catch a replacement either. Analysis is admitted
-BEFORE `complete(Source-G)` so the file is never briefly without a live
-stage identity (a concurrent dead-producer classification would read that
-as a Source-failed corpse). On refusal it publishes and consumes NOTHING
+generation check cannot catch a replacement either. When Analysis is
+demanded, it is admitted BEFORE `complete(Source-G)` so the file is never
+briefly without a live stage identity (a concurrent dead-producer
+classification would read that as a Source-failed corpse). A Source-only
+request intentionally has no downstream identity after completion. On
+refusal it publishes and consumes NOTHING
 and calls `refuse_stale_stage_completion`, which cancels the dequeued
 identity idempotently — safe against a later generation because
 `WorkNodeIdentity::FileStage` carries the generation — signals the

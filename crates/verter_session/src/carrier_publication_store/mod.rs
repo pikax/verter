@@ -159,11 +159,17 @@ pub struct FrameworkArtifactId {
     adapter_id: FrameworkAdapterId,
     language_id: LanguageId,
     parse_key: ParseKey,
+    /// Pre-hashed canonical bytes for the opaque public-token family. Public
+    /// block/node/attribute tokens are minted repeatedly from one artifact;
+    /// retaining this basis avoids formatting the full identity through its
+    /// `Debug` representation and re-hashing that allocation for every local
+    /// reference.
+    public_token_basis: [u8; 32],
 }
 
 impl FrameworkArtifactId {
     fn derive(accepted: &AcceptedRegisteredCarrierSource, parse_key: ParseKey) -> Self {
-        Self {
+        let mut artifact = Self {
             authority: accepted.source().authority(),
             source: accepted.source().snapshot_id().clone(),
             grammar_authority: accepted.grammar().authority(),
@@ -171,7 +177,10 @@ impl FrameworkArtifactId {
             adapter_id: accepted.grammar().adapter_id().clone(),
             language_id: accepted.grammar().language_id().clone(),
             parse_key,
-        }
+            public_token_basis: [0; 32],
+        };
+        artifact.public_token_basis = framework_artifact_token_basis(&artifact);
+        artifact
     }
 }
 
@@ -278,11 +287,32 @@ impl ArtifactAttributeRef {
     }
 }
 
+fn update_len_prefixed(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
+}
+
+fn framework_artifact_token_basis(artifact: &FrameworkArtifactId) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"verter.framework-artifact-token-basis.v2\0");
+    digest.update(artifact.authority.as_bytes());
+    digest.update(artifact.source.canonical_digest().as_bytes());
+    digest.update(artifact.source.file_incarnation().get().to_le_bytes());
+    digest.update(artifact.source.generation().get().to_le_bytes());
+    digest.update(artifact.source.content_hash().as_bytes());
+    digest.update(artifact.grammar_authority.as_bytes());
+    digest.update(artifact.grammar_fingerprint.as_bytes());
+    update_len_prefixed(&mut digest, artifact.adapter_id.as_str().as_bytes());
+    update_len_prefixed(&mut digest, artifact.language_id.as_str().as_bytes());
+    update_len_prefixed(&mut digest, artifact.parse_key.canonical_bytes());
+    digest.finalize().into()
+}
+
 fn public_token(domain: &[u8], artifact: &FrameworkArtifactId, local: Option<u32>) -> Arc<str> {
     let mut digest = Sha256::new();
-    digest.update(b"verter.structure-token.v1\0");
+    digest.update(b"verter.structure-token.v2\0");
     digest.update(domain);
-    digest.update(format!("{artifact:?}").as_bytes());
+    digest.update(artifact.public_token_basis);
     if let Some(local) = local {
         digest.update(local.to_le_bytes());
     }
@@ -503,10 +533,10 @@ pub struct HostSourceRevisionToken {
 impl HostSourceRevisionToken {
     pub fn public_token(self) -> String {
         let mut digest = Sha256::new();
-        digest.update(b"verter.host-source-revision.v1\0");
+        digest.update(b"verter.host-source-revision.v2\0");
         digest.update(self.host_instance.get().to_le_bytes());
-        digest.update(format!("{:?}", self.file_incarnation).as_bytes());
-        digest.update(format!("{:?}", self.source_generation).as_bytes());
+        digest.update(self.file_incarnation.get().to_le_bytes());
+        digest.update(self.source_generation.get().to_le_bytes());
         base64url_32(digest.finalize().into())
     }
 }

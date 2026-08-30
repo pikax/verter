@@ -59,7 +59,7 @@ fn upsert_req(canonical_id: &str, source: &str) -> UpsertRequest {
 // ---------------------------------------------------------------------------
 
 /// Cold N unique inputs: Stage B must submit ONE
-/// `Submission::NewRequestBatch` carrying N source/Analysis requests,
+/// `Submission::NewRequestBatch` carrying N source-stage requests,
 /// admitted under a SINGLE `dag.lock()` acquisition — observable via the
 /// scheduler's per-admit epoch trace, which is populated ONLY from
 /// `handle_new_request_batch` (the atomic batch path) and records the

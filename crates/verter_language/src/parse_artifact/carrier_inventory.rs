@@ -7,6 +7,8 @@ use crate::registered_source_authority::{
 };
 use crate::ScriptSourceType as RegistryScriptSourceType;
 
+use super::carrier_structure_hash::CarrierStructureHash;
+
 macro_rules! local_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -64,15 +66,24 @@ pub enum SourceEncoding {
 /// integer can never masquerade as block identity. Consumers associate data
 /// through full-identity equality (artifact identity + block id) and
 /// re-validate against a live inventory via [`ArtifactBlockRef::validate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CarrierArtifactIdentity([u8; 32]);
+
+impl CarrierArtifactIdentity {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ArtifactBlockRef {
-    artifact_identity: Arc<str>,
+    artifact_identity: CarrierArtifactIdentity,
     block: BlockId,
 }
 
 impl ArtifactBlockRef {
     /// Content-addressed identity of the artifact that minted this ref.
-    pub fn artifact_identity(&self) -> &Arc<str> {
+    pub fn artifact_identity(&self) -> &CarrierArtifactIdentity {
         &self.artifact_identity
     }
 
@@ -87,7 +98,7 @@ impl ArtifactBlockRef {
     /// mismatch (stale artifact, foreign artifact, out-of-range block).
     pub fn validate(&self, owner: &CarrierBlockInventory) -> bool {
         (owner.blocks.len() > self.block.get() as usize)
-            && *self.artifact_identity == **owner.artifact_identity_token()
+            && self.artifact_identity == *owner.artifact_identity_token()
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -154,7 +165,12 @@ pub struct CarrierBlockInventory {
     markup: Arc<MarkupSyntaxArena>,
     /// Lazily computed content-addressed artifact identity (memo only —
     /// derived entirely from the fields above, excluded from equality).
-    artifact_identity: std::sync::OnceLock<Arc<str>>,
+    artifact_identity: std::sync::OnceLock<CarrierArtifactIdentity>,
+    /// The immutable carrier geometry is consumed both by the registered
+    /// projection and by sealed block identity. Cache its digest on the
+    /// inventory so the second consumer does not serialize and hash the same
+    /// structure again.
+    structure_hash: std::sync::OnceLock<CarrierStructureHash>,
 }
 
 impl PartialEq for CarrierBlockInventory {
@@ -185,6 +201,7 @@ impl CarrierBlockInventory {
             blocks,
             markup,
             artifact_identity: std::sync::OnceLock::new(),
+            structure_hash: std::sync::OnceLock::new(),
         };
         inventory.validate()?;
         inventory.validate_registered_sources(registered_sources)?;
@@ -228,7 +245,7 @@ impl CarrierBlockInventory {
     /// EXCLUDED — the same bytes with the same block geometry yield the same
     /// identity (path-independent), while any content or geometry change
     /// yields a different one.
-    pub fn artifact_identity_token(&self) -> &Arc<str> {
+    pub fn artifact_identity_token(&self) -> &CarrierArtifactIdentity {
         self.artifact_identity.get_or_init(|| {
             let mut out = Vec::new();
             out.extend_from_slice(b"verter.sealed-artifact-block-identity.v1\0");
@@ -269,14 +286,15 @@ impl CarrierBlockInventory {
                 crate::parse_artifact::carrier_structure_hash::compute_carrier_structure_hash(self)
                     .as_bytes(),
             );
-            let digest = crate::registered_source_authority::sha256(&[&out]);
-            let mut token = String::with_capacity(64);
-            for byte in digest {
-                use std::fmt::Write;
-                let _ = write!(token, "{byte:02x}");
-            }
-            Arc::from(token)
+            CarrierArtifactIdentity(crate::registered_source_authority::sha256(&[&out]))
         })
+    }
+
+    pub(crate) fn carrier_structure_hash_with(
+        &self,
+        compute: impl FnOnce() -> CarrierStructureHash,
+    ) -> CarrierStructureHash {
+        *self.structure_hash.get_or_init(compute)
     }
 
     /// The SOLE mint authority for sealed block refs: seals
@@ -285,7 +303,7 @@ impl CarrierBlockInventory {
     pub fn block_ref(&self, block: BlockId) -> Option<ArtifactBlockRef> {
         self.blocks.get(block.get() as usize)?;
         Some(ArtifactBlockRef {
-            artifact_identity: Arc::clone(self.artifact_identity_token()),
+            artifact_identity: *self.artifact_identity_token(),
             block,
         })
     }

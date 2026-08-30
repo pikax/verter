@@ -419,6 +419,14 @@ pub struct NapiHostConfig {
     /// construction and reused across every batch call — to
     /// change the pool size, construct a new host.
     pub hostCpuThreads: Option<u32>,
+    /// Worker count for the scheduler-owned CPU stage pool. `None` or
+    /// `Some(0)` keeps the scheduler default; a positive value fixes the
+    /// pool size for this host.
+    pub schedulerCpuThreads: Option<u32>,
+    /// Worker count for the scheduler-owned I/O stage pool. `None` or
+    /// `Some(0)` keeps the scheduler default; a positive value fixes the
+    /// pool size for this host.
+    pub schedulerIoThreads: Option<u32>,
     /// Enable host performance-metrics collection. `None`/absent keeps
     /// the default `false` (counters stay zero; `getMetrics()` returns
     /// `null`). Replaces the retired `session_metrics` Cargo feature as
@@ -443,6 +451,19 @@ impl From<NapiHostConfig> for FfiHostConfig {
             metrics_enabled: n.metricsEnabled,
         }
     }
+}
+
+fn scheduler_config_from_napi(
+    config: &NapiHostConfig,
+) -> verter_scheduler::scheduler::SchedulerConfig {
+    let mut scheduler = verter_scheduler::scheduler::SchedulerConfig::default();
+    if let Some(threads) = config.schedulerCpuThreads.filter(|&threads| threads > 0) {
+        scheduler.cpu_threads = threads as usize;
+    }
+    if let Some(threads) = config.schedulerIoThreads.filter(|&threads| threads > 0) {
+        scheduler.io_threads = threads as usize;
+    }
+    scheduler
 }
 
 #[napi(object)]
@@ -1863,10 +1884,13 @@ impl NapiVerterHost {
     /// unrecognised `compileErrorPolicy` string).
     #[napi(constructor)]
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
-        let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
+        let config = config.unwrap_or_default();
+        let scheduler_config = scheduler_config_from_napi(&config);
+        let ffi_config: FfiHostConfig = config.into();
         Ok(Self {
-            inner: std::sync::Arc::new(host::VerterHost::new_standalone(
+            inner: std::sync::Arc::new(host::VerterHost::new_standalone_with_scheduler_config(
                 ffi_config_to_host(ffi_config).map_err(ffi_err)?,
+                scheduler_config,
             )),
         })
     }
@@ -1881,10 +1905,16 @@ impl NapiVerterHost {
         config: Option<NapiHostConfig>,
         workspace: &NapiWorkspace,
     ) -> Result<Self> {
-        let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
+        let config = config.unwrap_or_default();
+        let scheduler_config = scheduler_config_from_napi(&config);
+        let ffi_config: FfiHostConfig = config.into();
         let host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
         Ok(Self {
-            inner: std::sync::Arc::new(host::VerterHost::new(host_config, workspace.inner.clone())),
+            inner: std::sync::Arc::new(host::VerterHost::new_with_scheduler_config(
+                host_config,
+                workspace.inner.clone(),
+                scheduler_config,
+            )),
         })
     }
 

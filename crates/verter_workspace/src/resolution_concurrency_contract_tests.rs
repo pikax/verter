@@ -573,7 +573,7 @@ fn conditional_commit_restarts_share_one_churn_ledger_and_a_new_request_resets_i
         ResolutionPhase::PreAdmissionValidation,
         move || {
             let ordinal = mutate_count.fetch_add(1, Ordering::AcqRel);
-            let target = if ordinal % 2 == 0 {
+            let target = if ordinal.is_multiple_of(2) {
                 "/p/exact-a.ts"
             } else {
                 "/p/exact-b.ts"
@@ -636,7 +636,7 @@ fn ratified_outer_churn_boundary_runs_the_ninth_attempt_and_rejects_only_its_res
         move || {
             let ordinal = hook_calls.fetch_add(1, Ordering::AcqRel);
             if ordinal < InputResolutionBudgets::RATIFIED.churn() as usize {
-                let target = if ordinal % 2 == 0 {
+                let target = if ordinal.is_multiple_of(2) {
                     "/p/exact-a.ts"
                 } else {
                     "/p/exact-b.ts"
@@ -663,7 +663,7 @@ fn ratified_outer_churn_boundary_runs_the_ninth_attempt_and_rejects_only_its_res
         ResolutionPhase::PreAdmissionValidation,
         move || {
             let ordinal = hook_calls.fetch_add(1, Ordering::AcqRel);
-            let target = if ordinal % 2 == 0 {
+            let target = if ordinal.is_multiple_of(2) {
                 "/p/exact-a.ts"
             } else {
                 "/p/exact-b.ts"
@@ -727,7 +727,7 @@ fn parsed_edge_commit_restarts_share_one_churn_ledger_and_discard_stale_edges() 
         ResolutionPhase::ParsedEdgePreCommit,
         move || {
             let ordinal = mutate_count.fetch_add(1, Ordering::AcqRel);
-            let target = if ordinal % 2 == 0 {
+            let target = if ordinal.is_multiple_of(2) {
                 "/p/exact-a.ts"
             } else {
                 "/p/exact-b.ts"
@@ -772,7 +772,7 @@ fn parsed_edge_exact_companion_rejects_the_ninth_restart_after_running_nine_atte
         ResolutionPhase::ParsedEdgePreCommit,
         move || {
             let ordinal = calls.fetch_add(1, Ordering::AcqRel);
-            let target = if ordinal % 2 == 0 {
+            let target = if ordinal.is_multiple_of(2) {
                 "/p/exact-a.ts"
             } else {
                 "/p/exact-b.ts"
@@ -824,7 +824,11 @@ fn explicit_project_churn_rejection_discards_the_superseded_result() {
         ResolutionPhase::PreAdmissionValidation,
         move || {
             let ordinal = mutate_count.fetch_add(1, Ordering::AcqRel);
-            let target = if ordinal % 2 == 0 { "/p/new" } else { "/p/old" };
+            let target = if ordinal.is_multiple_of(2) {
+                "/p/new"
+            } else {
+                "/p/old"
+            };
             publish_alias(&mutate_engine, "/p", target);
         },
         || engine.resolve_import_for_project_outcome(&reader, &owner, "@dep", CONTEXT),

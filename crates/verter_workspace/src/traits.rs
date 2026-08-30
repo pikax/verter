@@ -158,11 +158,11 @@ pub trait WorkspaceRead: Send + Sync {
         }
         Err(
             verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
-                key: keys.first().cloned().unwrap_or_else(|| {
+                key: Box::new(keys.first().cloned().unwrap_or_else(|| {
                     verter_semantic::resolver_core::InputKey::PathProbe {
                         path: Arc::from("<empty-bounded-preflight>"),
                     }
-                }),
+                })),
             },
         )
     }
@@ -179,11 +179,11 @@ pub trait WorkspaceRead: Send + Sync {
     > {
         Err(
             verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
-                key: reservation.keys().first().cloned().unwrap_or_else(|| {
+                key: Box::new(reservation.keys().first().cloned().unwrap_or_else(|| {
                     verter_semantic::resolver_core::InputKey::PathProbe {
                         path: Arc::from("<empty-bounded-load>"),
                     }
-                }),
+                })),
             },
         )
     }

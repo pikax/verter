@@ -361,6 +361,12 @@ jobs:
       # gate's freshness preflight then verdict-gates tolerance OFF, making a
       # freshness failure a HARD failure rather than PASS-WITH-TOLERATED.
       - run: pnpm install --frozen-lockfile
+      # The canonical gate realizes the pinned Vue/Svelte oracle closures
+      # offline and intentionally refuses to provision this cache itself. CI is
+      # the explicit network boundary, so warm the cache before entering the
+      # hermetic gate.
+      - name: Provision the Rust gate's offline oracle npm cache
+        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
       # REQUIRED for a non-vacuous gate — see gate.mjs's BUILD-PREREQUISITE PREFLIGHT. The real-provider
       # suites spawn the pinned tsserver with `--globalPlugins @verter/typescript-plugin
       # --pluginProbeLocations packages/vue-vscode/node_modules`; that probe dir is a pnpm SYMLINK to

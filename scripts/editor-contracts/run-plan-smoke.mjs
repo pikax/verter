@@ -127,7 +127,13 @@ const observed = { ready: new Set(), sync: new Set() };
 const latestDiagnostics = new Map();
 const client = new LspClient(`${plan.editor}-contract`, plan.command, plan.args, root, {
   defaultTimeout: 30_000,
-  stderr: { maxBytes: Number.POSITIVE_INFINITY },
+  stderr: {
+    maxBytes: Number.POSITIVE_INFINITY,
+    onLine:
+      process.env.VERTER_EDITOR_CONTRACT_TRACE === "1"
+        ? (line) => console.error(`[server stderr] ${line}`)
+        : undefined,
+  },
   onAnyNotification(method, params) {
     if (method === "textDocument/publishDiagnostics" && typeof params?.uri === "string") {
       latestDiagnostics.set(params.uri, params.diagnostics ?? []);
