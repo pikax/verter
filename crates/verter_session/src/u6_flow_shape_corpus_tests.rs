@@ -1349,6 +1349,26 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "ca413199ab0bff1dde03fc9e6c7a418890599f4325a608716909e5c50cac0c68",
     ),
     (
+        "N31_discriminated_union_switch_positive_control",
+        "82864336129b447c34bf97d99dd936464a993c1c7a6112ab35892ffa151ca93c",
+    ),
+    (
+        "N38_postfix_non_null_wrapped_guard",
+        "ea4d706da28a3e569aefa75f45af245cd496d8a55295927c5b7d9d9d58bfabe8",
+    ),
+    (
+        "N40_as_wrapped_guard",
+        "c641157ff36c975ad319a9643cbbf6f2e1e6f9a31a0c5dc09122d66502bdf4a3",
+    ),
+    (
+        "N45_destructured_parameter_discriminant",
+        "a80e5dc02aaf92fc332064af44e9debe551db7e7e0cfbbaf6cf917f279c5330e",
+    ),
+    (
+        "N49_closure_narrows_own_parameter",
+        "7c3c9f675623866d1625c5ddbda540c416b751080fcefc6983d9c8c97e9ee4f0",
+    ),
+    (
         "X01_spread_narrow_arm_source",
         "affeead1e071a2ba50875d5bfcfd86a842b79d4139751a55b03a172d5a33a25f",
     ),
@@ -2575,6 +2595,64 @@ mod corpus_suite {
                  `{ v: Union(…) }` where the checker prints `{ v: \"no\" | \"ok\"; }` — \
                  print syntax AND semantics differ; the semantic divergence is held by \
                  the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N31_discriminated_union_switch_positive_control",
+                "checker prints `{ v: string | number; }`; the renderer spells \
+                 `{ v: Union(string | number) }`",
+            ),
+            (
+                "N40_as_wrapped_guard",
+                "checker prints `{ v: string | number; }`; the renderer spells \
+                 `{ v: Union(string | number) }`",
+            ),
+            (
+                "N49_closure_narrows_own_parameter",
+                "checker prints `{ result: { kind: \"s\"; val: string; } | \
+                 { kind: \"n\"; val: number; }; }`; the renderer spells the same node \
+                 `{ result: Union({ kind: \"s\", val: string } | \
+                 { kind: \"n\", val: number }) }` — object members print `,`-separated \
+                 and the union carries the `Union(…)` wrapper",
+            ),
+            (
+                "N27_switch_true_guard_dispatch",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N28_switch_typeof_dispatch",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N30_switch_true_negated_guard_dispatch",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N34_non_null_asserted_property_discriminant",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(Opaque(UnmodeledPosition) | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N35_const_aliased_condition",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N42_comma_sequence_guard",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N44_typeof_over_unknown",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(unknown | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N46_typeof_over_any",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(any | string) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N47_correlated_tuple_discriminant",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | Opaque(UnmodeledPosition)) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+            ),
+            (
+                "N48_closure_narrows_captured_binding",
+                "checker prints `{ v: string; }`; the renderer spells the (KnownOwed-divergent) surface `{ v: Union(string | number) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "N26_structurally_possible_predicate_intersection_survives",
@@ -3870,13 +3948,58 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6ValueInference,
         "root Other — a function value; deepening pins the signature (params + return)",
     ),
+    (
+        "N29_switch_optional_chain_discriminant",
+        Owner::U6NarrowLattice,
+        "member Union carrying Opaque(Miss) — the recursive expectation vocabulary has no Miss variant, so the surface is unspellable as a deep pin; the member pin plus the KnownOwed note carry it",
+    ),
+    (
+        "N32_optional_chain_property_discriminant",
+        Owner::U6NarrowLattice,
+        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
+    ),
+    (
+        "N33_computed_property_discriminant",
+        Owner::U6NarrowLattice,
+        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
+    ),
+    (
+        "N36_aliased_discriminant",
+        Owner::U6NarrowLattice,
+        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
+    ),
+    (
+        "N37_destructured_local_discriminant",
+        Owner::U6NarrowLattice,
+        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
+    ),
+    (
+        "N39_instanceof_imported_class",
+        Owner::U6NarrowTypeof,
+        "member Union carrying Opaque(Miss) beside DeclRef(Box) — no Miss variant in the recursive expectation vocabulary",
+    ),
+    (
+        "N41_instanceof_member_expression_constructor",
+        Owner::U6NarrowTypeof,
+        "member Union carrying Opaque(Miss) beside DeclRef(Box) — no Miss variant in the recursive expectation vocabulary",
+    ),
+    (
+        "N43_boolean_wrapped_guard",
+        Owner::U6NarrowTypeof,
+        "the member Union EQUALS the checker, so a deep pin would have to be MatchesChecker while the result is a typed ReturnOnly; the KnownOwed note and the member pin carry the divergence",
+    ),
+    (
+        "N50_sequence_discriminant_test",
+        Owner::U6NarrowLattice,
+        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
+    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
 /// deepen; raising it admits a new shallow exception. Asserted by
 /// `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 72;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 81;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -3915,6 +4038,7 @@ const OPEN_DEBTS: &[&str] = &[
     // `"no" | "ok"`), wrong-and-warm. Exposed by the recursive expect
     // pin — the root `v: Union` member pin could not see it.
     "N25_impossible_predicate_statement_keeps_dead_contributor",
+    "N55_in_operator_nonliteral_key",
     // ── CALL RESOLUTION — context-sensitive callback inference ──────────
     // A callback argument's un-annotated parameter is never contextually
     // typed: withheld from the first inference pass and never re-typed
@@ -3954,6 +4078,29 @@ const OPEN_DEBTS: &[&str] = &[
     // The gap and its repair are named on both rows' notes.
     "CC09_satisfies_widening_target",
     "X21_satisfies_plain_return",
+    // ── NARROWING VOCABULARY — guard forms the flow lattice does not
+    //    carry. Every row publishes an HONEST SUPERSET as a typed
+    //    ReturnOnly (zero candidates, recomputed cold), never a
+    //    silently narrowed answer.
+    "N27_switch_true_guard_dispatch",
+    "N28_switch_typeof_dispatch",
+    "N29_switch_optional_chain_discriminant",
+    "N30_switch_true_negated_guard_dispatch",
+    "N32_optional_chain_property_discriminant",
+    "N33_computed_property_discriminant",
+    "N34_non_null_asserted_property_discriminant",
+    "N35_const_aliased_condition",
+    "N36_aliased_discriminant",
+    "N37_destructured_local_discriminant",
+    "N39_instanceof_imported_class",
+    "N41_instanceof_member_expression_constructor",
+    "N42_comma_sequence_guard",
+    "N43_boolean_wrapped_guard",
+    "N44_typeof_over_unknown",
+    "N46_typeof_over_any",
+    "N47_correlated_tuple_discriminant",
+    "N48_closure_narrows_captured_binding",
+    "N50_sequence_discriminant_test",
 ];
 
 // Per-owner conformance — the merge go/no-go
@@ -3976,14 +4123,14 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 5, 4, 1),
     (Owner::U6ValueInference, 71, 67, 1),
-    (Owner::U6LoopClosure, 1, 0, 1),
+    (Owner::U6LoopClosure, 4, 0, 1),
     (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 57, 42, 2),
-    (Owner::U6NarrowTypeof, 14, 14, 0),
+    (Owner::U6NarrowTypeof, 28, 17, 11),
     // N25's MatchesChecker label predated the recursive expect pin; the
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block.
-    (Owner::U6NarrowLattice, 7, 6, 1),
+    (Owner::U6NarrowLattice, 18, 8, 10),
     (Owner::U6NarrowSubstitution, 5, 5, 0),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 9, 4, 3),
