@@ -1836,13 +1836,19 @@ fn unwrap_parenthesized<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a
 
 /// The reference an expression NAMES, through the wrappers the checker
 /// treats as transparent when it matches a narrowing reference:
-/// parentheses, the postfix non-null assertion, and `satisfies`.
+/// parentheses and the postfix non-null assertion.
 ///
-/// An `as` / angle-bracket TYPE ASSERTION is deliberately absent. It is
-/// not a matching reference for narrowing, so a test behind one
-/// establishes nothing rather than establishing something this half
-/// cannot express — unwrapping it would degrade tests the checker
-/// itself leaves unnarrowed.
+/// `satisfies` and the `as` / angle-bracket TYPE ASSERTION are both
+/// deliberately absent, and for the same reason: neither is a matching
+/// reference for narrowing, in a leaf position or around a whole test.
+/// Measured against the checker, `if ((x satisfies string | undefined))`
+/// leaves `undefined` in the result and `typeof (x satisfies string |
+/// number) === "string"` narrows nothing, exactly as their `as` twins
+/// do, while both postfix-`!` spellings narrow. Peeling either one makes
+/// this half narrow where the checker does not — a SUBSET of the
+/// checker's type, which drops a real contributor rather than merely
+/// widening, and is therefore worse than the superset a missing narrow
+/// produces.
 fn unwrap_reference_transparent<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
     match expression {
         Expression::ParenthesizedExpression(paren) => {
@@ -1850,9 +1856,6 @@ fn unwrap_reference_transparent<'a>(expression: &'a Expression<'a>) -> &'a Expre
         }
         Expression::TSNonNullExpression(non_null) => {
             unwrap_reference_transparent(&non_null.expression)
-        }
-        Expression::TSSatisfiesExpression(satisfies) => {
-            unwrap_reference_transparent(&satisfies.expression)
         }
         inner => inner,
     }

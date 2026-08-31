@@ -2678,22 +2678,27 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
 }
 
 /// The wrappers the checker treats as transparent when it matches a
-/// narrowing reference — parentheses, the postfix non-null assertion, and
-/// `satisfies` — wrap a WHOLE control test exactly as they wrap a leaf
-/// reference. `(typeof x === "string")!` still establishes the `typeof`
-/// fact, so peeling has to happen at the classifier's ENTRY: dispatching
-/// on the parenthesized form alone leaves every composing spelling behind
-/// one wrapper matching no arm, falling through to the truthiness rule,
-/// and reporting a PROVED absence of narrowing for a test that narrows —
-/// a silent superset, published complete and warm.
+/// narrowing reference — parentheses and the postfix non-null assertion —
+/// wrap a WHOLE control test exactly as they wrap a leaf reference.
+/// `(typeof x === "string")!` still establishes the `typeof` fact, so
+/// peeling has to happen at the classifier's ENTRY: dispatching on the
+/// parenthesized form alone leaves every composing spelling behind one
+/// wrapper matching no arm, falling through to the truthiness rule, and
+/// reporting a PROVED absence of narrowing for a test that narrows — a
+/// silent superset, published complete and warm.
 ///
 /// Gap count alone cannot discriminate this: a modeled guard and a proved
 /// absence of narrowing both mint zero gaps. The guard SHAPE is the
 /// discriminator, so this asserts the lowered fact itself.
 ///
-/// A type assertion is deliberately NOT transparent here — it is not a
-/// matching reference for narrowing, so a test behind one establishes
-/// nothing rather than establishing something this half cannot express.
+/// `satisfies` and a type assertion are BOTH deliberately opaque, and the
+/// direction of that error matters more than the missing-narrow one.
+/// Measured against the checker, `(typeof x === "string") satisfies
+/// boolean` narrows nothing, exactly as its `as` twin does, while both
+/// postfix-`!` spellings narrow. Peeling either would make this half
+/// narrow where the checker does not, publishing a SUBSET of the
+/// checker's type — dropping a real return contributor rather than
+/// merely widening, and warm.
 #[test]
 fn reference_transparent_wrappers_around_a_whole_test_keep_its_narrowing_fact() {
     fn guard_of(source: &str) -> SliceGuard {
@@ -2713,10 +2718,6 @@ fn reference_transparent_wrappers_around_a_whole_test_keep_its_narrowing_fact() 
         (
             "a non-null assertion around a `typeof` test",
             "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\")!) { return x } return 0 }",
-        ),
-        (
-            "a `satisfies` around a `typeof` test",
-            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") satisfies boolean) { return x } return 0 }",
         ),
         (
             "a non-null assertion around a literal equality",
@@ -2748,24 +2749,38 @@ fn reference_transparent_wrappers_around_a_whole_test_keep_its_narrowing_fact() 
         "a wrapped unrepresented access still takes the typed gap: {node:?}"
     );
 
-    // A type assertion is NOT a matching reference: the test establishes
-    // nothing, and inventing a gap here would degrade a test the checker
-    // itself leaves unnarrowed.
-    let asserted = content_for(
-        "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") as boolean) { return x } return 0 }",
-        "f",
-    );
-    assert!(
-        matches!(guard_of(
-            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") as boolean) { return x } return 0 }"
-        ), SliceGuard::None),
-        "a type assertion is not peeled"
-    );
-    assert_eq!(
-        guard_gap_count(&asserted),
-        0,
-        "and it mints no gap either: {asserted:?}"
-    );
+    // Neither `satisfies` nor a type assertion is a matching reference.
+    // The checker narrows through NEITHER, so peeling one would publish a
+    // SUBSET of its type, and inventing a gap would degrade a test the
+    // checker itself leaves unnarrowed: the honest lowering is an
+    // explicit proved-absence with no gap.
+    let opaque = [
+        (
+            "a `satisfies` around a `typeof` test",
+            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") satisfies boolean) { return x } return 0 }",
+        ),
+        (
+            "a type assertion around a `typeof` test",
+            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") as boolean) { return x } return 0 }",
+        ),
+        (
+            "a `satisfies` around a bare reference",
+            "export {};\nfunction f(x?: string) { if ((x satisfies string | undefined)) { return x } return 0 }",
+        ),
+    ];
+    for (case, source) in opaque {
+        let guard = guard_of(source);
+        assert!(
+            matches!(guard, SliceGuard::None),
+            "{case}: the wrapper is opaque, so no fact is carried: {guard:?}"
+        );
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: and the checker narrows nothing here, so no gap is owed: {node:?}"
+        );
+    }
 }
 
 /// A bare CALL STATEMENT feeds no value, but two of its effects reach the
