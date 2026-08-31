@@ -59,7 +59,7 @@ This charter accepts one authority boundary; it contains no independently dispat
 
 ## Exact predecessor contracts
 
-- **None.** This node is foundational and independent of TA1, so the two are reviewable in parallel. It is an explicit predecessor of D2B.
+- **None.** This node is foundational and independent of TA1A, so the two are reviewable in parallel. It is an explicit predecessor of D2B.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope

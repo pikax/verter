@@ -4,7 +4,7 @@
 - Date: 2026-08-31
 - Scope: adds two predecessor units to D2B; amends no other node's budgets or boundaries.
   No other node receives algebra ownership. The consumer clauses in D3R, D3P, D4, D7, E4 and
-  `NCF-FD-NARROW` were clarified to name TA1 and TA2 as the authorities they already consume.
+  `NCF-FD-NARROW` were clarified to name TA1A and TA2 as the authorities they already consume.
 
 ## Context
 
@@ -245,4 +245,40 @@ no per-slice prohibition field, so the ban on checker-private truthiness
 classification rides the `fact_sources` string rather than a structural forbidden-
 design field. Giving it a field of its own requires a schema amendment plus the NCK4
 generator, and is not done here.
+
+## Amendment: the algebra unit splits by mechanism
+
+A preflight inventory measured the atomic canonical-algebra unit at roughly 24
+production files and 1,100-1,400 LOC. The line count fits the amended 1,500-LOC
+target; the FILE count does not fit 18, and the cause is structural rather than
+incidental: the enforcement mechanism flips the union and intersection payloads to an
+opaque carrier, which forces a token edit at every authored, ordered and rebuilder
+construction site in the same compile. Bringing it under the ceiling would require a
+blanket conversion that lets any producer mint a composite, which defeats the seal
+the mechanism exists to provide.
+
+The architecture authority pre-authorized exactly one remedy for that outcome, and
+forbade the obvious alternative. Splitting around the roughly fourteen sites that
+currently reach a published surface is NOT acceptable: it would leave the
+non-published semantic constructors outside the authority, ready to become defects
+the moment they are exposed. Neither a published subset nor a temporarily partially
+closed authority is a valid intermediate state.
+
+The sanctioned split is by MECHANISM:
+
+- **TA1A** — the comparator, the freshness plumbing, the canonical builder, and the
+  sealed mint substrate, with the enum payload NOT yet flipped. Its acceptance is
+  that the three measured findings publish correctly and warm at the public boundary.
+- **TA1B** — the payload flip, the exhaustive construction-site migration under the
+  carrier-category registry, the compile-fail unforgeability proof, and the final
+  idempotent pre-seal closure.
+
+TA1B depends on TA1A, and the flow cutover depends on TA1B; TA1A is reached
+transitively and is deliberately not listed as a second predecessor edge. Consumer
+charters name TA1A, because what they consume is the canonical builder.
+
+One disclosed language limit rides with TA1B rather than being engineered around:
+Rust visibility makes the mints unforgeable from OUTSIDE the crate and provable by
+compile-fail, while in-crate the exhaustive carrier-category match is the forcing
+function rather than the type system. In-crate unforgeability is not claimed.
 
