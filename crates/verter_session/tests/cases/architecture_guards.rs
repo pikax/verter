@@ -9299,6 +9299,10 @@ pub(crate) mod foundations_guards {
             "fake `--api` engine test double — writes a process-id rendezvous file and manages the local IPC pipe lifecycle (`std::fs::File::from_raw_handle` over a Windows named pipe, `std::fs::remove_file` on the pipe path) so the test harness can drive the API protocol off real IPC. Real-FS IPC by nature; same category as `control/advertisement.rs` + `control/transport.rs`. Not a NativeFs/VFS disk-boundary bypass, never workspace/semantic state.",
         ),
         (
+            "crates/verter_tsgo_api/src/process.rs",
+            "Linux process-liveness probe — reads the kernel-synthesised `/proc/<pid>/stat` state so an exited zombie is not mistaken for a live engine/client merely because `kill(pid, 0)` still finds its unreaped pid. Process lifecycle metadata, not workspace, semantic, overlay, or VFS state; routing it through NativeFs would incorrectly cache a per-process state transition.",
+        ),
+        (
             "crates/verter_type_runtime/src/discovery.rs",
             "TypeScript SDK install discovery for the type-runtime tool layer (tsserver/tsgo binary lookup, package.json reads inside the SDK directory).",
         ),
