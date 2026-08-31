@@ -4177,10 +4177,13 @@ impl Lowerer<'_> {
                 // statement. The ONE class discipline the leaf path applies
                 // to a class EXPRESSION answers for it: provably
                 // non-narrowing calls are decided above, every other call
-                // flags the enclosing statement's typed gap. Deferred
-                // bodies (a method runs when called, an instance property
-                // initializer at construction) keep the nested-frame
-                // blanket treatment.
+                // flags the enclosing statement's typed gap, and a
+                // whole-binding WRITE to a frame-owned target — invisible
+                // to the slice's effect ledger, which the skeleton never
+                // feeds from the class subtree — takes the same typed gap.
+                // Deferred bodies (a method runs when called, an instance
+                // property initializer at construction) keep the
+                // nested-frame blanket treatment.
                 Statement::ClassDeclaration(class) => {
                     let mut scanner = LeafCallScanner::default();
                     scanner.visit_class(class);
@@ -5836,8 +5839,15 @@ impl Lowerer<'_> {
     /// Discharge one walked [`LeafCallScanner`]: nested-frame calls are
     /// decided above outright; the same-frame `control` / `discarded`
     /// channels certify per-callee, and any unprovable call flags the
-    /// enclosing statement's typed `GuardNarrowing` gap.
-    fn drain_leaf_call_scanner(&mut self, scanner: LeafCallScanner) {
+    /// enclosing statement's typed `GuardNarrowing` gap. A collected
+    /// same-frame WRITE whose target this frame OWNS takes the same gap:
+    /// the write runs at the enclosing statement but never enters the
+    /// slice's effect ledger (the flow skeleton skips the class subtree),
+    /// so neither this half nor the evaluator can model the retype the
+    /// checker applies — a degraded success, never a silently certified
+    /// superset. A FREE target writes no binding this frame tracks and
+    /// stays silent.
+    fn drain_leaf_call_scanner(&mut self, scanner: LeafCallScanner<'_>) {
         self.decided_above_call_spans.extend(scanner.decided);
         let control_unprovable = self.certify_result_independent_calls(
             scanner.control,
@@ -5847,7 +5857,11 @@ impl Lowerer<'_> {
             scanner.discarded,
             ResultIndependentPosition::DiscardedOperand,
         );
-        if control_unprovable || discarded_unprovable {
+        let unmodelled_write = scanner
+            .writes
+            .into_iter()
+            .any(|(name, span)| !matches!(self.resolve_name(name, span), NameBinding::Free));
+        if control_unprovable || discarded_unprovable || unmodelled_write {
             self.control_test_gap = true;
         }
     }
@@ -6255,27 +6269,142 @@ impl<'a> Visit<'a> for ControlCalls {
 /// initializers evaluate in the ENCLOSING frame, so they are visited
 /// outside the nested-frame guard and their control positions split like
 /// any other same-frame position.
+///
+/// The same positions can also WRITE a frame binding: `class C { static {
+/// x = "s"; } }` retypes `x` in the checker for every read that follows,
+/// but the flow skeleton skips the whole class subtree, so the write
+/// never enters the slice's effect ledger and the evaluator's
+/// unapplied-write gate never sees it. The scanner therefore collects
+/// every same-frame WHOLE-BINDING write target (a plain `=` assignment, a
+/// compound-operator write, an update — identifier and destructuring
+/// targets; a member write is a projection under its root and never
+/// retypes the binding itself), and the drain resolves each against this
+/// frame's lexical authority: a target the frame OWNS flags the enclosing
+/// statement's typed `GuardNarrowing` gap, a FREE target stays silent.
 #[derive(Default)]
-struct LeafCallScanner {
+struct LeafCallScanner<'a> {
     decided: Vec<verter_span::Span>,
     discarded: Vec<ControlCall>,
     control: Vec<ControlCall>,
+    /// Same-frame whole-binding write targets: `(name, identifier span)`.
+    writes: Vec<(&'a str, oxc_span::Span)>,
     control_nesting: usize,
     nested_frame_nesting: usize,
 }
 
-impl LeafCallScanner {
+impl<'a> LeafCallScanner<'a> {
     /// Visit one same-frame CONTROL-position expression: every call it
     /// holds (transitively, until a nested frame) takes the
     /// [`ResultIndependentPosition::ControlTest`] rule.
-    fn visit_control_expression(&mut self, expr: &Expression<'_>) {
+    fn visit_control_expression(&mut self, expr: &Expression<'a>) {
         self.control_nesting += 1;
         self.visit_expression(expr);
         self.control_nesting -= 1;
     }
+
+    /// Collect the WHOLE-BINDING write targets of one assignment target:
+    /// an identifier target writes its binding, a destructuring pattern
+    /// writes every element it binds, and a TS wrapper forwards to its
+    /// inner expression. A member write is a projection under its root —
+    /// it never retypes the binding itself — so it collects nothing.
+    fn collect_write_targets(&mut self, target: &oxc_ast::ast::AssignmentTarget<'a>) {
+        use oxc_ast::ast::AssignmentTarget;
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+                self.writes
+                    .push((identifier.name.as_str(), identifier.span));
+            }
+            AssignmentTarget::TSAsExpression(as_expression) => {
+                self.collect_expression_write_target(&as_expression.expression);
+            }
+            AssignmentTarget::TSSatisfiesExpression(satisfies) => {
+                self.collect_expression_write_target(&satisfies.expression);
+            }
+            AssignmentTarget::TSNonNullExpression(non_null) => {
+                self.collect_expression_write_target(&non_null.expression);
+            }
+            AssignmentTarget::TSTypeAssertion(assertion) => {
+                self.collect_expression_write_target(&assertion.expression);
+            }
+            AssignmentTarget::ArrayAssignmentTarget(array) => {
+                for element in array.elements.iter().flatten() {
+                    self.collect_maybe_default_write_target(element);
+                }
+                if let Some(rest) = array.rest.as_ref() {
+                    self.collect_write_targets(&rest.target);
+                }
+            }
+            AssignmentTarget::ObjectAssignmentTarget(object) => {
+                use oxc_ast::ast::AssignmentTargetProperty;
+                for property in &object.properties {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(
+                            identifier,
+                        ) => {
+                            self.writes
+                                .push((identifier.binding.name.as_str(), identifier.binding.span));
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                            self.collect_maybe_default_write_target(&property.binding);
+                        }
+                    }
+                }
+                if let Some(rest) = object.rest.as_ref() {
+                    self.collect_write_targets(&rest.target);
+                }
+            }
+            AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::PrivateFieldExpression(_) => {}
+        }
+    }
+
+    fn collect_maybe_default_write_target(
+        &mut self,
+        target: &oxc_ast::ast::AssignmentTargetMaybeDefault<'a>,
+    ) {
+        match target {
+            oxc_ast::ast::AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(
+                with_default,
+            ) => {
+                self.collect_write_targets(&with_default.binding);
+            }
+            _ => self.collect_write_targets(target.to_assignment_target()),
+        }
+    }
+
+    fn collect_expression_write_target(&mut self, expression: &Expression<'a>) {
+        if let Expression::Identifier(identifier) = expression {
+            self.writes
+                .push((identifier.name.as_str(), identifier.span));
+        }
+    }
 }
 
-impl<'a> Visit<'a> for LeafCallScanner {
+impl<'a> Visit<'a> for LeafCallScanner<'a> {
+    fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
+        // A same-frame assignment RUNS at the enclosing statement: a
+        // whole-binding write to a frame-owned target retypes the binding
+        // in the checker while the slice's effect ledger never sees it
+        // (the skeleton skips the class subtree). Collect it for the
+        // drain's fail-closed gap; the walk still descends for nested
+        // calls and writes in computed keys and the right-hand side.
+        if self.nested_frame_nesting == 0 {
+            self.collect_write_targets(&it.left);
+        }
+        walk::walk_assignment_expression(self, it);
+    }
+    fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
+        if self.nested_frame_nesting == 0 {
+            if let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
+                &it.argument
+            {
+                self.writes
+                    .push((identifier.name.as_str(), identifier.span));
+            }
+        }
+        walk::walk_update_expression(self, it);
+    }
     fn visit_conditional_expression(&mut self, it: &oxc_ast::ast::ConditionalExpression<'a>) {
         if self.nested_frame_nesting > 0 {
             walk::walk_conditional_expression(self, it);

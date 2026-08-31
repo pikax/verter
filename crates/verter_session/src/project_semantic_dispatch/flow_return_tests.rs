@@ -5845,6 +5845,52 @@ fn assert_control_callee_gaps_unwarmed(
     );
 }
 
+/// Assert that a class-evaluation-time WRITE to a frame binding never
+/// seals the unnarrowed superset warm: the join keeps BOTH arms of the
+/// unnarrowed `string | number` parameter, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[track_caller]
+fn assert_class_evaluation_write_gaps_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: the unapplied class-evaluation write is never modelled as a narrow — \
+             the {primitive:?} arm survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "{name}: the unmodelled write degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unmodelled class-evaluation write never warms"
+    );
+}
+
 /// Control-call certification and predicate selection are proofs over
 /// the callee's CHECKER-VISIBLE declaration set, which is not the current
 /// file's text: a file with no top-level module syntax is a SCRIPT whose
@@ -6647,6 +6693,60 @@ function f(x: string | number) {
     upsert_ts(&host, CANONICAL, FIXTURE);
     with_dispatch(&host, |dispatch| {
         assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A class-evaluation position can WRITE a frame binding, not only call:
+/// the static block of `class C { static { x = "s"; } }` runs at class
+/// evaluation and retypes `x` to `"s"` in the checker for every read that
+/// follows. The flow skeleton skips the whole class subtree, so the write
+/// never entered the slice's effect ledger and the unapplied-write gate
+/// never saw it — the candidate minted a COMPLETE warm result with `x` at
+/// its pre-class `string | number`. The class scan flags the enclosing
+/// statement's typed gap instead: the return's read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap,
+/// and the family slot holds zero candidates.
+#[test]
+fn class_declaration_static_block_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-static-block-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class C { static { x = "s"; } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// The class's `super_class` heritage expression evaluates in the
+/// ENCLOSING frame at the class declaration, so the sequence write in
+/// `class C extends (x = "s", B) {}` retypes `x` in the checker exactly
+/// as a static block write does — and is exactly as invisible to the
+/// slice's effect ledger. The same fail-closed discipline applies: the
+/// return's read of `x` keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_declaration_heritage_sequence_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-heritage-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class B {}
+  class C extends (x = "s", B) {}
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
     });
 }
 

@@ -1871,6 +1871,107 @@ fn discarded_operand_calls_stop_at_nested_frames() {
     );
 }
 
+/// A class-evaluation position can WRITE a frame binding, not only call:
+/// `class C { static { x = "s"; } }` retypes `x` to `"s"` in the checker
+/// for every read that follows, but the flow skeleton skips the whole
+/// class subtree, so the write never enters the slice's effect ledger and
+/// the unapplied-write gate never sees it — the candidate would seal warm
+/// with `x` at its pre-class `string | number`. The class scan collects
+/// every same-frame whole-binding write whose target the frame owns (a
+/// plain `=` assignment, a compound-operator write, an update) and flags
+/// the enclosing statement's typed gap: a degraded success, never a
+/// silently certified superset. Deferred bodies (a method runs when
+/// called, an instance property initializer at construction) keep the
+/// nested-frame blanket treatment, and a write to a binding the frame
+/// does NOT own stays silent.
+#[test]
+fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
+    let gapped = [
+        (
+            "a static block assignment",
+            "export {};\nfunction f(x: string | number) { class C { static { x = \"s\"; } } return x }",
+        ),
+        (
+            "a heritage sequence assignment",
+            "export {};\nfunction f(x: string | number) { class B {} class C extends (x = \"s\", B) {} return x }",
+        ),
+        (
+            "a static property initializer assignment",
+            "export {};\nfunction f(x: string | number) { class C { static p = (x = \"s\"); } return x }",
+        ),
+        (
+            "a computed key assignment",
+            "export {};\nfunction f(x: string | number) { class C { [(x = \"s\")]() {} } return x }",
+        ),
+        (
+            "a static block compound write",
+            "export {};\nfunction f(x: string | number) { class C { static { x += 1; } } return x }",
+        ),
+        (
+            "a static block update",
+            "export {};\nfunction f(x: string | number) { class C { static { x++; } } return x }",
+        ),
+        (
+            "a class-expression static block assignment",
+            "export {};\nfunction f(x: string | number) { return (class { static { x = \"s\"; } } as object) }",
+        ),
+        (
+            "a static block destructuring assignment",
+            "export {};\nfunction f(x: string | number) { class C { static { [x] = [1]; } } return x }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    let deferred = [
+        (
+            "a method body assignment",
+            "export {};\nfunction f(x: string | number) { class C { m() { x = \"s\"; } } return x }",
+        ),
+        (
+            "an instance property initializer assignment",
+            "export {};\nfunction f(x: string | number) { class C { p = (x = \"s\"); } return x }",
+        ),
+        (
+            "an instance auto-accessor initializer assignment",
+            "export {};\nfunction f(x: string | number) { class C { accessor p = (x = \"s\"); } return x }",
+        ),
+    ];
+    for (case, source) in deferred {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a deferred body mints no gap: {node:?}"
+        );
+    }
+
+    let clean = [
+        (
+            "a static-block-local write",
+            "export {};\nfunction f(x: string | number) { class C { static { let y = 0; y = 1; } } return x }",
+        ),
+        (
+            "a member write never retypes the binding",
+            "export {};\nfunction f(x: string | number) { const o = { p: 0 }; class C { static { o.p = 1; } } return x }",
+        ),
+    ];
+    for (case, source) in clean {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a write to no frame-owned whole binding stays silent: {node:?}"
+        );
+    }
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {
