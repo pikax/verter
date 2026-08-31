@@ -87,14 +87,6 @@ export const PROVIDER_LIVE_SELECTORS = Object.freeze([
     lane: "tsgo",
     package: "verter_lsp",
     kind: "prefix",
-    value: "cases::shared_provider_live::",
-    example: "cases::shared_provider_live::shared_provider_serves_real_vue_macro_carrier",
-    label: "shared-tsgo LSP integration",
-  },
-  {
-    lane: "tsgo",
-    package: "verter_lsp",
-    kind: "prefix",
     value: "cases::tsgo_virtual_membership::",
     example:
       "cases::tsgo_virtual_membership::vue_specific_include_companion_becomes_member_via_virtualization",

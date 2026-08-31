@@ -386,6 +386,10 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: v0.17.0
+      # setup-node enables package-manager caching from package.json metadata,
+      # so pnpm must already be on PATH even though this job does not install
+      # the JavaScript workspace.
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
@@ -396,7 +400,13 @@ jobs:
       - name: Build the shared Rust test archive
         run: |
           mkdir -p artifacts
-          node scripts/run-cached.mjs -- 'cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'
+          # act has no GitHub Actions cache service. Compile the same archive
+          # directly there; GitHub keeps the telemetry-enforced sccache path.
+          if [ "${ACT:-}" = "true" ]; then
+            cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst
+          else
+            node scripts/run-cached.mjs -- 'cargo nextest archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst'
+          fi
       # Fail closed before upload if a selector has gone stale, overlaps another
       # lane, or would leave a provider lane empty.
       - name: Verify the provider CI partition
@@ -673,6 +683,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
+      # gen-svelte-goldens invokes the Rust semantic-comment extractor. Pin the
+      # toolchain instead of relying on GitHub-hosted runner preinstalls.
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v5
         with:

@@ -445,34 +445,50 @@ describe("release gating", () => {
 describe("CI Rust path eligibility", () => {
   const ci = read(".github/workflows/ci.yml");
 
-  // @ai-generated - Pins the bounded first sccache rollout and cold-build memory fix.
-  it("runs the direct Rust test gate through the measured GitHub sccache lane", () => {
-    const body = workflowJobs(ci).get("rust-test") ?? "";
-    expect(body, "rust-test must install the reviewed sccache action").toContain(
+  // @ai-generated - Pins the single-build archive split and its measured cache owner.
+  it("builds the shared Rust test archive through the measured GitHub sccache lane", () => {
+    const build = workflowJobs(ci).get("rust-test-build") ?? "";
+    expect(build, "rust-test-build must install the reviewed sccache action").toContain(
       "mozilla-actions/sccache-action@v0.0.11",
     );
-    expect(body, "rust-test must pin the measured sccache binary").toContain("version: v0.17.0");
-    expect(body, "rust-test must enable the GitHub Actions cache backend").toContain(
+    expect(build, "rust-test-build must pin the measured sccache binary").toContain(
+      "version: v0.17.0",
+    );
+    expect(build, "rust-test-build must enable the GitHub Actions cache backend").toContain(
       'SCCACHE_GHA_ENABLED: "true"',
     );
-    expect(body, "rust-test must namespace its shared cache generation").toContain(
+    expect(build, "rust-test-build must namespace its shared cache generation").toContain(
       'SCCACHE_GHA_VERSION: "verter-rust-test-v1"',
     );
-    expect(body, "the direct gate must use the repository's telemetry wrapper").toContain(
-      "node scripts/run-cached.mjs -- 'cargo nextest run --workspace",
+    expect(build, "the archive build must use the repository's telemetry wrapper").toContain(
+      "node scripts/run-cached.mjs -- 'cargo nextest archive --workspace",
     );
-    expect(body, "the direct gate must preserve the authoritative provider feature").toContain(
-      "--features verter_session/bf2-authoritative",
+    expect(build, "act must bypass the unavailable GHA cache service").toMatch(
+      /if \[ "\$\{ACT:-\}" = "true" \]; then[\s\S]*cargo nextest archive --workspace/,
     );
-    expect(body, "the direct gate must use the canonical Surface 1 filter").toContain(
-      "buildCanonicalSurface1FilterExpr",
+    expect(build, "the archive must be verified before it is uploaded").toContain(
+      "node scripts/provider-ci.mjs verify --archive-file",
     );
-    expect(body, "the direct gate must bound cold-build linker pressure").toContain(
-      "--build-jobs 2",
+    expect(
+      build,
+      "the archive producer must install pnpm before setup-node enables its cache",
+    ).toMatch(/pnpm\/action-setup@v6[\s\S]*actions\/setup-node@v5/);
+
+    const core = workflowJobs(ci).get("rust-test") ?? "";
+    expect(core, "the core lane must consume the shared archive").toContain(
+      "cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst",
     );
-    expect(body, "the direct gate must not duplicate test binaries into an archive").not.toContain(
+    expect(core, "the core lane must not pay for another workspace compile").not.toContain(
       "cargo nextest archive",
     );
+  });
+
+  it("pins Rust for the JS lane's semantic-comment extractor", () => {
+    const body = workflowJobs(ci).get("js-build-test") ?? "";
+    expect(body, "the JS lane invokes cargo while checking Svelte goldens").toContain(
+      "dtolnay/rust-toolchain@1.97.1",
+    );
+    expect(body).toContain("node scripts/gen-svelte-goldens.mjs --check");
   });
 
   it("pins the required VS Code matrix to a reviewed editor release", () => {

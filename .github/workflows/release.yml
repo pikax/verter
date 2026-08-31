@@ -122,6 +122,8 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Provision the Rust gate's offline oracle npm cache
+        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
       # REQUIRED for a non-vacuous gate — the same prerequisite ci.yml's rust-test job builds, and the same
       # one gate.mjs's BUILD-PREREQUISITE PREFLIGHT refuses to run without. The real-provider suites spawn
       # the pinned tsserver with `--globalPlugins @verter/typescript-plugin`, whose entry is a `tsc -b`

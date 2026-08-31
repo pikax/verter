@@ -1751,7 +1751,7 @@ fn every_enumerated_body_reader_is_present_at_its_anchor() {
             r.fn_name,
             r.class.label()
         );
-        if !anchored_definition_present(&inv, r.file, r.impl_path, r.fn_name) {
+        if !anchored_definition_present(inv, r.file, r.impl_path, r.fn_name) {
             missing.push(format!(
                 "{} reader `{}` is MISSING at its anchor ({} :: {}) — the residual partition \
                  enumeration is stale (a same-named body elsewhere does NOT satisfy the anchor)",
@@ -1770,7 +1770,7 @@ fn every_enumerated_body_reader_is_present_at_its_anchor() {
             r.impl_path,
             r.fn_name
         );
-        if !anchored_definition_present(&inv, r.file, r.impl_path, r.fn_name) {
+        if !anchored_definition_present(inv, r.file, r.impl_path, r.fn_name) {
             missing.push(format!(
                 "COMPAT reader `{}` is MISSING at its anchor ({} :: {}) — the compat helper / its \
                  routed call site must exist",
@@ -1797,7 +1797,7 @@ fn every_anchored_body_reader_is_unique() {
     let inv = production_inventory();
     let mut violations = Vec::new();
     for (file, impl_path, name) in all_inventory_anchors() {
-        let count = anchored_defs(&inv, &file, &impl_path, &name).len();
+        let count = anchored_defs(inv, &file, &impl_path, &name).len();
         if count != 1 {
             violations.push(format!(
                 "anchor `{file} :: {impl_path} :: fn {name}` resolves to {count} non-test \
@@ -1861,7 +1861,7 @@ fn no_method_chain_body_read_outside_the_inventory() {
     let inv = production_inventory();
     let allowed = method_chain_allowed_anchors();
     let mut violations = Vec::new();
-    for hit in unclassified_method_chain_reads(&inv, &allowed) {
+    for hit in unclassified_method_chain_reads(inv, &allowed) {
         violations.push(format!(
             "{} :: {} :: fn `{}` performs a `<recv>.body.{:?}` lowered-body read but its anchor is \
              NOT in the residual or COMPAT inventory — a new/moved lowered-body reader appeared. \
@@ -1960,7 +1960,7 @@ fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
         } = anchor;
         // The anchor must be present + unique (PRESENCE/UNIQUENESS cover this too,
         // but assert here so a missing migrated anchor reds THIS invariant).
-        let defs = anchored_defs(&inv, file, impl_path, name);
+        let defs = anchored_defs(inv, file, impl_path, name);
         if defs.len() != 1 {
             violations.push(format!(
                 "GraphBackedMigrated anchor `{file} :: {impl_path} :: fn {name}` resolves to {} \
@@ -2584,7 +2584,7 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
             class.label()
         );
         assert_eq!(
-            anchored_defs(&real_inv, file, impl_path, fn_name).len(),
+            anchored_defs(real_inv, file, impl_path, fn_name).len(),
             1,
             "self-test: the reader `{file} :: {impl_path} :: {fn_name}` must resolve to exactly one \
              non-test def on the real tree (the enumeration row is load-bearing)"
@@ -2595,7 +2595,7 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
     // mutated variant is NOT.
     assert!(
         anchored_definition_present(
-            &real_inv,
+            real_inv,
             "src/resolver_core/component_meta_query_engine/helpers.rs",
             "",
             "resolve_imported_registry_symbol_with_budget"
@@ -2604,7 +2604,7 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
     );
     assert!(
         !anchored_definition_present(
-            &real_inv,
+            real_inv,
             "src/resolver_core/component_meta_query_engine/helpers.rs",
             "",
             "resolve_imported_registry_symbol_with_budget_MUTATED_zzz"
@@ -2794,7 +2794,7 @@ fn real_tree_satisfies_all_invariants() {
     // (1) Presence — every enumerated reader is anchored.
     for r in RESIDUAL_BODY_READERS {
         assert!(
-            anchored_definition_present(&inv, r.file, r.impl_path, r.fn_name),
+            anchored_definition_present(inv, r.file, r.impl_path, r.fn_name),
             "control: residual reader `{}` ({} :: {}) [{}] must be present on the real tree",
             r.fn_name,
             r.file,
@@ -2804,7 +2804,7 @@ fn real_tree_satisfies_all_invariants() {
     }
     for r in COMPAT_BODY_READERS {
         assert!(
-            anchored_definition_present(&inv, r.file, r.impl_path, r.fn_name),
+            anchored_definition_present(inv, r.file, r.impl_path, r.fn_name),
             "control: COMPAT reader `{}` ({} :: {}) must be present on the real tree",
             r.fn_name,
             r.file,
@@ -2815,7 +2815,7 @@ fn real_tree_satisfies_all_invariants() {
     // (2) Uniqueness.
     for (file, impl_path, name) in all_inventory_anchors() {
         assert_eq!(
-            anchored_defs(&inv, &file, &impl_path, &name).len(),
+            anchored_defs(inv, &file, &impl_path, &name).len(),
             1,
             "control: anchor `{file} :: {impl_path} :: {name}` must resolve to exactly one def"
         );
@@ -2823,7 +2823,7 @@ fn real_tree_satisfies_all_invariants() {
 
     // (3) Tripwire.
     let allowed = method_chain_allowed_anchors();
-    let stray = unclassified_method_chain_reads(&inv, &allowed);
+    let stray = unclassified_method_chain_reads(inv, &allowed);
     assert!(
         stray.is_empty(),
         "control: the real tree must have NO un-inventoried `<recv>.body.<method>` read — got {:?}",
@@ -3080,7 +3080,7 @@ pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
 pub(super) fn run_production_guards() {
     std::thread::scope(|scope| {
         for (_, guard) in PRODUCTION_GUARDS {
-            scope.spawn(move || guard());
+            scope.spawn(guard);
         }
     });
 }

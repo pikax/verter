@@ -251,7 +251,7 @@ function renderChunkBody(chunkIndex, componentFiles, config) {
 // mod.rs generator
 // ---------------------------------------------------------------------------
 
-function renderEntryPointRs(chunkSlugs, overrideSlugs, testSubdir) {
+function renderEntryPointRs(chunkSlugs, overrideSlugs, testSubdir, caseCount) {
   // The committed entry point is `tests/cases/corpus_audit_tests.rs`,
   // compiled as a submodule of the consolidated `main` integration
   // binary. Every chunk is one nextest process. The hand-written harness owns
@@ -263,6 +263,7 @@ function renderEntryPointRs(chunkSlugs, overrideSlugs, testSubdir) {
     "//! Stitches moderate table-test chunks into the consolidated session",
     "//! integration binary. Nextest gives every `#[test]` its own process;",
     "//! sharing therefore occurs inside each chunk, never across tests.",
+    `//! Logical corpus cases: ${caseCount}.`,
     "",
   ];
   for (const slug of chunkSlugs) {
@@ -401,7 +402,12 @@ function sweepCorpus(corpus, cliConfig) {
   // target name, raising a duplicate-name error when both exist.
   writeFileSync(
     resolve(cliConfig.outputDir, `${corpus.entryStem}.rs`),
-    renderEntryPointRs(chunkSlugs, Array.from(overrideSlugs).sort(), corpus.testSubdir),
+    renderEntryPointRs(
+      chunkSlugs,
+      Array.from(overrideSlugs).sort(),
+      corpus.testSubdir,
+      componentFiles.length,
+    ),
   );
   writeFileSync(resolve(testDir, "README.md"), renderCorpusReadme(componentFiles.length));
 

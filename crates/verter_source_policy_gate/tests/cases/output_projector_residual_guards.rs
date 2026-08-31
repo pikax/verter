@@ -193,7 +193,7 @@ fn whole_ident_occurrences(src: &str, needle: &str) -> usize {
 fn retired_kind_b_bridge_symbol_absent_from_production_source() {
     let mut offenders: Vec<String> = Vec::new();
     for (rel, src) in production_src_files() {
-        let n = whole_ident_occurrences(&src, RETIRED_BRIDGE_IDENT);
+        let n = whole_ident_occurrences(src, RETIRED_BRIDGE_IDENT);
         if n > 0 {
             offenders.push(format!("{rel} ({n}x)"));
         }
@@ -2453,7 +2453,7 @@ fn collect_output_cap_mint_scopes() -> Vec<CapMintScope> {
     use proc_macro2::TokenTree;
     let mut out = Vec::new();
     for (rel, src) in production_src_files() {
-        let file = match syn::parse_file(&src) {
+        let file = match syn::parse_file(src) {
             Ok(f) => f,
             Err(_) => continue,
         };
@@ -6640,14 +6640,14 @@ fn collect_sink_fn_sigs(
     let scan_prefixes = sink_scan_prefixes();
     let mut out = Vec::new();
     for (rel, src) in production_src_files() {
-        let module_path = module_path_for_rel(&rel);
+        let module_path = module_path_for_rel(rel);
         if !scan_prefixes
             .iter()
             .any(|p| module_path == *p || module_path.starts_with(&format!("{p}::")))
         {
             continue;
         }
-        let file = match syn::parse_file(&src) {
+        let file = match syn::parse_file(src) {
             Ok(f) => f,
             Err(_) => continue,
         };
@@ -8159,7 +8159,7 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
     // token FAILS. Under module-qualified identity a shared bare name is two
     // DISTINCT ids (no "accepted because bearing" carve-out); an ambiguous
     // UNQUALIFIED reference to such a name is caught fail-closed at the boundary.
-    let collisions = qualified_safe_input_collision_violations(&name_to_ids);
+    let collisions = qualified_safe_input_collision_violations(name_to_ids);
     assert!(
         collisions.is_empty(),
         "qualified safe-input identity violation(s) — a safe-input / construction-chain token name \
@@ -8169,7 +8169,7 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
     );
     // §G FAIL-CLOSED ANTI-VACUITY: every QUALIFIED non-authority input exemption
     // must still resolve to a collected def — a stale exemption FAILS loudly.
-    let stale_non_authority = non_authority_input_anti_vacuity_violations(&name_to_ids);
+    let stale_non_authority = non_authority_input_anti_vacuity_violations(name_to_ids);
     assert!(
         stale_non_authority.is_empty(),
         "qualified non-authority input anti-vacuity violation(s) — a `Qualified` non-authority \
@@ -8336,7 +8336,7 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
     // UNRESOLVED PascalCase output ident is a TypeExpr-bearing WRAPPER DTO defined
     // OUTSIDE the read file set treated as a non-bearing leaf (or an ambiguous
     // bare name) — the silent under-classification this fails loudly on.
-    let unclassifiable = unclassifiable_output_idents(&sigs, &name_to_ids, &bearing);
+    let unclassifiable = unclassifiable_output_idents(&sigs, name_to_ids, &bearing);
     assert!(
         unclassifiable.is_empty(),
         "STRUCTURAL closure completeness violation(s) — a sink fn returns a PascalCase output type \
@@ -8357,7 +8357,7 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
     // known non-authority external). An UNRESOLVED input type could be a forgeable
     // wrapper whose def home is unread — which the cross-sink check would then
     // silently miss — so it FAILS loudly.
-    let unclassifiable_inputs = unclassifiable_input_idents(&sigs, &bearing, &name_to_ids);
+    let unclassifiable_inputs = unclassifiable_input_idents(&sigs, &bearing, name_to_ids);
     assert!(
         unclassifiable_inputs.is_empty(),
         "STRUCTURAL input completeness violation(s) — a sink fn with a `TypeExpr`-bearing output \
@@ -11956,14 +11956,14 @@ fn authority_scopes_contain_no_unsafe() {
     let mut violations = Vec::new();
     let mut scanned = 0usize;
     for (rel, src) in production_src_files() {
-        let module_path = module_path_for_rel(&rel);
+        let module_path = module_path_for_rel(rel);
         if !NO_UNSAFE_SCOPE_PREFIXES
             .iter()
             .any(|p| module_path == *p || module_path.starts_with(&format!("{p}::")))
         {
             continue;
         }
-        let Ok(file) = syn::parse_file(&src) else {
+        let Ok(file) = syn::parse_file(src) else {
             continue;
         };
         scanned += 1;
@@ -14922,9 +14922,9 @@ fn hot_materialize_offenders_with_facts(
         offenders.extend(hot_materialize_violations_in_file(
             rel,
             file,
-            &index,
-            &returns_mat,
-            &returns_typeexpr,
+            index,
+            returns_mat,
+            returns_typeexpr,
         ));
     }
     offenders.sort();
