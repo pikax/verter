@@ -21,3 +21,17 @@ export async function pollUntilWithin<T>(
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remainingMs)));
   }
 }
+
+export function semanticHoverReady(
+  text: string,
+  needles: readonly string[],
+  options?: { forbidAny?: boolean; forbidUnknown?: boolean; forbidGenerated?: boolean },
+): boolean {
+  return (
+    text.length > 0 &&
+    needles.every((needle) => text.includes(needle)) &&
+    (options?.forbidAny === false || !/:\s*any\b/.test(text)) &&
+    (!options?.forbidUnknown || !/\bunknown\b/.test(text)) &&
+    (options?.forbidGenerated === false || !/__Verter\w*/.test(text))
+  );
+}
