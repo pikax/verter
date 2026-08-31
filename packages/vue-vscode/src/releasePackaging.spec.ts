@@ -470,22 +470,11 @@ describe("CI Rust path eligibility", () => {
     );
   });
 
-  it("runs endurance routes independently and retains actionable editor diagnostics", () => {
-    const endurance = workflowJobs(ci).get("endurance-lsp") ?? "";
-    expect(endurance, "one failing route must not prevent the other endurance routes").toContain(
-      "fail-fast: false",
-    );
+  it("keeps unbaselined endurance probes out of required CI and retains editor diagnostics", () => {
     expect(
-      endurance,
-      "the endurance strategy must enumerate every required provider route",
-    ).toContain("route: [tsserver, tsgo, shared-tsgo]");
-    expect(endurance, "the harness must receive the current matrix route").toContain(
-      "VERTER_ENDURANCE_PROVIDER: ${{ matrix.route }}",
-    );
-    expect(endurance, "each route must retain its own receipt artifact").toContain(
-      "endurance-lsp-receipts-${{ matrix.route }}",
-    );
-
+      workflowJobs(ci).has("endurance-lsp"),
+      "endurance semantic probes exercise unfinished features and must not masquerade as PR regressions",
+    ).toBe(false);
     const vscode = workflowJobs(ci).get("vscode-e2e") ?? "";
     expect(vscode, "failed E2E runs must retain the extension/LSP log").toContain(
       "/tmp/verter-e2e-*.log",

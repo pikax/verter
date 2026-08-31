@@ -12,6 +12,7 @@ import {
 } from "./sharedLaunch";
 import { clearRunArtifacts, enforceRunSummary } from "../src/runSummaryOracle";
 import {
+  knownFrameworkContractGapsForRoute,
   requiredFrameworkContractIds,
   type ContractFramework,
 } from "./lib/frameworkContractManifest";
@@ -44,6 +45,12 @@ import {
   PROJECTLESS_CONTRACT_TEST_IDS,
 } from "./lib/projectlessContractManifest";
 import { knownProductGapsForRoute } from "./lib/knownProductGapManifest";
+import {
+  BARREL_REGRESSION_LOADED_FILES,
+  BARREL_REGRESSION_SUITE_GLOB,
+  BARREL_REGRESSION_TEST_IDS,
+  isBarrelRegressionFixture,
+} from "./lib/barrelRegressionManifest";
 
 const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
 const EXTENSION_ACCEPTANCE_FIXTURE = "out-of-tree-monorepo";
@@ -551,16 +558,19 @@ async function main() {
                   ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
                   : isProjectlessContractFixture(fixture)
                     ? { VERTER_E2E_ONLY: PROJECTLESS_CONTRACT_SUITE_GLOB }
-                    : CONTRACT_FIXTURES[fixture]
-                      ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
-                      : fixture in PARITY_FIXTURE_CONFIGS
-                        ? {
-                            VERTER_E2E_ONLY:
-                              onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
-                          }
-                        : onlyPattern
-                          ? { VERTER_E2E_ONLY: onlyPattern }
-                          : {}),
+                    : isBarrelRegressionFixture(fixture)
+                      ? { VERTER_E2E_ONLY: BARREL_REGRESSION_SUITE_GLOB }
+                      : CONTRACT_FIXTURES[fixture]
+                        ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
+                        : fixture in PARITY_FIXTURE_CONFIGS
+                          ? {
+                              VERTER_E2E_ONLY:
+                                onlyPattern ??
+                                PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
+                            }
+                          : onlyPattern
+                            ? { VERTER_E2E_ONLY: onlyPattern }
+                            : {}),
             },
           });
         } catch (error) {
@@ -580,11 +590,14 @@ async function main() {
         const contract = CONTRACT_FIXTURES[fixture];
         const parity = requiredParityRun(fixture, onlyPattern);
         const projectlessContract = isProjectlessContractFixture(fixture);
+        const barrelRegression = isBarrelRegressionFixture(fixture);
         const requiredLoadedFiles = contract
           ? [`frameworks/${contract.framework}/contract.test.js`]
           : projectlessContract
             ? PROJECTLESS_CONTRACT_LOADED_FILES
-            : parity?.loadedFiles;
+            : barrelRegression
+              ? BARREL_REGRESSION_LOADED_FILES
+              : parity?.loadedFiles;
         try {
           await enforceRunSummary(logFile, label, {
             expectedFixture: fixture,
@@ -594,10 +607,14 @@ async function main() {
               ? requiredFrameworkContractIds(contract.framework)
               : projectlessContract
                 ? PROJECTLESS_CONTRACT_TEST_IDS
-                : parity?.testIds,
+                : barrelRegression
+                  ? BARREL_REGRESSION_TEST_IDS
+                  : parity?.testIds,
             allowedProductGaps: parity
-              ? knownProductGapsForRoute(fixture, typeProvider)
-              : undefined,
+              ? knownProductGapsForRoute(fixture, typeProvider, parity.testIds)
+              : contract
+                ? knownFrameworkContractGapsForRoute(contract.framework, typeProvider)
+                : undefined,
           });
         } catch (summaryError) {
           if (extensionHostError) {

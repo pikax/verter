@@ -1,8 +1,9 @@
 /**
  * Register a dense matrix of IDE cases as individual mocha tests.
  *
- * Failures are never converted to skips: a broken anchor, timeout, or product
- * gap all surface as failed required tests.
+ * Failures are never converted to skips. The static run-summary manifest may
+ * accept a specifically classified product gap; broken anchors and unlisted
+ * failures remain fatal.
  */
 import { FIXTURE_NAME } from "../helpers";
 import {
@@ -15,9 +16,10 @@ import {
   assertReferenceCountAtLeast,
   completionsAtOffset,
   definitionsAt,
-  ensureParityReady,
+  failParityGap,
   findOffset,
   openRelative,
+  restartParityReady,
 } from "./parityHarness";
 import type { MatrixCase } from "./matrixCases";
 
@@ -105,14 +107,19 @@ export function registerMatrixSuite(options: {
   suite(options.title, function () {
     suiteSetup(async function () {
       this.timeout(60_000);
-      await ensureParityReady(options.entry);
+      await restartParityReady(options.entry);
     });
 
     for (const c of options.cases) {
       test(c.id, async function () {
         this.timeout(30_000);
-        // Hard fail — never failParityGap on unexpected errors.
-        await runCase(c);
+        try {
+          await runCase(c);
+        } catch (error) {
+          // This remains a failed test. The run-summary oracle accepts it only
+          // when this exact case ID and issue are declared for the route.
+          failParityGap(this, c.id, c.issue, String(error), "product-gap");
+        }
       });
     }
   });

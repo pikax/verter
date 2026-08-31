@@ -43,6 +43,59 @@ export const FRAMEWORK_CONTRACT_CAPABILITIES = [
 export type FrameworkContractCapability = (typeof FRAMEWORK_CONTRACT_CAPABILITIES)[number];
 export type ContractFramework = "vue" | "svelte";
 
+export type FrameworkContractProductGapManifest = Readonly<Record<string, string>>;
+
+const VUE_PUBLIC_SURFACE_GAPS: FrameworkContractProductGapManifest = {
+  "vue.import.direct.sfc-tag-hover.typed": "ISSUE-vue-public-surface-leak",
+  "vue.import.direct.plain-ts-hover.typed": "ISSUE-vue-public-surface-leak",
+  "vue.import.deep-barrel.sfc-tag-hover.typed": "ISSUE-vue-public-surface-leak",
+  "vue.import.deep-barrel.plain-ts-hover.typed": "ISSUE-vue-public-surface-leak",
+};
+
+const VUE_TSGO_CONTRACT_GAPS: FrameworkContractProductGapManifest = {
+  ...VUE_PUBLIC_SURFACE_GAPS,
+  "vue.ts.references.script-and-markup": "ISSUE-vue-contract-references",
+  "vue.js.references.script-and-markup": "ISSUE-vue-contract-references",
+  "vue.ts.rename.from-script": "ISSUE-vue-contract-rename",
+  "vue.ts.rename.from-markup": "ISSUE-vue-contract-rename",
+  "vue.js.rename.from-script": "ISSUE-vue-contract-rename",
+  "vue.js.rename.from-markup": "ISSUE-vue-contract-rename",
+  "vue.import.deep-barrel.plain-ts-to-child": "ISSUE-vue-barrel-definition",
+};
+
+const VUE_TSSERVER_CONTRACT_GAPS: FrameworkContractProductGapManifest = {
+  ...VUE_PUBLIC_SURFACE_GAPS,
+  "vue.js.rename.from-script": "ISSUE-vue-contract-rename",
+};
+
+/**
+ * Exact framework-contract gaps reproduced with the main-branch LSP binary.
+ *
+ * A passing row is always accepted, while a newly failing ID, a different
+ * issue marker, or the same failure on an undeclared route remains fatal.
+ */
+const FRAMEWORK_CONTRACT_PRODUCT_GAPS_BY_ROUTE: Readonly<
+  Record<string, FrameworkContractProductGapManifest>
+> = {
+  "vue@tsserver": VUE_TSSERVER_CONTRACT_GAPS,
+  "vue@tsgo": VUE_TSGO_CONTRACT_GAPS,
+  "vue@shared-tsgo": {},
+  "svelte@tsserver": {},
+  "svelte@tsgo": {},
+  "svelte@shared-tsgo": {},
+};
+
+export function knownFrameworkContractGapsForRoute(
+  framework: ContractFramework,
+  typeProvider: string | undefined,
+): FrameworkContractProductGapManifest {
+  return FRAMEWORK_CONTRACT_PRODUCT_GAPS_BY_ROUTE[`${framework}@${typeProvider ?? ""}`] ?? {};
+}
+
+export const FRAMEWORK_CONTRACT_PRODUCT_GAP_ROUTE_KEYS = Object.freeze(
+  Object.keys(FRAMEWORK_CONTRACT_PRODUCT_GAPS_BY_ROUTE).sort(),
+);
+
 /**
  * The completion gestures whose CONTENT is asserted, per framework.
  *

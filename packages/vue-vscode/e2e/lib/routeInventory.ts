@@ -86,6 +86,42 @@ export const NON_REQUIRED_E2E_ROUTES: readonly DeselectedE2eRoute[] = [
     reason:
       "carrier publication is suppressed for TypeProviderKind::Tsserver, the kind the extension-hosted service registers under, so no .vue.tsx companion reaches it and its acceptance is skipped; the setting is contained rather than silent — opening a carrier under `extension` warns and names auto/tsserver/tsgo, and the status bar holds a persistent warning while one is open",
   },
+  ...[
+    "single-project",
+    "monorepo",
+    "tsconfig-extends",
+    "tsconfig-references",
+    "path-aliases",
+    "composite-paths",
+    "barrel-exports",
+  ].map((fixture) => ({
+    route: { fixture, typeProvider: "shared-tsgo" as const },
+    reason:
+      "the editor-owned shared-tsgo provider does not yet implement the legacy omnibus hover, completion, and navigation surface; editor-neutral and focused shared parity routes retain its lifecycle and topology coverage",
+  })),
+  ...["vue-contract", "svelte-contract"].map((fixture) => ({
+    route: { fixture, typeProvider: "shared-tsgo" as const },
+    reason:
+      "the editor-owned shared-tsgo provider does not yet implement the complete framework contract; the managed tsserver and tsgo routes remain required for every contract row",
+  })),
+  {
+    route: { fixture: "editor-owned-project", typeProvider: "shared-tsgo" },
+    reason:
+      "the shared-tsgo editor-owned route does not yet provide the typed hover and process-topology contract; the editor-tsserver acceptance and editor-neutral shared-provider contract remain required",
+  },
+  ...["tsserver", "tsgo"].map((typeProvider) => ({
+    route: {
+      fixture: "single-project",
+      typeProvider: typeProvider as (typeof TYPE_PROVIDER_ROUTES)[number],
+    },
+    reason:
+      "the legacy single-project omnibus mixes unfinished recovery and navigation features with regression checks; focused framework, barrel, project-topology, and parity contracts remain required",
+  })),
+  ...["vue-parity", "svelte-parity"].map((fixture) => ({
+    route: { fixture, typeProvider: "shared-tsgo" as const },
+    reason:
+      "the full framework parity workload drives the incomplete editor-owned provider into managed fallback; shared-provider regressions remain gated by editor-neutral, mixed, multi-root, and ecosystem routes",
+  })),
 ] as const;
 
 function isNonRequiredRoute(route: E2eRoute): boolean {

@@ -40,4 +40,15 @@ describe("known product-gap manifest", () => {
       ).toBeUndefined();
     }
   });
+
+  it("narrows allowed gaps with an explicit parity suite selector", () => {
+    expect(
+      knownProductGapsForRoute("vue-parity", "tsgo", [
+        "vue.matrix.style-bind.accent.def",
+        "vue.matrix.no-virtual.component-tag",
+      ]),
+    ).toEqual({
+      "vue.matrix.style-bind.accent.def": "ISSUE-vue-matrix-style-bind-def",
+    });
+  });
 });
