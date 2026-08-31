@@ -1009,11 +1009,16 @@ include!("u6_flow_shape_corpus_rows_tests.rs");
 
 /// Locked baseline rows that were checker-correct, complete, and singly admitted.
 ///
-/// The cohort is derived mechanically from commit
-/// `80a7d9c328842f1457e866fb8588687e9f1d3118`. Each SHA-256 fingerprint is
-/// length-delimited over `(script, probe, checker)`, so changing the authored
-/// fixture, its probe, or its recorded checker answer cannot be hidden by
-/// re-pinning the remaining row fields.
+/// The cohort is derived mechanically from the table: it is EXACTLY the rows
+/// labelled [`Verdict::MatchesChecker`] whose flow lane is complete
+/// (`Degr::None`) and singly admitted (`candidates: 1`), and
+/// `flow_gap_retraction_preserves_clean_checker_matches` asserts that set
+/// equality in both directions — so a row that stops matching the checker,
+/// stops warming, or newly starts doing either fails here until the cohort is
+/// re-derived. Each SHA-256 fingerprint is length-delimited over
+/// `(script, probe, checker)`, so changing the authored fixture, its probe, or
+/// its recorded checker answer cannot be hidden by re-pinning the remaining
+/// row fields.
 #[cfg(test)]
 const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
@@ -1651,6 +1656,90 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
     (
         "X88_nested_label_inherits_enclosing_suffix_return",
         "76fa69e05ef1bc843a3d649da249b426144ad4a8f37a93c8265d4be987b3a66d",
+    ),
+    (
+        "N58_predicate_targets_second_parameter",
+        "67937178ac7fa11755183b7de413da72c13210550a6606d39e40cd8e160a87b9",
+    ),
+    (
+        "N63_two_discriminants_conjunction",
+        "b7d1e5359cb077889bb12447e27a7590144da48791ce7e3270d27a845dc10d5c",
+    ),
+    (
+        "N64_boolean_literal_discriminant",
+        "c13f0591d4c8cbad6f9598e8f0416e78ccd0fa510563558e51bafc52240f2f8d",
+    ),
+    (
+        "N66_shared_nonliteral_property_is_not_a_discriminant",
+        "c79aa1eef3b0955b01462e490e414915f527e0e73f7c81dd6835be7eda251523",
+    ),
+    (
+        "N67_intersection_arm_discriminant",
+        "fa77124287966e04ecd8b1f5e1554c68b83216157ef1a3b560ef208f859eec25",
+    ),
+    (
+        "N68_template_literal_discriminant",
+        "d0cac39054be89c7afdb7cce4bae21d3fc5fc280af6b3039073a3fd7f63ab981",
+    ),
+    (
+        "N73_typeof_object_keeps_null",
+        "95343cc9fd971495876ad1406249ffc7167c107bea92a77eade69daaa71d4d54",
+    ),
+    (
+        "N77_strict_not_null_keeps_undefined",
+        "64a93578211c164bb4f545454879b4d63be0bace35905d5f22e30629b66ea1f8",
+    ),
+    (
+        "N78_strict_not_undefined_keeps_null",
+        "501aee0440f7bfb526a1235fe6e75f55e6e9d314f31cded0cca0ca22c0bd497e",
+    ),
+    (
+        "N82_falsy_branch_keeps_empty_string_literal",
+        "74493204e6a526ecf7c6b24c59635076e3b8f3c7e241cda0623723f229ff73bb",
+    ),
+    (
+        "N83_optional_property_truthiness",
+        "efdc012efc005f13011543f60358f17e89b529cd7cd29701231e972d01b1f111",
+    ),
+    (
+        "X89_never_returning_call_terminates_branch",
+        "9a4b4247b867ee52ca9b88aeeb0d0699ba0600899668f133f4f5ade8977d2ffa",
+    ),
+    (
+        "X92_if_false_branch_still_contributes_return",
+        "d9f042edc82799e267929c202c6a63b2956f4ec2cf8fdc8711d2dcd7982f2b70",
+    ),
+    (
+        "X93_if_true_branch_keeps_fallthrough_return",
+        "d7b616ee9e42758ab6c958c3f50839790cbd088d0441663fa5c4a7c6d64ac479",
+    ),
+    (
+        "X99_nested_try_finally_collects_every_return",
+        "46933021df276dc95d823af15b07d58e2c20f7dc05ce61b5d55cc897b4703772",
+    ),
+    (
+        "X100_switch_default_between_cases_source_order",
+        "2ca64ebeb8d8025b0823a9374a44c5fc57fc542f7a691dc794b543a3edbd6274",
+    ),
+    (
+        "X102_literal_return_absorbed_by_string_sibling",
+        "2973459cfe70ee6277fa671f27597f13e11f7cc5bb0fcc93a7d647c8fa101095",
+    ),
+    (
+        "X104_void_arm_not_absorbed_in_union",
+        "e845a45b10ce2a1e02d00459d845fcf3513277f16da200970e4d48a9a97f1555",
+    ),
+    (
+        "X106_triple_nested_closure_return",
+        "2e3602b0461a1531ef1c06bfd59b5ba3dd124c83222ac2b01d2d331f4d953340",
+    ),
+    (
+        "X111_guard_clause_return_then_use",
+        "29b1b1b45391fb6e864797a6de8fec98ed65489300d35db1ac6d1cd12f68ff42",
+    ),
+    (
+        "X115_union_alias_passthrough_keeps_alias",
+        "9f2c707f961ff0630cb1633a1ec3eec7abf371845f3126b5918e2e8866b01ca4",
     ),
 ];
 
@@ -2577,6 +2666,7 @@ mod corpus_suite {
         const RENDER_COMPARABLE: &[&str] = &[
             "X85_nested_closure_write_updates_captured_binding",
             "X87_read_only_let_capture_keeps_reaching_literal",
+            "X106_triple_nested_closure_return",
         ];
         /// Deep-pinned rows whose `checker` text is NOT byte-comparable
         /// to the renderer, each with the PRESENTATION reason. Semantic
@@ -2673,6 +2763,116 @@ mod corpus_suite {
                  unmodelled-marker arm the `typeof` test cannot classify; print syntax \
                  AND semantics differ; the KnownOwed divergence is held by the semantic \
                  test",
+            ),
+            (
+                "N56_arrow_predicate_annotated_binding",
+                "checker prints `{ v: string | A; }`; the renderer spells the same node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }`",
+            ),
+            (
+                "N57_object_literal_method_predicate",
+                "checker prints `{ v: string | A; }`; the renderer spells the same node `{ v: Union(DeclRef(A) | DeclRef(B) | string) }`",
+            ),
+            (
+                "N59_generic_predicate_instantiated_at_call",
+                "checker prints `{ v: string; }`; the renderer spells the same node `{ v: Union(unknown | string) }`",
+            ),
+            (
+                "N60_class_method_assertion_narrows",
+                "checker prints `{ v: string; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+            ),
+            (
+                "N62_annotated_const_assertion_narrows",
+                "checker prints `{ v: string; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+            ),
+            (
+                "N64_boolean_literal_discriminant",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
+            ),
+            (
+                "N66_shared_nonliteral_property_is_not_a_discriminant",
+                "checker prints `{ v: N1 | N2; }`; the renderer spells the same node `{ v: Union(DeclRef(N1) | DeclRef(N2)) }`",
+            ),
+            (
+                "N69_in_operator_const_literal_key",
+                "checker prints `{ v: string | { a: string; }; }`; the renderer spells the same node `{ v: Union(string | { a: string } | { b: number }) }`",
+            ),
+            (
+                "N70_in_operator_numeric_key",
+                "checker prints `{ v: string | boolean; }`; the renderer spells the same node `{ v: Union(Opaque(UnmodeledPosition) | string) }`",
+            ),
+            (
+                "N72_typeof_function_guard",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(string | any) }`",
+            ),
+            (
+                "N73_typeof_object_keeps_null",
+                "checker prints `{ v: { a: number; } | null; }`; the renderer spells the same node `{ v: Union({ a: number } | null) }`",
+            ),
+            (
+                // Equality-guard forms: the loose `== null` operator, and equality
+    // against a const-typed literal binding or comparison target.
+    "N76_loose_equality_null_removes_both",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(string | null | undefined | number) }`",
+            ),
+            (
+                "N77_strict_not_null_keeps_undefined",
+                "checker prints `{ v: string | undefined; }`; the renderer spells the same node `{ v: Union(string | undefined) }`",
+            ),
+            (
+                "N78_strict_not_undefined_keeps_null",
+                "checker prints `{ v: string | null; }`; the renderer spells the same node `{ v: Union(string | null) }`",
+            ),
+            (
+                "N79_equality_against_const_literal_binding",
+                "checker prints `{ v: 5 | 15; }`; the renderer spells the same node `{ v: Union(5 | 10 | 15) }`",
+            ),
+            (
+                "N80_equality_against_const_literal_target_narrows",
+                "checker prints `{ v: \"a\"; }`; the renderer spells the same node `{ v: Union(\"a\" | \"b\") }`",
+            ),
+            (
+                "N82_falsy_branch_keeps_empty_string_literal",
+                "checker prints `{ v: \"\"; }`; the renderer spells the same node `{ v: \"\" }`",
+            ),
+            (
+                "X92_if_false_branch_still_contributes_return",
+                "checker prints `\"a1\" | \"a2\"`; the renderer spells the same node `Union(\"a1\" | \"a2\")`",
+            ),
+            (
+                "X93_if_true_branch_keeps_fallthrough_return",
+                "checker prints `\"b1\" | \"b2\"`; the renderer spells the same node `Union(\"b1\" | \"b2\")`",
+            ),
+            (
+                "X95_evolving_let_both_branches_join",
+                "checker prints `{ v: \"p\" | 1; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+            ),
+            (
+                "X97_evolving_let_switch_without_default_keeps_undefined",
+                "checker prints `{ v: \"s\" | 3 | undefined; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+            ),
+            (
+                "X99_nested_try_finally_collects_every_return",
+                "checker prints `\"z3\" | \"z4\" | \"z5\" | \"z6\"`; the renderer spells the same node `Union(\"z3\" | \"z4\" | \"z5\" | \"z6\")`",
+            ),
+            (
+                "X100_switch_default_between_cases_source_order",
+                "checker prints `{ v: \"w1\"; } | { v: \"w2\"; } | { v: \"w3\"; }`; the renderer spells the same node `Union({ v: \"w1\" } | { v: \"w2\" } | { v: \"w3\" })`",
+            ),
+            (
+                "X104_void_arm_not_absorbed_in_union",
+                "checker prints `{ v: void | number; }`; the renderer spells the same node `{ v: Union(void | number) }`",
+            ),
+            (
+                "X105_closure_captures_narrowed_binding_in_guarded_arm",
+                "checker prints `() => string`; the renderer spells the same node `Union(() => Union(string | undefined) | () => string)`",
+            ),
+            (
+                "X111_guard_clause_return_then_use",
+                "checker prints `{ v: number; } | { v: string; }`; the renderer spells the same node `Union({ v: number } | { v: string })`",
+            ),
+            (
+                "X115_union_alias_passthrough_keeps_alias",
+                "checker prints `Shape`; the renderer spells the same node `DeclRef(Shape)`",
             ),
         ];
         let mut failures = Vec::new();
@@ -3993,13 +4193,54 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         Owner::U6NarrowLattice,
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
     ),
+    (
+        "N61_unannotated_const_assertion_does_not_narrow",
+        Owner::U6NarrowSubstitution,
+        "member Union — the published value EQUALS the checker, so a recursive pin would assert the divergence this KnownOwed row records does not exist",
+    ),
+    (
+        // `Array.isArray` is not applied as a predicate on either edge.
+    "N74_array_isarray_true_arm",
+        Owner::U6NarrowTypeof,
+        "member Union carrying Array(number) — no Array variant in the recursive expectation vocabulary",
+    ),
+    (
+        "N75_array_isarray_false_arm",
+        Owner::U6NarrowTypeof,
+        "member Union carrying Array(number) — no Array variant in the recursive expectation vocabulary",
+    ),
+    (
+        "N81_equality_against_let_widened_target_does_not_narrow",
+        Owner::U6NarrowTypeof,
+        "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
+    ),
+    (
+        "N84_let_aliased_condition_does_not_narrow",
+        Owner::U6NarrowTypeof,
+        "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
+    ),
+    (
+        "X96_evolving_let_explicit_undefined_initializer",
+        Owner::U6ValueInference,
+        "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
+    ),
 ];
 
 /// Burn-down ceiling of [`SHALLOW_PINNED_ROWS`]. Lower freely as rows
 /// deepen; raising it admits a new shallow exception. Asserted by
 /// `value_indistinct_rows_carry_deep_pins_or_are_named_shallow`.
+///
+/// Raised from 81 to 87 for six deliberately-shallow rows, all blocked
+/// structurally rather than by convenience: three carry a measured value the
+/// recursive vocabulary cannot spell (`Array(…)` for the two `Array.isArray`
+/// rows, `Opaque(Miss)` for the explicit-`undefined` evolving binding), and
+/// three are over-narrow CONTROLS whose published value EQUALS the checker
+/// while the result is a typed `ReturnOnly` — a recursive pin on those would
+/// have to assert a divergence the row does not have, which
+/// `deep_pinned_rows_semantic_equality_follows_their_verdict` correctly
+/// rejects. Each entry records which of the two it is.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 81;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 87;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4101,6 +4342,47 @@ const OPEN_DEBTS: &[&str] = &[
     "N47_correlated_tuple_discriminant",
     "N48_closure_narrows_captured_binding",
     "N50_sequence_discriminant_test",
+    // Predicate / assertion CALL TARGETS the guard rail does not accept: an
+    // arrow-expression binding, an object-literal method, a class method, an
+    // annotated `const`, and a generic predicate instantiated at the call
+    // site. Each publishes the unnarrowed union as a typed ReturnOnly. The
+    // two `does_not_narrow` rows are the paired over-narrow CONTROLS: their
+    // published value is already correct and only the admission is owed, so
+    // a repair must leave their surfaces alone.
+    "N56_arrow_predicate_annotated_binding",
+    "N57_object_literal_method_predicate",
+    "N59_generic_predicate_instantiated_at_call",
+    "N60_class_method_assertion_narrows",
+    "N61_unannotated_const_assertion_does_not_narrow",
+    "N62_annotated_const_assertion_narrows",
+    // Discriminant / `in` key SPELLINGS outside the decidable-guard set:
+    // an enum member reference, a const-typed literal key, a numeric key,
+    // and a `typeof`-narrowed callable. The optional-member row is the one
+    // NARROWER-than-checker answer in this group; its note says so.
+    "N65_enum_member_discriminant",
+    "N69_in_operator_const_literal_key",
+    "N70_in_operator_numeric_key",
+    "N71_in_operator_optional_member_keeps_undefined",
+    "N72_typeof_function_guard",
+    "N74_array_isarray_true_arm",
+    "N75_array_isarray_false_arm",
+    "N76_loose_equality_null_removes_both",
+    "N79_equality_against_const_literal_binding",
+    "N80_equality_against_const_literal_target_narrows",
+    "N81_equality_against_let_widened_target_does_not_narrow",
+    "N84_let_aliased_condition_does_not_narrow",
+    // Evolving `let` bindings, the `never`-default switch admission, the
+    // `??` short circuit, index-signature reads, and a closure created
+    // inside a narrowed arm.
+    "X91_assert_never_default_arm_contributes_nothing",
+    "X94_evolving_let_one_branch_keeps_undefined",
+    "X95_evolving_let_both_branches_join",
+    "X96_evolving_let_explicit_undefined_initializer",
+    "X97_evolving_let_switch_without_default_keeps_undefined",
+    "X101_optional_chain_nullish_coalesce",
+    "X105_closure_captures_narrowed_binding_in_guarded_arm",
+    "X108_record_index_read_has_no_undefined",
+    "X109_optional_index_read_through_optional_chain",
 ];
 
 // Per-owner conformance — the merge go/no-go
@@ -4119,19 +4401,19 @@ const OPEN_DEBTS: &[&str] = &[
 /// message, which is the signal to re-pin the rows and this ledger together.
 #[cfg(test)]
 const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
-    (Owner::U2IndexedAccess, 1, 1, 0),
+    (Owner::U2IndexedAccess, 3, 1, 2),
     (Owner::U2MappedTemplate, 4, 1, 2),
     (Owner::U6CallResolve, 5, 4, 1),
-    (Owner::U6ValueInference, 71, 67, 1),
-    (Owner::U6LoopClosure, 4, 0, 1),
+    (Owner::U6ValueInference, 79, 70, 6),
+    (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
-    (Owner::U6FlowReturnSubstrate, 57, 42, 2),
-    (Owner::U6NarrowTypeof, 28, 17, 11),
+    (Owner::U6FlowReturnSubstrate, 63, 47, 3),
+    (Owner::U6NarrowTypeof, 42, 23, 19),
     // N25's MatchesChecker label predated the recursive expect pin; the
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block.
-    (Owner::U6NarrowLattice, 18, 8, 10),
-    (Owner::U6NarrowSubstitution, 5, 5, 0),
+    (Owner::U6NarrowLattice, 27, 13, 14),
+    (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 9, 4, 3),
     (Owner::SharedCompilePipeline, 8, 1, 7),
