@@ -133,6 +133,7 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "lsp.document-format.carrier": "ISSUE-lsp-document-format",
     "lsp.document-highlights.binding": "ISSUE-lsp-document-highlights",
     "lsp.signature-help.script-call": "ISSUE-lsp-signature-help",
+    "lsp.type-definition.binding": "ISSUE-lsp-type-definition",
     "product.extract-component.command": "ISSUE-product-extract-component",
     "shared.find.definition-then-refs-consistency": "ISSUE-find-def-refs-consistency",
     "shared.find.function.cross-region": "ISSUE-find-function",
@@ -176,8 +177,12 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "lsp.document-format.carrier": "ISSUE-lsp-document-format",
     "lsp.signature-help.script-call": "ISSUE-lsp-signature-help",
     "product.extract-component.command": "ISSUE-product-extract-component",
+    "shared.find.definition-then-refs-consistency": "ISSUE-find-def-refs-consistency",
+    "shared.find.js.exact-min-set": "ISSUE-find-js-exact",
     "shared.find.ts.exact-min-set": "ISSUE-find-ts-exact",
     "shared.inlay-hints.script-region": "ISSUE-product-inlay-hints",
+    "shared.rename.js.function": "ISSUE-rename-js-function",
+    "shared.rename.ts.markup-origin": "ISSUE-rename-ts-markup",
     "shared.style.id.references": "ISSUE-style-id-references",
     "shared.ts.dom-event.classic-or-legacy-not-contextual":
       "ISSUE-dom-event-over-inference-boundary",
@@ -323,6 +328,7 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
   "vue-parity@tsserver": {
     "confidence.definition.never-virtual-for-daily-and-strict": "ISSUE-vue-confidence-no-virtual",
     "depth.mapping.slot-prop-hover-range": "ISSUE-depth-mapping-slot",
+    "depth.rename.script-and-markup.min-two-edits": "ISSUE-depth-rename-apply",
     "generic.defaulted-t-string.no-annotation": "ISSUE-vue-generic-default",
     "generic.expect-error.structural": "ISSUE-vue-generic-expect-error",
     "generic.hover.field-multi-prop-number-chain": "ISSUE-vue-generic-hover-field",
