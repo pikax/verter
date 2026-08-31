@@ -9,22 +9,20 @@ use super::chunk_harness::{run_chunk, CorpusCase};
 fn corpus_audit_chunk_003_produces_audit_records_or_documents_skips() {
     #[rustfmt::skip]
     const CASES: &[CorpusCase] = &[
-        CorpusCase::new("editor_drag_handle", "/EditorDragHandle.vue", include_str!("fixtures/EditorDragHandle.vue")),
-        CorpusCase::new("editor_emoji_menu", "/EditorEmojiMenu.vue", include_str!("fixtures/EditorEmojiMenu.vue")),
-        CorpusCase::new("editor_mention_menu", "/EditorMentionMenu.vue", include_str!("fixtures/EditorMentionMenu.vue")),
-        CorpusCase::new("editor_suggestion_menu", "/EditorSuggestionMenu.vue", include_str!("fixtures/EditorSuggestionMenu.vue")),
-        CorpusCase::new("editor_toolbar", "/EditorToolbar.vue", include_str!("fixtures/EditorToolbar.vue")),
-        CorpusCase::new("empty", "/Empty.vue", include_str!("fixtures/Empty.vue")),
-        CorpusCase::new("error", "/Error.vue", include_str!("fixtures/Error.vue")),
-        CorpusCase::new("field_group", "/FieldGroup.vue", include_str!("fixtures/FieldGroup.vue")),
-        CorpusCase::new("file_upload", "/FileUpload.vue", include_str!("fixtures/FileUpload.vue")),
-        CorpusCase::new("footer", "/Footer.vue", include_str!("fixtures/Footer.vue")),
+        CorpusCase::new("command_palette", "/CommandPalette.vue", include_str!("fixtures/CommandPalette.vue")),
+        CorpusCase::new("editor", "/Editor.vue", include_str!("fixtures/Editor.vue")),
+        CorpusCase::new("prose_code_tree", "/prose/CodeTree.vue", include_str!("fixtures/prose/CodeTree.vue")),
+        CorpusCase::new("drawer", "/Drawer.vue", include_str!("fixtures/Drawer.vue")),
+        CorpusCase::new("progress", "/Progress.vue", include_str!("fixtures/Progress.vue")),
         CorpusCase::new("footer_columns", "/FooterColumns.vue", include_str!("fixtures/FooterColumns.vue")),
-        CorpusCase::new("form", "/Form.vue", include_str!("fixtures/Form.vue")),
-        CorpusCase::new("form_field", "/FormField.vue", include_str!("fixtures/FormField.vue")),
-        CorpusCase::new("header", "/Header.vue", include_str!("fixtures/Header.vue")),
-        CorpusCase::new("icon", "/Icon.vue", include_str!("fixtures/Icon.vue")),
-        CorpusCase::new("input", "/Input.vue", include_str!("fixtures/Input.vue")),
+        CorpusCase::new("prose_code_group", "/prose/CodeGroup.vue", include_str!("fixtures/prose/CodeGroup.vue")),
+        CorpusCase::new("pricing_plans", "/PricingPlans.vue", include_str!("fixtures/PricingPlans.vue")),
+        CorpusCase::new("dashboard_sidebar_toggle", "/DashboardSidebarToggle.vue", include_str!("fixtures/DashboardSidebarToggle.vue")),
+        CorpusCase::new("marquee", "/Marquee.vue", include_str!("fixtures/Marquee.vue")),
+        CorpusCase::new("dashboard_resize_handle", "/DashboardResizeHandle.vue", include_str!("fixtures/DashboardResizeHandle.vue")),
+        CorpusCase::new("prose_a", "/prose/A.vue", include_str!("fixtures/prose/A.vue")),
+        CorpusCase::new("prose_strong", "/prose/Strong.vue", include_str!("fixtures/prose/Strong.vue")),
+        CorpusCase::new("prose_em", "/prose/Em.vue", include_str!("fixtures/prose/Em.vue")),
     ];
     run_chunk(CASES);
 }

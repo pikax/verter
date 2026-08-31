@@ -95,6 +95,39 @@ fn is_generated_chunk_path(path: &Path) -> bool {
     suffix.len() == 3 && suffix.chars().all(|character| character.is_ascii_digit())
 }
 
+fn expected_weighted_chunks(
+    corpus_root: &Path,
+    expected: &BTreeMap<String, GeneratedRow>,
+) -> Vec<Vec<String>> {
+    let chunk_count = expected.len().div_ceil(CHUNK_SIZE);
+    let mut weighted = expected
+        .iter()
+        .map(|(slug, row)| {
+            let bytes = std::fs::metadata(corpus_root.join(&row.include_path))
+                .expect("read corpus fixture metadata")
+                .len();
+            (slug.clone(), row.include_path.clone(), bytes)
+        })
+        .collect::<Vec<_>>();
+    weighted.sort_by(|(_, left_path, left_bytes), (_, right_path, right_bytes)| {
+        right_bytes
+            .cmp(left_bytes)
+            .then_with(|| left_path.cmp(right_path))
+    });
+
+    let mut chunks = vec![Vec::new(); chunk_count];
+    let mut weights = vec![0_u64; chunk_count];
+    for (slug, _, bytes) in weighted {
+        let chunk = (0..chunk_count)
+            .filter(|&index| chunks[index].len() < CHUNK_SIZE)
+            .min_by_key(|&index| (weights[index], index))
+            .expect("a weighted corpus chunk must have capacity");
+        chunks[chunk].push(slug);
+        weights[chunk] += bytes;
+    }
+    chunks
+}
+
 #[test]
 fn generated_component_meta_corpus_is_chunked_complete_and_nonduplicating() {
     let cases_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
@@ -155,6 +188,7 @@ fn generated_component_meta_corpus_is_chunked_complete_and_nonduplicating() {
     );
 
     let mut occurrences = BTreeMap::<String, Vec<GeneratedRow>>::new();
+    let mut actual_chunks = Vec::with_capacity(chunk_paths.len());
     for path in &chunk_paths {
         let source = std::fs::read_to_string(path).expect("read generated chunk");
         assert_eq!(
@@ -180,6 +214,11 @@ fn generated_component_meta_corpus_is_chunked_complete_and_nonduplicating() {
             "chunk size must be within 1..={CHUNK_SIZE}: {}",
             path.display()
         );
+        actual_chunks.push(
+            rows.iter()
+                .map(|(slug, _)| slug.clone())
+                .collect::<Vec<_>>(),
+        );
         for (slug, row) in rows {
             occurrences.entry(slug).or_default().push(row);
         }
@@ -196,6 +235,11 @@ fn generated_component_meta_corpus_is_chunked_complete_and_nonduplicating() {
     assert_eq!(
         actual, expected,
         "every non-overridden fixture must occur exactly once with matching slug, canonical, and include path"
+    );
+    assert_eq!(
+        actual_chunks,
+        expected_weighted_chunks(&corpus_root, &expected),
+        "the generator must use deterministic source-byte LPT partitioning instead of lexical slices"
     );
 
     let entry = std::fs::read_to_string(cases_root.join("corpus_audit_tests.rs"))
@@ -233,20 +277,15 @@ fn generated_component_meta_corpus_is_chunked_complete_and_nonduplicating() {
         "entry point must include every authored override exactly once"
     );
 
-    let duplicate = std::fs::read_to_string(corpus_root.join("mod.rs"))
-        .expect("read intentional Main.vue duplicate shim");
-    assert_eq!(
-        duplicate.matches("#[test]").count(),
-        1,
-        "the historical Main.vue duplicate remains one separate logical row"
-    );
-    assert!(
-        duplicate.contains("include_str!(\"fixtures/Main.vue\")"),
-        "the intentional duplicate must continue to exercise Main.vue"
-    );
     assert!(
         actual.contains_key("main") || overrides.contains("main"),
-        "Main.vue must occur once in the generated-or-override lane and once in the manual duplicate"
+        "Main.vue must occur exactly once in the generated-or-override lane"
+    );
+    let cases_module =
+        std::fs::read_to_string(cases_root.join("mod.rs")).expect("read consolidated cases module");
+    assert!(
+        !cases_module.contains("mod component_meta_audit_corpus;"),
+        "the generated Main.vue row must not be duplicated by a historical directory-target shim"
     );
 }
 

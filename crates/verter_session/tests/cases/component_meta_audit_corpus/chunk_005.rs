@@ -9,22 +9,22 @@ use super::chunk_harness::{run_chunk, CorpusCase};
 fn corpus_audit_chunk_005_produces_audit_records_or_documents_skips() {
     #[rustfmt::skip]
     const CASES: &[CorpusCase] = &[
-        CorpusCase::new("page_aside", "/PageAside.vue", include_str!("fixtures/PageAside.vue")),
-        CorpusCase::new("page_body", "/PageBody.vue", include_str!("fixtures/PageBody.vue")),
-        CorpusCase::new("page_cta", "/PageCTA.vue", include_str!("fixtures/PageCTA.vue")),
-        CorpusCase::new("page_card", "/PageCard.vue", include_str!("fixtures/PageCard.vue")),
-        CorpusCase::new("page_columns", "/PageColumns.vue", include_str!("fixtures/PageColumns.vue")),
-        CorpusCase::new("page_feature", "/PageFeature.vue", include_str!("fixtures/PageFeature.vue")),
-        CorpusCase::new("page_grid", "/PageGrid.vue", include_str!("fixtures/PageGrid.vue")),
-        CorpusCase::new("page_header", "/PageHeader.vue", include_str!("fixtures/PageHeader.vue")),
-        CorpusCase::new("page_hero", "/PageHero.vue", include_str!("fixtures/PageHero.vue")),
-        CorpusCase::new("page_links", "/PageLinks.vue", include_str!("fixtures/PageLinks.vue")),
-        CorpusCase::new("page_list", "/PageList.vue", include_str!("fixtures/PageList.vue")),
-        CorpusCase::new("page_logos", "/PageLogos.vue", include_str!("fixtures/PageLogos.vue")),
-        CorpusCase::new("page_section", "/PageSection.vue", include_str!("fixtures/PageSection.vue")),
-        CorpusCase::new("pagination", "/Pagination.vue", include_str!("fixtures/Pagination.vue")),
-        CorpusCase::new("pin_input", "/PinInput.vue", include_str!("fixtures/PinInput.vue")),
+        CorpusCase::new("select", "/Select.vue", include_str!("fixtures/Select.vue")),
+        CorpusCase::new("content_content_toc", "/content/ContentToc.vue", include_str!("fixtures/content/ContentToc.vue")),
+        CorpusCase::new("input_date", "/InputDate.vue", include_str!("fixtures/InputDate.vue")),
+        CorpusCase::new("input", "/Input.vue", include_str!("fixtures/Input.vue")),
+        CorpusCase::new("accordion", "/Accordion.vue", include_str!("fixtures/Accordion.vue")),
         CorpusCase::new("popover", "/Popover.vue", include_str!("fixtures/Popover.vue")),
+        CorpusCase::new("changelog_versions", "/ChangelogVersions.vue", include_str!("fixtures/ChangelogVersions.vue")),
+        CorpusCase::new("page_feature", "/PageFeature.vue", include_str!("fixtures/PageFeature.vue")),
+        CorpusCase::new("badge", "/Badge.vue", include_str!("fixtures/Badge.vue")),
+        CorpusCase::new("prose_pre", "/prose/Pre.vue", include_str!("fixtures/prose/Pre.vue")),
+        CorpusCase::new("color_mode_color_mode_button", "/color-mode/ColorModeButton.vue", include_str!("fixtures/color-mode/ColorModeButton.vue")),
+        CorpusCase::new("dashboard_toolbar", "/DashboardToolbar.vue", include_str!("fixtures/DashboardToolbar.vue")),
+        CorpusCase::new("page_grid", "/PageGrid.vue", include_str!("fixtures/PageGrid.vue")),
+        CorpusCase::new("prose_tr", "/prose/Tr.vue", include_str!("fixtures/prose/Tr.vue")),
+        CorpusCase::new("icon", "/Icon.vue", include_str!("fixtures/Icon.vue")),
+        CorpusCase::new("prose_callout_tip", "/prose/callout/Tip.vue", include_str!("fixtures/prose/callout/Tip.vue")),
     ];
     run_chunk(CASES);
 }

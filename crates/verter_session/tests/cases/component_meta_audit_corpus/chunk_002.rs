@@ -9,22 +9,20 @@ use super::chunk_harness::{run_chunk, CorpusCase};
 fn corpus_audit_chunk_002_produces_audit_records_or_documents_skips() {
     #[rustfmt::skip]
     const CASES: &[CorpusCase] = &[
-        CorpusCase::new("context_menu", "/ContextMenu.vue", include_str!("fixtures/ContextMenu.vue")),
-        CorpusCase::new("context_menu_content", "/ContextMenuContent.vue", include_str!("fixtures/ContextMenuContent.vue")),
-        CorpusCase::new("dashboard_group", "/DashboardGroup.vue", include_str!("fixtures/DashboardGroup.vue")),
-        CorpusCase::new("dashboard_navbar", "/DashboardNavbar.vue", include_str!("fixtures/DashboardNavbar.vue")),
-        CorpusCase::new("dashboard_panel", "/DashboardPanel.vue", include_str!("fixtures/DashboardPanel.vue")),
-        CorpusCase::new("dashboard_resize_handle", "/DashboardResizeHandle.vue", include_str!("fixtures/DashboardResizeHandle.vue")),
+        CorpusCase::new("select_menu", "/SelectMenu.vue", include_str!("fixtures/SelectMenu.vue")),
+        CorpusCase::new("pricing_plan", "/PricingPlan.vue", include_str!("fixtures/PricingPlan.vue")),
+        CorpusCase::new("changelog_version", "/ChangelogVersion.vue", include_str!("fixtures/ChangelogVersion.vue")),
         CorpusCase::new("dashboard_search", "/DashboardSearch.vue", include_str!("fixtures/DashboardSearch.vue")),
+        CorpusCase::new("page_card", "/PageCard.vue", include_str!("fixtures/PageCard.vue")),
         CorpusCase::new("dashboard_search_button", "/DashboardSearchButton.vue", include_str!("fixtures/DashboardSearchButton.vue")),
-        CorpusCase::new("dashboard_sidebar", "/DashboardSidebar.vue", include_str!("fixtures/DashboardSidebar.vue")),
-        CorpusCase::new("dashboard_sidebar_collapse", "/DashboardSidebarCollapse.vue", include_str!("fixtures/DashboardSidebarCollapse.vue")),
-        CorpusCase::new("dashboard_sidebar_toggle", "/DashboardSidebarToggle.vue", include_str!("fixtures/DashboardSidebarToggle.vue")),
-        CorpusCase::new("dashboard_toolbar", "/DashboardToolbar.vue", include_str!("fixtures/DashboardToolbar.vue")),
-        CorpusCase::new("drawer", "/Drawer.vue", include_str!("fixtures/Drawer.vue")),
-        CorpusCase::new("dropdown_menu", "/DropdownMenu.vue", include_str!("fixtures/DropdownMenu.vue")),
-        CorpusCase::new("dropdown_menu_content", "/DropdownMenuContent.vue", include_str!("fixtures/DropdownMenuContent.vue")),
-        CorpusCase::new("editor", "/Editor.vue", include_str!("fixtures/Editor.vue")),
+        CorpusCase::new("page_links", "/PageLinks.vue", include_str!("fixtures/PageLinks.vue")),
+        CorpusCase::new("locale_locale_select", "/locale/LocaleSelect.vue", include_str!("fixtures/locale/LocaleSelect.vue")),
+        CorpusCase::new("collapsible", "/Collapsible.vue", include_str!("fixtures/Collapsible.vue")),
+        CorpusCase::new("dashboard_group", "/DashboardGroup.vue", include_str!("fixtures/DashboardGroup.vue")),
+        CorpusCase::new("page_list", "/PageList.vue", include_str!("fixtures/PageList.vue")),
+        CorpusCase::new("prose_code", "/prose/Code.vue", include_str!("fixtures/prose/Code.vue")),
+        CorpusCase::new("prose_th", "/prose/Th.vue", include_str!("fixtures/prose/Th.vue")),
+        CorpusCase::new("prose_icon", "/prose/Icon.vue", include_str!("fixtures/prose/Icon.vue")),
     ];
     run_chunk(CASES);
 }

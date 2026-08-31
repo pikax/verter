@@ -9,22 +9,22 @@ use super::chunk_harness::{run_chunk, CorpusCase};
 fn corpus_audit_chunk_009_produces_audit_records_or_documents_skips() {
     #[rustfmt::skip]
     const CASES: &[CorpusCase] = &[
-        CorpusCase::new("prose_code_preview", "/prose/CodePreview.vue", include_str!("fixtures/prose/CodePreview.vue")),
-        CorpusCase::new("prose_code_tree", "/prose/CodeTree.vue", include_str!("fixtures/prose/CodeTree.vue")),
-        CorpusCase::new("prose_collapsible", "/prose/Collapsible.vue", include_str!("fixtures/prose/Collapsible.vue")),
-        CorpusCase::new("prose_em", "/prose/Em.vue", include_str!("fixtures/prose/Em.vue")),
-        CorpusCase::new("prose_field", "/prose/Field.vue", include_str!("fixtures/prose/Field.vue")),
-        CorpusCase::new("prose_field_group", "/prose/FieldGroup.vue", include_str!("fixtures/prose/FieldGroup.vue")),
-        CorpusCase::new("prose_h1", "/prose/H1.vue", include_str!("fixtures/prose/H1.vue")),
-        CorpusCase::new("prose_h2", "/prose/H2.vue", include_str!("fixtures/prose/H2.vue")),
-        CorpusCase::new("prose_h3", "/prose/H3.vue", include_str!("fixtures/prose/H3.vue")),
-        CorpusCase::new("prose_h4", "/prose/H4.vue", include_str!("fixtures/prose/H4.vue")),
-        CorpusCase::new("prose_hr", "/prose/Hr.vue", include_str!("fixtures/prose/Hr.vue")),
-        CorpusCase::new("prose_icon", "/prose/Icon.vue", include_str!("fixtures/prose/Icon.vue")),
+        CorpusCase::new("tree", "/Tree.vue", include_str!("fixtures/Tree.vue")),
+        CorpusCase::new("editor_toolbar", "/EditorToolbar.vue", include_str!("fixtures/EditorToolbar.vue")),
+        CorpusCase::new("content_content_search", "/content/ContentSearch.vue", include_str!("fixtures/content/ContentSearch.vue")),
+        CorpusCase::new("radio_group", "/RadioGroup.vue", include_str!("fixtures/RadioGroup.vue")),
+        CorpusCase::new("blog_post", "/BlogPost.vue", include_str!("fixtures/BlogPost.vue")),
+        CorpusCase::new("editor_drag_handle", "/EditorDragHandle.vue", include_str!("fixtures/EditorDragHandle.vue")),
+        CorpusCase::new("toaster", "/Toaster.vue", include_str!("fixtures/Toaster.vue")),
         CorpusCase::new("prose_img", "/prose/Img.vue", include_str!("fixtures/prose/Img.vue")),
-        CorpusCase::new("prose_kbd", "/prose/Kbd.vue", include_str!("fixtures/prose/Kbd.vue")),
-        CorpusCase::new("prose_li", "/prose/Li.vue", include_str!("fixtures/prose/Li.vue")),
+        CorpusCase::new("separator", "/Separator.vue", include_str!("fixtures/Separator.vue")),
+        CorpusCase::new("blog_posts", "/BlogPosts.vue", include_str!("fixtures/BlogPosts.vue")),
+        CorpusCase::new("color_mode_color_mode_select", "/color-mode/ColorModeSelect.vue", include_str!("fixtures/color-mode/ColorModeSelect.vue")),
+        CorpusCase::new("color_mode_color_mode_switch", "/color-mode/ColorModeSwitch.vue", include_str!("fixtures/color-mode/ColorModeSwitch.vue")),
+        CorpusCase::new("page_body", "/PageBody.vue", include_str!("fixtures/PageBody.vue")),
         CorpusCase::new("prose_ol", "/prose/Ol.vue", include_str!("fixtures/prose/Ol.vue")),
+        CorpusCase::new("color_mode_color_mode_avatar", "/color-mode/ColorModeAvatar.vue", include_str!("fixtures/color-mode/ColorModeAvatar.vue")),
+        CorpusCase::new("prose_callout_note", "/prose/callout/Note.vue", include_str!("fixtures/prose/callout/Note.vue")),
     ];
     run_chunk(CASES);
 }

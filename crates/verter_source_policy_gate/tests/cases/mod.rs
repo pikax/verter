@@ -85,30 +85,60 @@ fn assert_repository_source_policy_guard_receipt_is_exact() {
 
 #[test]
 fn repository_source_policy_guards() {
+    let aggregate_started = std::time::Instant::now();
+    let source_scan_started = std::time::Instant::now();
     assert_repository_source_policy_guard_receipt_is_exact();
     source_corpus::assert_repeated_policy_queries_share_one_source_scan();
+    let source_scan_elapsed = source_scan_started.elapsed();
 
-    std::thread::scope(|scope| {
-        let residual =
-            scope.spawn(|| residual_type_expr_body_reader_inventory::run_production_guards());
-        let whole_env =
-            scope.spawn(|| whole_env_consumer_graph_native_inventory::run_production_guards());
-        let handle = scope.spawn(|| handle_capable_consumer_guards::run_production_guards());
-        let output = scope.spawn(|| output_projector_residual_guards::run_production_guards());
+    let (residual_elapsed, whole_env_elapsed, handle_elapsed, output_elapsed) =
+        std::thread::scope(|scope| {
+            let residual = scope.spawn(|| {
+                let started = std::time::Instant::now();
+                residual_type_expr_body_reader_inventory::run_production_guards();
+                started.elapsed()
+            });
+            let whole_env = scope.spawn(|| {
+                let started = std::time::Instant::now();
+                whole_env_consumer_graph_native_inventory::run_production_guards();
+                started.elapsed()
+            });
+            let handle = scope.spawn(|| {
+                let started = std::time::Instant::now();
+                handle_capable_consumer_guards::run_production_guards();
+                started.elapsed()
+            });
+            let output = scope.spawn(|| {
+                let started = std::time::Instant::now();
+                output_projector_residual_guards::run_production_guards();
+                started.elapsed()
+            });
 
-        residual
-            .join()
-            .expect("residual body-reader production policy thread must complete");
-        whole_env
-            .join()
-            .expect("whole-env production policy thread must complete");
-        handle
-            .join()
-            .expect("handle-capable production policy thread must complete");
-        output
-            .join()
-            .expect("output-projector production policy thread must complete");
-    });
+            (
+                residual
+                    .join()
+                    .expect("residual body-reader production policy thread must complete"),
+                whole_env
+                    .join()
+                    .expect("whole-env production policy thread must complete"),
+                handle
+                    .join()
+                    .expect("handle-capable production policy thread must complete"),
+                output
+                    .join()
+                    .expect("output-projector production policy thread must complete"),
+            )
+        });
 
     source_corpus::assert_repeated_policy_queries_share_one_source_scan();
+    output_projector_residual_guards::assert_repeated_type_def_queries_share_one_fact_build();
+
+    if std::env::var_os("VERTER_SOURCE_POLICY_TIMING").is_some() {
+        eprintln!(
+            "source-policy timing: scan={source_scan_elapsed:?} residual={residual_elapsed:?} \
+             whole_env={whole_env_elapsed:?} handle={handle_elapsed:?} output={output_elapsed:?} \
+             aggregate={:?}",
+            aggregate_started.elapsed()
+        );
+    }
 }
