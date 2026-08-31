@@ -510,54 +510,67 @@ async function main() {
         if (typeProvider !== "shared-tsgo") {
           launchArgs.push("--disable-extensions");
         }
-        await runTests({
-          vscodeExecutablePath,
-          extensionDevelopmentPath,
-          extensionTestsPath,
-          launchArgs,
-          extensionTestsEnv: {
-            ...process.env,
-            // Every temp-derived artifact the extension host and the LSP it spawns create —
-            // the carrier store above all — lands under this route's own root. `TMPDIR` is
-            // what Node's `os.tmpdir()` and Rust's `std::env::temp_dir()` read on Unix;
-            // `TMP`/`TEMP` are the Windows equivalents, so all three are set.
-            TMPDIR: tempRoot,
-            TMP: tempRoot,
-            TEMP: tempRoot,
-            VERTER_E2E_TEST: "1",
-            VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
-            VERTER_E2E_LOG_FILE: logFile,
-            VERTER_E2E_FIXTURE: fixture,
-            // What the server was STARTED with. A suite must not infer this from the
-            // live settings — a previous suite may have flipped them — and the
-            // default-configuration pin refuses to run on anything but `default`.
-            [`VERTER_E2E_${E2E_SERVER_PROFILE_ENV}`]: serverProfile,
-            [`VERTER_E2E_${E2E_BASE_SERVER_PROFILE_ENV}`]: baseServerProfile,
-            VERTER_E2E_TIMING_FILE: path.join(HARNESS_TEMP_ROOT, `verter-e2e-timing-${label}.json`),
-            VERTER_LOG: "debug",
-            ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
-            ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
-            ...(rcTsgoBinaryPath && (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
-              ? { VERTER_TSGO_BIN: rcTsgoBinaryPath }
-              : {}),
-            ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
-              ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
-              : fixture === EXTENSION_ACCEPTANCE_FIXTURE
-                ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
-                : isProjectlessContractFixture(fixture)
-                  ? { VERTER_E2E_ONLY: PROJECTLESS_CONTRACT_SUITE_GLOB }
-                  : CONTRACT_FIXTURES[fixture]
-                    ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
-                    : fixture in PARITY_FIXTURE_CONFIGS
-                      ? {
-                          VERTER_E2E_ONLY:
-                            onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
-                        }
-                      : onlyPattern
-                        ? { VERTER_E2E_ONLY: onlyPattern }
-                        : {}),
-          },
-        });
+        let extensionHostError: unknown;
+        try {
+          await runTests({
+            vscodeExecutablePath,
+            extensionDevelopmentPath,
+            extensionTestsPath,
+            launchArgs,
+            extensionTestsEnv: {
+              ...process.env,
+              // Every temp-derived artifact the extension host and the LSP it spawns create —
+              // the carrier store above all — lands under this route's own root. `TMPDIR` is
+              // what Node's `os.tmpdir()` and Rust's `std::env::temp_dir()` read on Unix;
+              // `TMP`/`TEMP` are the Windows equivalents, so all three are set.
+              TMPDIR: tempRoot,
+              TMP: tempRoot,
+              TEMP: tempRoot,
+              VERTER_E2E_TEST: "1",
+              VERTER_E2E_PROVIDER_ONLY_COMPLETIONS: "1",
+              VERTER_E2E_LOG_FILE: logFile,
+              VERTER_E2E_FIXTURE: fixture,
+              // What the server was STARTED with. A suite must not infer this from the
+              // live settings — a previous suite may have flipped them — and the
+              // default-configuration pin refuses to run on anything but `default`.
+              [`VERTER_E2E_${E2E_SERVER_PROFILE_ENV}`]: serverProfile,
+              [`VERTER_E2E_${E2E_BASE_SERVER_PROFILE_ENV}`]: baseServerProfile,
+              VERTER_E2E_TIMING_FILE: path.join(
+                HARNESS_TEMP_ROOT,
+                `verter-e2e-timing-${label}.json`,
+              ),
+              VERTER_LOG: "debug",
+              ...(lspBinaryPath ? { VERTER_E2E_LSP_PATH: lspBinaryPath } : {}),
+              ...(typeProvider ? { VERTER_E2E_TYPE_PROVIDER: typeProvider } : {}),
+              ...(rcTsgoBinaryPath && (typeProvider === "tsgo" || typeProvider === "shared-tsgo")
+                ? { VERTER_TSGO_BIN: rcTsgoBinaryPath }
+                : {}),
+              ...(fixture === EDITOR_ACCEPTANCE_FIXTURE
+                ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
+                : fixture === EXTENSION_ACCEPTANCE_FIXTURE
+                  ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
+                  : isProjectlessContractFixture(fixture)
+                    ? { VERTER_E2E_ONLY: PROJECTLESS_CONTRACT_SUITE_GLOB }
+                    : CONTRACT_FIXTURES[fixture]
+                      ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
+                      : fixture in PARITY_FIXTURE_CONFIGS
+                        ? {
+                            VERTER_E2E_ONLY:
+                              onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
+                          }
+                        : onlyPattern
+                          ? { VERTER_E2E_ONLY: onlyPattern }
+                          : {}),
+            },
+          });
+        } catch (error) {
+          // VS Code exits non-zero when Mocha reports a known product gap. The
+          // structured run summary below is the verdict authority: it rejects
+          // unexpected failures, missing/duplicate required tests, and missing
+          // summaries. Retain the launcher error for diagnostics, but do not let
+          // its coarse exit code bypass the route-specific product-gap manifest.
+          extensionHostError = error;
+        }
         // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
         // on some hosts (Windows: VS Code can exit 0 even when the extension test run
         // rejected). The authoritative oracle is the run summary the mocha runner writes
@@ -572,17 +585,35 @@ async function main() {
           : projectlessContract
             ? PROJECTLESS_CONTRACT_LOADED_FILES
             : parity?.loadedFiles;
-        await enforceRunSummary(logFile, label, {
-          expectedFixture: fixture,
-          expectedTypeProvider: typeProvider,
-          requiredLoadedFiles,
-          requiredTestIds: contract
-            ? requiredFrameworkContractIds(contract.framework)
-            : projectlessContract
-              ? PROJECTLESS_CONTRACT_TEST_IDS
-              : parity?.testIds,
-          allowedProductGaps: parity ? knownProductGapsForRoute(fixture, typeProvider) : undefined,
-        });
+        try {
+          await enforceRunSummary(logFile, label, {
+            expectedFixture: fixture,
+            expectedTypeProvider: typeProvider,
+            requiredLoadedFiles,
+            requiredTestIds: contract
+              ? requiredFrameworkContractIds(contract.framework)
+              : projectlessContract
+                ? PROJECTLESS_CONTRACT_TEST_IDS
+                : parity?.testIds,
+            allowedProductGaps: parity
+              ? knownProductGapsForRoute(fixture, typeProvider)
+              : undefined,
+          });
+        } catch (summaryError) {
+          if (extensionHostError) {
+            console.error(
+              `  Extension-host process also exited non-zero for ${label}:`,
+              extensionHostError,
+            );
+          }
+          throw summaryError;
+        }
+        if (extensionHostError) {
+          console.warn(
+            `  Extension-host process exited non-zero for ${label}; the complete run summary ` +
+              "contains only statically allowed product gaps.",
+          );
+        }
         console.log(`  PASSED: ${label}`);
       } catch (err) {
         console.error(`  FAILED: ${label}`, err);
