@@ -498,7 +498,7 @@ fn helper_unconfigured_workspace_source_resolves_no_project() {
 // ── The composite OWNED carrier-diagnostics gate. ──
 
 #[tokio::test]
-async fn gate_bound_carrier_uses_exact_project_capability_without_raw_pull() {
+async fn gate_bound_carrier_uses_established_managed_diagnostics_route() {
     let (c, owned) = composite_with_owned(host_with_snapshot());
     let path = format!("{WS_ROOT}/src/Widget.vue.tsx");
     let diags = c
@@ -508,22 +508,22 @@ async fn gate_bound_carrier_uses_exact_project_capability_without_raw_pull() {
     assert_eq!(
         codes(&diags),
         vec![MARKER_CODE.to_string()],
-        "a BOUND carrier is served by the project-bound capability"
+        "a BOUND carrier is admitted to the established rich managed diagnostics route"
     );
-    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         *owned
             .requested_projects
             .lock()
             .expect("project request log"),
-        vec![(path, TSCONFIG.to_string())],
-        "the exact BoundProject identity must reach the provider"
+        Vec::<(String, String)>::new(),
+        "the partial attached-API capability must not replace user-facing managed diagnostics"
     );
 }
 
 #[tokio::test]
-async fn project_capability_none_never_falls_back_to_raw_carrier_diagnostics() {
+async fn partial_project_capability_none_does_not_erase_bound_managed_diagnostics() {
     let owned = Arc::new(MarkerOwned::default());
     assert!(owned
         .get_diagnostics_in_project("/carrier.vue.jsx", "/nested/jsconfig.json")
@@ -541,12 +541,13 @@ async fn project_capability_none_never_falls_back_to_raw_carrier_diagnostics() {
         .get_diagnostics(&format!("{WS_ROOT}/src/Widget.vue.jsx"))
         .await
         .expect("composite diagnostics");
-    assert!(diags.is_empty());
-    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(codes(&diags), vec![MARKER_CODE.to_string()]);
+    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn project_capability_some_empty_is_authoritative_and_never_pulls_raw() {
+async fn partial_project_capability_empty_does_not_override_bound_managed_diagnostics() {
     let owned = Arc::new(MarkerOwned::project_bound(true));
     let c = TsgoCompositeProvider::new(
         Arc::clone(&owned) as Arc<dyn TypeProvider>,
@@ -557,12 +558,9 @@ async fn project_capability_some_empty_is_authoritative_and_never_pulls_raw() {
         .get_diagnostics(&format!("{WS_ROOT}/src/Widget.svelte.jsx"))
         .await
         .expect("composite diagnostics");
-    assert!(
-        diags.is_empty(),
-        "Some([]) is an authoritative clean result"
-    );
-    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(codes(&diags), vec![MARKER_CODE.to_string()]);
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -620,7 +618,7 @@ async fn gate_non_carrier_path_is_not_gated() {
 //    the background lane too, and a bound carrier still delegates to OWNED. ──
 
 #[tokio::test]
-async fn gate_bound_carrier_uses_project_capability_background() {
+async fn gate_bound_carrier_uses_established_managed_diagnostics_background() {
     // A BOUND carrier on the BACKGROUND lane delegates to OWNED — the OWNED `--lsp`
     // marker surfaces. This is the discriminator proving the background lane PRODUCES the
     // marker for a bound carrier, so the empty result in the sibling test below is the
@@ -633,7 +631,7 @@ async fn gate_bound_carrier_uses_project_capability_background() {
     assert_eq!(
         codes(&diags),
         vec![MARKER_CODE.to_string()],
-        "a BOUND carrier uses the project-bound capability on the BACKGROUND lane"
+        "a BOUND carrier uses the established managed diagnostics route on the BACKGROUND lane"
     );
 }
 

@@ -265,10 +265,20 @@ impl VerterLanguageServer {
         // write below — so a woken joiner re-reads a settled memo.
         let _in_flight = self.import_sync.begin_in_flight(canonical_id);
 
-        let outcome = self
+        let mut outcome = self
             .ensure_imported_carrier_apis_synced(uri)
             .await
             .and(self.ensure_barrel_imports_synced(uri).await);
+
+        // An open carrier is itself a future imported child. Publish its own
+        // contract on the same debounced background lane after its dependency
+        // closure settles, so a parent typed from an empty buffer can consume a
+        // committed contract on the first `<Child ` completion. Previously only
+        // an already-authored importer could start this projection, which made
+        // cold progressive editing miss until typing stopped.
+        if verter_semantic::resolver_core::path_is_carrier(canonical_id) {
+            outcome = outcome.and(self.publish_loaded_child_contract(canonical_id));
+        }
 
         // Publish the receipt only when the whole pass DELIVERED under a stable
         // key — never warm a torn generation, and never warm over a leg that has

@@ -337,8 +337,13 @@ pub fn authored_component_attribute_name_context(
     fn directive_argument_contains_inclusive(argument: &DirectiveArgument, offset: u32) -> bool {
         match argument {
             DirectiveArgument::None => false,
-            DirectiveArgument::Static { name } => contains_inclusive(name.name_span, offset),
-            DirectiveArgument::Dynamic { full_span, .. } => contains_inclusive(*full_span, offset),
+            DirectiveArgument::Static { name } => {
+                name.name_span.start < name.name_span.end
+                    && contains_inclusive(name.name_span, offset)
+            }
+            DirectiveArgument::Dynamic { full_span, .. } => {
+                full_span.start < full_span.end && contains_inclusive(*full_span, offset)
+            }
         }
     }
 
@@ -1236,6 +1241,19 @@ mod tests {
             authored_component_attribute_name_context(&native, native_offset),
             None,
             "native elements do not mint component-contract authority"
+        );
+
+        let directive_head = "<template><DirectComp :></template>";
+        let directive_head_offset = directive_head.find(":>").unwrap() + 1;
+        assert_eq!(
+            authored_component_attribute_name_context(
+                &test_structure(directive_head, false),
+                directive_head_offset as u32,
+            ),
+            Some(AuthoredComponentAttributeNameContext::ExactAttribute {
+                tag: "DirectComp".to_string(),
+            }),
+            "a zero-length directive argument is still the authored attribute-name head"
         );
 
         let incomplete = "<script setup>\nimport DirectComp from './DirectComp.vue'\n</script>\n<template>\n<DirectComp un";

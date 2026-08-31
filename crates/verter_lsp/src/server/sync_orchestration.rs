@@ -78,29 +78,13 @@ impl VerterLanguageServer {
     pub(super) fn imported_child_contract_freshness_key(
         &self,
     ) -> Option<super::ImportedChildContractFreshnessKey> {
-        let (workspace_content_generation, resolver_snapshot_generation) =
-            self.import_sync_freshness_key()?;
+        let (_, resolver_snapshot_generation) = self.import_sync_freshness_key()?;
         let host = self.documents.host();
         Some(super::ImportedChildContractFreshnessKey {
-            workspace_content_generation,
             resolver_snapshot_generation,
             published_root: host.workspace_read().published_root(),
             project_generation: host.project_type_store().current_project_generation(),
         })
-    }
-
-    fn child_contract_freshness_advances_only_content(
-        before: &super::ImportedChildContractFreshnessKey,
-        after: &super::ImportedChildContractFreshnessKey,
-    ) -> bool {
-        after.workspace_content_generation == before.workspace_content_generation.saturating_add(1)
-            && after.resolver_snapshot_generation == before.resolver_snapshot_generation
-            && after.project_generation == before.project_generation
-            && match (&before.published_root, &after.published_root) {
-                (Some(before), Some(after)) => std::sync::Arc::ptr_eq(before, after),
-                (None, None) => true,
-                _ => false,
-            }
     }
 
     fn import_identity_is_current(
@@ -335,7 +319,7 @@ impl VerterLanguageServer {
     /// child's lifecycle lease, so this projection cannot race did-open/close;
     /// the explicit source + workspace witnesses fence edits and resolver
     /// updates that do not need that lease.
-    fn publish_loaded_child_contract(&self, canonical_id: &str) -> ImportSyncOutcome {
+    pub(super) fn publish_loaded_child_contract(&self, canonical_id: &str) -> ImportSyncOutcome {
         if self.cached_child_public_contract(canonical_id).is_some() {
             return ImportSyncOutcome::Complete;
         }
@@ -401,44 +385,6 @@ impl VerterLanguageServer {
             return ImportSyncOutcome::Retry;
         }
         ImportSyncOutcome::Complete
-    }
-
-    /// Restamp reusable imported-child contracts after the existing
-    /// isolated-edit proof established that only the parent document's
-    /// content generation moved and its dependency frontier is unchanged.
-    /// Every semantic and publication witness remains independently fenced;
-    /// this performs no projection or resolver work.
-    pub(super) fn promote_child_contracts_after_isolated_edit(
-        &self,
-        before: super::ImportedChildContractFreshnessKey,
-        after: super::ImportedChildContractFreshnessKey,
-        dependency_frontier_unchanged: bool,
-    ) {
-        if !dependency_frontier_unchanged
-            || !Self::child_contract_freshness_advances_only_content(&before, &after)
-        {
-            return;
-        }
-        let host = self.documents.host();
-        for mut snapshot in self.child_public_contracts.iter_mut() {
-            if snapshot.freshness == before
-                && host.registered_source_revision_token(snapshot.key())
-                    == Some(snapshot.host_revision)
-                && snapshot.publication_witness.is_current(host)
-            {
-                snapshot.freshness = after.clone();
-            }
-        }
-        for mut route in self.barrel_component_routes.iter_mut() {
-            if route.freshness == before
-                && self.import_identity_is_current(&route.key().0, &route.identity)
-                && host.registered_source_revision_token(&route.terminal_canonical_id)
-                    == Some(route.terminal_host_revision)
-                && route.publication_witness.is_current(host)
-            {
-                route.freshness = after.clone();
-            }
-        }
     }
 
     #[cfg(test)]

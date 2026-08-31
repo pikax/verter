@@ -2,11 +2,15 @@
 //! shared-session lifecycle.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 use verter_session::{HostConfig, VerterHost};
+use verter_type_runtime::protocol::TypeProviderError;
+use verter_type_runtime::traits::ProviderFuture;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
@@ -23,8 +27,80 @@ use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess};
 
 use super::{
     carrier_source_of, compose_establishment_discriminant, injection_shadow_safe,
-    real_file_occupies_injected_path, SharedRendezvous, SharedTsgoOverlay,
+    invoke_epoch_bound, observe_epoch_bound, real_file_occupies_injected_path, LazyOverlayCore,
+    OverlayPriority, OverlayTransport, SharedEngageFailureKind, SharedRendezvous,
+    SharedTsgoOverlay,
 };
+
+struct InvocationTransport {
+    alive: AtomicBool,
+}
+
+impl InvocationTransport {
+    fn alive() -> Self {
+        Self {
+            alive: AtomicBool::new(true),
+        }
+    }
+
+    fn set_dead(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
+}
+
+impl OverlayTransport for InvocationTransport {
+    fn inject(&self, _path: &str, _content: &str) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn retract(&self, _path: &str) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn is_live(&self) -> bool {
+        self.alive.load(Ordering::SeqCst)
+    }
+
+    fn teardown(&self) -> ProviderFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+async fn establish_invocation_transport(
+    core: &LazyOverlayCore<InvocationTransport>,
+    generation: u64,
+    nonce: &str,
+) -> crate::tsgo::transport_cell::EstablishedTransport<InvocationTransport> {
+    let nonce = nonce.to_string();
+    core.ensure(
+        Some(((), generation)),
+        move |_| Some(nonce.clone()),
+        |(), _| async { Some(Arc::new(InvocationTransport::alive())) },
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("establish invocation transport")
+}
+
+async fn replace_dead_invocation_transport(
+    core: &LazyOverlayCore<InvocationTransport>,
+) -> crate::tsgo::transport_cell::EstablishedTransport<InvocationTransport> {
+    for generation in 2..=6 {
+        let nonce = format!("invoke-{generation}");
+        if let Some(established) = core
+            .ensure(
+                Some(((), generation)),
+                move |_| Some(nonce.clone()),
+                |(), _| async { Some(Arc::new(InvocationTransport::alive())) },
+                Duration::from_secs(5),
+            )
+            .await
+        {
+            return established;
+        }
+    }
+    panic!("dead invocation transport was not replaced")
+}
 
 /// The SHARED-establishment re-arm discriminant depends on BOTH the
 /// shim advertisement nonce AND the workspace/config generation — so a failed
@@ -299,6 +375,151 @@ async fn genuine_declaration_carrier_is_still_injectable_vue_and_svelte() {
              must stay injectable as a supporting Program member"
         );
     }
+}
+
+/// A failed first attach is observable as a typed terminal refusal carrying the exact
+/// carrier/project binding context. This pins the diagnostic surface that the VS Code
+/// single-project failure previously collapsed into an undifferentiated `None`.
+#[tokio::test]
+async fn engage_transport_failure_preserves_source_project_and_generation() {
+    let source = "d:/ws/src/Foo.vue";
+    let companion = "d:/ws/src/Foo.vue.tsx";
+    let overlay = shadow_overlay_with(&[(source, "<template></template>")]);
+    overlay.record_content(
+        companion,
+        "export const foo = 1;",
+        OverlayPriority::Interactive,
+    );
+    let carrier = crate::tsgo::project_binding::resolve_carrier_bound(&overlay.inner.host, source)
+        .into_bound()
+        .expect("the single configured project binds the carrier");
+
+    let failure = match overlay.engage_provider(companion, &carrier).await {
+        Ok(_) => panic!("a workspace with no relay advertisement cannot engage SHARED"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.kind, SharedEngageFailureKind::TransportUnavailable);
+    assert_eq!(failure.source, source);
+    assert_eq!(failure.config, SHADOW_TSCONFIG);
+    assert_eq!(failure.generation, carrier.generation());
+    assert_eq!(failure.transport_epoch, None);
+    assert_eq!(failure.sync_state, None);
+    let rendered = failure.to_string();
+    assert!(rendered.contains("TransportUnavailable"));
+    assert!(rendered.contains(source));
+    assert!(rendered.contains(SHADOW_TSCONFIG));
+}
+
+/// Selection retains epoch A until the feature call boundary. If reconnect B lands
+/// between selection and invocation, the stale A provider is never called and the
+/// already-admitted carrier falls back to managed.
+#[tokio::test]
+async fn feature_invocation_revalidates_epoch_after_selection() {
+    let path = "/ws/Foo.vue.tsx";
+    let core = LazyOverlayCore::<InvocationTransport>::new();
+    core.record_content(path, "export const value = 1;");
+
+    let selected = establish_invocation_transport(&core, 1, "invoke-1").await;
+    core.inject_dirty(&selected, path, 1).await;
+    let selected_epoch = selected.identity.epoch;
+    assert!(core.sync_state_for_epoch(path, selected_epoch).is_synced());
+
+    // Reconnect B after selection but before the terminal feature invocation.
+    selected.transport.set_dead();
+    let replacement = replace_dead_invocation_transport(&core).await;
+    core.inject_dirty(&replacement, path, 1).await;
+    assert_ne!(replacement.identity.epoch, selected_epoch);
+
+    let shared_calls = AtomicUsize::new(0);
+    let managed_calls = AtomicUsize::new(0);
+    let result = invoke_epoch_bound(
+        &core,
+        path,
+        selected_epoch,
+        || async {
+            shared_calls.fetch_add(1, Ordering::SeqCst);
+            Err::<&'static str, _>(TypeProviderError::new("stale epoch A"))
+        },
+        || async {
+            managed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("managed")
+        },
+    )
+    .await
+    .expect("epoch mismatch activates managed fallback");
+
+    assert_eq!(result, "managed");
+    assert_eq!(shared_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(managed_calls.load(Ordering::SeqCst), 1);
+}
+
+/// Revalidate again after the shared await: reconnect B can occur while an epoch-A
+/// request is in flight. Its stale success or error is discarded and managed serves
+/// the admitted carrier instead.
+#[tokio::test]
+async fn feature_invocation_discards_stale_error_after_inflight_reconnect() {
+    let path = "/ws/Foo.vue.tsx";
+    let core = LazyOverlayCore::<InvocationTransport>::new();
+    core.record_content(path, "export const value = 1;");
+
+    let selected = establish_invocation_transport(&core, 1, "invoke-1").await;
+    core.inject_dirty(&selected, path, 1).await;
+    let selected_epoch = selected.identity.epoch;
+    let shared_calls = AtomicUsize::new(0);
+    let managed_calls = AtomicUsize::new(0);
+
+    let result = invoke_epoch_bound(
+        &core,
+        path,
+        selected_epoch,
+        || async {
+            shared_calls.fetch_add(1, Ordering::SeqCst);
+            selected.transport.set_dead();
+            let replacement = replace_dead_invocation_transport(&core).await;
+            core.inject_dirty(&replacement, path, 1).await;
+            assert_ne!(replacement.identity.epoch, selected_epoch);
+            Err::<&'static str, _>(TypeProviderError::new("stale epoch A"))
+        },
+        || async {
+            managed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("managed")
+        },
+    )
+    .await
+    .expect("post-call epoch mismatch activates managed fallback");
+
+    assert_eq!(result, "managed");
+    assert_eq!(shared_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(managed_calls.load(Ordering::SeqCst), 1);
+}
+
+/// Diagnostics uses its own typed-refusal route instead of the feature helper,
+/// but it must retain the same post-await epoch fence. A reconnect while the
+/// shared diagnostics request is in flight makes that result stale and admits
+/// the managed diagnostics fallback.
+#[tokio::test]
+async fn diagnostics_observation_rejects_result_after_inflight_reconnect() {
+    let path = "/ws/Foo.vue.tsx";
+    let core = LazyOverlayCore::<InvocationTransport>::new();
+    core.record_content(path, "export const value = 1;");
+
+    let selected = establish_invocation_transport(&core, 1, "diagnostics-1").await;
+    core.inject_dirty(&selected, path, 1).await;
+    let selected_epoch = selected.identity.epoch;
+    let shared_calls = AtomicUsize::new(0);
+
+    let result = observe_epoch_bound(&core, path, selected_epoch, || async {
+        shared_calls.fetch_add(1, Ordering::SeqCst);
+        selected.transport.set_dead();
+        let replacement = replace_dead_invocation_transport(&core).await;
+        core.inject_dirty(&replacement, path, 1).await;
+        assert_ne!(replacement.identity.epoch, selected_epoch);
+        "stale shared diagnostics"
+    })
+    .await;
+
+    assert!(result.is_err(), "epoch-A diagnostics must be discarded");
+    assert_eq!(shared_calls.load(Ordering::SeqCst), 1);
 }
 
 /// The existing IDE-carrier shadow behavior is preserved under the disk-occupancy gate: a

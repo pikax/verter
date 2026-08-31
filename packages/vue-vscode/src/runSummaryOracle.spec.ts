@@ -102,17 +102,41 @@ describe("enforceRunSummary result semantics", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("refuses pending tests even when the run has no named capability manifest", async () => {
+  it("refuses pending tests even when the run has no capability manifest", async () => {
     writeSummary({
       failures: 0,
       executed: 2,
       passedTestIds: ["activation starts"],
-      pendingTestIds: ["hover fixture token is absent"],
+      pendingTestIds: ["TS plugin: definition from barrel file navigates to .vue (not .vue.d.ts)"],
     });
 
     await expect(
       enforceRunSummary(logFile, "single-project@tsserver", { pollMs: 0 }),
-    ).rejects.toThrow(/pending test.*hover fixture token is absent/i);
+    ).rejects.toThrow(/pending test.*definition from barrel file/i);
+  });
+
+  it("accepts only the exact explicitly allowed pending manifest", async () => {
+    writeSummary({
+      failures: 0,
+      executed: 2,
+      passedTestIds: ["activation starts"],
+      pendingTestIds: ["fixture-specific optional row"],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "single-project@tsserver", {
+        pollMs: 0,
+        allowedPendingTestIds: ["fixture-specific optional row"],
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      enforceRunSummary(logFile, "single-project@tsserver", {
+        pollMs: 0,
+        allowedPendingTestIds: ["different row"],
+      }),
+    ).rejects.toThrow(
+      /pending.*missing.*different row.*unexpected.*fixture-specific optional row/i,
+    );
   });
 
   it("refuses pending tests for a required capability contract", async () => {
@@ -197,6 +221,144 @@ describe("enforceRunSummary result semantics", () => {
         requiredTestIds: ["svelte.js.definition", "svelte.js.rename"],
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("accepts an exact parity inventory split between passes and explicit product gaps", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 2,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: [],
+      productGapTestIds: ["vue.definition.markup-to-script"],
+      failedTests: [
+        {
+          id: "vue.definition.markup-to-script",
+          err: "PRODUCT_GAP ISSUE-vue-definition vue.definition.markup-to-script: got 0 definitions",
+          kind: "test",
+        },
+      ],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsserver", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily", "vue.definition.markup-to-script"],
+        allowedProductGaps: {
+          "vue.definition.markup-to-script": "ISSUE-vue-definition",
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ["ordinary error", "timed out waiting for definition"],
+    ["test defect", "TEST_DEFECT vue.definition.markup-to-script: missing fixture anchor"],
+    ["wrong row marker", "PRODUCT_GAP ISSUE-vue-definition vue.different-row: got 0 definitions"],
+    [
+      "unapproved issue",
+      "PRODUCT_GAP ISSUE-new-regression vue.definition.markup-to-script: newly red",
+    ],
+  ])("refuses a parity %s instead of absorbing it as a product gap", async (_label, err) => {
+    writeSummary({
+      failures: 1,
+      executed: 1,
+      passedTestIds: [],
+      pendingTestIds: [],
+      productGapTestIds: ["vue.definition.markup-to-script"],
+      failedTests: [{ id: "vue.definition.markup-to-script", err, kind: "test" }],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["vue.definition.markup-to-script"],
+        allowedProductGaps: {
+          "vue.definition.markup-to-script": "ISSUE-vue-definition",
+        },
+      }),
+    ).rejects.toThrow(/failed|product.gap|classification/i);
+  });
+
+  it("refuses duplicate or missing parity outcome rows", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 2,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
+      pendingTestIds: [],
+      productGapTestIds: ["vue.clean-diagnostics.daily"],
+      failedTests: [
+        {
+          id: "vue.clean-diagnostics.daily",
+          err: "PRODUCT_GAP ISSUE-clean vue.clean-diagnostics.daily: duplicate outcome",
+          kind: "test",
+        },
+      ],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@shared-tsgo", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily", "vue.definition.markup-to-script"],
+        allowedProductGaps: {
+          "vue.clean-diagnostics.daily": "ISSUE-clean",
+        },
+      }),
+    ).rejects.toThrow(/duplicate.*vue\.clean-diagnostics\.daily.*missing.*markup-to-script/i);
+  });
+
+  it("refuses root-hook failures even when every recorded test failure is a product gap", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 1,
+      rootHookError: "provider warmup failed",
+      passedTestIds: [],
+      pendingTestIds: [],
+      productGapTestIds: ["vue.clean-diagnostics.daily"],
+      failedTests: [
+        {
+          id: "vue.clean-diagnostics.daily",
+          err: "PRODUCT_GAP ISSUE-clean vue.clean-diagnostics.daily: clean diagnostics unavailable",
+          kind: "test",
+        },
+      ],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsserver", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily"],
+        allowedProductGaps: {
+          "vue.clean-diagnostics.daily": "ISSUE-clean",
+        },
+      }),
+    ).rejects.toThrow(/root hook error.*provider warmup failed/i);
+  });
+
+  it("refuses a hook that imitates the product-gap marker", async () => {
+    writeSummary({
+      failures: 1,
+      executed: 1,
+      passedTestIds: [],
+      pendingTestIds: [],
+      productGapTestIds: [],
+      failedTests: [
+        {
+          id: '"after all" hook',
+          err: 'PRODUCT_GAP ISSUE-clean "after all" hook: teardown failed',
+          kind: "hook",
+        },
+      ],
+    });
+
+    await expect(
+      enforceRunSummary(logFile, "vue-parity@tsserver", {
+        pollMs: 0,
+        requiredTestIds: ["vue.clean-diagnostics.daily"],
+        allowedProductGaps: {
+          "vue.clean-diagnostics.daily": "ISSUE-clean",
+        },
+      }),
+    ).rejects.toThrow(/outside the explicit PRODUCT_GAP row grammar/i);
   });
 
   it("attests the exact fixture and loaded suite-file inventory", async () => {

@@ -10030,6 +10030,178 @@ async fn svelte_progressive_script_bindings_survive_incomplete_member_edits() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn component_completion_cold_parent_import_converges_without_test_prewarm() {
+    const CHILD: &str = "<script setup lang=\"ts\">\ninterface DraftProps { title: string; unusedOnly?: boolean }\ndefineProps<DraftProps>()\n</script>\n";
+    const PARENT: &str = "<script setup lang=\"ts\">\nimport DraftCard from './DraftCard.vue'\n</script>\n<template><DraftCard :title=\"heading\" /></template>\n";
+    const PARENT_PARTIAL: &str = "<script setup lang=\"ts\">\nimport DraftCard from './DraftCard.vue'\n</script>\n<template><DraftCard :></template>\n";
+
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/DraftCard.vue", "vue", CHILD),
+                ("src/App.vue", "vue", PARENT),
+            ],
+            crate::TypeProviderKind::Tsserver,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                metrics_enabled: true,
+                ..HostConfig::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+    let child_uri = workspace_uri(&workspace_id, "src/DraftCard.vue");
+    let child_id = format!("{workspace_id}/src/DraftCard.vue");
+
+    // Exercise the same lifecycle path as an editor restoring and typing into
+    // empty buffers. Open both buffers before authoring the child, so its
+    // background publication is fenced by the final workspace/resolver
+    // snapshot and the later parent content edits are the only invalidation
+    // pressure under test.
+    server.documents.did_close(&app_uri);
+    super::lifecycle::handle_did_open(
+        server,
+        DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: app_uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: String::new(),
+            },
+        },
+    )
+    .await;
+
+    // Do not call the test-only settled publication helper: the normal
+    // post-edit background lane must publish the child's own contract before
+    // its future parent imports it.
+    server.documents.did_close(&child_uri);
+    super::lifecycle::handle_did_open(
+        server,
+        DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: child_uri.clone(),
+                language_id: "vue".to_string(),
+                version: 1,
+                text: String::new(),
+            },
+        },
+    )
+    .await;
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: child_uri,
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: CHILD.to_string(),
+            }],
+        },
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while server.cached_child_public_contract(&child_id).is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("normal child edit publication must commit its future import contract");
+
+    assert!(
+        server.cached_child_public_contract(&child_id).is_some(),
+        "the committed child contract must be warm before progressive parent typing"
+    );
+
+    let mut version = 1;
+    let component_head_end =
+        PARENT.find("<DraftCard ").expect("component head") + "<DraftCard ".len();
+    let mut edit_ends = (3..PARENT.len()).step_by(3).collect::<Vec<_>>();
+    edit_ends.extend([component_head_end, PARENT.len()]);
+    edit_ends.sort_unstable();
+    edit_ends.dedup();
+    for end in edit_ends {
+        version += 1;
+        super::lifecycle::handle_did_change(
+            server,
+            DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: app_uri.clone(),
+                    version,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: PARENT[..end].to_string(),
+                }],
+            },
+        )
+        .await;
+        if end == component_head_end {
+            let position = LineIndex::new_utf16(&PARENT[..end])
+                .offset_to_position(end as u32)
+                .expect("component-head completion position");
+            let labels = completion_labels(
+                server
+                    .completion(completion_params(&app_uri, position, None))
+                    .await
+                    .expect("component-head completion request"),
+            );
+            assert!(
+                labels.contains(&"unused-only".to_string()),
+                "the first `<DraftCard ` checkpoint must consume the already committed child contract: {labels:?}"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    version += 1;
+    super::lifecycle::handle_did_change(
+        server,
+        DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: app_uri.clone(),
+                version,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: PARENT_PARTIAL.to_string(),
+            }],
+        },
+    )
+    .await;
+
+    let cursor = PARENT_PARTIAL.find("<DraftCard :").expect("component") + "<DraftCard :".len();
+    let position = LineIndex::new_utf16(PARENT_PARTIAL)
+        .offset_to_position(cursor as u32)
+        .expect("completion position");
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let labels = completion_labels(
+                server
+                    .completion(completion_params(&app_uri, position, None))
+                    .await
+                    .expect("completion request"),
+            );
+            if labels.contains(&"unused-only".to_string()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("zero-length `:` directive head must retain child prop completion authority");
+
+    drain_handle.abort();
+    drop(service);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn svelte_progressive_component_completion_uses_committed_child_contract() {
     for (provider_label, provider_kind) in [
         ("none", crate::TypeProviderKind::None),
@@ -10817,13 +10989,16 @@ async fn imported_child_contract_cache_is_provenance_fenced_and_republished() {
         projection_count + 1
     );
 
-    // Any workspace-content mutation conservatively invalidates the cache,
-    // while an unchanged child still re-publishes without a provider write.
+    // An unrelated workspace-content mutation must not invalidate a child
+    // contract. The child revision, publication witness, resolver snapshot,
+    // and project generation are unchanged, so neither provider delivery nor
+    // contract projection should repeat.
+    let projection_count = server.child_public_contract_projection_count_for_test();
     server.documents.host().notify_upsert(
         &format!("{workspace_id}/src/unrelated.ts"),
         Arc::<str>::from("export const unrelated = 1;"),
     );
-    assert!(server.cached_child_public_contract(&child_id).is_none());
+    assert!(server.cached_child_public_contract(&child_id).is_some());
     let provider_call_count = provider.file_sync_calls().len();
     assert!(server
         .sync_imported_carrier_api_lightweight(&child_id)
@@ -10831,6 +11006,10 @@ async fn imported_child_contract_cache_is_provenance_fenced_and_republished() {
         .is_complete());
     assert!(server.cached_child_public_contract(&child_id).is_some());
     assert_eq!(provider.file_sync_calls().len(), provider_call_count);
+    assert_eq!(
+        server.child_public_contract_projection_count_for_test(),
+        projection_count
+    );
 
     // Replacing the published resolver/config world evicts the prior key. The
     // same background wrapper must establish a contract in the new world.

@@ -4,11 +4,16 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { FIXTURE_SUITE_GLOBS } from "./fixtureSuiteMap";
+import {
+  PROJECTLESS_CONTRACT_LOADED_FILES,
+  PROJECTLESS_CONTRACT_TEST_IDS,
+} from "./projectlessContractManifest";
+
 import {
   EDITOR_ACCEPTANCE_ROUTES,
   EXTENSION_ACCEPTANCE_ROUTES,
   NON_REQUIRED_E2E_ROUTES,
-  SHARED_TSGO_INAPPLICABLE_FIXTURES,
   STANDARD_E2E_FIXTURES,
   TYPE_PROVIDER_ROUTES,
   buildE2eRouteInventory,
@@ -25,9 +30,9 @@ describe("VS Code E2E route inventory", () => {
     const labels = routes.map(({ fixture, typeProvider }) => `${fixture}@${typeProvider}`);
     const matrix = buildGitHubActionsMatrix();
 
-    expect(routes).toHaveLength(49);
-    expect(routes.filter((route) => route.typeProvider === "tsserver")).toHaveLength(16);
-    expect(routes.filter((route) => route.typeProvider === "tsgo")).toHaveLength(16);
+    expect(routes).toHaveLength(47);
+    expect(routes.filter((route) => route.typeProvider === "tsserver")).toHaveLength(14);
+    expect(routes.filter((route) => route.typeProvider === "tsgo")).toHaveLength(14);
     expect(routes.filter((route) => route.typeProvider === "shared-tsgo")).toHaveLength(15);
     // The editor-owned tier is never selected automatically, so it appears
     // exactly once — on the fixture that exists to exercise it.
@@ -36,6 +41,7 @@ describe("VS Code E2E route inventory", () => {
     // out-of-tree workspace that is the only layout able to discriminate its
     // project-bound TypeScript resolution.
     expect(routes.filter((route) => route.typeProvider === "extension")).toHaveLength(1);
+    expect(routes.filter((route) => route.typeProvider === "off")).toHaveLength(2);
     expect(new Set(labels).size).toBe(labels.length);
     expect(matrix.include).toEqual(
       buildRequiredE2eRouteInventory().map(({ fixture, typeProvider }) => ({
@@ -50,17 +56,19 @@ describe("VS Code E2E route inventory", () => {
     const inventory = buildE2eRouteInventory();
 
     expect(NON_REQUIRED_E2E_ROUTES).toHaveLength(1);
-    const [deselected] = NON_REQUIRED_E2E_ROUTES;
-    expect(deselected.route).toEqual({
+    const extensionRoute = NON_REQUIRED_E2E_ROUTES.find(
+      ({ route }) => route.typeProvider === "extension",
+    );
+    expect(extensionRoute?.route).toEqual({
       fixture: "out-of-tree-monorepo",
       typeProvider: "extension",
     });
-    expect(deselected.reason).toMatch(/TypeProviderKind::Tsserver/);
+    expect(extensionRoute?.reason).toMatch(/TypeProviderKind::Tsserver/);
     // A deselected route must not read as merely broken: the reason states the
     // interim containment the product ships, so the next reader knows the
     // setting warns instead of silently answering nothing.
-    expect(deselected.reason).toMatch(/contained/i);
-    expect(deselected.reason).toMatch(/warn/i);
+    expect(extensionRoute?.reason).toMatch(/contained/i);
+    expect(extensionRoute?.reason).toMatch(/warn/i);
 
     // Every deselected route is a declared route: the required set is the
     // inventory minus exactly those, never a set that drops a route silently.
@@ -73,12 +81,18 @@ describe("VS Code E2E route inventory", () => {
     // The default (unselected) run is the required matrix.
     expect(selectE2eRoutes({})).toEqual(required);
     // An explicit selector still reaches it, by label and by fixture.
-    expect(parseE2eRouteLabel("out-of-tree-monorepo@extension")).toEqual(deselected.route);
-    expect(selectE2eRoutes({ fixture: "out-of-tree-monorepo" })).toEqual([deselected.route]);
-    expect(selectE2eRoutes({ typeProvider: "extension" })).toEqual([deselected.route]);
+    expect(parseE2eRouteLabel("out-of-tree-monorepo@extension")).toEqual(extensionRoute?.route);
+    expect(selectE2eRoutes({ fixture: "out-of-tree-monorepo" })).toEqual([extensionRoute?.route]);
+    expect(selectE2eRoutes({ typeProvider: "extension" })).toEqual([extensionRoute?.route]);
+
+    for (const fixture of ["vue-parity", "svelte-parity", "mixed-parity"] as const) {
+      for (const typeProvider of TYPE_PROVIDER_ROUTES) {
+        expect(required).toContainEqual({ fixture, typeProvider });
+      }
+    }
   });
 
-  it("runs every project-bound standard fixture on all three provider routes", () => {
+  it("runs every configured standard fixture on all three provider routes", () => {
     const routes = buildE2eRouteInventory();
 
     for (const fixture of STANDARD_E2E_FIXTURES) {
@@ -86,12 +100,21 @@ describe("VS Code E2E route inventory", () => {
         .filter((route) => route.fixture === fixture)
         .map((route) => route.typeProvider)
         .sort();
-      if (SHARED_TSGO_INAPPLICABLE_FIXTURES.includes(fixture as never)) {
-        expect(providers).toEqual(["tsgo", "tsserver"]);
-      } else {
-        expect(providers).toEqual([...TYPE_PROVIDER_ROUTES].sort());
-      }
+      expect(providers).toEqual([...TYPE_PROVIDER_ROUTES].sort());
     }
+  });
+
+  it("runs projectless fixtures only on the explicit provider-off route", () => {
+    const routes = buildE2eRouteInventory();
+    for (const fixture of ["no-config", "single-file"] as const) {
+      expect(routes.filter((route) => route.fixture === fixture)).toEqual([
+        { fixture, typeProvider: "off" },
+      ]);
+      expect(FIXTURE_SUITE_GLOBS[fixture]).toEqual(["projectless-contract.test"]);
+    }
+    expect(PROJECTLESS_CONTRACT_LOADED_FILES).toEqual(["projectless-contract.test.js"]);
+    expect(PROJECTLESS_CONTRACT_TEST_IDS).toHaveLength(4);
+    expect(new Set(PROJECTLESS_CONTRACT_TEST_IDS).size).toBe(PROJECTLESS_CONTRACT_TEST_IDS.length);
   });
 
   it("retains the explicit editor-owned acceptance routes without inventing managed coverage", () => {
@@ -130,6 +153,11 @@ describe("VS Code E2E route inventory", () => {
     );
     expect(() => parseE2eRouteLabel("sveltte-contract@tsgo")).toThrow(/matched nothing/i);
     expect(() => parseE2eRouteLabel("no-config@shared-tsgo")).toThrow(/matched nothing/i);
+    expect(() => parseE2eRouteLabel("no-config@tsgo")).toThrow(/matched nothing/i);
+    expect(parseE2eRouteLabel("no-config@off")).toEqual({
+      fixture: "no-config",
+      typeProvider: "off",
+    });
   });
 });
 
@@ -143,9 +171,9 @@ describe("resolveE2eFixtureSelection", () => {
       fixture: "barrel-exports",
       typeProvider: "",
     });
-    expect(resolveE2eFixtureSelection({ rawFixture: "no-config", typeProvider: "tsgo" })).toEqual({
+    expect(resolveE2eFixtureSelection({ rawFixture: "no-config", typeProvider: "off" })).toEqual({
       fixture: "no-config",
-      typeProvider: "tsgo",
+      typeProvider: "off",
     });
     // The `<fixture>@<provider>` spelling, and it beats the separate variable.
     expect(

@@ -91,6 +91,17 @@ describe("VSIX engine payload", () => {
   });
 });
 
+describe("playground deploy build", () => {
+  const netlify = read("netlify.toml");
+  const viteConfig = read("packages/playground/vite.config.ts");
+
+  it("uses the artifact-free Vue shell transform only on Netlify", () => {
+    expect(netlify).toMatch(/VERTER_PLAYGROUND_SHELL_COMPILER\s*=\s*"vue"/);
+    expect(viteConfig).toContain('process.env.VERTER_PLAYGROUND_SHELL_COMPILER ?? "verter"');
+    expect(viteConfig).toContain('shellCompiler === "vue" ? vue() : verter()');
+  });
+});
+
 const bracketDepth = (text: string) =>
   (text.match(/\[/g)?.length ?? 0) - (text.match(/\]/g)?.length ?? 0);
 
@@ -367,6 +378,14 @@ describe("release gating", () => {
     expect(body, "the test job must run the JS suite").toMatch(/pnpm (run )?test/);
   });
 
+  // @ai-generated - Release shares the dedicated 16 GiB runner policy with CI.
+  it("gives the release Rust gate a dedicated-runner memory ceiling", () => {
+    const body = workflowJobs(release).get("test") ?? "";
+    expect(body, "the release gate must retain 4 GiB of runner headroom").toContain(
+      "node scripts/gate.mjs --exhaustive --memory-limit 12GiB",
+    );
+  });
+
   // @ai-generated - Every hermetic gate invocation needs an explicitly provisioned oracle cache.
   it("provisions the offline oracle cache before every release workflow gate invocation", () => {
     const provision =
@@ -398,6 +417,56 @@ describe("release gating", () => {
 
 describe("CI Rust path eligibility", () => {
   const ci = read(".github/workflows/ci.yml");
+
+  // @ai-generated - Pins the bounded first sccache rollout and cold-build memory fix.
+  it("runs the Rust test gate through the measured GitHub sccache lane", () => {
+    const body = workflowJobs(ci).get("rust-test") ?? "";
+    expect(body, "rust-test must install the reviewed sccache action").toContain(
+      "mozilla-actions/sccache-action@v0.0.11",
+    );
+    expect(body, "rust-test must pin the measured sccache binary").toContain("version: v0.17.0");
+    expect(body, "rust-test must enable the GitHub Actions cache backend").toContain(
+      'SCCACHE_GHA_ENABLED: "true"',
+    );
+    expect(body, "rust-test must namespace its shared cache generation").toContain(
+      'SCCACHE_GHA_VERSION: "verter-rust-test-v1"',
+    );
+    expect(body, "the gate must use the repository's telemetry wrapper").toContain(
+      "node scripts/run-cached.mjs -- node scripts/gate.mjs --exhaustive --memory-limit 12GiB",
+    );
+  });
+
+  it("pins the required VS Code matrix to a reviewed editor release", () => {
+    const body = workflowJobs(ci).get("vscode-e2e") ?? "";
+    expect(body, "the required matrix must not resolve a moving stable editor").toContain(
+      'E2E_VSCODE_VERSION: "1.135.0"',
+    );
+  });
+
+  it("runs endurance routes independently and retains actionable editor diagnostics", () => {
+    const endurance = workflowJobs(ci).get("endurance-lsp") ?? "";
+    expect(endurance, "one failing route must not prevent the other endurance routes").toContain(
+      "fail-fast: false",
+    );
+    expect(
+      endurance,
+      "the endurance strategy must enumerate every required provider route",
+    ).toContain("route: [tsserver, tsgo, shared-tsgo]");
+    expect(endurance, "the harness must receive the current matrix route").toContain(
+      "VERTER_ENDURANCE_PROVIDER: ${{ matrix.route }}",
+    );
+    expect(endurance, "each route must retain its own receipt artifact").toContain(
+      "endurance-lsp-receipts-${{ matrix.route }}",
+    );
+
+    const vscode = workflowJobs(ci).get("vscode-e2e") ?? "";
+    expect(vscode, "failed E2E runs must retain the extension/LSP log").toContain(
+      "/tmp/verter-e2e-*.log",
+    );
+    expect(vscode, "failed E2E runs must retain the exact run-summary oracle").toContain(
+      "/tmp/verter-e2e-*.log.runsummary",
+    );
+  });
 
   // @ai-generated - Pins every non-Rust input consumed by the canonical Rust gate job.
   it("runs the Rust job when gate, harness, provider, or install-graph inputs change", () => {

@@ -790,14 +790,8 @@ pub(super) async fn handle_did_change(
         .flatten()
         .map(|canonical_id| {
             let freshness_key = server.import_sync_freshness_key();
-            let child_contract_freshness = server.imported_child_contract_freshness_key();
             let frontier = server.dependency_frontier_signature(&canonical_id);
-            (
-                canonical_id,
-                freshness_key,
-                child_contract_freshness,
-                frontier,
-            )
+            (canonical_id, freshness_key, frontier)
         });
     let update_result = block_in_place_if_available(|| {
         server
@@ -829,10 +823,8 @@ pub(super) async fn handle_did_change(
             }
         }
     }
-    if let (
-        Some((before_id, Some(before_key), before_contract_freshness, before_frontier)),
-        Some(canonical_id),
-    ) = (import_receipt_before, canonical_id.as_ref())
+    if let (Some((before_id, Some(before_key), before_frontier)), Some(canonical_id)) =
+        (import_receipt_before, canonical_id.as_ref())
     {
         let after_frontier = server.dependency_frontier_signature(canonical_id);
         if before_id == *canonical_id {
@@ -853,16 +845,6 @@ pub(super) async fn handle_did_change(
                         after_key,
                         frontier_unchanged,
                     );
-                    if let (Some(before), Some(after)) = (
-                        before_contract_freshness,
-                        server.imported_child_contract_freshness_key(),
-                    ) {
-                        server.promote_child_contracts_after_isolated_edit(
-                            before,
-                            after,
-                            frontier_unchanged,
-                        );
-                    }
                 }
             }
         }

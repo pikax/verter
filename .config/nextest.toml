@@ -21,14 +21,19 @@ path = "junit.xml"
 # engine. They are deterministic in isolation but contend for the shared
 # Windows process/pipe budget when nextest schedules them together. Pure
 # resolver tests and the missing-attach fallback (no shim/tsgo child) remain
-# parallel.
+# parallel. Linux and macOS do not share that bottleneck, so they keep normal
+# nextest scheduling through the platform-scoped overrides below.
 [test-groups]
 shared-provider-live = { max-threads = 1 }
 lsp-server-unit = { max-threads = 1 }
 
 [[profile.default.overrides]]
 filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|shared_provider_serves_dual_claimant_carrier_with_real_types|shared_provider_carrier_never_leaks_to_editor|shared_provider_reconnect_mints_fresh_engine_no_split_brain|composite_overlays_shared_diagnostics_via_live_resolver|composite_successful_shared_route_never_activates_managed_fallback|composite_shared_template_answers_are_typed_single_project|composite_shared_template_answers_are_typed_monorepo_nested_leaf)$/)'
+platform = 'cfg(windows)'
 test-group = 'shared-provider-live'
+
+[[profile.default.overrides]]
+filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|shared_provider_serves_dual_claimant_carrier_with_real_types|shared_provider_carrier_never_leaks_to_editor|shared_provider_reconnect_mints_fresh_engine_no_split_brain|composite_overlays_shared_diagnostics_via_live_resolver|composite_successful_shared_route_never_activates_managed_fallback|composite_shared_template_answers_are_typed_single_project|composite_shared_template_answers_are_typed_monorepo_nested_leaf)$/)'
 # The composite template tests declare up to 230s of in-test deadlines
 # (40s setup + a 90s diagnostics watchdog + two 45s guards + 10s teardown).
 # The outer terminator must sit strictly ABOVE that so it stays the backstop
@@ -38,7 +43,11 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 
 [[profile.ci.overrides]]
 filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|shared_provider_serves_dual_claimant_carrier_with_real_types|shared_provider_carrier_never_leaks_to_editor|shared_provider_reconnect_mints_fresh_engine_no_split_brain|composite_overlays_shared_diagnostics_via_live_resolver|composite_successful_shared_route_never_activates_managed_fallback|composite_shared_template_answers_are_typed_single_project|composite_shared_template_answers_are_typed_monorepo_nested_leaf)$/)'
+platform = 'cfg(windows)'
 test-group = 'shared-provider-live'
+
+[[profile.ci.overrides]]
+filter = 'test(/shared_provider_live::(shared_provider_serves_real_vue_macro_carrier|shared_provider_serves_dual_claimant_carrier_with_real_types|shared_provider_carrier_never_leaks_to_editor|shared_provider_reconnect_mints_fresh_engine_no_split_brain|composite_overlays_shared_diagnostics_via_live_resolver|composite_successful_shared_route_never_activates_managed_fallback|composite_shared_template_answers_are_typed_single_project|composite_shared_template_answers_are_typed_monorepo_nested_leaf)$/)'
 # The composite template tests declare up to 230s of in-test deadlines
 # (40s setup + a 90s diagnostics watchdog + two 45s guards + 10s teardown).
 # The outer terminator must sit strictly ABOVE that so it stays the backstop
@@ -50,13 +59,16 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 # pools. Nextest process isolation makes them safe from shared Rust state, but
 # running many services together exhausts Windows scheduler/process capacity
 # and causes production request budgets to expire nondeterministically. Keep
-# the server contracts isolated from one another; every selector still runs.
+# the server contracts isolated from one another on Windows; every selector
+# still runs, while Linux and macOS retain their normal concurrency.
 [[profile.default.overrides]]
 filter = 'test(/^server::server_tests::/)'
+platform = 'cfg(windows)'
 test-group = 'lsp-server-unit'
 
 [[profile.ci.overrides]]
 filter = 'test(/^server::server_tests::/)'
+platform = 'cfg(windows)'
 test-group = 'lsp-server-unit'
 
 # ── trybuild compile-fail tests: a real `cargo` build, not a unit test ───────

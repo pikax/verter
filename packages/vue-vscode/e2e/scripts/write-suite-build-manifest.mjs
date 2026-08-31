@@ -12,11 +12,13 @@ const require = createRequire(import.meta.url);
 const { buildParityTestInventory } = require(
   join(packageRoot, "out-test", "e2e", "lib", "parityTestInventory.js"),
 );
-// 77 = 76 + `native-hover-default.test.ts`, the DEFAULT-configuration pin added
+// 78 = 77 + `projectless-contract.test.ts`, the exact provider-off contract
+// for no-config/single-file routes. The previous 77th suite was
+// `native-hover-default.test.ts`, the DEFAULT-configuration pin added
 // when `hover.test.ts` and `generic-attrs.test.ts` moved onto the
 // `verter-native-semantics` server profile. Adding a suite is a deliberate act,
 // which is exactly why this number is pinned rather than derived.
-const ACCEPTED_SUITE_COUNT = 77;
+const ACCEPTED_SUITE_COUNT = 78;
 // 259 = 258 + `ide.complete.import-path-carrier` (import-path completion in a
 // plain `.ts` offers the carrier file — the VS-Code-TS-service lane).
 const ACCEPTED_PARITY_LITERAL_COUNT = 259;
