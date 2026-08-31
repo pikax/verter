@@ -134,12 +134,27 @@ fn produced_bundle(
     }
 }
 
-/// Test-minted consume-once projection grant (production carves grants off
-/// a host-issued admission).
+/// A genuine consume-once projection grant: issued through the registered
+/// Vue host-integration backend and carved off the admission — the only
+/// out-of-crate source of execution grants.
 fn ide_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
-    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
-        verter_compiler::compile_request::ProductKind::IdeCompanion,
-    )
+    use verter_compiler::compile_request::{CompileProduct, IdeProductRequest};
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, VueHostIntegrationBackend, VueHostMultiProductDemand,
+    };
+    let artifact = registered_artifact("file:///grant-mint.vue", VUE_SIMPLE, false);
+    VueHostIntegrationBackend::registered()
+        .admit_host_products(
+            &artifact,
+            VueHostMultiProductDemand {
+                products: vec![CompileProduct::IdeCompanion(IdeProductRequest::default())],
+                ..Default::default()
+            },
+        )
+        .expect("the grant-mint admission issues")
+        .into_execution_grants()
+        .projection
+        .expect("the projection leg was admitted")
 }
 
 #[test]

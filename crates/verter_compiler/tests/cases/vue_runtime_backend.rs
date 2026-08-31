@@ -172,21 +172,37 @@ fn compile_via_backend_with_inputs(
     )
 }
 
-/// Test-minted consume-once runtime grant matching the request's demanded
-/// runtime kind (production carves grants off a host-issued admission).
+/// A genuine consume-once runtime grant matching the request's demanded
+/// runtime kind: issued through the registered Vue host-integration
+/// backend and carved off the admission — the only out-of-crate source of
+/// execution grants.
 fn runtime_grant_for(
     request: &CompileRequest,
 ) -> verter_compiler::framework_common::ProductExecutionGrant {
-    let kind = if request
+    use verter_compiler::compile_request::VueOptionAttempt;
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, VueHostIntegrationBackend, VueHostRuntimeRenderDemand,
+    };
+    let ssr = request
         .products()
         .iter()
-        .any(|p| p.kind() == ProductKind::RuntimeServer)
-    {
-        ProductKind::RuntimeServer
-    } else {
-        ProductKind::RuntimeClient
-    };
-    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(kind)
+        .any(|p| p.kind() == ProductKind::RuntimeServer);
+    let artifact = registered_artifact("file:///grant-mint.vue", SIMPLE);
+    VueHostIntegrationBackend::registered()
+        .admit_runtime_render(
+            &artifact,
+            VueHostRuntimeRenderDemand {
+                vue_options: VueOptionAttempt {
+                    ssr,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("the grant-mint admission issues")
+        .into_execution_grants()
+        .runtime
+        .expect("the runtime leg was admitted")
 }
 
 fn selected_style(code: &str) -> RuntimeBlockContentInput {
@@ -318,6 +334,28 @@ fn assert_runtime_parity(
     }
 }
 
+/// A genuine consume-once PROJECTION grant, for wrong-demand
+/// discrimination.
+fn projection_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
+    use verter_compiler::compile_request::IdeProductRequest;
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, VueHostIntegrationBackend, VueHostMultiProductDemand,
+    };
+    let artifact = registered_artifact("file:///grant-mint.vue", SIMPLE);
+    VueHostIntegrationBackend::registered()
+        .admit_host_products(
+            &artifact,
+            VueHostMultiProductDemand {
+                products: vec![CompileProduct::IdeCompanion(IdeProductRequest::default())],
+                ..Default::default()
+            },
+        )
+        .expect("the grant-mint admission issues")
+        .into_execution_grants()
+        .projection
+        .expect("the projection leg was admitted")
+}
+
 /// A grant carved for a different demand refuses typed before any
 /// compile work runs — the demand match is part of consumption.
 #[test]
@@ -329,12 +367,9 @@ fn wrong_demand_grant_refuses_runtime_typed() {
         VueCompileRequest::default(),
         false,
     );
-    let projection_grant = verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
-        ProductKind::IdeCompanion,
-    );
     let err = RuntimeCompilerBackend::compile_runtime(
         &VueRuntimeBackend,
-        projection_grant,
+        projection_grant(),
         SIMPLE,
         &artifact,
         &request,

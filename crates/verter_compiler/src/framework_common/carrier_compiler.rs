@@ -351,12 +351,13 @@ pub enum CompileUnsupported {
     },
 }
 
-/// The retained registry compatibility routes' grant mint: the
+/// The registry-dispatched routes' grant mint: the
 /// [`CarrierCompiler::compile_bundle`] / [`CarrierCompiler::compile_ide`]
-/// entries predate the host-issued admission flow, so they mint their leg
-/// grants directly from the neutral option demand at the route boundary.
-/// Crate-private — an external caller reaches a product backend only
-/// through an admission carve — and deleted with the routes it serves.
+/// entries mint their leg grants directly from the neutral option demand
+/// at the route boundary, because those routes carry no host-issued
+/// admission. Crate-private: an external caller reaches a product backend
+/// only through an admission carve, so grant minting authority never
+/// leaves the crate.
 pub(crate) fn registry_route_execution_grants(
     opts: &RuntimeCompileOptions,
 ) -> super::capability::ProductExecutionGrants {

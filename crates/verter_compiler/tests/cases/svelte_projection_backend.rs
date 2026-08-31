@@ -26,12 +26,28 @@ use verter_language::registered_source_authority::{
 };
 use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId, ParseOptions};
 
-/// Test-minted consume-once projection grant (production carves grants off
-/// a host-issued admission).
+/// A genuine consume-once projection grant: issued through the registered
+/// Svelte host-integration backend and carved off the admission — the
+/// only out-of-crate source of execution grants.
 fn ide_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
-    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
-        verter_compiler::compile_request::ProductKind::IdeCompanion,
-    )
+    use verter_compiler::compile_request::{CompileProduct, IdeProductRequest};
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, SvelteHostIntegrationBackend,
+        SvelteHostMultiProductDemand,
+    };
+    let artifact = registered_artifact("file:///grant-mint.svelte", SIMPLE, true);
+    SvelteHostIntegrationBackend::registered()
+        .admit_host_products(
+            &artifact,
+            SvelteHostMultiProductDemand {
+                products: vec![CompileProduct::IdeCompanion(IdeProductRequest::default())],
+                ..Default::default()
+            },
+        )
+        .expect("the grant-mint admission issues")
+        .into_execution_grants()
+        .projection
+        .expect("the projection leg was admitted")
 }
 
 const KITCHEN_SINK: &str = concat!(

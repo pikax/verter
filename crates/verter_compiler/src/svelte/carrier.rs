@@ -412,9 +412,10 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                 ..Default::default()
             },
         )?;
-        // Retained registry route: the projection grant is minted at this
-        // route boundary (crate-private mint); admission-issued flows carve
-        // theirs off the consumed admission instead.
+        // This registry route carries no host-issued admission, so the
+        // projection grant is minted at the route boundary (crate-private
+        // mint); admission-issued flows carve theirs off the consumed
+        // admission instead.
         let grant = crate::framework_common::capability::ProductExecutionGrant::mint(
             crate::compile_request::ProductKind::IdeCompanion,
         );

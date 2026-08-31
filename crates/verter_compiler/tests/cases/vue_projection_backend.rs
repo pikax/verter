@@ -28,12 +28,40 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 
 const KITCHEN_SINK: &str = include_str!("../fixtures/kitchen-sink.vue");
 
-/// Test-minted consume-once projection grant (production carves grants off
-/// a host-issued admission).
+/// A genuine consume-once projection grant: issued through the registered
+/// Vue host-integration backend and carved off the admission — the only
+/// out-of-crate source of execution grants.
 fn ide_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
-    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
-        ProductKind::IdeCompanion,
-    )
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, VueHostIntegrationBackend, VueHostMultiProductDemand,
+    };
+    let artifact = registered_artifact("file:///grant-mint.vue", SIMPLE);
+    VueHostIntegrationBackend::registered()
+        .admit_host_products(
+            &artifact,
+            VueHostMultiProductDemand {
+                products: vec![CompileProduct::IdeCompanion(IdeProductRequest::default())],
+                ..Default::default()
+            },
+        )
+        .expect("the grant-mint admission issues")
+        .into_execution_grants()
+        .projection
+        .expect("the projection leg was admitted")
+}
+
+/// A genuine consume-once RUNTIME grant, for wrong-demand discrimination.
+fn runtime_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, VueHostIntegrationBackend, VueHostRuntimeRenderDemand,
+    };
+    let artifact = registered_artifact("file:///grant-mint.vue", SIMPLE);
+    VueHostIntegrationBackend::registered()
+        .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
+        .expect("the grant-mint admission issues")
+        .into_execution_grants()
+        .runtime
+        .expect("the runtime leg was admitted")
 }
 
 const SIMPLE: &str = concat!(
@@ -136,12 +164,9 @@ fn projected_template(code: &str) -> RuntimeBlockContentInput {
 #[test]
 fn wrong_demand_grant_refuses_projection_typed() {
     let artifact = registered_artifact("file:///wrong-grant.vue", SIMPLE);
-    let runtime_grant = verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
-        ProductKind::RuntimeClient,
-    );
     let err = VueProjectionBackend
         .project_ide(
-            runtime_grant,
+            runtime_grant(),
             SIMPLE,
             &artifact,
             &ide_only_request("Wrong.vue", false),

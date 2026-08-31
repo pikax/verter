@@ -44,11 +44,37 @@ use super::{CarrierCompiler, FrameworkParseArtifact, Present};
 
 /// Svelte host-integration backend for the native host epoch.
 ///
-/// Deliberately NOT `Clone`/`Copy`: what a consumer receives from a
-/// request-scoped binding or the immutable catalog is a `&'static`
-/// registered row, never a freely duplicable long-lived service value.
-#[derive(Debug, PartialEq, Eq, Default)]
-pub struct SvelteHostIntegrationBackend;
+/// Deliberately NOT `Clone`/`Copy`/`Default`, and not constructible
+/// outside this crate (private field): every consumer holds the
+/// `&'static` registered instance — from [`Self::registered`], the
+/// immutable catalog, or a request-scoped binding — never a freshly
+/// minted service value. A retained reference is inert on its own:
+/// request scoping lives entirely on the consume-once witnesses (the
+/// by-value compile admission and its per-demand execution grants).
+#[derive(Debug, PartialEq, Eq)]
+pub struct SvelteHostIntegrationBackend {
+    _registered: (),
+}
+
+impl SvelteHostIntegrationBackend {
+    /// Crate-internal constructor; the only instances are the registered
+    /// static and catalog registrations built here.
+    pub(crate) const fn new() -> Self {
+        Self { _registered: () }
+    }
+
+    /// The registered native-host instance. Holding this reference grants
+    /// no execution: every execution entry additionally requires a
+    /// host-issued consume-once admission (or a grant carved off one).
+    #[must_use]
+    pub fn registered() -> &'static Self {
+        static REGISTERED: SvelteHostIntegrationBackend = SvelteHostIntegrationBackend::new();
+        &REGISTERED
+    }
+}
+
+// The backends are sealed identities, never duplicable service values.
+static_assertions::assert_not_impl_any!(SvelteHostIntegrationBackend: Clone, Copy, Default);
 
 /// Host-backed multi-product demand: every requested product plus the
 /// typed Svelte option attempt the backend turns into the one canonical
@@ -167,6 +193,13 @@ pub enum SvelteAdmittedDemand {
     /// Runtime-render (render-only) demand.
     RuntimeRender,
 }
+
+// Consume-once by-value evidence must never be duplicable or
+// round-trippable through a serialized form: one issuance drives at most
+// one execution.
+static_assertions::assert_not_impl_any!(
+    SvelteCompileAdmission: Clone, Copy, serde::Serialize, serde::Deserialize<'static>
+);
 
 /// The sole Svelte compile-admission token for the native host epoch:
 /// the admitted demand, the one canonical request, the exact parse
@@ -423,7 +456,7 @@ impl SvelteHostIntegrationBackend {
     /// population, never a second compile. Consumes the admission by
     /// value: one issuance drives at most one execution.
     pub fn compile_host_products(
-        self,
+        &self,
         admission: SvelteCompileAdmission,
         artifact: &FrameworkParseArtifact,
         inputs: &SvelteHostExecutionInputs,
@@ -445,7 +478,7 @@ impl SvelteHostIntegrationBackend {
     /// template facts. Consumes the admission by value: one issuance
     /// drives at most one execution.
     pub fn compile_runtime_render(
-        self,
+        &self,
         admission: SvelteCompileAdmission,
         artifact: &FrameworkParseArtifact,
         inputs: &SvelteHostExecutionInputs,
@@ -760,9 +793,9 @@ fn refuse_unproducible_svelte_options(
 pub fn svelte_host_integration_registration(
 ) -> TypedCapabilityRegistration<HostCap<SvelteHostIntegrationBackend>> {
     TypedCapabilityRegistration::register_host_integration::<SvelteSfc5, NativeHostEpoch, _>(
-        SvelteHostIntegrationBackend.adapter_id(),
-        SvelteHostIntegrationBackend.carrier_language_id(),
-        Present(SvelteHostIntegrationBackend),
+        SvelteHostIntegrationBackend::new().adapter_id(),
+        SvelteHostIntegrationBackend::new().carrier_language_id(),
+        Present(SvelteHostIntegrationBackend::new()),
     )
 }
 
@@ -859,7 +892,7 @@ mod tests {
     #[test]
     fn multi_product_admission_composes_one_canonical_request() {
         let artifact = svelte_artifact(COMPONENT);
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("a Svelte parse with registered capabilities admits");
         assert_eq!(admission.demand(), SvelteAdmittedDemand::HostMultiProduct);
@@ -878,7 +911,7 @@ mod tests {
     fn runtime_render_admission_is_runtime_only_and_never_consults_projection() {
         let artifact = svelte_artifact(COMPONENT);
         let before = projection_catalog_consult_count();
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
             .expect("a Svelte parse with a registered runtime backend admits");
         assert_eq!(admission.demand(), SvelteAdmittedDemand::RuntimeRender);
@@ -895,7 +928,7 @@ mod tests {
 
         // The multi-product demand naming the IDE companion DOES consult it
         // — the counter discriminates the two demand validations.
-        let _ = SvelteHostIntegrationBackend
+        let _ = SvelteHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("multi-product admits");
         assert_eq!(projection_catalog_consult_count(), before + 1);
@@ -904,7 +937,7 @@ mod tests {
     #[test]
     fn ssr_render_demand_admits_the_server_runtime_product() {
         let artifact = svelte_artifact(COMPONENT);
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(
                 &artifact,
                 SvelteHostRuntimeRenderDemand {
@@ -925,7 +958,7 @@ mod tests {
         // demand fails CLOSED at execution with the precise typed surface
         // — never a silent client-mode compile in its place.
         let artifact = svelte_artifact(COMPONENT);
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(
                 &artifact,
                 SvelteHostRuntimeRenderDemand {
@@ -935,7 +968,7 @@ mod tests {
             )
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .compile_runtime_render(
                 admission,
                 &artifact,
@@ -959,7 +992,7 @@ mod tests {
     #[test]
     fn unsupported_product_refuses_typed_and_issues_nothing() {
         let artifact = svelte_artifact(COMPONENT);
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 SvelteHostMultiProductDemand {
@@ -972,7 +1005,7 @@ mod tests {
             refusal,
             SvelteHostAdmissionRefusal::UnsupportedProduct(ProductKind::PublicApi)
         );
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 SvelteHostMultiProductDemand {
@@ -990,7 +1023,7 @@ mod tests {
     #[test]
     fn dual_runtime_kind_demand_refuses_at_issuance() {
         let artifact = svelte_artifact(COMPONENT);
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 SvelteHostMultiProductDemand {
@@ -1013,7 +1046,7 @@ mod tests {
     #[test]
     fn analysis_script_bindings_demand_refuses_at_issuance() {
         let artifact = svelte_artifact(COMPONENT);
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 SvelteHostMultiProductDemand {
@@ -1068,7 +1101,7 @@ mod tests {
             ),
         ];
         for (options, expected) in variants {
-            let refusal = SvelteHostIntegrationBackend
+            let refusal = SvelteHostIntegrationBackend::new()
                 .admit_host_products(
                     &artifact,
                     SvelteHostMultiProductDemand {
@@ -1084,7 +1117,7 @@ mod tests {
                 refusal,
                 SvelteHostAdmissionRefusal::UnproducibleDemand(expected)
             );
-            let refusal = SvelteHostIntegrationBackend
+            let refusal = SvelteHostIntegrationBackend::new()
                 .admit_runtime_render(
                     &artifact,
                     SvelteHostRuntimeRenderDemand {
@@ -1116,7 +1149,7 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            let refusal = SvelteHostIntegrationBackend
+            let refusal = SvelteHostIntegrationBackend::new()
                 .admit_host_products(
                     &artifact,
                     SvelteHostMultiProductDemand {
@@ -1137,7 +1170,7 @@ mod tests {
                 ),
                 "got {refusal:?}"
             );
-            let refusal = SvelteHostIntegrationBackend
+            let refusal = SvelteHostIntegrationBackend::new()
                 .admit_runtime_render(
                     &artifact,
                     SvelteHostRuntimeRenderDemand {
@@ -1154,7 +1187,7 @@ mod tests {
             ));
         }
         // The refusal carries the exact option row.
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 SvelteHostMultiProductDemand {
@@ -1189,7 +1222,7 @@ mod tests {
         // `inline` is a Vue-only axis; Svelte's canonical request refuses
         // it at construction (never a silently-ignored field).
         let artifact = svelte_artifact(COMPONENT);
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 SvelteHostMultiProductDemand {
@@ -1216,11 +1249,11 @@ mod tests {
             CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap(),
             "<template><p>a</p></template>",
         );
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .admit_host_products(&foreign, multi_demand())
             .expect_err("a Vue artifact composes no Svelte parse admission");
         assert_eq!(refusal, SvelteHostAdmissionRefusal::NotASvelteParse);
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(&foreign, SvelteHostRuntimeRenderDemand::default())
             .expect_err("the render demand composes the same parse admission");
         assert_eq!(refusal, SvelteHostAdmissionRefusal::NotASvelteParse);
@@ -1229,7 +1262,7 @@ mod tests {
     #[test]
     fn one_admitted_request_populates_prerequisites_once() {
         let artifact = svelte_artifact(COMPONENT);
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits");
         let runtime_before = runtime_backend_delegation_count();
@@ -1237,7 +1270,7 @@ mod tests {
         let _ = take_template_facts_producer_invocations();
 
         let alloc = oxc_allocator::Allocator::new();
-        let products = SvelteHostIntegrationBackend
+        let products = SvelteHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &artifact,
@@ -1289,14 +1322,14 @@ mod tests {
     #[test]
     fn render_execution_is_render_only() {
         let artifact = svelte_artifact(COMPONENT);
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
             .expect("admits");
         let _ = take_projection_producer_invocations();
         let _ = take_template_facts_producer_invocations();
 
         let alloc = oxc_allocator::Allocator::new();
-        let rendered = SvelteHostIntegrationBackend
+        let rendered = SvelteHostIntegrationBackend::new()
             .compile_runtime_render(
                 admission,
                 &artifact,
@@ -1335,11 +1368,11 @@ mod tests {
     #[test]
     fn entry_points_refuse_the_other_demands_admission() {
         let artifact = svelte_artifact(COMPONENT);
-        let render = SvelteHostIntegrationBackend
+        let render = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .compile_host_products(
                 render,
                 &artifact,
@@ -1355,10 +1388,10 @@ mod tests {
             }
         ));
 
-        let multi = SvelteHostIntegrationBackend
+        let multi = SvelteHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits");
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .compile_runtime_render(
                 multi,
                 &artifact,
@@ -1379,11 +1412,11 @@ mod tests {
     fn admission_binds_to_the_exact_admitted_parse() {
         let artifact = svelte_artifact(COMPONENT);
         let other = svelte_artifact("<p>other</p>\n");
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &other,
@@ -1400,7 +1433,7 @@ mod tests {
     #[test]
     fn publication_payloads_gate_on_the_admitted_product_set() {
         let artifact = svelte_artifact(COMPONENT);
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 SvelteHostMultiProductDemand {
@@ -1412,7 +1445,7 @@ mod tests {
             )
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let products = SvelteHostIntegrationBackend
+        let products = SvelteHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &artifact,
@@ -1440,12 +1473,12 @@ mod tests {
         // publishes after the refusal — the refusal carries no payload at
         // all, so the atomicity is structural.
         let artifact = svelte_artifact(SNIPPET_COMPONENT);
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("issuance is producibility validation, not source support");
         let _ = take_projection_producer_invocations();
         let alloc = oxc_allocator::Allocator::new();
-        let refusal = SvelteHostIntegrationBackend
+        let refusal = SvelteHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &artifact,
@@ -1495,10 +1528,10 @@ mod tests {
             "the generic production route must not execute the host backend"
         );
 
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
             .expect("admits");
-        let _ = SvelteHostIntegrationBackend.compile_runtime_render(
+        let _ = SvelteHostIntegrationBackend::new().compile_runtime_render(
             admission,
             &artifact,
             &SvelteHostExecutionInputs::default(),
@@ -1518,7 +1551,7 @@ mod tests {
         let artifact = svelte_artifact(COMPONENT);
         let alloc = oxc_allocator::Allocator::new();
         let compile = |runtime_map: bool, ide_map: bool| {
-            let admission = SvelteHostIntegrationBackend
+            let admission = SvelteHostIntegrationBackend::new()
                 .admit_host_products(
                     &artifact,
                     SvelteHostMultiProductDemand {
@@ -1537,7 +1570,7 @@ mod tests {
                     },
                 )
                 .expect("admits");
-            SvelteHostIntegrationBackend
+            SvelteHostIntegrationBackend::new()
                 .compile_host_products(
                     admission,
                     &artifact,
@@ -1583,11 +1616,11 @@ mod tests {
         // scope class — an execution input beside the admitted request,
         // never part of admission identity.
         let artifact = svelte_artifact(COMPONENT);
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let rendered = SvelteHostIntegrationBackend
+        let rendered = SvelteHostIntegrationBackend::new()
             .compile_runtime_render(
                 admission,
                 &artifact,
@@ -1623,11 +1656,11 @@ mod tests {
             COMPONENT,
             "the artifact's carrier source is the exact registered bytes"
         );
-        let admission = SvelteHostIntegrationBackend
+        let admission = SvelteHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, SvelteHostRuntimeRenderDemand::default())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let rendered = SvelteHostIntegrationBackend
+        let rendered = SvelteHostIntegrationBackend::new()
             .compile_runtime_render(
                 admission,
                 &artifact,

@@ -47,11 +47,37 @@ use super::{CarrierCompiler, FrameworkParseArtifact};
 
 /// Vue host-integration backend for the native host epoch.
 ///
-/// Deliberately NOT `Clone`/`Copy`: what a consumer receives from a
-/// request-scoped binding or the immutable catalog is a `&'static`
-/// registered row, never a freely duplicable long-lived service value.
-#[derive(Debug, PartialEq, Eq, Default)]
-pub struct VueHostIntegrationBackend;
+/// Deliberately NOT `Clone`/`Copy`/`Default`, and not constructible
+/// outside this crate (private field): every consumer holds the
+/// `&'static` registered instance — from [`Self::registered`], the
+/// immutable catalog, or a request-scoped binding — never a freshly
+/// minted service value. A retained reference is inert on its own:
+/// request scoping lives entirely on the consume-once witnesses (the
+/// by-value compile admission and its per-demand execution grants).
+#[derive(Debug, PartialEq, Eq)]
+pub struct VueHostIntegrationBackend {
+    _registered: (),
+}
+
+impl VueHostIntegrationBackend {
+    /// Crate-internal constructor; the only instances are the registered
+    /// static and catalog registrations built here.
+    pub(crate) const fn new() -> Self {
+        Self { _registered: () }
+    }
+
+    /// The registered native-host instance. Holding this reference grants
+    /// no execution: every execution entry additionally requires a
+    /// host-issued consume-once admission (or a grant carved off one).
+    #[must_use]
+    pub fn registered() -> &'static Self {
+        static REGISTERED: VueHostIntegrationBackend = VueHostIntegrationBackend::new();
+        &REGISTERED
+    }
+}
+
+// The backends are sealed identities, never duplicable service values.
+static_assertions::assert_not_impl_any!(VueHostIntegrationBackend: Clone, Copy, Default);
 
 /// Host-backed multi-product demand: every requested product plus the
 /// typed Vue option attempt the backend turns into the one canonical
@@ -157,6 +183,13 @@ pub enum VueAdmittedDemand {
     /// Runtime-render (render-only) demand.
     RuntimeRender,
 }
+
+// Consume-once by-value evidence must never be duplicable or
+// round-trippable through a serialized form: one issuance drives at most
+// one execution.
+static_assertions::assert_not_impl_any!(
+    VueCompileAdmission: Clone, Copy, serde::Serialize, serde::Deserialize<'static>
+);
 
 /// The sole Vue compile-admission token for the native host epoch:
 /// the admitted demand, the one canonical request, the exact parse
@@ -408,7 +441,7 @@ impl VueHostIntegrationBackend {
     /// projection, plan, and emit prerequisites once. Consumes the
     /// admission by value: one issuance drives at most one execution.
     pub fn compile_host_products(
-        self,
+        &self,
         admission: VueCompileAdmission,
         artifact: &FrameworkParseArtifact,
         inputs: &VueHostExecutionInputs,
@@ -430,7 +463,7 @@ impl VueHostIntegrationBackend {
     /// template facts. Consumes the admission by value: one issuance
     /// drives at most one execution.
     pub fn compile_runtime_render(
-        self,
+        &self,
         admission: VueCompileAdmission,
         artifact: &FrameworkParseArtifact,
         inputs: &VueHostExecutionInputs,
@@ -780,9 +813,9 @@ fn refuse_unproducible_vue_options(
 pub fn vue_host_integration_registration(
 ) -> TypedCapabilityRegistration<HostCap<VueHostIntegrationBackend>> {
     TypedCapabilityRegistration::register_host_integration::<VueSfcV3, NativeHostEpoch, _>(
-        VueHostIntegrationBackend.adapter_id(),
-        VueHostIntegrationBackend.carrier_language_id(),
-        Present(VueHostIntegrationBackend),
+        VueHostIntegrationBackend::new().adapter_id(),
+        VueHostIntegrationBackend::new().carrier_language_id(),
+        Present(VueHostIntegrationBackend::new()),
     )
 }
 
@@ -794,10 +827,10 @@ pub fn vue_host_integration_registration(
 /// framework's row (mirrors the installed runtime-backend sum).
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstalledHostIntegration {
-    /// Vue host-integration backend.
-    Vue(VueHostIntegrationBackend),
-    /// Svelte host-integration backend.
-    Svelte(super::svelte_host_integration::SvelteHostIntegrationBackend),
+    /// Vue host-integration backend (the registered instance).
+    Vue(&'static VueHostIntegrationBackend),
+    /// Svelte host-integration backend (the registered instance).
+    Svelte(&'static super::svelte_host_integration::SvelteHostIntegrationBackend),
 }
 
 /// Frozen host-integration catalog. Built once from the host-integration
@@ -809,13 +842,16 @@ pub fn built_in_host_integration_catalog(
         OnceLock::new();
     CATALOG.get_or_init(|| {
         ImmutableCapabilityCatalog::try_from_rows([
-            CatalogRow::from(
-                vue_host_integration_registration()
-                    .map_host_integration(InstalledHostIntegration::Vue),
-            ),
+            CatalogRow::from(vue_host_integration_registration().map_host_integration(|_| {
+                InstalledHostIntegration::Vue(VueHostIntegrationBackend::registered())
+            })),
             CatalogRow::from(
                 super::svelte_host_integration::svelte_host_integration_registration()
-                    .map_host_integration(InstalledHostIntegration::Svelte),
+                    .map_host_integration(|_| {
+                        InstalledHostIntegration::Svelte(
+                            super::svelte_host_integration::SvelteHostIntegrationBackend::registered(),
+                        )
+                    }),
             ),
         ])
         .expect("the built-in Vue and Svelte host-integration identities are unique")
@@ -936,7 +972,7 @@ mod tests {
     #[test]
     fn admission_carves_one_grant_per_admitted_product_leg() {
         let artifact = vue_artifact(SFC);
-        let grants = VueHostIntegrationBackend
+        let grants = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits")
             .into_execution_grants();
@@ -949,7 +985,7 @@ mod tests {
 
         // A render-only admission carves NO projection grant: the carve is
         // demand-specific, never a blanket capability bag.
-        let render_grants = VueHostIntegrationBackend
+        let render_grants = VueHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
             .expect("admits")
             .into_execution_grants();
@@ -963,7 +999,7 @@ mod tests {
     #[test]
     fn multi_product_admission_composes_one_canonical_request() {
         let artifact = vue_artifact(SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("a Vue parse with registered capabilities admits");
         assert_eq!(admission.demand(), VueAdmittedDemand::HostMultiProduct);
@@ -982,7 +1018,7 @@ mod tests {
     fn runtime_render_admission_is_runtime_only_and_never_consults_projection() {
         let artifact = vue_artifact(SFC);
         let before = projection_catalog_consult_count();
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
             .expect("a Vue parse with a registered runtime backend admits");
         assert_eq!(admission.demand(), VueAdmittedDemand::RuntimeRender);
@@ -999,7 +1035,7 @@ mod tests {
 
         // The multi-product demand naming the IDE companion DOES consult it
         // — the counter discriminates the two demand validations.
-        let _ = VueHostIntegrationBackend
+        let _ = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("multi-product admits");
         assert_eq!(projection_catalog_consult_count(), before + 1);
@@ -1008,7 +1044,7 @@ mod tests {
     #[test]
     fn ssr_render_demand_admits_the_server_runtime_product() {
         let artifact = vue_artifact(SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(
                 &artifact,
                 VueHostRuntimeRenderDemand {
@@ -1029,7 +1065,7 @@ mod tests {
     #[test]
     fn unsupported_product_refuses_typed_and_issues_nothing() {
         let artifact = vue_artifact(SFC);
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 VueHostMultiProductDemand {
@@ -1042,7 +1078,7 @@ mod tests {
             refusal,
             VueHostAdmissionRefusal::UnsupportedProduct(ProductKind::PublicApi)
         );
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 VueHostMultiProductDemand {
@@ -1060,7 +1096,7 @@ mod tests {
     #[test]
     fn dual_runtime_kind_demand_refuses_at_issuance() {
         let artifact = vue_artifact(SFC);
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 VueHostMultiProductDemand {
@@ -1086,7 +1122,7 @@ mod tests {
     fn ssr_flag_disagreeing_with_the_runtime_kind_refuses_at_issuance() {
         let artifact = vue_artifact(SFC);
         // ssr=true with a CLIENT product would silently compile client.
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 VueHostMultiProductDemand {
@@ -1108,7 +1144,7 @@ mod tests {
             )
         );
         // The inverse: a SERVER product with ssr=false.
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 VueHostMultiProductDemand {
@@ -1130,7 +1166,7 @@ mod tests {
     #[test]
     fn analysis_script_bindings_demand_refuses_at_issuance() {
         let artifact = vue_artifact(SFC);
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 VueHostMultiProductDemand {
@@ -1257,7 +1293,7 @@ mod tests {
             ),
         ];
         for (options, expected) in variants {
-            let refusal = VueHostIntegrationBackend
+            let refusal = VueHostIntegrationBackend::new()
                 .admit_host_products(
                     &artifact,
                     VueHostMultiProductDemand {
@@ -1275,7 +1311,7 @@ mod tests {
                     expected
                 ))
             );
-            let refusal = VueHostIntegrationBackend
+            let refusal = VueHostIntegrationBackend::new()
                 .admit_runtime_render(
                     &artifact,
                     VueHostRuntimeRenderDemand {
@@ -1300,11 +1336,11 @@ mod tests {
             CarrierGrammarConfig::Svelte,
             "<p>a</p>",
         );
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_host_products(&foreign, multi_demand())
             .expect_err("a Svelte artifact composes no Vue parse admission");
         assert_eq!(refusal, VueHostAdmissionRefusal::NotAVueParse);
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_runtime_render(&foreign, VueHostRuntimeRenderDemand::default())
             .expect_err("the render demand composes the same parse admission");
         assert_eq!(refusal, VueHostAdmissionRefusal::NotAVueParse);
@@ -1313,7 +1349,7 @@ mod tests {
     #[test]
     fn ssr_vapor_demand_refuses_at_issuance() {
         let artifact = vue_artifact(SFC);
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 VueHostMultiProductDemand {
@@ -1338,7 +1374,7 @@ mod tests {
     #[test]
     fn one_admitted_request_populates_prerequisites_once() {
         let artifact = vue_artifact(SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits");
         let runtime_before = runtime_backend_delegation_count();
@@ -1346,7 +1382,7 @@ mod tests {
         let _ = take_template_facts_producer_invocations();
 
         let alloc = oxc_allocator::Allocator::new();
-        let products = VueHostIntegrationBackend
+        let products = VueHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &artifact,
@@ -1386,14 +1422,14 @@ mod tests {
     #[test]
     fn render_execution_is_render_only() {
         let artifact = vue_artifact(SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
             .expect("admits");
         let _ = take_projection_producer_invocations();
         let _ = take_template_facts_producer_invocations();
 
         let alloc = oxc_allocator::Allocator::new();
-        let rendered = VueHostIntegrationBackend
+        let rendered = VueHostIntegrationBackend::new()
             .compile_runtime_render(
                 admission,
                 &artifact,
@@ -1422,11 +1458,11 @@ mod tests {
     #[test]
     fn entry_points_refuse_the_other_demands_admission() {
         let artifact = vue_artifact(SFC);
-        let render = VueHostIntegrationBackend
+        let render = VueHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .compile_host_products(
                 render,
                 &artifact,
@@ -1447,11 +1483,11 @@ mod tests {
     fn admission_binds_to_the_exact_admitted_parse() {
         let artifact = vue_artifact(SFC);
         let other = vue_artifact("<template><span>other</span></template>");
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &other,
@@ -1468,7 +1504,7 @@ mod tests {
     #[test]
     fn publication_payloads_gate_on_the_admitted_product_set() {
         let artifact = vue_artifact(SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_host_products(
                 &artifact,
                 VueHostMultiProductDemand {
@@ -1480,7 +1516,7 @@ mod tests {
             )
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let products = VueHostIntegrationBackend
+        let products = VueHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &artifact,
@@ -1500,7 +1536,7 @@ mod tests {
     #[test]
     fn refusal_is_atomic_no_product_publishes_after_it() {
         let artifact = vue_artifact(SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
@@ -1521,7 +1557,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .compile_host_products(admission, &artifact, &inputs, &alloc)
             .expect_err("the transaction is all-or-none");
         assert!(matches!(
@@ -1552,10 +1588,10 @@ mod tests {
             "the generic production route must not execute the host backend"
         );
 
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
             .expect("admits");
-        let _ = VueHostIntegrationBackend.compile_runtime_render(
+        let _ = VueHostIntegrationBackend::new().compile_runtime_render(
             admission,
             &artifact,
             &VueHostExecutionInputs::default(),
@@ -1575,7 +1611,7 @@ mod tests {
         let artifact = vue_artifact(SFC);
         let alloc = oxc_allocator::Allocator::new();
         let compile = |runtime_map: bool, ide_map: bool| {
-            let admission = VueHostIntegrationBackend
+            let admission = VueHostIntegrationBackend::new()
                 .admit_host_products(
                     &artifact,
                     VueHostMultiProductDemand {
@@ -1593,7 +1629,7 @@ mod tests {
                     },
                 )
                 .expect("admits");
-            VueHostIntegrationBackend
+            VueHostIntegrationBackend::new()
                 .compile_host_products(
                     admission,
                     &artifact,
@@ -1642,11 +1678,11 @@ mod tests {
     #[test]
     fn render_entry_refuses_the_multi_product_admission() {
         let artifact = vue_artifact(SFC);
-        let multi = VueHostIntegrationBackend
+        let multi = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let refusal = VueHostIntegrationBackend
+        let refusal = VueHostIntegrationBackend::new()
             .compile_runtime_render(multi, &artifact, &VueHostExecutionInputs::default(), &alloc)
             .expect_err("a multi-product admission does not admit the render entry");
         assert!(matches!(
@@ -1662,7 +1698,7 @@ mod tests {
     fn ssr_render_execution_produces_the_server_surface() {
         use super::super::TemplateRenderExport;
         let artifact = vue_artifact(SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(
                 &artifact,
                 VueHostRuntimeRenderDemand {
@@ -1675,7 +1711,7 @@ mod tests {
             )
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let rendered = VueHostIntegrationBackend
+        let rendered = VueHostIntegrationBackend::new()
             .compile_runtime_render(
                 admission,
                 &artifact,
@@ -1708,7 +1744,7 @@ mod tests {
     #[test]
     fn demanded_template_fact_companion_surfaces_producer_diagnostics_payload_free() {
         let artifact = vue_artifact(MALFORMED_EXPR_SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(
                 &artifact,
                 VueHostRuntimeRenderDemand {
@@ -1719,7 +1755,7 @@ mod tests {
             .expect("admits");
         let _ = take_template_facts_producer_invocations();
         let alloc = oxc_allocator::Allocator::new();
-        let rendered = VueHostIntegrationBackend
+        let rendered = VueHostIntegrationBackend::new()
             .compile_runtime_render(
                 admission,
                 &artifact,
@@ -1752,12 +1788,12 @@ mod tests {
     #[test]
     fn undemanded_template_fact_companion_runs_no_fact_producer() {
         let artifact = vue_artifact(MALFORMED_EXPR_SFC);
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
             .expect("admits");
         let _ = take_template_facts_producer_invocations();
         let alloc = oxc_allocator::Allocator::new();
-        let _ = VueHostIntegrationBackend.compile_runtime_render(
+        let _ = VueHostIntegrationBackend::new().compile_runtime_render(
             admission,
             &artifact,
             &VueHostExecutionInputs::default(),
@@ -1783,11 +1819,11 @@ mod tests {
             SFC,
             "the artifact's carrier source is the exact registered bytes"
         );
-        let admission = VueHostIntegrationBackend
+        let admission = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("admits");
         let alloc = oxc_allocator::Allocator::new();
-        let products = VueHostIntegrationBackend
+        let products = VueHostIntegrationBackend::new()
             .compile_host_products(
                 admission,
                 &artifact,

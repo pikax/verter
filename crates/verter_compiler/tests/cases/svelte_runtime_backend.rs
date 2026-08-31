@@ -169,21 +169,34 @@ fn compile_via_backend_with_inputs(
     )
 }
 
-/// Test-minted consume-once runtime grant matching the request's demanded
-/// runtime kind (production carves grants off a host-issued admission).
+/// A genuine consume-once runtime grant matching the request's demanded
+/// runtime kind: issued through the registered Svelte host-integration
+/// backend and carved off the admission — the only out-of-crate source of
+/// execution grants.
 fn runtime_grant_for(
     request: &CompileRequest,
 ) -> verter_compiler::framework_common::ProductExecutionGrant {
-    let kind = if request
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, SvelteHostIntegrationBackend,
+        SvelteHostRuntimeRenderDemand,
+    };
+    let ssr = request
         .products()
         .iter()
-        .any(|p| p.kind() == ProductKind::RuntimeServer)
-    {
-        ProductKind::RuntimeServer
-    } else {
-        ProductKind::RuntimeClient
-    };
-    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(kind)
+        .any(|p| p.kind() == ProductKind::RuntimeServer);
+    let artifact = registered_artifact("file:///grant-mint.svelte", SIMPLE, true);
+    SvelteHostIntegrationBackend::registered()
+        .admit_runtime_render(
+            &artifact,
+            SvelteHostRuntimeRenderDemand {
+                ssr,
+                ..Default::default()
+            },
+        )
+        .expect("the grant-mint admission issues")
+        .into_execution_grants()
+        .runtime
+        .expect("the runtime leg was admitted")
 }
 
 fn compile_via_standalone(

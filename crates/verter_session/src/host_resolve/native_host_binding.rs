@@ -596,7 +596,7 @@ mod tests {
     ) -> Result<BoundNativeHostRequest, NativeHostBindingUnavailable> {
         BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::vue(),
-            &VueHostIntegrationBackend.carrier_language_id(),
+            &VueHostIntegrationBackend::registered().carrier_language_id(),
             vue_epoch(),
             CANONICAL,
             snapshot,
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(identity.adapter_id(), &FrameworkAdapterId::vue());
         assert_eq!(
             identity.carrier_language_id(),
-            &VueHostIntegrationBackend.carrier_language_id()
+            &VueHostIntegrationBackend::registered().carrier_language_id()
         );
         assert_eq!(attribution.framework_epoch().as_str(), "vue");
         assert_eq!(
@@ -641,7 +641,7 @@ mod tests {
         let snap = snapshot(1);
         let bound = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::svelte(),
-            &SvelteHostIntegrationBackend.carrier_language_id(),
+            &SvelteHostIntegrationBackend::registered().carrier_language_id(),
             svelte_epoch(),
             "/src/App.svelte",
             &snap,
@@ -663,7 +663,7 @@ mod tests {
         let snap = snapshot(1);
         let bound = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::svelte(),
-            &SvelteHostIntegrationBackend.carrier_language_id(),
+            &SvelteHostIntegrationBackend::registered().carrier_language_id(),
             svelte_epoch(),
             "/src/Confusing.vue",
             &snap,
@@ -684,7 +684,7 @@ mod tests {
         let unregistered = FrameworkAdapterId::new("angular");
         let err = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &unregistered,
-            &VueHostIntegrationBackend.carrier_language_id(),
+            &VueHostIntegrationBackend::registered().carrier_language_id(),
             vue_epoch(),
             CANONICAL,
             &snap,
@@ -706,7 +706,7 @@ mod tests {
         let snap = snapshot(0);
         let err = BoundNativeHostRequest::bind::<OtherHostEpoch>(
             &FrameworkAdapterId::vue(),
-            &VueHostIntegrationBackend.carrier_language_id(),
+            &VueHostIntegrationBackend::registered().carrier_language_id(),
             vue_epoch(),
             CANONICAL,
             &snap,
@@ -730,7 +730,7 @@ mod tests {
         let snap = snapshot(0);
         let err = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::vue(),
-            &VueHostIntegrationBackend.carrier_language_id(),
+            &VueHostIntegrationBackend::registered().carrier_language_id(),
             svelte_epoch(),
             CANONICAL,
             &snap,
@@ -797,21 +797,22 @@ mod tests {
         > = Box::leak(Box::new(
             verter_compiler::framework_common::catalog::ImmutableCapabilityCatalog::try_from_rows(
                 [
-                    CatalogRow::from(
-                        vue_host_integration_registration()
-                            .map_host_integration(InstalledHostIntegration::Vue),
-                    ),
+                    CatalogRow::from(vue_host_integration_registration().map_host_integration(
+                        |_| InstalledHostIntegration::Vue(VueBackend::registered()),
+                    )),
                     CatalogRow::from(
                         TypedCapabilityRegistration::register_host_integration::<
                             SecondVueEpoch,
                             NativeHostEpoch,
                             _,
                         >(
-                            VueBackend.adapter_id(),
-                            VueBackend.carrier_language_id(),
+                            VueBackend::registered().adapter_id(),
+                            VueBackend::registered().carrier_language_id(),
                             Present(SecondEpochVueBackend),
                         )
-                        .map_host_integration(|_| InstalledHostIntegration::Vue(VueBackend)),
+                        .map_host_integration(|_| {
+                            InstalledHostIntegration::Vue(VueBackend::registered())
+                        }),
                     ),
                 ],
             )
@@ -827,7 +828,7 @@ mod tests {
             let bound = BoundNativeHostRequest::bind_in_catalog::<NativeHostEpoch>(
                 catalog,
                 &FrameworkAdapterId::vue(),
-                &VueBackend.carrier_language_id(),
+                &VueBackend::registered().carrier_language_id(),
                 epoch,
                 CANONICAL,
                 &snap,
@@ -850,7 +851,7 @@ mod tests {
         let snap = snapshot(0);
         let err = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::vue(),
-            &SvelteHostIntegrationBackend.carrier_language_id(),
+            &SvelteHostIntegrationBackend::registered().carrier_language_id(),
             vue_epoch(),
             CANONICAL,
             &snap,
@@ -860,8 +861,8 @@ mod tests {
         assert_eq!(
             err,
             NativeHostBindingUnavailable::CarrierLanguageMismatch {
-                registered: VueHostIntegrationBackend.carrier_language_id(),
-                requested: SvelteHostIntegrationBackend.carrier_language_id(),
+                registered: VueHostIntegrationBackend::registered().carrier_language_id(),
+                requested: SvelteHostIntegrationBackend::registered().carrier_language_id(),
             }
         );
     }
@@ -891,7 +892,7 @@ mod tests {
         let unregistered = FrameworkAdapterId::new("angular");
         let err = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &unregistered,
-            &VueHostIntegrationBackend.carrier_language_id(),
+            &VueHostIntegrationBackend::registered().carrier_language_id(),
             vue_epoch(),
             CANONICAL,
             &snap,
@@ -1084,6 +1085,63 @@ mod tests {
                 .get(CANONICAL)
                 .is_none_or(|state| state.compile_slots.is_empty()),
             "a refused bind publishes no compile output"
+        );
+    }
+
+    /// The bound arm's catalog-carried `&'static` backend reference can
+    /// drive execution directly: the session consumes the binding, issues
+    /// the demand-specific admission through the referenced backend, and
+    /// executes it by value — no move out of the registered instance, and
+    /// request scoping carried entirely by the consume-once admission.
+    #[test]
+    fn bound_backend_reference_issues_and_executes_a_by_value_admission() {
+        use verter_compiler::framework_common::{
+            FrameworkHostIntegrationBackend as _, VueHostExecutionInputs,
+            VueHostRuntimeRenderDemand,
+        };
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        upsert_vue(&host, VUE_SRC);
+        let snap = host
+            .scheduler
+            .try_get_source(CANONICAL)
+            .expect("the upserted source is live");
+        let efs = host
+            .effective_file_state_from_snapshot(&snap, CANONICAL, None)
+            .expect("the upserted source carries host data");
+        let artifact = efs
+            .framework_parse
+            .as_deref()
+            .expect("a Vue carrier registers a framework parse artifact");
+        let binding = host
+            .bind_native_host_compile_attempt(
+                Some(artifact),
+                CANONICAL,
+                snap.source.len() as u32,
+                &snap,
+                crate::types::CompileCacheMode::Session,
+            )
+            .expect("the registered identity binds")
+            .expect("a carrier artifact exists");
+        let BoundNativeHostRequest::Vue(vue) = binding else {
+            panic!("the Vue catalog arm binds the Vue variant");
+        };
+        let (backend, attribution) = vue.into_host_backend();
+        assert_eq!(attribution.snapshot().canonical_id(), CANONICAL);
+        let admission = backend
+            .admit_runtime_render(artifact, VueHostRuntimeRenderDemand::default())
+            .expect("the bound backend issues the render admission");
+        let alloc = oxc_allocator::Allocator::new();
+        let rendered = backend
+            .compile_runtime_render(
+                admission,
+                artifact,
+                &VueHostExecutionInputs::default(),
+                &alloc,
+            )
+            .expect("the bound backend executes the admitted render");
+        assert!(
+            rendered.runtime_bundle().has_runtime_surface(),
+            "execution through the bound reference produces the runtime Main"
         );
     }
 

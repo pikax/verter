@@ -28,10 +28,11 @@ pub struct Present<T>(pub T);
 /// Provenance: a grant is carved off a host-issued compile admission by
 /// value (`into_execution_grants` on the admission types) — the
 /// host-integration backend composes parse + semantic into the admission
-/// and remains the sole issuer — or minted crate-internally by the
-/// retained registry-dispatched `compile_bundle`/`compile_ide`
-/// compatibility routes, which die with those routes. The inner field is
-/// private, so an external caller cannot forge one.
+/// and remains the sole issuer — or minted crate-internally at the
+/// registry-dispatched `compile_bundle`/`compile_ide` route boundaries.
+/// The inner field is private and the mint is crate-private, so grant
+/// minting authority never leaves the crate and an external caller
+/// cannot forge one.
 #[derive(Debug)]
 pub struct ProductExecutionGrant {
     admitted: ProductKind,
@@ -41,14 +42,6 @@ impl ProductExecutionGrant {
     /// Crate-internal mint. Reachable only from the admission carve and
     /// the retained registry-route orchestration.
     pub(crate) fn mint(admitted: ProductKind) -> Self {
-        Self { admitted }
-    }
-
-    /// Test-only mint so backend integration tests can drive a product
-    /// backend directly without composing a full admission.
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn mint_for_tests(admitted: ProductKind) -> Self {
         Self { admitted }
     }
 
@@ -70,6 +63,15 @@ impl ProductExecutionGrant {
         }
     }
 }
+
+// Consume-once by-value evidence must never be duplicable or
+// round-trippable through a serialized form.
+static_assertions::assert_not_impl_any!(
+    ProductExecutionGrant: Clone, Copy, serde::Serialize, serde::Deserialize<'static>
+);
+static_assertions::assert_not_impl_any!(
+    ProductExecutionGrants: Clone, Copy, serde::Serialize, serde::Deserialize<'static>
+);
 
 /// The per-demand execution grants carved off ONE compile admission (or
 /// minted by a retained registry compatibility route): at most one grant

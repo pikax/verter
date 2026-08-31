@@ -393,9 +393,10 @@ impl CarrierCompiler for VueCarrierCompiler {
             },
             vue_request_from_admitted_artifact(artifact),
         )?;
-        // Retained registry route: the projection grant is minted at this
-        // route boundary (crate-private mint); admission-issued flows carve
-        // theirs off the consumed admission instead.
+        // This registry route carries no host-issued admission, so the
+        // projection grant is minted at the route boundary (crate-private
+        // mint); admission-issued flows carve theirs off the consumed
+        // admission instead.
         let grant = super::capability::ProductExecutionGrant::mint(
             crate::compile_request::ProductKind::IdeCompanion,
         );

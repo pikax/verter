@@ -10,23 +10,25 @@ use verter_compiler::framework_common::{
 };
 
 fn vue_double_execute(
+    backend: &VueHostIntegrationBackend,
     admission: VueCompileAdmission,
     artifact: &FrameworkParseArtifact,
     inputs: &VueHostExecutionInputs,
     alloc: &oxc_allocator::Allocator,
 ) {
-    let _ = VueHostIntegrationBackend.compile_host_products(admission, artifact, inputs, alloc);
-    let _ = VueHostIntegrationBackend.compile_host_products(admission, artifact, inputs, alloc);
+    let _ = backend.compile_host_products(admission, artifact, inputs, alloc);
+    let _ = backend.compile_host_products(admission, artifact, inputs, alloc);
 }
 
 fn svelte_double_render(
+    backend: &SvelteHostIntegrationBackend,
     admission: SvelteCompileAdmission,
     artifact: &FrameworkParseArtifact,
     inputs: &SvelteHostExecutionInputs,
     alloc: &oxc_allocator::Allocator,
 ) {
-    let _ = SvelteHostIntegrationBackend.compile_runtime_render(admission, artifact, inputs, alloc);
-    let _ = SvelteHostIntegrationBackend.compile_runtime_render(admission, artifact, inputs, alloc);
+    let _ = backend.compile_runtime_render(admission, artifact, inputs, alloc);
+    let _ = backend.compile_runtime_render(admission, artifact, inputs, alloc);
 }
 
 fn main() {}
