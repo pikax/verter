@@ -1789,6 +1789,27 @@ fn compute_verter_diagnostics_for_with_views(
                 );
             }
 
+            // Reassert the provider-ownership boundary at the final public
+            // diagnostic surface. The template inventory normally suppresses
+            // unused-prop facts as soon as it sees destructured `defineProps`,
+            // but semantic enrichment and diagnostic publication advance on
+            // independent generations. A publication that briefly combines a
+            // newer script snapshot with an older template inventory must fail
+            // open instead of double-reporting every destructured member next
+            // to the provider's precise TS6133 diagnostic.
+            if analysis
+                .macro_usage
+                .as_ref()
+                .is_some_and(|usage| usage.props_destructured)
+            {
+                diags.retain(|diagnostic| {
+                    !matches!(
+                        diagnostic.code.as_ref(),
+                        Some(NumberOrString::String(code)) if code == "verter/no-unused-props"
+                    )
+                });
+            }
+
             // `$props()` is a Svelte rune, but its semantic carrier deliberately
             // reuses the same macro/member facts that power Vue's
             // `defineProps` surface. Those shared facts must not make the

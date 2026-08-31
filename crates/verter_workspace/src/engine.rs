@@ -2126,22 +2126,39 @@ impl Engine {
     /// live", so the workspace-symbol frontier never completes and rename
     /// silently returns no edits.
     ///
-    /// Bounded, and bounded by YIELDS rather than by time: a publisher that
-    /// never finishes still fails closed here instead of hanging, and a
-    /// publisher that is merely slow is waited out without spending a
-    /// coherence retry.
+    /// Bounded: the optimistic yields keep the uncontended path lock-free,
+    /// then one timed rendezvous on the publication gate distinguishes a slow
+    /// publisher from a stuck one. Every session writer holds the base gate
+    /// for its whole publication too, so acquiring that gate pins both epochs
+    /// without needing a second lock.
     fn capture_stable_resolution_world(
         &self,
         population: ResolutionPopulation,
     ) -> Option<CapturedResolutionFence> {
         const CAPTURE_YIELDS: usize = 1024;
-        for _ in 0..CAPTURE_YIELDS {
+        const CAPTURE_GATE_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+        self.capture_stable_resolution_world_with_policy(
+            population,
+            CAPTURE_YIELDS,
+            CAPTURE_GATE_WAIT,
+        )
+    }
+
+    fn capture_stable_resolution_world_with_policy(
+        &self,
+        population: ResolutionPopulation,
+        optimistic_yields: usize,
+        gate_wait: std::time::Duration,
+    ) -> Option<CapturedResolutionFence> {
+        for _ in 0..optimistic_yields {
             if let Some(captured) = self.capture_resolution_world(population) {
                 return Some(captured);
             }
             std::thread::yield_now();
         }
-        None
+
+        let _publication = self.resolution_world_write.try_lock_for(gate_wait)?;
+        self.capture_resolution_world(population)
     }
 
     fn resolution_world_still_current(&self, captured: &CapturedResolutionFence) -> bool {

@@ -351,9 +351,10 @@ fn parent_dir(path: &str) -> String {
 
 /// How many files to process before yielding to the tokio runtime.
 const BATCH_SIZE: usize = 10;
-/// Under continuous editor traffic, admit one carrier warmup unit occasionally
-/// so project-wide rename/reference coverage still converges. This bounds only
-/// background deferral; it never bounds or cancels an LSP/provider request.
+/// Under continuous editor traffic, admit discovery and one carrier warmup unit
+/// occasionally so project-wide rename/reference coverage still converges. This
+/// bounds only background deferral; it never bounds or cancels an LSP/provider
+/// request.
 const BACKGROUND_MAX_DEFER: std::time::Duration = std::time::Duration::from_secs(1);
 /// A filesystem walk cannot be preempted once handed to the blocking pool. Give
 /// editor startup/open traffic a stable lead before beginning that coarse unit.
@@ -384,8 +385,13 @@ async fn scanner_loop(
     let workspace_snapshot = config.workspace_snapshot.clone();
     let vfs_workspace = config.vfs_workspace.clone();
 
-    // Step 1: FS walk all roots (blocking) — collect both Vue and non-carrier files
-    crate::server::wait_for_handlers_quiet(DISCOVERY_IDLE_GRACE).await;
+    // Step 1: FS walk all roots (blocking) — collect both Vue and non-carrier
+    // files. Prefer a genuinely quiet window, but do not require one forever:
+    // references/rename themselves are interactive traffic, and after a
+    // provider-generation restart their polling must not prevent the scanner
+    // that makes their project frontier complete from even starting.
+    let _ =
+        crate::server::wait_for_handlers_quiet(DISCOVERY_IDLE_GRACE, BACKGROUND_MAX_DEFER).await;
     let (carrier_paths, source_paths) = tokio::task::spawn_blocking(move || {
         let mut carrier = Vec::new();
         let mut src = Vec::new();
