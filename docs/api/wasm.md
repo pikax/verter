@@ -285,20 +285,30 @@ interface WasmDiagnostic {
 
 ### Host Types
 
-The `Host` class accepts and returns the same `Host*` types as `@verter/native`. These types are re-exported from `@verter/native/host-types`:
+The `Host` class accepts and returns the same `Host*` types as `@verter/native`.
+
+`@verter/wasm` declares the compile profile and the two request shapes that carry it, so
+the browser binding owns its own compatibility contract for them. Their names and wire
+shapes are identical to the `@verter/native` ones, and `src/index.test-d.ts` type-checks
+that equivalence:
+
+- `HostCompileProfile`
+- `HostBlockOverrideRequest`
+- `HostVirtualQuery`
+
+The remaining types are re-exported from `@verter/native/host-types`:
 
 - `HostConfig`
-- `HostCompileProfile`
 - `HostIdeResponse`
 - `HostUpdateResult`
 - `HostUpsertRequest`
 - `HostVirtualFileResponse`
-- `HostVirtualQuery`
 - `HostResolvedId`
 - `HostRemoveResult`
 - `HostVirtualNodeKind`
 
-See the [@verter/native documentation](./native.md) for full type definitions.
+See the [@verter/native documentation](./native.md) for full definitions of the
+re-exported types.
 
 ## Input Encoding
 

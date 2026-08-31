@@ -18,6 +18,7 @@ default = ["console_error_panic_hook"]
 verter_audit = { path = "../verter_audit" }
 verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
+verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
 verter_semantic = { path = "../verter_semantic" }
 verter_type_expr = { workspace = true }
 verter_diagnostics = { path = "../verter_diagnostics", version = "0.0.1-beta.1" }
@@ -38,6 +39,7 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.72"
+verter_identity = { path = "../verter_identity" }
 verter_css_syntax = { path = "../verter_css_syntax", features = ["test-support"] }
 verter_semantic = { path = "../verter_semantic", features = ["test-support"] }
 verter_session = { path = "../verter_session", features = ["test-support"] }

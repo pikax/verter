@@ -71,8 +71,8 @@ export interface CodegenResult {
 // =============================================================================
 
 export type {
+  CompileCacheMode,
   HostConfig,
-  HostCompileProfile,
   HostIdeResponse,
   HostVirtualNodeKind,
   HostSliceChanges,
@@ -83,13 +83,11 @@ export type {
   HostModuleReference,
   HostPreprocessorRequest,
   HostBlockOverrideEntry,
-  HostBlockOverrideRequest,
   HostUpdateResult,
   HostResolvedId,
   HostVirtualMeta,
   HostVirtualFileResponse,
   HostUpsertRequest,
-  HostVirtualQuery,
   HostRemoveResult,
   HostTextEdit,
   HostCodeAction,
@@ -117,15 +115,11 @@ export type {
 
 import type {
   HostConfig,
-  HostCompileProfile,
   HostIdeResponse,
   HostModuleReference,
   HostResolvedId,
   HostUpsertRequest,
-  HostBlockOverrideEntry,
-  HostBlockOverrideRequest,
   HostUpdateResult,
-  HostVirtualQuery,
   HostVirtualFileResponse,
   HostVirtualNodeKind,
   HostRemoveResult,
@@ -136,6 +130,18 @@ import type {
   HostSelectorMatchResult,
   HostDependencyResolution,
 } from "@verter/native/host-types";
+
+export type {
+  HostCompileProfile,
+  HostBlockOverrideRequest,
+  HostVirtualQuery,
+} from "./request-types";
+
+import type {
+  HostBlockOverrideRequest,
+  HostCompileProfile,
+  HostVirtualQuery,
+} from "./request-types";
 
 // =============================================================================
 // WASM compile types
