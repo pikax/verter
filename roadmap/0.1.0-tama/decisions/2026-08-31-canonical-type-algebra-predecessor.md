@@ -366,3 +366,32 @@ only permissible further mechanism boundary is the opaque-payload and exhaustive
 seal first, the idempotent pre-seal closure second. A subset of construction sites
 remains refused.
 
+## Ratified budget variance — the closure node
+
+The closure node exceeded the file ceiling that had just been revised for it, and the
+breach was escalated rather than absorbed. Ruling: ratify, do not split.
+
+- measurement: cumulative GROSS additions from the node's start point
+- approved actual: 663 gross lines added, 28 production files, 1 related crate
+- accounting: two further changed files are modified only inside cfg-gated test
+  modules and do NOT count as production files; the implementer's 26-file figure is
+  not adopted
+- disposition: architect-ratified overrun, no further split
+
+The thresholds themselves stay unchanged, as they did for the substrate node, so the
+escalation remains visible in the record rather than being erased by a rewritten row.
+
+The overage is the predicted compiler-enforced fanout of the opaque-payload seal: the
+seal is what forces every construction and read site to declare a category, which
+produces many small edits across many files and few lines overall — 663 lines across 28
+files. The only permitted split would leave the seal half above the ceiling anyway, so
+it would not satisfy the rescope condition it was meant to answer.
+
+No second node is created. Forced, it would contain only the idempotent whole-result
+re-close before sealing plus its placement and idempotence proof, which does not
+justify a separate landing and review cycle. That closure is instead reviewed as a
+dedicated concern inside the closure node's own review profile.
+
+This variance concerns budget only and prejudges neither correctness nor the
+apparent-type callability decision.
+
