@@ -46,6 +46,26 @@ async function openWorkspaceFile(relative: string): Promise<vscode.TextDocument>
   return doc;
 }
 
+/**
+ * References and rename are workspace-wide operations. The server deliberately
+ * fails closed until every discovered framework carrier has crossed the
+ * activation frontier, so the contract must activate the whole fixture before
+ * asking those questions. Relying on VS Code's incidental background opening
+ * made Linux runs stop at 3/8 Vue or 3/7 Svelte carriers while local runs happened
+ * to warm the remaining files.
+ */
+async function activateFrameworkCarriers(languageId: string): Promise<void> {
+  const carriers = await vscode.workspace.findFiles(
+    `**/*.${languageId}`,
+    "**/{node_modules,.git}/**",
+  );
+  assert.ok(carriers.length > 0, `framework contract found no .${languageId} carriers`);
+  carriers.sort((left, right) => left.fsPath.localeCompare(right.fsPath));
+  for (const uri of carriers) {
+    await vscode.workspace.openTextDocument(uri);
+  }
+}
+
 function anchorOffset(doc: vscode.TextDocument, anchor: ContractAnchor): number {
   assert.equal(
     path.normalize(doc.uri.fsPath),
@@ -601,6 +621,7 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
     suiteSetup(async function () {
       this.timeout(60_000);
       await ensureTypeProviderSynced();
+      await activateFrameworkCarriers(descriptor.languageId);
       const entry = await openWorkspaceFile(descriptor.entry);
       assert.equal(entry.languageId, descriptor.languageId);
     });

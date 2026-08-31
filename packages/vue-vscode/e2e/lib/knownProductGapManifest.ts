@@ -26,6 +26,7 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "mixed.vue.entry.clean": "ISSUE-mixed-vue-entry",
   },
   "mixed-parity@tsserver": {
+    "mixed.cross-import.vue-imports-svelte": "ISSUE-mixed-cross-import",
     "mixed.svelte.root.hover": "ISSUE-mixed-svelte-hover",
     "mixed.vue.entry.clean": "ISSUE-mixed-vue-entry",
   },

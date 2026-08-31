@@ -51,4 +51,12 @@ describe("known product-gap manifest", () => {
       "vue.matrix.style-bind.accent.def": "ISSUE-vue-matrix-style-bind-def",
     });
   });
+
+  it("keeps the mixed cross-framework typing gap exact on every affected route", () => {
+    for (const provider of TYPE_PROVIDER_ROUTES) {
+      expect(
+        knownProductGapsForRoute("mixed-parity", provider)["mixed.cross-import.vue-imports-svelte"],
+      ).toBe("ISSUE-mixed-cross-import");
+    }
+  });
 });
