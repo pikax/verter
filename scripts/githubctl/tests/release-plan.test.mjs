@@ -15,6 +15,7 @@ import {
   MutationModeRequiredError,
   NotFoundError,
   PROJECT_NUMBER,
+  rehearsalIdentity as resolveRehearsalIdentity,
   releasePlan,
 } from "../index.mjs";
 
@@ -596,6 +597,36 @@ jobs:
   );
   const fx = fixture({ implemented: ["A", "B", "C"] });
   assert.throws(() => plan(fx, { mode: "check", repoRoot }), /dry_run/u);
+});
+
+test("REL1-AC1 ordinary step jobs do not hide the dispatched rehearsal caller", () => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "githubctl-rehearsal-"));
+  writeWorkflows(
+    repoRoot,
+    `name: Release Check
+jobs:
+  pull-request-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          cache: pnpm
+      - run: node contract.mjs
+  dry-run:
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      dry_run: true
+`,
+  );
+
+  assert.deepEqual(resolveRehearsalIdentity(repoRoot), {
+    workflow: "release-check.yml",
+    uses: "release.yml",
+    dry_run: true,
+  });
 });
 
 test("REL1-AC1 dispatch apply without mode or clearance is refused", () => {

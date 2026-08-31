@@ -4,9 +4,10 @@ on:
   push:
     tags:
       - "v*"
-  # Callable so a release REHEARSAL runs this exact job graph with publishing
-  # switched off, rather than a parallel copy that drifts. See
-  # release-check.yml, which is a thin caller passing dry_run: true.
+  # Callable so an explicitly dispatched release REHEARSAL runs this exact job
+  # graph with publishing switched off, rather than a parallel copy that
+  # drifts. Pull requests cannot safely inherit this workflow's publishing
+  # permissions, so release-check.yml runs its read-only contract lane there.
   workflow_call:
     inputs:
       dry_run:
