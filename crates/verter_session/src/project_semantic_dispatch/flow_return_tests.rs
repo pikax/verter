@@ -6538,6 +6538,176 @@ fn assert_object_read_gaps_unwarmed(
     );
 }
 
+/// A class DECLARATION statement is not transparent: its static block
+/// runs at class evaluation — in THIS frame, at the statement — so the
+/// assertion in `class C { static { assertString(x); } }` narrows `x` to
+/// `string` for every read that follows in the checker. Treating the
+/// statement as a no-op minted neither a call obligation (the skeleton
+/// mints none for a class body) nor the typed gap: the unnarrowed
+/// `string | number` superset sealed complete and warm. The statement
+/// takes the same class discipline a class EXPRESSION leaf takes: the
+/// unprovable assertion keeps the return's read of `x` unnarrowed, the
+/// demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[test]
+fn class_declaration_static_block_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-static-block/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { static { assertString(x); } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A COMPUTED member key evaluates at class definition — the enclosing
+/// frame — so the assertion in `class C { [assertString(x)]() {} }`
+/// narrows `x` for every read that follows in the checker. Guarding the
+/// key with the class body blanket-certified the call decided-above and
+/// the unnarrowed superset sealed complete and warm. The key takes the
+/// same-frame discipline: the unprovable assertion keeps the return's
+/// read of `x` unnarrowed, the demand carries the typed `GuardNarrowing`
+/// gap, and the family slot holds zero candidates.
+#[test]
+fn class_declaration_computed_key_call_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-computed-key/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { [assertString(x)]() {} }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A member DECORATOR evaluates at class definition — the enclosing
+/// frame — so the assertion in `class C { @assertString(x) m() {} }`
+/// narrows `x` for every read that follows in the checker. The same
+/// same-frame discipline applies: the unprovable assertion keeps the
+/// return's read of `x` unnarrowed, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_declaration_member_decorator_call_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-member-decorator/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { @assertString(x) m() {} }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A STATIC auto-accessor initializer runs at class evaluation — the
+/// enclosing frame — exactly as a static property initializer does, so
+/// the assertion in `class C { static accessor p = assertString(x); }`
+/// narrows `x` for every read that follows in the checker. The same
+/// same-frame discipline applies: the unprovable assertion keeps the
+/// return's read of `x` unnarrowed, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_declaration_static_accessor_initializer_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-static-accessor/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  class C { static accessor p = assertString(x); }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A call inside a discarded operand's NESTED frame never executes in
+/// this frame: the arrow body of `((() => { assertString(x); }), x)`
+/// runs only if the arrow is called, which nothing here does — so the
+/// checker narrows NOTHING and the read of `x` stays `string | number`.
+/// Walking the discarded operand without nested-frame boundaries
+/// collected the arrow body's call, could not certify the closed
+/// `asserts` callee, and flagged the typed gap for a call that never
+/// runs — a spurious degraded success. The nested-frame discipline
+/// collects nothing there: the demand stays CLEAN, keeps the unnarrowed
+/// join, and admits warm.
+#[test]
+fn discarded_operand_nested_frame_call_never_gaps_this_frame() {
+    const CANONICAL: &str = "/ws/discarded-nested-frame/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  return ((() => { assertString(x); }), x);
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        assert_eq!(
+            result.degradation(),
+            None,
+            "f: a never-executing call mints no gap — the demand stays clean"
+        );
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("f: the read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the arrow body never runs — the {primitive:?} arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            1,
+            "f: a clean complete result admits warm"
+        );
+    });
+}
+
 /// A CONTROL position nested inside a leaf-lowered expression is still a
 /// control position: the checker binds the predicate call in the ternary
 /// test into the branch narrowing even though the WHOLE array folds into

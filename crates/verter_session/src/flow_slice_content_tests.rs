@@ -1653,6 +1653,224 @@ fn semantic_any_leaf_still_scans_immediate_static_block_calls() {
     );
 }
 
+/// A class DECLARATION statement is not transparent: its immediately
+/// evaluated positions run in THIS frame at the statement — a static
+/// block executes at class evaluation, so the assertion in `class C {
+/// static { assertString(x); } }` narrows `x` for every read that
+/// follows in the checker. Treating the statement as a no-op minted
+/// neither a call obligation (the skeleton mints none for a class body)
+/// nor the typed gap: the unnarrowed superset could seal complete and
+/// warm. The statement takes the SAME class discipline a class
+/// EXPRESSION leaf takes: certified only when the callee provably
+/// establishes no narrowing, otherwise the typed gap. Deferred bodies
+/// (a method runs when called, an instance property initializer at
+/// construction) keep the nested-frame blanket treatment.
+#[test]
+fn class_declaration_statement_calls_take_enclosing_frame_discipline() {
+    let refused = [
+        (
+            "a closed same-file assertion in a static block",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { class C { static { assertString(x); } } return x }",
+        ),
+        (
+            "an imported callee in a static block",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { class C { static { touch(); } } return x }",
+        ),
+    ];
+    for (case, source) in refused {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: an unprovable class-evaluation call is never certified: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the class declaration statement takes the typed gap: {node:?}"
+        );
+    }
+
+    let certified = [(
+        "a closed unannotated same-file callee in a static block",
+        "export {};\nfunction touch() {}\n\
+         function f(x: string | number) { class C { static { touch(); } } return x }",
+    )];
+    for (case, source) in certified {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a provably non-narrowing static-block call is certified: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+
+    let deferred = [
+        (
+            "a method body",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { class C { m() { assertString(x); } } return x }",
+        ),
+        (
+            "an instance property initializer",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { class C { p = (assertString(x), 0); } return x }",
+        ),
+    ];
+    for (case, source) in deferred {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a deferred body keeps the nested-frame blanket certification: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a deferred body mints no gap: {node:?}"
+        );
+    }
+}
+
+/// The class-evaluation phase split covers EVERY position that evaluates
+/// at class definition, not only static blocks and static property
+/// initializers: a COMPUTED member key (`class { [key()]() {} }`), a
+/// member's DECORATORS (`@dec method() {}`), and a STATIC auto-accessor
+/// initializer (`static accessor p = expr`) all run in the enclosing
+/// frame at class evaluation. Guarding them with the class body
+/// blanket-certified their calls decided-above while the checker narrows
+/// what follows. Each takes the same same-frame discipline: certified
+/// only when the callee provably establishes no narrowing, otherwise the
+/// typed gap. Deferred positions (a method body, an INSTANCE
+/// auto-accessor initializer at construction) keep the nested-frame
+/// blanket treatment.
+#[test]
+fn class_definition_phase_positions_take_enclosing_frame_discipline() {
+    let refused = [
+        (
+            "a computed method key",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return (class { [touch()]() {} } as object) }",
+        ),
+        (
+            "a computed property key",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return (class { [touch()]: 1 } as object) }",
+        ),
+        (
+            "a method decorator",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return (class { @touch() m() {} } as object) }",
+        ),
+        (
+            "a static property decorator",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return (class { @touch() static p = 1 } as object) }",
+        ),
+        (
+            "a static auto-accessor initializer",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return (class { static accessor p = touch(); } as object) }",
+        ),
+    ];
+    for (case, source) in refused {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: an unprovable class-definition call is never certified: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    let deferred = [(
+        "an instance auto-accessor initializer",
+        "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+         function f(x: string | number) { return (class { accessor p = (assertString(x), 0); } as object) }",
+    )];
+    for (case, source) in deferred {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a deferred body keeps the nested-frame blanket certification: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a deferred body mints no gap: {node:?}"
+        );
+    }
+}
+
+/// A call inside a discarded operand's NESTED frame — an arrow body, a
+/// function-expression body, a class's deferred members — never executes
+/// in this frame, so it is not this frame's call at all. Collecting it
+/// for the result-independent certification forced the enclosing
+/// statement's typed gap for a callee that never runs; the nested-frame
+/// discipline collects nothing there instead. A class's immediately
+/// evaluated positions still collect: a static block inside the
+/// discarded operand runs at class evaluation, which the operand's own
+/// evaluation performs.
+#[test]
+fn discarded_operand_calls_stop_at_nested_frames() {
+    let never_executing = [
+        (
+            "an arrow body",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return ((() => { touch(); }), x) }",
+        ),
+        (
+            "a function-expression body",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return ((function () { touch(); }), x) }",
+        ),
+        (
+            "a class method body",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return ((class { m() { touch(); } }), x) }",
+        ),
+        (
+            "an instance property initializer",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return ((class { p = touch(); }), x) }",
+        ),
+    ];
+    for (case, source) in never_executing {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: a never-executing call is not this frame's call — nothing to \
+             certify: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a never-executing call mints no gap: {node:?}"
+        );
+    }
+
+    let executing = content_for(
+        "import { touch } from \"./touch\";\n\
+         function f(x: string | number) { return ((class { static { touch(); } }), x) }",
+        "f",
+    );
+    assert!(
+        executing.decided_above_call_spans.is_empty(),
+        "an unprovable static-block call in a discarded operand is never certified: {executing:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&executing),
+        1,
+        "a static block still runs at class evaluation — its unprovable call gaps: {executing:?}"
+    );
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {

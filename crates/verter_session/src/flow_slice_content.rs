@@ -4170,12 +4170,27 @@ impl Lowerer<'_> {
                     hit_unsupported = true;
                     can_fall_through = false;
                 }
+                // A class declaration is NOT a no-op: its decorators,
+                // `super_class` heritage expression, computed member keys,
+                // member decorators, static blocks, and static property /
+                // accessor initializers evaluate in THIS frame at the
+                // statement. The ONE class discipline the leaf path applies
+                // to a class EXPRESSION answers for it: provably
+                // non-narrowing calls are decided above, every other call
+                // flags the enclosing statement's typed gap. Deferred
+                // bodies (a method runs when called, an instance property
+                // initializer at construction) keep the nested-frame
+                // blanket treatment.
+                Statement::ClassDeclaration(class) => {
+                    let mut scanner = LeafCallScanner::default();
+                    scanner.visit_class(class);
+                    self.drain_leaf_call_scanner(scanner);
+                }
                 // Declaration / no-op statements: transparent (no return
                 // contribution, no content statement).
                 Statement::DebuggerStatement(_)
                 | Statement::EmptyStatement(_)
                 | Statement::FunctionDeclaration(_)
-                | Statement::ClassDeclaration(_)
                 | Statement::TSTypeAliasDeclaration(_)
                 | Statement::TSInterfaceDeclaration(_)
                 | Statement::TSEnumDeclaration(_)
@@ -5773,10 +5788,11 @@ impl Lowerer<'_> {
     /// evaluation, never in this statement — so its calls keep the
     /// blanket decided-above treatment they always had. The exceptions
     /// evaluate in the ENCLOSING frame and take the same-frame
-    /// discipline: a class's decorators and `super_class` heritage
-    /// expression, and a class's STATIC BLOCKS (enclosing-frame-immediate
-    /// at class evaluation — unlike methods, which run when called, and
-    /// property initializers, which run at construction).
+    /// discipline: a class's decorators, `super_class` heritage
+    /// expression, computed member keys, member decorators, STATIC BLOCKS,
+    /// and static property / accessor initializers (enclosing-frame-
+    /// immediate at class evaluation — unlike methods, which run when
+    /// called, and instance initializers, which run at construction).
     fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
         let mut scanner = LeafCallScanner::default();
         scanner.visit_expression(expr);
@@ -6136,6 +6152,17 @@ impl ControlCall {
 
 /// The whole-expression call collector behind
 /// [`Lowerer::record_result_independent_calls`].
+///
+/// A nested function / class body is its OWN frame — its calls run at
+/// ITS evaluation (a method when called, an instance initializer at
+/// construction), never when the operand itself evaluates — so the
+/// collector never descends into one: a call there is not this frame's
+/// call and must not be certified or gapped on this frame's account.
+/// The class-evaluation-time positions DO run the moment the operand
+/// evaluates, so they collect: a class's decorators, `super_class`
+/// heritage expression, computed member keys, member decorators, STATIC
+/// BLOCKS, and static property / accessor initializers.
+#[derive(Default)]
 struct ControlCalls {
     calls: Vec<ControlCall>,
 }
@@ -6148,6 +6175,57 @@ impl<'a> Visit<'a> for ControlCalls {
     fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
         self.calls.push(ControlCall::Construct(new.span.into()));
         walk::walk_new_expression(self, new);
+    }
+    // A nested function / arrow body runs only when the value is CALLED —
+    // deferred, never this frame's calls.
+    fn visit_function(
+        &mut self,
+        _it: &oxc_ast::ast::Function<'a>,
+        _flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+    }
+    fn visit_arrow_function_expression(&mut self, _it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+    }
+    // A class evaluates its decorators, `super_class`, computed member
+    // keys, member decorators, static blocks, and static property /
+    // accessor initializers the moment the operand evaluates — in THIS
+    // frame. Its deferred members (method bodies, instance initializers)
+    // never run here and collect nothing. (The name binding, type
+    // parameters, and implements clause carry no runtime expressions.)
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        use oxc_ast::ast::ClassElement;
+        self.visit_decorators(&it.decorators);
+        if let Some(super_class) = &it.super_class {
+            self.visit_expression(super_class);
+        }
+        for element in &it.body.body {
+            match element {
+                ClassElement::StaticBlock(block) => self.visit_static_block(block),
+                ClassElement::MethodDefinition(method) => {
+                    self.visit_decorators(&method.decorators);
+                    self.visit_property_key(&method.key);
+                }
+                ClassElement::PropertyDefinition(property) => {
+                    self.visit_decorators(&property.decorators);
+                    self.visit_property_key(&property.key);
+                    if property.r#static {
+                        if let Some(value) = &property.value {
+                            self.visit_expression(value);
+                        }
+                    }
+                }
+                ClassElement::AccessorProperty(accessor) => {
+                    self.visit_decorators(&accessor.decorators);
+                    self.visit_property_key(&accessor.key);
+                    if accessor.r#static {
+                        if let Some(value) = &accessor.value {
+                            self.visit_expression(value);
+                        }
+                    }
+                }
+                ClassElement::TSIndexSignature(_) => {}
+            }
+        }
     }
 }
 
@@ -6168,13 +6246,15 @@ impl<'a> Visit<'a> for ControlCalls {
 ///
 /// A nested function / class body is its OWN frame — its names never
 /// resolve against this frame's skeleton and its calls run at ITS
-/// evaluation (a method when called, a property initializer at
-/// construction), never in this statement — so its calls keep the
-/// blanket `decided` treatment they always had. A class's decorators,
-/// `super_class` heritage expression, and STATIC BLOCKS are NOT deferred:
-/// they evaluate in the ENCLOSING frame, so they are visited outside the
-/// nested-frame guard and their control positions split like any other
-/// same-frame position.
+/// evaluation (a method when called, an instance property / accessor
+/// initializer at construction), never in this statement — so its calls
+/// keep the blanket `decided` treatment they always had. The
+/// class-evaluation-time positions are NOT deferred: a class's
+/// decorators, `super_class` heritage expression, computed member keys,
+/// member decorators, STATIC BLOCKS, and static property / accessor
+/// initializers evaluate in the ENCLOSING frame, so they are visited
+/// outside the nested-frame guard and their control positions split like
+/// any other same-frame position.
 #[derive(Default)]
 struct LeafCallScanner {
     decided: Vec<verter_span::Span>,
@@ -6312,17 +6392,59 @@ impl<'a> Visit<'a> for LeafCallScanner {
         walk::walk_static_block(self, it);
         self.nested_frame_nesting += 1;
     }
+    fn visit_method_definition(&mut self, it: &oxc_ast::ast::MethodDefinition<'a>) {
+        // Member decorators and a computed key evaluate at CLASS
+        // DEFINITION — enclosing-frame immediate, exactly as the class's
+        // own decorators do. The method's VALUE is a function whose body
+        // runs when CALLED: `visit_function` re-arms the nested-frame
+        // guard for exactly the deferred body.
+        self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+        walk::walk_method_definition(self, it);
+        self.nested_frame_nesting += 1;
+    }
     fn visit_property_definition(&mut self, it: &oxc_ast::ast::PropertyDefinition<'a>) {
-        // A STATIC property initializer also runs at class evaluation —
+        // Member decorators and a computed key evaluate at CLASS
+        // DEFINITION, and a STATIC initializer runs at class evaluation —
         // the same enclosing-frame discipline as a static block. An
-        // instance property initializer is deferred to construction and
+        // INSTANCE property initializer is deferred to construction and
         // keeps the body guard.
-        if it.r#static && it.value.is_some() {
-            self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
-            walk::walk_property_definition(self, it);
-            self.nested_frame_nesting += 1;
-        } else {
-            walk::walk_property_definition(self, it);
+        self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+        self.visit_decorators(&it.decorators);
+        self.visit_property_key(&it.key);
+        self.nested_frame_nesting += 1;
+        if let Some(type_annotation) = &it.type_annotation {
+            self.visit_ts_type_annotation(type_annotation);
+        }
+        if let Some(value) = &it.value {
+            if it.r#static {
+                self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+                self.visit_expression(value);
+                self.nested_frame_nesting += 1;
+            } else {
+                self.visit_expression(value);
+            }
+        }
+    }
+    fn visit_accessor_property(&mut self, it: &oxc_ast::ast::AccessorProperty<'a>) {
+        // The same phase split as a property definition: decorators and a
+        // computed key evaluate at class definition; a STATIC
+        // auto-accessor initializer runs at class evaluation; an INSTANCE
+        // one is deferred to construction and keeps the body guard.
+        self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+        self.visit_decorators(&it.decorators);
+        self.visit_property_key(&it.key);
+        self.nested_frame_nesting += 1;
+        if let Some(type_annotation) = &it.type_annotation {
+            self.visit_ts_type_annotation(type_annotation);
+        }
+        if let Some(value) = &it.value {
+            if it.r#static {
+                self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+                self.visit_expression(value);
+                self.nested_frame_nesting += 1;
+            } else {
+                self.visit_expression(value);
+            }
         }
     }
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
@@ -6330,10 +6452,12 @@ impl<'a> Visit<'a> for LeafCallScanner {
         // the ENCLOSING frame — before the class body exists — so they are
         // visited OUTSIDE the nested-frame guard and their calls take the
         // same-frame discipline. Only the class BODY is guarded — and
-        // inside it `visit_static_block` drops the guard again for the
-        // immediately-evaluated static blocks. (`walk_class` visits
-        // children in exactly this order; the name binding, type
-        // parameters, and implements clause carry no runtime expressions.)
+        // inside it the member visitors drop the guard again for every
+        // class-evaluation-time position (computed keys, member
+        // decorators, static blocks, static property / accessor
+        // initializers). (`walk_class` visits children in exactly this
+        // order; the name binding, type parameters, and implements clause
+        // carry no runtime expressions.)
         self.visit_decorators(&it.decorators);
         if let Some(super_class) = &it.super_class {
             self.visit_expression(super_class);
