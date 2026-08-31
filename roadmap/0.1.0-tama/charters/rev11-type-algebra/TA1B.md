@@ -13,25 +13,25 @@ conflict_domains=semantic_authority
 resource_class=rust-mixed
 review_profile=semantic-3
 gate_profile=targeted-domain
-implementation_effort_min=medium
-implementation_effort_default=medium
-review_effort_min=medium
-review_effort_default=medium
-verification_effort_min=medium
-verification_effort_default=medium
-confirmation_effort_min=medium
-confirmation_effort_default=medium
-size=M
+implementation_effort_min=high
+implementation_effort_default=high
+review_effort_min=high
+review_effort_default=high
+verification_effort_min=high
+verification_effort_default=high
+confirmation_effort_min=high
+confirmation_effort_default=high
+size=L
 dispatchable=true
 optional=false
 release_gating=none
 external_requirements=
 charter=charters/rev11-type-algebra/TA1B.md
-max_production_loc=700
-max_production_files=16
+max_production_loc=1000
+max_production_files=24
 max_related_packages=2
-rescope_loc=1000
-rescope_files=18
+rescope_loc=1500
+rescope_files=26
 rescope_unrelated_packages=3
 -->
 
@@ -289,9 +289,9 @@ accompanied by a terse rationale.
 
 ## Budgets and mandatory rescope
 
-- Target ceiling: 700 production LOC, 16 production files, 2 related
+- Target ceiling: 1,000 production LOC, 24 production files, 2 related
   crates/packages.
-- Mandatory rescope above 1,000 production LOC, 18 files, 3 unrelated
+- Mandatory rescope above 1,500 production LOC, 26 files, 3 unrelated
   crates/packages, or when public/wire, unsafe, concurrency, or lifetime work is
   combined with another major concern.
 - Correctness budget: zero stale publication, silent fallback, wrong-complete

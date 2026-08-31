@@ -319,3 +319,50 @@ but the reason to cite is display and authored-order fidelity, not member preced
 An implementer who tests only value-level shadowing will conclude the exclusion is
 unnecessary, and will be wrong.
 
+## Ratified budget variance — the substrate node
+
+The substrate node breached both budget dimensions and the breach was escalated to the
+architecture authority rather than absorbed. Ruling: it lands at its measured size and
+is NOT split again. No sound mechanism boundary remained — moving the
+dispatch-reachable joins would reverse the recorded ADOPT-NOW disposition and become
+the site-based split already refused; separating the comparator and builders from
+freshness and admission would leave a warm-unsafe substrate that is not independently
+acceptable; and the seven review fixes close correctness properties of one authority
+rather than rollback-independent features.
+
+The charter's budget row is deliberately NOT rewritten. Rewriting a threshold to make a
+completed node appear compliant would erase the fact that the escalation correctly
+occurred, so the original target and the breached rescope thresholds remain as the
+historical acceptance record, and the overrun is recorded here instead:
+
+- measurement: cumulative GROSS additions from the node's start point; gross additions
+  are the budget measure, net change is supplementary disclosure
+- scope: `crates/*/src/**`, excluding test modules
+- approved actual: 2,417 gross lines added, +1,893 net, 22 production files, 2 related
+  crates
+- disposition: architect-ratified overrun, no further split
+
+Three causes compounded, recorded in order of contribution. The largest was an
+orchestration error: the implementation brief instructed routing of every
+dispatch-context construction join and enumerated sites the charter reserved for the
+closure node, which was dispositioned ADOPT-NOW and the charters corrected, widening
+real scope without the budget row moving. The second was the fix round itself, roughly
+869 production lines closing seven blocking findings. The third was an under-predicting
+preflight, which projected the ATOMIC unit at ~1,100-1,400 lines across ~24 files while
+the substrate node alone reached 22.
+
+## Revised budget — the closure node
+
+The closure node's original 700 lines / 16 files is not credible and is revised BEFORE
+implementation. The representation flip still forces edits at already-routed sites, so
+ratifying the routing into the substrate node reduced semantic work without removing
+the compiler-wide file fanout — the same pressure that broke the substrate's file
+count.
+
+Revised: 1,000 production lines / 24 files target, 1,500 / 26 rescope, 2 related
+crates, classified `L` at high effort, retaining the `semantic-3` review profile. It is
+NOT split now. If exact preflight exceeds the revised ceiling, escalate again — and the
+only permissible further mechanism boundary is the opaque-payload and exhaustive-site
+seal first, the idempotent pre-seal closure second. A subset of construction sites
+remains refused.
+
