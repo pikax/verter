@@ -8,6 +8,7 @@
  */
 import { strict as assert } from "node:assert";
 import { pollBudget } from "./timeouts";
+import { pollUntilWithin } from "./polling";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
@@ -114,14 +115,7 @@ export async function pollUntil<T>(
   ready: (value: T) => boolean,
   timeoutMs = pollBudget("parityHarnessSettle"),
 ): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let latest = await request();
-  while (Date.now() < deadline) {
-    if (ready(latest)) return latest;
-    await sleep(150);
-    latest = await request();
-  }
-  throw new Error(`${label} not ready within ${timeoutMs}ms`);
+  return pollUntilWithin(label, request, ready, timeoutMs);
 }
 
 export function toLocations(

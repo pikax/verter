@@ -474,6 +474,7 @@ async fn scanner_loop(
     // ── All carrier files (produce carrier public API artifacts for barrel re-exports) ──
     let mut published_companions = Vec::new();
     let mut idx = 0;
+    let mut fairness_burst_remaining = 0;
     while idx < carrier_classified.len() {
         drain_priority_signals(&mut rx, &mut priority_dirs, &mut carrier_classified[idx..]);
 
@@ -484,15 +485,23 @@ async fn scanner_loop(
             continue;
         }
 
-        // Background warmup must never monopolize the host CPU lane while an
-        // editor request is waiting. Re-check before every carrier so a newly
-        // arriving request competes with at most the one compile already in
-        // progress, then owns the lane until its handler finishes.
-        let _ = tokio::time::timeout(
-            BACKGROUND_MAX_DEFER,
-            crate::server::wait_for_handlers_idle(),
-        )
-        .await;
+        // Prefer interactive work before every carrier while handlers reach
+        // idle normally. Under continuous traffic, however, a one-second
+        // timeout PER FILE reduces a 70-carrier frontier to one activation per
+        // second and makes the 12-second references contract impossible. The
+        // fairness deadline therefore admits one bounded batch, then yields
+        // priority back to handlers before admitting another batch.
+        if fairness_burst_remaining == 0 {
+            let admitted_at_idle = tokio::time::timeout(
+                BACKGROUND_MAX_DEFER,
+                crate::server::wait_for_handlers_idle(),
+            )
+            .await
+            .is_ok();
+            if !admitted_at_idle {
+                fairness_burst_remaining = BATCH_SIZE;
+            }
+        }
 
         // Upsert + compile (blocking)
         let path_clone = path.clone();
@@ -537,6 +546,7 @@ async fn scanner_loop(
         }
 
         batch_count += 1;
+        fairness_burst_remaining = fairness_burst_remaining.saturating_sub(1);
         if batch_count.is_multiple_of(BATCH_SIZE) {
             tokio::task::yield_now().await;
         }
