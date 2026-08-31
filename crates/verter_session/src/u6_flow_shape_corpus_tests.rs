@@ -1745,6 +1745,18 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "X115_union_alias_passthrough_keeps_alias",
         "9f2c707f961ff0630cb1633a1ec3eec7abf371845f3126b5918e2e8866b01ca4",
     ),
+    (
+        "Y01_union_never_arm_collapses",
+        "fce25953d5f1e1ab45d1e4826885061aed0f21ec9e5128d745b9525f3edd8969",
+    ),
+    (
+        "Y02_union_idempotent_switch_join",
+        "24d2efa40c539c51ff636d111a18c90418964f425add1c69967267118e50bf2b",
+    ),
+    (
+        "Y03_disjoint_scalar_intersection_member",
+        "30f97e989e158f33f9f20ce2af9f7b55bad03e663803b4c6ae336bcbeb290735",
+    ),
 ];
 
 // The suite
@@ -2678,6 +2690,24 @@ mod corpus_suite {
         /// the verdict-directed semantic test, and the byte-divergence
         /// claimed here is asserted live below.
         const RENDER_INCOMPARABLE: &[(&str, &str)] = &[
+            (
+                "Y01_union_never_arm_collapses",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
+            ),
+            (
+                "Y02_union_idempotent_switch_join",
+                "checker prints `{ v: string; }`; the renderer spells the same \
+                 surface `{ v: string }` — object members print without the \
+                 trailing `;` terminator",
+            ),
+            (
+                "Y03_disjoint_scalar_intersection_member",
+                "checker prints `{ v: never; }`; the renderer spells the same \
+                 surface `{ v: never }` — object members print without the \
+                 trailing `;` terminator",
+            ),
             (
                 "X88_nested_label_inherits_enclosing_suffix_return",
                 "checker prints `\"a\" | \"b\"`; the renderer spells the same node \
@@ -4432,7 +4462,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6NarrowLattice, 27, 14, 13),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
-    (Owner::SharedTypeResolution, 9, 4, 3),
+    (Owner::SharedTypeResolution, 12, 7, 3),
     (Owner::SharedCompilePipeline, 8, 1, 7),
     (Owner::FrameworkOnly, 7, 5, 0),
 ];

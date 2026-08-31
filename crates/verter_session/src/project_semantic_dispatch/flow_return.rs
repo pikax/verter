@@ -982,11 +982,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         drop(sticky_defer);
         if matches!(&step, FlowReturnStep::Complete(result) if result.degradation().is_none()) {
             crate::request_context::fold_result_completeness(completeness);
-            self.fold_into_top_build_local_taint_with(
-                observed.result_is_partial,
-                observed.cache_suppress,
-                observed.partial_reasons,
-            );
+            self.fold_observed_frame_into_top(&observed);
         }
         match step {
             FlowReturnStep::Complete(result) if result.degradation().is_none() => {

@@ -682,10 +682,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .collect::<Vec<_>>();
         match kept.as_slice() {
             [] => value,
-            [only] => *only,
-            _ => self
-                .graph()
-                .intern_node(SemanticNodeData::Union(Arc::from(kept))),
+            // Canonical construction: the undefined-stripped present-value
+            // union routes through the one authority.
+            _ => self.intern_normalized_union_or_intersection(&kept, true),
         }
     }
 
@@ -707,12 +706,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 _ => {}
             }
         }
-        match arms.as_slice() {
-            [only] => *only,
-            _ => self
-                .graph()
-                .intern_node(SemanticNodeData::Union(Arc::from(arms))),
-        }
+        // Canonical construction: the spread-alternative structural union
+        // routes through the one authority (flatten + structural dedup
+        // replace the hand-rolled one-level splice).
+        self.intern_normalized_union_or_intersection(&arms, true)
     }
 
     /// Normalize a spread operand before classification: transparent aliases

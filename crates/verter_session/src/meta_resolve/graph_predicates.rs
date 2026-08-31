@@ -195,13 +195,14 @@ pub(crate) fn build_keys_union_node(
         })
         .collect();
     let key_ids = key_ids?;
-    if let [only] = key_ids.as_slice() {
-        Some(*only)
-    } else {
-        Some(graph.intern_node(SemanticNodeData::Union(Arc::from(
-            key_ids.into_boxed_slice(),
-        ))))
-    }
+    // Canonical construction: the literal key-domain union routes through
+    // the one authority. Evidence disposition per the fact-railed-consumer
+    // wrapper (all arms are `Global`-scoped literals).
+    Some(
+        crate::project_semantic_dispatch::canonical_algebra::canonical_union_node_for_fact_railed_consumer(
+            graph, &key_ids,
+        ),
+    )
 }
 
 /// Helper: walk an `IndexedAccess` chain and produce a

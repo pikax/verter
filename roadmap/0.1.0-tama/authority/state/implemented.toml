@@ -233,6 +233,11 @@ node_id = "D2B"
 commit_message = "feat(session): route flow-return admission through the sole completeness proof"
 commit_date = "2026-08-30T17:32:00+01:00"
 
+[[implemented]]
+node_id = "TA1A"
+commit_message = "feat(session): canonical union and intersection algebra with structural constituent identity"
+commit_date = "2026-08-31T18:30:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

@@ -112,6 +112,7 @@ pub mod admit;
 /// [`SemanticNodeData::carrier_type_args`]; the sole rebuild channel is
 /// [`SemanticNodeData::map_carrier_type_args`].
 pub mod carrier;
+pub(crate) mod composite;
 mod flow_return_result;
 pub use flow_return_result::FlowReturnResult;
 

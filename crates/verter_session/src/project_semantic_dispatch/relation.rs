@@ -6548,50 +6548,18 @@ fn distribute_and<F>(
     push_forward_work(work, forward);
 }
 
-/// O(tag) disjointness for the contravariant-candidate intersection
-/// collapse: `true` ONLY for pairs whose intersection is provably empty at
-/// tag level — distinct concrete primitives (modulo the
-/// `undefined`/`void` widening pair), distinct literals, or a literal
-/// against a mismatched base primitive. Conservative `false` for every
-/// other shape (the structural Intersection carrier is kept).
+/// Proven tag-level disjointness for the contravariant-candidate
+/// intersection collapse — delegates to the canonical algebra's single
+/// proven-disjoint authority ([`super::canonical_algebra::tag_level_disjoint`]),
+/// so the relation engine and canonical intersection construction share one
+/// implementation. Conservative `false` for every undecided shape (the
+/// structural Intersection carrier is kept).
 fn tag_level_disjoint(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     a: SemanticNodeId,
     b: SemanticNodeId,
 ) -> bool {
-    let (Some(a_data), Some(b_data)) = (graph.node_data(a), graph.node_data(b)) else {
-        return false;
-    };
-    fn literal_base(lit: &LiteralValue) -> PrimitiveKind {
-        match lit {
-            LiteralValue::String(_) => PrimitiveKind::String,
-            LiteralValue::Number(_) => PrimitiveKind::Number,
-            LiteralValue::Boolean(_) => PrimitiveKind::Boolean,
-            LiteralValue::BigInt(_) => PrimitiveKind::BigInt,
-        }
-    }
-    fn concrete(kind: PrimitiveKind) -> bool {
-        !matches!(
-            kind,
-            PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never
-        )
-    }
-    match (&*a_data, &*b_data) {
-        (SemanticNodeData::Primitive(x), SemanticNodeData::Primitive(y)) => {
-            let widening_pair = matches!(
-                (*x, *y),
-                (PrimitiveKind::Undefined, PrimitiveKind::Void)
-                    | (PrimitiveKind::Void, PrimitiveKind::Undefined)
-            );
-            concrete(*x) && concrete(*y) && x != y && !widening_pair
-        }
-        (SemanticNodeData::Literal(x), SemanticNodeData::Literal(y)) => x != y,
-        (SemanticNodeData::Literal(lit), SemanticNodeData::Primitive(prim))
-        | (SemanticNodeData::Primitive(prim), SemanticNodeData::Literal(lit)) => {
-            concrete(*prim) && literal_base(lit) != *prim
-        }
-        _ => false,
-    }
+    super::canonical_algebra::tag_level_disjoint(graph, a, b)
 }
 
 #[cfg(test)]

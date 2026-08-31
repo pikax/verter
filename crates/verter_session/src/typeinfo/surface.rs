@@ -418,24 +418,13 @@ impl TypeInfoSurface {
         };
 
         fn union_value(graph: &SemanticGraphStore, values: Vec<SemanticNodeId>) -> SemanticNodeId {
-            let mut arms: Vec<SemanticNodeId> = Vec::new();
-            for value in values {
-                match graph.node_data(value).as_deref() {
-                    Some(SemanticNodeData::Union(nested)) => {
-                        for arm in nested.iter().copied() {
-                            if !arms.contains(&arm) {
-                                arms.push(arm);
-                            }
-                        }
-                    }
-                    _ if !arms.contains(&value) => arms.push(value),
-                    _ => {}
-                }
-            }
-            match arms.as_slice() {
-                [only] => *only,
-                _ => graph.intern_node(SemanticNodeData::Union(Arc::from(arms))),
-            }
+            // Canonical construction: the joined per-alternative value union
+            // routes through the one authority (recursive flatten +
+            // structural dedup replace the hand-rolled one-level splice).
+            // Evidence disposition per the fact-railed-consumer wrapper.
+            crate::project_semantic_dispatch::canonical_algebra::canonical_union_node_for_fact_railed_consumer(
+                graph, &values,
+            )
         }
 
         let alternatives = formula.alternatives();

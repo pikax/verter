@@ -2743,20 +2743,14 @@ fn optional_parameter_target(
     if param.ty == undefined {
         return param.ty;
     }
-    match graph.node_data(param.ty).as_deref() {
-        Some(SemanticNodeData::Union(members)) => {
-            if members.contains(&undefined) {
-                param.ty
-            } else {
-                let mut arms = members.to_vec();
-                arms.push(undefined);
-                graph.intern_node(SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())))
-            }
-        }
-        _ => graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![param.ty, undefined].into_boxed_slice(),
-        ))),
-    }
+    // Canonical construction: the optional-parameter relation target
+    // (`T | undefined`) routes through the one authority (which also
+    // flattens a union-typed `T`). Evidence disposition per the
+    // fact-railed-consumer wrapper.
+    crate::project_semantic_dispatch::canonical_algebra::canonical_union_node_for_fact_railed_consumer(
+        graph,
+        &[param.ty, undefined],
+    )
 }
 
 /// The relation target for an indefinite spread landing at `offset` inside

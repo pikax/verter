@@ -1673,12 +1673,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                     SemanticNodeData::Primitive(PrimitiveKind::Undefined),
                                 ));
                             }
-                            member_value = Some(match projected.as_slice() {
-                                [only] => *only,
-                                _ => self
-                                    .graph()
-                                    .intern_node(SemanticNodeData::Union(Arc::from(projected))),
-                            });
+                            // Canonical construction: the per-candidate
+                            // projection join routes through the one
+                            // union/intersection authority.
+                            member_value = Some(
+                                self.dispatch
+                                    .intern_normalized_union_or_intersection(&projected, true),
+                            );
                             break 'candidates;
                         }
                     }
@@ -3503,12 +3504,14 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         }
         if partials.is_empty() {
             results.push(self.opaque_miss());
-        } else if partials.len() == 1 {
-            results.push(partials[0]);
         } else {
-            results.push(self.graph().intern_node(SemanticNodeData::Union(Arc::from(
-                partials.into_boxed_slice(),
-            ))));
+            // Canonical construction: the arm join routes through the one
+            // union/intersection authority (flatten, absorb, structural
+            // dedup) with ambient freshness-evidence deposit.
+            results.push(
+                self.dispatch
+                    .intern_normalized_union_or_intersection(&partials, true),
+            );
         }
     }
 
@@ -3529,14 +3532,13 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .collect();
         if contributors.is_empty() {
             results.push(self.opaque_miss());
-        } else if contributors.len() == 1 {
-            results.push(contributors[0]);
         } else {
+            // Canonical construction — includes the proven-disjoint scalar
+            // collapse (`string & number = never`) the checker applies to a
+            // member projected through an intersection.
             results.push(
-                self.graph()
-                    .intern_node(SemanticNodeData::Intersection(Arc::from(
-                        contributors.into_boxed_slice(),
-                    ))),
+                self.dispatch
+                    .intern_normalized_union_or_intersection(&contributors, false),
             );
         }
     }
@@ -5752,9 +5754,12 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         .is_some_and(|k| k.element_access_collides(&produced_name))
                 }) {
                     if existing.value != value {
-                        existing.value = self.graph().intern_node(SemanticNodeData::Union(
-                            Arc::from(vec![existing.value, value].into_boxed_slice()),
-                        ));
+                        // Canonical construction (same fold as
+                        // `build_mapped_type`'s rail — see that site).
+                        existing.value = self.dispatch.intern_normalized_union_or_intersection(
+                            &[existing.value, value],
+                            true,
+                        );
                     }
                     continue;
                 }
@@ -6435,11 +6440,45 @@ fn merge_value_nodes_recursive(
             return graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
         }
     }
-    // Fall back: intern an Intersection node so the structural meaning
-    // is preserved without forcing the values into an Object shape.
-    graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        values.to_vec().into_boxed_slice(),
-    )))
+    // Fall back on an Intersection node so the structural meaning is
+    // preserved without forcing the values into an Object shape. The route
+    // splits by CARRIER SEMANTICS:
+    //
+    // * a callable-shaped contributor makes the intersection an
+    //   overload-ordered carrier — call resolution over an intersection
+    //   tries arms in declaration order, so the raw ORDER-PRESERVING
+    //   intern is a deliberate bypass of the canonical authority
+    //   (commutative sorting would break overload precedence);
+    // * otherwise the derived member-value intersection routes through the
+    //   canonical authority (structural dedup + the proven-disjoint scalar
+    //   collapse, `string & number = never`). Evidence disposition per the
+    //   fact-railed-consumer wrapper.
+    if values.iter().any(|v| value_is_callable_shaped(graph, *v)) {
+        graph.intern_node(SemanticNodeData::Intersection(Arc::from(
+            values.to_vec().into_boxed_slice(),
+        )))
+    } else {
+        crate::project_semantic_dispatch::canonical_algebra::canonical_intersection_node_for_fact_railed_consumer(
+            graph, values,
+        )
+    }
+}
+
+/// Whether a member-value contributor is callable-shaped — a `Signature`, a
+/// deferred callable, a merged declaration (an ordered overload group by
+/// construction), or an `Object` carrying call/construct signatures. Such a
+/// contributor makes the containing intersection an overload-ordered
+/// carrier, which the canonical (commutative) algebra must not reorder.
+fn value_is_callable_shaped(graph: &SemanticGraphStore, value: SemanticNodeId) -> bool {
+    match graph.node_data(value).as_deref() {
+        Some(SemanticNodeData::Signature { .. })
+        | Some(SemanticNodeData::DeferredCallable(_))
+        | Some(SemanticNodeData::MergedDecl { .. }) => true,
+        Some(SemanticNodeData::Object(view)) => {
+            !view.call_signatures.is_empty() || !view.construct_signatures.is_empty()
+        }
+        _ => false,
+    }
 }
 
 /// Merge per-arm union surfaces under the TS-correct common-member rule,
@@ -6596,9 +6635,13 @@ impl UnionMemberAccum {
     fn value_node(&self, graph: &SemanticGraphStore) -> SemanticNodeId {
         match self.values.as_slice() {
             [single] => *single,
-            values => graph.intern_node(SemanticNodeData::Union(Arc::from(
-                values.to_vec().into_boxed_slice(),
-            ))),
+            // Canonical construction: the per-arm member-value union routes
+            // through the one authority (union arm order carries no
+            // overload precedence). Evidence disposition per the
+            // fact-railed-consumer wrapper.
+            values => crate::project_semantic_dispatch::canonical_algebra::canonical_union_node_for_fact_railed_consumer(
+                graph, values,
+            ),
         }
     }
 }

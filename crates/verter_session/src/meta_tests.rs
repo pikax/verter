@@ -22209,18 +22209,6 @@ export interface ProjectClickEvent {
     // semantics `authored_intersection_duplicate_does_not_shadow` pins) and is
     // distinct from interface heritage, which DOES shadow.
 
-    /// An intersection arm `&TypeExpr` contains `expected` when it (or one of its
-    /// intersection / union arms) is that primitive.
-    fn intersection_contains_primitive(expr: &TypeExpr, expected: PrimitiveName) -> bool {
-        match expr {
-            TypeExpr::Primitive(name) => *name == expected,
-            TypeExpr::Union(types) | TypeExpr::Intersection(types) => types
-                .iter()
-                .any(|ty| intersection_contains_primitive(ty, expected)),
-            _ => false,
-        }
-    }
-
     let project_only = meta
         .accepted_props
         .iter()
@@ -22232,19 +22220,15 @@ export interface ProjectClickEvent {
         project_only.publication.result().selected_source(),
         "projectOnly accepted prop",
     );
-    // POSITIVE: the conflicting member is the value-intersection of both arms.
+    // POSITIVE: the conflicting member is the value-intersection of both
+    // arms; `number & string` is PROVABLY disjoint at tag level, so the
+    // canonical intersection reduces it to `never` (checker-confirmed:
+    // `IsNever<number & string>` is `true`) — the value-intersect rule
+    // applied, never a last-arm override.
     assert!(
-        matches!(&project_only_ty, TypeExpr::Intersection(_)),
+        matches!(&project_only_ty, TypeExpr::Primitive(PrimitiveName::Never)),
         "projectOnly must value-intersect the conflicting fallback (`number & \
-         string`), not override; got: {project_only_ty:?}"
-    );
-    assert!(
-        intersection_contains_primitive(&project_only_ty, PrimitiveName::Number),
-        "projectOnly intersection must retain the fallback `number` arm; got: {project_only_ty:?}"
-    );
-    assert!(
-        intersection_contains_primitive(&project_only_ty, PrimitiveName::String),
-        "projectOnly intersection must retain the tag-local `string` arm; got: {project_only_ty:?}"
+         string` reduces to `never`), not override; got: {project_only_ty:?}"
     );
     // NEGATIVE: it must NOT have collapsed to the old last-arm override `string`.
     assert!(

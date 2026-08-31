@@ -1963,6 +1963,274 @@ fn normalize_union_is_structurally_canonical() {
     }
 }
 
+/// Canonical constituent identity is STRUCTURAL, not raw-ordinal: two
+/// same-payload arms interned under DIFFERENT file scopes (distinct
+/// `SemanticNodeId`s) dedup to one arm, the singleton fold returns the
+/// retained member unchanged (that member's own scope), and the builder
+/// records a self-root for the DISCARDED duplicate's file — an edit to
+/// that file must reject the warm entry even though the duplicate no
+/// longer appears in the result. A derived multi-arm composite interns
+/// under `Global`.
+#[test]
+fn normalize_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let file_scope = |canonical: &str, hash: u8| NodeScopeId::File {
+        canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [hash; 16],
+        local_scope: None,
+    };
+    let lit = SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(
+        "dup".to_string(),
+    ));
+    let kept = graph.intern_node_with_scope(lit.clone(), file_scope("/w/dup_kept.ts", 3));
+    let discarded = graph.intern_node_with_scope(lit, file_scope("/w/dup_discarded.ts", 5));
+    assert_ne!(
+        kept, discarded,
+        "scope is arena identity — the fixture needs two distinct ids"
+    );
+
+    let members: Arc<[SemanticNodeId]> = Arc::from(vec![kept, discarded].into_boxed_slice());
+    let output = dispatch.build_normalize_union(&members);
+    let QueryResult::Value(node) = output.result else {
+        panic!(
+            "normalization must produce a value, got {:?}",
+            output.result
+        );
+    };
+    assert_eq!(
+        node, kept,
+        "structurally-equal cross-scope arms collapse to the FIRST retained member \
+         (the singleton fold returns it unchanged, keeping its own scope)"
+    );
+    assert_eq!(
+        graph.node_scope(node),
+        Some(file_scope("/w/dup_kept.ts", 3)),
+        "the retained member keeps its own file scope"
+    );
+    for (canonical, hash) in [
+        ("/w/dup_kept.ts", [3u8; 16]),
+        ("/w/dup_discarded.ts", [5u8; 16]),
+    ] {
+        assert!(
+            output
+                .observed_self_roots
+                .iter()
+                .any(|(c, h)| c.as_ref() == canonical && *h == hash),
+            "the identity walk inspected `{canonical}` — its self-root must be recorded \
+             (DISCARDED duplicates included); observed: {:?}",
+            output.observed_self_roots
+        );
+    }
+
+    // Descent through a `Global` intermediate: two Global-scoped objects
+    // whose only member values are the two file-scoped literals above.
+    // Comparison ignores the sidecar scopes for EQUALITY (the objects
+    // collapse) but must retain the file-scoped DESCENDANTS as cache
+    // evidence.
+    let obj_a = simple_object(&graph, &[("v", kept)]);
+    let obj_b = simple_object(&graph, &[("v", discarded)]);
+    assert_ne!(obj_a, obj_b);
+    assert_eq!(graph.node_scope(obj_a), Some(NodeScopeId::Global));
+    let members: Arc<[SemanticNodeId]> = Arc::from(vec![obj_a, obj_b].into_boxed_slice());
+    let output = dispatch.build_normalize_union(&members);
+    let QueryResult::Value(node) = output.result else {
+        panic!(
+            "normalization must produce a value, got {:?}",
+            output.result
+        );
+    };
+    assert_eq!(
+        node, obj_a,
+        "structurally-equal objects with cross-scope member values collapse"
+    );
+    assert!(
+        output
+            .observed_self_roots
+            .iter()
+            .any(|(c, _)| c.as_ref() == "/w/dup_discarded.ts"),
+        "comparison descended through the Global object into the discarded arm's \
+         file-scoped member — that descendant's root is cache evidence; observed: {:?}",
+        output.observed_self_roots
+    );
+
+    // A derived multi-arm composite interns under `Global`.
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let members: Arc<[SemanticNodeId]> = Arc::from(vec![kept, number].into_boxed_slice());
+    let output = dispatch.build_normalize_union(&members);
+    let QueryResult::Value(node) = output.result else {
+        panic!(
+            "normalization must produce a value, got {:?}",
+            output.result
+        );
+    };
+    assert!(
+        matches!(graph.node_data(node).as_deref(), Some(SemanticNodeData::Union(m)) if m.len() == 2),
+        "distinct arms stay a two-arm union"
+    );
+    assert_eq!(
+        graph.node_scope(node),
+        Some(NodeScopeId::Global),
+        "a derived multi-arm composite interns under Global — never a scope join"
+    );
+}
+
+/// An `Incomplete` canonical comparison is `ReturnOnly`: both arms are
+/// preserved (never a wrong collapse), the read reports `cache_suppress`,
+/// and the memo stores ZERO warm candidates — on the second call too.
+/// Both `Incomplete` classes are exercised: a missing node payload and an
+/// exhausted comparison work budget.
+#[test]
+fn normalize_union_incomplete_comparison_is_return_only_with_zero_warm_candidates() {
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    // Case 1 — missing payload: an arm whose id has no interned node.
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let dangling = SemanticNodeId(u64::MAX - 1);
+    let missing_payload: Arc<[SemanticNodeId]> =
+        Arc::from(vec![string, dangling].into_boxed_slice());
+
+    // Case 2 — budget exhaustion: two structurally EQUAL alias chains,
+    // longer than the per-normalization comparison budget, rooted at the
+    // same literal payload under different file scopes so every link has
+    // a distinct id. The collapse would be legitimate, but it cannot be
+    // PROVEN within budget — so it must not happen, and nothing warms.
+    let file_scope = |canonical: &str| NodeScopeId::File {
+        canonical_id: Arc::from(canonical),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: [9u8; 16],
+        local_scope: None,
+    };
+    let chain = |leaf_file: &str| {
+        let mut node = graph.intern_node_with_scope(
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(
+                "chain-leaf".to_string(),
+            )),
+            file_scope(leaf_file),
+        );
+        // bounded-loop: fixture construction, 5000 links.
+        for _ in 0..5000 {
+            node = graph.intern_node(SemanticNodeData::Alias(node));
+        }
+        node
+    };
+    let chain_a = chain("/w/chain_a.ts");
+    let chain_b = chain("/w/chain_b.ts");
+    assert_ne!(chain_a, chain_b);
+    let over_budget: Arc<[SemanticNodeId]> = Arc::from(vec![chain_a, chain_b].into_boxed_slice());
+
+    for (what, members) in [
+        ("missing payload", missing_payload),
+        ("budget exhaustion", over_budget),
+    ] {
+        let key = SemanticQueryKey::NormalizeUnion {
+            members: Arc::clone(&members),
+        };
+        let first = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
+        assert!(
+            first.cache_suppress,
+            "{what}: an Incomplete comparison must report cache_suppress (ReturnOnly)"
+        );
+        let QueryResult::Value(node) = first.value else {
+            panic!(
+                "{what}: the value still flows to the caller, got {:?}",
+                first.value
+            );
+        };
+        assert!(
+            matches!(graph.node_data(node).as_deref(), Some(SemanticNodeData::Union(m)) if m.len() == 2),
+            "{what}: Incomplete preserves BOTH arms — never a guessed collapse"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&key),
+            0,
+            "{what}: an Incomplete canonical result must store ZERO warm candidates"
+        );
+        let second = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
+        assert!(
+            second.cache_suppress,
+            "{what}: the second demand also reports cache_suppress — with zero \
+             stored candidates there is nothing to serve warm, so it recomputed"
+        );
+        assert_eq!(
+            graph.slot_candidate_count_for_tests(&key),
+            0,
+            "{what}: still zero warm candidates after the second call"
+        );
+    }
+}
+
+/// The canonical algebra never guesses: a structurally DISTINCT pair does
+/// not collapse, and an UNDECIDED intersection disjointness keeps the
+/// structural carrier. Only the PROVEN tag-level-disjoint scalar pair
+/// reduces to `never`.
+#[test]
+fn canonical_algebra_collapses_only_proven_facts() {
+    use crate::project_semantic_dispatch::canonical_algebra;
+
+    let host = host();
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let lit_a = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("a".to_string()),
+    ));
+    let lit_b = graph.intern_node(SemanticNodeData::Literal(
+        crate::semantic_query::LiteralValue::String("b".to_string()),
+    ));
+
+    // Distinct literal arms stay a two-arm union.
+    let union = canonical_algebra::canonical_union(&graph, &[lit_a, lit_b]);
+    assert!(
+        matches!(graph.node_data(union.node).as_deref(), Some(SemanticNodeData::Union(m)) if m.len() == 2),
+        "\"a\" | \"b\" must not collapse"
+    );
+    assert!(!union.evidence.incomplete);
+
+    // PROVEN disjoint scalar intersection collapses to `never`.
+    let disjoint = canonical_algebra::canonical_intersection(&graph, &[string, number]);
+    assert!(
+        matches!(
+            graph.node_data(disjoint.node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        ),
+        "string & number is PROVABLY empty at tag level"
+    );
+
+    // UNDECIDED disjointness (two object surfaces) keeps the carrier.
+    let obj_x = simple_object(&graph, &[("x", string)]);
+    let obj_y = simple_object(&graph, &[("y", number)]);
+    let undecided = canonical_algebra::canonical_intersection(&graph, &[obj_x, obj_y]);
+    assert!(
+        matches!(
+            graph.node_data(undecided.node).as_deref(),
+            Some(SemanticNodeData::Intersection(m)) if m.len() == 2
+        ),
+        "an undecided relation is never guessed — the structural carrier is kept"
+    );
+
+    // Nested composites FLATTEN recursively (a union is never an arm of a
+    // union), across the raw-constructor seam too.
+    let inner = graph.intern_node(SemanticNodeData::Union(Arc::from(
+        vec![lit_a, string].into_boxed_slice(),
+    )));
+    let flattened = canonical_algebra::canonical_union(&graph, &[inner, number]);
+    match graph.node_data(flattened.node).as_deref() {
+        Some(SemanticNodeData::Union(m)) => {
+            // `\"a\"` is subsumed by its base primitive `string` (checker
+            // `getUnionType` literal reduction), leaving `string | number`.
+            assert_eq!(m.len(), 2, "flattened + literal-subsumed arm set");
+            assert!(m.contains(&string) && m.contains(&number));
+        }
+        other => panic!("expected a flattened union, got {other:?}"),
+    }
+}
+
 /// `ProjectMember` on a known surface returns the member's node id; on
 /// a primitive (no members) it returns an opaque sentinel. Both cases
 /// memoize under distinct keys.
@@ -5603,9 +5871,15 @@ fn normalize_records_sources() {
         );
     }
 
-    // Intersection records sources the same way.
+    // Intersection records sources the same way. The arms are two OBJECT
+    // surfaces: an undecidable (non-scalar) pair, so the canonical algebra
+    // keeps the derived Intersection composite — a provably-disjoint scalar
+    // set would fold to the shared `never` extreme, which records no edge.
+    let obj_a = simple_object(&graph, &[("a", a)]);
+    let obj_b = simple_object(&graph, &[("b", b)]);
+    let int_members: Arc<[SemanticNodeId]> = Arc::from(vec![obj_a, obj_b].into_boxed_slice());
     let int_result = match dispatch.execute_type_node(SemanticQueryKey::NormalizeIntersection {
-        members: Arc::clone(&members),
+        members: Arc::clone(&int_members),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected Value, got {other:?}"),
@@ -27533,9 +27807,12 @@ fn oracle_merge_union_surfaces(
         let value = if per_arm_values.len() == 1 {
             per_arm_values[0]
         } else {
-            graph.intern_node(SemanticNodeData::Union(Arc::from(
-                per_arm_values.into_boxed_slice(),
-            )))
+            // The production rule now constructs member-value unions through
+            // the canonical algebra; the reference oracle mirrors it.
+            crate::project_semantic_dispatch::canonical_algebra::canonical_union_node_for_fact_railed_consumer(
+                graph,
+                &per_arm_values,
+            )
         };
         members.push(ShallowSurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
@@ -27613,9 +27890,12 @@ fn oracle_merge_union_surfaces_for_macro(
         let value = if per_arm_values.len() == 1 {
             per_arm_values[0]
         } else {
-            graph.intern_node(SemanticNodeData::Union(Arc::from(
-                per_arm_values.into_boxed_slice(),
-            )))
+            // The production rule now constructs member-value unions through
+            // the canonical algebra; the reference oracle mirrors it.
+            crate::project_semantic_dispatch::canonical_algebra::canonical_union_node_for_fact_railed_consumer(
+                graph,
+                &per_arm_values,
+            )
         };
         members.push(ShallowSurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
