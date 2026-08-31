@@ -3175,6 +3175,7 @@ dependencies = [
  "trybuild",
  "ts-rs",
  "verter_span",
+ "verter_test_support",
  "web-time",
  "windows-sys",
 ]
@@ -3452,6 +3453,7 @@ dependencies = [
  "tokio",
  "tracing-subscriber",
  "verter_mcp",
+ "verter_test_support",
 ]
 
 [[package]]
@@ -3798,6 +3800,7 @@ dependencies = [
  "verter_semantic",
  "verter_session",
  "verter_span",
+ "verter_test_support",
  "verter_tsc",
  "verter_tsgo_api",
  "verter_workspace",
@@ -3817,6 +3820,7 @@ dependencies = [
  "tokio",
  "verter_debug_assert",
  "verter_span",
+ "verter_test_support",
  "verter_tsgo_api",
  "windows-sys",
 ]

@@ -421,11 +421,15 @@ jobs:
           retention-days: 1
 
   rust-test:
-    name: Rust Test (Core)
+    name: Rust Test (Core ${{ matrix.shard }}/4)
     needs: [detect-changes, rust-test-build]
     if: needs.detect-changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 95
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -450,7 +454,7 @@ jobs:
         run: |
           mkdir -p target/rust-nextest-archive
           export VERTER_NEXTEST_FILTER="$(node scripts/provider-ci.mjs filter core)"
-          cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast -E "$VERTER_NEXTEST_FILTER"
+          cargo nextest run --archive-file artifacts/rust-nextest-archive.tar.zst --extract-to target/rust-nextest-archive --no-fail-fast --partition "hash:${{ matrix.shard }}/4" -E "$VERTER_NEXTEST_FILTER"
       - name: Locate nextest JUnit report
         if: always()
         id: junit
@@ -467,7 +471,7 @@ jobs:
         if: always() && steps.junit.outputs.path != ''
         uses: dorny/test-reporter@v3
         with:
-          name: Rust Core Test Results
+          name: Rust Core Test Results (${{ matrix.shard }}/4)
           path: ${{ steps.junit.outputs.path }}
           reporter: java-junit
           fail-on-error: false

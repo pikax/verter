@@ -60,6 +60,7 @@ web-time = "1.1"
 # [[oxc-is-the-ts-parser]]. Dev-only: production audit code has
 # no parser dependency.
 [dev-dependencies]
+verter_test_support = { path = "../verter_test_support" }
 trybuild = "1.0"
 oxc_allocator = { workspace = true }
 oxc_ast = { workspace = true }

@@ -744,7 +744,8 @@ impl VerterHost {
         // this branch out completely; see field doc on
         // `VerterHost::compile_one_call_count`.
         #[cfg(test)]
-        self.compile_one_call_count
+        self.test_force
+            .compile_one_call_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Test-only: record the caller-kind tag of the worker
@@ -765,7 +766,8 @@ impl VerterHost {
                 verter_scheduler::caller_kind::CallerKind::IoWorker => 4,
                 verter_scheduler::caller_kind::CallerKind::Inline => 5,
             };
-            self.compile_one_caller_kind_tag
+            self.test_force
+                .compile_one_caller_kind_tag
                 .store(tag, std::sync::atomic::Ordering::Relaxed);
             // Record the host-CPU-pool identity token of this worker.
             // The discriminator: a worker running on *this host's*

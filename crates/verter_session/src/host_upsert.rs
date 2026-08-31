@@ -394,7 +394,7 @@ impl VerterHost {
             // Production builds compile this branch out completely.
             #[cfg(test)]
             {
-                *self.last_upsert_priority.lock() = Some(priority);
+                *self.test_force.last_upsert_priority.lock() = Some(priority);
             }
 
             // Pre-submit: read old state from the scheduler. `try_get_source`

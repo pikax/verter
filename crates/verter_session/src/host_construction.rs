@@ -454,11 +454,11 @@ impl VerterHost {
         // cumulatively across requests on this host. Test-only;
         // production builds compile without this block.
         #[cfg(test)]
-        let test_audit = Arc::new(crate::host_test_audit::HostTestAuditState::new());
+        let test_force = crate::host_test_force::TestForceKnobs::default();
         #[cfg(test)]
         project_type_store
             .indexed()
-            .install_test_audit_hook(Arc::clone(&test_audit));
+            .install_test_audit_hook(Arc::clone(&test_force.audit));
         // Build the audit records store ONCE and share its `Arc` between
         // the legacy `audit_records` field and the new `host_audit_runtime`
         // so writes through either surface land in the same map. The
@@ -533,14 +533,6 @@ impl VerterHost {
                 audit_config,
                 Arc::clone(&audit_records_init),
             )),
-            #[cfg(test)]
-            test_audit,
-            #[cfg(test)]
-            last_upsert_priority: parking_lot::Mutex::new(None),
-            #[cfg(test)]
-            compile_one_call_count: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
-            compile_one_caller_kind_tag: std::sync::atomic::AtomicU8::new(0),
             // `usize::MAX` is the "unobserved" sentinel. A real worker
             // overwrites this with either its host-pool id or `usize::MAX`
             // again if no token is installed (the regression case).
@@ -590,7 +582,7 @@ impl VerterHost {
             #[cfg(any(test, feature = "test-support"))]
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
-            test_force: crate::host_test_force::TestForceKnobs::default(),
+            test_force,
             #[cfg(test)]
             macro_hot_lowering_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
@@ -681,7 +673,7 @@ impl VerterHost {
     #[must_use]
     pub fn audit(&self) -> crate::host_test_audit::HostTestAudit<'_> {
         crate::host_test_audit::HostTestAudit::new(
-            &self.test_audit,
+            &self.test_force.audit,
             self.project_type_store.semantic_graph(),
         )
     }

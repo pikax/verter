@@ -16,6 +16,14 @@
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct TestForceKnobs {
+    /// Cumulative host-level audit state exposed only to in-process tests.
+    pub(crate) audit: std::sync::Arc<crate::host_test_audit::HostTestAuditState>,
+    /// Last scheduler priority observed by `upsert_with_priority`.
+    pub(crate) last_upsert_priority: parking_lot::Mutex<Option<verter_scheduler::stage::Priority>>,
+    /// Number of `compile_one_in_batch` invocations.
+    pub(crate) compile_one_call_count: std::sync::atomic::AtomicUsize,
+    /// Encoded `CallerKind` observed by the latest compile worker.
+    pub(crate) compile_one_caller_kind_tag: std::sync::atomic::AtomicU8,
     /// Deterministic entry/release rendezvous for the once-per-SFC Vue macro
     /// scheduled closure. The first barrier reports that the winner entered;
     /// the second holds it while a sibling joins and the winner is cancelled.

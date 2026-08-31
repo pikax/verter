@@ -52,7 +52,7 @@ fn engine_absent_project() -> (tempfile::TempDir, std::path::PathBuf) {
 fn noemit_typecheck_exits_nonzero_when_api_engine_absent() {
     let (temp, tsconfig_path) = engine_absent_project();
 
-    let bin = env!("CARGO_BIN_EXE_verter-tsc");
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
     // An empty PATH dir: the resolver's PATH tier cannot leak a host engine
     // into this hermetic absence.
     let empty_path = tempfile::TempDir::new().expect("empty PATH dir");

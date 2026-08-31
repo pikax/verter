@@ -203,14 +203,16 @@ fn verter_lsp_initialize_handshake_returns_capabilities() {
         "the shared contract must place the workspace root last: {args:?}"
     );
     // Cheap discovery-contract pin: an explicit override resolves to Override.
+    let binary = verter_test_support::cargo_test_binary_path!("verter-lsp");
+    let binary_string = binary.to_string_lossy().into_owned();
     let resolved = resolve_server(&DiscoveryInputs {
-        override_path: Some(env!("CARGO_BIN_EXE_verter-lsp")),
+        override_path: Some(binary_string.as_str()),
         ..Default::default()
     })
     .expect("an explicit override must resolve");
     assert_eq!(
         resolved,
-        ServerSource::Override(env!("CARGO_BIN_EXE_verter-lsp").to_string()),
+        ServerSource::Override(binary_string),
         "an explicit override path must resolve to ServerSource::Override"
     );
 
@@ -229,7 +231,7 @@ fn verter_lsp_initialize_handshake_returns_capabilities() {
     // buffer before `initialize` is answered, blocking the server on the stderr
     // write and tripping a spurious read timeout. Nulling stderr removes that
     // failure mode while keeping the handshake assertions fully discriminating.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_verter-lsp"))
+    let mut child = Command::new(binary)
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -2941,19 +2941,6 @@ fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'static str>
             "workspace",
             "phase-06b-report.md §6b.2.F6.bypass: single-cell workspace handle (Arc<RwLock<Arc<dyn WorkspaceAccess>>>) shared with the scheduler's SourceLoader so the lock always reads through the latest workspace after set_workspace(). NOT a cache; a re-pointable handle.",
         ),
-        // (c) Phase 9b test-only observable. `#[cfg(test)] last_upsert_priority`
-        //     is a single-cell `Mutex<Option<Priority>>` test mailbox written
-        //     by `upsert_with_priority` and read by the
-        //     `compile_many_propagates_*_priority` tests on `VerterHost::compile_many`.
-        //     Production builds compile this field out completely; allow-listed
-        //     here because the guard parses `lib.rs` whose `#[cfg(test)]`-gated
-        //     declaration is structurally a `Mutex<...>` field that the cache
-        //     shape detector flags. NOT a cache; a per-host single-cell test
-        //     observable.
-        (
-            "last_upsert_priority",
-            "phase-09b-report.md §0 row \"Test-only observables on VerterHost\": Mutex<Option<Priority>> test mailbox written by upsert_with_priority and read by compile_many_propagates_*_priority. Compiled out in production builds. NOT a cache.",
-        ),
         // (c2) Test-only concurrency seams for mid-flight mutation tests.
         //     `#[cfg(test)] materialize_seam_hook` is a single-cell
         //     `Mutex<Option<Arc<dyn Fn()>>>` hook slot fired inside the

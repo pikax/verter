@@ -21,6 +21,50 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+/// Resolve a sibling Cargo binary to the copy belonging to the current test run.
+///
+/// `CARGO_BIN_EXE_*` is expanded at compile time, so its absolute build-tree
+/// path becomes stale when a nextest archive is extracted on another runner.
+/// Nextest publishes the relocated path through `NEXTEST_BIN_EXE_*` at runtime.
+/// Under nextest that runtime value is mandatory: falling back would silently
+/// test a different binary when the original build tree happens to exist.
+pub fn test_binary_path(name: &str, compile_time_path: &str) -> PathBuf {
+    resolve_test_binary_path(
+        name,
+        std::env::var_os(format!("NEXTEST_BIN_EXE_{name}")),
+        std::env::var_os("NEXTEST").is_some(),
+        compile_time_path,
+    )
+    .unwrap_or_else(|message| panic!("{message}"))
+}
+
+/// Resolve a Cargo `[[bin]]` target without spelling its compile-time variable
+/// separately at every test launch site.
+#[macro_export]
+macro_rules! cargo_test_binary_path {
+    ($name:literal) => {
+        $crate::test_binary_path($name, env!(concat!("CARGO_BIN_EXE_", $name)))
+    };
+}
+
+/// Pure decision behind [`test_binary_path`], exposed so harnesses can prove
+/// relocation behavior without mutating process-global environment variables.
+pub fn resolve_test_binary_path(
+    name: &str,
+    runtime_path: Option<std::ffi::OsString>,
+    under_nextest: bool,
+    compile_time_path: &str,
+) -> Result<PathBuf, String> {
+    match (runtime_path.filter(|path| !path.is_empty()), under_nextest) {
+        (Some(path), _) => Ok(PathBuf::from(path)),
+        (None, true) => Err(format!(
+            "NEXTEST_BIN_EXE_{name} is not set (or is empty) while running under nextest; \
+             refusing to fall back to the compile-time CARGO_BIN_EXE_{name} build-tree path"
+        )),
+        (None, false) => Ok(PathBuf::from(compile_time_path)),
+    }
+}
+
 /// A per-process, per-call temp path under `name`.
 ///
 /// Bare `std::env::temp_dir().join(name)` is a shared OS path with no
@@ -123,6 +167,39 @@ impl DeterministicCounter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archived_binary_resolution_prefers_the_runtime_copy() {
+        let runtime = std::ffi::OsString::from("/archive/bin/verter-probe");
+        let resolved = resolve_test_binary_path(
+            "verter-probe",
+            Some(runtime),
+            true,
+            "/build/target/debug/verter-probe",
+        )
+        .expect("a nextest runtime binary path must resolve");
+        assert_eq!(resolved, PathBuf::from("/archive/bin/verter-probe"));
+    }
+
+    #[test]
+    fn archived_binary_resolution_fails_closed_without_the_runtime_copy() {
+        let error = resolve_test_binary_path(
+            "verter-probe",
+            None,
+            true,
+            "/build/target/debug/verter-probe",
+        )
+        .expect_err("nextest must never fall back to a build-tree binary");
+        assert!(error.contains("NEXTEST_BIN_EXE_verter-probe"));
+    }
+
+    #[test]
+    fn plain_cargo_binary_resolution_uses_the_compile_time_path() {
+        let build_tree = "/build/target/debug/verter-probe";
+        let resolved = resolve_test_binary_path("verter-probe", None, false, build_tree)
+            .expect("plain cargo test keeps its compile-time binary path");
+        assert_eq!(resolved, PathBuf::from(build_tree));
+    }
 
     #[test]
     fn unique_temp_dir_paths_never_repeat_across_calls_with_the_same_name() {

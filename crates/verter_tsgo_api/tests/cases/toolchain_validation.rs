@@ -26,8 +26,6 @@ use verter_tsgo_api::toolchain::validation::{
 
 use super::common::workspace_root;
 
-const FAKE_ENGINE: &str = env!("CARGO_BIN_EXE_verter_tsgo_fake_engine");
-
 /// Copy the fake engine to a scenario-named path (the scenario is selected by
 /// the binary's file name). Copies are shared per process; the copy lands via
 /// an atomic rename so a parallel test never executes a partially-written file.
@@ -47,7 +45,11 @@ fn fake_engine(scenario: &str) -> PathBuf {
         let _guard = COPY_LOCK.lock().unwrap();
         if !target.exists() {
             let tmp = dir.join(format!(".copying-{}", scenario));
-            std::fs::copy(FAKE_ENGINE, &tmp).expect("copy the fake engine");
+            std::fs::copy(
+                verter_test_support::cargo_test_binary_path!("verter_tsgo_fake_engine"),
+                &tmp,
+            )
+            .expect("copy the fake engine");
             // A leftover from a killed earlier run must not block the rename.
             let _ = std::fs::remove_file(&target);
             std::fs::rename(&tmp, &target).expect("rename the fake engine into place");
