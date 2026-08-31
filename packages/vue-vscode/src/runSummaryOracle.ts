@@ -9,10 +9,10 @@
  *   - {@link clearRunArtifacts}: delete the log and summary sidecar before a run
  *     so a STALE green summary from a prior run can never false-green a CURRENT
  *     zero-exit crash that writes no fresh summary; and
- *   - {@link enforceRunSummary}: fail on an ordinary test failure, an unmanifested
- *     pending row in an exact capability run, a MISSING summary (a zero-exit
- *     host crash), or a vacuous execution. Required parity runs may account an
- *     exact row as an explicit product gap. Legacy multi-fixture suites may
+ *   - {@link enforceRunSummary}: fail on any test failure, an unmanifested pending
+ *     row in an exact capability run, a MISSING summary (a zero-exit host crash),
+ *     or a vacuous execution. Required parity runs may account an exact pending
+ *     row as a statically declared product-gap skip. Legacy multi-fixture suites may
  *     report inapplicable rows as pending, but must still prove a real pass.
  *
  * Split out of `runTests.ts` (whose `main()` auto-runs) so the oracle is unit-testable
@@ -30,8 +30,8 @@ export interface RunSummary {
   pendingTestIds?: string[];
   /** Detailed failure records (id + message); required for triage when failures > 0. */
   failedTests?: RunSummaryFailure[];
-  /** Failed parity rows independently classified by the extension-host runner. */
-  productGapTestIds?: string[];
+  /** Route-approved product gaps skipped before their test bodies executed. */
+  skippedProductGaps?: ProductGapSkip[];
   fixture?: string;
   typeProvider?: string;
   loadedFiles?: string[];
@@ -44,26 +44,9 @@ export interface RunSummaryFailure {
   kind?: "test" | "hook";
 }
 
-export interface ExplicitProductGap {
+export interface ProductGapSkip {
   readonly id: string;
   readonly issue: string;
-}
-
-/**
- * Recognize the only failure grammar a parity run may account as an expected
- * product-gap row. The marker must name the exact Mocha test title, and hooks
- * can never opt themselves into this classification.
- */
-export function classifyExplicitProductGap(
-  failure: RunSummaryFailure,
-): ExplicitProductGap | undefined {
-  if (failure.kind !== "test" || !failure.id || !failure.err) return undefined;
-  const marker = /^PRODUCT_GAP (ISSUE-[A-Za-z0-9_-]+) /.exec(failure.err);
-  if (!marker) return undefined;
-  const issue = marker[1];
-  const exactPrefix = `PRODUCT_GAP ${issue} ${failure.id}:`;
-  if (failure.err !== exactPrefix && !failure.err.startsWith(`${exactPrefix} `)) return undefined;
-  return { id: failure.id, issue };
 }
 
 /** The sidecar paths derived from a run's log file. */
@@ -112,8 +95,8 @@ export interface EnforceRunSummaryOptions {
   pollIntervalMs?: number;
   /**
    * Required behavioral test IDs for a release-critical run. Every required ID must
-   * be accounted exactly once as a pass or an explicitly allowlisted product gap;
-   * no extra ID may appear and none may be pending.
+   * be accounted exactly once as a pass or an explicitly allowlisted product-gap
+   * skip; no extra ID may appear.
    */
   requiredTestIds?: readonly string[];
   /**
@@ -122,9 +105,9 @@ export interface EnforceRunSummaryOptions {
    */
   allowedPendingTestIds?: readonly string[];
   /**
-   * Exact route-specific product-gap manifest (`test ID` -> `ISSUE-*`). A row
-   * may fail only when both its ID and issue match this manifest. Requires
-   * `requiredTestIds`; ordinary failures, hooks, and newly red rows stay fatal.
+   * Exact route-specific product-gap manifest (`test ID` -> `ISSUE-*`). Every
+   * listed row must be pending and recorded as skipped before its body executes.
+   * Requires `requiredTestIds`; all failures, hooks, and newly red rows stay fatal.
    */
   allowedProductGaps?: Readonly<Record<string, string>>;
   /** Exact compiled suite-file inventory the fixture was required to load. */
@@ -133,7 +116,7 @@ export interface EnforceRunSummaryOptions {
 
 /**
  * Enforce the mocha run summary as the authoritative pass/fail oracle. Throws — so the
- * caller counts a fixture failure — when the summary reports an unclassified failure,
+ * caller counts a fixture failure — when the summary reports any failure,
  * an unmanifested pending row in an exact capability run, when the summary is
  * MISSING, or when it reports a vacuous execution. The
  * delete-before-run (`clearRunArtifacts`) guarantees any summary observed here was
@@ -192,68 +175,73 @@ export async function enforceRunSummary(
     }
   }
 
-  let productGapTestIds: string[] = [];
-  if (failureCount > 0 && opts.allowedProductGaps) {
-    if (failedTests.length !== failureCount) {
-      throw new Error(
-        `${label}: product-gap classification requires one failure record per reported failure; ` +
-          `reported=${failureCount} recorded=${failedTests.length}`,
-      );
-    }
-    const classified = failedTests.map(classifyExplicitProductGap);
-    if (classified.some((row) => row === undefined)) {
-      throw new Error(
-        `${label}: parity run contains failure(s) outside the explicit PRODUCT_GAP row grammar; ` +
-          `details: ${failedDetail}`,
-      );
-    }
-    productGapTestIds = classified.map((row) => row!.id);
-    const unapproved = classified.filter(
-      (row) => row && opts.allowedProductGaps?.[row.id] !== row.issue,
-    );
-    if (unapproved.length > 0) {
-      throw new Error(
-        `${label}: unapproved product-gap failure(s): ` +
-          unapproved
-            .map(
-              (row) =>
-                `${row!.id}=${row!.issue} (allowed ${opts.allowedProductGaps?.[row!.id] ?? "none"})`,
-            )
-            .join(", "),
-      );
-    }
-    const declared = summary.productGapTestIds ?? [];
-    const declaredCounts = countIds(declared);
-    const classifiedCounts = countIds(productGapTestIds);
-    const duplicate = duplicateIds(declaredCounts);
-    const missing = productGapTestIds.filter((id) => (declaredCounts.get(id) ?? 0) === 0);
-    const unexpected = declared.filter((id) => (classifiedCounts.get(id) ?? 0) === 0);
-    if (duplicate.length > 0 || missing.length > 0 || unexpected.length > 0) {
-      throw new Error(
-        `${label}: product-gap summary classification mismatch` +
-          `; duplicate: ${duplicate.join(", ") || "none"}` +
-          `; missing: ${missing.join(", ") || "none"}` +
-          `; unexpected: ${unexpected.join(", ") || "none"}`,
-      );
-    }
-  } else if (failureCount > 0) {
+  if (failureCount > 0) {
     throw new Error(
       `${label}: ${failureCount} test(s) failed (per run summary); details: ${failedDetail}`,
     );
-  } else if ((summary.productGapTestIds?.length ?? 0) > 0) {
-    throw new Error(`${label}: run summary declares product-gap rows without failed tests`);
+  }
+
+  const skippedProductGaps = summary.skippedProductGaps ?? [];
+  const skippedProductGapIds = skippedProductGaps.map((row) => row.id);
+  if (!opts.allowedProductGaps && skippedProductGaps.length > 0) {
+    throw new Error(`${label}: run summary declares product-gap skips without a route manifest`);
+  }
+  if (opts.allowedProductGaps) {
+    const expected = opts.allowedProductGaps;
+    const expectedIds = Object.keys(expected);
+    const skippedCounts = countIds(skippedProductGapIds);
+    const duplicate = duplicateIds(skippedCounts);
+    const missing = expectedIds.filter((id) => (skippedCounts.get(id) ?? 0) === 0);
+    const unexpected = skippedProductGapIds.filter((id) => expected[id] === undefined);
+    const issueMismatch = skippedProductGaps.filter(
+      (row) => expected[row.id] !== undefined && expected[row.id] !== row.issue,
+    );
+    if (
+      duplicate.length > 0 ||
+      missing.length > 0 ||
+      unexpected.length > 0 ||
+      issueMismatch.length > 0
+    ) {
+      throw new Error(
+        `${label}: product-gap skip manifest mismatch` +
+          `; duplicate: ${duplicate.join(", ") || "none"}` +
+          `; missing: ${missing.join(", ") || "none"}` +
+          `; unexpected: ${unexpected.join(", ") || "none"}` +
+          `; issue mismatch: ${
+            issueMismatch
+              .map((row) => `${row.id}=${row.issue} (expected ${expected[row.id]})`)
+              .join(", ") || "none"
+          }`,
+      );
+    }
   }
   if ((summary.executed ?? 0) === 0) {
     throw new Error(`${label}: run executed 0 tests (vacuous pass refused)`);
   }
   const pending = summary.pendingTestIds ?? [];
-  if (opts.requiredTestIds && !opts.allowedPendingTestIds && pending.length > 0) {
-    throw new Error(`${label}: pending test ID(s) in required run: ${pending.join(", ")}`);
+  if (opts.requiredTestIds) {
+    const allowedPending = [
+      ...Object.keys(opts.allowedProductGaps ?? {}),
+      ...(opts.allowedPendingTestIds ?? []),
+    ];
+    const allowedCounts = countIds(allowedPending);
+    const pendingCounts = countIds(pending);
+    const duplicate = duplicateIds(pendingCounts);
+    const missing = allowedPending.filter((id) => (pendingCounts.get(id) ?? 0) === 0);
+    const unexpected = pending.filter((id) => (allowedCounts.get(id) ?? 0) === 0);
+    if (duplicate.length > 0 || missing.length > 0 || unexpected.length > 0) {
+      throw new Error(
+        `${label}: pending manifest mismatch` +
+          `; duplicate: ${duplicate.join(", ") || "none"}` +
+          `; missing: ${missing.join(", ") || "none"}` +
+          `; unexpected: ${unexpected.join(", ") || "none"}`,
+      );
+    }
   }
   if (!opts.requiredTestIds && (summary.passedTestIds?.length ?? 0) === 0) {
     throw new Error(`${label}: run reported no passing test IDs (vacuous pass refused)`);
   }
-  if (opts.allowedPendingTestIds) {
+  if (opts.allowedPendingTestIds && !opts.requiredTestIds) {
     const allowedCounts = countIds(opts.allowedPendingTestIds);
     if (duplicateIds(allowedCounts).length > 0) {
       throw new Error(`${label}: allowed-pending manifest itself contains duplicate IDs`);
@@ -304,7 +292,7 @@ export async function enforceRunSummary(
     if (required.size !== opts.requiredTestIds.length) {
       throw new Error(`${label}: required capability manifest itself contains duplicate IDs`);
     }
-    const outcomes = [...(summary.passedTestIds ?? []), ...productGapTestIds];
+    const outcomes = [...(summary.passedTestIds ?? []), ...skippedProductGapIds];
     const counts = countIds(outcomes);
     const duplicates = duplicateIds(counts);
     const missing = opts.requiredTestIds.filter((id) => (counts.get(id) ?? 0) === 0);

@@ -3,9 +3,10 @@
  * (GitHub Actions run 33338079553).
  *
  * This is intentionally static and exact: a newly failing row, a changed issue
- * classification, or a gap on a different provider route remains fatal. Passing
- * rows do not have to keep failing. The confidence invalidation row is omitted
- * deliberately because it is a regression sentinel, not an accepted gap.
+ * classification, or a gap on a different provider route remains fatal. Listed
+ * rows are skipped before execution and stay visible as degraded coverage until
+ * their manifest entry is reviewed and removed. The confidence invalidation row
+ * is omitted deliberately because it is a regression sentinel, not accepted debt.
  */
 
 export type ProductGapManifest = Readonly<Record<string, string>>;

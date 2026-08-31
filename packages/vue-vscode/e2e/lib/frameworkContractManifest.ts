@@ -71,8 +71,8 @@ const VUE_TSSERVER_CONTRACT_GAPS: FrameworkContractProductGapManifest = {
 /**
  * Exact framework-contract gaps reproduced with the main-branch LSP binary.
  *
- * A passing row is always accepted, while a newly failing ID, a different
- * issue marker, or the same failure on an undeclared route remains fatal.
+ * Listed rows are skipped before execution and reported as degraded coverage.
+ * A newly failing ID or the same failure on an undeclared route remains fatal.
  */
 const FRAMEWORK_CONTRACT_PRODUCT_GAPS_BY_ROUTE: Readonly<
   Record<string, FrameworkContractProductGapManifest>
