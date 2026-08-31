@@ -10334,6 +10334,13 @@ async fn svelte_progressive_component_completion_uses_committed_child_contract()
                 "{provider_label}/{label}/{route}/{child_state}: published contract must retain an unused declared prop"
             );
 
+            // `did_change` schedules import publication independently. The
+            // cached contract above must remain immediately readable, but the
+            // background lane can still be finishing a no-op/revalidation pass
+            // under a loaded runner. Settle that lane before attributing any
+            // later projection-count change to the foreground completion.
+            server.publish_import_dependencies_settled(&app_uri).await;
+
             // Settle the independently-owned CURRENT-file provider surface
             // before measuring the child-contract completion seam. The
             // assertion below then discriminates child cache reads from either
