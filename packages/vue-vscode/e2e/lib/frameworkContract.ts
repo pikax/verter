@@ -454,7 +454,12 @@ async function assertAndApplyRename(
 
 async function assertCleanDiagnostics(local: LocalCarrierCase): Promise<void> {
   const doc = await openWorkspaceFile(local.file);
-  await assertDefinitionTargetsAnchor(local.markupUse, local.declaration);
+  // A typed hover is the readiness witness for this diagnostic assertion.
+  // Definition has its own exact tests below and may converge on a different
+  // provider queue; coupling the two made a clean JS carrier fail on Linux even
+  // though hover and diagnostics were ready and the following definition test
+  // passed.
+  await assertTypedHover(local);
   const diagnostics = await waitForDiagnosticsSettled(doc.uri, {
     timeoutMs: 10_000,
     stableMs: 600,
@@ -485,7 +490,7 @@ async function assertCleanFileDiagnostics(file: string): Promise<void> {
   );
 }
 
-async function assertTypedHover(local: LocalCarrierCase): Promise<void> {
+async function assertTypedHover(local: LocalCarrierCase, timeoutMs?: number): Promise<void> {
   const doc = await openWorkspaceFile(local.markupUse.file);
   const hovers = await poll(
     `hover ${local.file}`,
@@ -496,6 +501,7 @@ async function assertTypedHover(local: LocalCarrierCase): Promise<void> {
         anchorPosition(doc, local.markupUse),
       )) ?? [],
     (result) => result.length > 0,
+    timeoutMs,
   );
   const text = hovers
     .flatMap((hover) => hover.contents)
@@ -624,6 +630,12 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
       await activateFrameworkCarriers(descriptor.languageId);
       const entry = await openWorkspaceFile(descriptor.entry);
       assert.equal(entry.languageId, descriptor.languageId);
+      // Opening a document schedules provider admission but does not await it.
+      // Warm both primary carriers explicitly before the diagnostic and
+      // workspace-wide assertions begin; Linux tsserver can take more than the
+      // ordinary per-assertion budget while admitting the whole fixture.
+      await assertTypedHover(descriptor.ts, 30_000);
+      await assertTypedHover(descriptor.js, 30_000);
     });
 
     test(id("ts.clean-diagnostics"), () => assertCleanDiagnostics(descriptor.ts));

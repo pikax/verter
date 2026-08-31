@@ -1260,7 +1260,11 @@ async function main() {
     await teardown();
     finalizeTelemetry(exitCode);
   }
-  process.exit(exitCode);
+  // Let Node drain the buffered lane transcript before terminating. Surface 1
+  // can produce many megabytes of nextest output; process.exit() discards any
+  // asynchronous stderr writes still queued by replayGateLaneTranscript(),
+  // which previously hid the actual failing test and the final verdict in CI.
+  process.exitCode = exitCode;
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -2349,5 +2353,5 @@ async function runGate(opts, ctx) {
 
 main().catch((e) => {
   err(`fatal: ${e && e.stack ? e.stack : e}`);
-  process.exit(EXIT_USAGE);
+  process.exitCode = EXIT_USAGE;
 });
