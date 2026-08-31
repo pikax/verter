@@ -10059,6 +10059,11 @@ async fn svelte_progressive_script_bindings_survive_incomplete_member_edits() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn component_completion_cold_parent_import_converges_without_test_prewarm() {
+    // This is a convergence deadline, not a latency assertion. The canonical
+    // nextest surface runs thousands of tests concurrently, so a two-second
+    // wall-clock deadline can expire before the background publication task is
+    // scheduled even though the exact witness arrives immediately afterwards.
+    const CONVERGENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     const CHILD: &str = "<script setup lang=\"ts\">\ninterface DraftProps { title: string; unusedOnly?: boolean }\ndefineProps<DraftProps>()\n</script>\n";
     const PARENT: &str = "<script setup lang=\"ts\">\nimport DraftCard from './DraftCard.vue'\n</script>\n<template><DraftCard :title=\"heading\" /></template>\n";
     const PARENT_PARTIAL: &str = "<script setup lang=\"ts\">\nimport DraftCard from './DraftCard.vue'\n</script>\n<template><DraftCard :></template>\n";
@@ -10133,7 +10138,7 @@ async fn component_completion_cold_parent_import_converges_without_test_prewarm(
         },
     )
     .await;
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
         while server.cached_child_public_contract(&child_id).is_none() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -10208,7 +10213,7 @@ async fn component_completion_cold_parent_import_converges_without_test_prewarm(
     let position = LineIndex::new_utf16(PARENT_PARTIAL)
         .offset_to_position(cursor as u32)
         .expect("completion position");
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(CONVERGENCE_TIMEOUT, async {
         loop {
             let labels = completion_labels(
                 server
@@ -21943,6 +21948,47 @@ fn svelte_legacy_slot_produces_no_unused_declaration_diagnostic() {
             Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
         )),
         "legacy <slot> has no declaration site — nothing to flag, got: {diags:?}"
+    );
+}
+
+/// Svelte's `$props()` rune shares semantic macro/member facts with Vue's
+/// `defineProps`, but that reuse must never enable Vue-only unused-declaration
+/// diagnostics on the authored Svelte carrier. Provider-owned TS6133 remains
+/// independent and is covered by the real-provider diagnostic contract.
+#[test]
+fn svelte_props_rune_produces_no_vue_unused_declaration_diagnostic() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "<script lang=\"ts\">\n\
+                  import type { Snippet } from 'svelte';\n\
+                  interface Props { header?: Snippet; body?: Snippet }\n\
+                  let { header, body }: Props = $props();\n\
+                  </script>\n\
+                  \n\
+                  {@render body?.()}\n";
+    let file = dir.path().join("UnusedSnippetProp.svelte");
+    std::fs::write(&file, source).unwrap();
+
+    let host = crate::test_utils::make_filesystem_test_host(dir.path());
+    let documents = Arc::new(DocumentRegistry::new(Arc::clone(&host)));
+    let uri =
+        crate::uri::path_to_file_uri(&file.to_string_lossy().replace('\\', "/")).expect("uri");
+    let _ = documents.did_open(&TextDocumentItem {
+        uri: uri.clone(),
+        language_id: "svelte".to_string(),
+        version: 1,
+        text: source.to_string(),
+    });
+
+    let cached_verter_diags = Arc::new(DashMap::new());
+    let diags =
+        crate::server::document_diagnostics_for_test(&documents, &uri, &cached_verter_diags, None);
+
+    assert!(
+        !diags.iter().any(|diag| matches!(
+            diag.code.as_ref(),
+            Some(NumberOrString::String(code)) if code.starts_with("verter/no-unused-")
+        )),
+        "Svelte rune facts must not enable Vue-only unused diagnostics, got: {diags:?}"
     );
 }
 

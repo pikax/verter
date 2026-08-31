@@ -1789,6 +1789,25 @@ fn compute_verter_diagnostics_for_with_views(
                 );
             }
 
+            // `$props()` is a Svelte rune, but its semantic carrier deliberately
+            // reuses the same macro/member facts that power Vue's
+            // `defineProps` surface. Those shared facts must not make the
+            // Vue-only unused-declaration rules appear on a Svelte document.
+            // Filter at the public diagnostic boundary, where the authored
+            // carrier language is authoritative, rather than weakening the
+            // shared semantic facts used by completion and navigation.
+            if carrier_language_for(&canonical_id).is_some_and(|language| language.is_svelte()) {
+                diags.retain(|diagnostic| {
+                    !matches!(
+                        diagnostic.code.as_ref(),
+                        Some(NumberOrString::String(code))
+                            if code == "verter/no-unused-props"
+                                || code == "verter/no-unused-emit-declarations"
+                                || code == "verter/no-unused-slots"
+                    )
+                });
+            }
+
             // When lint is not explicitly configured, suppress lint diagnostics but
             // keep component usage diagnostics (type-level, not lint rules) and
             // the unused-declaration diagnostics (fail-open populated, faded
