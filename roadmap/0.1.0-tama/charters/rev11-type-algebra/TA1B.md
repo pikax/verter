@@ -346,3 +346,24 @@ presence is the implementation fact. Commit metadata is a loose locator only and
 never resolved or validated against Git or GitHub. Reviewers inspect the squashed
 candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound
 orchestration manifests.
+
+## Boundary correction inherited from the predecessor's review
+
+The predecessor's review corrected where the dispatch-reachable construction joins
+land. They routed through the canonical authority in TA1A — path-walking and
+projection joins, mapped / keyof / utility reducers, relation and call widening,
+object-spread projections, and the synthesized closed unions reaching component-meta
+or typeinfo publication — and that placement was ratified there rather than moved,
+because the routing is correct and tested and relocating it would be churn.
+
+This node's remaining scope is therefore sharper, not smaller in kind: the payload
+flip; substitution and post-substitution finalization; the final idempotent pre-seal
+closure; and the exhaustive closure of every construction site the flip forces the
+compiler to enumerate, under the carrier-category registry with its sealed per-category
+bypass mints and the compile-fail proof.
+
+The forcing function is the point. Because the flip makes the compiler enumerate every
+remaining site, this node cannot silently miss one, which is precisely why the
+architecture authority refused a split around the sites that happened to be published
+at measurement time.
+

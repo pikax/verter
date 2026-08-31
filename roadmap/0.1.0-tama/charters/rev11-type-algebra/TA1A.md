@@ -89,10 +89,16 @@ TA1A deliberately does **not** flip `SemanticNodeData::Union` /
 produces today's transparent variant shape. It also does not attempt the
 repo-wide exhaustive construction-site migration, the carrier-category allowlist, or
 the compile-fail bypass proof — those are TA1B's closure job, forced by the flip
-TA1B performs. TA1A's own footprint is therefore bounded to the comparator,
-builders, mint, freshness plumbing, and the interning funnel plus the live dispatch
-join it routes — not every one of the ~34 production construction sites the ruling's
-reconnaissance measured.
+TA1B performs. TA1A's own footprint is the comparator, builders, mint, freshness
+plumbing, the interning funnel, and the construction joins REACHABLE FROM DISPATCH —
+not every one of the ~34 production construction sites the ruling's reconnaissance
+measured. The dispatch-reachable set is wider than the funnel alone: it includes the
+path-walking and projection joins, the mapped / keyof / utility reducers, relation and
+call widening, object-spread projections, and the synthesized closed unions that reach
+component-meta or typeinfo publication. Those sites route here because they are live
+dispatch joins that produce findings-class results today; what remains for TA1B is the
+payload flip and the exhaustive closure of every REMAINING construction site under the
+carrier-category registry, which the flip forces the compiler to enumerate.
 
 The node is accepted when its four owned obligations hold together: (1) the
 comparator is exhaustive over `SemanticNodeData`'s manual equality, ignores only the
@@ -202,12 +208,14 @@ it contains no independently dispatchable subblocks.
   execution inside `ProjectSemanticDispatch`; the official union builder's
   `absorb_union` path; and the flow-return join and path-walking direct raw
   construction that the ruling names as the measured defect behind findings A–C.
-  The REST of the ruling's full enforcement inclusion list (mapped/keyof/
-  conditional/utility reducers, substitution and post-substitution finalization,
-  relation and call widening, object-spread projections, flow joins/SCC/fixed-point
-  output, the final pre-seal closure, and synthesized closed unions reaching
-  component-meta or typeinfo publication) is TA1B's exhaustive-closure job, not
-  this node's.
+  The dispatch-reachable remainder of the ruling's enforcement inclusion list —
+  mapped / keyof / conditional / utility reducers, relation and call widening,
+  object-spread projections, and synthesized closed unions reaching component-meta or
+  typeinfo publication — routes here as well, because each is a live dispatch join
+  producing findings-class results today. What is left to TA1B is substitution and
+  post-substitution finalization, the final pre-seal closure, and the exhaustive
+  closure of every construction site the payload flip forces the compiler to
+  enumerate.
 - **Enforcement exclusion list, DEFINED BY CARRIER SEMANTICS rather than by named
   function.** "authored-syntax lowering and equivalent locator-shape shell lowering;
   display- and materialization-only `TypeExpr` union/intersection construction; and
@@ -384,3 +392,23 @@ presence is the implementation fact. Commit metadata is a loose locator only and
 never resolved or validated against Git or GitHub. Reviewers inspect the squashed
 candidate patch without SHA-, tree-, ancestry-, receipt-, lease-, or digest-bound
 orchestration manifests.
+
+## Scope disposition recorded on review
+
+Review found that the landed node routes construction joins in categories an earlier
+reading of this charter reserved for TA1B, and traced the cause to the implementation
+brief rather than to the implementation: the brief instructed the implementer to route
+every dispatch-context construction join and enumerated the sites in question. Every
+routed site was verified behaviourally correct by that review, several of its
+disjointness claims independently confirmed against the pinned compiler.
+
+Disposition: ADOPT-NOW. The routing stays where it landed and this charter's boundary
+is corrected to describe it, because moving correct, tested routing between nodes to
+satisfy a boundary that was never the ruling's own wording would be churn with no
+correctness benefit. The mechanism split the architecture authority actually mandated
+is preserved intact: TA1A holds the comparator, builders, mint, freshness and the
+dispatch-reachable joins with the payload still transparent; TA1B holds the flip, the
+carrier-category registry, the compile-fail proof, the pre-seal closure, and the
+exhaustive closure the flip forces. Neither a published-subset split nor a partially
+closed authority was created.
+
