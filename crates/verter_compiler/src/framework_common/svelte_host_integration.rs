@@ -48,9 +48,10 @@ use super::{CarrierCompiler, FrameworkParseArtifact, Present};
 /// outside this crate (private field): every consumer holds the
 /// `&'static` registered instance — from [`Self::registered`], the
 /// immutable catalog, or a request-scoped binding — never a freshly
-/// minted service value. A retained reference is inert on its own:
-/// request scoping lives entirely on the consume-once witnesses (the
-/// by-value compile admission and its per-demand execution grants).
+/// minted service value. The request-scoped session binding is the sole
+/// production route to issuance on the native session lanes; the issued
+/// admission's parse key pairs issuance with execution, and the
+/// admission and its per-demand execution grants are consumed by value.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SvelteHostIntegrationBackend {
     _registered: (),

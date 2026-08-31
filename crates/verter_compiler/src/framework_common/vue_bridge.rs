@@ -439,8 +439,9 @@ impl CarrierCompiler for VueCarrierCompiler {
 ///
 /// Every product-backend leg requires — and consumes — its own
 /// [`super::capability::ProductExecutionGrant`]: the host route carves
-/// them off the consumed admission, the retained registry route mints them
-/// at its boundary, and a demanded-but-ungranted leg fails closed typed.
+/// them off the consumed admission, the registry bundle route mints them
+/// crate-privately at its boundary, and a demanded-but-ungranted leg
+/// fails closed typed.
 pub(crate) fn vue_carrier_bundle(
     source: &str,
     artifact: &FrameworkParseArtifact,

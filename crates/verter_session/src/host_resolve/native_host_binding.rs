@@ -1091,8 +1091,9 @@ mod tests {
     /// The bound arm's catalog-carried `&'static` backend reference can
     /// drive execution directly: the session consumes the binding, issues
     /// the demand-specific admission through the referenced backend, and
-    /// executes it by value — no move out of the registered instance, and
-    /// request scoping carried entirely by the consume-once admission.
+    /// executes it by value — no move out of the registered instance. The
+    /// admission's parse key pairs the issuance with this execution, and
+    /// the admission is consumed by value.
     #[test]
     fn bound_backend_reference_issues_and_executes_a_by_value_admission() {
         use verter_compiler::framework_common::{

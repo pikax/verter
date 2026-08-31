@@ -522,3 +522,19 @@ fn host_diagnostic_span_is_mandatory() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/host_diagnostic_span_is_mandatory.rs");
 }
+
+/// The consume-once execution grant has no test-only public constructor
+/// even under `verter_compiler`'s `test-support` feature, which this
+/// crate's dev-dependency edge always enables — so a reintroduced
+/// feature-gated public mint (invisible to the compiler crate's own
+/// default-feature probe) fails HERE. If the constructor reappeared, the
+/// fixture would compile and trybuild would fail this test.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn execution_grant_has_no_test_mint_under_test_support() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/execution_grant_test_mint_absent.rs");
+}

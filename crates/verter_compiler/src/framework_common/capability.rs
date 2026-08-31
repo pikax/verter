@@ -25,14 +25,17 @@ pub struct Present<T>(pub T);
 /// `Clone` nor `Copy` and is consumed by value, one grant drives at most
 /// one execution of its admitted demand.
 ///
-/// Provenance: a grant is carved off a host-issued compile admission by
-/// value (`into_execution_grants` on the admission types) — the
-/// host-integration backend composes parse + semantic into the admission
-/// and remains the sole issuer — or minted crate-internally at the
-/// registry-dispatched `compile_bundle`/`compile_ide` route boundaries.
-/// The inner field is private and the mint is crate-private, so grant
-/// minting authority never leaves the crate and an external caller
-/// cannot forge one.
+/// The grant is demand-MULTIPLICITY evidence for one product-backend
+/// leg; it is not artifact provenance — the admission's parse key is
+/// what pairs issuance with execution. A grant is carved off a
+/// host-issued compile admission by value (`into_execution_grants` on
+/// the admission types) — the host-integration backend composes parse +
+/// semantic into the admission and remains the sole issuer — or minted
+/// crate-privately at the registry-dispatched
+/// `compile_bundle`/`compile_ide` route boundaries, which carry no
+/// host-issued admission. The inner field is private and the mint is
+/// crate-private, so grant minting authority never leaves the crate and
+/// an external caller cannot forge one.
 #[derive(Debug)]
 pub struct ProductExecutionGrant {
     admitted: ProductKind,
@@ -40,7 +43,8 @@ pub struct ProductExecutionGrant {
 
 impl ProductExecutionGrant {
     /// Crate-internal mint. Reachable only from the admission carve and
-    /// the retained registry-route orchestration.
+    /// the registry bundle-route orchestration; grant-minting authority
+    /// never leaves the crate.
     pub(crate) fn mint(admitted: ProductKind) -> Self {
         Self { admitted }
     }
@@ -74,8 +78,8 @@ static_assertions::assert_not_impl_any!(
 );
 
 /// The per-demand execution grants carved off ONE compile admission (or
-/// minted by a retained registry compatibility route): at most one grant
-/// per product-backend leg. Each slot is consume-once by value.
+/// minted crate-privately by the registry bundle route): at most one
+/// grant per product-backend leg. Each slot is consume-once by value.
 #[derive(Debug, Default)]
 pub struct ProductExecutionGrants {
     /// Grant for the admitted runtime product leg, when one was admitted.

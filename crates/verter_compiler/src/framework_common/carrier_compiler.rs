@@ -342,8 +342,8 @@ pub enum CompileUnsupported {
     RequestExecutionRefused(crate::compile_request::CompileRequestError),
     /// A product leg was demanded without (or with the wrong) consume-once
     /// execution grant for it. Product-backend legs execute only under a
-    /// grant carved off the demand's admission (or minted by the retained
-    /// registry compatibility route); a demanded-but-ungranted leg fails
+    /// grant carved off the demand's admission (or minted crate-privately
+    /// by the registry bundle route); a demanded-but-ungranted leg fails
     /// closed instead of executing without admission evidence.
     ProductExecutionUngranted {
         /// The demanded product whose execution grant was absent or wrong.

@@ -17,11 +17,20 @@ fn absent_capabilities_are_compile_time_truth() {
 }
 
 /// Consume-once admission evidence: one issued admission cannot drive a
-/// second execution (by-value move), and the per-demand execution grant
-/// can be neither forged by struct literal nor minted outside the crate.
+/// second execution (by-value move), the per-demand execution grant can
+/// be neither forged by struct literal nor minted outside the crate, and
+/// the sealed host-integration backends cannot be constructed outside
+/// the crate. One fixture per forbidden operation, so every arm's error
+/// surfaces in its own pinned stderr — a single widened seal fails its
+/// own fixture instead of hiding behind a sibling error.
 #[test]
 fn admissions_are_consume_once_and_grants_are_unforgeable() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/cases/compile-fail/compile_admission_not_reexecutable.rs");
-    tests.compile_fail("tests/cases/compile-fail/product_execution_grant_not_forgeable.rs");
+    tests.compile_fail("tests/cases/compile-fail/grant_struct_literal_not_forgeable.rs");
+    tests.compile_fail("tests/cases/compile-fail/grant_mint_is_private.rs");
+    tests.compile_fail("tests/cases/compile-fail/grant_test_mint_absent.rs");
+    tests.compile_fail("tests/cases/compile-fail/vue_host_backend_literal_not_constructible.rs");
+    tests.compile_fail("tests/cases/compile-fail/vue_host_backend_no_default.rs");
+    tests.compile_fail("tests/cases/compile-fail/svelte_host_backend_new_is_private.rs");
 }

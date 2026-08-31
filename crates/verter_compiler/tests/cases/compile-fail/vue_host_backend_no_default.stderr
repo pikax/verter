@@ -1,0 +1,10 @@
+error[E0599]: no associated function or constant named `default` found for struct `VueHostIntegrationBackend` in the current scope
+ --> tests/cases/compile-fail/vue_host_backend_no_default.rs:8:32
+  |
+8 |     VueHostIntegrationBackend::default()
+  |                                ^^^^^^^ associated function or constant not found in `VueHostIntegrationBackend`
+  |
+help: there is a method `default_color` with a similar name
+  |
+8 |     VueHostIntegrationBackend::default_color()
+  |                                       ++++++

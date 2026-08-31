@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/cases/compile-fail/svelte_host_backend_new_is_private.rs:8:35
+  |
+8 |     SvelteHostIntegrationBackend::new()
+  |                                   ^^^ private associated function
+  |
+ ::: src/framework_common/svelte_host_integration.rs
+  |
+  |     pub(crate) const fn new() -> Self {
+  |     --------------------------------- private associated function defined here
