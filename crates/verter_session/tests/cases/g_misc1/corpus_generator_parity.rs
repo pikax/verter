@@ -134,8 +134,7 @@ fn corpus_generator_output_matches_committed_files() {
     // structural-drift check so the parity test stays focused on
     // generator output. `overrides/` is authored generator INPUT and therefore
     // is not copied into a dry-run output tree. `harness.rs` and
-    // `chunk_harness.rs` are hand-written harnesses; `mod.rs` is the
-    // hand-written historical Main.vue duplicate.
+    // `chunk_harness.rs` are hand-written harnesses.
     let is_generator_output = |rel: &str| {
         !rel.starts_with("fixtures/")
             && rel != "fixtures"
@@ -143,7 +142,6 @@ fn corpus_generator_output_matches_committed_files() {
             && rel != "overrides"
             && rel != "harness.rs"
             && rel != "chunk_harness.rs"
-            && rel != "mod.rs"
     };
     let gen_names: std::collections::BTreeSet<_> = generated_files
         .iter()
@@ -343,8 +341,8 @@ fn corpus_audit_coverage_covers_every_vendored_component() {
 /// generator twice into two separate tempdirs MUST produce
 /// byte-identical `corpus_audit_tests.rs` entry files AND
 /// byte-identical generated chunk files. Pins the cross-platform
-/// determinism requirement that the generator sorts input files
-/// lexicographically.
+/// determinism requirement that source-byte weighting uses stable
+/// path and chunk-index tie breakers.
 ///
 /// Discriminating: if `readdirSync` starts returning OS-dependent
 /// order (the generator sorts after discovery, so this is the guard
@@ -352,7 +350,7 @@ fn corpus_audit_coverage_covers_every_vendored_component() {
 /// template (e.g. `Date.now()` in a comment), the second run
 /// produces a different tree and this test fails.
 #[test]
-fn corpus_audit_mod_rs_regenerates_deterministically_across_platforms() {
+fn corpus_audit_entry_regenerates_deterministically_across_platforms() {
     let root = workspace_root();
     let generator = root.join("scripts/gen-corpus-audit-tests.mjs");
     assert!(

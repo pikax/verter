@@ -9,22 +9,21 @@ use super::chunk_harness::{run_chunk, CorpusCase};
 fn corpus_audit_chunk_006_produces_audit_records_or_documents_skips() {
     #[rustfmt::skip]
     const CASES: &[CorpusCase] = &[
-        CorpusCase::new("pricing_plan", "/PricingPlan.vue", include_str!("fixtures/PricingPlan.vue")),
-        CorpusCase::new("pricing_plans", "/PricingPlans.vue", include_str!("fixtures/PricingPlans.vue")),
         CorpusCase::new("pricing_table", "/PricingTable.vue", include_str!("fixtures/PricingTable.vue")),
-        CorpusCase::new("progress", "/Progress.vue", include_str!("fixtures/Progress.vue")),
-        CorpusCase::new("radio_group", "/RadioGroup.vue", include_str!("fixtures/RadioGroup.vue")),
-        CorpusCase::new("scroll_area", "/ScrollArea.vue", include_str!("fixtures/ScrollArea.vue")),
-        CorpusCase::new("select", "/Select.vue", include_str!("fixtures/Select.vue")),
-        CorpusCase::new("select_menu", "/SelectMenu.vue", include_str!("fixtures/SelectMenu.vue")),
-        CorpusCase::new("separator", "/Separator.vue", include_str!("fixtures/Separator.vue")),
-        CorpusCase::new("sidebar", "/Sidebar.vue", include_str!("fixtures/Sidebar.vue")),
-        CorpusCase::new("skeleton", "/Skeleton.vue", include_str!("fixtures/Skeleton.vue")),
-        CorpusCase::new("slideover", "/Slideover.vue", include_str!("fixtures/Slideover.vue")),
-        CorpusCase::new("slider", "/Slider.vue", include_str!("fixtures/Slider.vue")),
-        CorpusCase::new("stepper", "/Stepper.vue", include_str!("fixtures/Stepper.vue")),
-        CorpusCase::new("switch", "/Switch.vue", include_str!("fixtures/Switch.vue")),
-        CorpusCase::new("table", "/Table.vue", include_str!("fixtures/Table.vue")),
+        CorpusCase::new("content_content_navigation", "/content/ContentNavigation.vue", include_str!("fixtures/content/ContentNavigation.vue")),
+        CorpusCase::new("link", "/Link.vue", include_str!("fixtures/Link.vue")),
+        CorpusCase::new("dropdown_menu", "/DropdownMenu.vue", include_str!("fixtures/DropdownMenu.vue")),
+        CorpusCase::new("timeline", "/Timeline.vue", include_str!("fixtures/Timeline.vue")),
+        CorpusCase::new("form_field", "/FormField.vue", include_str!("fixtures/FormField.vue")),
+        CorpusCase::new("alert", "/Alert.vue", include_str!("fixtures/Alert.vue")),
+        CorpusCase::new("empty", "/Empty.vue", include_str!("fixtures/Empty.vue")),
+        CorpusCase::new("prose_tabs", "/prose/Tabs.vue", include_str!("fixtures/prose/Tabs.vue")),
+        CorpusCase::new("card", "/Card.vue", include_str!("fixtures/Card.vue")),
+        CorpusCase::new("app", "/App.vue", include_str!("fixtures/App.vue")),
+        CorpusCase::new("prose_h1", "/prose/H1.vue", include_str!("fixtures/prose/H1.vue")),
+        CorpusCase::new("page_columns", "/PageColumns.vue", include_str!("fixtures/PageColumns.vue")),
+        CorpusCase::new("prose_table", "/prose/Table.vue", include_str!("fixtures/prose/Table.vue")),
+        CorpusCase::new("prose_kbd", "/prose/Kbd.vue", include_str!("fixtures/prose/Kbd.vue")),
     ];
     run_chunk(CASES);
 }

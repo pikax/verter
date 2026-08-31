@@ -1,8 +1,6 @@
 //! Private sorted manifest of the consolidated integration-test
-//! entries. One `mod <entry>;` per former top-level
-//! `tests/<entry>.rs` target (and the former
-//! `tests/component_meta_audit_corpus/` directory target). Each
-//! entry is its own module so per-entry helpers stay in disjoint
+//! entries. One `mod <entry>;` per consolidated top-level test entry.
+//! Each entry is its own module so per-entry helpers stay in disjoint
 //! scopes — do NOT centralise shared helpers here, and keep this
 //! list sorted. Support-only includes (e.g.
 //! `support/audit_hot_loop_denylist.rs`) are reached via `#[path]`
@@ -17,7 +15,6 @@ mod carrier_encapsulation_guards;
 mod carrier_routing_no_vue_gate;
 mod client_framework_manifest_ts_freshness;
 mod component_meta_audit;
-mod component_meta_audit_corpus;
 mod corpus_audit_layout;
 mod corpus_audit_tests;
 mod css_attribution_chargeable;

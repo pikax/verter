@@ -98,7 +98,10 @@
 //! shape) per the Stub-Prevention contract.
 
 use std::collections::BTreeMap;
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    OnceLock,
+};
 
 use quote::ToTokens;
 
@@ -5206,7 +5209,10 @@ fn use_is_reexport(vis: &syn::Visibility) -> bool {
 /// the def at `verter_semantic::analysis::types::AnalyzedBinding`) is PROVED by a
 /// genuine `pub use types::{…}` re-export through the now-load-bearing rail
 /// instead of a bare ancestor-prefix match.
-fn collect_reexport_index() -> ReExportIndex {
+fn collect_reexport_index(
+    type_sources: &[(String, syn::File)],
+    reexport_sources: &[(String, syn::File)],
+) -> ReExportIndex {
     struct V {
         module_stack: Vec<String>,
         idx: ReExportIndex,
@@ -5274,19 +5280,14 @@ fn collect_reexport_index() -> ReExportIndex {
         }
     }
     let mut idx: ReExportIndex = BTreeMap::new();
-    let sources = type_def_source_files()
-        .into_iter()
-        .chain(reexport_only_source_files());
-    for (module_base, src) in sources {
-        if let Ok(file) = syn::parse_file(&src) {
-            let mut v = V {
-                module_stack: vec![module_base],
-                idx: ReExportIndex::new(),
-            };
-            syn::visit::Visit::visit_file(&mut v, &file);
-            for (k, paths) in v.idx {
-                idx.entry(k).or_default().extend(paths);
-            }
+    for (module_base, file) in type_sources.iter().chain(reexport_sources) {
+        let mut v = V {
+            module_stack: vec![module_base.clone()],
+            idx: ReExportIndex::new(),
+        };
+        syn::visit::Visit::visit_file(&mut v, file);
+        for (k, paths) in v.idx {
+            idx.entry(k).or_default().extend(paths);
         }
     }
     idx
@@ -5439,7 +5440,10 @@ type UseBindingIndex = BTreeMap<(String, String), Vec<UseBindingTarget>>;
 /// pushed with each inline `mod`. A glob `use x::*` is skipped (names no
 /// symbol); the local name of a `use … as Alias` is the alias, else the final
 /// segment.
-fn collect_use_binding_index() -> UseBindingIndex {
+fn collect_use_binding_index(
+    type_sources: &[(String, syn::File)],
+    reexport_sources: &[(String, syn::File)],
+) -> UseBindingIndex {
     struct V {
         module_stack: Vec<String>,
         idx: UseBindingIndex,
@@ -5515,19 +5519,14 @@ fn collect_use_binding_index() -> UseBindingIndex {
         }
     }
     let mut idx: UseBindingIndex = BTreeMap::new();
-    let sources = type_def_source_files()
-        .into_iter()
-        .chain(reexport_only_source_files());
-    for (module_base, src) in sources {
-        if let Ok(file) = syn::parse_file(&src) {
-            let mut v = V {
-                module_stack: vec![module_base],
-                idx: UseBindingIndex::new(),
-            };
-            syn::visit::Visit::visit_file(&mut v, &file);
-            for (k, targets) in v.idx {
-                idx.entry(k).or_default().extend(targets);
-            }
+    for (module_base, file) in type_sources.iter().chain(reexport_sources) {
+        let mut v = V {
+            module_stack: vec![module_base.clone()],
+            idx: UseBindingIndex::new(),
+        };
+        syn::visit::Visit::visit_file(&mut v, file);
+        for (k, targets) in v.idx {
+            idx.entry(k).or_default().extend(targets);
         }
     }
     idx
@@ -6034,7 +6033,16 @@ fn resolve_type_ref_seen(
 /// `name -> {TypeDefId}` collision index. Pass 2 resolves every raw reference to
 /// a concrete `TypeDefId` (or `Unresolved`) via the conservative
 /// [`resolve_type_ref`]. Returns the resolved def-graph plus the collision index.
-fn collect_type_defs() -> (BTreeMap<TypeDefId, TypeDefRefs>, NameDefIndex) {
+struct TypeDefProductionFacts {
+    defs: BTreeMap<TypeDefId, TypeDefRefs>,
+    name_to_ids: NameDefIndex,
+    reexports: ReExportIndex,
+    use_bindings: UseBindingIndex,
+}
+
+static TYPE_DEF_FACT_BUILDS: AtomicUsize = AtomicUsize::new(0);
+
+fn build_type_def_production_facts() -> TypeDefProductionFacts {
     // Pass 1: per-file raw collection.
     struct FileDefs {
         raw_defs: BTreeMap<TypeDefId, Vec<Vec<String>>>,
@@ -6046,25 +6054,34 @@ fn collect_type_defs() -> (BTreeMap<TypeDefId, TypeDefRefs>, NameDefIndex) {
     // The cross-file `pub` / `pub(crate)` RE-EXPORT index + the module-scoped
     // intra-crate `use`-binding PROOF index — the proven-identity rails the
     // conservative qualified-path resolver uses INSTEAD of a unique-name shortcut.
-    let reexports = collect_reexport_index();
-    let use_bindings = collect_use_binding_index();
-    for (module_base, src) in type_def_source_files() {
-        if let Ok(file) = syn::parse_file(&src) {
-            let mut collector = TypeDefCollector::with_module_base(module_base);
-            syn::visit::Visit::visit_file(&mut collector, &file);
-            let uses = collect_use_index(&file);
-            for id in collector.raw_defs.keys() {
-                name_to_ids
-                    .entry(id.name.clone())
-                    .or_default()
-                    .insert(id.clone());
-            }
-            alias_targets.extend(collector.alias_targets);
-            per_file.push(FileDefs {
-                raw_defs: collector.raw_defs,
-                uses,
-            });
+    let parse_sources = |sources: Vec<(String, String)>| {
+        sources
+            .into_iter()
+            .filter_map(|(module, source)| syn::parse_file(&source).ok().map(|file| (module, file)))
+            .collect::<Vec<_>>()
+    };
+    // `syn::File` is deliberately thread-local (`proc_macro2` AST nodes are not
+    // Send/Sync). Keep one local parsed set just long enough to run every fact
+    // visitor, publish only owned fact DTOs into the process cache, then drop it.
+    let type_sources = parse_sources(type_def_source_files());
+    let reexport_sources = parse_sources(reexport_only_source_files());
+    let reexports = collect_reexport_index(&type_sources, &reexport_sources);
+    let use_bindings = collect_use_binding_index(&type_sources, &reexport_sources);
+    for (module_base, file) in &type_sources {
+        let mut collector = TypeDefCollector::with_module_base(module_base.clone());
+        syn::visit::Visit::visit_file(&mut collector, file);
+        let uses = collect_use_index(file);
+        for id in collector.raw_defs.keys() {
+            name_to_ids
+                .entry(id.name.clone())
+                .or_default()
+                .insert(id.clone());
         }
+        alias_targets.extend(collector.alias_targets);
+        per_file.push(FileDefs {
+            raw_defs: collector.raw_defs,
+            uses,
+        });
     }
     // Collapse same-name re-export aliases: a `type X = <path>` alias whose RHS
     // resolves (by name + qualifier) to ANOTHER same-name def is NOT a distinct
@@ -6126,7 +6143,34 @@ fn collect_type_defs() -> (BTreeMap<TypeDefId, TypeDefRefs>, NameDefIndex) {
             }
         }
     }
-    (defs, name_to_ids)
+    TypeDefProductionFacts {
+        defs,
+        name_to_ids,
+        reexports,
+        use_bindings,
+    }
+}
+
+fn type_def_production_facts() -> &'static TypeDefProductionFacts {
+    static FACTS: OnceLock<TypeDefProductionFacts> = OnceLock::new();
+    FACTS.get_or_init(|| {
+        TYPE_DEF_FACT_BUILDS.fetch_add(1, Ordering::SeqCst);
+        build_type_def_production_facts()
+    })
+}
+
+pub(super) fn assert_repeated_type_def_queries_share_one_fact_build() {
+    let first = type_def_production_facts();
+    let second = type_def_production_facts();
+    assert!(
+        std::ptr::eq(first, second),
+        "production type-definition policy queries must share one immutable fact snapshot"
+    );
+    assert_eq!(
+        TYPE_DEF_FACT_BUILDS.load(Ordering::SeqCst),
+        1,
+        "the production type-definition graph must be built exactly once per policy process"
+    );
 }
 
 /// The CANONICAL test module for a fixture def NAME: if the name is a seed /
@@ -6587,14 +6631,12 @@ impl<'ast> syn::visit::Visit<'ast> for SinkFnCollector<'_> {
 }
 
 /// Collect every production fn signature in the registered sink-scope files.
-fn collect_sink_fn_sigs(name_to_ids: &NameDefIndex) -> Vec<SinkFnSig> {
+fn collect_sink_fn_sigs(
+    name_to_ids: &NameDefIndex,
+    reexports: &ReExportIndex,
+    use_bindings: &UseBindingIndex,
+) -> Vec<SinkFnSig> {
     let resolve_index = name_index_with_seed_ids(name_to_ids);
-    // The cross-file re-export index + the module-scoped intra-crate use-binding
-    // PROOF index so a sink-fn param/return type written through a `pub` /
-    // `pub(crate)` re-export path OR a private-`use` chain resolves to its real
-    // def.
-    let reexports = collect_reexport_index();
-    let use_bindings = collect_use_binding_index();
     let scan_prefixes = sink_scan_prefixes();
     let mut out = Vec::new();
     for (rel, src) in production_src_files() {
@@ -6616,8 +6658,8 @@ fn collect_sink_fn_sigs(name_to_ids: &NameDefIndex) -> Vec<SinkFnSig> {
             in_trait_impl: false,
             uses,
             name_to_ids: &resolve_index,
-            reexports: &reexports,
-            use_bindings: &use_bindings,
+            reexports,
+            use_bindings,
         };
         syn::visit::Visit::visit_file(&mut collector, &file);
         out.extend(collector.sigs);
@@ -8107,9 +8149,11 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
     // node-domain facts/key and the demand-bound publication adapters take a
     // `&TypeExpr` demand (NOT a forgeable node), materialising at a registered
     // sink, so they are not flagged here.
-    let (defs, name_to_ids) = collect_type_defs();
-    let bearing = typeexpr_bearing_closure(&defs);
-    let forgeable = forgeable_authority_closure(&defs, &bearing);
+    let facts = type_def_production_facts();
+    let defs = &facts.defs;
+    let name_to_ids = &facts.name_to_ids;
+    let bearing = typeexpr_bearing_closure(defs);
+    let forgeable = forgeable_authority_closure(defs, &bearing);
     // FAIL-CLOSED anti-vacuity: every qualified safe-input / construction-chain
     // token must be defined at its sanctioned `(module, name)` — a renamed/moved
     // token FAILS. Under module-qualified identity a shared bare name is two
@@ -8253,7 +8297,7 @@ fn cross_sink_raw_authority_to_type_expr_boundary() {
              SANCTIONED_SINK_MODULES (see `sink_scan_prefixes`), never a manual prefix list."
         );
     }
-    let sigs = collect_sink_fn_sigs(&name_to_ids);
+    let sigs = collect_sink_fn_sigs(name_to_ids, &facts.reexports, &facts.use_bindings);
     assert!(
         !sigs.is_empty(),
         "expected to collect production fns from the registered sink scopes; found none — the \
@@ -10909,8 +10953,9 @@ fn forgeable_input_fence_has_no_dual_bearing_type() {
     // values as `SemanticNodeId`, never a co-located `TypeExpr`). If that premise
     // is ever broken, this surfaces it loudly; the closure's GAP-2 carve-out also
     // keeps the type forgeable so the cross-sink guard catches a consumer too.
-    let (defs, _name_to_ids) = collect_type_defs();
-    let bearing = typeexpr_bearing_closure(&defs);
+    let facts = type_def_production_facts();
+    let defs = &facts.defs;
+    let bearing = typeexpr_bearing_closure(defs);
     // Anti-vacuity: the bearing closure actually produced a non-empty set, and the
     // real seed/DTO defs are collected (so an empty `defs` cannot vacuously pass).
     assert!(
@@ -10926,7 +10971,7 @@ fn forgeable_input_fence_has_no_dual_bearing_type() {
         "anti-vacuity: the real type defs must include the seed `crate::semantic_query::SurfaceMember` \
          and a bearing DTO `…request::ExpandedField` (the collector / read roots regressed)"
     );
-    let violations = dual_bearing_violations(&defs, &bearing);
+    let violations = dual_bearing_violations(defs, &bearing);
     assert!(
         violations.is_empty(),
         "DUAL-BEARING type(s) found — the forgeable-authority closure's \
@@ -13248,6 +13293,7 @@ fn hot_type_tokens_name_typeexpr(
 }
 
 /// One indexed production function.
+#[derive(Debug, Clone)]
 struct HotFnEntry {
     /// `mod_path ++ impl_stack ++ fn_stack`; last segment = bare fn name.
     key: Vec<String>,
@@ -13271,7 +13317,7 @@ struct HotFnEntry {
 /// A call's CALLEE identity as written. `Method` carries no path qualifier;
 /// `Path` carries the full segment path so a written qualifier (`other::inner` /
 /// `Type::method`) is matched faithfully instead of collapsed to the bare name.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum HotCallId {
     Method(String),
     Path(Vec<String>),
@@ -13288,7 +13334,7 @@ impl HotFnEntry {
 }
 
 /// The global production fn index plus a bare-name lookup.
-#[derive(Default)]
+#[derive(Debug, Default, Clone)]
 struct HotFnIndex {
     entries: Vec<HotFnEntry>,
     by_bare: std::collections::HashMap<String, Vec<usize>>,
@@ -14865,14 +14911,6 @@ fn parse_hot_sources(sources: &[(String, String)]) -> Vec<(String, syn::File)> {
         .collect()
 }
 
-fn hot_materialize_offenders_in_parsed(parsed: &[(String, syn::File)]) -> Vec<String> {
-    let index = build_hot_index(parsed);
-    let returns_mat = hot_returns_materialized(&index);
-    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
-
-    hot_materialize_offenders_with_facts(parsed, &index, &returns_mat, &returns_typeexpr)
-}
-
 fn hot_materialize_offenders_with_facts(
     parsed: &[(String, syn::File)],
     index: &HotFnIndex,
@@ -14982,6 +15020,7 @@ struct HotProductionFacts {
     offenders: Vec<String>,
     terminal_accounting_failures: Vec<String>,
     terminal_policy_failures: Vec<String>,
+    index: HotFnIndex,
 }
 
 fn hot_production_facts() -> &'static HotProductionFacts {
@@ -15041,6 +15080,7 @@ fn build_hot_production_facts(sources: &[(String, String)]) -> HotProductionFact
             &located,
         ),
         terminal_policy_failures,
+        index,
     }
 }
 
@@ -15099,9 +15139,11 @@ fn hot_path_never_calls_materialize_type_expr() {
 /// (`hot_materialize_offenders_in_sources` — no parallel scanner clone).
 ///
 /// 1. GREEN: the real on-disk production tree scans to zero offenders.
-/// 2. RED: the collected sources are cloned IN MEMORY and one synthetic
-///    materialize-then-decide fn is appended to ONE real production source
-///    string; the same scan path must report the planted qualified (file, fn).
+/// 2. RED: one production source is cloned IN MEMORY and a synthetic
+///    materialize-then-decide fn is appended. The cached immutable global fn
+///    index is extended with that planted fn, then the same per-file scan path
+///    must report the planted qualified (file, fn); unchanged files are not
+///    reparsed merely to prove a one-file mutation discriminates.
 ///    If the scanner ever went hollow (e.g. an over-broad exclusion, a broken
 ///    index pass, an emptied detector list), this step fails — a green fence
 ///    would no longer be evidence.
@@ -15111,16 +15153,17 @@ fn hot_materialize_scanner_flags_in_memory_injected_offender() {
     let sources = production_src_files();
 
     // (1) GREEN on the real tree through the cached production fact path.
-    let baseline = &hot_production_facts().offenders;
+    let production = hot_production_facts();
+    let baseline = &production.offenders;
     assert!(
         baseline.is_empty(),
         "probe step 1: the real production tree must scan green through the factored scan path; \
          got: {baseline:#?}"
     );
 
-    // (2) RED: parse an in-memory clone with one injected file through the same
-    //     fact builder. The production fact cache remains immutable and is not
-    //     rebuilt; this one extra parse is the discriminating mutation cost.
+    // (2) RED: parse the one injected file and extend a cloned owned fn index
+    //     with only the planted definition. The production fact cache remains
+    //     immutable; unchanged files retain their already-proved owned facts.
     const PROBE_FN: &str = "in_memory_probe_materializes_then_decides";
     let target_rel = "src/lib.rs";
     let target_src = sources
@@ -15139,13 +15182,30 @@ fn {PROBE_FN}(x: &TypeExpr) -> bool {{
     );
     let injected_file = syn::parse_file(&injected_src)
         .unwrap_or_else(|error| panic!("injected `{target_rel}` must parse: {error}"));
-    let mut injected_parsed = parse_hot_sources(sources);
-    let slot = injected_parsed
-        .iter_mut()
-        .find(|(rel, _)| rel == target_rel)
-        .unwrap_or_else(|| panic!("`{target_rel}` must exist in the parsed production corpus"));
-    slot.1 = injected_file;
-    let offenders = hot_materialize_offenders_in_parsed(&injected_parsed);
+    let injected_parsed = vec![(target_rel.to_string(), injected_file)];
+    let injected_index = build_hot_index(&injected_parsed);
+    let mut index = production.index.clone();
+    let mut planted = 0;
+    for entry in injected_index
+        .entries
+        .into_iter()
+        .filter(|entry| entry.bare() == PROBE_FN)
+    {
+        index.push(entry);
+        planted += 1;
+    }
+    assert_eq!(
+        planted, 1,
+        "the injected source must contribute exactly one `{PROBE_FN}` definition"
+    );
+    let returns_mat = hot_returns_materialized(&index);
+    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
+    let offenders = hot_materialize_offenders_with_facts(
+        &injected_parsed,
+        &index,
+        &returns_mat,
+        &returns_typeexpr,
+    );
     let expected_key = {
         let mut parts = hot_mod_path_from_rel(target_rel);
         parts.push(PROBE_FN.to_string());
@@ -17087,8 +17147,23 @@ pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
 
 pub(super) fn run_production_guards() {
     std::thread::scope(|scope| {
-        for (_, guard) in PRODUCTION_GUARDS {
-            scope.spawn(move || guard());
+        let handles = PRODUCTION_GUARDS
+            .iter()
+            .map(|&(id, guard)| {
+                scope.spawn(move || {
+                    let started = std::time::Instant::now();
+                    guard();
+                    (id, started.elapsed())
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            let (id, elapsed) = handle
+                .join()
+                .expect("output-projector production policy thread must complete");
+            if std::env::var_os("VERTER_SOURCE_POLICY_TIMING").is_some() {
+                eprintln!("source-policy timing: guard={id} elapsed={elapsed:?}");
+            }
         }
     });
 }

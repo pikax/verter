@@ -6,10 +6,13 @@
 //! construction. No workspace, scheduler/driver, semantic cache, audit store,
 //! request state, or declaration-lowering service crosses a row boundary.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
+use verter_scheduler::scheduler::SchedulerConfig;
 use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
-use verter_session::{HostConfig, TestHostWorkerPools};
+use verter_session::{
+    HostConfig, HostResourcePolicy, PoolPolicy, PoolSize, PoolSpawn, TestHostWorkerPools,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CorpusCase {
@@ -38,14 +41,20 @@ pub(super) fn run_chunk(cases: &'static [CorpusCase]) {
         "a generated corpus chunk must not be empty"
     );
 
-    let config = HostConfig::default();
-    let worker_pools = TestHostWorkerPools::new(
-        &config,
-        verter_scheduler::scheduler::SchedulerConfig::default(),
-    );
+    let timing_enabled = std::env::var_os("VERTER_CORPUS_AUDIT_TIMING").is_some();
+    let pool_started = Instant::now();
+    let (config, scheduler_config) = corpus_worker_configs();
+    let worker_pools = TestHostWorkerPools::new(&config, scheduler_config);
+    if timing_enabled {
+        eprintln!(
+            "corpus-audit timing: phase=pool_setup elapsed_us={}",
+            pool_started.elapsed().as_micros()
+        );
+    }
     let expected_pool_ids = worker_pools.pool_ids();
 
     for (index, case) in cases.iter().enumerate() {
+        let case_started = Instant::now();
         let before = worker_pools.receipt();
         assert_eq!(before.host_shells_created, index);
         assert_eq!(before.scheduler_shells_created, index);
@@ -57,6 +66,7 @@ pub(super) fn run_chunk(cases: &'static [CorpusCase]) {
         assert_eq!(before.pool_ids, expected_pool_ids);
 
         let result = AuditedRequest::builder()
+            .host_config(config.clone())
             .test_worker_pools(Arc::clone(&worker_pools))
             .files([(case.canonical_id, case.source)])
             .resolve_component_meta(case.canonical_id);
@@ -111,5 +121,45 @@ pub(super) fn run_chunk(cases: &'static [CorpusCase]) {
             "{}: every fresh shell must use the chunk's exact shared worker pools",
             case.slug,
         );
+        if timing_enabled {
+            eprintln!(
+                "corpus-audit timing: phase=case slug={} bytes={} elapsed_us={}",
+                case.slug,
+                case.source.len(),
+                case_started.elapsed().as_micros()
+            );
+        }
     }
+}
+
+fn corpus_worker_configs() -> (HostConfig, SchedulerConfig) {
+    let fixed_lazy_one = PoolPolicy {
+        spawn: PoolSpawn::LazyOnFirstUse,
+        size: PoolSize::Fixed(1),
+    };
+    let mut host = HostConfig::default();
+    host.resource_policy = HostResourcePolicy {
+        host_cpu_pool: fixed_lazy_one,
+        decl_lowering: fixed_lazy_one,
+    };
+    let scheduler = SchedulerConfig {
+        cpu_threads: 1,
+        io_threads: 1,
+        dag_budget: None,
+    };
+    (host, scheduler)
+}
+
+#[test]
+fn worker_policy_bounds_nested_parallelism() {
+    let (config, scheduler) = corpus_worker_configs();
+    let fixed_lazy_one = PoolPolicy {
+        spawn: PoolSpawn::LazyOnFirstUse,
+        size: PoolSize::Fixed(1),
+    };
+    assert_eq!(config.resource_policy.host_cpu_pool, fixed_lazy_one);
+    assert_eq!(config.resource_policy.decl_lowering, fixed_lazy_one);
+    assert_eq!(scheduler.cpu_threads, 1);
+    assert_eq!(scheduler.io_threads, 1);
+    assert!(scheduler.dag_budget.is_none());
 }

@@ -6035,6 +6035,11 @@ pub(crate) mod foundations_guards {
         // crate root so `benches/projection_safety_bench.rs` keeps a
         // stable `verter_session::projection_bench_support` path).
         "pub use for_tests::projection_bench_support",
+        // Test-support-only shared execution substrate used by the generated
+        // component-meta corpus chunks. The public re-export exists only under
+        // `cfg(any(test, feature = "test-support"))`; ordinary production builds
+        // do not expose the pool identities or constructors.
+        "pub use test_worker_pools::",
         // Test-only probe substrate for the content-addressed
         // `MapperFingerprint` primitive. Consumed by
         // `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`. The

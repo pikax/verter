@@ -9,22 +9,20 @@ use super::chunk_harness::{run_chunk, CorpusCase};
 fn corpus_audit_chunk_000_produces_audit_records_or_documents_skips() {
     #[rustfmt::skip]
     const CASES: &[CorpusCase] = &[
-        CorpusCase::new("accordion", "/Accordion.vue", include_str!("fixtures/Accordion.vue")),
-        CorpusCase::new("alert", "/Alert.vue", include_str!("fixtures/Alert.vue")),
-        CorpusCase::new("app", "/App.vue", include_str!("fixtures/App.vue")),
-        CorpusCase::new("auth_form", "/AuthForm.vue", include_str!("fixtures/AuthForm.vue")),
-        CorpusCase::new("avatar", "/Avatar.vue", include_str!("fixtures/Avatar.vue")),
-        CorpusCase::new("avatar_group", "/AvatarGroup.vue", include_str!("fixtures/AvatarGroup.vue")),
-        CorpusCase::new("badge", "/Badge.vue", include_str!("fixtures/Badge.vue")),
+        CorpusCase::new("input_menu", "/InputMenu.vue", include_str!("fixtures/InputMenu.vue")),
+        CorpusCase::new("modal", "/Modal.vue", include_str!("fixtures/Modal.vue")),
+        CorpusCase::new("pagination", "/Pagination.vue", include_str!("fixtures/Pagination.vue")),
         CorpusCase::new("banner", "/Banner.vue", include_str!("fixtures/Banner.vue")),
-        CorpusCase::new("blog_post", "/BlogPost.vue", include_str!("fixtures/BlogPost.vue")),
-        CorpusCase::new("blog_posts", "/BlogPosts.vue", include_str!("fixtures/BlogPosts.vue")),
-        CorpusCase::new("breadcrumb", "/Breadcrumb.vue", include_str!("fixtures/Breadcrumb.vue")),
-        CorpusCase::new("button", "/Button.vue", include_str!("fixtures/Button.vue")),
-        CorpusCase::new("calendar", "/Calendar.vue", include_str!("fixtures/Calendar.vue")),
-        CorpusCase::new("card", "/Card.vue", include_str!("fixtures/Card.vue")),
-        CorpusCase::new("carousel", "/Carousel.vue", include_str!("fixtures/Carousel.vue")),
-        CorpusCase::new("changelog_version", "/ChangelogVersion.vue", include_str!("fixtures/ChangelogVersion.vue")),
+        CorpusCase::new("chat_prompt_submit", "/ChatPromptSubmit.vue", include_str!("fixtures/ChatPromptSubmit.vue")),
+        CorpusCase::new("editor_suggestion_menu", "/EditorSuggestionMenu.vue", include_str!("fixtures/EditorSuggestionMenu.vue")),
+        CorpusCase::new("user", "/User.vue", include_str!("fixtures/User.vue")),
+        CorpusCase::new("dashboard_panel", "/DashboardPanel.vue", include_str!("fixtures/DashboardPanel.vue")),
+        CorpusCase::new("prose_code_collapse", "/prose/CodeCollapse.vue", include_str!("fixtures/prose/CodeCollapse.vue")),
+        CorpusCase::new("chat_shimmer", "/ChatShimmer.vue", include_str!("fixtures/ChatShimmer.vue")),
+        CorpusCase::new("prose_code_preview", "/prose/CodePreview.vue", include_str!("fixtures/prose/CodePreview.vue")),
+        CorpusCase::new("prose_code_icon", "/prose/CodeIcon.vue", include_str!("fixtures/prose/CodeIcon.vue")),
+        CorpusCase::new("prose_td", "/prose/Td.vue", include_str!("fixtures/prose/Td.vue")),
+        CorpusCase::new("prose_ul", "/prose/Ul.vue", include_str!("fixtures/prose/Ul.vue")),
     ];
     run_chunk(CASES);
 }

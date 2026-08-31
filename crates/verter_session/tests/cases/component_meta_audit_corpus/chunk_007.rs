@@ -9,22 +9,21 @@ use super::chunk_harness::{run_chunk, CorpusCase};
 fn corpus_audit_chunk_007_produces_audit_records_or_documents_skips() {
     #[rustfmt::skip]
     const CASES: &[CorpusCase] = &[
+        CorpusCase::new("listbox", "/Listbox.vue", include_str!("fixtures/Listbox.vue")),
+        CorpusCase::new("context_menu_content", "/ContextMenuContent.vue", include_str!("fixtures/ContextMenuContent.vue")),
+        CorpusCase::new("scroll_area", "/ScrollArea.vue", include_str!("fixtures/ScrollArea.vue")),
+        CorpusCase::new("input_tags", "/InputTags.vue", include_str!("fixtures/InputTags.vue")),
         CorpusCase::new("tabs", "/Tabs.vue", include_str!("fixtures/Tabs.vue")),
-        CorpusCase::new("textarea", "/Textarea.vue", include_str!("fixtures/Textarea.vue")),
-        CorpusCase::new("theme", "/Theme.vue", include_str!("fixtures/Theme.vue")),
-        CorpusCase::new("timeline", "/Timeline.vue", include_str!("fixtures/Timeline.vue")),
-        CorpusCase::new("toast", "/Toast.vue", include_str!("fixtures/Toast.vue")),
-        CorpusCase::new("toaster", "/Toaster.vue", include_str!("fixtures/Toaster.vue")),
-        CorpusCase::new("tooltip", "/Tooltip.vue", include_str!("fixtures/Tooltip.vue")),
-        CorpusCase::new("tree", "/Tree.vue", include_str!("fixtures/Tree.vue")),
-        CorpusCase::new("user", "/User.vue", include_str!("fixtures/User.vue")),
-        CorpusCase::new("color_mode_color_mode_avatar", "/color-mode/ColorModeAvatar.vue", include_str!("fixtures/color-mode/ColorModeAvatar.vue")),
-        CorpusCase::new("color_mode_color_mode_button", "/color-mode/ColorModeButton.vue", include_str!("fixtures/color-mode/ColorModeButton.vue")),
+        CorpusCase::new("switch", "/Switch.vue", include_str!("fixtures/Switch.vue")),
+        CorpusCase::new("pin_input", "/PinInput.vue", include_str!("fixtures/PinInput.vue")),
+        CorpusCase::new("page_cta", "/PageCTA.vue", include_str!("fixtures/PageCTA.vue")),
+        CorpusCase::new("avatar_group", "/AvatarGroup.vue", include_str!("fixtures/AvatarGroup.vue")),
+        CorpusCase::new("chip", "/Chip.vue", include_str!("fixtures/Chip.vue")),
+        CorpusCase::new("page", "/Page.vue", include_str!("fixtures/Page.vue")),
+        CorpusCase::new("link_base", "/LinkBase.vue", include_str!("fixtures/LinkBase.vue")),
+        CorpusCase::new("prose_accordion_item", "/prose/AccordionItem.vue", include_str!("fixtures/prose/AccordionItem.vue")),
+        CorpusCase::new("prose_badge", "/prose/Badge.vue", include_str!("fixtures/prose/Badge.vue")),
         CorpusCase::new("color_mode_color_mode_image", "/color-mode/ColorModeImage.vue", include_str!("fixtures/color-mode/ColorModeImage.vue")),
-        CorpusCase::new("color_mode_color_mode_select", "/color-mode/ColorModeSelect.vue", include_str!("fixtures/color-mode/ColorModeSelect.vue")),
-        CorpusCase::new("color_mode_color_mode_switch", "/color-mode/ColorModeSwitch.vue", include_str!("fixtures/color-mode/ColorModeSwitch.vue")),
-        CorpusCase::new("content_content_navigation", "/content/ContentNavigation.vue", include_str!("fixtures/content/ContentNavigation.vue")),
-        CorpusCase::new("content_content_search", "/content/ContentSearch.vue", include_str!("fixtures/content/ContentSearch.vue")),
     ];
     run_chunk(CASES);
 }
