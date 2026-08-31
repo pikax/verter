@@ -458,12 +458,13 @@ pub(crate) fn vue_carrier_bundle(
     // The same two fail-closed rules `CompileRequest::new` /
     // `resolve_vue_backend` apply to every `CompileRequest`-constructed
     // route apply here too: this orchestration is a SEPARATE production
-    // entry into the same shared codegen substrate, reached by the
-    // session's per-file/virtual-product compile path (not yet
-    // converted onto `CompileRequest` itself). Without this check an
-    // SSR x Vapor or inline x SSR request would silently reach codegen
-    // and produce wrong output instead of a typed refusal — the same
-    // bug class `CompileRequest` construction closes for its own
+    // entry into the same shared codegen substrate — the host-integration
+    // backend reaches it from an admitted `CompileRequest` (options
+    // derived off the admitted request), while the retained registry
+    // route reaches it from bare `RuntimeCompileOptions`. Without this
+    // check an SSR x Vapor or inline x SSR request would silently reach
+    // codegen and produce wrong output instead of a typed refusal — the
+    // same bug class `CompileRequest` construction closes for its own
     // callers. `parsed.is_vapor()` covers the implicit `<template
     // vapor>` marker; `opts.force_vapor` covers the explicit request —
     // together they mirror `resolve_vue_backend`'s `Inferred` fallback.

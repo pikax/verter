@@ -1,11 +1,10 @@
-//! `impl VerterHost` — resolve and virtual file retrieval methods,
-//! split across sub-modules per the Tier 2 §4 god-module split
-//! (debt-and-deferred-fixes plan).
+//! `impl VerterHost` — resolve and virtual file retrieval methods, split
+//! across sub-modules by concern.
 //!
-//! Public surface unchanged: every item that was reachable through
-//! `crate::host_resolve::*` before the split is re-exported below so
-//! existing callers (`crate::resolver_store`, `crate::host_manage`,
-//! `crate::frontier_tests`, etc.) compile without modification.
+//! `crate::host_resolve::*` is the module's whole public surface: every
+//! item a sub-module owns is re-exported here, so a caller
+//! (`crate::resolver_store`, `crate::host_manage`, …) names this module
+//! and never a sub-module path.
 //!
 //! Cross-file component-meta / analysis rule: host-backed consumers share
 //! one resolver and one traversal policy.
@@ -20,10 +19,11 @@
 //!   repeated wildcard re-export scans are expensive.
 //!
 //! Module layout:
-//! - [`compile_request_build`] — the canonical `CompileRequest`
-//!   construction/derivation pair `compile_entry` routes every host-backed
-//!   compile through, plus the bound framework render-demand constructors
-//!   `compile_entry_runtime_render` builds its backend demands from.
+//! - [`compile_request_build`] — the bound compile lanes' session side:
+//!   the framework host-backend demand constructors, the host-backed
+//!   bound execution dispatch (`execute_bound_host_products`), refusal
+//!   mapping, and the shared result carriers both `compile_entry` and
+//!   `compile_entry_runtime_render` consume.
 //! - [`frontier_helpers`] — route-cache and wildcard-ranking helpers.
 //! - [`native_host_binding`] — the sealed request-scoped
 //!   `BoundNativeHostRequest` binding substrate over the registered
@@ -96,6 +96,17 @@ pub use virtual_file_pipeline::CompileForceOverflowGuard;
 pub use virtual_file_pipeline::{
     compile_tier_prefetch_invocations, reset_compile_tier_prefetch_invocations,
 };
+
+// Test-only introspection for the host-backed bound compile lane: the
+// lane tests match on the typed transaction outcome directly.
+#[cfg(test)]
+pub(crate) use virtual_file_pipeline::CompileEntryOutcome;
+
+// The bound host-backed compile lane's own tests, housed with the routes
+// they drive (same `#[path]` pattern as the sibling suites below).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "../host_backed_lane_tests.rs"]
+mod host_backed_lane_tests;
 
 #[cfg(test)]
 #[path = "../host_resolve_tests.rs"]

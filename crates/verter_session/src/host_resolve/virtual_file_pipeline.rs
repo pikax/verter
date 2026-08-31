@@ -12,12 +12,11 @@ use crate::instant::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use super::compile_request_build::BoundRenderedMain;
 use super::compile_request_build::{
-    build_bound_compile_request, compile_unsupported_code, derive_runtime_compile_options,
-    no_carrier_artifact_diagnostics, no_carrier_compiler_diagnostics, render_execution_error,
-    request_construction_refused_diagnostics, svelte_render_admission_refused_diagnostics,
+    execute_bound_host_products, no_carrier_artifact_diagnostics, render_execution_error,
+    request_construction_refused_diagnostics, svelte_admission_refused_diagnostics,
     svelte_render_execution_refusal, svelte_runtime_render_demand,
-    vue_render_admission_refused_diagnostics, vue_render_execution_refusal,
-    vue_runtime_render_demand,
+    vue_admission_refused_diagnostics, vue_render_execution_refusal, vue_runtime_render_demand,
+    HostProductsFailure,
 };
 use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
@@ -29,9 +28,7 @@ use crate::CompileTarget;
 use crate::VerterHost;
 use oxc_allocator::Allocator;
 use verter_compiler::compile::format_import_specifier;
-use verter_compiler::framework_common::{
-    CarrierCompileOutcome, RuntimeDiagnosticSeverity, RuntimeTemplateBlock,
-};
+use verter_compiler::framework_common::{RuntimeDiagnosticSeverity, RuntimeTemplateBlock};
 
 /// Fail-closed Main-module assembly outcome as a compile error — every
 /// [`VueMainAssemblyFailure`] variant (missing/uncomposable input map,
@@ -65,18 +62,23 @@ fn template_compose_refusal_diagnostics(
     }])
 }
 
-/// The Template virtual file's code + map. Verbatim when the template
-/// declares no runtime imports; otherwise the import preamble is composed
-/// through the typed assembly engine so the map stays in sync with the
-/// shifted bytes. Fails closed on `Err` — never a map-dropping fallback
-/// that silently serves wrong-but-plausible code.
-fn compose_template_virtual_file(
-    template: RuntimeTemplateBlock,
+/// The Template virtual file's code + map. Verbatim (borrowed) when the
+/// template declares no runtime imports; otherwise the import preamble is
+/// composed through the typed assembly engine so the map stays in sync
+/// with the shifted bytes. Fails closed on `Err` — never a map-dropping
+/// fallback that silently serves wrong-but-plausible code.
+fn compose_template_virtual_file<'t>(
+    template: &'t RuntimeTemplateBlock,
     runtime_module_name: Option<&str>,
-) -> Result<(String, Option<String>), verter_compiler::assembly::ComposeRefusal> {
+) -> Result<
+    (std::borrow::Cow<'t, str>, Option<std::borrow::Cow<'t, str>>),
+    verter_compiler::assembly::ComposeRefusal,
+> {
+    use std::borrow::Cow;
     if template.imports.is_empty() {
-        let source_map = (!template.source_map.is_empty()).then_some(template.source_map);
-        return Ok((template.code, source_map));
+        let source_map = (!template.source_map.is_empty())
+            .then_some(Cow::Borrowed(template.source_map.as_str()));
+        return Ok((Cow::Borrowed(template.code.as_str()), source_map));
     }
     let runtime = runtime_module_name.unwrap_or("vue");
     let specifiers: Vec<String> = template
@@ -92,7 +94,10 @@ fn compose_template_virtual_file(
     let existing_map = (!template.source_map.is_empty()).then_some(template.source_map.as_str());
     let composed =
         verter_compiler::assembly::prepend_preamble(&preamble, &template.code, existing_map)?;
-    Ok((composed.code, existing_map.map(|_| composed.source_map)))
+    Ok((
+        Cow::Owned(composed.code),
+        existing_map.map(|_| Cow::Owned(composed.source_map)),
+    ))
 }
 
 #[cfg(test)]
@@ -120,7 +125,8 @@ mod compose_template_virtual_file_tests {
 
     #[test]
     fn no_imports_returns_the_template_verbatim() {
-        let (code, map) = compose_template_virtual_file(template("const a = 1", "", vec![]), None)
+        let block = template("const a = 1", "", vec![]);
+        let (code, map) = compose_template_virtual_file(&block, None)
             .expect("no-import template composes trivially");
         assert_eq!(code, "const a = 1");
         assert!(map.is_none());
@@ -130,11 +136,9 @@ mod compose_template_virtual_file_tests {
     fn imports_present_prepends_the_import_line_and_shifts_the_map() {
         let map_json =
             "{\"version\":3,\"sources\":[\"Comp.vue\"],\"names\":[],\"mappings\":\"MACM\"}";
-        let (code, map) = compose_template_virtual_file(
-            template("const n = 1", map_json, vec!["_openBlock".to_string()]),
-            None,
-        )
-        .expect("import template composes");
+        let block = template("const n = 1", map_json, vec!["_openBlock".to_string()]);
+        let (code, map) =
+            compose_template_virtual_file(&block, None).expect("import template composes");
         assert_eq!(
             code, "import { openBlock as _openBlock } from \"vue\"\nconst n = 1",
             "the import preamble must precede the template's own code verbatim"
@@ -160,11 +164,9 @@ mod compose_template_virtual_file_tests {
 
     #[test]
     fn custom_runtime_module_name_reaches_the_import_specifier() {
-        let (code, _) = compose_template_virtual_file(
-            template("const n = 1", "", vec!["_openBlock".to_string()]),
-            Some("@vue/runtime-dom"),
-        )
-        .expect("composes");
+        let block = template("const n = 1", "", vec!["_openBlock".to_string()]);
+        let (code, _) =
+            compose_template_virtual_file(&block, Some("@vue/runtime-dom")).expect("composes");
         assert!(code.starts_with("import { openBlock as _openBlock } from \"@vue/runtime-dom\"\n"));
     }
 }
@@ -1347,8 +1349,9 @@ impl VerterHost {
 
     /// Retrieve a compiled virtual file (script, template, style, or main bundle).
     ///
-    /// On cache hit, returns immediately. On cache miss, compiles the file using
-    /// the carrier registry, caches the result, and returns the requested node.
+    /// On cache hit, returns immediately. On cache miss, compiles the file
+    /// through the request's bound framework host backend, caches the result,
+    /// and returns the requested node.
     /// In dev mode with [`CompileErrorPolicy::DevServeLastKnownGood`], falls back
     /// to the last successful compilation when the current source has errors.
     ///
@@ -2248,6 +2251,7 @@ impl VerterHost {
                         admission,
                         crate::cache_runtime::SignatureAdmission::Cacheable(_)
                     );
+
                     // The scheduler artifact carries PRODUCTS. A refused
                     // transaction has none, and an artifact holding its empty
                     // output map would re-encode the refusal as an untyped
@@ -3224,12 +3228,12 @@ impl VerterHost {
             scope.needs_template_analysis() || profile.target.needs_template_data();
 
         // The consumed request-scoped binding is the SOLE framework-identity
-        // authority for this compile attempt; the carrier-registry dispatch
-        // below still routes by the artifact identity (the retained
-        // compatibility route's own dispatch). An input with no carrier
-        // artifact (e.g. a plain script that reached this path) has no
-        // registered identity, so no binding exists and there is no runtime
-        // surface to produce.
+        // authority for this compile attempt: its catalog arm selects the
+        // host backend that admits and executes the demand below, so nothing
+        // here re-derives the framework from the file. An input with no
+        // carrier artifact (e.g. a plain script that reached this path) has
+        // no registered identity, so no binding exists and there is no
+        // runtime surface to produce.
         let (artifact, binding) = match (snapshot.framework_parse.as_ref(), binding) {
             (Some(artifact), Some(binding)) => (artifact, binding),
             _ => {
@@ -3240,57 +3244,11 @@ impl VerterHost {
             }
         };
 
-        // The canonical, admission-checked request. This is the session's
-        // per-file/virtual-product request-construction authority: an
-        // unsupported option, a malformed Svelte namespace/fragments token,
-        // or an SSR x Vapor / inline x SSR combination refuses HERE, before
-        // any codegen input is built — see `compile_request_build`. The
-        // constructor is selected by the binding's catalog arm.
-        let request = match build_bound_compile_request(
-            &binding,
-            profile,
-            &snapshot.canonical_id,
-            want_runtime,
-            want_ide,
-            want_template_data,
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                return Err(diagnostics.merge(request_construction_refused_diagnostics(
-                    &snapshot.canonical_id,
-                    snapshot.source.len() as u32,
-                    &error,
-                )));
-            }
-        };
-
-        // The neutral runtime-compile options the carrier consults, read
-        // back off the validated request — never re-derived from `profile`
-        // directly. The framework-private resolved inputs ride on
-        // `vue_facts`; the carrier reads only what it supports.
-        let runtime_opts = derive_runtime_compile_options(
-            &request,
-            profile,
-            snapshot.block_content_inputs.clone(),
-            Some(vue_facts),
-            snapshot.prepared_styles.clone(),
-        );
-
-        let Some(compiler) = crate::parse::carrier_compiler_registry()
-            .compiler_for_carrier_language(artifact.adapter_id(), artifact.language_id())
-        else {
-            return Err(diagnostics.merge(no_carrier_compiler_diagnostics(
-                artifact,
-                snapshot.source.len() as u32,
-            )));
-        };
-
-        // The host OWNS the cached-parse validity decision: a cached
-        // artifact is reused ONLY when the source was not modified by
-        // external `src=` merging and the profile carries no
-        // parse-affecting template options (custom delimiters / custom
-        // elements). Otherwise the carrier re-parses the merged source.
-        // Either way the carrier owns the typed downcast + native compile.
+        // The host OWNS the cached-parse validity decision: the bound
+        // backend executes over the artifact's own registered parse, so a
+        // profile carrying parse-affecting template grammar (custom
+        // delimiters / custom elements) cannot be honored on this lane and
+        // refuses instead of compiling under the wrong grammar.
         let grammar_matches = profile
             .delimiters
             .as_ref()
@@ -3308,55 +3266,42 @@ impl VerterHost {
             );
         }
 
-        // Consume the binding exactly once, by value; the attribution is
-        // held across the retained compat call for identity coherence with
-        // the dispatched artifact (see `into_attribution`).
-        let bound_attribution = binding.into_attribution();
-        verter_debug_assert_eq!(
-            bound_attribution.catalog_identity().adapter_id(),
-            artifact.adapter_id(),
-        );
-        verter_debug_assert_eq!(
-            bound_attribution.snapshot().canonical_id(),
-            snapshot.canonical_id,
-        );
-
-        let outcome = match compiler.compile_bundle(
-            snapshot.source.as_ref(),
+        // One backend call per host-backed request: the consumed binding's
+        // catalog arm yields the backend, the backend issues the
+        // multi-product admission over the SAME presented artifact (an
+        // unsupported option, an unproducible demand, or a malformed
+        // Svelte token refuses typed at issuance, before any codegen input
+        // is built), and the product execution consumes the admission by
+        // value — one request, one backend call, one admitted population.
+        // See `compile_request_build::execute_bound_host_products`.
+        let products = match execute_bound_host_products(
+            binding,
             artifact,
-            &runtime_opts,
+            profile,
+            snapshot,
+            vue_facts,
+            want_runtime,
+            want_ide,
+            want_template_data,
             &alloc,
         ) {
-            Ok(outcome) => outcome,
-            Err(unsupported) => {
-                let code = compile_unsupported_code(&unsupported);
-                return Err(diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
-                    HostDiagnostic {
-                        severity: HostSeverity::Error,
-                        code: code.to_string(),
-                        message: format!(
-                            "carrier '{}' cannot produce a runtime bundle for '{}'",
-                            artifact.adapter_id().as_str(),
-                            snapshot.canonical_id
-                        ),
-                        arguments: Vec::new(),
-                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
-                    },
-                ])));
+            Ok(products) => products,
+            Err(HostProductsFailure::Fatal(payload)) => {
+                return Err(diagnostics.merge(payload));
             }
-        };
-
-        // A carrier that fail-closed on the runtime surface THIS request asked
-        // for returns a product-free refusal, and the transaction ends here: no
-        // outputs are assembled, no IDE artifact is lifted, no template analysis
-        // is built. Its non-fatal diagnostics still reach the host snapshot so
-        // the reason is visible to the diagnostics route.
-        let compiled = match outcome {
-            CarrierCompileOutcome::Produced(bundle) => bundle,
-            CarrierCompileOutcome::RuntimeSurfaceRefused(refusal) => {
-                let mut refusal_diags = diagnostics;
-                let mut lifted: Vec<HostDiagnostic> = refusal
-                    .diagnostics
+            // The backend fail-closed on the runtime surface THIS request
+            // asked for (all-or-none), and the transaction ends here: no
+            // outputs are assembled, no IDE artifact is lifted, no template
+            // analysis is built. Its non-fatal diagnostics still reach the
+            // host snapshot so the reason is visible to the diagnostics
+            // route.
+            Err(HostProductsFailure::Surface {
+                diagnostic_code,
+                message,
+                span,
+                diagnostics: refusal_diagnostics,
+            }) => {
+                let mut lifted: Vec<HostDiagnostic> = refusal_diagnostics
                     .iter()
                     .map(|d| HostDiagnostic {
                         severity: match d.severity {
@@ -3375,36 +3320,37 @@ impl VerterHost {
                 // terminal answer for this request's runtime product.
                 lifted.push(HostDiagnostic {
                     severity: HostSeverity::Warning,
-                    code: refusal.diagnostic_code.clone(),
-                    message: refusal.message.clone(),
+                    code: diagnostic_code.clone(),
+                    message: message.clone(),
                     arguments: Vec::new(),
-                    span: refusal.span,
+                    span,
                 });
-                refusal_diags = refusal_diags.merge(DiagnosticsSnapshot::from_vec(lifted));
+                let refusal_diags = diagnostics.merge(DiagnosticsSnapshot::from_vec(lifted));
                 return Ok(CompileEntryOutcome::RuntimeSurfaceRefused(
                     CompileEntryRefusal {
-                        diagnostic_code: Arc::from(refusal.diagnostic_code.as_str()),
-                        message: Arc::from(refusal.message.as_str()),
+                        diagnostic_code: Arc::from(diagnostic_code.as_str()),
+                        message: Arc::from(message.as_str()),
                         diagnostics: refusal_diags,
                     },
                 ));
             }
         };
 
-        // Lift the bundle's framework-neutral diagnostics into the host
-        // `DiagnosticsSnapshot` (a Svelte projector diagnostic reaches the
-        // snapshot through THIS path). DEDUPLICATED against `diagnostics`
-        // (the carrier's own parse-time channel, already in `compile_diags`):
-        // Vue's `compile_bundle` reuses the already-parsed artifact and its
-        // compile result clones that SAME `ParsedSfc`'s diagnostics wholesale
-        // (`clone_diagnostics`), so a parse-time diagnostic
-        // (`MissingSfcEntryBlock`) is otherwise double-counted — see
-        // `DiagnosticsSnapshot::merge_deduplicated`'s doc.
+        // Lift the admitted compile's framework-neutral diagnostics into
+        // the host `DiagnosticsSnapshot` (a Svelte projector diagnostic
+        // reaches the snapshot through THIS path). DEDUPLICATED against
+        // `diagnostics` (the carrier's own parse-time channel, already in
+        // `compile_diags`): the Vue backend's bundle execution reuses the
+        // already-parsed artifact and its compile result clones that SAME
+        // `ParsedSfc`'s diagnostics wholesale (`clone_diagnostics`), so a
+        // parse-time diagnostic (`MissingSfcEntryBlock`) is otherwise
+        // double-counted — see `DiagnosticsSnapshot::merge_deduplicated`'s
+        // doc.
         let mut compile_diags = diagnostics.clone();
-        if !compiled.diagnostics.is_empty() {
+        if !products.diagnostics().is_empty() {
             compile_diags = compile_diags.merge_deduplicated(DiagnosticsSnapshot::from_vec(
-                compiled
-                    .diagnostics
+                products
+                    .diagnostics()
                     .iter()
                     .map(|d| HostDiagnostic {
                         severity: match d.severity {
@@ -3445,169 +3391,175 @@ impl VerterHost {
         let publish_template = profile.target.contains(CompileTarget::TEMPLATE);
         let publish_style = profile.target.needs_style();
 
-        if publish_runtime_module && compiled.has_runtime_surface() {
-            let (main_code, main_source_map, main_lang) = match &compiled.main.body_code {
-                // A carrier that emits its own self-contained ESM body uses it
-                // verbatim (e.g. Svelte's official-shaped runtime output),
-                // paired with the map that carrier produced for it.
-                Some(body) => (
-                    body.clone(),
-                    (!compiled.main.source_map.is_empty())
-                        .then(|| Arc::from(compiled.main.source_map.clone())),
-                    compiled.main.lang.clone().unwrap_or_else(|| {
-                        if profile.force_js {
-                            "js".to_string()
-                        } else {
-                            snapshot
-                                .meta
-                                .script_lang
-                                .as_deref()
-                                .unwrap_or("js")
-                                .to_string()
-                        }
-                    }),
-                ),
-                // Vue: the host assembles the `_sfc_main` module from the
-                // neutral block fields (its virtual-file concern) — and the map
-                // it composed while assembling them. The code and the map are
-                // one result of one assembly, so the map here always describes
-                // the exact code beside it. `assembled.lang` is the SAME
-                // dialect the assembler derived once and validated every
-                // fragment/the final artifact under — reused here instead of
-                // independently re-deriving it a second time.
-                None => {
-                    let assembled = assemble_vue_main_module(
-                        &snapshot.canonical_id,
-                        &compiled,
-                        &snapshot.meta,
-                        profile,
-                    )
-                    .map_err(|failure| {
-                        assembled_map_failure_diagnostics(failure, snapshot.source.len() as u32)
-                    })?;
-                    (
-                        assembled.code,
-                        assembled.source_map.map(Arc::from),
-                        assembled.lang,
-                    )
-                }
-            };
-            outputs.insert(
-                VirtualNodeKind::Main,
-                CachedVirtualFile {
-                    code: Arc::from(main_code),
-                    source_map: main_source_map,
-                    lang: Some(main_lang),
-                    meta: VirtualMeta {
-                        scope_id: if compiled.scope_id.is_empty() {
+        // Every runtime-derived node reads off the ADMITTED runtime
+        // bundle: the accessor is `Some` only when a runtime product was
+        // admitted (each publish bit below implies the runtime demand),
+        // and the bundle carries only what the admitted request asked
+        // for.
+        if let Some(compiled) = products.runtime_bundle() {
+            if publish_runtime_module && compiled.has_runtime_surface() {
+                let (main_code, main_source_map, main_lang) = match &compiled.main.body_code {
+                    // A carrier that emits its own self-contained ESM body uses it
+                    // verbatim (e.g. Svelte's official-shaped runtime output),
+                    // paired with the map that carrier produced for it.
+                    Some(body) => (
+                        body.clone(),
+                        (!compiled.main.source_map.is_empty())
+                            .then(|| Arc::from(compiled.main.source_map.clone())),
+                        compiled.main.lang.clone().unwrap_or_else(|| {
+                            if profile.force_js {
+                                "js".to_string()
+                            } else {
+                                snapshot
+                                    .meta
+                                    .script_lang
+                                    .as_deref()
+                                    .unwrap_or("js")
+                                    .to_string()
+                            }
+                        }),
+                    ),
+                    // Vue: the host assembles the `_sfc_main` module from the
+                    // neutral block fields (its virtual-file concern) — and the map
+                    // it composed while assembling them. The code and the map are
+                    // one result of one assembly, so the map here always describes
+                    // the exact code beside it. `assembled.lang` is the SAME
+                    // dialect the assembler derived once and validated every
+                    // fragment/the final artifact under — reused here instead of
+                    // independently re-deriving it a second time.
+                    None => {
+                        let assembled = assemble_vue_main_module(
+                            &snapshot.canonical_id,
+                            compiled,
+                            &snapshot.meta,
+                            profile,
+                        )
+                        .map_err(|failure| {
+                            assembled_map_failure_diagnostics(failure, snapshot.source.len() as u32)
+                        })?;
+                        (
+                            assembled.code,
+                            assembled.source_map.map(Arc::from),
+                            assembled.lang,
+                        )
+                    }
+                };
+                outputs.insert(
+                    VirtualNodeKind::Main,
+                    CachedVirtualFile {
+                        code: Arc::from(main_code),
+                        source_map: main_source_map,
+                        lang: Some(main_lang),
+                        meta: VirtualMeta {
+                            scope_id: if compiled.scope_id.is_empty() {
+                                None
+                            } else {
+                                Some(compiled.scope_id.clone())
+                            },
+                            ..VirtualMeta::default()
+                        },
+                    },
+                );
+            }
+
+            if let Some(script) = compiled.script.as_ref().filter(|_| publish_script) {
+                outputs.insert(
+                    VirtualNodeKind::Script,
+                    CachedVirtualFile {
+                        code: Arc::from(script.code.as_str()),
+                        source_map: if script.source_map.is_empty() {
                             None
                         } else {
-                            Some(compiled.scope_id.clone())
+                            Some(Arc::from(script.source_map.as_str()))
                         },
-                        ..VirtualMeta::default()
+                        lang: Some("ts".to_string()),
+                        meta: VirtualMeta::default(),
                     },
-                },
-            );
-        }
+                );
+            }
 
-        if let Some(script) = compiled.script.filter(|_| publish_script) {
-            outputs.insert(
-                VirtualNodeKind::Script,
-                CachedVirtualFile {
-                    code: Arc::from(script.code),
-                    source_map: if script.source_map.is_empty() {
-                        None
-                    } else {
-                        Some(Arc::from(script.source_map))
+            if let Some(template) = compiled.template.as_ref().filter(|_| publish_template) {
+                let (code, source_map) =
+                    compose_template_virtual_file(template, profile.runtime_module_name.as_deref())
+                        .map_err(|refusal| {
+                            template_compose_refusal_diagnostics(
+                                refusal,
+                                snapshot.source.len() as u32,
+                            )
+                        })?;
+                outputs.insert(
+                    VirtualNodeKind::Template,
+                    CachedVirtualFile {
+                        code: Arc::from(code.as_ref()),
+                        source_map: source_map.map(|map| Arc::from(map.as_ref())),
+                        lang: Some("tsx".to_string()),
+                        meta: VirtualMeta::default(),
                     },
-                    lang: Some("ts".to_string()),
-                    meta: VirtualMeta::default(),
-                },
-            );
-        }
+                );
+            }
 
-        if let Some(template) = compiled.template.filter(|_| publish_template) {
-            let (code, source_map) =
-                compose_template_virtual_file(template, profile.runtime_module_name.as_deref())
-                    .map_err(|refusal| {
-                        template_compose_refusal_diagnostics(refusal, snapshot.source.len() as u32)
-                    })?;
-            outputs.insert(
-                VirtualNodeKind::Template,
-                CachedVirtualFile {
-                    code: Arc::from(code),
-                    source_map: source_map.map(Arc::from),
-                    lang: Some("tsx".to_string()),
-                    meta: VirtualMeta::default(),
-                },
-            );
-        }
-
-        for (i, style) in compiled
-            .styles
-            .into_iter()
-            .enumerate()
-            .filter(|_| publish_style)
-        {
-            // The compiler-produced CSS and map already reflect the single
-            // host-selected block artifact. There is no ordinal override
-            // layer at this boundary.
-            let style_source_map: Option<Arc<str>> = style.source_map.map(Arc::from);
-            outputs.insert(
-                VirtualNodeKind::Style { index: i },
-                CachedVirtualFile {
-                    code: Arc::from(style.code),
-                    source_map: style_source_map,
-                    lang: Some(style.lang.unwrap_or_else(|| "css".to_string())),
-                    meta: VirtualMeta {
-                        style_index: Some(i),
-                        ..VirtualMeta::default()
+            for (i, style) in compiled.styles.iter().enumerate().filter(|_| publish_style) {
+                // The compiler-produced CSS and map already reflect the single
+                // host-selected block artifact. There is no ordinal override
+                // layer at this boundary.
+                let style_source_map: Option<Arc<str>> =
+                    style.source_map.as_ref().map(|map| Arc::from(map.as_str()));
+                outputs.insert(
+                    VirtualNodeKind::Style { index: i },
+                    CachedVirtualFile {
+                        code: Arc::from(style.code.as_str()),
+                        source_map: style_source_map,
+                        lang: Some(style.lang.clone().unwrap_or_else(|| "css".to_string())),
+                        meta: VirtualMeta {
+                            style_index: Some(i),
+                            ..VirtualMeta::default()
+                        },
                     },
-                },
-            );
-        }
+                );
+            }
 
-        // Custom blocks have no target bit of their own. They ride with the
-        // runtime module: the host's `Main` assembly emits their virtual imports
-        // (`crate::compile::assemble_vue_main_module`), so a `Custom` node with
-        // no `Main` would have no importer.
-        for (i, block) in compiled
-            .custom_blocks
-            .into_iter()
-            .enumerate()
-            .filter(|_| publish_runtime_module)
-        {
-            outputs.insert(
-                VirtualNodeKind::Custom { index: i },
-                CachedVirtualFile {
-                    code: Arc::from(block.content),
-                    source_map: None,
-                    lang: snapshot.meta.custom_langs.get(i).cloned().flatten(),
-                    meta: VirtualMeta {
-                        custom_index: Some(i),
-                        block_type: Some(block.block_type),
-                        ..VirtualMeta::default()
+            // Custom blocks have no target bit of their own. They ride with the
+            // runtime module: the host's `Main` assembly emits their virtual imports
+            // (`crate::compile::assemble_vue_main_module`), so a `Custom` node with
+            // no `Main` would have no importer.
+            for (i, block) in compiled
+                .custom_blocks
+                .iter()
+                .enumerate()
+                .filter(|_| publish_runtime_module)
+            {
+                outputs.insert(
+                    VirtualNodeKind::Custom { index: i },
+                    CachedVirtualFile {
+                        code: Arc::from(block.content.as_str()),
+                        source_map: None,
+                        lang: snapshot.meta.custom_langs.get(i).cloned().flatten(),
+                        meta: VirtualMeta {
+                            custom_index: Some(i),
+                            block_type: Some(block.block_type.clone()),
+                            ..VirtualMeta::default()
+                        },
                     },
-                },
-            );
+                );
+            }
         }
 
         // Combined IDE output (TSX/JSX) for LSP type checking â€” stored separately, not as virtual file
-        let cached_tsx = compiled.tsx.map(|tsx| CachedTsx {
-            code: Arc::from(tsx.code),
+        let cached_tsx = products.ide_companion().map(|tsx| CachedTsx {
+            code: Arc::from(tsx.code.as_str()),
             source_map: if tsx.source_map.is_empty() {
                 None
             } else {
-                Some(Arc::from(tsx.source_map))
+                Some(Arc::from(tsx.source_map.as_str()))
             },
             is_jsx: tsx.is_jsx,
-            destructured_block: tsx.destructured_block,
+            destructured_block: tsx.destructured_block.clone(),
         });
 
         // Convert raw template data into analysis types when available
         let mut template_class_admission =
             crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission::not_applicable();
-        let template_analysis = compiled.template_data.as_ref().map(|facts_product| {
+        let template_analysis = products.template_facts().map(|facts_product| {
             // Build script import pairs for component â†’ source resolution
             let all_imports =
                 template_converter_inputs(&snapshot.script_imports, &snapshot.script_bindings);
@@ -3753,7 +3705,8 @@ impl VerterHost {
         let rendered = match binding {
             BoundNativeHostRequest::Vue(bound) => {
                 let (backend, attribution) = bound.into_host_backend();
-                crate::host_compile_audit::debug_assert_runtime_render_bound_attribution(
+                crate::host_compile_audit::debug_assert_compile_bound_attribution(
+                    crate::host_compile_audit::BoundCompileRoute::RuntimeRender,
                     &attribution,
                     artifact,
                     &snapshot.canonical_id,
@@ -3789,13 +3742,11 @@ impl VerterHost {
                 let admission = match backend.admit_runtime_render(artifact, demand) {
                     Ok(admission) => admission,
                     Err(refusal) => {
-                        return Err(fatal(diagnostics.merge(
-                            vue_render_admission_refused_diagnostics(
-                                &snapshot.canonical_id,
-                                snapshot.source.len() as u32,
-                                refusal,
-                            ),
-                        )));
+                        return Err(fatal(diagnostics.merge(vue_admission_refused_diagnostics(
+                            &snapshot.canonical_id,
+                            snapshot.source.len() as u32,
+                            refusal,
+                        ))));
                     }
                 };
                 let inputs = VueHostExecutionInputs {
@@ -3826,7 +3777,8 @@ impl VerterHost {
             }
             BoundNativeHostRequest::Svelte(bound) => {
                 let (backend, attribution) = bound.into_host_backend();
-                crate::host_compile_audit::debug_assert_runtime_render_bound_attribution(
+                crate::host_compile_audit::debug_assert_compile_bound_attribution(
+                    crate::host_compile_audit::BoundCompileRoute::RuntimeRender,
                     &attribution,
                     artifact,
                     &snapshot.canonical_id,
@@ -3851,7 +3803,7 @@ impl VerterHost {
                     Ok(admission) => admission,
                     Err(refusal) => {
                         return Err(fatal(diagnostics.merge(
-                            svelte_render_admission_refused_diagnostics(
+                            svelte_admission_refused_diagnostics(
                                 &snapshot.canonical_id,
                                 snapshot.source.len() as u32,
                                 refusal,

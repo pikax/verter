@@ -443,28 +443,12 @@ impl BoundNativeHostRequest {
     }
 }
 
-impl BoundNativeHostRequest {
-    /// Consumes the binding by value for a retained compatibility route:
-    /// yields the attribution and drops the bound backend arm UNEXECUTED —
-    /// execution stays with the route's registry-dispatched
-    /// `compile_bundle` call; a route that executes through its bound
-    /// backend consumes the backend itself instead of this seam. Both
-    /// arms route through their single per-arm consumption points.
-    #[must_use]
-    pub(crate) fn into_attribution(self) -> NativeHostRequestAttribution {
-        match self {
-            Self::Vue(vue) => vue.into_host_backend().1,
-            Self::Svelte(svelte) => svelte.into_host_backend().1,
-        }
-    }
-}
-
 impl crate::VerterHost {
     /// The ONE common production binding point for host compile attempts:
-    /// every compile attempt — host-backed `compile_entry` and the
-    /// runtime-render `compile_entry_runtime_render` compatibility route —
-    /// creates exactly one [`BoundNativeHostRequest`] here, from its
-    /// immutable request snapshot, and threads the binding into the route.
+    /// every compile attempt — the host-backed `compile_entry` route and
+    /// the runtime-render `compile_entry_runtime_render` route — creates
+    /// exactly one [`BoundNativeHostRequest`] here, from its immutable
+    /// request snapshot, and threads the binding into the route.
     /// A warm hit performs no compile and never reaches this point.
     ///
     /// Framework identity derives SOLELY from the registered parse

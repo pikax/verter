@@ -38,7 +38,7 @@
         "generate": "client",
         "runes": true
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/basic-runes__client__runes1__dev1": {
       "officialDomain": {
@@ -80,7 +80,7 @@
         "generate": "client",
         "runes": true
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/basic-runes__server__runes1__dev0": {
       "officialDomain": {
@@ -114,7 +114,7 @@
         "generate": "server",
         "runes": true
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/basic-runes__server__runes1__dev1": {
       "officialDomain": {
@@ -148,7 +148,7 @@
         "generate": "server",
         "runes": true
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/legacy-slots__client__runes0__dev0": {
       "officialDomain": {
@@ -188,7 +188,7 @@
         "generate": "client",
         "runes": false
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/legacy-slots__client__runes0__dev1": {
       "officialDomain": {
@@ -230,7 +230,7 @@
         "generate": "client",
         "runes": false
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/legacy-slots__server__runes0__dev0": {
       "officialDomain": {
@@ -264,7 +264,7 @@
         "generate": "server",
         "runes": false
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/legacy-slots__server__runes0__dev1": {
       "officialDomain": {
@@ -298,7 +298,7 @@
         "generate": "server",
         "runes": false
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/props-events__client__runes1__dev0": {
       "officialDomain": {
@@ -338,7 +338,7 @@
         "generate": "client",
         "runes": true
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/props-events__client__runes1__dev1": {
       "officialDomain": {
@@ -380,7 +380,7 @@
         "generate": "client",
         "runes": true
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/props-events__server__runes1__dev0": {
       "officialDomain": {
@@ -414,7 +414,7 @@
         "generate": "server",
         "runes": true
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     },
     "svelte/props-events__server__runes1__dev1": {
       "officialDomain": {
@@ -448,7 +448,7 @@
         "generate": "server",
         "runes": true
       },
-      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> CarrierCompilerRegistry::compile_bundle -> svelte::runtime::compile_client"
+      "route": "VerterHost::upsert -> get_virtual_file(Main) -> compile_entry -> bound host request [adapter=svelte carrier-language=svelte framework-epoch=svelte host-epoch=native-host] -> SvelteHostIntegrationBackend::admit_host_products -> compile_host_products -> svelte::runtime::compile_client"
     }
   },
   "note": "Per-cell facts for the committed Svelte conformance goldens: the exact request, its route, its profile axes, the products the route can publish, the pinned official domain the golden was generated against, and the observed outcome. Facts only — no correction owner, no acceptance identifier, no disposition."

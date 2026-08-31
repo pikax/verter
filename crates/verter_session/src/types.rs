@@ -1320,15 +1320,15 @@ bitflags::bitflags! {
     ///
     /// Session-owned: the canonical `CompileRequest` (`verter_compiler`) is
     /// the ONE fail-closed construction authority for the actual compile
-    /// pipeline: every production entry point that reaches `compile_bundle`/
-    /// `compile()` builds a `CompileRequest` (via `CompileRequest::new` or
-    /// the equivalent per-route reverse-mapping helper) and refuses an
-    /// invalid product/mode combination by construction. This bitset exists
-    /// only because `CompileProfile` needs a `Hash`/`Eq` cache-slot
-    /// discriminant, and most of `CompileRequest`'s nested types are not
-    /// `Hash`. It is never passed into the compiler directly; call sites
-    /// convert it through `CompileRequest::new` (or a route's reverse-
-    /// mapping helper) before it can influence a compile.
+    /// pipeline. Every production compile entry point composes a
+    /// `CompileRequest` — the host-backed and runtime-render lanes through
+    /// the framework host backend's own admission issuance, every other
+    /// caller through `CompileRequest::new` — and an invalid product/mode
+    /// combination refuses by construction. This bitset exists only because
+    /// `CompileProfile` needs a `Hash`/`Eq` cache-slot discriminant, and
+    /// most of `CompileRequest`'s nested types are not `Hash`. It is never
+    /// passed into the compiler directly: a call site converts it into a
+    /// demanded product set before it can influence a compile.
     ///
     /// Use the preset constants for common configurations:
     /// - [`BUNDLER`](Self::BUNDLER) — style + script + template codegen (runtime output)
@@ -1523,24 +1523,29 @@ pub struct CompileProfile {
     /// Svelte `ModuleCompileOptions.generate`. Settable here (a
     /// `supported canonical` option row in isolation), but there is no
     /// Verter product for Svelte's `ModuleJavaScript` output family
-    /// today: setting this refuses `build_svelte_compile_request` with a typed
-    /// `UnsupportedOption` naming the `SvelteModule` capability cell,
-    /// `unsupported fail-closed` per `capability-matrix.tsv` — the same
-    /// "option admits fine, the capability it depends on does not"
-    /// pattern as `VUE-COMPAT-V2`.
+    /// today: setting this refuses canonical request construction inside
+    /// the bound backend's admission with a typed `UnsupportedOption`
+    /// naming the `SvelteModule` capability cell, `unsupported
+    /// fail-closed` per `capability-matrix.tsv` — the same "option admits
+    /// fine, the capability it depends on does not" pattern as
+    /// `VUE-COMPAT-V2`.
     pub svelte_generate_module: Option<bool>,
     /// Svelte `ModuleCompileOptions.experimental.async`. Same capability
     /// gate as [`Self::svelte_generate_module`] — also refuses.
     pub svelte_experimental_async: Option<bool>,
-    /// Svelte `CompileOptions.css` — `"injected"` or `"external"`. Not yet
-    /// consulted by the carrier's own css-mode detection (which derives
-    /// the mode from the source's `<svelte:options css>` / `<style>`
-    /// content instead) — representable on the request, not yet live.
+    /// Svelte `CompileOptions.css` — `"injected"` or `"external"`. The
+    /// bundle execution derives its css mode from the source
+    /// (`<svelte:options css>` / `<style>` content) and carries no
+    /// request-level css channel, so a host compile demanding this axis
+    /// refuses TYPED at the bound backend's admission
+    /// (`SvelteHostUnproducibleDemand::CssMode`) — never a silent drop.
     pub svelte_css: Option<String>,
     /// Svelte `SvelteOptions.customElement.tag` — the custom-element tag
-    /// name. Not yet consulted by the carrier's custom-element
-    /// resolution (`resolve_custom_element`, which only reads the plain
-    /// `customElement: bool` axis today) — representable, not yet live.
+    /// name. The bundle execution resolves the descriptor from the parsed
+    /// `<svelte:options>` element only, so a host compile demanding a
+    /// request-level descriptor refuses TYPED at the bound backend's
+    /// admission (`SvelteHostUnproducibleDemand::CustomElementDescriptor`)
+    /// — never a silent drop.
     pub svelte_custom_element_tag: Option<String>,
     /// Svelte `SvelteOptions.customElement.shadow` — `true` (open shadow
     /// root, the default) or `false` (no shadow root). Same carrier-
@@ -1551,7 +1556,10 @@ pub struct CompileProfile {
     /// meaningful sub-fields once its `componentApi` axis is excluded as
     /// `unsupported fail-closed`; only WHETHER the caller specified
     /// `compatibility: {}` at all is representable). `Some(true)` sets
-    /// the presence marker; `None`/`Some(false)` omit it.
+    /// the presence marker; `None`/`Some(false)` omit it. The bundle
+    /// execution has no compatibility routing channel, so a host compile
+    /// demanding it refuses TYPED at the bound backend's admission
+    /// (`SvelteHostUnproducibleDemand::Compatibility`).
     pub svelte_compatibility: Option<bool>,
     /// Caller-requested compile cache mode for this request.
     ///
@@ -2587,9 +2595,10 @@ impl DiagnosticsSnapshot {
     }
 
     /// Merge diagnostics from a different reporting channel that can
-    /// carry the same defect. Vue's `compile_bundle` clones parse-time
-    /// diagnostics into the compile result, so byte-identical entries
-    /// (severity, code, message, span, arguments) are dropped.
+    /// carry the same defect. The Vue backend's bundle execution reuses the
+    /// already-parsed artifact and clones that same parse's diagnostics into
+    /// the compile result, so byte-identical entries (severity, code,
+    /// message, span, arguments) are dropped.
     pub(crate) fn merge_deduplicated(mut self, mut incoming: DiagnosticsSnapshot) -> Self {
         incoming
             .diagnostics
@@ -4879,9 +4888,8 @@ mod tests {
     /// * the Svelte carrier's own codes (`svelte-runtime-*`, its CSS and
     ///   rejected-rule codes) — all unsupported/invalid constructs in the
     ///   bytes;
-    /// * `HOST_NO_CARRIER_ARTIFACT` / `HOST_NO_CARRIER_COMPILER` — no parse
-    ///   artifact for these bytes / no compiler registered for the adapter;
-    ///   neither is waiting on a file;
+    /// * `HOST_NO_CARRIER_ARTIFACT` — no parse artifact for these bytes; the
+    ///   input registers no framework carrier, so it is not waiting on a file;
     /// * `HOST_NATIVE_BINDING_UNAVAILABLE` — the registered host-integration
     ///   catalog holds no bindable row for the artifact's identity; the
     ///   catalog is built-in and static per build, so identical bytes cannot
@@ -5036,7 +5044,6 @@ mod tests {
             "svelte-runtime-generated-module-invalid",
             // The host-side compile-routing refusals.
             "HOST_NO_CARRIER_ARTIFACT",
-            "HOST_NO_CARRIER_COMPILER",
             "HOST_NATIVE_BINDING_UNAVAILABLE",
             "HOST_COMPILE_TARGET_MISSING_IDE",
             "HOST_COMPILE_UNSUPPORTED",

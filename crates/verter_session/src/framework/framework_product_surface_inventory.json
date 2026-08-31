@@ -18,7 +18,7 @@
       "id": "virtual-node.read",
       "hostEntryPoint": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:1040",
       "requestType": "VirtualQuery { raw_id, canonical_id, node_kind, compile_profile }",
-      "route": "get_virtual_file -> ensure_compiled -> compile_entry -> CarrierCompilerRegistry::compile_bundle (virtual_file_pipeline.rs:2946); Vue Main additionally through assemble_vue_main_module (virtual_file_pipeline.rs:3033)",
+      "route": "get_virtual_file -> ensure_compiled -> compile_entry consumes the request-scoped BoundNativeHostRequest (bind_native_host_compile_attempt, one binding per compile attempt); the binding's catalog arm selects the framework host-integration backend, which issues the demand-specific multi-product admission (admit_host_products over the session-built demand: requested products + typed option attempt) and executes it by value (compile_host_products) — one admitted parse/semantic/projection/plan/emit population per request, publication gated per product on the admitted set; Vue Main additionally through assemble_vue_main_module (virtual_file_pipeline.rs)",
       "products": [
         "virtual-node.main",
         "virtual-node.script",
@@ -104,7 +104,7 @@
       "id": "ide.ensure",
       "hostEntryPoint": "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs:2095",
       "requestType": "(canonical id, CompileProfile)",
-      "route": "ensure_ide_compiled -> compile_entry -> CarrierCompiler::compile_bundle with want_ide (virtual_file_pipeline.rs:2874)",
+      "route": "ensure_ide_compiled -> compile_entry consumes the request-scoped BoundNativeHostRequest (bind_native_host_compile_attempt, one binding per compile attempt); the binding's catalog arm selects the framework host-integration backend, which issues the demand-specific multi-product admission (admit_host_products over the session-built demand: requested products + typed option attempt) and executes it by value (compile_host_products) — one admitted parse/semantic/projection/plan/emit population per request, publication gated per product on the admitted set with the IDE product demanded (virtual_file_pipeline.rs)",
       "products": [
         "ide-tsx",
         "source-map",
@@ -236,7 +236,7 @@
       "id": "compile.audited",
       "hostEntryPoint": "crates/verter_session/src/host_compile_audit.rs:90",
       "requestType": "(canonical id, CompileTarget)",
-      "route": "compile_with_audit -> compile_entry -> CarrierCompilerRegistry::compile_bundle",
+      "route": "compile_with_audit -> request_from_target composes the canonical CompileRequest from the CompileTarget bits through the shared Vue option-admission surface (VueOptionAttempt::into_request, which refuses an unsupported option by construction), then drives the already-published registered Vue parse artifact directly (compile_registered_vue_artifact -> compile_from_parsed) inside the audit request context. This spelling names its Vue producer itself instead of consuming a request-scoped BoundNativeHostRequest, so it does NOT reach compile_entry and does NOT go through the bound host-backed multi-product admission the get_virtual_file / compile_many HostBacked lanes use; it is Vue-only and fails closed with a typed VerterE001 diagnostic on any other registered framework carrier.",
       "products": [
         "audit-record",
         "virtual-node.main",
@@ -264,16 +264,16 @@
       ],
       "successForRepresentativeInput": {
         "vue": "yes",
-        "svelte": "yes"
+        "svelte": "no — the Vue-only guard fails closed with a typed VerterE001 error and publishes no compiled block (pinned by compile_audit_vue_only_guard.rs); the call still returns its audit-record carrier"
       },
       "transportReturnDivergence": "The transport spellings return the AUDIT RECORD only, not the compiled product: crates/verter_napi/src/lib.rs:2525-2540 and crates/verter_wasm/src/lib.rs:874 encode `.audit()` and drop the result, projecting to null when no stored record was captured (crates/verter_napi/src/audit.rs:60-65). Driven on both transports on an audit-enabled host, the Vue carrier yields a stored record and the Svelte carrier yields null; both transports agree, so it is the shared host's capture behaviour, not a transport divergence. Pinned by the_audited_compile_spelling_captures_for_vue_and_not_for_svelte_on_both_transports."
     },
     {
       "id": "compile.batch",
-      "note": "HostBacked lane only: the runtime-render rows are the separate `compile.batch.runtime-render` case; this record covers the registry-dispatched compile_entry route the HostBacked lane serves.",
+      "note": "HostBacked lane only: the runtime-render rows are the separate `compile.batch.runtime-render` case; this record covers the bound host-backed compile_entry route the HostBacked lane serves.",
       "hostEntryPoint": "crates/verter_session/src/host_compile.rs:327",
       "requestType": "(Vec<CompileBatchInput>, CompileBatchOptions, CompileManyTarget::HostBacked)",
-      "route": "compile_many -> the same compile_entry substrate as get_virtual_file",
+      "route": "compile_many -> the same compile_entry substrate as get_virtual_file: each batch entry is its own host compile request with its own request-scoped BoundNativeHostRequest (bind_native_host_compile_attempt, one binding per compile attempt); the binding's catalog arm selects the framework host-integration backend, which issues the demand-specific multi-product admission (admit_host_products) and executes it by value (compile_host_products) — one admitted parse/semantic/projection/plan/emit population, per-product publication gated on the admitted set, cache-mode/fact-tracer/warm-hit/publish wrapper unchanged; Vue Main additionally through assemble_vue_main_module",
       "products": [
         "virtual-node.main",
         "source-map",
@@ -292,14 +292,15 @@
       "successForRepresentativeInput": {
         "vue": "yes",
         "svelte": "yes — driven in svelte_batch_route_tests (in-process) and through the native transport in transport_route_equivalence_tests; the batch derives each input language from its canonical id, so a .svelte input is compiled by the Svelte carrier and its runtime refusals surface there"
-      }
+      },
+      "routeEvidence": "Structured facts over route strings: the requested lane is the explicit CompileManyTarget variant; the selected host catalog identity (adapter, carrier language, framework epoch, host epoch) and the bound snapshot's source generation ride the binding's NativeHostRequestAttribution and are checked against the executed artifact at the lane's per-arm consumption points (debug_assert_compile_bound_attribution in host_compile_audit.rs); the requested products are recorded on the issued admission's canonical request (admitted_products) and every publication accessor gates on that admitted set; the outcome is the typed CompileBatchOutcome sum (Produced | Failed) with runtime-surface refusals as the typed all-or-none refusal arm. Those structured observations are what the suites assert: host_backed_lane_tests.rs (bound-attribution injection, admitted-demand-set execution with per-product byte oracles) and the AST routing guard host_backend_routing_guards.rs (no hardcoded producer, no registry bundle dispatch, and the bound-backend issuance + by-value execution seams required PER dispatch arm, so one framework arm cannot be covered by its sibling's calls). The route string above is prose derived from those same observations; no test compares it byte-wise, so a route that drifts is caught by those suites failing on the behaviour the string describes, not by a string diff."
     },
     {
       "id": "compile.batch.runtime-render",
       "hostEntryPoint": "crates/verter_session/src/host_compile.rs:327",
       "requestType": "(Vec<CompileBatchInput>, CompileBatchOptions, CompileManyTarget::RuntimeRender { profile })",
       "route": "compile_many -> render_only_main -> compile_entry_runtime_render: each batch entry is its own host compile request with its own request-scoped BoundNativeHostRequest (bind_native_host_compile_attempt, one binding per render attempt); the binding's catalog arm selects the framework host-integration backend, which issues the demand-specific runtime-render admission (admit_runtime_render) and executes it through the matching runtime backend (compile_runtime_render) — one admitted parse/semantic/runtime/assembly population, no cache admission, no last-known-good; Vue Main additionally through assemble_vue_main_module",
-      "routeEvidence": "Structured facts over route strings: the requested lane is the explicit CompileManyTarget variant; the selected host catalog identity (adapter, carrier language, framework epoch, host epoch) and the bound snapshot's source generation ride the binding's NativeHostRequestAttribution and are checked against the executed artifact at the lane's per-arm consumption points (debug_assert_runtime_render_bound_attribution in host_compile_audit.rs); the selected runtime identity is the catalog row the backend's execution re-selects (registered_runtime_for); the requested products are recorded on the issued admission's canonical request (admitted_products); the outcome is the typed CompileBatchOutcome sum (Produced | Failed) with runtime-surface refusals as typed HostError::RuntimeSurfaceRefused. The route string above is equality-checked against those observations by runtime_render_lane_tests.rs (binding cardinality, bound-arm request shape, admitted-demand execution, attribution mismatch) and svelte_batch_route_tests.rs.",
+      "routeEvidence": "Structured facts over route strings: the requested lane is the explicit CompileManyTarget variant; the selected host catalog identity (adapter, carrier language, framework epoch, host epoch) and the bound snapshot's source generation ride the binding's NativeHostRequestAttribution and are checked against the executed artifact at the lane's per-arm consumption points (debug_assert_compile_bound_attribution in host_compile_audit.rs); the selected runtime identity is the catalog row the backend's execution re-selects (registered_runtime_for); the requested products are recorded on the issued admission's canonical request (admitted_products); the outcome is the typed CompileBatchOutcome sum (Produced | Failed) with runtime-surface refusals as typed HostError::RuntimeSurfaceRefused. The route string above is equality-checked against those observations by runtime_render_lane_tests.rs (binding cardinality, bound-arm request shape, admitted-demand execution, attribution mismatch) and svelte_batch_route_tests.rs.",
       "products": [
         "virtual-node.main",
         "source-map",

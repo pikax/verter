@@ -540,12 +540,13 @@ fn runtime_render_syntax_error_is_fatal() {
 /// `compile_many`'s `RuntimeRender` lane — the shared substrate NAPI's
 /// `compileMany` and the unplugin's bundler render route both go through —
 /// must refuse an `ssr=true, force_vapor=true` batch render profile with a
-/// fatal typed error, not silently reach codegen. Regression coverage for
-/// the `compile_bundle` fail-closed gate: this lane calls
-/// `compiler.compile_bundle` directly (not `CompileRequest::new`), so
-/// without that gate this combination would have produced whatever the
-/// Vapor/SSR codegen paths happen to interact to on an unvalidated input,
-/// not a clean refusal.
+/// fatal typed error, not silently reach codegen. The lane admits the
+/// render demand through the bound framework host backend and issues a
+/// `CompileRequest` from it, so the unsupported backend x mode pair is
+/// caught at request construction, before any codegen leg runs. Without
+/// that construction-time refusal the combination would have produced
+/// whatever the Vapor and SSR codegen paths happen to interact to on an
+/// unvalidated input, not a clean refusal.
 #[test]
 fn runtime_render_refuses_ssr_and_force_vapor() {
     let src = "<template><div>{{ a }}</div></template>\n";

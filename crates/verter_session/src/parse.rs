@@ -313,12 +313,14 @@ pub(crate) fn try_resolve_src_block(
 /// or lifecycle state.
 /// The process-wide compiler-side carrier-compiler registry.
 ///
-/// Compile / eval / IDE / template-data dispatch looks the file's adapter
-/// compiler up here. This module does not select a parse frontend: host
-/// source-stage carrier parse is owned by the publication store, and
-/// [`carrier_snapshot_from_artifact`] only builds a snapshot from an
-/// already-published artifact. The compiler registry is stateless, so one
-/// process-wide instance serves every host.
+/// Test-only: no production session route dispatches through the
+/// combined registry any more — the host compile lanes execute through
+/// the request-scoped bound framework host-integration backends, and
+/// host source-stage carrier parse is owned by the publication store
+/// ([`carrier_snapshot_from_artifact`] only builds a snapshot from an
+/// already-published artifact). The registry is stateless, so one
+/// process-wide instance serves every test caller.
+#[cfg(test)]
 pub(crate) fn carrier_compiler_registry(
 ) -> &'static verter_compiler::framework_common::CarrierCompilerRegistry {
     use std::sync::OnceLock;

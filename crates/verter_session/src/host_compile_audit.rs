@@ -1,10 +1,16 @@
 //! `VerterHost::compile_with_audit` — single-file audited compile entry-point.
 //!
-//! VUE-ONLY: this entry compiles the Vue artifact elected by the host's
-//! registered publication store. It fails closed on a non-Vue framework
-//! carrier (a `.svelte` file) with a typed `VerterE001` diagnostic rather than
-//! silently Vue-compiling it. Routing this audited path through the carrier
-//! registry so it compiles every registered carrier is a tracked follow-up.
+//! VUE-ONLY BY CONSTRUCTION: this entry names the Vue SFC producer itself
+//! instead of consuming a request-scoped bound host identity that would elect
+//! one, so the Vue carrier is its whole supported surface. It compiles the
+//! Vue artifact elected by the host's registered publication store, and on any
+//! other registered framework carrier (a `.svelte` file) it fails closed with
+//! a typed `VerterE001` diagnostic rather than silently Vue-compiling it.
+//!
+//! The framework-neutral answer is the host-backed compile route, which
+//! selects its producer from a request-scoped host binding's catalog arm — NOT
+//! an outer carrier-registry bundle call, which reintroduces exactly the
+//! registry-selected dispatch the bound route forbids.
 //!
 //! Wraps one registered-artifact compile call in the same
 //! audit-registration / TLS-observer machinery the component-meta entry-point
@@ -29,14 +35,15 @@
 //! [`verter_audit::AuditCaptureState::FilteredNoop`] /
 //! [`verter_audit::AuditCaptureState::AuditDisabled`].
 //!
-//! Runtime-render attribution: the render-only lane
-//! (`compile_entry_runtime_render`) is not an audited entry-point of its
-//! own — its structured attribution is the request-scoped bound identity
+//! Bound-route attribution: both bound compile lanes — the host-backed
+//! multi-product route (`compile_entry`) and the render-only lane
+//! (`compile_entry_runtime_render`) — carry their structured attribution
+//! on the request-scoped bound identity
 //! ([`crate::host_resolve::native_host_binding::NativeHostRequestAttribution`]:
 //! the registered catalog row plus the bound snapshot), checked against
-//! the executed artifact at the lane's per-arm consumption points via
-//! [`debug_assert_runtime_render_bound_attribution`] so the attribution
-//! can never disagree with the backend arm that actually executed.
+//! the executed artifact at each lane's per-arm consumption points via
+//! [`debug_assert_compile_bound_attribution`] so the attribution can
+//! never disagree with the backend arm that actually executed.
 
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
@@ -152,9 +159,10 @@ fn request_from_target(
         },
         ..Default::default()
     };
-    // Routes through the SAME admission surface the session route
-    // (`host_resolve::compile_request_build::build_vue_compile_request`)
-    // uses, rather than constructing `VueCompileRequest` directly:
+    // Routes through the SAME option-admission surface the session's
+    // bound host-backed demand reaches inside the framework host
+    // backend's issuance (`VueOptionAttempt::into_request`), rather than
+    // constructing `VueCompileRequest` directly:
     // `CompileAuditOverrides` has no field mapping onto any of the 12
     // unsupported-fail-closed slots today, so this can never actually
     // refuse here — but it is the structural admission gate, not a
@@ -389,19 +397,18 @@ impl VerterHost {
         };
         let source: &str = source_arc.as_ref();
 
-        // Vue-only guard. `compile_sfc` (`verter_compiler::compile::compile`) is
-        // the hardcoded Vue SFC runtime compiler — it is NOT the framework-
-        // neutral carrier path (`compile_entry` → `CarrierCompilerRegistry::
-        // compile_bundle`). Driving a NON-Vue framework carrier (a `.svelte`
-        // file) through it would silently produce WRONG output (Vue-compiling a
-        // Svelte component). This audited path stays Vue-only and FAILS CLOSED
-        // on a non-Vue carrier with a clear typed diagnostic rather than
-        // emitting wrong bytes.
+        // Vue-only guard. Every arm below drives
+        // `compile_registered_vue_artifact` — the Vue SFC producer, named by
+        // THIS function rather than selected from the request's registered
+        // framework identity. Driving a NON-Vue framework carrier (a
+        // `.svelte` file) through it would silently produce WRONG output
+        // (Vue-compiling a Svelte component), so it FAILS CLOSED on a non-Vue
+        // carrier with a typed diagnostic instead of emitting wrong bytes.
         //
-        // TODO(follow-up): route `compile_with_audit` through the carrier
-        // registry (`compile_bundle`) so the audit path compiles every
-        // registered carrier — see .claude/skills/compiler-codegen/SKILL.md §11
-        // (the audit/helper compile-caller carrier migration follow-up).
+        // The framework-neutral answer is the host-backed compile route,
+        // which selects its producer from a request-scoped host binding's
+        // catalog arm; this audited spelling consumes no binding, so its
+        // supported surface is the Vue carrier alone.
         let language = self.language_classifier().classify(canonical_id);
         if language.is_framework_carrier() && !language.is_vue() {
             let mut unsupported = VerterCompileResult {
@@ -430,8 +437,8 @@ impl VerterHost {
                     code: "VerterE001".to_string(),
                     message: format!(
                         "compile_with_audit is the Vue-only audited compile path; the non-Vue \
-                         framework carrier '{canonical_id}' is not supported here (route it \
-                         through the carrier registry)"
+                         framework carrier '{canonical_id}' is not supported here (compile it \
+                         through the host-backed compile routes)"
                     ),
                     span: None,
                 });
@@ -789,36 +796,59 @@ impl VerterHost {
     }
 }
 
-/// Structured runtime-render bound-topology attribution check: the
-/// registered catalog row the request was bound to (adapter, carrier
-/// language, framework epoch, host epoch) plus the bound snapshot
-/// identity must describe EXACTLY the artifact the render admission was
-/// issued and executed over. Called at the render lane's per-arm binding
-/// consumption points, immediately before issuance, so the attribution a
-/// consumer would report can never disagree with the executed bound
-/// topology. Debug-build invariant: a mismatch is a session wiring
-/// defect (the binding and the compile input were read from different
-/// request contexts), not a user-input outcome.
-pub(crate) fn debug_assert_runtime_render_bound_attribution(
+/// The bound compile lane a [`debug_assert_compile_bound_attribution`]
+/// check attributes — names the route in the assertion diagnostics so a
+/// tripped invariant identifies which lane paired a foreign binding with
+/// its compile input.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BoundCompileRoute {
+    /// The host-backed multi-product route (`compile_entry`).
+    HostBacked,
+    /// The render-only route (`compile_entry_runtime_render`).
+    RuntimeRender,
+}
+
+impl BoundCompileRoute {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::HostBacked => "host-backed",
+            Self::RuntimeRender => "runtime-render",
+        }
+    }
+}
+
+/// Structured bound-topology attribution check: the registered catalog
+/// row the request was bound to (adapter, carrier language, framework
+/// epoch, host epoch) plus the bound snapshot identity must describe
+/// EXACTLY the artifact the compile admission was issued and executed
+/// over. Called at each bound lane's per-arm binding consumption points,
+/// immediately before issuance, so the attribution a consumer would
+/// report can never disagree with the executed bound topology.
+/// Debug-build invariant: a mismatch is a session wiring defect (the
+/// binding and the compile input were read from different request
+/// contexts), not a user-input outcome.
+pub(crate) fn debug_assert_compile_bound_attribution(
+    route: BoundCompileRoute,
     attribution: &crate::host_resolve::native_host_binding::NativeHostRequestAttribution,
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     canonical_id: &str,
 ) {
+    let route = route.as_str();
     let identity = attribution.catalog_identity();
     verter_debug_assert_eq!(
         identity.adapter_id(),
         artifact.adapter_id(),
-        "runtime-render bound attribution must name the executed artifact's adapter"
+        "{route} bound attribution must name the executed artifact's adapter"
     );
     verter_debug_assert_eq!(
         identity.carrier_language_id(),
         artifact.language_id(),
-        "runtime-render bound attribution must name the executed artifact's carrier language"
+        "{route} bound attribution must name the executed artifact's carrier language"
     );
     verter_debug_assert_eq!(
         identity.epoch(),
         artifact.epoch(),
-        "runtime-render bound attribution must name the executed artifact's framework epoch"
+        "{route} bound attribution must name the executed artifact's framework epoch"
     );
     verter_debug_assert!(
         identity.host_epoch().is_some(),
@@ -827,7 +857,7 @@ pub(crate) fn debug_assert_runtime_render_bound_attribution(
     verter_debug_assert_eq!(
         attribution.snapshot().canonical_id(),
         canonical_id,
-        "runtime-render bound attribution must name the executed request's canonical id"
+        "{route} bound attribution must name the executed request's canonical id"
     );
 }
 

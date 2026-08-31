@@ -353,6 +353,11 @@ node_id = "CCA1N4"
 commit_message = "feat(session): route runtime render through bound framework host backends"
 commit_date = "2026-08-31T10:47:35+01:00"
 
+[[implemented]]
+node_id = "CCA1N3"
+commit_message = "feat(session): route host-backed compile through bound framework host backends"
+commit_date = "2026-08-31T14:30:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102

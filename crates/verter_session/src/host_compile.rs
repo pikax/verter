@@ -385,8 +385,8 @@ impl VerterHost {
     /// project capability snapshot — is its only authority. Registering a
     /// `.svelte` source under the Vue carrier is what made the batch route
     /// publish Vue-assembled bytes and swallow the Svelte runtime refusals,
-    /// because the carrier registry dispatches its compiler by the language
-    /// row recorded here.
+    /// because the compile lane binds its framework host backend from the
+    /// registered carrier identity this language row produces.
     ///
     /// This function takes no language argument, so a batch call site has
     /// nothing to get wrong. Re-introducing a fixed carrier means editing the

@@ -162,9 +162,11 @@ pub enum VueHostUnproducibleDemand {
     /// serve one kind a bundle whose compile never ran. The canonical
     /// direct compile route remains the dual-kind path.
     DualRuntimeKind,
-    /// The `vue_options.ssr` flag disagrees with the demanded runtime
-    /// product kind — execution derives its ssr mode from the product set,
-    /// so honoring the flag and honoring the product would diverge.
+    /// A runtime product is demanded and the `vue_options.ssr` flag
+    /// disagrees with its kind — execution derives its ssr mode from the
+    /// product set, so honoring the flag and honoring the product would
+    /// diverge. A demand carrying NO runtime product is not a mismatch:
+    /// the derived mode drives only the runtime leg, which never runs.
     SsrFlagRuntimeKindMismatch,
     /// `AnalysisProductRequest.want_script_bindings`: execution never
     /// produces script bindings on this route and no accessor publishes
@@ -727,7 +729,16 @@ fn refuse_unproducible_products(
             VueHostUnproducibleDemand::DualRuntimeKind,
         ));
     }
-    if ssr_flag != wants_server {
+    // The ssr flag has to agree with the product set only when a runtime
+    // product is actually demanded. `derive_admitted_runtime_options`
+    // reads the mode off the product set to drive the RUNTIME leg alone,
+    // and reports `want_runtime: false` when no runtime product was
+    // admitted — so with no runtime product the flag drives nothing and
+    // cannot be a dropped or substituted axis. An IDE-only or
+    // analysis-only demand therefore serves regardless of the flag, while
+    // a demand that does carry a runtime product must agree with it or
+    // execution would serve the other kind.
+    if (wants_client || wants_server) && ssr_flag != wants_server {
         return Err(VueHostAdmissionRefusal::UnproducibleDemand(
             VueHostUnproducibleDemand::SsrFlagRuntimeKindMismatch,
         ));
@@ -1162,6 +1173,62 @@ mod tests {
                 VueHostUnproducibleDemand::SsrFlagRuntimeKindMismatch
             )
         );
+    }
+
+    /// The ssr flag is an axis of the RUNTIME leg. A demand that asks for
+    /// no runtime product at all runs no runtime leg, so the flag drives
+    /// nothing and cannot be silently dropped — such a demand is admitted
+    /// whatever the flag says, and the admitted request carries the
+    /// demanded products unchanged.
+    #[test]
+    fn ssr_flag_without_any_runtime_product_admits() {
+        let artifact = vue_artifact(SFC);
+        for products in [
+            vec![CompileProduct::IdeCompanion(IdeProductRequest::default())],
+            vec![CompileProduct::Analysis(AnalysisProductRequest {
+                want_script_bindings: false,
+                want_template_data: true,
+            })],
+            vec![
+                CompileProduct::IdeCompanion(IdeProductRequest::default()),
+                CompileProduct::Analysis(AnalysisProductRequest {
+                    want_script_bindings: false,
+                    want_template_data: true,
+                }),
+            ],
+        ] {
+            let admission = VueHostIntegrationBackend::new()
+                .admit_host_products(
+                    &artifact,
+                    VueHostMultiProductDemand {
+                        products: products.clone(),
+                        vue_options: VueOptionAttempt {
+                            ssr: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .expect("no runtime product is demanded, so the ssr flag drives nothing");
+            assert_eq!(
+                admission
+                    .request()
+                    .products()
+                    .iter()
+                    .map(CompileProduct::kind)
+                    .collect::<Vec<_>>(),
+                products
+                    .iter()
+                    .map(CompileProduct::kind)
+                    .collect::<Vec<_>>(),
+                "the admitted request carries exactly the demanded products"
+            );
+            let grants = admission.into_execution_grants();
+            assert!(
+                grants.runtime.is_none(),
+                "no runtime leg is admitted, so the ssr mode is never derived"
+            );
+        }
     }
 
     #[test]
