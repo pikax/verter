@@ -90,10 +90,24 @@ pub(super) fn relate_literal_to_primitive(
     }
 }
 
+/// TypeScript literal-type identity for two literal payloads.
+///
+/// Numeric payloads compare SameValueZero — the keying the checker's
+/// literal-type interning uses, where `0` and `-0` are ONE literal type —
+/// NOT f64 bit identity. The producer boundary normalizes `-0.0`, so this
+/// is the second line of defence: a stray unnormalized `-0` payload must
+/// never be read as a DIFFERENT literal type (which would publish a wrong
+/// `NotAssignable`). The same oracle backs the disjointness proof, so the
+/// relation and canonical-algebra halves cannot disagree about which pairs
+/// are one literal type.
 pub(super) fn literals_equal(a: &LiteralValue, b: &LiteralValue) -> bool {
     match (a, b) {
         (LiteralValue::String(s1), LiteralValue::String(s2)) => s1 == s2,
-        (LiteralValue::Number(n1), LiteralValue::Number(n2)) => n1.to_bits() == n2.to_bits(),
+        (LiteralValue::Number(n1), LiteralValue::Number(n2)) => {
+            !crate::project_semantic_dispatch::canonical_algebra::numeric_literal_values_disjoint(
+                *n1, *n2,
+            )
+        }
         (LiteralValue::Boolean(b1), LiteralValue::Boolean(b2)) => b1 == b2,
         (LiteralValue::BigInt(s1), LiteralValue::BigInt(s2)) => s1 == s2,
         _ => false,
@@ -273,4 +287,47 @@ fn is_numeric_literal_name(property_name: &str) -> bool {
     property_name
         .parse::<f64>()
         .is_ok_and(|value| super::build::js_number_to_string(value) == property_name)
+}
+
+#[cfg(test)]
+mod literal_identity_tests {
+    use super::literals_equal;
+    use verter_type_expr::LiteralValue;
+
+    /// TypeScript interns `0` and `-0` as ONE numeric literal type (the
+    /// checker keys literal types by `toString()`), so the relation
+    /// engine's literal-identity oracle must judge them EQUAL. Raw f64 bit
+    /// identity does not: `0.0f64.to_bits() != (-0.0f64).to_bits()`, which
+    /// would publish a wrong `NotAssignable` for a stray unnormalized `-0`
+    /// payload. The producer boundary normalizes `-0.0`; this oracle is the
+    /// second line of defence, and it must not be selectively applied —
+    /// the disjointness proof already compares SameValueZero.
+    #[test]
+    fn numeric_literal_identity_is_same_value_zero_not_bit_identity() {
+        assert!(
+            literals_equal(&LiteralValue::Number(0.0), &LiteralValue::Number(-0.0_f64)),
+            "`0` and `-0` are one TypeScript literal type"
+        );
+        assert!(
+            literals_equal(&LiteralValue::Number(-0.0_f64), &LiteralValue::Number(0.0)),
+            "the oracle is symmetric"
+        );
+        // The guard must not widen identity anywhere else.
+        assert!(!literals_equal(
+            &LiteralValue::Number(0.0),
+            &LiteralValue::Number(1.0)
+        ));
+        assert!(!literals_equal(
+            &LiteralValue::Number(1.0),
+            &LiteralValue::Number(-1.0)
+        ));
+        assert!(literals_equal(
+            &LiteralValue::Number(1.5),
+            &LiteralValue::Number(1.5)
+        ));
+        assert!(!literals_equal(
+            &LiteralValue::Number(0.0),
+            &LiteralValue::String("0".to_string())
+        ));
+    }
 }

@@ -184,7 +184,17 @@ impl CanonicalEvidence {
                 continue;
             };
             children.clear();
-            push_child_ids(&data, &mut children);
+            if !push_child_ids(&data, &mut children) {
+                // The payload's children are not enumerable from here (a
+                // sealed composition payload). Its subtree therefore never
+                // enters the root set, so the evidence must NOT claim a
+                // complete root walk — the discarded arm is served
+                // `ReturnOnly` rather than warm on a possibly-narrow root
+                // set. Honouring this signal is the whole point of the
+                // return value; discarding it is the silent-under-rooting
+                // class this walk exists to close.
+                self.incomplete = true;
+            }
             stack.extend(children.iter().copied());
         }
     }
@@ -236,6 +246,10 @@ const STRUCTURAL_PREHASH_MIN_ARMS: usize = 8;
 /// composition payload) — the caller must treat the walk as incomplete.
 /// EXHAUSTIVE (no wildcard): a new variant fails to compile here until its
 /// child topology is classified.
+#[must_use = "a `false` return means the walk did NOT enumerate this \
+              payload's children — the caller MUST mark its evidence \
+              incomplete, or the unwalked subtree is silently unrooted \
+              and a stale warm read is served"]
 fn push_child_ids(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> bool {
     use SemanticNodeData as D;
     match data {

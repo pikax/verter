@@ -6532,13 +6532,20 @@ fn merge_value_nodes_recursive(
 /// classification follows transparent `Alias` chains, recurses composite
 /// arms, and FAILS CLOSED: an unresolved reference carrier (`DeclRef`,
 /// `InstantiationRef`, `BareRef`, `ImportType`, `TypeOf`), an open generic
-/// position, an unreduced operator, a dangling node, or a budget-exceeded
-/// walk all count as possibly-callable — the authored order is preserved
-/// (the pre-canonical shape) rather than risking a wrong overload reorder.
-/// Only PROVABLY non-callable values (scalars, arrays, tuples, template
-/// literals, mapped types — which never yield call signatures — key
-/// domains, signature-free object surfaces, terminal error/miss carriers)
-/// admit the commutative canonical route.
+/// position, an unreduced operator, an apparent type whose global backing
+/// interface user code may legally augment with a call signature
+/// (`Array` / `String` — so arrays, tuples and template literals), a
+/// dangling node, or a budget-exceeded walk all count as possibly-callable
+/// — the authored order is preserved (the pre-canonical shape) rather than
+/// risking a wrong overload reorder. Failing closed is the SAFE direction
+/// here: it keeps the raw ordered carrier.
+///
+/// Only values whose surface PROVABLY carries no call/construct signature
+/// admit the commutative canonical route: a mapped type (the mapping
+/// produces properties only — TS drops the source's call signatures) and
+/// an object-spread program (spreading copies own enumerable properties,
+/// never callability), a signature-free object surface, and terminal
+/// error/miss carriers.
 fn value_may_contribute_call_signatures(graph: &SemanticGraphStore, value: SemanticNodeId) -> bool {
     const CLASSIFY_NODE_BUDGET: usize = 64;
     let mut stack: Vec<SemanticNodeId> = vec![value];
@@ -6585,17 +6592,14 @@ fn value_may_contribute_call_signatures(graph: &SemanticGraphStore, value: Seman
             SemanticNodeData::SyntheticBinding { value_node, .. } => {
                 stack.push(SemanticNodeId(*value_node));
             }
-            // PROVABLY non-callable shapes. Mapped types never yield call
-            // signatures (TS drops them); key domains, scalars, tuples,
-            // arrays, template literals cannot carry them; a terminal
-            // error/miss carrier can never later manifest signatures; an
-            // object spread program produces a plain surface (spreading
-            // copies own enumerable properties, never callability).
+            // Shapes whose surface provably carries no call/construct
+            // signature: the mapping of a mapped type produces properties
+            // only (TS drops the source's call signatures), an object
+            // spread program produces a plain surface (spreading copies own
+            // enumerable properties, never callability), and a scalar /
+            // key domain contributes no signature of its own.
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
-            | SemanticNodeData::Array { .. }
-            | SemanticNodeData::Tuple { .. }
-            | SemanticNodeData::TemplateLiteral { .. }
             | SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::ObjectSpreadProgram(_) => {}
@@ -6609,6 +6613,17 @@ fn value_may_contribute_call_signatures(graph: &SemanticGraphStore, value: Seman
                     return true;
                 }
             }
+            // An array, a tuple and a template literal all take their
+            // apparent surface from a GLOBAL backing interface (`Array<T>`
+            // / `String`) that user code may legally augment with a call
+            // signature — `declare global { interface Array<T> { (m:
+            // "call-me"): number } }` makes both `string[]` and `[string,
+            // number]` callable, and `String` augmentation does the same
+            // for a template-literal type. Callability is therefore not
+            // decidable from the node alone; fail closed.
+            SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::TemplateLiteral { .. } => return true,
             // Undecidable without resolution — fail closed.
             SemanticNodeData::RawFallback { .. }
             | SemanticNodeData::IndexedAccess { .. }
@@ -7699,5 +7714,213 @@ mod overload_carrier_exclusion_tests {
             }
             other => panic!("expected the order-preserving intersection carrier, got {other:?}"),
         }
+    }
+
+    /// Mint one UNRESOLVED reference carrier of `kind` naming `name`. None
+    /// of these can be classified callable-or-not without resolving the
+    /// reference, so each must fail closed.
+    fn reference_carrier(
+        graph: &SemanticGraphStore,
+        kind: &str,
+        name: &str,
+    ) -> crate::semantic_query::SemanticNodeId {
+        use crate::semantic_query::{
+            BinderScopeId, DeclIdentity, NodeScopeId, ScopeId, ValueRootKey,
+        };
+        use std::sync::Arc;
+
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let identity = DeclIdentity {
+            canonical_id: Arc::from("/carrier.ts"),
+            owner,
+            whole_hash: Default::default(),
+            decl_name: Arc::from(name),
+        };
+        let empty_args: Arc<[crate::semantic_query::SemanticNodeId]> =
+            Arc::from(Vec::new().into_boxed_slice());
+        let data = match kind {
+            "DeclRef" => SemanticNodeData::DeclRef { identity },
+            "InstantiationRef" => SemanticNodeData::InstantiationRef {
+                base: identity,
+                args: Arc::from(
+                    vec![graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))]
+                        .into_boxed_slice(),
+                ),
+            },
+            "BareRef" => {
+                SemanticNodeData::new_bare_ref(Arc::from(name), NodeScopeId::Global, empty_args)
+            }
+            "ImportType" => SemanticNodeData::new_import_type(
+                Arc::from("./m"),
+                Arc::from(vec![Arc::<str>::from(name)].into_boxed_slice()),
+                empty_args,
+                false,
+            ),
+            "TypeOf" => SemanticNodeData::new_typeof(
+                ValueRootKey {
+                    scope: ScopeId {
+                        canonical_id: Arc::from("/carrier.ts"),
+                        owner,
+                        local_scope: None,
+                        binder_scope_id: BinderScopeId::file_scope(owner),
+                    },
+                    name: Arc::from(name),
+                },
+                Arc::from(Vec::new().into_boxed_slice()),
+                empty_args,
+            ),
+            other => unreachable!("unknown reference carrier kind `{other}`"),
+        };
+        graph.intern_node(data)
+    }
+
+    /// Assert that a member-value intersection over `[a, b]` preserved the
+    /// AUTHORED arm order — i.e. the classification failed closed and the
+    /// commutative canonical sort never ran. `b` is interned with the LOWER
+    /// ordinal, so a canonical (ordinal-sorted) route would emit `[b, a]`.
+    fn assert_authored_order_preserved(
+        graph: &SemanticGraphStore,
+        a: crate::semantic_query::SemanticNodeId,
+        b: crate::semantic_query::SemanticNodeId,
+        what: &str,
+    ) {
+        assert!(
+            b.0 < a.0,
+            "{what}: fixture needs the reversed ordinals (b interned first)"
+        );
+        let arm = |value| {
+            Some(ShallowSurface::from_entries(
+                vec![super::ShallowSurfaceEntry::Member(value_member("m", value))],
+                None,
+            ))
+        };
+        let mut evidence =
+            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+        let merged =
+            merge_intersection_surfaces_with_graph(graph, &[arm(a), arm(b)], &mut evidence)
+                .expect("two live arms merge");
+        let value = merged
+            .members
+            .iter()
+            .find(|m| m.string_name() == Some("m"))
+            .expect("member m survives")
+            .value;
+        match graph.node_data(value).as_deref() {
+            Some(SemanticNodeData::Intersection(arms)) => assert_eq!(
+                arms.as_ref(),
+                &[a, b],
+                "{what}: callability is not decidable from the node alone, so the \
+                 overload-carrier classification must FAIL CLOSED and keep the \
+                 authored arm order — the commutative canonical sort would emit \
+                 the reversed overload set"
+            ),
+            other => {
+                panic!("{what}: expected the order-preserving intersection carrier, got {other:?}")
+            }
+        }
+    }
+
+    /// Mint one apparent-type carrier of `kind` over `terminal`. Each takes
+    /// its apparent surface from a GLOBAL backing interface user code may
+    /// augment with a call signature.
+    fn apparent_type_carrier(
+        graph: &SemanticGraphStore,
+        kind: &str,
+        terminal: PrimitiveKind,
+    ) -> crate::semantic_query::SemanticNodeId {
+        use std::sync::Arc;
+
+        let element = graph.intern_node(SemanticNodeData::Primitive(terminal));
+        let data = match kind {
+            "Array" => SemanticNodeData::Array {
+                element,
+                readonly: false,
+            },
+            "Tuple" => SemanticNodeData::Tuple {
+                elements: Arc::from(
+                    vec![crate::semantic_query::TupleElement {
+                        label: None,
+                        value: element,
+                        optional: false,
+                        rest: false,
+                    }]
+                    .into_boxed_slice(),
+                ),
+                readonly: false,
+            },
+            "TemplateLiteral" => SemanticNodeData::TemplateLiteral {
+                quasis: Arc::from(vec![Arc::<str>::from("hello-")].into_boxed_slice()),
+                expressions: Arc::from(vec![element].into_boxed_slice()),
+            },
+            other => unreachable!("unknown apparent-type carrier kind `{other}`"),
+        };
+        graph.intern_node(data)
+    }
+
+    /// An array, a tuple and a template literal all take their apparent
+    /// surface from a GLOBAL backing interface (`Array<T>` / `String`) that
+    /// user code may legally augment with a call signature. Verified
+    /// against the pinned TypeScript compiler: with
+    /// `declare global { interface Array<T> { (m: "call-me"): number } }`
+    /// both `string[]` and `[string, number]` are callable, and the same
+    /// `String` augmentation makes a template-literal type callable — while
+    /// the un-augmented program rejects the call with TS2349. So callability
+    /// is NOT decidable from the node alone and the classification must fail
+    /// closed, preserving the raw ordered overload carrier.
+    #[test]
+    fn augmentable_apparent_type_carriers_keep_authored_overload_order() {
+        for kind in ["Array", "Tuple", "TemplateLiteral"] {
+            let graph = SemanticGraphStore::new();
+            // Adversarial interning order: the SECOND authored contributor
+            // is minted first, so its ordinal sorts lower.
+            let b = apparent_type_carrier(&graph, kind, PrimitiveKind::Number);
+            let a = apparent_type_carrier(&graph, kind, PrimitiveKind::String);
+            assert_authored_order_preserved(&graph, a, b, kind);
+        }
+    }
+
+    /// Every UNRESOLVED reference carrier fails closed. A `DeclRef`,
+    /// `InstantiationRef`, `BareRef`, `ImportType` or `TypeOf` may resolve
+    /// to a callable, so the graph alone cannot prove the contributor
+    /// signature-free; routing it through the commutative canonical algebra
+    /// would reorder the overload arms and make call resolution observe the
+    /// wrong ordered signature set.
+    #[test]
+    fn unresolved_reference_carriers_keep_authored_overload_order() {
+        for kind in [
+            "DeclRef",
+            "InstantiationRef",
+            "BareRef",
+            "ImportType",
+            "TypeOf",
+        ] {
+            let graph = SemanticGraphStore::new();
+            // Adversarial interning order: the SECOND authored contributor
+            // is minted first, so its ordinal sorts lower.
+            let b = reference_carrier(&graph, kind, "B");
+            let a = reference_carrier(&graph, kind, "A");
+            assert_authored_order_preserved(&graph, a, b, kind);
+        }
+    }
+
+    /// A classification walk that exhausts its node budget is UNDECIDED,
+    /// not "non-callable". The terminal here is a provably signature-free
+    /// primitive, but it sits behind more transparent alias hops than the
+    /// walk may visit, so the classification must fail closed rather than
+    /// let an unclassified contributor reach the commutative sort.
+    #[test]
+    fn budget_exhausted_classification_keeps_authored_overload_order() {
+        let graph = SemanticGraphStore::new();
+        let deep_chain = |terminal: PrimitiveKind| {
+            let mut node = graph.intern_node(SemanticNodeData::Primitive(terminal));
+            // bounded-loop: fixed 80-hop fixture chain, comfortably past the classification walk's node budget.
+            for _ in 0..80 {
+                node = graph.intern_node(SemanticNodeData::Alias(node));
+            }
+            node
+        };
+        let b = deep_chain(PrimitiveKind::Number);
+        let a = deep_chain(PrimitiveKind::String);
+        assert_authored_order_preserved(&graph, a, b, "budget-exhausted alias chain");
     }
 }
