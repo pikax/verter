@@ -256,6 +256,7 @@ const FILE_TO_SUBSTRATE = new Map([
 const BLOCK_TEXT_TO_VARIANT = new Map([
   ["U0.MANIFEST_SUBSTRATE", "U0ManifestSubstrate"],
   ["U2.QUERY_VALUE_DOMAIN", "U2QueryValueDomain"],
+  ["U2.CANONICAL_TYPE_ALGEBRA", "U2CanonicalTypeAlgebra"],
   ["U2.BINDER_IDENTITY_FACTS", "U2BinderIdentityFacts"],
   ["U8.WIRE_SURFACE_CLOSURE", "U8WireSurfaceClosure"],
   ["U12.EXPORTER", "U12Exporter"],
@@ -304,6 +305,7 @@ const BLOCK_TEXT_TO_VARIANT = new Map([
 const BLOCK_TO_MECHANISM = new Map([
   ["U0ManifestSubstrate", "LedgerCoverageGate"],
   ["U2QueryValueDomain", "QueryValueDomainFoundation"],
+  ["U2CanonicalTypeAlgebra", "CanonicalTypeAlgebraClosure"],
   ["U2BinderIdentityFacts", "BinderIdentityFactsSubstrate"],
   ["U8WireSurfaceClosure", "WireSurfaceClosure"],
   ["U12Exporter", "ExporterPublication"],
@@ -354,6 +356,10 @@ const MECHANISM_OWNING_BLOCK = new Map([...BLOCK_TO_MECHANISM].map(([b, m]) => [
 const BLOCK_PREREQS = new Map([
   ["U0ManifestSubstrate", []],
   ["U2QueryValueDomain", ["U0ManifestSubstrate"]],
+  // Canonical union/intersection algebra closure: a sub-block of the
+  // value-domain foundation that owns the normalization authority, NOT a
+  // second normalization system.
+  ["U2CanonicalTypeAlgebra", ["U2QueryValueDomain"]],
   ["U2BinderIdentityFacts", ["U2QueryValueDomain"]],
   ["U2RelationInfer", ["U2QueryValueDomain", "U2BinderIdentityFacts", "U3AdaptiveFamilyRetention"]],
   ["U2IndexedAccess", ["U2QueryValueDomain", "U2RelationInfer"]],
@@ -459,6 +465,7 @@ const BLOCK_PREREQS = new Map([
 const BLOCK_TO_UBLOCK = new Map([
   ["U0ManifestSubstrate", "U0"],
   ["U2QueryValueDomain", "U2"],
+  ["U2CanonicalTypeAlgebra", "U2"],
   ["U2BinderIdentityFacts", "U2"],
   ["U8WireSurfaceClosure", "U8"],
   ["U12Exporter", "U12"],
@@ -498,6 +505,7 @@ const BLOCK_TO_UBLOCK = new Map([
 const BLOCK_TO_ORGAN = new Map([
   ["U0ManifestSubstrate", "LedgerSubstrate"],
   ["U2QueryValueDomain", "QueryValueDomain"],
+  ["U2CanonicalTypeAlgebra", "QueryValueDomain"],
   ["U2BinderIdentityFacts", "QueryValueDomain"],
   ["U8WireSurfaceClosure", "WireSurface"],
   ["U12Exporter", "Exporter"],
@@ -597,6 +605,18 @@ const BLOCK_TO_REQUIRED_GUARDS = new Map([
       "query_modes_are_presets_over_projection_demand_eval_policy",
       "skeleton_is_typeparamshells_plus_carrier_stop_not_special_mode",
       "cache_key_axes_are_minimal_and_normalized",
+    ],
+  ],
+  [
+    "U2CanonicalTypeAlgebra",
+    [
+      _DAG,
+      "union_and_intersection_construction_routes_through_canonical_algebra",
+      "canonical_constituent_identity_ignores_only_arena_sidecar_scope",
+      "incomplete_structural_comparison_is_return_only_never_warm",
+      "derived_composite_interns_global_and_roots_every_inspected_file_scoped_node",
+      "ordered_heritage_and_overload_carriers_are_never_canonically_normalized",
+      "structural_hash_is_prehash_only_and_never_deduplicates_without_exact_comparison",
     ],
   ],
   [
@@ -979,6 +999,37 @@ const GUARD_REGISTRY_DATA = [
   [
     "reserved_checker_queries_are_non_live_typeinfo_does_not_whole_body_check",
     "U2QueryValueDomain",
+    "owed",
+  ],
+  // U2.CANONICAL_TYPE_ALGEBRA — owed guards. Union/intersection construction
+  // closed over the existing normalization authority: a dedicated exhaustive
+  // structural comparator (Equal/Distinct/Incomplete) whose identity ignores
+  // ONLY the arena sidecar scope, an explicit raw-constructor allowlist with
+  // bypass proof, and canonical freshness evidence.
+  [
+    "union_and_intersection_construction_routes_through_canonical_algebra",
+    "U2CanonicalTypeAlgebra",
+    "owed",
+  ],
+  [
+    "canonical_constituent_identity_ignores_only_arena_sidecar_scope",
+    "U2CanonicalTypeAlgebra",
+    "owed",
+  ],
+  ["incomplete_structural_comparison_is_return_only_never_warm", "U2CanonicalTypeAlgebra", "owed"],
+  [
+    "derived_composite_interns_global_and_roots_every_inspected_file_scoped_node",
+    "U2CanonicalTypeAlgebra",
+    "owed",
+  ],
+  [
+    "ordered_heritage_and_overload_carriers_are_never_canonically_normalized",
+    "U2CanonicalTypeAlgebra",
+    "owed",
+  ],
+  [
+    "structural_hash_is_prehash_only_and_never_deduplicates_without_exact_comparison",
+    "U2CanonicalTypeAlgebra",
     "owed",
   ],
   // U2.BINDER_IDENTITY_FACTS — live guards (7 integration + 1 lib).
@@ -2089,6 +2140,10 @@ const MECHANISM_TO_KEYS = new Map([
     "QueryValueDomainFoundation",
     ["ResolveDecl", "TypeOf", "NormalizeUnion", "NormalizeIntersection"],
   ],
+  // The algebra closure OWNS no key of its own: the normalization queries
+  // it closes construction over stay owned by the value-domain foundation
+  // it is a sub-block of: a successor may not own its predecessor's keys.
+  ["CanonicalTypeAlgebraClosure", []],
   // The binder-identity substrate feeds the scope-carrying decl/value
   // lookup keys (its `binder_scope_id` rides their `ScopeId`).
   ["BinderIdentityFactsSubstrate", ["ResolveDecl", "TypeOf"]],

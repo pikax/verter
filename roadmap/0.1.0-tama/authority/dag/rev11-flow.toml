@@ -76,7 +76,7 @@ rescope_unrelated_packages = 3
 [[node]]
 id = "D2B"
 name = "Atomic public flow-proof cutover and distributed-admission retirement"
-predecessors = ["D2A"]
+predecessors = ["D2A","TA1","TA2"]
 phase = "rev11"
 train = "rev11.flow"
 product = "rev11"

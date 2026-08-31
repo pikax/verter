@@ -7,7 +7,7 @@ product=rev11
 kind=implementation
 semantic_role=delivery
 class=foundational-atomic
-predecessors=D2A
+predecessors=D2A,TA1,TA2
 owner=rev11.flow:sole shared flow authority
 conflict_domains=public_protocol,semantic_authority
 resource_class=rust-mixed
@@ -52,6 +52,7 @@ Atomic public flow-proof cutover — one indivisible accepted cutover per the fl
 ## Exact predecessor contracts
 
 - **D2A:** implemented ledger row for “Canonical flow demand and proof substrate”; ledger presence alone satisfies the predecessor. Its commit message, approximate timezone-bearing date, and optional PR are locator hints only.
+- **TA1 and TA2:** implemented ledger rows for “Canonical union and intersection algebra closure” and “Demand-scoped truthiness domain authority”; ledger presence alone satisfies each predecessor. Their commit messages, approximate timezone-bearing dates, and optional PRs are locator hints only. Both were added as explicit D2B predecessors by the canonical-type-algebra ruling (`decisions/2026-08-31-canonical-type-algebra-predecessor.md`), which holds that D2B does not land until both land, because `FlowReturnResult` promises a canonical whole-return node and D2B-AC2 pins exact identity.
 - **External requirements:** agents check any listed requirement; tooling does not validate external state.
 
 ## Source-specific scope
