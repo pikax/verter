@@ -525,13 +525,6 @@ async fn gate_bound_carrier_uses_established_managed_diagnostics_route() {
 #[tokio::test]
 async fn partial_project_capability_none_does_not_erase_bound_managed_diagnostics() {
     let owned = Arc::new(MarkerOwned::default());
-    assert!(owned
-        .get_diagnostics_in_project("/carrier.vue.jsx", "/nested/jsconfig.json")
-        .await
-        .expect("default project capability")
-        .is_none());
-    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 0);
-
     let c = TsgoCompositeProvider::new(
         Arc::clone(&owned) as Arc<dyn TypeProvider>,
         host_with_snapshot(),
@@ -544,10 +537,21 @@ async fn partial_project_capability_none_does_not_erase_bound_managed_diagnostic
     assert_eq!(codes(&diags), vec![MARKER_CODE.to_string()]);
     assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 1);
     assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *owned
+            .requested_projects
+            .lock()
+            .expect("project request log"),
+        vec![(
+            format!("{WS_ROOT}/src/Widget.vue.jsx"),
+            TSCONFIG.to_string()
+        )],
+        "a JavaScript carrier must ask its bound configured project before using the rich fallback"
+    );
 }
 
 #[tokio::test]
-async fn partial_project_capability_empty_does_not_override_bound_managed_diagnostics() {
+async fn project_bound_clean_javascript_diagnostics_are_authoritative() {
     let owned = Arc::new(MarkerOwned::project_bound(true));
     let c = TsgoCompositeProvider::new(
         Arc::clone(&owned) as Arc<dyn TypeProvider>,
@@ -558,9 +562,12 @@ async fn partial_project_capability_empty_does_not_override_bound_managed_diagno
         .get_diagnostics(&format!("{WS_ROOT}/src/Widget.svelte.jsx"))
         .await
         .expect("composite diagnostics");
-    assert_eq!(codes(&diags), vec![MARKER_CODE.to_string()]);
-    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        diags.is_empty(),
+        "the configured JavaScript project's clean result must preserve its checkJs policy"
+    );
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(owned.raw_diagnostics_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

@@ -984,14 +984,39 @@ impl TsgoCompositeProvider {
             }
         }
 
-        // The BoundProject witness above remains the admission authority, but the
-        // managed diagnostics implementation stays the established rich `--lsp`
-        // pull. The attached `--api` checker does not yet have per-carrier parity:
-        // a real `*.vue` include proves the source owner while excluding the
-        // generated `.vue.tsx` from configured `rootFiles`. Promoting that partial
-        // checker to the sole user-diagnostics route silently erased valid editor
-        // diagnostics. Once admitted, use the same managed LSP surface that owns
-        // the didOpen/didChange overlay; never use it for an unbound carrier.
+        // JavaScript carriers must preserve the bound project's checkJs/@ts-check
+        // policy. The rich `--lsp` pull treats the generated JSX as a standalone
+        // inferred file and can therefore report diagnostics that the configured
+        // project intentionally disables. A project-bound result (including an empty
+        // one) is authoritative for JSX; an unavailable/partial capability falls back
+        // to the rich route so valid diagnostics are not silently erased.
+        let javascript_carrier = path
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("jsx"));
+        if javascript_carrier {
+            match self
+                .managed
+                .get_diagnostics_in_project(path, carrier.bound().project())
+                .await
+            {
+                Ok(Some(diagnostics)) => return Ok(diagnostics),
+                Ok(None) => tracing::debug!(
+                    source = %source,
+                    project = %carrier.bound().project(),
+                    "configured-project JavaScript diagnostics unavailable; using rich managed fallback"
+                ),
+                Err(error) => tracing::warn!(
+                    source = %source,
+                    project = %carrier.bound().project(),
+                    error = %error,
+                    "configured-project JavaScript diagnostics failed; using rich managed fallback"
+                ),
+            }
+        }
+
+        // The BoundProject witness above remains the admission authority. Once
+        // admitted, use the same managed LSP surface that owns the didOpen/didChange
+        // overlay; never use it for an unbound carrier.
         self.managed_diagnostics(path, background).await
     }
 
