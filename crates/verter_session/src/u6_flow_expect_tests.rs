@@ -4395,3 +4395,409 @@ fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
         assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
     }
 }
+
+/// A narrow's iteration domain enumerates THROUGH identity carriers: a
+/// subject typed by a union type ALIAS (`type Tag = ... | ...`), an
+/// alias of an alias, or a generic alias instantiation contributes the
+/// aliased union's arms — the checker's own reading — never ONE opaque
+/// arm. Treating the carrier as a single arm made every narrow over an
+/// alias-typed subject find nothing to filter and publish the WHOLE
+/// alias (a superset of the checker's type, e.g. a switch default edge
+/// still carrying the matched case's arm) complete and warm. Every
+/// guard family iterates the same domain, so the switch dispatch /
+/// remainder / exhaustiveness edges, `===`/`!==` literal equality,
+/// `typeof`, `instanceof`, `in`, and truthiness all narrow alias-typed
+/// subjects exactly as their inline-union spellings do; the inline
+/// control pins that the non-carrier domain is unchanged. Alias arms
+/// that are THEMSELVES aliases of non-union bodies stay the authored
+/// carrier (`DeclRef(A)`), matching the checker's published name. An
+/// alias to `boolean` decomposes into its literal arms for switch
+/// coverage exactly as the authored primitive does.
+#[test]
+fn alias_union_subjects_enumerate_and_narrow_like_the_checker() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            id: "alias_switch_template_default",
+            script: "type Tag = `item-${string}` | \"none\";\nexport function f(t: Tag) { switch (t) { case \"none\": return { v: 0 }; default: return { v: t } } }",
+            checker: "{ v: number; } | { v: `item-${string}`; }",
+            rendered: "Union({ v: number } | { v: TemplateLiteral(…) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_switch_matched_arm",
+            script: "type Tag = \"a\" | \"b\" | \"c\";\nexport function f(t: Tag) { switch (t) { case \"a\": return t; default: return 0 } }",
+            checker: "\"a\" | 0",
+            rendered: "Union(\"a\" | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_switch_default_remainder",
+            script: "type Tag = \"a\" | \"b\" | \"c\";\nexport function f(t: Tag) { switch (t) { case \"a\": return 0; default: return t } }",
+            checker: "\"b\" | \"c\" | 0",
+            rendered: "Union(\"b\" | \"c\" | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_switch_exhaustive_no_default",
+            script: "type Tag = \"a\" | \"b\";\nexport function f(t: Tag) { switch (t) { case \"a\": return 0; case \"b\": return \"s\" } }",
+            checker: "\"s\" | 0",
+            rendered: "Union(0 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "boolean_alias_switch_exhaustive",
+            script: "type B = boolean;\nexport function f(t: B) { switch (t) { case true: return 1; case false: return \"s\" } }",
+            checker: "\"s\" | 1",
+            rendered: "Union(1 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_disc_union_object_arm",
+            script: "type U = { kind: \"a\"; v: number } | { kind: \"b\"; w: string };\ntype A = U;\nexport function f(u: A) { if (u.kind === \"a\") return u; return 0 }",
+            checker: "0 | { kind: \"a\"; v: number; }",
+            rendered: "Union({ kind: \"a\", v: number } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_arms_are_aliases_disc",
+            script: "type A = { kind: \"a\"; v: number };\ntype B = { kind: \"b\"; w: string };\ntype U = A | B;\nexport function f(u: U) { if (u.kind === \"a\") return u; return 0 }",
+            checker: "0 | A",
+            rendered: "Union(DeclRef(A) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "alias_of_alias_negated_eq",
+            script: "type Inner = \"a\" | \"b\";\ntype Outer = Inner | \"c\";\nexport function f(t: Outer) { if (t !== \"c\") return t; return 0 }",
+            checker: "0 | Inner",
+            rendered: "Union(\"a\" | \"b\" | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "generic_alias_instantiation_eq",
+            script: "type Wrap<T> = T | \"none\";\nexport function f(t: Wrap<\"a\">) { if (t !== \"none\") return t; return 0 }",
+            checker: "\"a\" | 0",
+            rendered: "Union(\"a\" | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "maybe_generic_alias_undefined_negated",
+            script: "type Maybe<T> = T | undefined;\nexport function f(t: Maybe<string>) { if (t !== undefined) return t; return 0 }",
+            checker: "string | 0",
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "typeof_over_alias_subject",
+            script: "type SN = string | number;\ntype T = SN;\nexport function f(t: T) { if (typeof t === \"string\") return t; return t }",
+            checker: "string | number",
+            rendered: "Union(string | number)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_alias_negated_identity",
+            script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\ntype U = Sub | string;\nexport function f(x: U) { if (!(x instanceof Sub)) return x; return 1 }",
+            checker: "string | 1",
+            rendered: "Union(string | 1)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "in_over_alias_subject",
+            script: "type U = { a: number } | { b: string };\nexport function f(x: U) { if (\"a\" in x) return x; return 0 }",
+            checker: "0 | { a: number; }",
+            rendered: "Union({ a: number } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy_alias_positive_edge",
+            script: "type T = 0 | 1;\nexport function f(t: T) { if (t) return t; return 9 }",
+            checker: "1 | 9",
+            rendered: "Union(1 | 9)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "non_alias_inline_union_control",
+            script: "export function f(t: `item-${string}` | \"none\") { switch (t) { case \"none\": return { v: 0 }; default: return { v: t } } }",
+            checker: "{ v: number; } | { v: `item-${string}`; }",
+            rendered: "Union({ v: number } | { v: TemplateLiteral(…) })",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (covering checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
+/// A guard over a property PATH lands its fact at the reference the
+/// checker narrows — never deeper-rooted. Measured against the pinned
+/// checker: `===` / `!==` (and the switch dispatch, remainder, and
+/// exhaustiveness edges) narrow the PARENT reference of the tested
+/// property — the root only when the path is one segment deep; at depth
+/// two the ROOT keeps every constituent, and selecting a root arm there
+/// DROPPED a real contributor (a SUBSET published complete and warm —
+/// strictly worse than widening). Truthiness narrows BOTH the tested
+/// reference and its parent (per-arm member truthiness, both edges,
+/// keeping a broad member on the falsy edge). `typeof`, `instanceof`,
+/// and `in` narrow ONLY the tested reference: their root stays whole at
+/// every depth, pinned by the controls. Switch coverage relates the
+/// parent's projected member per LEAF, so a nested boolean or a
+/// member-union discriminant proves exhaustiveness exactly as the
+/// checker does.
+#[test]
+fn deep_path_guards_narrow_the_parent_reference_not_the_root() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            id: "eq2_root_keeps_every_constituent",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { if (m.meta.kind === \"one\") { return m } return 0 }",
+            checker: "0 | M1 | M2",
+            rendered: "Union(DeclRef(M1) | DeclRef(M2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "eq2_parent_reference_narrows",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { if (m.meta.kind === \"one\") { return m.meta } return 0 }",
+            checker: "0 | { kind: \"one\"; }",
+            rendered: "Union({ kind: \"one\" } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "eq2_negated_parent_reference_narrows",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { if (m.meta.kind !== \"one\") { return m.meta } return 0 }",
+            checker: "0 | { kind: \"two\"; }",
+            rendered: "Union({ kind: \"two\" } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "eq1_root_discriminant_control",
+            script: "type Q1 = { kind: \"one\", a: string };\ntype Q2 = { kind: \"two\", b: number };\nexport function f(m: Q1 | Q2) { if (m.kind === \"one\") { return m } return 0 }",
+            checker: "0 | Q1",
+            rendered: "Union(DeclRef(Q1) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch2_root_keeps_every_constituent",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { switch (m.meta.kind) { case \"one\": return m; default: return 0 } }",
+            checker: "0 | M1 | M2",
+            rendered: "Union(DeclRef(M1) | DeclRef(M2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch2_parent_dispatch_edges",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { switch (m.meta.kind) { case \"one\": return m.meta; default: return m.meta } }",
+            checker: "{ kind: \"one\"; } | { kind: \"two\"; }",
+            rendered: "Union({ kind: \"two\" } | { kind: \"one\" })",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch2_exhaustive_no_default",
+            script: "type M1 = { meta: { kind: \"one\" }, a: string };\ntype M2 = { meta: { kind: \"two\" }, b: number };\nexport function f(m: M1 | M2) { switch (m.meta.kind) { case \"one\": return 1; case \"two\": return \"s\" } }",
+            checker: "\"s\" | 1",
+            rendered: "Union(1 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch2_nested_boolean_exhaustive",
+            script: "type W1 = { meta: { flag: true } };\ntype W2 = { meta: { flag: false } };\nexport function f(m: W1 | W2) { switch (m.meta.flag) { case true: return 1; case false: return \"s\" } }",
+            checker: "\"s\" | 1",
+            rendered: "Union(1 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "switch1_member_union_exhaustive",
+            script: "type X = { kind: \"a\" | \"b\" };\nexport function f(u: X) { switch (u.kind) { case \"a\": return 1; case \"b\": return \"s\" } }",
+            checker: "\"s\" | 1",
+            rendered: "Union(1 | \"s\")",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy1_literal_discriminant_root",
+            script: "type V1 = { ok: true, a: 1 };\ntype V2 = { ok: false, b: 2 };\nexport function f(m: V1 | V2) { if (m.ok) { return m } return 0 }",
+            checker: "0 | V1",
+            rendered: "Union(DeclRef(V1) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy1_literal_discriminant_negated_root",
+            script: "type V1 = { ok: true, a: 1 };\ntype V2 = { ok: false, b: 2 };\nexport function f(m: V1 | V2) { if (m.ok) { return 0 } return m }",
+            checker: "0 | V2",
+            rendered: "Union(DeclRef(V2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy1_broad_member_root",
+            script: "type Y1 = { v: string, a: 1 };\ntype Y2 = { v: undefined, b: 2 };\nexport function f(m: Y1 | Y2) { if (m.v) { return m } return 0 }",
+            checker: "0 | Y1",
+            rendered: "Union(DeclRef(Y1) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy1_broad_member_negated_keeps_both",
+            script: "type Y1 = { v: string, a: 1 };\ntype Y2 = { v: undefined, b: 2 };\nexport function f(m: Y1 | Y2) { if (m.v) { return 0 } return m }",
+            checker: "0 | Y1 | Y2",
+            rendered: "Union(DeclRef(Y1) | DeclRef(Y2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "truthy2_parent_reference_narrows",
+            script: "type U1 = { meta: { v: string }, a: 1 };\ntype U2 = { meta: { v: undefined }, b: 2 };\nexport function f(m: U1 | U2) { if (m.meta.v) { return m.meta } return 0 }",
+            checker: "0 | { v: string; }",
+            rendered: "Union({ v: string } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "typeof2_root_untouched_control",
+            script: "type N1 = { meta: { v: string }, a: 1 };\ntype N2 = { meta: { v: number }, b: 2 };\nexport function f(m: N1 | N2) { if (typeof m.meta.v === \"string\") { return m } return 0 }",
+            checker: "0 | N1 | N2",
+            rendered: "Union(DeclRef(N1) | DeclRef(N2) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "typeof2_leaf_reference_narrows_control",
+            script: "type N1 = { meta: { v: string }, a: 1 };\ntype N2 = { meta: { v: number }, b: 2 };\nexport function f(m: N1 | N2) { if (typeof m.meta.v === \"string\") { return m.meta.v } return 0 }",
+            checker: "string | 0",
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "in2_parent_reference_narrows_control",
+            script: "type R1 = { meta: { x: 1 }, a: 1 };\ntype R2 = { meta: { y: 2 }, b: 2 };\nexport function f(m: R1 | R2) { if (\"x\" in m.meta) { return m.meta } return 0 }",
+            checker: "0 | { x: 1; }",
+            rendered: "Union({ x: 1 } | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "inst2_leaf_reference_narrows_control",
+            script: "class C { c = 1 }\ntype S1 = { meta: { v: C }, a: 1 };\ntype S2 = { meta: { v: string }, b: 2 };\nexport function f(m: S1 | S2) { if (m.meta.v instanceof C) { return m.meta.v } return 0 }",
+            checker: "0 | C",
+            rendered: "Union(DeclRef(C) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (covering checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}

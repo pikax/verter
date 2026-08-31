@@ -4855,6 +4855,126 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// Expand a single relate pair into direct result(s) or sub-work
     /// items. Pushes exactly one net result onto `results` by the time all
     /// sub-work drains.
+    /// Relate a string literal against a template-literal pattern by the
+    /// pattern's quasi skeleton, deciding ONLY what the skeleton proves;
+    /// every undecidable shape returns `None` and stays deferred.
+    ///
+    /// The skeleton match treats every placeholder as an arbitrary
+    /// string — an OVER-approximation of the template's denoted set, so
+    /// a failed match is a proof of NON-membership while a successful
+    /// match alone proves nothing. Verdicts:
+    ///
+    /// - literal → template: no skeleton match ⇒ `NotAssignable`
+    ///   (over-approximated set excludes the literal). A match with
+    ///   every placeholder typed `string` ⇒ `Assignable` (each gap
+    ///   slice is a string). Any other match ⇒ `None` (a `number`
+    ///   placeholder constrains its slice beyond the skeleton).
+    /// - template → literal: only when every placeholder provably
+    ///   denotes a NONEMPTY string set (a scalar primitive or a
+    ///   literal — `never` denotes the empty template, which IS
+    ///   assignable to anything): no skeleton match ⇒ `NotAssignable`
+    ///   (two disjoint nonempty sets); a match ⇒ `None` (subset of a
+    ///   singleton needs the template to BE that singleton).
+    ///
+    /// Quasis are stored as RAW source text; a quasi carrying an escape
+    /// (`\\`) is not cooked-comparable and bails to `None`.
+    fn relate_string_literal_and_template(
+        &self,
+        source_data: &SemanticNodeData,
+        target_data: &SemanticNodeData,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        fn skeleton_comparable(quasis: &[Arc<str>], expressions: &[SemanticNodeId]) -> bool {
+            quasis.len() == expressions.len() + 1
+                && quasis.iter().all(|quasi| !quasi.contains('\\'))
+        }
+        /// Whether `text` is producible from the quasi skeleton with
+        /// every placeholder read as an arbitrary (possibly empty)
+        /// string. Leftmost placement of each middle quasi is complete:
+        /// both candidate remainders are suffixes of the same text, so
+        /// the final `ends_with` verdict is placement-independent.
+        fn skeleton_matches(text: &str, quasis: &[Arc<str>]) -> bool {
+            let first = quasis.first().map(|q| q.as_ref()).unwrap_or("");
+            let last = quasis.last().map(|q| q.as_ref()).unwrap_or("");
+            if quasis.len() == 1 {
+                return text == first;
+            }
+            let Some(mut rest) = text.strip_prefix(first) else {
+                return false;
+            };
+            for quasi in &quasis[1..quasis.len() - 1] {
+                match rest.find(quasi.as_ref()) {
+                    Some(pos) => rest = &rest[pos + quasi.len()..],
+                    None => return false,
+                }
+            }
+            rest.ends_with(last)
+        }
+        let placeholder_is_any_string = |id: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(id).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            )
+        };
+        let placeholder_denotes_nonempty = |id: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(id).as_deref(),
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                        | PrimitiveKind::Number
+                        | PrimitiveKind::BigInt
+                        | PrimitiveKind::Boolean
+                        | PrimitiveKind::Null
+                        | PrimitiveKind::Undefined
+                )) | Some(SemanticNodeData::Literal(_))
+            )
+        };
+        match (source_data, target_data) {
+            (
+                SemanticNodeData::Literal(LiteralValue::String(text)),
+                SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                },
+            ) if skeleton_comparable(quasis, expressions) => {
+                if !skeleton_matches(text, quasis) {
+                    return Some(RelationResult::NotAssignable);
+                }
+                if expressions.iter().copied().all(placeholder_is_any_string) {
+                    return Some(assignable(bindings));
+                }
+                None
+            }
+            (
+                SemanticNodeData::TemplateLiteral {
+                    quasis,
+                    expressions,
+                },
+                SemanticNodeData::Literal(LiteralValue::String(text)),
+            ) if skeleton_comparable(quasis, expressions) => {
+                if expressions.is_empty() {
+                    return Some(if skeleton_matches(text, quasis) {
+                        assignable(bindings)
+                    } else {
+                        RelationResult::NotAssignable
+                    });
+                }
+                if !expressions
+                    .iter()
+                    .copied()
+                    .all(placeholder_denotes_nonempty)
+                {
+                    return None;
+                }
+                if !skeleton_matches(text, quasis) {
+                    return Some(RelationResult::NotAssignable);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn expand_pair(
         &self,
         source: SemanticNodeId,
@@ -5019,6 +5139,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             results.push(RelationResult::Unknown);
+            return;
+        }
+
+        // ── String literal vs template-literal pattern: decided by the
+        //    quasi skeleton where that is provably sound, BEFORE the
+        //    deferred gate silently defers the pair. An undecidable pair
+        //    still falls through to Unknown. ─────────────────────────────
+        if let Some(result) =
+            self.relate_string_literal_and_template(&source_data, &target_data, bindings)
+        {
+            results.push(result);
             return;
         }
 

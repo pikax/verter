@@ -6083,11 +6083,87 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     // ── Guard narrowing ─────────────────────────────────────────────
 
     /// The union arms of `node`, or `node` itself when it is not a
-    /// union — the iteration domain every narrow filters.
+    /// LITERAL union node. This is the assignment path's
+    /// reaching-definition dedup domain only — a narrow's iteration
+    /// domain is [`Self::enumerated_union_arms_or_self`], which
+    /// additionally enumerates through identity carriers.
     fn union_arms_or_self(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
         match self.dispatch.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.to_vec(),
             _ => vec![node],
+        }
+    }
+
+    /// The iteration domain every narrow filters: the union arms of
+    /// `node`, enumerated THROUGH identity carriers. An alias /
+    /// merged-decl / `DeclRef` / `InstantiationRef` subject peels
+    /// through the one shared `Instantiate` dispatch
+    /// ([`ProjectSemanticDispatch::unwrap_identity_carrier_for_relation`]
+    /// — the same unwrap the `in` classifier and the relation engine
+    /// use), and a union found behind the carrier contributes its
+    /// members, recursively, so an alias of an alias flattens exactly
+    /// as the checker's union normalization does. A non-union arm stays
+    /// the ORIGINAL node: the published narrow keeps the authored
+    /// carrier, not its expansion. Treating a carrier as ONE opaque arm
+    /// was a defect: every narrow computed over an alias-typed subject
+    /// found nothing to filter and published the WHOLE alias — a
+    /// superset of the checker's type — complete and warm.
+    ///
+    /// A carrier the engine cannot resolve stays one opaque arm AND
+    /// records the typed `FlowGap::GuardNarrowing`: the narrow then
+    /// retains a superset (the sound direction — dropping a real
+    /// contributor is strictly worse than widening) and the gap keeps
+    /// it `ReturnOnly`, never warm. "Nothing filtered" must mean PROVED
+    /// unchanged, never "could not enumerate".
+    fn enumerated_union_arms_or_self(&mut self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let mut arms = Vec::new();
+        let mut expanded = rustc_hash::FxHashSet::default();
+        let mut gapped = false;
+        self.collect_enumerated_arms(node, &mut arms, &mut expanded, &mut gapped);
+        if gapped {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        arms
+    }
+
+    /// [`Self::enumerated_union_arms_or_self`]'s recursion. `expanded`
+    /// holds every union node whose members were already contributed, so
+    /// a cyclic carrier chain terminates without dropping or duplicating
+    /// a contributor.
+    fn collect_enumerated_arms(
+        &self,
+        node: SemanticNodeId,
+        arms: &mut Vec<SemanticNodeId>,
+        expanded: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+        gapped: &mut bool,
+    ) {
+        if let Some(SemanticNodeData::Union(members)) =
+            self.dispatch.graph().node_data(node).as_deref()
+        {
+            if expanded.insert(node) {
+                for member in members.to_vec() {
+                    self.collect_enumerated_arms(member, arms, expanded, gapped);
+                }
+            }
+            return;
+        }
+        match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            super::relation::IdentityCarrierUnwrap::Concrete(concrete)
+                if concrete != node
+                    && matches!(
+                        self.dispatch.graph().node_data(concrete).as_deref(),
+                        Some(SemanticNodeData::Union(_))
+                    ) =>
+            {
+                self.collect_enumerated_arms(concrete, arms, expanded, gapped);
+            }
+            super::relation::IdentityCarrierUnwrap::Concrete(_) => arms.push(node),
+            super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                arms.push(node);
+                *gapped = true;
+            }
         }
     }
 
@@ -6491,7 +6567,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
-        let arms = self.union_arms_or_self(current);
+        let arms = self.enumerated_union_arms_or_self(current);
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
             match keep(self, *arm) {
@@ -6587,6 +6663,9 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             | Some(SemanticNodeData::Array { .. })
             | Some(SemanticNodeData::Tuple { .. }) => Some(SliceTypeofKind::Object),
             Some(SemanticNodeData::Signature { .. }) => Some(SliceTypeofKind::Function),
+            // A template-literal type denotes only strings, whatever its
+            // placeholders resolve to.
+            Some(SemanticNodeData::TemplateLiteral { .. }) => Some(SliceTypeofKind::String),
             _ => None,
         };
         match classified {
@@ -6605,6 +6684,48 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
+        // A truthiness test over a PROPERTY narrows two references, both
+        // measured from the checker: the tested reference itself (below),
+        // and the property's PARENT — per-arm, an arm survives the tested
+        // edge iff ANY leaf of its projected member can take it, so a
+        // literal discriminant (`ok: true` / `ok: false`) filters both
+        // edges while a broad member (`v: string`) keeps its arm on the
+        // falsy edge (`""` inhabits it). The parent fact rides the
+        // narrowing overlay directly; the leaf fact is the returned
+        // narrow, so both land under the same guard scope.
+        if !subject.path.is_empty() {
+            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+                root: subject.root.clone(),
+                path: Arc::from(
+                    subject.path[..subject.path.len() - 1]
+                        .to_vec()
+                        .into_boxed_slice(),
+                ),
+            };
+            let last: Arc<[Arc<str>]> = Arc::from(
+                subject.path[subject.path.len() - 1..]
+                    .to_vec()
+                    .into_boxed_slice(),
+            );
+            let parent_fact = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
+                let member = this.project_segments_navigate(arm, &last)?;
+                let leaves = this.enumerated_union_arms_or_self(member);
+                Some(leaves.iter().any(|leaf| {
+                    if negated {
+                        this.arm_can_be_falsy(*leaf)
+                    } else {
+                        this.arm_can_be_truthy(*leaf)
+                    }
+                }))
+            });
+            match parent_fact {
+                GuardNarrowing::Impossible => return GuardNarrowing::Impossible,
+                GuardNarrowing::Narrowed(fact_subject, node) => {
+                    self.narrowings.push((fact_subject, node));
+                }
+                GuardNarrowing::Unchanged => {}
+            }
+        }
         self.narrow_arms_by(subject, subject, |this, arm| {
             Some(if negated {
                 this.arm_can_be_falsy(arm)
@@ -6678,8 +6799,14 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// narrows, `x === "a"` over `x: string`) the positive reading narrows
     /// the subject to the literal itself — the checker's own rule for a
     /// literal strictly narrower than the declared type. A non-empty path
-    /// is a DISCRIMINANT, filtering the ROOT's arms by whether the literal
-    /// is assignable to the arm's member type at the path.
+    /// is a DISCRIMINANT, filtering the arms of the tested property's
+    /// PARENT reference — the root itself for a one-segment path, the
+    /// enclosing reference for a deeper one. The checker never selects a
+    /// ROOT arm through a nested discriminant: doing so DROPS the
+    /// constituents whose nested member differs (a SUBSET of the
+    /// checker's type — strictly worse than widening), while the parent
+    /// reference is exactly what it narrows (`m.meta.kind === "one"`
+    /// narrows `m.meta`, never `m`).
     fn narrow_eq_literal(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -6691,6 +6818,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         };
         let literal_node = self.lower_body_type(&literal_ty);
         if subject.path.is_empty() {
+            // An arm whose relation to the literal the oracle cannot
+            // decide (a deferred form such as a template-literal arm)
+            // stays possible on BOTH edges and degrades the result: the
+            // checker decides such relations (`"none"` is off the
+            // `` `item-${string}` `` edge), so treating "undecided" as
+            // "proved unchanged" published a superset clean and warm.
+            let mut undecided = false;
             let narrowed = self.narrow_arms_by(subject, subject, |this, arm| {
                 if matches!(
                     this.dispatch.graph().node_data(arm).as_deref(),
@@ -6700,8 +6834,13 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 ) {
                     return None;
                 }
-                let forward = this.assignable(arm, literal_node)?;
-                let backward = this.assignable(literal_node, arm)?;
+                let (Some(forward), Some(backward)) = (
+                    this.assignable(arm, literal_node),
+                    this.assignable(literal_node, arm),
+                ) else {
+                    undecided = true;
+                    return Some(true);
+                };
                 // The positive edge keeps overlapping arms. The negative
                 // edge drops only an arm wholly covered by the literal: a
                 // broad `string` can exclude `"a"` and remain `string`, so
@@ -6712,6 +6851,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     forward || backward
                 })
             });
+            if undecided {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
             if matches!(narrowed, GuardNarrowing::Unchanged) && !negated {
                 // No arm was filtered. The literal can still be a STRICT
                 // subtype of the subject's whole type — then the literal
@@ -6729,27 +6873,56 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             }
             narrowed
         } else {
-            // The discriminant narrows the ROOT, so the fact lands at the
-            // root subject: a later read of ANY member of the binding
-            // resolves against the surviving arms.
-            let root_subject = crate::flow_slice_content::SliceNarrowSubject {
+            // The discriminant narrows the tested property's PARENT
+            // reference, so the fact lands at the parent subject: a
+            // later read of the parent, or of any member projected from
+            // it, resolves against the surviving arms — while the root
+            // keeps every constituent for two segments and beyond.
+            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
                 root: subject.root.clone(),
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: Arc::from(
+                    subject.path[..subject.path.len() - 1]
+                        .to_vec()
+                        .into_boxed_slice(),
+                ),
             };
-            let path = subject.path.clone();
-            self.narrow_arms_by(&root_subject, &root_subject, |this, arm| {
-                let member = this.project_segments_navigate(arm, &path)?;
-                if negated {
-                    // Excluding one literal removes a root arm only when
+            let last: Arc<[Arc<str>]> = Arc::from(
+                subject.path[subject.path.len() - 1..]
+                    .to_vec()
+                    .into_boxed_slice(),
+            );
+            // A parent arm whose projected discriminant the relation
+            // oracle cannot compare stays possible on BOTH edges and
+            // degrades the result — undecided is never "proved off this
+            // edge" nor "proved unchanged".
+            let mut undecided = false;
+            let narrowed = self.narrow_arms_by(&parent_subject, &parent_subject, |this, arm| {
+                let member = this.project_segments_navigate(arm, &last)?;
+                let verdict = if negated {
+                    // Excluding one literal removes a parent arm only when
                     // the projected member is wholly that literal. A named
                     // alias can project a broad discriminant union without
                     // exposing its root constituents; `"a"` fits
                     // `"a" | "b"`, but its negative edge remains possible.
-                    Some(!this.assignable(member, literal_node)?)
+                    this.assignable(member, literal_node)
+                        .map(|covered| !covered)
                 } else {
-                    Some(this.assignable(literal_node, member)?)
+                    this.assignable(literal_node, member)
+                };
+                match verdict {
+                    Some(keep) => Some(keep),
+                    None => {
+                        undecided = true;
+                        Some(true)
+                    }
                 }
-            })
+            });
+            if undecided {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            narrowed
         }
     }
 
@@ -6764,6 +6937,17 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
     ) {
+        // A fact about a PATH reference (a nested discriminant's parent)
+        // cannot ride the reaching-definition layers — those carry whole
+        // bindings — so it rides the state's narrowing overlay. The
+        // fall-through JOIN intersects overlays, so a deep fact two
+        // edges disagree on is dropped there: the joined start then
+        // reads the un-narrowed parent — a checker-superset, the sound
+        // direction — never another clause's value.
+        if !subject.path.is_empty() {
+            state.narrowings.push((subject.clone(), node));
+            return;
+        }
         match &subject.root {
             crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
                 state.param_writes.insert(*ordinal, node);
@@ -6778,30 +6962,36 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// The switch discriminant's arms that NO case test covers: the
-    /// remainder the default clause's dispatch edge narrows to, and —
-    /// when empty with no default authored — the proof the
+    /// The arms of the discriminant's PARENT reference that NO case test
+    /// covers: the remainder the default clause's dispatch edge narrows
+    /// to, and — when empty with no default authored — the proof the
     /// no-matching-case path is dead (the ONE exhaustiveness verdict).
     /// `None` when anything is undecidable (a projection miss, an
-    /// undecided relation): the caller then narrows nothing and keeps the
-    /// no-match path live.
+    /// undecided relation): the caller then narrows nothing, keeps the
+    /// no-match path live, and DEGRADES — a declined probe leaves a
+    /// checker-superset on those edges, never a clean one.
     ///
-    /// "Covers" is MUTUAL assignability between the arm and the test
-    /// literal (projected through the discriminant path for a member
-    /// discriminant): a broad arm a literal merely fits (`string` under
-    /// `case "a":`) is NOT covered — the checker's default edge keeps it.
-    /// Returns the surviving arms and the arm count, so the caller can
-    /// tell "no narrow established" (survivors == arms) from a real one.
+    /// "Covers" is per-LEAF mutual assignability between the arm's
+    /// projected member and a test literal
+    /// ([`Self::switch_member_covered`]): a broad leaf a literal merely
+    /// fits (`string` under `case "a":`) is NOT covered — the checker's
+    /// default edge keeps it. Returns the surviving arms and the arm
+    /// count, so the caller can tell "no narrow established"
+    /// (survivors == arms) from a real one.
     fn switch_discriminant_remainder(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         tests: &[crate::flow_slice_content::SliceGuardLiteral],
     ) -> Option<(Vec<SemanticNodeId>, usize)> {
-        // The narrow lands at the ROOT (a member-path discriminant
-        // narrows the binding itself), so the arms are the root's. The
-        // probe reads the live layers WITHOUT folding a membership flag:
-        // asking about coverage is not an observation of the binding's
-        // value, so it must not degrade one.
+        // The narrow lands at the tested property's PARENT reference
+        // (the root itself for a whole-subject or one-segment
+        // discriminant), so the arms are the parent's — a nested
+        // discriminant must never select among ROOT arms: that DROPS the
+        // constituents whose nested member differs, a subset of the
+        // checker's type. The probe reads the live layers WITHOUT
+        // folding a membership flag: asking about coverage is not an
+        // observation of the binding's value, so it must not degrade
+        // one.
         let root_subject = crate::flow_slice_content::SliceNarrowSubject {
             root: subject.root.clone(),
             path: Arc::from(Vec::new().into_boxed_slice()),
@@ -6822,15 +7012,38 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .copied()?,
             }
         };
-        let arms = self.union_arms_or_self(root);
+        let parent = if subject.path.len() > 1 {
+            let parent_subject = crate::flow_slice_content::SliceNarrowSubject {
+                root: subject.root.clone(),
+                path: Arc::from(
+                    subject.path[..subject.path.len() - 1]
+                        .to_vec()
+                        .into_boxed_slice(),
+                ),
+            };
+            if let Some(node) = self.narrowed_read(&parent_subject) {
+                node
+            } else {
+                self.project_segments_navigate(root, &subject.path[..subject.path.len() - 1])?
+            }
+        } else {
+            root
+        };
+        let arms = self.enumerated_union_arms_or_self(parent);
         // `boolean` decomposes into its two literal arms for coverage —
         // the checker's own reading of `case true:` / `case false:` over
-        // a boolean discriminant.
+        // a boolean discriminant. The check peels the arm's identity
+        // carrier so an alias to `boolean` decomposes exactly as the
+        // authored primitive does.
         let arms: Vec<SemanticNodeId> = arms
             .into_iter()
             .flat_map(|arm| {
+                let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+                    super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
+                    super::relation::IdentityCarrierUnwrap::Unresolvable => arm,
+                };
                 if matches!(
-                    self.dispatch.graph().node_data(arm).as_deref(),
+                    self.dispatch.graph().node_data(concrete).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
                 ) {
                     let graph = self.dispatch.graph();
@@ -6856,22 +7069,77 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             test_nodes.push(self.lower_body_type(&ty));
         }
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-        'arms: for arm in &arms {
-            for test in &test_nodes {
-                let covered = if subject.path.is_empty() {
-                    self.assignable(*arm, *test)? && self.assignable(*test, *arm)?
-                } else {
-                    let member = self.project_segments_navigate(*arm, &subject.path)?;
-                    self.assignable(*test, member)? && self.assignable(member, *test)?
-                };
-                if covered {
-                    continue 'arms;
-                }
+        for arm in &arms {
+            let member = if subject.path.is_empty() {
+                *arm
+            } else {
+                self.project_segments_navigate(*arm, &subject.path[subject.path.len() - 1..])?
+            };
+            if !self.switch_member_covered(member, &test_nodes)? {
+                survivors.push(*arm);
             }
-            survivors.push(*arm);
         }
         let total = arms.len();
         Some((survivors, total))
+    }
+
+    /// Whether every runtime value of one arm's tested member is matched
+    /// by some carried case test — the coverage relation behind the
+    /// switch remainder and the exhaustiveness verdict. Coverage is
+    /// decided per LEAF of the member: its enumerated union arms, with a
+    /// `boolean` leaf decomposing into its two literals — the checker's
+    /// own reading, which proves `case "a"` + `case "b"` exhaustive over
+    /// a `kind: "a" | "b"` member exactly as over two discriminated
+    /// arms. `None` when a leaf relation is undecided or the member's
+    /// arms cannot be enumerated: coverage is then unknowable and the
+    /// whole probe declines — the callers degrade instead of publishing
+    /// a clean unnarrowed edge or a false liveness verdict.
+    fn switch_member_covered(
+        &mut self,
+        member: SemanticNodeId,
+        tests: &[SemanticNodeId],
+    ) -> Option<bool> {
+        let mut leaves = Vec::new();
+        let mut expanded = rustc_hash::FxHashSet::default();
+        let mut gapped = false;
+        self.collect_enumerated_arms(member, &mut leaves, &mut expanded, &mut gapped);
+        if gapped {
+            return None;
+        }
+        let leaves: Vec<SemanticNodeId> = leaves
+            .into_iter()
+            .flat_map(|leaf| {
+                let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(leaf) {
+                    super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
+                    super::relation::IdentityCarrierUnwrap::Unresolvable => leaf,
+                };
+                if matches!(
+                    self.dispatch.graph().node_data(concrete).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+                ) {
+                    let graph = self.dispatch.graph();
+                    vec![
+                        graph.intern_node(SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::Boolean(true),
+                        )),
+                        graph.intern_node(SemanticNodeData::Literal(
+                            crate::semantic_query::LiteralValue::Boolean(false),
+                        )),
+                    ]
+                } else {
+                    vec![leaf]
+                }
+            })
+            .collect();
+        'leaves: for leaf in &leaves {
+            for test in tests {
+                if self.assignable(*leaf, *test)? && self.assignable(*test, *leaf)? {
+                    continue 'leaves;
+                }
+            }
+            return Some(false);
+        }
+        Some(true)
     }
 
     /// `subject instanceof Ctor`, applying the checker's own per-arm
@@ -6962,7 +7230,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         let Some(current) = self.subject_current_node(subject) else {
             return GuardNarrowing::Unchanged;
         };
-        let arms = self.union_arms_or_self(current);
+        let arms = self.enumerated_union_arms_or_self(current);
         let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut changed = false;
         let mut gapped = false;
@@ -7213,7 +7481,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             let current = self
                 .subject_current_node(subject)
                 .expect("the subject answered just above");
-            let arms = self.union_arms_or_self(current);
+            let arms = self.enumerated_union_arms_or_self(current);
             let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
             for arm in &arms {
                 match self.assignable(*arm, target_node) {
@@ -7798,12 +8066,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     // knows only `has_default`, so the no-matching-case
                     // path dies here, where the discriminant's arms and
                     // the tests can be related.
+                    // A DECLINED remainder probe (an unlowerable test, a
+                    // projection miss, an undecided relation) leaves the
+                    // no-matching-case path live over arms the checker may
+                    // prove covered — a superset, so it degrades: the
+                    // liveness verdict is then unproven, never clean.
                     let covered = !has_default
                         && discriminant.as_ref().is_some_and(|subject| {
-                            matches!(
-                                self.switch_discriminant_remainder(subject, &tests),
-                                Some((remainder, _)) if remainder.is_empty()
-                            )
+                            match self.switch_discriminant_remainder(subject, &tests) {
+                                Some((remainder, _)) => remainder.is_empty(),
+                                None => {
+                                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                                        crate::semantic_query::FlowGap::GuardNarrowing,
+                                    ));
+                                    false
+                                }
+                            }
                         });
                     let mut chain_end: Option<FlowLayerState> = None;
                     let mut last_end: Option<FlowLayerState> = None;
@@ -7859,17 +8137,40 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                                                 .intern_normalized_union_or_intersection(
                                                     &remainder, true,
                                                 );
-                                            let root_subject =
+                                            // The remainder's arms are the
+                                            // PARENT reference's, so the
+                                            // fact lands there — the root
+                                            // for a shallow discriminant,
+                                            // the enclosing reference for
+                                            // a nested one.
+                                            let parent_subject =
                                                 crate::flow_slice_content::SliceNarrowSubject {
                                                     root: subject.root.clone(),
-                                                    path: Arc::from(Vec::new().into_boxed_slice()),
+                                                    path: Arc::from(
+                                                        subject.path[..subject
+                                                            .path
+                                                            .len()
+                                                            .saturating_sub(1)]
+                                                            .to_vec()
+                                                            .into_boxed_slice(),
+                                                    ),
                                                 };
                                             Self::bake_narrow_into_state(
                                                 &mut dispatch,
-                                                &root_subject,
+                                                &parent_subject,
                                                 node,
                                             );
                                         }
+                                    } else {
+                                        // A DECLINED probe leaves this
+                                        // edge carrying the WHOLE
+                                        // discriminant where the checker
+                                        // subtracts the matched cases — a
+                                        // superset, so it degrades rather
+                                        // than publishing clean.
+                                        self.record_degradation(FlowReturnDegradation::FlowGap(
+                                            crate::semantic_query::FlowGap::GuardNarrowing,
+                                        ));
                                     }
                                 }
                             }
