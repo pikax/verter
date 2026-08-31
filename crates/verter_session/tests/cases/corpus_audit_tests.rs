@@ -3,6 +3,7 @@
 //! Stitches moderate table-test chunks into the consolidated session
 //! integration binary. Nextest gives every `#[test]` its own process;
 //! sharing therefore occurs inside each chunk, never across tests.
+//! Logical corpus cases: 179.
 
 #[path = "component_meta_audit_corpus/chunk_000.rs"]
 mod chunk_000;

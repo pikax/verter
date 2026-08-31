@@ -1122,7 +1122,7 @@ fn stage4_deferred_carriers_have_no_session_resolution_consumer() {
 
     let mut violations = Vec::new();
     for (rel, src) in production_src_files() {
-        for hit in file_names_deferred_payload(&src, &payload_patterns) {
+        for hit in file_names_deferred_payload(src, &payload_patterns) {
             violations.push(format!("{rel}: {hit}"));
         }
     }
@@ -1600,8 +1600,8 @@ fn no_hand_written_no_type_expr_impls_except_audited_hot_type_ref() {
     let mut violations = Vec::new();
     let mut audited_seen = false;
     for (rel, src) in production_src_files() {
-        let in_audited_file = is_audited_witness_file(&rel);
-        for hit in hand_written_no_type_expr_impls(&src) {
+        let in_audited_file = is_audited_witness_file(rel);
+        for hit in hand_written_no_type_expr_impls(src) {
             // EXACT whole-ident match on the self type AND file-precision — the
             // exemption applies ONLY to `HotTypeRef` in `semantic_query.rs`.
             // `HotTypeRefAlias` / `HotTypeRefSneaky` (wrong ident) and a
@@ -1648,7 +1648,7 @@ pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
 pub(super) fn run_production_guards() {
     std::thread::scope(|scope| {
         for (_, guard) in PRODUCTION_GUARDS {
-            scope.spawn(move || guard());
+            scope.spawn(guard);
         }
     });
 }

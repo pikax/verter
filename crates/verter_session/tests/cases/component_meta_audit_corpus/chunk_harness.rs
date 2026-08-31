@@ -137,10 +137,12 @@ fn corpus_worker_configs() -> (HostConfig, SchedulerConfig) {
         spawn: PoolSpawn::LazyOnFirstUse,
         size: PoolSize::Fixed(1),
     };
-    let mut host = HostConfig::default();
-    host.resource_policy = HostResourcePolicy {
-        host_cpu_pool: fixed_lazy_one,
-        decl_lowering: fixed_lazy_one,
+    let host = HostConfig {
+        resource_policy: HostResourcePolicy {
+            host_cpu_pool: fixed_lazy_one,
+            decl_lowering: fixed_lazy_one,
+        },
+        ..HostConfig::default()
     };
     let scheduler = SchedulerConfig {
         cpu_threads: 1,

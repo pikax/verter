@@ -189,10 +189,8 @@ test("release.yml runs the same BF2 command in parallel and blocks publishing on
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
   const coreJob = yamlJob(workflow, "test");
   const bf2Job = yamlJob(workflow, "bf2-authoritative");
-  assert.doesNotMatch(
-    coreJob,
-    /provision-oracle-npm-cache\.mjs|--features\s+(?:verter_session\/)?bf2-authoritative/,
-  );
+  assert.match(coreJob, /provision-oracle-npm-cache\.mjs/);
+  assert.doesNotMatch(coreJob, /--features\s+(?:verter_session\/)?bf2-authoritative/);
   assert.doesNotMatch(bf2Job, /^\s*needs:/m);
   assert.match(bf2Job, /provision-oracle-npm-cache\.mjs/);
   assert.match(bf2Job, /node scripts\/bf2-authoritative\.mjs/);

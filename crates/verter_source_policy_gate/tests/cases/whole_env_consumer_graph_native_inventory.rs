@@ -2177,7 +2177,7 @@ fn bounded_body_guard_discriminates_violation_from_clean() {
     // default / delegate of the same name) is clean.
     let real_inv = production_inventory();
     for row in WHOLE_ENV_CONSUMER_INVENTORY {
-        let bodies = all_named_bodies(&real_inv, row.graph_native_fn);
+        let bodies = all_named_bodies(real_inv, row.graph_native_fn);
         assert!(
             !bodies.is_empty(),
             "real reader body for `{}` must exist",
@@ -2231,7 +2231,7 @@ pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
 pub(super) fn run_production_guards() {
     std::thread::scope(|scope| {
         for (_, guard) in PRODUCTION_GUARDS {
-            scope.spawn(move || guard());
+            scope.spawn(guard);
         }
     });
 }
