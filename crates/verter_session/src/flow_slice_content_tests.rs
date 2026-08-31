@@ -1980,6 +1980,354 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
     }
 }
 
+/// A declaration position the slice never lowers still EXECUTES at the
+/// statement: the initializer of a destructuring declarator, the
+/// initializer of a binding the demand slice did not value-select, and
+/// every enum member initializer all run in THIS frame. An assertion call
+/// or a whole-binding write there narrows / retypes every read that
+/// follows in the checker while neither the obligation plan (the slice
+/// pruned the position) nor a scanner saw it — the unnarrowed superset
+/// would seal complete and warm. Each position takes the same fail-closed
+/// discipline the class-declaration arm applies: an effect that is not
+/// provably narrowing-free flags the enclosing statement's typed
+/// `GuardNarrowing` gap. A pure-literal initializer carries no effect and
+/// stays silent — the elision optimization is unchanged.
+#[test]
+fn elided_declaration_position_effects_take_the_typed_gap() {
+    let gapped = [
+        (
+            "an assertion in an unselected binding's initializer",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { const unused = (assertString(x), 0); return x }",
+        ),
+        (
+            "an imported callee with a frame-owned subject in an unselected initializer",
+            "import { check } from \"./check\";\n\
+             function f(x: string | number) { const unused = (check(x), 0); return x }",
+        ),
+        (
+            "a write in an unselected binding's initializer",
+            "export {};\nfunction f(x: string | number) { const unused = (x = \"s\", 0); return x }",
+        ),
+        (
+            "an assertion in a destructuring declarator's initializer",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { const { a } = (assertString(x), { a: 0 }); return x }",
+        ),
+        (
+            "a write in a destructuring declarator's initializer",
+            "export {};\nfunction f(x: string | number) { const [a] = (x = \"s\", [0]); return x }",
+        ),
+        (
+            "an assertion in an enum member initializer",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { enum E { A = (assertString(x), 1) } return x }",
+        ),
+        (
+            "an imported callee with a frame-owned subject in an enum member initializer",
+            "import { check } from \"./check\";\n\
+             function f(x: string | number) { enum E { A = check(x) } return x }",
+        ),
+        (
+            "a write in an enum member initializer",
+            "export {};\nfunction f(x: string | number) { enum E { A = (x = 1, 1) } return x }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the effect-bearing elided position takes the typed gap: {node:?}"
+        );
+    }
+
+    // The gapped exported-callee case names its own function.
+    let exported = content_for(
+        "export function check(x: unknown): void {}\n\
+         function g(x: string | number) { const unused = (check(x), 0); return x }",
+        "g",
+    );
+    assert_eq!(
+        guard_gap_count(&exported),
+        1,
+        "an exported callee's merged signature set can hide an assertion: {exported:?}"
+    );
+
+    let silent = [
+        (
+            "a pure-literal unselected initializer",
+            "export {};\nfunction f(x: string | number) { const unused = 0; return x }",
+        ),
+        (
+            "a pure destructuring initializer",
+            "export {};\nfunction f(x: string | number) { const { a } = { a: 0 }; return x }",
+        ),
+        (
+            "a literal-only enum",
+            "export {};\nfunction f(x: string | number) { enum E { A = 1, B = 2 } return x }",
+        ),
+        (
+            "a call with no frame-owned assertion subject",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { const unused = (touch(), 0); return x }",
+        ),
+        (
+            "a call whose only argument is not a reference",
+            "import { check } from \"./check\";\n\
+             function f(x: string | number) { const unused = (check(1), 0); return x }",
+        ),
+        (
+            "a nested-frame call in an unselected initializer stays deferred",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { const unused = () => touch(); return x }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: no frame-reaching effect mints no gap: {node:?}"
+        );
+    }
+
+    // A provably non-narrowing call in an elided initializer is certified
+    // decided-above, exactly as in any other same-frame position.
+    let certified = content_for(
+        "export {};\nfunction touch() {}\n\
+         function f(x: string | number) { const unused = (touch(), 0); return x }",
+        "f",
+    );
+    assert_eq!(
+        certified.decided_above_call_spans.len(),
+        1,
+        "a provably non-narrowing elided-initializer call is certified: {certified:?}"
+    );
+    assert_eq!(guard_gap_count(&certified), 0, "{certified:?}");
+}
+
+/// The discarded-operand / control-position scanner must collect
+/// whole-binding WRITES exactly as the leaf scanner does: the write in
+/// `(void (class { static { x = "s" } }), x)` hides inside a discarded
+/// operand's class, executes at the enclosing statement, and retypes `x`
+/// in the checker for every read that follows — but the flow skeleton
+/// skips the class subtree, so the write reaches neither the slice's
+/// effect ledger nor a scanner. A frame-owned write in one of those
+/// positions flags the enclosing statement's typed `GuardNarrowing` gap; a
+/// write to a binding the frame does not own stays silent.
+#[test]
+fn discarded_operand_writes_to_frame_bindings_take_the_typed_gap() {
+    let gapped = [
+        (
+            "a class static-block write in a discarded operand",
+            "export {};\nfunction f(x: string | number) { return (void (class { static { x = \"s\"; } }), x) }",
+        ),
+        (
+            "a class heritage write in a discarded operand",
+            "export {};\nclass Base {}\n\
+             function f(x: string | number) { return ((class extends (x = \"s\", Base) {}), x) }",
+        ),
+        (
+            "a class static-block write in an `if` test",
+            "export {};\nfunction f(x: string | number) { if ((class { static { x = \"s\"; } }, true)) return x; return x }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: nothing is certified: {node:?}"
+        );
+    }
+
+    let silent = [
+        (
+            "a write to a binding the frame does not own",
+            "export {};\nfunction f(x: string | number) { return (void (class { static { let y = 0; y = 1; } }), x) }",
+        ),
+        (
+            "a write in a discarded operand's NESTED frame never runs here",
+            "export {};\nfunction f(x: string | number) { return (((() => { x = \"s\"; }), 0), x) }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: no frame-owned same-frame write mints no gap: {node:?}"
+        );
+    }
+}
+
+/// A `for … of` / `for … in` loop whose LEFT side is an assignment target
+/// WRITES that binding once per iteration — `for (x of xs) {}` re-widens a
+/// narrowed `x` in the checker. Inside a scanned position (an immediately
+/// evaluated class static block) the default walk visited the target as a
+/// plain read, so the write reached neither the slice's effect ledger (the
+/// skeleton skips the class subtree) nor the scanner's write channel. The
+/// loop-head target takes the same whole-binding write discipline every
+/// other scanned position applies. A `for (const y of …)` declaration
+/// binds a FRESH binding — it writes nothing the frame owns and stays
+/// silent.
+#[test]
+fn for_loop_left_targets_in_scanned_positions_collect_writes() {
+    let gapped = [
+        (
+            "a for-of identifier target in a class declaration's static block",
+            "export {};\ndeclare const xs: unknown[];\n\
+             function f(x: string | number) { class C { static { for (x of xs) {} } } return x }",
+        ),
+        (
+            "a for-in identifier target in a class declaration's static block",
+            "export {};\ndeclare const o: object;\n\
+             function f(x: string | number) { class C { static { for (x in o) {} } } return x }",
+        ),
+        (
+            "a for-of destructuring target in a class-expression static block",
+            "export {};\ndeclare const xs: unknown[];\n\
+             function f(x: string | number) { return (class { static { for ([x] of xs) {} } } as object) }",
+        ),
+        (
+            "a for-of identifier target in a discarded operand's static block",
+            "export {};\ndeclare const xs: unknown[];\n\
+             function f(x: string | number) { return (void (class { static { for (x of xs) {} } }), x) }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the loop-head write takes the typed gap: {node:?}"
+        );
+    }
+
+    let silent = [
+        (
+            "a for-of const declaration binds fresh",
+            "export {};\ndeclare const xs: unknown[];\n\
+             function f(x: string | number) { class C { static { for (const y of xs) {} } } return x }",
+        ),
+        (
+            "a for-in let declaration binds fresh",
+            "export {};\ndeclare const o: object;\n\
+             function f(x: string | number) { class C { static { for (let y in o) {} } } return x }",
+        ),
+        (
+            "a member target never retypes the binding",
+            "export {};\ndeclare const xs: unknown[];\n\
+             function f(x: string | number) { const o = { p: 0 }; class C { static { for (o.p of xs) {} } } return x }",
+        ),
+        (
+            "a for-of in a deferred method body never runs here",
+            "export {};\ndeclare const xs: unknown[];\n\
+             function f(x: string | number) { class C { m() { for (x of xs) {} } } return x }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: no frame-owned whole-binding write mints no gap: {node:?}"
+        );
+    }
+}
+
+/// A `switch` case TEST is a control position: the checker binds a call
+/// there into the case's dispatch narrowing exactly as it binds an `if`
+/// test into the arms (`switch (true) { case isString(x): … }` narrows
+/// `x` inside the clause). The lowering modeled only LITERAL case tests,
+/// and the discriminant scanned nothing either — a call in either position
+/// reached neither a modeled lowering, nor an obligation, nor a scanner.
+/// The discriminant takes the discarded-operand discipline (its value is
+/// consumed by the dispatch but never feeds the demanded answer — only an
+/// `asserts` callee narrows what follows), and each case test takes the
+/// control-test discipline (a predicate callee CONTROLS the clause's
+/// narrowing). A bare-identifier test — including one aliasing a predicate
+/// call's result — carries no new call and stays silent.
+#[test]
+fn switch_case_tests_and_discriminant_take_the_control_discipline() {
+    let gapped = [
+        (
+            "a closed same-file predicate as a case test",
+            "export {};\nfunction isString(x: unknown): x is string { return true }\n\
+             function f(x: string | number) { switch (true) { case isString(x): break; } return x }",
+        ),
+        (
+            "an imported callee as a case test",
+            "import { check } from \"./check\";\n\
+             function f(x: string | number) { switch (true) { case check(x): break; } return x }",
+        ),
+        (
+            "a closed UNANNOTATED callee as a case test",
+            "export {};\nfunction check(x: unknown) { return true }\n\
+             function f(x: string | number) { switch (true) { case check(x): break; } return x }",
+        ),
+        (
+            "an assertion in the discriminant",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { switch ((assertString(x), 0)) { default: break; } return x }",
+        ),
+        (
+            "a class-hidden write in a case test",
+            "export {};\nfunction f(x: string | number) { switch (true) { case (class { static { x = \"s\"; } }, true): break; } return x }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the switch takes the typed gap: {node:?}"
+        );
+    }
+
+    // A provably non-narrowing case-test callee is certified decided-above.
+    let certified = content_for(
+        "export {};\nfunction check(x: unknown): boolean { return true }\n\
+         function f(x: string | number) { switch (true) { case check(x): break; } return x }",
+        "f",
+    );
+    assert_eq!(
+        certified.decided_above_call_spans.len(),
+        1,
+        "a provably non-narrowing case test is certified: {certified:?}"
+    );
+    assert_eq!(guard_gap_count(&certified), 0, "{certified:?}");
+
+    let silent = [
+        (
+            "a literal case test",
+            "export {};\nfunction f(x: string | number) { switch (x) { case 1: break; default: break; } return x }",
+        ),
+        (
+            "a bare-identifier case test aliasing a predicate call's result",
+            "export {};\nfunction isString(x: unknown): x is string { return true }\n\
+             function f(x: string | number) { const c = isString(x); switch (true) { case c: break; } return x }",
+        ),
+        (
+            "a bare-identifier discriminant",
+            "export {};\nfunction f(x: string | number) { switch (x) { default: break; } return x }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: no effect-bearing position mints no gap: {node:?}"
+        );
+    }
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {
@@ -2589,4 +2937,224 @@ fn locator_miss_is_typed_none() {
             .is_none(),
         "a mismatched descent is a typed miss"
     );
+}
+
+/// The expression-statement fallthrough — every shape that is neither a
+/// modeled whole-binding write nor a bare assertion call — still EXECUTES
+/// at the statement: a discarded sequence operand (`(assertString(x),
+/// 0);`), a `void` operand, a template interpolation, a call's ARGUMENT
+/// (`touch((assertString(x), 0));`), and an assignment the modeled arm
+/// refused (a member target, or a right-hand side the slice did not
+/// select) can all carry an `asserts` narrowing of a frame-owned binding,
+/// and a class subtree hides a write from the skeleton entirely. Each
+/// takes the fail-closed scan: an effect that could narrow a frame binding
+/// flags the typed `GuardNarrowing` gap. Ordinary value-neutral statements
+/// — a bare or member call whose arguments carry no effect, a visible
+/// write the unapplied-write ledger already covers — stay silent.
+#[test]
+fn unmodeled_expression_statement_effects_take_the_typed_gap() {
+    let gapped = [
+        (
+            "a discarded sequence operand",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { (assertString(x), 0); return x }",
+        ),
+        (
+            "a `void` operand",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { void assertString(x); return x }",
+        ),
+        (
+            "a template interpolation",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { `${assertString(x)}`; return x }",
+        ),
+        (
+            "a logical right operand",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { true && (assertString(x), true); return x }",
+        ),
+        (
+            "a call argument",
+            "import { touch } from \"./touch\";\n\
+             function assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { touch((assertString(x), 0)); return x }",
+        ),
+        (
+            "a member-write statement's right-hand side",
+            "export {};\ndeclare const o: { p: number };\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { o.p = (assertString(x), 1); return x }",
+        ),
+        (
+            "an assignment right-hand side the slice did not select",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { let y = 0; y = (assertString(x), 1); return x }",
+        ),
+        (
+            "a class-hidden write in an expression statement",
+            "export {};\nfunction f(x: string | number) { void (class { static { x = \"s\"; } }); return x }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the effect-bearing statement takes the typed gap: {node:?}"
+        );
+    }
+
+    // A throw argument evaluates before the region ends — its effect gaps
+    // AHEAD of the throw inside the try block's region.
+    let thrown = content_for(
+        "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+         function f(x: string | number) { try { throw (assertString(x), \"e\"); } catch { return x; } return x }",
+        "f",
+    );
+    let [SliceStatement::Try { block, .. }] = thrown.body.statements.as_ref() else {
+        panic!("the try lowers as a region: {thrown:?}");
+    };
+    assert_eq!(
+        region_guard_gap_count(block),
+        1,
+        "an assertion in a throw argument takes the typed gap ahead of the throw: {thrown:?}"
+    );
+
+    let silent = [
+        (
+            "a bare call with no frame-reaching effect",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { touch(); return x }",
+        ),
+        (
+            "a member call whose argument carries no effect",
+            "export {};\ndeclare const console: { log(x: unknown): void };\n\
+             function f(x: string | number) { console.log(x); return x }",
+        ),
+        (
+            "a visible write the ledger already covers",
+            "export {};\nfunction f(x: string | number) { let dead = 0; dead = x; return 1 }",
+        ),
+        (
+            "a compound write the ledger already covers",
+            "export {};\nfunction f(x: number) { x += 1; return x }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: no frame-reaching unmodeled effect mints no gap: {node:?}"
+        );
+    }
+}
+
+/// An executable namespace / module body RUNS its statements at the
+/// declaration statement, in this frame — no content lowers for them, so
+/// an assertion there narrows what follows without any obligation or
+/// scanner seeing it. The body takes the fail-closed scan; an ambient
+/// (`declare`) or augmenting (string-named) block evaluates nothing.
+#[test]
+fn namespace_body_effects_take_the_typed_gap() {
+    let gapped = [
+        (
+            "an assertion in a namespace body",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { namespace N { export const y = (assertString(x), 0); } return x }",
+        ),
+        (
+            "an assertion in a nested namespace chain's block",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { namespace A.B { export const y = (assertString(x), 0); } return x }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the namespace statement takes the typed gap: {node:?}"
+        );
+    }
+
+    let silent = [
+        (
+            "a literal-only namespace body",
+            "export {};\nfunction f(x: string | number) { namespace N { export const y = 1; } return x }",
+        ),
+        (
+            "a call with no frame-owned assertion subject",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { namespace N { export const y = touch(); } return x }",
+        ),
+        (
+            "a nested function body stays deferred",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { namespace N { export function g() { touch(); } } return x }",
+        ),
+        (
+            "an ambient namespace evaluates nothing",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { declare namespace N { const y: number; } return x }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: no frame-reaching effect mints no gap: {node:?}"
+        );
+    }
+}
+
+/// An elided object member value or spread source never lowers — but it
+/// still RUNS at the object literal's evaluation, so an assertion inside
+/// it narrows what follows in the checker while no obligation reaches the
+/// position. The elided position takes the same fail-closed scan: an
+/// effect that could narrow a frame binding flags the typed gap; a pure
+/// literal or a call with no frame-owned assertion subject stays silent.
+#[test]
+fn elided_member_value_effects_take_the_typed_gap() {
+    let gapped = [
+        (
+            "an assertion in an elided member value",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { return { a: (assertString(x), 1), b: x } }",
+        ),
+        (
+            "an assertion in an elided spread source",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { return { ...((assertString(x), { a: 1 }) as { a: number }), b: x } }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for_path(source, "f", &[Arc::from("b")]);
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the elided position takes the typed gap: {node:?}"
+        );
+    }
+
+    let silent = [
+        (
+            "a pure-literal elided member value",
+            "export {};\nfunction f(x: string | number) { return { a: 1, b: x } }",
+        ),
+        (
+            "a call with no frame-owned assertion subject in an elided member value",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return { a: touch(), b: x } }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for_path(source, "f", &[Arc::from("b")]);
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: no frame-reaching effect mints no gap: {node:?}"
+        );
+    }
 }

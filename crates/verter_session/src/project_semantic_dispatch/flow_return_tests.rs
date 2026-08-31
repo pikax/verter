@@ -6773,6 +6773,205 @@ function f(x: string | number) {
     });
 }
 
+/// An UNSELECTED binding's initializer never lowers — but it still runs at
+/// the statement: the discarded assertion of `const unused =
+/// (assertString(x), 0)` narrows `x` to `string` in the checker for every
+/// read that follows. The demand plan pruned the position (the binding is
+/// never read), so no call obligation existed, and no scanner saw it —
+/// the return's read of `x` could seal complete and warm at the unnarrowed
+/// `string | number`. The elided position takes the same fail-closed
+/// discipline: the read keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn unselected_initializer_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/unselected-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const unused = (assertString(x), 0);
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A DESTRUCTURING declarator never lowers (it is not a simple local
+/// reaching definition) — but its initializer still runs at the statement,
+/// so the assertion in `const { a } = (assertString(x), { a: 0 })` narrows
+/// `x` for the checker while nothing here modeled or scanned it. The same
+/// typed `GuardNarrowing` gap applies: the read stays unnarrowed and the
+/// family slot holds zero candidates.
+#[test]
+fn destructuring_initializer_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/destructuring-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const { a } = (assertString(x), { a: 0 });
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// An enum declaration is not transparent: every member initializer
+/// evaluates in THIS frame at the statement, so the assertion in `enum E {
+/// A = (assertString(x), 1) }` narrows `x` for every read that follows in
+/// the checker. The declaration lowered as a no-op — no obligation, no
+/// scanner — so the unnarrowed superset could seal complete and warm. The
+/// same fail-closed discipline applies: the read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
+/// the family slot holds zero candidates.
+#[test]
+fn enum_member_initializer_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/enum-init-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  enum E { A = (assertString(x), 1) }
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// The discarded-operand scan must see WRITES, not only calls: the write
+/// in `(void (class { static { x = "s"; } }), x)` hides in a discarded
+/// operand's class static block, runs at the enclosing statement, and
+/// retypes `x` in the checker for the read the sequence's value carries.
+/// The skeleton skips the class subtree, so the write reached neither the
+/// effect ledger nor a scanner — the sequence's read of `x` could publish
+/// the unnarrowed superset complete and warm. The write takes the typed
+/// `GuardNarrowing` gap instead, and the family slot holds zero
+/// candidates.
+#[test]
+fn discarded_operand_class_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/discarded-operand-class-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  return { x: (void (class { static { x = "s"; } }), x) };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A `for … of` whose left side is an assignment target WRITES the binding
+/// once per iteration — inside a class static block the write runs at
+/// class evaluation and retypes `x` in the checker, while the default walk
+/// visited the target as a plain read and the skeleton never entered the
+/// class subtree. The loop-head target takes the same whole-binding write
+/// discipline: the return's read of `x` keeps the unnarrowed join, the
+/// demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[test]
+fn for_of_left_target_write_in_scanned_position_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/for-of-left-target-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+declare const xs: string[];
+
+function f(x: string | number) {
+  class C { static { for (x of xs) {} } }
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A `switch` case TEST is a control position: `switch (true) { case
+/// isString(x): … }` narrows `x` inside the clause in the checker exactly
+/// as the `if` twin does. The lowering modeled only literal case tests, so
+/// a predicate call there reached neither a guard, nor an obligation, nor
+/// a scanner — the clause's read of `x` could publish the unnarrowed
+/// superset complete and warm. The case test takes the control-test
+/// discipline: an unprovable control callee keeps every read of `x`
+/// unnarrowed, the demand carries the typed `GuardNarrowing` gap, and the
+/// family slot holds zero candidates.
+#[test]
+fn switch_case_test_predicate_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/switch-case-test-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function isString(x: unknown): x is string { return typeof x === "string" }
+
+function f(x: string | number) {
+  switch (true) {
+    case isString(x):
+      break;
+    default:
+      break;
+  }
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// An expression statement that is neither a modeled write nor a bare
+/// assertion call still EXECUTES: the discarded sequence operand of
+/// `(assertString(x), 0);` narrows `x` to `string` in the checker for the
+/// read that follows, while no content lowered for it and no obligation
+/// reached it — the return's read of `x` could seal complete and warm at
+/// the unnarrowed `string | number`. The statement takes the fail-closed
+/// scan: the read keeps the unnarrowed join, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn expression_statement_discarded_assertion_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/expression-statement-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  (assertString(x), 0);
+  return { x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
 /// A call inside a discarded operand's NESTED frame never executes in
 /// this frame: the arrow body of `((() => { assertString(x); }), x)`
 /// runs only if the arrow is called, which nothing here does — so the
