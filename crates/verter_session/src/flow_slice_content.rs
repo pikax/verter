@@ -288,6 +288,9 @@ pub enum SliceStatement {
         span: FrameSpan,
         /// The lowered right-hand side.
         value: Box<SliceExpr>,
+        /// The right-hand side's top-level freshness shape, aligned with
+        /// `value` — the evaluator's evolving-target widening input.
+        freshness: SliceFreshness,
     },
     /// A same-file assertion call at statement position
     /// (`assertStr(u);`): the callee's declared return is
@@ -2198,6 +2201,52 @@ fn expr_is_bare_literal(expression: &Expression<'_>) -> bool {
         | Expression::BooleanLiteral(_) => true,
         Expression::TemplateLiteral(template) => template.expressions.is_empty(),
         _ => false,
+    }
+}
+
+/// The top-level FRESHNESS shape of one applied write's right-hand side —
+/// the lowering-time input to the evaluator's evolving-target widening
+/// rule (an assignment into a binding with NO declared authority widens
+/// exactly its FRESH literal positions; every pinned position keeps its
+/// literal — the checker's own fresh/regular literal-type split).
+///
+/// The tree MIRRORS the content lowering's own descent so the per-arm
+/// facts align 1:1 with the lowered [`SliceExpr`]: a parenthesis is the
+/// one wrapper both walks descend through (`value_descent`'s
+/// `Transparent`), and a conditional recurses per branch exactly where
+/// the lowering mints `SliceExpr::Union { arms: [consequent, alternate] }`
+/// (`value_descent`'s `Branches`). Every other form is one leaf verdict
+/// from the shared bare-literal authority — a `satisfies` wrapper stays
+/// fresh (the checker preserves freshness through it), a const assertion
+/// or type assertion pins. A read of a widening-literal `const` is an
+/// EVALUATOR fact (widening-locals membership), never spelled here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceFreshness {
+    /// A bare (fresh) literal position: widens at an evolving target.
+    Fresh,
+    /// Not a fresh literal position: the literal (if any) stays pinned.
+    Pinned,
+    /// A conditional expression: per-branch verdicts, aligned with the
+    /// lowered [`SliceExpr::Union`] arms (`[consequent, alternate]`).
+    PerArm(Arc<[SliceFreshness]>),
+}
+
+/// The freshness mirror for one assignment right-hand side. See
+/// [`SliceFreshness`] for the alignment contract with `lower_expr`.
+fn assignment_rhs_freshness(expression: &Expression<'_>) -> SliceFreshness {
+    match expression {
+        Expression::ParenthesizedExpression(paren) => assignment_rhs_freshness(&paren.expression),
+        Expression::ConditionalExpression(conditional) => SliceFreshness::PerArm(Arc::from([
+            assignment_rhs_freshness(&conditional.consequent),
+            assignment_rhs_freshness(&conditional.alternate),
+        ])),
+        _ => {
+            if expr_is_bare_literal(expression) {
+                SliceFreshness::Fresh
+            } else {
+                SliceFreshness::Pinned
+            }
+        }
     }
 }
 
@@ -5815,9 +5864,10 @@ impl Lowerer<'_> {
             &assignment.right,
             ExprMode::BindingInit {
                 // Preserve the RHS until the evaluator can reduce it
-                // against the target's authored declared type. It
-                // widens the literal itself when the target has no
-                // annotation.
+                // against the target's authored declared type. When the
+                // target has no declared authority the evaluator widens
+                // exactly the FRESH positions, directed by the
+                // `freshness` mirror below.
                 preserve_literal: true,
             },
         );
@@ -5831,6 +5881,7 @@ impl Lowerer<'_> {
             // IDENTIFIER — never the whole assignment expression.
             span: self.rebase(identifier.span),
             value: Box::new(value),
+            freshness: assignment_rhs_freshness(&assignment.right),
         })
     }
 

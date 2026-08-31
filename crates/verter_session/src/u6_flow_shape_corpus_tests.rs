@@ -1682,6 +1682,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "d0cac39054be89c7afdb7cce4bae21d3fc5fc280af6b3039073a3fd7f63ab981",
     ),
     (
+        "N71_in_operator_optional_member_keeps_undefined",
+        "216313b7c5a1ee161a92125b9e43c98bb3478ce97fcb255af8dd11b768382eb9",
+    ),
+    (
         "N73_typeof_object_keeps_null",
         "95343cc9fd971495876ad1406249ffc7167c107bea92a77eade69daaa71d4d54",
     ),
@@ -2692,6 +2696,10 @@ mod corpus_suite {
                  `{ v: Union(string | number) }`",
             ),
             (
+                "N71_in_operator_optional_member_keeps_undefined",
+                "checker prints `{ v: string | undefined; }`; the renderer spells the same node `{ v: Union(string | undefined) }`",
+            ),
+            (
                 "N40_as_wrapped_guard",
                 "checker prints `{ v: string | number; }`; the renderer spells \
                  `{ v: Union(string | number) }`",
@@ -2843,12 +2851,12 @@ mod corpus_suite {
                 "checker prints `\"b1\" | \"b2\"`; the renderer spells the same node `Union(\"b1\" | \"b2\")`",
             ),
             (
-                "X95_evolving_let_both_branches_join",
-                "checker prints `{ v: \"p\" | 1; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+                "X94_evolving_let_one_branch_keeps_undefined",
+                "the renderer spells the (KnownOwed-divergent) node `{ v: \"q\" }` where the checker prints `{ v: \"q\" | undefined; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "X97_evolving_let_switch_without_default_keeps_undefined",
-                "checker prints `{ v: \"s\" | 3 | undefined; }`; the renderer spells the same node `{ v: Union(string | number) }`",
+                "the renderer spells the (KnownOwed-divergent) node `{ v: Union(\"s\" | 3) }` where the checker prints `{ v: \"s\" | 3 | undefined; }` — print syntax AND semantics differ; the semantic divergence is held by the KnownOwed arm of the semantic test",
             ),
             (
                 "X99_nested_try_finally_collects_every_return",
@@ -4220,6 +4228,11 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
         "member Union — the published value EQUALS the checker, so a recursive pin would assert a divergence this KnownOwed row does not have",
     ),
     (
+        "X95_evolving_let_both_branches_join",
+        Owner::U6ValueInference,
+        "member Union — the published value EQUALS the checker (the const-asserted literals are preserved through the join), so a recursive pin would assert a divergence this KnownOwed row does not have; it stays parked on the ConditionalVarDefinition admission",
+    ),
+    (
         "X96_evolving_let_explicit_undefined_initializer",
         Owner::U6ValueInference,
         "member Union carrying Opaque(Miss) — no Miss variant in the recursive expectation vocabulary",
@@ -4239,8 +4252,13 @@ const SHALLOW_PINNED_ROWS: &[(&str, Owner, &str)] = &[
 /// have to assert a divergence the row does not have, which
 /// `deep_pinned_rows_semantic_equality_follows_their_verdict` correctly
 /// rejects. Each entry records which of the two it is.
+///
+/// Raised to 88 when the evolving-target literal widening learned the
+/// fresh/pinned split: X95's published value now EQUALS the checker while
+/// the result stays a typed `ReturnOnly` (ConditionalVarDefinition), the
+/// same value-equals-checker class as N81/N84.
 #[cfg(test)]
-const SHALLOW_PINNED_ROWS_CEILING: usize = 87;
+const SHALLOW_PINNED_ROWS_CEILING: usize = 88;
 
 /// The shapes this corpus landed with as OPEN debts — production disagrees
 /// with the checker, or deletes a type-check surface the checker types.
@@ -4362,7 +4380,6 @@ const OPEN_DEBTS: &[&str] = &[
     "N65_enum_member_discriminant",
     "N69_in_operator_const_literal_key",
     "N70_in_operator_numeric_key",
-    "N71_in_operator_optional_member_keeps_undefined",
     "N72_typeof_function_guard",
     "N74_array_isarray_true_arm",
     "N75_array_isarray_false_arm",
@@ -4412,7 +4429,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     // N25's MatchesChecker label predated the recursive expect pin; the
     // deep measurement showed the dead contributor SURVIVES (wrong-and-
     // warm), so the row is parked against its narrowing block.
-    (Owner::U6NarrowLattice, 27, 13, 14),
+    (Owner::U6NarrowLattice, 27, 14, 13),
     (Owner::U6NarrowSubstitution, 12, 6, 6),
     (Owner::U6NarrowInvalidation, 2, 1, 1),
     (Owner::SharedTypeResolution, 9, 4, 3),

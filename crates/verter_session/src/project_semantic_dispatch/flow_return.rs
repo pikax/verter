@@ -4035,13 +4035,16 @@ enum ArmGuardClass {
 
 /// One union arm's key-presence verdict for a `"key" in subject` test.
 /// The `in` guard needs one more state than [`ArmGuardClass`] because an
-/// OPTIONAL member decides the two edges differently: the arm provably
-/// stays on the NEGATED edge exactly as declared (a value of the arm's
-/// type may lack the key), while on the POSITIVE edge retention is a
-/// superset of the checker's key-present refinement and must carry the
-/// typed guard gap. `Always`/`Never` are per-edge PROOFS (a required
-/// member / a proven-absent key on a closed surface); `Unknown` proves
-/// nothing and keeps the arm on both edges with the gap recorded.
+/// OPTIONAL member is its own proof shape: the arm provably stays on
+/// BOTH edges exactly as declared — a value of the arm's type may lack
+/// the key (negated edge), and the checker's positive edge keeps the arm
+/// UNCHANGED too (measured: `if ("k" in x) x.k` reads `string |
+/// undefined` for `k?: string`, byte-identical to the guard-free read —
+/// `in` establishes key PRESENCE and says nothing about the value; the
+/// absent-key `undefined` is the member READ's own fact, folded at
+/// `project_segments_navigate`). `Always`/`Never` are per-edge PROOFS (a
+/// required member / a proven-absent key on a closed surface); `Unknown`
+/// proves nothing and keeps the arm on both edges with the gap recorded.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InArmPresence {
     Always,
@@ -4942,15 +4945,15 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Apply the checker's assignment typing rule to a preserved RHS literal.
-    /// Annotated unions select their comparable declared constituents;
-    /// annotated non-unions retain the declared type; an unannotated target
-    /// gets the ordinary widening-literal value.
-    fn assignment_node_for_target(
+    /// The declared authority governing a write target, after the same
+    /// lazy destructured-parameter bootstrap assignment application uses —
+    /// so RHS evaluation context and target authority cannot diverge.
+    /// `None` is an EVOLVING target: no annotation supplies a type, the
+    /// binding's type is the join of what the writes assign.
+    fn target_declared_node(
         &mut self,
         target: &crate::flow_slice_content::SliceNarrowSubject,
-        value: SemanticNodeId,
-    ) -> SemanticNodeId {
+    ) -> Option<SemanticNodeId> {
         if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
             if !self.locals.contains_key(name.as_ref())
                 && !self.var_locals.contains_key(name.as_ref())
@@ -4958,7 +4961,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 self.seed_destructured_param_element(name.as_ref());
             }
         }
-        let declared = match &target.root {
+        match &target.root {
             crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
                 self.params.get(*ordinal as usize).copied()
             }
@@ -4969,9 +4972,23 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     self.var_declared_locals.get(name.as_ref()).copied()
                 }
             }
-        };
-        let Some(declared) = declared else {
-            let widened = widen_literal_node(self.dispatch, value);
+        }
+    }
+
+    /// Apply the checker's assignment typing rule to an evaluated RHS.
+    /// Annotated unions select their comparable declared constituents;
+    /// annotated non-unions retain the declared type; an EVOLVING target
+    /// keeps the value as evaluated — the freshness-directed widening
+    /// already happened at [`Self::eval_evolving_rhs`], the one place the
+    /// fresh/pinned split is known (a bare literal widens, a
+    /// const-asserted or otherwise pinned literal stays — the checker's
+    /// own fresh/regular literal split, measured per assignment).
+    fn assignment_node_for_target(
+        &mut self,
+        target: &crate::flow_slice_content::SliceNarrowSubject,
+        value: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let Some(declared) = self.target_declared_node(target) else {
             // Reuse an equivalent reaching-definition arm when one already
             // exists. Primitive nodes can originate in distinct lowered
             // arenas; joining two ids that both spell `number` would otherwise
@@ -4990,16 +5007,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     .or_else(|| self.var_locals.get(name.as_ref()).copied()),
             };
             if let Some(current) = current {
-                let widened_data = self.dispatch.graph().node_data(widened);
+                let value_data = self.dispatch.graph().node_data(value);
                 if let Some(existing) = self
                     .union_arms_or_self(current)
                     .into_iter()
-                    .find(|node| self.dispatch.graph().node_data(*node) == widened_data)
+                    .find(|node| self.dispatch.graph().node_data(*node) == value_data)
                 {
                     return existing;
                 }
             }
-            return widened;
+            return value;
         };
         match self.dispatch.union_arms_of(declared) {
             Some(arms) => self.assignment_reduced_union(declared, &arms, value),
@@ -5007,33 +5024,126 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// Whether a write target is governed by a declared union. The check
-    /// performs the same lazy destructured-parameter bootstrap as assignment
-    /// application so RHS context and target authority cannot diverge.
-    fn target_has_declared_union(
+    /// Evaluate an applied write's right-hand side for an EVOLVING target
+    /// (no declared authority), applying the checker's per-assignment
+    /// literal widening: a FRESH position — a bare literal, a fresh
+    /// ternary arm, a read of a widening-literal `const` — widens to its
+    /// primitive; a PINNED position — a const assertion, a type
+    /// assertion, a pinned-`const` read, a callee's literal return —
+    /// keeps its literal. A fresh and a pinned spelling of the SAME
+    /// literal collapse to the pinned literal BEFORE widening (measured:
+    /// `let v; v = c ? 1 : 1 as const` reads `1`, never `number` — the
+    /// checker's union collapse keeps the regular literal).
+    fn eval_evolving_rhs(
         &mut self,
-        target: &crate::flow_slice_content::SliceNarrowSubject,
-    ) -> bool {
-        if let crate::flow_slice_content::SliceNarrowRoot::Local(name) = &target.root {
-            if !self.locals.contains_key(name.as_ref())
-                && !self.var_locals.contains_key(name.as_ref())
-            {
-                self.seed_destructured_param_element(name.as_ref());
-            }
-        }
-        let declared = match &target.root {
-            crate::flow_slice_content::SliceNarrowRoot::Param(ordinal) => {
-                self.params.get(*ordinal as usize).copied()
-            }
-            crate::flow_slice_content::SliceNarrowRoot::Local(name) => {
-                if self.locals.contains_key(name.as_ref()) {
-                    self.declared_locals.get(name.as_ref()).copied()
-                } else {
-                    self.var_declared_locals.get(name.as_ref()).copied()
+        expr: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+    ) -> Positional<SemanticNodeId> {
+        if let (
+            crate::flow_slice_content::SliceExpr::Union { .. },
+            crate::flow_slice_content::SliceFreshness::PerArm(_),
+        ) = (expr, freshness)
+        {
+            let mut parts: Vec<(SemanticNodeId, bool)> = Vec::new();
+            self.collect_evolving_parts(expr, freshness, &mut parts);
+            // Pinned-wins collapse of equal constituents, THEN widen the
+            // surviving fresh ones. Node data (not id) is the equality,
+            // exactly as the reaching-definition dedup below compares.
+            let mut merged: Vec<(SemanticNodeId, bool)> = Vec::new();
+            for (node, fresh) in parts {
+                let data = self.dispatch.graph().node_data(node);
+                match merged
+                    .iter_mut()
+                    .find(|(existing, _)| self.dispatch.graph().node_data(*existing) == data)
+                {
+                    Some((_, existing_fresh)) => *existing_fresh &= fresh,
+                    None => merged.push((node, fresh)),
                 }
             }
+            let nodes: Vec<SemanticNodeId> = merged
+                .into_iter()
+                .map(|(node, fresh)| {
+                    if fresh {
+                        widen_literal_node(self.dispatch, node)
+                    } else {
+                        node
+                    }
+                })
+                .collect();
+            return Positional::Value(
+                self.dispatch
+                    .intern_normalized_union_or_intersection(&nodes, true),
+            );
+        }
+        let outcome = self.eval_expr(expr);
+        let Positional::Value(node) = outcome else {
+            return outcome;
         };
-        declared.is_some_and(|node| self.dispatch.union_arms_of(node).is_some())
+        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
+            || self.reads_widening_literal_local(expr);
+        Positional::Value(if fresh {
+            widen_literal_node(self.dispatch, node)
+        } else {
+            node
+        })
+    }
+
+    /// The recursive collector behind [`Self::eval_evolving_rhs`]: a
+    /// ternary's arms evaluate under the SAME guard scoping as the
+    /// ordinary `SliceExpr::Union` evaluation (positive reading on the
+    /// consequent, negated on the alternate, arm-scoped narrows) and each
+    /// contributes `(node, fresh)`. The freshness tree mirrors the
+    /// lowering's own descent, so a Union/PerArm pair aligns by
+    /// construction; a mismatch means the mirror missed a form — the
+    /// widening decision is then UNPROVEN, so the whole position fails
+    /// toward the typed gap (unwidened, degraded, never warm) rather than
+    /// guessing either direction.
+    fn collect_evolving_parts(
+        &mut self,
+        expr: &crate::flow_slice_content::SliceExpr,
+        freshness: &crate::flow_slice_content::SliceFreshness,
+        parts: &mut Vec<(SemanticNodeId, bool)>,
+    ) {
+        if let crate::flow_slice_content::SliceExpr::Union { arms, guard } = expr {
+            match freshness {
+                crate::flow_slice_content::SliceFreshness::PerArm(facts)
+                    if facts.len() == arms.len() =>
+                {
+                    for (index, (arm, fact)) in arms.iter().zip(facts.iter()).enumerate() {
+                        let holds_before = self.holds.len();
+                        let narrow_len = self.narrowings.len();
+                        let possible = self.apply_guard_scoped(guard, index == 0);
+                        if !possible
+                            && !guard_has_subject_matching(guard, &|subject| {
+                                slice_expr_is_exact_subject_read(arm, subject)
+                            })
+                        {
+                            self.record_degradation(FlowReturnDegradation::FlowGap(
+                                crate::semantic_query::FlowGap::GuardNarrowing,
+                            ));
+                        }
+                        if possible {
+                            self.collect_evolving_parts(arm, fact, parts);
+                        } else {
+                            self.holds.truncate(holds_before);
+                        }
+                        self.narrowings.truncate(narrow_len);
+                    }
+                    return;
+                }
+                _ => {
+                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                        crate::semantic_query::FlowGap::UnmodeledExpression,
+                    ));
+                }
+            }
+        }
+        let holds_before = self.holds.len();
+        let outcome = self.eval_expr(expr);
+        let node = self.settle_composite_part(outcome, holds_before);
+        let fresh = matches!(freshness, crate::flow_slice_content::SliceFreshness::Fresh)
+            || self.reads_widening_literal_local(expr);
+        parts.push((node, fresh));
     }
 
     /// Read the newest narrow fact for exactly `subject`, if a guard
@@ -5955,37 +6065,11 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         } else {
             self.read_local(head)
         }?;
-        let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
-            value_ref.path[1..]
-                .iter()
-                .map(|segment| {
-                    crate::semantic_query::PathSegment::Member(
-                        crate::semantic_query::PropertyKey::identifier(Arc::from(segment.as_str())),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
-        // The member walk may widen a ROOTLESS callable (a function-typed
-        // parameter's signature) to its ambient apparent surface; that
-        // widening scopes its registry lookup by the lexical demand site,
-        // which rides this guard (see `apparent_type.rs`).
-        let _demand_scope = super::LexicalDemandScopeGuard::push(
-            &self.dispatch.lexical_demand_scope,
-            Arc::from(self.canonical),
-        );
-        match self.dispatch.execute_type_node(
-            crate::semantic_query::SemanticQueryKey::ProjectPath {
-                base: root,
-                path,
-                context: crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Navigate,
-                ),
-            },
-        ) {
-            crate::semantic_query::QueryResult::Value(output) => Some(output.value),
-            _ => None,
-        }
+        let segments: Vec<Arc<str>> = value_ref.path[1..]
+            .iter()
+            .map(|segment| Arc::from(segment.as_str()))
+            .collect();
+        self.project_segments_navigate(root, &segments)
     }
 
     /// tsc's `getAssignmentReducedType`: the union of the DECLARED
@@ -6215,9 +6299,47 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         base: SemanticNodeId,
         segments: &[Arc<str>],
     ) -> Option<SemanticNodeId> {
-        if segments.is_empty() {
+        // The TERMINAL hop's member optionality folds into the read's
+        // value: reading `x.k` where `k` is declared optional includes
+        // the absent-key `undefined` — the checker's member-READ rule
+        // (indexed access included; measured under `--strict`,
+        // `exactOptionalPropertyTypes` off — the oracle profile).
+        // Presence of a key and non-`undefined`-ness of its value are two
+        // different facts: an `in` guard establishes the first and never
+        // strips the second, so the fold lives HERE, on the read, not in
+        // any guard. Terminal ONLY: an intermediate optional hop read
+        // without a discharging narrow is an error program, and the
+        // checker's own recovery projects the tail off the non-`undefined`
+        // part — folding mid-path would instead miss the tail on the
+        // fabricated `undefined` arm. The fold is PROOF-gated
+        // ([`Self::member_read_optionality`]): only a surface that
+        // provably declares the member optional folds; an undecidable
+        // surface keeps the shared projection's answer unchanged.
+        let Some((terminal, prefix)) = segments.split_last() else {
             return Some(base);
-        }
+        };
+        let parent = if prefix.is_empty() {
+            base
+        } else {
+            self.project_path_navigate(base, prefix)?
+        };
+        let optional = self.member_read_optionality(parent, terminal.as_ref()) == Some(true);
+        let value = self.project_path_navigate(parent, std::slice::from_ref(terminal))?;
+        Some(if optional {
+            self.fold_optional_read_undefined(value)
+        } else {
+            value
+        })
+    }
+
+    /// The shared `ProjectPath { mode: Navigate }` walk over a non-empty
+    /// member path — the projection half of
+    /// [`Self::project_segments_navigate`].
+    fn project_path_navigate(
+        &mut self,
+        base: SemanticNodeId,
+        segments: &[Arc<str>],
+    ) -> Option<SemanticNodeId> {
         let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
             segments
                 .iter()
@@ -6249,6 +6371,92 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             crate::semantic_query::QueryResult::Value(output) => Some(output.value),
             _ => None,
         }
+    }
+
+    /// Whether reading member `key` off `base` provably includes the
+    /// absent-key `undefined`: `Some(true)` when a surface declares the
+    /// member OPTIONAL (for a union, on ANY arm — that arm's read carries
+    /// `undefined`, so the union's does), `Some(false)` when every arm
+    /// declares it required, `None` when nothing is proved (a type
+    /// parameter, an index-signature surface, an unresolvable carrier, a
+    /// proven-absent key — the projection's own miss answers those).
+    /// Union arms flatten on a seen-guarded worklist; each non-union arm
+    /// answers through THE key-presence authority
+    /// ([`Self::arm_in_presence`], heritage/intersection arms included),
+    /// so the `in` guard and the member read can never disagree about a
+    /// key's declaration.
+    fn member_read_optionality(&mut self, base: SemanticNodeId, key: &str) -> Option<bool> {
+        let mut pending = vec![base];
+        let mut seen: Vec<SemanticNodeId> = Vec::new();
+        let mut any_optional = false;
+        let mut all_required = true;
+        while let Some(node) = pending.pop() {
+            if seen.contains(&node) {
+                continue;
+            }
+            seen.push(node);
+            let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                    all_required = false;
+                    continue;
+                }
+            };
+            if concrete != node {
+                if seen.contains(&concrete) {
+                    continue;
+                }
+                seen.push(concrete);
+            }
+            if let Some(SemanticNodeData::Union(arms)) =
+                self.dispatch.graph().node_data(concrete).as_deref()
+            {
+                pending.extend(arms.iter().copied());
+                continue;
+            }
+            match self.arm_in_presence(concrete, key) {
+                InArmPresence::Optional => any_optional = true,
+                InArmPresence::Always => {}
+                InArmPresence::Never | InArmPresence::Unknown => all_required = false,
+            }
+        }
+        if any_optional {
+            Some(true)
+        } else if all_required {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Union the absent-key `undefined` into an optional member's read
+    /// value. `any` / `unknown` absorb it, and a value that already
+    /// carries an `undefined` arm (the member's own explicit
+    /// `| undefined`) gains no duplicate.
+    fn fold_optional_read_undefined(&mut self, value: SemanticNodeId) -> SemanticNodeId {
+        let data = self.dispatch.graph().node_data(value);
+        match data.as_deref() {
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Undefined,
+            )) => return value,
+            Some(SemanticNodeData::Union(arms)) => {
+                let arms: Vec<SemanticNodeId> = arms.to_vec();
+                if arms.iter().any(|arm| self.arm_reduces_to_undefined(*arm)) {
+                    return value;
+                }
+            }
+            _ => {
+                if self.arm_reduces_to_undefined(value) {
+                    return value;
+                }
+            }
+        }
+        let undefined = self
+            .dispatch
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        self.dispatch
+            .intern_normalized_union_or_intersection(&[value, undefined], true)
     }
 
     /// `a` is assignable to `b`, through the crate's SOLE relation
@@ -7351,16 +7559,16 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     /// negation keeps the ones proved not to. Proof is per edge and
     /// per arm ([`InArmPresence`]): a closed surface's REQUIRED member
     /// proves the arm off the negated edge, a closed surface with the
-    /// key ABSENT proves it off the positive edge, an OPTIONAL member
-    /// proves neither drop — its arm is retained exactly on the
-    /// negated edge (a value may lack the key) and retained as a
-    /// degraded superset on the positive edge (the checker refines the
-    /// key present there). An arm whose key set the graph cannot
-    /// decide — a type parameter, an index-signature surface, an
-    /// unresolvable carrier — stays possible on BOTH edges and records
-    /// the typed guard gap: the checker narrows such an arm, so
-    /// dropping it would fabricate a dead edge and silently lose that
-    /// edge's return contributor.
+    /// key ABSENT proves it off the positive edge, and an OPTIONAL
+    /// member proves EXACT retention on both edges — the checker keeps
+    /// an optional arm unchanged on the positive edge (presence of the
+    /// key is a separate fact from the value's non-`undefined`-ness,
+    /// which the member READ carries), so no gap rides it. An arm whose
+    /// key set the graph cannot decide — a type parameter, an
+    /// index-signature surface, an unresolvable carrier — stays
+    /// possible on BOTH edges and records the typed guard gap: the
+    /// checker narrows such an arm, so dropping it would fabricate a
+    /// dead edge and silently lose that edge's return contributor.
     fn narrow_in(
         &mut self,
         key: &Arc<str>,
@@ -7372,12 +7580,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             Some(match this.arm_in_presence(arm, key) {
                 InArmPresence::Always => !negated,
                 InArmPresence::Never => negated,
-                InArmPresence::Optional => {
-                    if !negated {
-                        gapped = true;
-                    }
-                    true
-                }
+                InArmPresence::Optional => true,
                 InArmPresence::Unknown => {
                     gapped = true;
                     true
@@ -7393,38 +7596,82 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// One union arm's key-presence verdict for `"key" in subject`,
-    /// decided from the arm's OWN closed surface: identity carriers
-    /// unwrap through the shared instantiate dispatch, then only a
-    /// closed object surface (no index signature) answers — a required
-    /// member is `Always`, a proven-absent key `Never`, an optional
-    /// member `Optional`. Every other shape — a type parameter, an
-    /// open index-signature surface, a primitive, an intersection, an
-    /// unresolvable carrier — is `Unknown`: nothing about the runtime
-    /// key set is proved, so neither edge of the test may drop the arm.
+    /// decided from the arm's OWN closed surface(s): identity carriers
+    /// unwrap through the shared instantiate dispatch; a closed object
+    /// surface (no index signature) answers directly — a required member
+    /// is `Always`, a proven-absent key `Never`, an optional member
+    /// `Optional` — and an INTERSECTION (a heritage arm, `extends`
+    /// included) folds its constituents by the checker's own rule: the
+    /// member is required if ANY constituent declares it required (every
+    /// value of the intersection carries it — decisive even beside an
+    /// undecidable sibling), optional if every decidable constituent is
+    /// optional-or-absent with at least one optional, absent only when
+    /// EVERY constituent proves absence. Any other shape — a type
+    /// parameter, an open index-signature surface, a primitive, a nested
+    /// union, an unresolvable carrier — is `Unknown` (for the whole
+    /// intersection unless a required constituent already decided it):
+    /// nothing about the runtime key set is proved, so neither edge of
+    /// the test may drop the arm. Constituents walk on a seen-guarded
+    /// worklist, cycle-safe by revisit discharge.
     fn arm_in_presence(&mut self, arm: SemanticNodeId, key: &str) -> InArmPresence {
-        let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
-            super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
-            super::relation::IdentityCarrierUnwrap::Unresolvable => return InArmPresence::Unknown,
-        };
-        match self.dispatch.graph().node_data(concrete).as_deref() {
-            Some(SemanticNodeData::Object(surface)) => {
-                if surface.closed().has_index_signature() || !surface.index_signatures.is_empty() {
-                    return InArmPresence::Unknown;
+        let mut pending = vec![arm];
+        let mut seen: Vec<SemanticNodeId> = Vec::new();
+        let mut any_required = false;
+        let mut any_optional = false;
+        let mut any_unknown = false;
+        while let Some(node) = pending.pop() {
+            if seen.contains(&node) {
+                continue;
+            }
+            seen.push(node);
+            let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => {
+                    any_unknown = true;
+                    continue;
                 }
-                match surface.project_string_key(key) {
-                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                        if member.optional {
-                            InArmPresence::Optional
-                        } else {
-                            InArmPresence::Always
+            };
+            if concrete != node {
+                if seen.contains(&concrete) {
+                    continue;
+                }
+                seen.push(concrete);
+            }
+            match self.dispatch.graph().node_data(concrete).as_deref() {
+                Some(SemanticNodeData::Intersection(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Object(surface)) => {
+                    if surface.closed().has_index_signature()
+                        || !surface.index_signatures.is_empty()
+                    {
+                        any_unknown = true;
+                        continue;
+                    }
+                    match surface.project_string_key(key) {
+                        crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                            if member.optional {
+                                any_optional = true;
+                            } else {
+                                any_required = true;
+                            }
                         }
+                        crate::semantic_query::SurfaceKeyProjection::AbsentProven => {}
                     }
-                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                        InArmPresence::Never
-                    }
+                }
+                _ => {
+                    any_unknown = true;
                 }
             }
-            _ => InArmPresence::Unknown,
+        }
+        if any_required {
+            InArmPresence::Always
+        } else if any_unknown {
+            InArmPresence::Unknown
+        } else if any_optional {
+            InArmPresence::Optional
+        } else {
+            InArmPresence::Never
         }
     }
 
@@ -7954,6 +8201,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         ))
                     } else {
                         implicit_alternate_falls = self.apply_guard_scoped(guard, false);
+                        // The IMPLICIT alternate's impossibility takes the
+                        // same fail-close as an explicit arm's: the
+                        // checker keeps a fall-through contribution that
+                        // never reads the subject (narrowing
+                        // impossibility collapses subject READS to
+                        // `never`, it does not remove the edge), so
+                        // dropping the fall-through must ride the typed
+                        // guard gap — degraded, never a silent warm drop.
+                        if !implicit_alternate_falls
+                            && slice_statements_have_non_subject_return(
+                                region.statements.iter().skip(statement_index + 1),
+                                &|expr| slice_expr_is_exact_guard_subject_read(expr, guard),
+                            )
+                        {
+                            self.record_degradation(FlowReturnDegradation::FlowGap(
+                                crate::semantic_query::FlowGap::GuardNarrowing,
+                            ));
+                        }
                         self.narrowings.truncate(narrow_len);
                         None
                     };
@@ -8795,19 +9060,32 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         }
                     }
                 }
-                crate::flow_slice_content::SliceStatement::Assignment { target, value, .. } => {
+                crate::flow_slice_content::SliceStatement::Assignment {
+                    target,
+                    value,
+                    freshness,
+                    ..
+                } => {
                     // THE applied write: a whole-binding `=` at statement
                     // position retypes the binding IN SOURCE ORDER, so the
                     // reads after it see the written value and the typed
                     // unapplied-write degradation never seeds. An
                     // unmodelled right-hand side binds the typed marker
                     // with the failed-initializer membership, exactly like
-                    // an unmodelled declarator initializer.
+                    // an unmodelled declarator initializer. The declared
+                    // authority picks the evaluation: a declared UNION
+                    // needs the pre-widening assignment view (constituent
+                    // selection), a declared non-union discards the value
+                    // (the declared type wins), and an EVOLVING target
+                    // takes the freshness-directed widening.
                     let holds_before = self.holds.len();
-                    let outcome = if self.target_has_declared_union(target) {
-                        self.eval_assignment_expr(value)
-                    } else {
-                        self.eval_expr(value)
+                    let declared = self.target_declared_node(target);
+                    let outcome = match declared {
+                        Some(node) if self.dispatch.union_arms_of(node).is_some() => {
+                            self.eval_assignment_expr(value)
+                        }
+                        Some(_) => self.eval_expr(value),
+                        None => self.eval_evolving_rhs(value, freshness),
                     };
                     match outcome {
                         Positional::Value(node) => {

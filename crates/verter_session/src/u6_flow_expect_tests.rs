@@ -4186,13 +4186,19 @@ fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
             degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
             warm: false,
         },
+        // The OPTIONAL arm is not an unclassifiable arm: retention is
+        // EXACT on both edges (the checker keeps an optional arm
+        // unchanged — measured: the negated edge keeps `A | B`, and the
+        // positive fall-through edge keeps `A` with no value refinement),
+        // so this row is the optional-retention positive control — clean
+        // and warm beside its genuinely unclassifiable siblings.
         Case {
             id: "in_optional_member_negated",
             script: "type A = { k?: number }; type B = { m: string };\nexport function f(x: A | B) { if (!(\"k\" in x)) return x; return 0; }",
             checker: "A | B | 0",
             rendered: "Union(DeclRef(A) | DeclRef(B) | 0)",
-            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
-            warm: false,
+            degradation: Degr::None,
+            warm: true,
         },
         Case {
             id: "in_index_signature_arm_keeps_contributor",
@@ -4800,4 +4806,272 @@ fn deep_path_guards_narrow_the_parent_reference_not_the_root() {
         }
         assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
     }
+}
+
+/// One member-object wrapper for the exact boundary JSON pins below:
+/// `{ v: <ty> }` exactly as the projector serialises a fresh literal
+/// return object with the single member `v`.
+#[cfg(test)]
+fn single_v_object_json(ty: &str) -> String {
+    format!(
+        r#"{{"kind":"object","properties":[{{"excessOrigin":"freshOwn","key":{{"kind":"string","value":"v"}},"memberKind":"property","optional":false,"readonly":false,"ty":{ty}}}]}}"#
+    )
+}
+
+/// `as const` literal identity through EVOLVING-variable assignments and
+/// joins (checker-measured, tsgo 7.0.2 `--strict`): an assignment into a
+/// binding with no declared authority widens EXACTLY the fresh
+/// positions — a bare literal, a fresh ternary arm, a read of a
+/// widening-literal `const` — and preserves every pinned one — a
+/// const-asserted literal, a pinned-const read, a callee's literal
+/// return. `switch`, `if`/`else`, straight-line reassignment and ternary
+/// RHS all route through the ONE assignment authority; a fresh and a
+/// pinned spelling of the SAME literal collapse to the pinned literal
+/// (measured: `c ? 1 : 1 as const` reads `1`, never `number`). The
+/// `if`/`else` twin keeps its sound `ConditionalVarDefinition`
+/// fail-close (the substrate cannot yet prove the never-assigned path
+/// empty), but its VALUE now carries the pinned literals.
+#[test]
+fn as_const_literal_identity_survives_evolving_assignments_and_joins() {
+    let lit_s = |v: &str| format!(r#"{{"kind":"literal","literalKind":"string","value":"{v}"}}"#);
+    let lit_n = |v: &str| format!(r#"{{"kind":"literal","literalKind":"number","value":{v}}}"#);
+    let prim = |name: &str| format!(r#"{{"kind":"primitive","name":"{name}"}}"#);
+    let union2 = |a: &str, b: &str| format!(r#"{{"kind":"union","types":[{a},{b}]}}"#);
+    let union3 = |a: &str, b: &str, c: &str| format!(r#"{{"kind":"union","types":[{a},{b},{c}]}}"#);
+    let cases: [(&str, &str, String, Degr, bool); 12] = [
+        (
+            "switch_asconst_join",
+            "function f(n: number) { let v; switch (n) { case 1: v = \"r\" as const; break; case 2: v = 2 as const; break; default: v = true as const } return { v } }",
+            single_v_object_json(&union3(
+                &lit_s("r"),
+                &lit_n("2.0"),
+                r#"{"kind":"literal","literalKind":"boolean","value":true}"#,
+            )),
+            Degr::None,
+            true,
+        ),
+        (
+            "ifelse_asconst_join_keeps_conditional_fail_close",
+            "function f(n: number) { let v; if (n > 0) { v = \"p\" as const } else { v = 1 as const } return { v } }",
+            single_v_object_json(&union2(&lit_s("p"), &lit_n("1.0"))),
+            Degr::ConditionalVarDefinition,
+            false,
+        ),
+        (
+            "straightline_reassign_last_pinned_write_wins",
+            "function f() { let v; v = \"r\" as const; v = 2 as const; return { v } }",
+            single_v_object_json(&lit_n("2.0")),
+            Degr::None,
+            true,
+        ),
+        (
+            "pinned_const_read_stays_pinned",
+            "function f() { const w = 1 as const; let v; v = w; return { v } }",
+            single_v_object_json(&lit_n("1.0")),
+            Degr::None,
+            true,
+        ),
+        (
+            "widening_const_read_still_widens",
+            "function f() { const w = 1; let v; v = w; return { v } }",
+            single_v_object_json(&prim("number")),
+            Degr::None,
+            true,
+        ),
+        (
+            "callee_literal_return_is_not_fresh",
+            "function g() { return 1 as const }\nfunction f() { let v; v = g(); return { v } }",
+            single_v_object_json(&lit_n("1.0")),
+            Degr::None,
+            true,
+        ),
+        (
+            "ternary_fresh_arms_widen",
+            "function f(n: number) { let v; v = n > 0 ? \"r\" : 2; return { v } }",
+            single_v_object_json(&union2(&prim("string"), &prim("number"))),
+            Degr::None,
+            true,
+        ),
+        (
+            "ternary_pinned_arms_stay",
+            "function f(n: number) { let v; v = n > 0 ? \"r\" as const : 2 as const; return { v } }",
+            single_v_object_json(&union2(&lit_s("r"), &lit_n("2.0"))),
+            Degr::None,
+            true,
+        ),
+        (
+            "ternary_mixed_arms_split_per_arm",
+            "function f(n: number) { let v; v = n > 0 ? (\"r\" as const) : 2; return { v } }",
+            single_v_object_json(&union2(&lit_s("r"), &prim("number"))),
+            Degr::None,
+            true,
+        ),
+        (
+            "same_literal_fresh_and_pinned_collapse_to_pinned",
+            "function f(c: boolean) { let v; v = c ? 1 : 1 as const; return { v } }",
+            single_v_object_json(&lit_n("1.0")),
+            Degr::None,
+            true,
+        ),
+        (
+            "satisfies_preserves_freshness",
+            "function f() { let v; v = \"r\" satisfies string; return { v } }",
+            single_v_object_json(&prim("string")),
+            Degr::None,
+            true,
+        ),
+        (
+            "switch_bare_literals_still_widen",
+            "function f(n: number) { let v; switch (n) { case 1: v = \"r\"; break; case 2: v = 2; break; default: v = true } return { v } }",
+            single_v_object_json(&union3(
+                &prim("string"),
+                &prim("number"),
+                &prim("boolean"),
+            )),
+            Degr::None,
+            true,
+        ),
+    ];
+    let mut report = Vec::new();
+    for (case, script, json, degradation, warm) in &cases {
+        let measured = drive_expect_boundary("", "evolve_fresh", script, "f", None);
+        let failures = check_boundary(json, *degradation, *warm, &measured.boundary);
+        if !failures.is_empty() {
+            report.push(format!(
+                "== {case}:\n{}\nrendered: {}",
+                failures.join("\n"),
+                measured.rendered.as_deref().unwrap_or("<none>")
+            ));
+        }
+    }
+    assert!(report.is_empty(), "\n{}", report.join("\n"));
+}
+
+/// `"k" in x` models KEY PRESENCE separately from value
+/// non-`undefined`-ness, and a member VALUE READ carries the optional
+/// member's own absent-key `undefined` (checker-measured, tsgo 7.0.2
+/// `--strict`, `exactOptionalPropertyTypes` NOT in the oracle profile):
+/// the positive edge keeps an optional arm UNCHANGED — the checker does
+/// not refine the value to non-`undefined` (`if ("k" in x) x.k` reads
+/// `string | undefined`, byte-identical to the guard-free read) — so
+/// retention is exact and publishes clean and warm; a REQUIRED member
+/// gains no fabricated `undefined`; an explicit `| undefined` gains no
+/// duplicate; an arm whose key set the graph cannot decide (an
+/// index-signature surface) still fails closed with the typed guard gap
+/// and never warms.
+#[test]
+fn in_guard_presence_is_separate_from_value_undefined() {
+    let obj_v = |ty: &str| single_v_object_json(ty);
+    let str_or_undef = r#"{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"primitive","name":"undefined"}]}"#;
+    // `return { v: 0 }`'s member literal widens at the member position
+    // (fresh-literal object member) — the checker's own `{ v: number }`.
+    let num = r#"{"kind":"primitive","name":"number"}"#;
+    let union2 = |a: &str, b: &str| format!(r#"{{"kind":"union","types":[{a},{b}]}}"#);
+    let cases: [(&str, &str, String, Degr, bool); 8] = [
+        (
+            "optional_member_positive_edge_keeps_undefined",
+            "type T = { k?: string }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            union2(&obj_v(str_or_undef), &obj_v(num)),
+            Degr::None,
+            true,
+        ),
+        (
+            "union_optional_arm_selected_keeps_undefined",
+            "type A = { k?: string }; type B = { n: number }\nfunction f(x: A | B) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            union2(&obj_v(str_or_undef), &obj_v(num)),
+            Degr::None,
+            true,
+        ),
+        (
+            "negated_edge_keeps_optional_arm_and_undefined",
+            "type T = { k?: string }\nfunction f(x: T) { if (\"k\" in x) { return { v: 0 } } return { v: x.k } }",
+            union2(&obj_v(num), &obj_v(str_or_undef)),
+            Degr::None,
+            true,
+        ),
+        (
+            "mixed_optional_and_required_arms_union_their_reads",
+            "type A = { k?: string }; type B = { k: number }\nfunction f(x: A | B) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            union2(
+                &obj_v(r#"{"kind":"union","types":[{"kind":"primitive","name":"string"},{"kind":"primitive","name":"number"},{"kind":"primitive","name":"undefined"}]}"#),
+                &obj_v(num),
+            ),
+            Degr::None,
+            true,
+        ),
+        (
+            "guard_free_optional_read_carries_undefined",
+            "type T = { k?: string }\nfunction f(x: T) { return { v: x.k } }",
+            obj_v(str_or_undef),
+            Degr::None,
+            true,
+        ),
+        (
+            "terminal_hop_after_required_hop_carries_undefined",
+            "type Inner = { k?: string }; type T = { a: Inner }\nfunction f(x: T) { return { v: x.a.k } }",
+            obj_v(str_or_undef),
+            Degr::None,
+            true,
+        ),
+        // The two rows below sit on a REQUIRED single-arm subject, whose
+        // negated `in` edge the narrow proves impossible. The checker
+        // still counts the fall-through `return { v: 0 }` (measured:
+        // `{ v: string; } | { v: number; }` — narrowing impossibility
+        // never removes a contribution that does not read the subject;
+        // only its subject reads collapse to `never`). Recovering that
+        // exact join needs `never`-in-union absorption, which is an open
+        // canonical-normalization question — so the honest reachable
+        // state pins here: the kept arm's value is EXACT (no fabricated
+        // `undefined` on a required member, no duplicate `undefined` on
+        // an explicit one) and the dropped-contributor edge is a typed
+        // guard gap, ReturnOnly, never warm — never a silent warm drop.
+        (
+            "required_member_gains_no_undefined",
+            "type T = { k: string }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            obj_v(r#"{"kind":"primitive","name":"string"}"#),
+            Degr::FlowGap(FlowGap::GuardNarrowing),
+            false,
+        ),
+        (
+            "explicit_undefined_gains_no_duplicate",
+            "type T = { k: string | undefined }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+            obj_v(str_or_undef),
+            Degr::FlowGap(FlowGap::GuardNarrowing),
+            false,
+        ),
+    ];
+    let mut report = Vec::new();
+    for (case, script, json, degradation, warm) in &cases {
+        let measured = drive_expect_boundary("", "in_presence", script, "f", None);
+        let failures = check_boundary(json, *degradation, *warm, &measured.boundary);
+        if !failures.is_empty() {
+            report.push(format!(
+                "== {case}:\n{}\nrendered: {}",
+                failures.join("\n"),
+                measured.rendered.as_deref().unwrap_or("<none>")
+            ));
+        }
+    }
+    assert!(report.is_empty(), "\n{}", report.join("\n"));
+
+    // An arm whose runtime key set the graph cannot decide — an
+    // index-signature surface — still fails closed: the typed guard gap
+    // rides the result and it NEVER warms (the fold refuses to claim a
+    // surface it cannot prove).
+    let measured = drive_expect_boundary(
+        "",
+        "in_presence_unknown",
+        "type T = { [key: string]: number }\nfunction f(x: T) { if (\"k\" in x) { return { v: x.k } } return { v: 0 } }",
+        "f",
+        None,
+    );
+    assert_eq!(
+        measured.boundary.degradation,
+        Some(Degr::FlowGap(FlowGap::GuardNarrowing)),
+        "an undecidable key set keeps the typed guard gap"
+    );
+    assert!(
+        !measured.boundary.second_from_cache,
+        "an undecidable key set is never admitted warm"
+    );
 }
