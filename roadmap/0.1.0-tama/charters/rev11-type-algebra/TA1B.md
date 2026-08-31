@@ -367,3 +367,24 @@ remaining site, this node cannot silently miss one, which is precisely why the
 architecture authority refused a split around the sites that happened to be published
 at measurement time.
 
+## Inherited observation — apparent-type callability is wider than the carriers already moved
+
+The predecessor's closing round moved arrays, tuples and template literals from
+"provably yields no call signatures" to the fail-closed arm, after measuring against
+the pinned compiler that a global interface augmentation makes values of all three
+callable. Mapped types and object-spread programs were verified genuinely
+signature-free and stayed.
+
+The same argument extends further and was deliberately NOT acted on there: a `keyof`
+domain and the string primitive and string literal carriers are equally callable under
+a `String` augmentation. Moving them too would have broadly disabled the canonical
+route for member-value intersections, which is a scope decision this node is the right
+place to make rather than a closing round on its predecessor.
+
+Decide it explicitly here. Either those carriers join the fail-closed arm — accepting
+that member-value intersections over string-shaped carriers keep their raw ordered form
+and lose canonicalization — or the classification gains a real apparent-type callability
+question rather than a shape guess. What is not acceptable is leaving a documented
+claim that those carriers never yield call signatures, because the compiler says
+otherwise and the consequence is a silently reversed overload set.
+
