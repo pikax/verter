@@ -557,6 +557,50 @@ async fn scanner_loop(
         batch_count,
     );
 
+    // A carrier publication can lose its provider-state admission race to a
+    // newer interactive transaction, or compilation can be transiently cold.
+    // Do not postpone those repairs behind the batched provider refresh and the
+    // rest of workspace discovery: derive the exact uniquely-owned misses from
+    // the authoritative membership ledger, queue them on the existing snapshot
+    // retry set, and drain through the single carrier reconciliation gateway.
+    if let (Some(coordinator), Some(snapshot)) =
+        (&config.carrier_publish_coordinator, &workspace_snapshot)
+    {
+        let expected_sources: Vec<String> = carrier_classified
+            .iter()
+            .filter(|(source, _)| {
+                matches!(
+                    snapshot.configured_owner_resolution_for_file(source),
+                    verter_workspace::ConfiguredOwnerResolution::Unique(_)
+                )
+            })
+            .map(|(source, _)| source.clone())
+            .collect();
+        let missing = coordinator.missing_published_activations(&expected_sources);
+        for source in &missing {
+            config.pending_snapshot_provider_sync.insert(source.clone());
+        }
+        if !config.pending_snapshot_provider_sync.is_empty() {
+            tracing::info!(
+                missing = missing.len(),
+                pending = config.pending_snapshot_provider_sync.len(),
+                "workspace_scanner: draining carrier-phase provider retries"
+            );
+            crate::server::drain_pending_snapshot_provider_sync(
+                config.project_sync.as_ref(),
+                &config.documents,
+                &config.vfs_workspace,
+                &config.provider_sync_states,
+                &config.pending_snapshot_provider_sync,
+                config.is_tsgo,
+                None,
+                config.carrier_publish_coordinator.as_ref(),
+                &config.carrier_transaction_coordinator,
+            )
+            .await;
+        }
+    }
+
     if !published_companions.is_empty() {
         if let Some(coordinator) = &config.carrier_publish_coordinator {
             if let Err(error) = coordinator

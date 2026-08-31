@@ -410,6 +410,16 @@ async fn published_frontier_activation_is_one_framework_neutral_batch() {
     .await;
     mock.clear_calls();
 
+    assert_eq!(
+        reconciler.missing_published_activations(&[missing.clone(), svelte.clone(), vue.clone(),]),
+        vec![missing.clone()],
+        "the readiness probe reports exactly the missing current IDE advertisements"
+    );
+    assert!(
+        mock.calls().is_empty(),
+        "the readiness probe must not activate the partial frontier"
+    );
+
     let activated = reconciler
         .activate_published_sources(&[missing, svelte, vue])
         .await

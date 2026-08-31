@@ -168,6 +168,7 @@ pub(crate) use self::server_utils::{
 
 #[path = "../background_drain.rs"]
 mod background_drain;
+pub(crate) use background_drain::drain_pending_snapshot_provider_sync;
 #[path = "../background_drain_decl_closure.rs"]
 mod background_drain_decl_closure;
 #[path = "../background_init.rs"]
