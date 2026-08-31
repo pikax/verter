@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { pollUntilWithin } from "./polling";
+import { pollUntilWithin, semanticHoverReady } from "./polling";
 
 describe("pollUntilWithin", () => {
   afterEach(() => vi.useRealTimers());
@@ -37,5 +37,24 @@ describe("pollUntilWithin", () => {
 
     await vi.advanceTimersByTimeAsync(20);
     await rejected;
+  });
+});
+
+describe("semanticHoverReady", () => {
+  it("rejects an intermediate any result even when all needles are present", () => {
+    expect(semanticHoverReady("const title: any", ["title"])).toBe(false);
+  });
+
+  it("accepts the requested concrete hover contract", () => {
+    expect(semanticHoverReady("const title: string", ["title", "string"])).toBe(true);
+  });
+
+  it("honours explicit unknown and generated-symbol guards", () => {
+    expect(semanticHoverReady("const title: unknown", ["title"], { forbidUnknown: true })).toBe(
+      false,
+    );
+    expect(
+      semanticHoverReady("const title: __VerterSlot", ["title"], { forbidGenerated: true }),
+    ).toBe(false);
   });
 });

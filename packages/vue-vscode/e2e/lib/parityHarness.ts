@@ -8,7 +8,7 @@
  */
 import { strict as assert } from "node:assert";
 import { pollBudget } from "./timeouts";
-import { pollUntilWithin } from "./polling";
+import { pollUntilWithin, semanticHoverReady } from "./polling";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
@@ -230,7 +230,28 @@ export async function assertHoverNeedles(
   needles: readonly string[],
   options?: { forbidAny?: boolean; forbidUnknown?: boolean; forbidGenerated?: boolean },
 ): Promise<string> {
-  const text = await hoverTextAt(anchor);
+  const doc = await openRelative(anchor.file);
+  const position = tokenPosition(doc, anchor);
+  const hoverText = (hovers: readonly vscode.Hover[]): string =>
+    hovers
+      .flatMap((hover) => hover.contents)
+      .map((content) => (typeof content === "string" ? content : content.value))
+      .join("\n");
+  // A non-empty hover can still be an intermediate projection (`const x: any`)
+  // while dependency/slot synthesis catches up. Poll for this assertion's
+  // declared semantic contract; a provider that remains degraded still times
+  // out and fails as the same unapproved product gap.
+  const hovers = await pollUntil(
+    `semantic hover ${anchor.file}#${anchor.token}`,
+    async () =>
+      (await vscode.commands.executeCommand<vscode.Hover[]>(
+        "vscode.executeHoverProvider",
+        doc.uri,
+        position,
+      )) ?? [],
+    (result) => semanticHoverReady(hoverText(result), needles, options),
+  );
+  const text = hoverText(hovers);
   for (const needle of needles) {
     assert.ok(text.includes(needle), `hover missing ${needle}: ${text}`);
   }

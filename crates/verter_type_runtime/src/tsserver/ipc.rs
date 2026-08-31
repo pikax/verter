@@ -767,7 +767,17 @@ impl TsserverTransport {
                     .load(Ordering::Acquire)
                     != epoch
             {
-                continue;
+                if retry_after_preemption {
+                    continue;
+                }
+                // A one-shot background caller (carrier refresh) owns an outer
+                // retry loop that can promote newly-urgent work to the
+                // interactive lane. Report admission-time preemption just like
+                // in-flight preemption; spinning here would hide that priority
+                // upgrade forever under a polling cadence equal to the grace.
+                return Err(TypeProviderError::new(
+                    "tsserver background transaction preempted",
+                ));
             }
             let mut responses = Vec::with_capacity(requests.len());
             let mut preempted = false;
