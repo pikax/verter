@@ -136,7 +136,10 @@ implements, patches, or ships production compiler behavior.
   behavior keeps skip-with-reason semantics for absent environment
   prerequisites; `--authoritative` / `BF2_AUTHORITATIVE=1` is the
   fail-closed contract for consumers that must prove every applicable axis
-  genuinely ran (skipped axis ⇒ exit 2).
+  genuinely ran (skipped axis ⇒ exit 2). `--batch <file.json>` accepts an
+  ordered `cases` array and emits a versioned, cardinality-preserving result
+  envelope, allowing a required matrix lane to share one Node process while
+  retaining per-case comparison exit codes and typed failures.
 - **TypeScript-observation validator** (`src/typescript-observe.mjs`): the
   reusable mechanism for TypeScript-observable product validation — drives
   the real pinned `typescript` compiler over produced artifacts in memory

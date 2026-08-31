@@ -1312,6 +1312,17 @@ const AUTO_INGESTED_RECENT_STALE_THRESHOLD: std::time::Duration =
     std::time::Duration::from_secs(60);
 
 impl Scheduler {
+    /// Identities of the injected CPU and I/O worker pools.
+    ///
+    /// Test-support only: production callers do not inspect scheduler execution
+    /// substrate identity. Fresh-host isolation tests use this to prove that two
+    /// distinct scheduler shells dispatch onto the exact same injected pools.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn test_worker_pool_ids(&self) -> (usize, usize) {
+        (self.cpu_pool.pool_id(), self.io_pool.pool_id())
+    }
+
     /// Create a new scheduler with a driver thread (native).
     ///
     /// The host constructs and injects the scheduler's CPU and I/O
@@ -5238,8 +5249,9 @@ impl Scheduler {
     /// reservation releases through the DAG's cancel path.
     ///
     /// CPU-bound work submitted by a non-CPU-worker thread (driver,
-    /// I/O worker, external, inline) goes to the rayon CPU pool via
-    /// `cpu_pool.spawn`. Source work always goes to the I/O pool.
+    /// I/O worker, external, inline) goes to the scheduler CPU pool via
+    /// nonblocking `cpu_pool.try_submit`. Source work always goes to the I/O
+    /// pool.
     /// When the caller is a CPU worker (it called into the pump via
     /// `wait_or_drive`) and the ready job is CPU-bound, the work
     /// runs inline on the calling thread so a single-CPU-worker

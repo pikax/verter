@@ -22,12 +22,16 @@ import { importOracleModule, oracleScratchDir } from "./oracle-install.mjs";
 // instance, so cleanup can never delete another worker's in-flight modules.
 const SCRATCH_LABEL = `vue-ssr-${randomUUID()}`;
 let scratchDir = null;
+let scratchModuleSequence = 0;
 
 function scratchModulePath(code) {
   if (scratchDir === null) scratchDir = oracleScratchDir("vue", SCRATCH_LABEL);
   mkdirSync(scratchDir, { recursive: true }); // cleanup may have removed it mid-run
   const digest = createHash("sha256").update(code).digest("hex").slice(0, 16);
-  const filePath = path.join(scratchDir, `vue-ssr-${digest}.mjs`);
+  // A batch may execute the same source more than once. A unique URL gives
+  // each case a fresh candidate module instance while the pinned framework
+  // runtime remains shared by the process.
+  const filePath = path.join(scratchDir, `vue-ssr-${digest}-${scratchModuleSequence++}.mjs`);
   writeFileSync(filePath, code, "utf8");
   return filePath;
 }

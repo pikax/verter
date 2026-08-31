@@ -97,9 +97,10 @@ portable on the documented 24-GiB host: its default ceiling is 12 GiB, only
 eight jobs (9.90-GiB measured peak, 2.10-GiB headroom); twelve remains available
 as an explicit override, or by default once the effective ceiling reaches 16
 GiB. The test-thread axis remains twelve because its measured peak is only 3.84
-GiB. `.config/nextest.toml` continues to serialize
-`shared-provider-live` and `lsp-server-unit` at `max-threads = 1` under their
-exact default/CI selectors; global concurrency never widens those lanes.
+GiB. Windows does not get a reduced-capacity exception: `shared-provider-live`
+and `lsp-server-unit` use the same full nextest concurrency as every other
+platform. Their longer hang protection and the compiler trybuild timeout
+overrides remain scoped by exact selectors; neither is a worker cap.
 
 On Windows, the three listed `kind: "proc-macro"`, `build-platform: "host"`
 suites contain 41 real tests and remain in the full warm loop. Their standalone
@@ -164,7 +165,7 @@ After acquiring the single-flight mutex, the gate starts a report-only `GateTele
 gives all startup reporting probes one separate hard aggregate deadline. The canonical build/test deadline
 is established only after startup collection settles, so telemetry consumes none of that budget. Its
 whole elapsed time ends only after the oversize-source advisory and teardown. Stable gate phase IDs are
-`build-prerequisite`, `oracle-cache`, `harness-smoke-vapor`, `harness-smoke-typescript`,
+`build-prerequisite`, `harness-smoke-typescript`,
 `freshness-tooling`, `vue-macro-oracle-check`, `vue-macro-oracle-tests`, `dev-archive`, `dev-list`,
 `surface-1`, `shipped-check`, `shipped-contract`, `advisory`, and `teardown`. A failed command remains in
 the table; an unreached or watchdog-aborted phase makes measurement completeness `partial`. A fully
@@ -220,23 +221,26 @@ test subprocess.
 
 ## Canonical conformance-harness preflight
 
-The gate now detects two broad JavaScript harness incompatibility classes
-before the expensive Rust archive build. After the build-prerequisite load
-and pinned oracle-cache realization succeed, and before freshness tooling or
-Cargo, it runs `packages/framework-conformance-harness/bin/gate-smoke.mjs`
-in two explicit modes:
+The core gate detects the workspace TypeScript harness incompatibility before
+the expensive Rust archive build. After the build-prerequisite load and before
+freshness tooling or Cargo, it runs
+`packages/framework-conformance-harness/bin/gate-smoke.mjs typescript`. The
+oracle-dependent `vapor` smoke lives in the parallel required BF2 lane, after
+offline oracle realization and before BF2 inventory listing:
 
-- `vapor` calls the harness's exported `ensureVaporRuntimePreloaded()` path,
+- BF2 `vapor` calls the harness's exported `ensureVaporRuntimePreloaded()` path,
   including its real jsdom bootstrap and pinned with-vapor runtime import.
-- `typescript` calls the exported `observeTypeScript()` over a small
+- Core `typescript` calls the exported `observeTypeScript()` over a small
   multi-file, in-memory workspace-domain graph, then asserts the intended
   export and zero relevant diagnostics. This exercises the canonical virtual
   host rather than a mirrored TypeScript setup.
 
-Each mode runs separately through `runContainedStep`, so the existing whole-
-gate deadline, stall detection, process-tree RSS ceiling, and teardown apply.
-Each also emits its own duration/peak-RSS telemetry line. Success requires the
-exact-key, mode-bound JSON object receipt
+Core TypeScript runs through the canonical gate supervisor, so its whole-gate
+deadline, stall detection, process-tree RSS ceiling, teardown, and telemetry
+apply. BF2 Vapor runs through the dedicated lane's process-tree supervisor with
+one 90-minute absolute lane deadline and teardown; it deliberately adds no
+stall, memory, build-job, or test-thread limit. Success in either lane requires
+the exact-key, mode-bound JSON object receipt
 `{"schema":"verter-harness-smoke/v1","mode":"<mode>","ok":true}`,
 which the executable writes only after the real work and assertions complete.
 A non-zero exit, timeout, stall, memory ceiling/monitor abort, signal, spawn

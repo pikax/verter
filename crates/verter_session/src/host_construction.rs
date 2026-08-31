@@ -50,6 +50,17 @@ pub(crate) struct RelationHostKnobs {
     pub(crate) strict_family_relax_bits: std::sync::atomic::AtomicU8,
 }
 
+/// Construction-time source for the host's execution-only worker pools.
+///
+/// `Fresh` is every production constructor. The shared variant is compiled
+/// only for the explicit test-support seam and still builds a fresh scheduler,
+/// driver, host state, and declaration-lowering service.
+enum HostWorkerPoolSource {
+    Fresh,
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    Shared(Arc<crate::TestHostWorkerPools>),
+}
+
 pub(crate) fn next_host_instance_id() -> u64 {
     static NEXT_HOST_INSTANCE_ID: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(1);
@@ -232,17 +243,61 @@ impl VerterHost {
 
     /// Create a new host with an explicit [`SchedulerConfig`].
     ///
-    /// Test harnesses construct hosts with
-    /// `SchedulerConfig { cpu_threads: 1, ..SchedulerConfig::default() }`
-    /// to avoid CPU oversubscription when many parallel test threads each
-    /// spin up their own scheduler thread pools.
+    /// Each call constructs worker pools at the configured production sizes.
+    /// Corpus harnesses that need process-local reuse inject an explicit shared
+    /// test worker substrate instead of changing those sizes.
     pub fn new_with_scheduler_config(
         config: HostConfig,
         workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
     ) -> Self {
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            scheduler_config,
+            HostWorkerPoolSource::Fresh,
+        )
+    }
+
+    /// Create a fresh host shell using an explicitly shared test worker
+    /// substrate.
+    ///
+    /// Only the three execution pools are shared. The workspace, scheduler and
+    /// driver, semantic caches, audit/request state, and declaration-lowering
+    /// service are reconstructed for every call.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub fn new_with_test_worker_pools(
+        config: HostConfig,
+        workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
+        worker_pools: Arc<crate::TestHostWorkerPools>,
+    ) -> Self {
+        worker_pools.assert_compatible(&config);
+        let scheduler_config = worker_pools.scheduler_config.clone();
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            scheduler_config,
+            HostWorkerPoolSource::Shared(worker_pools),
+        )
+    }
+
+    fn new_with_scheduler_config_and_worker_pool_source(
+        config: HostConfig,
+        workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
+        scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
+        worker_pool_source: HostWorkerPoolSource,
+    ) -> Self {
         #[cfg(test)]
         configure_workspace_test_projects(workspace.as_ref());
+        #[cfg(target_arch = "wasm32")]
+        let _ = &worker_pool_source;
+        #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+        let test_worker_pool_lease = match &worker_pool_source {
+            HostWorkerPoolSource::Fresh => None,
+            HostWorkerPoolSource::Shared(worker_pools) => {
+                Some(worker_pools.acquire_scheduler_shell())
+            }
+        };
 
         // Register the session-side "clear all install_tls slots"
         // hook with the scheduler's substrate registry. Idempotent
@@ -345,19 +400,32 @@ impl VerterHost {
                 // SAME resolved DAG budget the scheduler admits against
                 // (`resolved_dag_budget().io`) so the IO channel never
                 // becomes a second admission authority.
-                let scheduler_cpu_pool =
-                    verter_scheduler::SchedulerCpuPool::new(scheduler_config.cpu_threads);
-                let scheduler_io_pool = verter_scheduler::SchedulerIoPool::new(
-                    scheduler_config.io_threads,
-                    scheduler_config.resolved_dag_budget().io as usize,
-                );
-                verter_scheduler::scheduler::Scheduler::with_executor(
+                let (scheduler_cpu_pool, scheduler_io_pool) = match &worker_pool_source {
+                    HostWorkerPoolSource::Fresh => (
+                        verter_scheduler::SchedulerCpuPool::new(scheduler_config.cpu_threads),
+                        verter_scheduler::SchedulerIoPool::new(
+                            scheduler_config.io_threads,
+                            scheduler_config.resolved_dag_budget().io as usize,
+                        ),
+                    ),
+                    #[cfg(any(test, feature = "test-support"))]
+                    HostWorkerPoolSource::Shared(worker_pools) => (
+                        Arc::clone(&worker_pools.scheduler_cpu_pool),
+                        Arc::clone(&worker_pools.scheduler_io_pool),
+                    ),
+                };
+                let scheduler = verter_scheduler::scheduler::Scheduler::with_executor(
                     scheduler_config,
                     loader,
                     executor,
                     scheduler_cpu_pool,
                     scheduler_io_pool,
-                )
+                );
+                #[cfg(any(test, feature = "test-support"))]
+                if let HostWorkerPoolSource::Shared(worker_pools) = &worker_pool_source {
+                    worker_pools.record_scheduler_shell_created();
+                }
+                scheduler
             }
             #[cfg(target_arch = "wasm32")]
             {
@@ -421,17 +489,21 @@ impl VerterHost {
         // worker count is guaranteed by `PoolSize::resolve`, so
         // `HostCpuPool::new`'s positive-thread assertion never fires.
         #[cfg(not(target_arch = "wasm32"))]
-        let host_cpu_pool = {
-            let policy = config.resolved_host_cpu_pool_policy();
-            let threads = policy.size.resolve();
-            match policy.spawn {
-                crate::types::PoolSpawn::Eager => verter_scheduler::HostCpuPool::new(threads),
-                crate::types::PoolSpawn::LazyOnFirstUse => {
-                    verter_scheduler::HostCpuPool::new_lazy(threads)
+        let host_cpu_pool = match &worker_pool_source {
+            HostWorkerPoolSource::Fresh => {
+                let policy = config.resolved_host_cpu_pool_policy();
+                let threads = policy.size.resolve();
+                match policy.spawn {
+                    crate::types::PoolSpawn::Eager => verter_scheduler::HostCpuPool::new(threads),
+                    crate::types::PoolSpawn::LazyOnFirstUse => {
+                        verter_scheduler::HostCpuPool::new_lazy(threads)
+                    }
                 }
             }
+            #[cfg(any(test, feature = "test-support"))]
+            HostWorkerPoolSource::Shared(worker_pools) => Arc::clone(&worker_pools.host_cpu_pool),
         };
-        Self {
+        let host = Self {
             instance_id,
             config,
             carrier_publication: crate::carrier_publication_store::CarrierPublicationHostHandles {
@@ -524,7 +596,14 @@ impl VerterHost {
             #[cfg(any(test, feature = "test-support"))]
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
             signature_overflow_at_install: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+            _test_worker_pool_lease: test_worker_pool_lease,
+        };
+        #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+        if let HostWorkerPoolSource::Shared(worker_pools) = &worker_pool_source {
+            worker_pools.record_host_shell_created();
         }
+        host
     }
 
     /// Create a standalone host with an internal memory workspace.
@@ -722,6 +801,26 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn host_cpu_pool(&self) -> &Arc<verter_scheduler::HostCpuPool> {
         &self.host_cpu_pool
+    }
+
+    /// Process-unique identity of this fresh host shell.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn test_instance_id(&self) -> u64 {
+        self.instance_id
+    }
+
+    /// Identities of the scheduler CPU, scheduler I/O, and host coordinator
+    /// pools used by this host.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn test_worker_pool_ids(&self) -> crate::TestHostWorkerPoolIds {
+        let (scheduler_cpu, scheduler_io) = self.scheduler.test_worker_pool_ids();
+        crate::TestHostWorkerPoolIds {
+            scheduler_cpu,
+            scheduler_io,
+            host_cpu: self.host_cpu_pool.pool_id(),
+        }
     }
 
     /// The host's batch-coordinator primitive, bound to the host-owned

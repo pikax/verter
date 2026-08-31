@@ -226,63 +226,16 @@
 //! claims.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use syn::visit::Visit;
 use syn::{
     visit::visit_file as syn_visit_file, Attribute, ImplItemFn, ItemFn, ItemImpl, ItemMod, Meta,
     Type,
 };
-use walkdir::WalkDir;
 
-// Relocated from `verter_session` (gate-performance step 2): this guard scans
-// verter_session's OWN production `src/`, so — unlike a same-crate test where
-// `CARGO_MANIFEST_DIR` IS the scanned crate — `crate_root()` must explicitly
-// re-anchor to `crates/verter_session` rather than to this crate's own
-// manifest dir.
-fn crate_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("crate is <ws>/crates/verter_source_policy_gate")
-        .join("crates/verter_session")
-}
+use super::source_corpus::session_production_src_files as production_src_files;
 
-fn is_test_file(rel: &str) -> bool {
-    rel.ends_with("_tests.rs")
-        || rel.ends_with("/tests.rs")
-        || rel.contains("/tests/")
-        || rel.contains("/tests_")
-}
-
-/// Production `.rs` files under `crates/verter_session/src`, relative to the
-/// crate root, with their source — test fixtures excluded.
-fn production_src_files() -> Vec<(String, String)> {
-    let src_root = crate_root().join("src");
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in WalkDir::new(&src_root) {
-        let entry = entry.expect("walkdir entry");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(crate_root())
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if is_test_file(&rel) || !seen.insert(rel.clone()) {
-            continue;
-        }
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-        out.push((rel, src));
-    }
-    out
-}
 // ════════════════════════════════════════════════════════════════════
 // `syn` STRUCTURAL INVENTORY — impl-path renderer + cfg-test evaluator
 // (the proven machinery from the sibling inventory guard)
@@ -1156,6 +1109,13 @@ fn inventory_for(files: &[(String, String)]) -> Vec<FnDef> {
     build_fn_inventory(files)
 }
 
+fn production_inventory() -> &'static [FnDef] {
+    static INVENTORY: OnceLock<Vec<FnDef>> = OnceLock::new();
+    INVENTORY
+        .get_or_init(|| build_fn_inventory(production_src_files()))
+        .as_slice()
+}
+
 // ════════════════════════════════════════════════════════════════════
 // READER CLASS — the partition the residual TypeExpr body readers carry
 // ════════════════════════════════════════════════════════════════════
@@ -1778,10 +1738,8 @@ fn graph_backed_migrated_anchors() -> Vec<MigratedAnchor> {
 /// consumer call site) is defined at its `(file, impl/mod, fn)` anchor in the
 /// production tree. A renamed / moved / deleted reader reddens — the partition
 /// depends on this enumerated surface being stable.
-#[test]
 fn every_enumerated_body_reader_is_present_at_its_anchor() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     let mut missing = Vec::new();
 
     for r in RESIDUAL_BODY_READERS {
@@ -1835,10 +1793,8 @@ fn every_enumerated_body_reader_is_present_at_its_anchor() {
 /// definition. A second definition at the same anchor makes the anchor
 /// ambiguous and reddens — the partition must be able to address each reader
 /// uniquely.
-#[test]
 fn every_anchored_body_reader_is_unique() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     let mut violations = Vec::new();
     for (file, impl_path, name) in all_inventory_anchors() {
         let count = anchored_defs(&inv, &file, &impl_path, &name).len();
@@ -1901,10 +1857,8 @@ fn unclassified_method_chain_reads(
 /// read (incl. paren/ref-unwrapped and UFCS spellings) sits at an anchor in
 /// EITHER inventory. A NEW or MOVED such read outside both reddens at once. This
 /// is a bounded supplement to the curated enumeration, NOT the completeness rail.
-#[test]
 fn no_method_chain_body_read_outside_the_inventory() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     let allowed = method_chain_allowed_anchors();
     let mut violations = Vec::new();
     for hit in unclassified_method_chain_reads(&inv, &allowed) {
@@ -1932,12 +1886,12 @@ fn no_method_chain_body_read_outside_the_inventory() {
 /// `<recv>.body.<method>` lowered-body read in any non-test fn — their body
 /// reads route through the named compat helpers. Any direct method-chain read in
 /// these files means the compat routing regressed.
-#[test]
 fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
     let all = production_src_files();
     let consumer_files: Vec<(String, String)> = all
-        .into_iter()
+        .iter()
         .filter(|(rel, _)| COMPAT_CONSUMER_FILES.contains(&rel.as_str()))
+        .cloned()
         .collect();
     assert_eq!(
         consumer_files.len(),
@@ -1981,10 +1935,9 @@ fn compat_consumer_files_contain_no_direct_method_chain_body_read() {
 /// comments nor string literals, and proves the precise anchor identity (the right
 /// fn in the right impl). A migrated reader that regressed to reading a body
 /// `TypeExpr` (even through an aliased local binding) REDS here.
-#[test]
 fn graph_backed_migrated_anchors_perform_no_typeexpr_body_read() {
     let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     let by_rel: std::collections::HashMap<&str, &str> = files
         .iter()
         .map(|(r, s)| (r.as_str(), s.as_str()))
@@ -2409,7 +2362,6 @@ fn migrated_route_requirement_is_per_row_not_a_flat_union() {
 /// (`let p = get_prepared(); p.body.clone()`) is caught. The aliased case is the
 /// launder a text needle `"prepared.body"` cannot see — the AST field-access match
 /// catches it. This exercises the AST visitor, NOT a text path.
-#[test]
 fn graph_backed_migrated_no_read_check_discriminates() {
     // Synthetic anchors share one impl/fn anchor shape so the scanner finds them.
     // The migrated anchor under test (`lower_decl_body_to_node`) requires
@@ -2561,7 +2513,6 @@ fn graph_backed_migrated_no_read_check_discriminates() {
 /// is closed ONLY by the author keeping the enumeration complete + the behavioural
 /// parity rail. A representative bare-field reader of each non-migrated class is
 /// present + unique on the real tree (the enumeration rows are load-bearing).
-#[test]
 fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
     let allowed = method_chain_allowed_anchors();
 
@@ -2597,8 +2548,7 @@ fn enumeration_is_the_completeness_rail_for_bare_field_readers() {
     // structural arm landed and its rows left the ledger (the partition pin in
     // `real_tree_inventory_is_non_vacuous` and the non-growth cap both hold it
     // at zero).
-    let files = production_src_files();
-    let real_inv = build_fn_inventory(&files);
+    let real_inv = production_inventory();
     // AuthoredShape has NO witness: the class is EMPTY — the heritage and
     // closedness/key-domain clusters both went fact-native and their rows
     // left the ledger (the partition pin in `real_tree_inventory_is_non_vacuous`
@@ -2837,10 +2787,9 @@ fn cfg_test_chain_read_is_not_flagged() {
 /// One UNPLANTED CONTROL that stays GREEN: the REAL production tree passes ALL
 /// FIVE invariants as-is (presence, uniqueness, the tripwire, compat purity, and
 /// the GraphBackedMigrated-no-read rail).
-#[test]
 fn real_tree_satisfies_all_invariants() {
     let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
 
     // (1) Presence — every enumerated reader is anchored.
     for r in RESIDUAL_BODY_READERS {
@@ -2950,10 +2899,8 @@ fn real_tree_satisfies_all_invariants() {
 /// inventoried `method_chain` rows; the TOTAL inventory sizes are pinned; and the
 /// PER-CLASS partition counts are pinned so a reader silently changing class (or
 /// the partition drifting) reddens.
-#[test]
 fn real_tree_inventory_is_non_vacuous() {
-    let files = production_src_files();
-    let inv = build_fn_inventory(&files);
+    let inv = production_inventory();
     assert!(
         inv.len() > 100,
         "self-test: the structural inventory must contain many fn definitions — got {}",
@@ -3089,6 +3036,53 @@ fn real_tree_inventory_is_non_vacuous() {
         "self-test: exactly two residual readers perform the `<recv>.body.<method>` chain read \
          (finish_prepared_type_decl and transient_body_shape)"
     );
+}
+
+pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
+    (
+        "every_enumerated_body_reader_is_present_at_its_anchor",
+        every_enumerated_body_reader_is_present_at_its_anchor,
+    ),
+    (
+        "every_anchored_body_reader_is_unique",
+        every_anchored_body_reader_is_unique,
+    ),
+    (
+        "no_method_chain_body_read_outside_the_inventory",
+        no_method_chain_body_read_outside_the_inventory,
+    ),
+    (
+        "compat_consumer_files_contain_no_direct_method_chain_body_read",
+        compat_consumer_files_contain_no_direct_method_chain_body_read,
+    ),
+    (
+        "graph_backed_migrated_anchors_perform_no_typeexpr_body_read",
+        graph_backed_migrated_anchors_perform_no_typeexpr_body_read,
+    ),
+    (
+        "graph_backed_migrated_no_read_check_discriminates",
+        graph_backed_migrated_no_read_check_discriminates,
+    ),
+    (
+        "enumeration_is_the_completeness_rail_for_bare_field_readers",
+        enumeration_is_the_completeness_rail_for_bare_field_readers,
+    ),
+    (
+        "real_tree_satisfies_all_invariants",
+        real_tree_satisfies_all_invariants,
+    ),
+    (
+        "real_tree_inventory_is_non_vacuous",
+        real_tree_inventory_is_non_vacuous,
+    ),
+];
+
+pub(super) fn run_production_guards() {
+    std::thread::scope(|scope| {
+        for (_, guard) in PRODUCTION_GUARDS {
+            scope.spawn(move || guard());
+        }
+    });
 }
 
 // ════════════════════════════════════════════════════════════════════

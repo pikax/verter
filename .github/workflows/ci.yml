@@ -47,9 +47,18 @@ jobs:
               - 'scripts/check-integration-test-layout.mjs'
               - 'scripts/integration-test-layout-allowlist.json'
               - 'scripts/gate*.mjs'
+              # Dedicated BF2 lane authority. A driver/self-test-only change
+              # must run the lane it can weaken rather than passing through a
+              # skipped required job.
+              - 'scripts/bf2-authoritative.mjs'
+              - 'scripts/bf2-ci-lane-selftest.mjs'
+              - 'scripts/compiler-ci-lane-selftest.mjs'
               - 'packages/framework-conformance-harness/**'
               - 'packages/language-shared/**'
               - 'packages/svelte-jsx/**'
+              # BF2's workspace-domain TypeScript observation resolves both
+              # @verter/svelte-jsx and @verter/types.
+              - 'packages/types/**'
               - 'packages/typescript-plugin/**'
               - '.npmrc'
               - '.nvmrc'
@@ -67,8 +76,12 @@ jobs:
               - 'scripts/gen-svelte-goldens.mjs'
               - 'scripts/sccache-env.mjs'
               - 'scripts/sccache-env.test.mjs'
+              - 'scripts/compiler-ci-lane-selftest.mjs'
               - 'scripts/svelte-golden-lib.mjs'
               - 'crates/verter_compiler/tests/svelte_oracle_corpus/**'
+              # test:scripts validates the required BF2 dependencies in the
+              # release graph; release-only changes must execute that guard.
+              - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
             wasm:
               - 'crates/verter_compiler/**'
@@ -362,6 +375,9 @@ jobs:
           # to finish ever wrote a cache and the other six restored a
           # `target/` that did not match their build.
           key: rust-test
+          # The core archive lives under the runner-owned root. Compiler
+          # trybuild artifacts belong to the parallel compiler-contracts job
+          # that actually executes that driver.
           cache-directories: target/gate-runner
       # Start with the compile-heavy canonical gate only. The existing target
       # cache remains useful for registry/final artifacts while sccache proves
@@ -382,12 +398,6 @@ jobs:
       # gate's freshness preflight then verdict-gates tolerance OFF, making a
       # freshness failure a HARD failure rather than PASS-WITH-TOLERATED.
       - run: pnpm install --frozen-lockfile
-      # The canonical gate realizes the pinned Vue/Svelte oracle closures
-      # offline and intentionally refuses to provision this cache itself. CI is
-      # the explicit network boundary, so warm the cache before entering the
-      # hermetic gate.
-      - name: Provision the Rust gate's offline oracle npm cache
-        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
       # REQUIRED for a non-vacuous gate — see gate.mjs's BUILD-PREREQUISITE PREFLIGHT. The real-provider
       # suites spawn the pinned tsserver with `--globalPlugins @verter/typescript-plugin
       # --pluginProbeLocations packages/vue-vscode/node_modules`; that probe dir is a pnpm SYMLINK to
@@ -461,6 +471,89 @@ jobs:
           path: ${{ steps.junit.outputs.path }}
           reporter: java-junit
           fail-on-error: false
+
+  # Required and parallel with rust-test. The canonical archive excludes
+  # trybuild because nested Cargo builds cannot execute from an extracted
+  # nextest archive; this lane owns the consolidated compiler driver and its
+  # deterministic generated-artifact freshness guard.
+  compiler-contracts:
+    name: Compiler Contracts
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-compiler-contracts-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: compiler-contracts
+          cache-directories: target/tests/trybuild
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Verify compiler contracts lane and cache ownership
+        run: node --test scripts/compiler-ci-lane-selftest.mjs
+      - name: Run grouped compiler trybuild and generated-artifact contracts
+        run: >-
+          cargo nextest run --package verter_compiler --test main
+          -E 'test(/^cases::compiler_compile_fail::default_compiler_compile_fail_contracts_are_enforced$/)
+          or test(/^cases::svelte_generated_artifacts_freshness::generated_svelte_artifacts_match_their_authoritative_inputs$/)'
+
+  # Required and parallel with rust-test. The core archive deliberately omits
+  # `verter_session/bf2-authoritative`; this lane owns its pinned oracle setup,
+  # exact source/list inventory admission, and full-capacity nextest run.
+  bf2-authoritative:
+    name: BF2 Authoritative
+    needs: detect-changes
+    if: needs.detect-changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: "verter-bf2-authoritative-v1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bf2-authoritative
+      - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.17.0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The workspace TypeScript observation is part of BF2 and refuses to
+      # degrade when @verter/types or @verter/svelte-jsx is unavailable.
+      - name: Build BF2 TypeScript declaration prerequisites
+        run: pnpm run build:ts
+      # Provisioning is the explicit network boundary. The lane command only
+      # realizes these pinned closures offline and fails setup if unusable.
+      - name: Provision BF2's offline oracle npm cache
+        run: node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Verify BF2 CI lane contract
+        run: node --test scripts/bf2-ci-lane-selftest.mjs
+      - name: Run exact BF2 authoritative inventory
+        env:
+          NEXTEST_PROFILE: ci
+        run: node scripts/bf2-authoritative.mjs
 
 
   js-build-test:
@@ -1577,6 +1670,8 @@ jobs:
       - rust-clippy
       - rust-build-configs
       - rust-test
+      - compiler-contracts
+      - bf2-authoritative
       - js-build-test
       - svelte-oracle
       - svelte-conformance

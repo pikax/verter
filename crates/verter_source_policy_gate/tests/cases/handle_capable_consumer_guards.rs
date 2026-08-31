@@ -45,10 +45,11 @@
 //! prove they discriminate (fire on a synthetic violation, pass on the
 //! known-good shape) per the Stub-Prevention contract.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
-use walkdir::WalkDir;
+use super::source_corpus::{
+    session_production_source, session_production_src_files as production_src_files,
+};
 
 // Relocated from `verter_session` (gate-performance step 2): this guard scans
 // verter_session's OWN production `src/` (and reads sibling verter_session
@@ -65,44 +66,13 @@ fn crate_root() -> PathBuf {
 }
 
 fn read_rel(rel: &str) -> String {
+    if rel.starts_with("src/") {
+        return session_production_source(rel)
+            .unwrap_or_else(|| panic!("production source missing from shared corpus: {rel}"))
+            .to_string();
+    }
     let path = crate_root().join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
-
-fn is_test_file(rel: &str) -> bool {
-    rel.ends_with("_tests.rs")
-        || rel.ends_with("/tests.rs")
-        || rel.contains("/tests/")
-        || rel.contains("/tests_")
-}
-
-/// Production `.rs` files under `crates/verter_session/src`, relative
-/// to the crate root, test fixtures excluded.
-fn production_src_files() -> Vec<(String, String)> {
-    let src_root = crate_root().join("src");
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for entry in WalkDir::new(&src_root) {
-        let entry = entry.expect("walkdir entry");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(crate_root())
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if is_test_file(&rel) || !seen.insert(rel.clone()) {
-            continue;
-        }
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-        out.push((rel, src));
-    }
-    out
 }
 
 // ===========================================================================
@@ -155,7 +125,6 @@ fn boundary_definition_sites() -> Vec<String> {
     sites
 }
 
-#[test]
 fn g_a_exactly_one_boundary_definition_in_raise() {
     // Anti-vacuity + anti-evasion: there must be EXACTLY ONE boundary
     // definition, and it must live in the single reverse-boundary file.
@@ -1080,8 +1049,7 @@ fn stage4_carrier_inventory_handle_native_consumers_present() {
             continue;
         }
         for (file, needle) in row.witness {
-            let path = crate_root().join(file);
-            let present = std::fs::read_to_string(&path)
+            let present = session_production_source(file)
                 .map(|src| src.contains(needle))
                 .unwrap_or(false);
             if !present {
@@ -1112,7 +1080,6 @@ fn deferred_payload_patterns() -> Vec<&'static str> {
         .collect()
 }
 
-#[test]
 fn stage4_deferred_carriers_have_no_session_resolution_consumer() {
     // NAME NOTE: the historical name says "no session resolution consumer",
     // but this guard enforces the narrower, honest invariant below — a
@@ -1327,11 +1294,10 @@ fn g_b_self_test_inventory_is_well_formed_and_discriminating() {
 
     // Non-vacuity 2: the presence check discriminates — a needle that is
     // KNOWN ABSENT must report missing.
-    let absent_present = std::fs::read_to_string(
-        crate_root().join("src/resolver_core/component_meta_query_engine/registry_decl.rs"),
-    )
-    .map(|src| src.contains("fn this_handle_arm_does_not_exist_xyzzy"))
-    .unwrap_or(false);
+    let absent_present =
+        session_production_source("src/resolver_core/component_meta_query_engine/registry_decl.rs")
+            .map(|src| src.contains("fn this_handle_arm_does_not_exist_xyzzy"))
+            .unwrap_or(false);
     assert!(
         !absent_present,
         "self-test: a deliberately-absent needle must NOT be found — proving the presence check \
@@ -1602,7 +1568,6 @@ fn is_audited_witness_file(rel: &str) -> bool {
     rel.replace('\\', "/") == "src/semantic_query.rs"
 }
 
-#[test]
 fn no_hand_written_no_type_expr_impls_except_audited_hot_type_ref() {
     // DEFENSE-IN-DEPTH, honestly scoped — NOT the semantic proof. The compiler
     // (derive + assert_impl_all) owns transitive type meaning. This bans the one
@@ -1663,6 +1628,29 @@ fn no_hand_written_no_type_expr_impls_except_audited_hot_type_ref() {
          verter_session/src — its absence means the single sanctioned witness was deleted (the \
          `HotTypeRef` handle would then fail its own `assert_impl_all!`), not that the ban is clean."
     );
+}
+
+pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
+    (
+        "g_a_exactly_one_boundary_definition_in_raise",
+        g_a_exactly_one_boundary_definition_in_raise,
+    ),
+    (
+        "stage4_deferred_carriers_have_no_session_resolution_consumer",
+        stage4_deferred_carriers_have_no_session_resolution_consumer,
+    ),
+    (
+        "no_hand_written_no_type_expr_impls_except_audited_hot_type_ref",
+        no_hand_written_no_type_expr_impls_except_audited_hot_type_ref,
+    ),
+];
+
+pub(super) fn run_production_guards() {
+    std::thread::scope(|scope| {
+        for (_, guard) in PRODUCTION_GUARDS {
+            scope.spawn(move || guard());
+        }
+    });
 }
 
 #[test]

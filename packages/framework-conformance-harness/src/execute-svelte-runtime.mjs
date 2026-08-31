@@ -16,12 +16,16 @@ import { importOracleModule, oracleScratchDir } from "./oracle-install.mjs";
 // instance, so cleanup can never delete another worker's in-flight modules.
 const SCRATCH_LABEL = `svelte-ssr-${randomUUID()}`;
 let scratchDir = null;
+let scratchModuleSequence = 0;
 
 function scratchModulePath(code) {
   if (scratchDir === null) scratchDir = oracleScratchDir("svelte", SCRATCH_LABEL);
   mkdirSync(scratchDir, { recursive: true }); // cleanup may have removed it mid-run
   const digest = createHash("sha256").update(code).digest("hex").slice(0, 16);
-  const filePath = path.join(scratchDir, `svelte-ssr-${digest}.mjs`);
+  // Batch mode may execute byte-identical server modules more than once.
+  // Node caches ESM by URL, so a per-execution suffix is required to prevent
+  // module-level component state from leaking into a later candidate case.
+  const filePath = path.join(scratchDir, `svelte-ssr-${digest}-${scratchModuleSequence++}.mjs`);
   writeFileSync(filePath, code, "utf8");
   return filePath;
 }

@@ -696,6 +696,15 @@ const CRITICAL_RULE_GUARDS: &[(&str, &[&str])] = &[
             // dispatch sibling cannot launder — pinned by
             // `raise_output_seam_returns_sealed_carrier_not_bare_type_expr`.
             "materialize_type_expr_is_not_production_visible",
+            // The aggregate owns the scan-heavy policy functions below and
+            // dispatches them in one process against one immutable source
+            // corpus. Their individual names remain documented above so the
+            // architectural boundary stays reviewable without hollow wrapper
+            // tests that would repeat the repository scan under Nextest. The
+            // R6 validity scanner resolves the member IDs from the aggregate's
+            // exact machine-checked manifest, not merely from this generic
+            // libtest entry point.
+            "repository_source_policy_guards",
             "retired_kind_b_bridge_symbol_absent_from_production_source",
             "sealed_module_is_private_not_pub_super",
             "output_projector_owner_registration_inventory",
@@ -1563,6 +1572,80 @@ fn walk_rs_files(path: &PathBuf, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn source_policy_aggregate_guard_ids_from_source(
+    source: &str,
+) -> Result<std::collections::HashSet<String>, String> {
+    const MANIFEST: &str = "REQUIRED_REPOSITORY_SOURCE_POLICY_GUARD_IDS";
+
+    let file =
+        syn::parse_file(source).map_err(|error| format!("parse aggregate manifest: {error}"))?;
+    let mut matching = file.items.into_iter().filter_map(|item| match item {
+        syn::Item::Const(item) if item.ident == MANIFEST => Some(item),
+        _ => None,
+    });
+    let item = matching
+        .next()
+        .ok_or_else(|| format!("missing `{MANIFEST}`"))?;
+    if matching.next().is_some() {
+        return Err(format!("duplicate `{MANIFEST}` definitions"));
+    }
+
+    fn peel(expr: &syn::Expr) -> &syn::Expr {
+        match expr {
+            syn::Expr::Reference(reference) => peel(&reference.expr),
+            syn::Expr::Group(group) => peel(&group.expr),
+            syn::Expr::Paren(paren) => peel(&paren.expr),
+            other => other,
+        }
+    }
+
+    let syn::Expr::Array(array) = peel(&item.expr) else {
+        return Err(format!("`{MANIFEST}` must be an array of string literals"));
+    };
+    let mut ids = std::collections::HashSet::new();
+    for element in &array.elems {
+        let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(value),
+            ..
+        }) = peel(element)
+        else {
+            return Err(format!("`{MANIFEST}` contains a non-string-literal member"));
+        };
+        let value = value.value();
+        if !ids.insert(value.clone()) {
+            return Err(format!("`{MANIFEST}` contains duplicate ID `{value}`"));
+        }
+    }
+    if ids.is_empty() {
+        return Err(format!("`{MANIFEST}` must not be empty"));
+    }
+    Ok(ids)
+}
+
+#[test]
+fn source_policy_aggregate_manifest_parser_is_fail_closed() {
+    let good = r#"
+        const REQUIRED_REPOSITORY_SOURCE_POLICY_GUARD_IDS: &[&str] = &["alpha", "beta"];
+    "#;
+    let parsed = source_policy_aggregate_guard_ids_from_source(good).expect("valid manifest");
+    assert_eq!(
+        parsed,
+        std::collections::HashSet::from(["alpha".to_string(), "beta".to_string()])
+    );
+
+    for malformed in [
+        "const OTHER: &[&str] = &[\"alpha\"];",
+        "const REQUIRED_REPOSITORY_SOURCE_POLICY_GUARD_IDS: &[&str] = &[];",
+        "const REQUIRED_REPOSITORY_SOURCE_POLICY_GUARD_IDS: &[&str] = &[\"alpha\", \"alpha\"];",
+        "const REQUIRED_REPOSITORY_SOURCE_POLICY_GUARD_IDS: &[&str] = &[SOME_ID];",
+    ] {
+        assert!(
+            source_policy_aggregate_guard_ids_from_source(malformed).is_err(),
+            "aggregate manifest parser must reject malformed input: {malformed}"
+        );
+    }
+}
+
 fn collect_known_guard_names() -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::<String>::new();
     let root = workspace_root();
@@ -1717,6 +1800,22 @@ fn collect_known_guard_names() -> std::collections::HashSet<String> {
             }
         }
     }
+
+    let aggregate_manifest = root.join("crates/verter_source_policy_gate/tests/cases/mod.rs");
+    let aggregate_source = fs::read_to_string(&aggregate_manifest).unwrap_or_else(|error| {
+        panic!(
+            "read source-policy aggregate manifest `{}`: {error}",
+            aggregate_manifest.display()
+        )
+    });
+    names.extend(
+        source_policy_aggregate_guard_ids_from_source(&aggregate_source).unwrap_or_else(|error| {
+            panic!(
+                "invalid source-policy aggregate manifest `{}`: {error}",
+                aggregate_manifest.display()
+            )
+        }),
+    );
 
     names
 }

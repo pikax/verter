@@ -87,8 +87,9 @@ The global memory rule remains unchanged. The tier matters on the documented
 24-GiB host: its 12-GiB default ceiling selects 8 jobs, because the measured
 12-job peak was already 11.60 GiB; 8 jobs peaked at 9.90 GiB. Explicit positive
 resource overrides are never clamped, so future comparisons can retest either
-axis independently; retain the nextest serialized heavy-test groups during
-every comparison.
+axis independently. Windows has no serialized `max-threads = 1` test groups;
+retain the exact hang-protection overrides while using full configured
+capacity during every comparison.
 
 `--prepare` may reuse an already-built archive target as a first-launch check.
 On Windows, proc-macro test harnesses need the host runtime DLL search path;

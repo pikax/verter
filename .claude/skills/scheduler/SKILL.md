@@ -1,6 +1,6 @@
 ---
 name: scheduler
-description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_batch_atomic (atomic DAG admission via driver-drained NewRequestBatch + shared admission core + deferred DedupJoinerEvent), wait_batch (input-order), live TaskKind (Source/Analysis/Artifact), CPU vs I/O pool routing, scheduler-owned cpu_pool + host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission; plus the landed-but-unwired leaf substrate (CpuConcurrencySemaphore/CpuConcurrencyPermit, CancellationToken, opaque SchedulerCacheId newtype, caller-side DedupeHook trait, SubmissionResult) and the not-yet-implemented cache-runtime DAG design target (KeyedJob/CacheNodeDagNode/SchedulerCpuPool/submit_dag/DAG submission)
+description: Verter scheduler — Scheduler, submit_request/submit_batch/submit_batch_atomic (atomic DAG admission via driver-drained NewRequestBatch + shared admission core + deferred DedupJoinerEvent), wait_batch (input-order), live TaskKind (Source/Analysis/Artifact), CPU vs I/O pool routing, host-injected SchedulerCpuPool/SchedulerIoPool + separate host-owned HostCpuPool coordinator (shared by every host batch API), account_batch_submission; plus the landed-but-unwired leaf substrate (CpuConcurrencySemaphore/CpuConcurrencyPermit, CancellationToken, opaque SchedulerCacheId newtype, caller-side DedupeHook trait, SubmissionResult) and the not-yet-implemented cache-runtime DAG design target (KeyedJob/CacheNodeDagNode/SchedulerCpuPool/submit_dag/DAG submission)
 ---
 
 # Scheduler
@@ -10,10 +10,10 @@ Concise reference for the `verter_scheduler` crate.
 **Live** surface (current tree): the `submit_request` / `submit_batch` /
 `submit_batch_atomic` submission API, the live `TaskKind` variant set
 (`Source` / `Analysis` / `Artifact`), CPU vs I/O pool routing, and dual
-pool ownership — the scheduler-owned stage `cpu_pool` (+ `io_pool`) plus
-the host-owned `HostCpuPool` coordinator shared by every host batch API,
-with per-batch `account_batch_submission` accounting. *Dual pool
-ownership* is the authority for the live pool model.
+pool isolation — the host-injected scheduler stage `cpu_pool` (+ `io_pool`)
+plus the separate host-owned `HostCpuPool` coordinator shared by every host
+batch API, with per-batch `account_batch_submission` accounting. *Dual pool
+isolation* is the authority for the live pool model.
 
 `submit_batch` is non-atomic (N separate `Submission::NewRequest` items;
 the pump may observe the batch half-admitted, `submit_count` bumped per
@@ -245,7 +245,7 @@ ONE `submit_batch_atomic` + ONE `wait_batch` for the whole batch rather
 than one upsert per file. Per-call worker count is NOT a parameter of
 `compile_many` — concurrency is the construction-time host-owned
 `HostCpuPool` (`HostConfig::host_cpu_threads`); see *Dual pool
-ownership*.
+isolation*.
 
 A **leaf substrate** for the cache-runtime DAG design has LANDED but is
 UNWIRED (no submission path takes it as an argument yet): the
@@ -390,8 +390,9 @@ UNWIRED — no submission path or work node carries one yet.
 > `.claude/skills/type-cache-architecture/SKILL.md`; none are on the current
 > tree. Live submission surface: `Scheduler::submit_request` /
 > `submit_batch` (returning a `BatchHandle`) over the live `TaskKind` set
-> `Source` / `Analysis` / `Artifact`, dispatched onto the scheduler-owned
-> `cpu_pool` via `cpu_pool.spawn(...)` (see *Dual pool ownership*). Types
+> `Source` / `Analysis` / `Artifact`, dispatched onto the host-injected scheduler
+> `cpu_pool` via nonblocking `cpu_pool.try_submit(...)` (see *Dual pool
+> isolation*). Types
 > and steps below describe the intended shape.
 >
 > **Dedupe-identity reconciliation:** the LANDED dedupe authority is
@@ -435,8 +436,8 @@ lives on `CacheNodeDagNode.task_kind` only — one source of truth.
 > target from `.claude/skills/type-cache-architecture/SKILL.md`; NOT on the
 > current tree. On the current tree the scheduler exposes `submit_request`
 > (no `submit_dag`), the live `TaskKind` set is `Source` / `Analysis` /
-> `Artifact`, and CPU stage work dispatches via the scheduler-owned
-> `cpu_pool.spawn(...)` (see *Dual pool ownership* for the authoritative
+> `Artifact`, and CPU stage work dispatches via the host-injected scheduler
+> `cpu_pool.try_submit(...)` (see *Dual pool isolation* for the authoritative
 > live pool model). Steps below describe the intended DAG flow once Block
 > 7 lands.
 
@@ -476,23 +477,28 @@ Lifecycle (Block 7 design target):
    `CpuConcurrencyPermit` drops via RAII immediately after the task body
    returns, releasing the semaphore counter and notifying one waiter.
 
-## Dual pool ownership
+## Dual pool isolation
 
-Two distinct `rayon::ThreadPool`s cooperate so the batch-orchestration
-outer wait and the scheduler's CPU stage executor cannot deadlock on the
-same workers. Owned by DIFFERENT layers — the split is the
-deadlock-isolation invariant.
+Distinct native worker substrates cooperate so the batch-orchestration outer
+wait and the scheduler's CPU stage executor cannot deadlock on the same
+workers. The host constructs both roles, but the split between scheduler stage
+workers and host coordinator workers is the deadlock-isolation invariant; the
+separate channel-backed I/O pool preserves source-load isolation.
 
-- **Scheduler stage pool (`cpu_pool`)** — owned BY the scheduler, built
-  internally in `Scheduler::with_executor` / `new_sync_with_executor`
-  from `SchedulerConfig::cpu_threads`. The ONLY pool for CPU stage
+- **Scheduler stage pool (`cpu_pool`)** — constructed by the host from
+  `SchedulerConfig::cpu_threads` and injected as an
+  `Arc<SchedulerCpuPool>` into `Scheduler::with_executor` /
+  `new_sync_with_executor`. The scheduler retains that handle as the ONLY pool
+  for CPU stage
   execution: the driver dispatches the live `TaskKind::Source` CPU step
   (the parse folded into `Source`) plus `TaskKind::Analysis` and
-  `TaskKind::Artifact` onto it via `cpu_pool.spawn(...)`. Workers register
+  `TaskKind::Artifact` onto it via nonblocking `cpu_pool.try_submit(...)`.
+  Workers register
   `CallerKind::CpuWorker` so `wait_or_drive` routes them to the
-  cooperative-pump branch. The scheduler also owns the bounded `io_pool`
-  (`SchedulerConfig::io_threads`) for the pure-I/O step of
-  `TaskKind::Source` (reading bytes off disk).
+  cooperative-pump branch. The host likewise constructs and injects the
+  bounded `Arc<SchedulerIoPool>` (`SchedulerConfig::io_threads`) for the
+  pure-I/O step of `TaskKind::Source` (reading bytes off disk). Its transport
+  capacity must dominate the same scheduler DAG's resolved I/O budget.
 - **Coordinator pool (`HostCpuPool`)** —
   `crates/verter_scheduler/src/host_cpu_pool.rs`. Constructed once at
   startup by the external host/runtime layer via
@@ -507,41 +513,56 @@ deadlock-isolation invariant.
   therefore NEVER run scheduler CPU stage work (`TaskKind::Source` /
   `Analysis` / `Artifact`).
 
-The scheduler constructor takes only `(config, source_loader[,
-executor])` — NO pool parameter. The scheduler builds and owns its
-`cpu_pool` + `io_pool`; the coordinator pool lives entirely in the
-external layer:
+Native scheduler constructors receive the host-built `cpu_pool` + `io_pool` as
+explicit `Arc` parameters. The coordinator pool remains entirely in the
+external layer and is never passed into the scheduler:
 
 ```rust
 impl Scheduler {
     pub fn new(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
+        cpu_pool: Arc<SchedulerCpuPool>,
+        io_pool: Arc<SchedulerIoPool>,
     ) -> Arc<Self> {
-        Self::with_executor(config, source_loader, Arc::new(DefaultExecutor))
+        Self::with_executor(
+            config,
+            source_loader,
+            Arc::new(DefaultExecutor),
+            cpu_pool,
+            io_pool,
+        )
     }
 
     pub fn with_executor(
         config: SchedulerConfig,
         source_loader: Arc<dyn SourceLoader>,
         executor: Arc<dyn StageExecutor>,
+        cpu_pool: Arc<SchedulerCpuPool>,
+        io_pool: Arc<SchedulerIoPool>,
     ) -> Arc<Self> {
-        // Build `cpu_pool` (config.cpu_threads, CpuWorker-tagged) and
-        // `io_pool` (config.io_threads); spawn the driver thread
-        // holding `Weak<Scheduler>`. No coordinator pool here.
+        // Retain the injected scheduler execution pools and spawn the driver
+        // thread holding `Weak<Scheduler>`. No coordinator pool here.
     }
 }
 
 pub struct Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) cpu_pool: rayon::ThreadPool, // stage execution ONLY
+    pub(crate) cpu_pool: Arc<SchedulerCpuPool>, // stage execution ONLY
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) io_pool: crate::pool::IoPool,
+    pub(crate) io_pool: Arc<SchedulerIoPool>,
     // ... other existing state (inbox, edges, dag, overlay, source_loader,
     //     executor, tombstones, generation_floors, deferred_blocker_ids,
     //     removal_epoch, shutdown, driver_handle, counters, config) ...
 }
 ```
+
+Test corpus code may reuse these execution-pool `Arc`s across sequential fresh
+scheduler shells inside one aggregate `#[test]`. It must not run multiple such
+schedulers concurrently unless the shared bounded I/O transport is sized for
+their aggregate admission: the ordinary host capacity rule only proves the
+transport dominates one scheduler's resolved I/O ledger. Scheduler/DAG/driver
+state and `HostCpuPool` coordinator ownership remain per-host.
 
 **Single batch-coordination primitive (lives in the external host/
 runtime layer, not in this crate).** Every host/runtime batch API (batch
@@ -572,16 +593,16 @@ sequentially on the current coordinator worker. Stacking a second outer
 wait on the same finite coordinator pool would reintroduce the starvation
 class one level up.
 
-**Deadlock-free property + new invariant.** The two pools are distinct
-and owned by different layers: **no worker waits for a job in its OWN
-pool.** A coordinator-pool worker may block on scheduler stage work
+**Deadlock-free property + new invariant.** The execution roles are distinct:
+**no worker waits for a job in its OWN pool.** A coordinator-pool worker may
+block on scheduler stage work
 without deadlock because the scheduler's `cpu_pool` has its own
 independently-proceeding worker set; a `cpu_pool` worker running
 `TaskKind::Source` stage work is not a coordinator worker and does not
 gate the outer coordinator's wait. The invariant in full:
 
-> Outer API fan-out may block only on scheduler-owned work;
-> scheduler-owned work must never require coordinator-pool workers;
+> Outer API fan-out may block only on scheduler stage work;
+> scheduler stage work must never require coordinator-pool workers;
 > nested host-batch fan-out is rejected or collapsed inline by the
 > external batch coordinator. External host/runtime layers own the
 > coordinator pool(s) and the batch-coordination primitive; they must
@@ -666,9 +687,9 @@ concurrently.
 
 > **Current state.** The live `TaskKind` set is `Source` / `Analysis` /
 > `Artifact`. CPU stage work (`Analysis` / `Artifact`, and the parse step
-> folded into `Source`) dispatches onto the scheduler-owned `cpu_pool` via
-> `cpu_pool.spawn(...)`; `Load`-style I/O runs on the `io_pool`. See *Dual
-> pool ownership* for the authoritative live pool model.
+> folded into `Source`) dispatches onto the host-injected scheduler `cpu_pool`
+> via `cpu_pool.try_submit(...)`; `Load`-style I/O runs on the `io_pool`. See
+> *Dual pool isolation* for the authoritative live pool model.
 >
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
 > expanded `TaskKind` shape below (`Load` / `Parse` / `CacheNode`
@@ -676,7 +697,7 @@ concurrently.
 > Block 7 design target from `.claude/skills/type-cache-architecture/SKILL.md`;
 > NOT on the current tree. Wherever a routing bullet below says
 > `SchedulerCpuPool::submit`, the current tree dispatches the equivalent
-> stage work onto `cpu_pool` via `cpu_pool.spawn(...)`. The bullets
+> stage work onto `cpu_pool` via `cpu_pool.try_submit(...)`. The bullets
 > describe the intended Block 7 routing.
 
 The scheduler routes (Block 7 design target):
@@ -723,7 +744,7 @@ component-meta batch enum at `stage.rs:19`) is **retained** unchanged —
 it discriminates `ComponentMeta { canonical_id }`. The scheduler does NOT
 own the batch fan-out for it: the external host/runtime layer maps these
 job items and fans them out through its own batch-coordination primitive
-(see *Dual pool ownership*), calling `Scheduler::account_batch_submission`
+(see *Dual pool isolation*), calling `Scheduler::account_batch_submission`
 once per non-empty batch for the O(1) submission accounting. The Block 7
 `TaskKind::CacheNode` variant lives alongside it on the new ready-queue
 envelope.
@@ -775,8 +796,8 @@ adapters before writing it on `node.completion`.
 > `.claude/skills/type-cache-architecture/SKILL.md`; NOT on the current tree. On
 > the current tree the scheduler exposes `submit_request` (no `submit_dag`
 > and no `CacheNodeDag` envelope), and the live `TaskKind` set is
-> `Source` / `Analysis` / `Artifact` dispatched onto the scheduler-owned
-> `cpu_pool` via `cpu_pool.spawn(...)` (see *Dual pool ownership* for the
+> `Source` / `Analysis` / `Artifact` dispatched onto the host-injected scheduler
+> `cpu_pool` via `cpu_pool.try_submit(...)` (see *Dual pool isolation* for the
 > authoritative live pool model). The DAG submission contract below
 > describes the intended flow once Block 7 lands.
 
@@ -955,12 +976,12 @@ routing rules.)
   bytes off disk) and any other pure-I/O work. A parse closure on the I/O
   pool is a bug
   (`pool_isolation::source_parse_runs_on_cpu_pool_not_io_pool`).
-- **Scheduler stage pool (`cpu_pool`)** owns the CPU stage work — the
+- **Scheduler stage pool (`cpu_pool`)** executes the CPU stage work — the
   parse step folded into `TaskKind::Source`, plus `TaskKind::Analysis` and
-  `TaskKind::Artifact` — dispatched via `cpu_pool.spawn(...)`. The
-  scheduler builds and owns it internally from
-  `SchedulerConfig::cpu_threads`; NOT passed into the constructor. The
-  only pool the driver dispatches stage work onto.
+  `TaskKind::Artifact` — dispatched via `cpu_pool.try_submit(...)`. The
+  host constructs it from `SchedulerConfig::cpu_threads` and injects its
+  `Arc` into the constructor. It is the only pool the driver dispatches stage
+  work onto.
 - **Coordinator pool (`HostCpuPool`)** owns the outer batch coordinator's
   wait points for EVERY host batch API (batch component-meta, batch SFC
   compile, and any future host batch fan-out). The external host/runtime
@@ -974,8 +995,9 @@ routing rules.)
 ## Test-support helpers (`feature = "test-support"`)
 
 > **Not yet implemented — cache-runtime DAG design (Block 7).** The
-> `feature = "test-support"` gate itself is live, but on the current tree
-> it exposes only `host_cpu_pool_token` (see *Dual pool ownership*). The
+> `feature = "test-support"` gate itself is live; its current pool-identity
+> readers are `host_cpu_pool_token` and `Scheduler::test_worker_pool_ids` (see
+> *Dual pool isolation*). The
 > fixture catalogue below — `Scheduler::new_for_test`, `enqueue_analysis`,
 > `last_dispatched_task`, `LastDispatchedTaskRecorder`, the `KeyedJob` /
 > `CacheNodeDagNode` / `DedupKey` / `SchedulerCacheId` stubs, etc. — is

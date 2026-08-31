@@ -1,21 +1,14 @@
 //! Former directory-based integration target
 //! `tests/component_meta_audit_corpus` — Cargo auto-discovered
-//! `<dir>/main.rs` as its entry root, so the `Main.vue` corpus case
-//! ran in TWO binaries: once here (the directory target) and once via
-//! `corpus_audit_tests`'s `mod main`. Consolidated into the `main`
-//! binary, this module reproduces the directory-target run so the
-//! test surfaces at the SAME internal path
-//! `component_meta_audit_corpus::corpus_audit_main_…` the former
-//! target had; `corpus_audit_tests::main::corpus_audit_main_…` keeps
-//! the second former path via the generated sibling `main.rs`.
+//! `<dir>/main.rs` as its entry root, so the `Main.vue` corpus case ran in TWO
+//! binaries. Consolidated into the `main` binary, this module preserves that
+//! directory-target logical row; the generated chunk table preserves the
+//! other `/Main.vue` row. The hand-written layout guard requires exactly one
+//! of each.
 //!
-//! The body mirrors the generated `main.rs` for `/Main.vue`. It is a
-//! hand-maintained consolidation shim (excluded from the generator's
-//! parity check and preserved across regeneration) — `include!`ing
-//! `main.rs` is not possible because the generated file leads with
-//! its own `//!` inner-doc, which `include!` cannot relocate to a
-//! module root. Keep this body in step with the generated `/Main.vue`
-//! assertion posture.
+//! The body mirrors the generated chunk runner's assertion posture for
+//! `/Main.vue`. It is a hand-maintained consolidation shim, excluded from the
+//! generator's parity check and preserved across regeneration.
 
 use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
 

@@ -256,6 +256,8 @@ import {
   // real conformance-harness gate smokes (GB15/GB16).
   HARNESS_SMOKE_MARKER,
   HARNESS_SMOKE_MODES,
+  CORE_HARNESS_SMOKE_MODES,
+  BF2_HARNESS_SMOKE_MODES,
   harnessSmokeCommand,
   decideHarnessSmokeResult,
   formatHarnessSmokeFailure,
@@ -268,8 +270,14 @@ import {
   ORACLE_CACHE_PROVISION_COMMAND,
   ORACLE_CACHE_PROBE_MAX_MS,
   ORACLE_CACHE_PROBE_MODULE_SEGMENTS,
-  // shipped-cfg archive-build feature wiring + independent expected-test-inventory scan (GB12).
+  // core archive feature isolation + dedicated BF2 exact inventory + shipped-cfg scan (GB12).
   ARCHIVE_FEATURES,
+  BF2_AUTHORITATIVE_FEATURE,
+  BF2_AUTHORITATIVE_MODULES,
+  buildBf2NextestArgs,
+  countBf2AuthoritativeListTests,
+  decideBf2AuthoritativeInventoryMatch,
+  scanBf2AuthoritativeSourceInventory,
   buildNextestArchiveArgs,
   buildSurface1RunArgs,
   buildShippedCfgContractArgs,
@@ -285,6 +293,8 @@ import {
   buildTrybuildExclusionFilterExpr,
   trybuildSkipArgsForPackage,
   countTrybuildExclusionMatches,
+  discoverCompilerTrybuildSourceModulePrefixes,
+  compilerTrybuildDriverUsesCanonicalConstructor,
   // reused by the gate-failure-triage parsing scenarios (GB14) so a nextest recap fixture is read through
   // the SAME extractor the live gate/triage share — no second nextest-output parser.
   extractNextestTerminalFailures,
@@ -1219,8 +1229,8 @@ async function main() {
   // --------------------------------------------------------------------------------------------------
   // (GB15) REAL CONFORMANCE-HARNESS COMMANDS + PRODUCTION ORDERING. Command construction is pure and
   //        launches the harness-owned executable through the current Node binary, once for each exact
-  //        mode. The production call-site must place the orchestration after the oracle-cache realization
-  //        and before freshness tooling/archive work.
+  //        mode. Core must run only TypeScript before freshness/archive work; the dedicated BF2 command
+  //        must run oracle realization then Vapor before its exact nextest list.
   // --------------------------------------------------------------------------------------------------
   process.stderr.write("\n(GB15) REAL CONFORMANCE-HARNESS COMMANDS + PRODUCTION ORDERING\n");
   {
@@ -1228,6 +1238,16 @@ async function main() {
     if (JSON.stringify(HARNESS_SMOKE_MODES) !== JSON.stringify(["vapor", "typescript"])) {
       fail(
         `(GB15.1) smoke modes must be exactly vapor/typescript; got ${JSON.stringify(HARNESS_SMOKE_MODES)}`,
+      );
+      ok = false;
+    }
+    if (
+      JSON.stringify(CORE_HARNESS_SMOKE_MODES) !== JSON.stringify(["typescript"]) ||
+      JSON.stringify(BF2_HARNESS_SMOKE_MODES) !== JSON.stringify(["vapor"])
+    ) {
+      fail(
+        `(GB15.1) core must own only typescript and BF2 only vapor; got core=` +
+          `${JSON.stringify(CORE_HARNESS_SMOKE_MODES)} bf2=${JSON.stringify(BF2_HARNESS_SMOKE_MODES)}`,
       );
       ok = false;
     }
@@ -1266,10 +1286,26 @@ async function main() {
     const smokeAt = gateSource.indexOf("const harnessSmokesOk = await runHarnessSmokeChecks(ctx);");
     const freshnessAt = gateSource.indexOf("const preflight = await preflightFreshnessTooling(");
     const archiveAt = gateSource.indexOf("const out = await archiveAndList(ctx);", smokeAt);
-    if (!(oracleAt >= 0 && oracleAt < smokeAt && smokeAt < freshnessAt && smokeAt < archiveAt)) {
+    const bf2Source = readFileSync(join(SELFTEST_DIR, "bf2-authoritative.mjs"), "utf8");
+    const bf2OracleAt = bf2Source.indexOf("const oracle = checkOracleCachePrerequisite(");
+    const bf2VaporAt = bf2Source.indexOf("for (const mode of BF2_HARNESS_SMOKE_MODES)");
+    const bf2ListAt = bf2Source.indexOf('buildBf2NextestArgs("list")');
+    if (
+      !(
+        oracleAt === -1 &&
+        smokeAt >= 0 &&
+        smokeAt < freshnessAt &&
+        smokeAt < archiveAt &&
+        bf2OracleAt >= 0 &&
+        bf2OracleAt < bf2VaporAt &&
+        bf2VaporAt < bf2ListAt
+      )
+    ) {
       fail(
-        `(GB15.2) production order must be oracle realization -> both harness smokes -> freshness -> cargo archive; ` +
-          `got oracle=${oracleAt} smoke=${smokeAt} freshness=${freshnessAt} archive=${archiveAt}`,
+        `(GB15.2) core order must be TypeScript smoke -> freshness -> cargo archive with no oracle ` +
+          `preflight, while dedicated BF2 must order oracle -> vapor smoke -> nextest list; got ` +
+          `coreOracle=${oracleAt} smoke=${smokeAt} freshness=${freshnessAt} archive=${archiveAt} ` +
+          `bf2Oracle=${bf2OracleAt} bf2Vapor=${bf2VaporAt} bf2List=${bf2ListAt}`,
       );
       ok = false;
     }
@@ -1323,23 +1359,17 @@ async function main() {
       );
       ok = false;
     }
-    if (vaporDone >= 0 && typescriptDone < 0 && cargoStarted > vaporDone) {
+    if (!(vaporDone < 0 && typescriptDone >= 0 && typescriptDone < cargoStarted)) {
       fail(
-        `(GB15.3) PRODUCTION BYPASS PROVEN: the real CLI omitted TypeScript smoke and improperly reached ` +
-          `Cargo (vapor=${vaporDone} typescript=${typescriptDone} cargo=${cargoStarted})`,
-      );
-      ok = false;
-    } else if (!(vaporDone >= 0 && vaporDone < typescriptDone && typescriptDone < cargoStarted)) {
-      fail(
-        `(GB15.3) the real production CLI must complete both real harness smokes before attempting Cargo; ` +
+        `(GB15.3) core must omit vapor and complete the real TypeScript smoke before Cargo; ` +
           `got vapor=${vaporDone} typescript=${typescriptDone} cargo=${cargoStarted}:\n${live.out}`,
       );
       ok = false;
     }
     if (ok) {
       pass(
-        "(GB15) commands target the harness-owned executable in exact vapor/typescript modes, and the " +
-          "production gate invokes both after oracle realization but before freshness tooling and Cargo",
+        "(GB15) commands target the harness-owned executable in exact vapor/typescript modes; core runs " +
+          "only TypeScript before freshness/Cargo, while BF2 owns oracle -> vapor -> exact list ordering",
       );
     }
   }
@@ -8646,16 +8676,16 @@ fi
           row.slowTimeout === slowTimeout,
       ).length;
     const configOk =
-      count(/^shared-provider-live\s*=\s*\{\s*max-threads\s*=\s*1\s*\}\s*$/gm) === 1 &&
-      count(/^lsp-server-unit\s*=\s*\{\s*max-threads\s*=\s*1\s*\}\s*$/gm) === 1 &&
+      count(/^shared-provider-live\s*=\s*\{\s*max-threads\s*=\s*1\s*\}\s*$/gm) === 0 &&
+      count(/^lsp-server-unit\s*=\s*\{\s*max-threads\s*=\s*1\s*\}\s*$/gm) === 0 &&
       exactOverrideCount(
         "default",
         expectedSharedFilter,
         "shared-provider-live",
         "cfg(windows)",
-      ) === 1 &&
+      ) === 0 &&
       exactOverrideCount("ci", expectedSharedFilter, "shared-provider-live", "cfg(windows)") ===
-        1 &&
+        0 &&
       exactOverrideCount(
         "default",
         expectedSharedFilter,
@@ -8675,13 +8705,13 @@ fi
         "test(/^server::server_tests::/)",
         "lsp-server-unit",
         "cfg(windows)",
-      ) === 1 &&
+      ) === 0 &&
       exactOverrideCount(
         "ci",
         "test(/^server::server_tests::/)",
         "lsp-server-unit",
         "cfg(windows)",
-      ) === 1 &&
+      ) === 0 &&
       exactOverrideCount(
         "default",
         "test(/^cases::g_compile::compile_fail::/)",
@@ -8692,15 +8722,29 @@ fi
       exactOverrideCount(
         "ci",
         "test(/^cases::g_compile::compile_fail::/)",
+        null,
+        null,
+        '{ period = "120s", terminate-after = 3 }',
+      ) === 1 &&
+      exactOverrideCount(
+        "default",
+        "test(/^cases::resolver_observation_compile_fail::/)",
+        null,
+        null,
+        '{ period = "120s", terminate-after = 3 }',
+      ) === 1 &&
+      exactOverrideCount(
+        "ci",
+        "test(/^cases::resolver_observation_compile_fail::/)",
         null,
         null,
         '{ period = "120s", terminate-after = 3 }',
       ) === 1;
     if (!configOk) {
       fail(
-        `(GB18.7) raising global test concurrency must preserve both Windows-only serialized nextest ` +
-          `groups, the all-platform shared-provider timeout, their exact default/ci selectors, and ` +
-          `both platform-neutral trybuild timeout overrides; parsed rows=` +
+        `(GB18.7) full CI capacity forbids both Windows-only serialized nextest groups and their ` +
+          `default/ci assignments while preserving the all-platform shared-provider timeout and every ` +
+          `platform-neutral trybuild timeout override; parsed rows=` +
           JSON.stringify(overrideRows),
       );
       ok = false;
@@ -8775,7 +8819,7 @@ fi
       pass(
         "(GB18) measured build resources are CPU/memory-tiered while the independent 12-thread cap " +
           "remains CPU-clamped and both stay explicitly overrideable; both " +
-          "serialized nextest groups/selectors are pinned; every Windows proc-macro suite (including a " +
+          "Windows-only serialized nextest groups/selectors are forbidden while safety timeouts remain pinned; every Windows proc-macro suite (including a " +
           "novel future id) remains warmable with its listed host libdir prepended to one canonical PATH; " +
           "malformed metadata and every non-zero/no-status/signal outcome fail closed; a real cargo-free " +
           "child receives the environment; production wires it into the unfiltered suite loop; the `gate-lane` " +
@@ -8785,10 +8829,10 @@ fi
   }
 
   // --------------------------------------------------------------------------------------------------
-  // (GB11) ORACLE-CACHE PREREQUISITE PREFLIGHT — the gate must tell "the offline oracle npm cache is
-  // absent or unusable" apart from "the compiled output genuinely diverges from the pinned oracle".
+  // (GB11) ORACLE-CACHE PREREQUISITE PREFLIGHT — the dedicated BF2 lane must tell "the offline oracle
+  // npm cache is absent or unusable" apart from "the compiled output genuinely diverges from the pin".
   //
-  // THE BUG IT GUARDS. `verter_session/bf2-authoritative` gates 45 tests — including the ENTIRE
+  // THE BUG IT GUARDS. `verter_session/bf2-authoritative` gates authoritative tests — including the ENTIRE
   // `svelte_official_conformance_gate` suite — that realize their Vue/Svelte oracles OFFLINE from a
   // gitignored `.oracle-npm-cache`. In a fresh checkout that cache does not exist, and the harness does
   // NOT fail loudly on a missing/unusable cache: it records the affected axis as
@@ -9067,13 +9111,12 @@ fi
   }
 
   // --------------------------------------------------------------------------------------------------
-  // (GB12) SHIPPED-CFG ARCHIVE-FEATURE WIRING + INDEPENDENT EXPECTED-TEST-INVENTORY SCAN.
+  // (GB12) CORE FEATURE ISOLATION + DEDICATED BF2 EXACT INVENTORY + SHIPPED-CFG SOURCE SCAN.
   //
-  // GB12.1 — ARCHIVE_FEATURES + buildNextestArchiveArgs: `verter_session/bf2-authoritative` is ON for the
-  // ONE `cargo nextest archive --workspace` build (surface 1), so the 45 gated tests are actually built.
-  // THE REGRESSION THIS CATCHES: someone drops `"verter_session/bf2-authoritative"` from
-  // `ARCHIVE_FEATURES` (the 45 tests silently vanish from the archive again), or `buildNextestArchiveArgs`
-  // stops threading `features` through even though the constant stayed correct.
+  // GB12.1 — the canonical archive must stay feature-default, while the separate BF2 command pins the
+  // feature, exact module selector, source-derived `#[test]` inventory, and per-module nextest-list parity.
+  // THE REGRESSION THIS CATCHES: BF2 drifts back onto the core critical path, or moving it out silently
+  // leaves CI with a stale/partial/zero authoritative selection.
   //
   // GB12.2 — countTestAttributesInDir: the shipped-cfg guard's independent expected-test-inventory scan
   // (deletion-bar row "shipped configuration silently selects zero tests" -> required detector
@@ -9091,25 +9134,17 @@ fi
   // SOLE place that comparison is made (gate.mjs contains no inline copy), so GB12.3 calling it directly IS
   // calling the production decision path.
   // --------------------------------------------------------------------------------------------------
-  process.stderr.write(
-    "\n(GB12) SHIPPED-CFG ARCHIVE-FEATURE WIRING + EXPECTED-TEST-INVENTORY SCAN\n",
-  );
+  process.stderr.write("\n(GB12) CORE FEATURE ISOLATION + BF2/SHIPPED EXACT INVENTORY\n");
   {
     let ok = true;
 
-    // ARCHIVE_FEATURES must name the exact feature the 45 tests are gated behind.
-    if (!ARCHIVE_FEATURES.includes("verter_session/bf2-authoritative")) {
+    if (ARCHIVE_FEATURES.length !== 0) {
       fail(
-        `(GB12.1) ARCHIVE_FEATURES must include "verter_session/bf2-authoritative"; got ` +
-          `${JSON.stringify(ARCHIVE_FEATURES)} — the 45 oracle-backed tests would silently vanish from ` +
-          "every archived surface again.",
+        `(GB12.1) core ARCHIVE_FEATURES must be empty so BF2 remains off the core critical path; got ` +
+          JSON.stringify(ARCHIVE_FEATURES),
       );
       ok = false;
     }
-    // The WIRING: buildNextestArchiveArgs (the function gate.mjs actually calls for the archive both
-    // surface 1 and the shipped-cfg guard's compile-check step share) must emit `--features` with the
-    // CURRENT ARCHIVE_FEATURES value, for every cargoProfile — a future refactor that stops threading
-    // `features` through would be caught here even though the constant itself stayed correct.
     for (const cargoProfile of [null, "no-debug-assertions"]) {
       const args = buildNextestArchiveArgs({
         buildJobs: 4,
@@ -9117,30 +9152,68 @@ fi
         archiveFile: "/synthetic/a.tar.zst",
         runnerTarget: "/synthetic/target",
       });
-      const featIdx = args.indexOf("--features");
-      if (featIdx === -1 || args[featIdx + 1] !== ARCHIVE_FEATURES.join(",")) {
+      if (args.includes("--features")) {
         fail(
-          `(GB12.1) buildNextestArchiveArgs({cargoProfile:${JSON.stringify(cargoProfile)}}) must emit ` +
-            `--features ${ARCHIVE_FEATURES.join(",")}; got ${JSON.stringify(args)}`,
+          `(GB12.1) core buildNextestArchiveArgs({cargoProfile:${JSON.stringify(cargoProfile)}}) must ` +
+            `not emit --features; got ${JSON.stringify(args)}`,
         );
         ok = false;
       }
     }
-    // DISCRIMINATION: an EMPTY features list (what "someone dropped the feature" looks like at the
-    // wiring layer) must NOT emit a `--features` flag at all — proving the assertions above are sensitive
-    // to exactly that regression, not vacuously true regardless of `features`.
-    const strippedArgs = buildNextestArchiveArgs({
-      buildJobs: 4,
-      cargoProfile: null,
-      archiveFile: "/synthetic/a.tar.zst",
-      runnerTarget: "/synthetic/target",
-      features: [],
-    });
-    if (strippedArgs.includes("--features")) {
+
+    const bf2Source = scanBf2AuthoritativeSourceInventory(REPO_REALPATH);
+    if (
+      JSON.stringify(bf2Source.modules) !== JSON.stringify(BF2_AUTHORITATIVE_MODULES) ||
+      !(bf2Source.total > 0)
+    ) {
       fail(
-        `(GB12.1) buildNextestArchiveArgs with an EMPTY features list must NOT emit --features at all ` +
-          `(this is the control that proves the assertions above discriminate); got ${JSON.stringify(strippedArgs)}`,
+        `(GB12.1) BF2 source discovery must exactly match the pinned non-empty module inventory; got ` +
+          JSON.stringify(bf2Source),
       );
+      ok = false;
+    }
+    for (const mode of ["list", "run"]) {
+      const args = buildBf2NextestArgs(mode);
+      const featureAt = args.indexOf("--features");
+      if (
+        featureAt < 0 ||
+        args[featureAt + 1] !== BF2_AUTHORITATIVE_FEATURE ||
+        !args.includes("-E") ||
+        args.some((arg) => /threads|jobs/.test(arg))
+      ) {
+        fail(
+          `(GB12.1) dedicated BF2 ${mode} argv must pin the feature/filter with no capacity cap; got ` +
+            JSON.stringify(args),
+        );
+        ok = false;
+      }
+    }
+    const syntheticListed = countBf2AuthoritativeListTests({
+      "rust-suites": Object.fromEntries(
+        BF2_AUTHORITATIVE_MODULES.map((module) => [
+          module,
+          {
+            testcases: Object.fromEntries(
+              Array.from({ length: bf2Source.countByModule[module] || 0 }, (_, index) => [
+                `compile::map_equality_tests::${module}::synthetic_${index}`,
+                { "filter-match": { status: "matches" } },
+              ]),
+            ),
+          },
+        ]),
+      ),
+    });
+    if (decideBf2AuthoritativeInventoryMatch(syntheticListed, bf2Source) !== null) {
+      fail("(GB12.1) an exact per-module BF2 source/list inventory must be admitted");
+      ok = false;
+    }
+    const fewerListed = { ...syntheticListed, total: syntheticListed.total - 1 };
+    if (
+      !/selected .* declares/.test(
+        decideBf2AuthoritativeInventoryMatch(fewerListed, bf2Source) || "",
+      )
+    ) {
+      fail("(GB12.1) a partial BF2 nextest selection must fail closed naming both totals");
       ok = false;
     }
 
@@ -9267,9 +9340,9 @@ fi
 
     if (ok) {
       pass(
-        "(GB12) ARCHIVE_FEATURES names verter_session/bf2-authoritative and buildNextestArchiveArgs " +
-          "actually threads it into the cargo nextest archive argv for every cargo profile (an empty " +
-          "features list, the shape of the exact regression, provably emits no --features flag at all); " +
+        "(GB12) the core archive emits no BF2 feature; the dedicated BF2 command pins the feature and " +
+          "selector without a worker cap, discovers the exact gated module/source inventory, admits an " +
+          "exact per-module nextest listing, and rejects a partial listing; " +
           "countTestAttributesInDir counts #[test] attributes across a real multi-file source tree, " +
           "ignores non-.rs files, and is proven to track a live mutation (3 -> 4) rather than a cached or " +
           "hardcoded value, plus the empty/missing-directory edge cases report 0 without throwing; " +
@@ -9366,23 +9439,20 @@ fi
   {
     let ok = true;
 
-    // The registry: one row per file that actually calls trybuild::TestCases::new(), across all 6 crates.
+    // The registry has one row per excluded driver across its six packages. Compiler coverage is checked
+    // independently against every source file that actually calls trybuild::TestCases::new().
     const wantPackages = [
       "verter_session",
       "verter_language",
       "verter_identity",
-      "verter_compiler",
-      "verter_compiler",
-      "verter_compiler",
-      "verter_compiler",
       "verter_compiler",
       "verter_audit",
       "verter_type_runtime",
     ];
     if (TRYBUILD_EXCLUDED_SUITES.length !== wantPackages.length) {
       fail(
-        `(GB13.1) TRYBUILD_EXCLUDED_SUITES must have ${wantPackages.length} rows (one per trybuild file ` +
-          `across the 6 owning crates); got ${TRYBUILD_EXCLUDED_SUITES.length}: ` +
+        `(GB13.1) TRYBUILD_EXCLUDED_SUITES must have ${wantPackages.length} rows across its six ` +
+          `registered packages; got ${TRYBUILD_EXCLUDED_SUITES.length}: ` +
           JSON.stringify(TRYBUILD_EXCLUDED_SUITES),
       );
       ok = false;
@@ -9402,6 +9472,53 @@ fi
             `module, not a partial name); got ${JSON.stringify(row)}`,
         );
         ok = false;
+      }
+    }
+
+    const discoveredCompilerSources = discoverCompilerTrybuildSourceModulePrefixes(REPO_REALPATH);
+    const registeredCompilerSources = TRYBUILD_EXCLUDED_SUITES.filter(
+      (row) => row.package === "verter_compiler",
+    )
+      .map((row) => row.modulePrefix)
+      .sort();
+    if (JSON.stringify(registeredCompilerSources) !== JSON.stringify(discoveredCompilerSources)) {
+      fail(
+        `(GB13.1) verter_compiler registry rows must exactly cover every source module that calls ` +
+          `trybuild::TestCases::new(); registered=${JSON.stringify(registeredCompilerSources)} ` +
+          `discovered=${JSON.stringify(discoveredCompilerSources)}`,
+      );
+      ok = false;
+    }
+    if (
+      !compilerTrybuildDriverUsesCanonicalConstructor(
+        "fn guard() { let tests = trybuild::TestCases::new(); }",
+        "synthetic-canonical.rs",
+      )
+    ) {
+      fail("(GB13.1) the canonical fully-qualified trybuild constructor must be discovered");
+      ok = false;
+    }
+    for (const [label, source] of [
+      ["imported", "use trybuild::TestCases; fn guard() { let tests = TestCases::new(); }"],
+      [
+        "renamed-import",
+        "use trybuild::TestCases as Cases; fn guard() { let tests = Cases::new(); }",
+      ],
+      ["crate-alias", "use trybuild as tb; fn guard() { let tests = tb::TestCases::new(); }"],
+      [
+        "constructor-reference",
+        "fn guard() { let constructor = trybuild::TestCases::new; let tests = constructor(); }",
+      ],
+    ]) {
+      try {
+        compilerTrybuildDriverUsesCanonicalConstructor(source, `synthetic-${label}.rs`);
+        fail(`(GB13.1) unsupported ${label} trybuild constructor spelling must fail closed`);
+        ok = false;
+      } catch (error) {
+        if (!/must call `trybuild::TestCases::new/.test(String(error))) {
+          fail(`(GB13.1) unsupported ${label} constructor reported the wrong error: ${error}`);
+          ok = false;
+        }
       }
     }
 
@@ -9512,7 +9629,7 @@ fi
     }
     if (stale.total !== TRYBUILD_EXCLUDED_SUITES.length - 1) {
       fail(
-        `(GB13.5) dropping one row's testcase must reduce total by exactly 1 (the other 9 rows still match); ` +
+        `(GB13.5) dropping one row's testcase must reduce total by exactly 1 (the other rows still match); ` +
           `got total=${stale.total}`,
       );
       ok = false;
@@ -9520,8 +9637,9 @@ fi
 
     if (ok) {
       pass(
-        "(GB13) TRYBUILD EXCLUSION: TRYBUILD_EXCLUDED_SUITES names all 10 trybuild files across the 6 owning " +
-          "crates; buildTrybuildExclusionFilterExpr emits one package+test arm per row inside a single " +
+        "(GB13) TRYBUILD EXCLUSION: TRYBUILD_EXCLUDED_SUITES names the excluded trybuild drivers across " +
+          "six registered packages and exactly covers the compiler's source-derived driver set; " +
+          "buildTrybuildExclusionFilterExpr emits one package+test arm per row inside a single " +
           "negated group; trybuildSkipArgsForPackage returns the exact --skip pair for verter_session and " +
           "nothing for an unregistered package; countTrybuildExclusionMatches counts exactly the registered " +
           "rows against a real listing shape while ignoring two adversarial same-substring lookalikes, and " +
