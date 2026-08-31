@@ -446,7 +446,7 @@ describe("CI Rust path eligibility", () => {
   const ci = read(".github/workflows/ci.yml");
 
   // @ai-generated - Pins the bounded first sccache rollout and cold-build memory fix.
-  it("runs the Rust test gate through the measured GitHub sccache lane", () => {
+  it("runs the direct Rust test gate through the measured GitHub sccache lane", () => {
     const body = workflowJobs(ci).get("rust-test") ?? "";
     expect(body, "rust-test must install the reviewed sccache action").toContain(
       "mozilla-actions/sccache-action@v0.0.11",
@@ -458,8 +458,20 @@ describe("CI Rust path eligibility", () => {
     expect(body, "rust-test must namespace its shared cache generation").toContain(
       'SCCACHE_GHA_VERSION: "verter-rust-test-v1"',
     );
-    expect(body, "the gate must use the repository's telemetry wrapper").toContain(
-      "node scripts/run-cached.mjs -- node scripts/gate.mjs --exhaustive --memory-limit 12GiB",
+    expect(body, "the direct gate must use the repository's telemetry wrapper").toContain(
+      "node scripts/run-cached.mjs -- 'cargo nextest run --workspace",
+    );
+    expect(body, "the direct gate must preserve the authoritative provider feature").toContain(
+      "--features verter_session/bf2-authoritative",
+    );
+    expect(body, "the direct gate must use the canonical Surface 1 filter").toContain(
+      "buildCanonicalSurface1FilterExpr",
+    );
+    expect(body, "the direct gate must bound cold-build linker pressure").toContain(
+      "--build-jobs 2",
+    );
+    expect(body, "the direct gate must not duplicate test binaries into an archive").not.toContain(
+      "cargo nextest archive",
     );
   });
 
