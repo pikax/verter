@@ -9375,6 +9375,7 @@ fi
       "verter_compiler",
       "verter_compiler",
       "verter_compiler",
+      "verter_compiler",
       "verter_audit",
       "verter_type_runtime",
     ];
@@ -9511,7 +9512,7 @@ fi
     }
     if (stale.total !== TRYBUILD_EXCLUDED_SUITES.length - 1) {
       fail(
-        `(GB13.5) dropping one row's testcase must reduce total by exactly 1 (the other 8 rows still match); ` +
+        `(GB13.5) dropping one row's testcase must reduce total by exactly 1 (the other 9 rows still match); ` +
           `got total=${stale.total}`,
       );
       ok = false;
@@ -9519,7 +9520,7 @@ fi
 
     if (ok) {
       pass(
-        "(GB13) TRYBUILD EXCLUSION: TRYBUILD_EXCLUDED_SUITES names all 9 trybuild files across the 6 owning " +
+        "(GB13) TRYBUILD EXCLUSION: TRYBUILD_EXCLUDED_SUITES names all 10 trybuild files across the 6 owning " +
           "crates; buildTrybuildExclusionFilterExpr emits one package+test arm per row inside a single " +
           "negated group; trybuildSkipArgsForPackage returns the exact --skip pair for verter_session and " +
           "nothing for an unregistered package; countTrybuildExclusionMatches counts exactly the registered " +
