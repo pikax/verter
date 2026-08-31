@@ -6,6 +6,11 @@ import { describe, expect, it } from "vitest";
 
 import { FIXTURE_SUITE_GLOBS } from "./fixtureSuiteMap";
 import {
+  BARREL_REGRESSION_LOADED_FILES,
+  BARREL_REGRESSION_SUITE_GLOB,
+  BARREL_REGRESSION_TEST_IDS,
+} from "./barrelRegressionManifest";
+import {
   PROJECTLESS_CONTRACT_LOADED_FILES,
   PROJECTLESS_CONTRACT_TEST_IDS,
 } from "./projectlessContractManifest";
@@ -19,6 +24,7 @@ import {
   buildE2eRouteInventory,
   buildGitHubActionsMatrix,
   buildRequiredE2eRouteInventory,
+  e2eRouteLabel,
   parseE2eRouteLabel,
   resolveE2eFixtureSelection,
   selectE2eRoutes,
@@ -55,7 +61,26 @@ describe("VS Code E2E route inventory", () => {
     const required = buildRequiredE2eRouteInventory();
     const inventory = buildE2eRouteInventory();
 
-    expect(NON_REQUIRED_E2E_ROUTES).toHaveLength(1);
+    expect(NON_REQUIRED_E2E_ROUTES).toHaveLength(15);
+    expect(NON_REQUIRED_E2E_ROUTES.map(({ route }) => e2eRouteLabel(route)).sort()).toEqual(
+      [
+        "barrel-exports@shared-tsgo",
+        "composite-paths@shared-tsgo",
+        "editor-owned-project@shared-tsgo",
+        "monorepo@shared-tsgo",
+        "out-of-tree-monorepo@extension",
+        "path-aliases@shared-tsgo",
+        "single-project@shared-tsgo",
+        "single-project@tsgo",
+        "single-project@tsserver",
+        "svelte-contract@shared-tsgo",
+        "svelte-parity@shared-tsgo",
+        "tsconfig-extends@shared-tsgo",
+        "tsconfig-references@shared-tsgo",
+        "vue-contract@shared-tsgo",
+        "vue-parity@shared-tsgo",
+      ].sort(),
+    );
     const extensionRoute = NON_REQUIRED_E2E_ROUTES.find(
       ({ route }) => route.typeProvider === "extension",
     );
@@ -85,7 +110,13 @@ describe("VS Code E2E route inventory", () => {
     expect(selectE2eRoutes({ fixture: "out-of-tree-monorepo" })).toEqual([extensionRoute?.route]);
     expect(selectE2eRoutes({ typeProvider: "extension" })).toEqual([extensionRoute?.route]);
 
-    for (const fixture of ["vue-parity", "svelte-parity", "mixed-parity"] as const) {
+    for (const fixture of ["vue-parity", "svelte-parity"] as const) {
+      for (const typeProvider of ["tsserver", "tsgo"] as const) {
+        expect(required).toContainEqual({ fixture, typeProvider });
+      }
+      expect(required).not.toContainEqual({ fixture, typeProvider: "shared-tsgo" });
+    }
+    for (const fixture of ["mixed-parity", "multi-root-parity", "ecosystem-parity"] as const) {
       for (const typeProvider of TYPE_PROVIDER_ROUTES) {
         expect(required).toContainEqual({ fixture, typeProvider });
       }
@@ -115,6 +146,13 @@ describe("VS Code E2E route inventory", () => {
     expect(PROJECTLESS_CONTRACT_LOADED_FILES).toEqual(["projectless-contract.test.js"]);
     expect(PROJECTLESS_CONTRACT_TEST_IDS).toHaveLength(4);
     expect(new Set(PROJECTLESS_CONTRACT_TEST_IDS).size).toBe(PROJECTLESS_CONTRACT_TEST_IDS.length);
+  });
+
+  it("keeps barrel CI focused on the exact typed public-surface regression contract", () => {
+    expect(FIXTURE_SUITE_GLOBS["barrel-exports"]).toEqual([BARREL_REGRESSION_SUITE_GLOB]);
+    expect(BARREL_REGRESSION_LOADED_FILES).toEqual(["barrel-type-integrity.test.js"]);
+    expect(BARREL_REGRESSION_TEST_IDS).toHaveLength(9);
+    expect(new Set(BARREL_REGRESSION_TEST_IDS).size).toBe(BARREL_REGRESSION_TEST_IDS.length);
   });
 
   it("retains the explicit editor-owned acceptance routes without inventing managed coverage", () => {

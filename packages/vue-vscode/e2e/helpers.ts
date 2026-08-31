@@ -1352,6 +1352,12 @@ export async function ensureTypeProviderSynced(budgets?: {
   _typeProviderSynced = true;
 }
 
+/** Invalidate readiness facts after an explicit language-server restart. */
+export function invalidateTypeProviderSyncCache(): void {
+  _typeProviderSynced = false;
+  _fileReadyCache.clear();
+}
+
 /** Opens file, waits for readiness, caches result. */
 export async function openReadyCached(
   relativePath: string,

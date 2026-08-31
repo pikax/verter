@@ -14,6 +14,7 @@ import * as vscode from "vscode";
 import {
   FIXTURE_NAME,
   ensureTypeProviderSynced,
+  invalidateTypeProviderSyncCache,
   sleep,
   waitForDiagnostics,
   waitForDiagnosticsSettled,
@@ -77,6 +78,13 @@ export async function openRelative(relative: string): Promise<vscode.TextDocumen
 export async function ensureParityReady(entry: string): Promise<vscode.TextDocument> {
   await ensureTypeProviderSynced();
   return openRelative(entry);
+}
+
+/** Start a clean provider epoch for a state-sensitive parity suite. */
+export async function restartParityReady(entry: string): Promise<vscode.TextDocument> {
+  await vscode.commands.executeCommand("verter.restartLanguageServer");
+  invalidateTypeProviderSyncCache();
+  return ensureParityReady(entry);
 }
 
 export function tokenOffset(doc: vscode.TextDocument, anchor: TokenAnchor): number {

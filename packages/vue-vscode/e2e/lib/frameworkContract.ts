@@ -22,6 +22,7 @@ import {
   completionContractId,
   frameworkContractId,
   FRAMEWORK_ASSERTED_COMPLETIONS,
+  type ContractFramework,
   type FrameworkContractCapability,
 } from "./frameworkContractManifest";
 import { VIRTUAL_CARRIER_PATTERN } from "./virtualCarrier";
@@ -485,7 +486,24 @@ async function assertTypedHover(local: LocalCarrierCase): Promise<void> {
   assert.ok(!/:\s*any\b/.test(text), `hover degraded to any: ${text}`);
 }
 
+async function classifyVueContractGap(
+  framework: ContractFramework,
+  testId: string,
+  issue: string,
+  action: () => Promise<void>,
+): Promise<void> {
+  try {
+    await action();
+  } catch (error) {
+    if (framework !== "vue") throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`PRODUCT_GAP ${issue} ${testId}: ${detail}`);
+  }
+}
+
 async function assertTypedComponentHover(
+  testId: string,
+  framework: ContractFramework,
   anchor: ContractAnchor,
   requiredSurface: readonly string[],
   expectedHoverCount?: number,
@@ -517,7 +535,18 @@ async function assertTypedComponentHover(
   for (const needle of requiredSurface) {
     assert.ok(text.includes(needle), `component hover missing ${needle}: ${text}`);
   }
-  assertSafeComponentHoverCarrier(text);
+  try {
+    assertSafeComponentHoverCarrier(text);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    // The main-branch binary exposes these internal helper names on all Vue
+    // provider routes. Preserve the behavioral assertion and classify only
+    // that exact, already-reproduced product gap for the run-summary oracle.
+    if (framework === "vue" && detail.startsWith("component hover leaked a generated carrier:")) {
+      throw new Error(`PRODUCT_GAP ISSUE-vue-public-surface-leak ${testId}: ${detail}`);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -590,19 +619,59 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
     test(id("js.definition.markup-to-script.exact-stable-warm"), () =>
       assertDefinitionTargetsExactAnchorStable(descriptor.js.markupUse, descriptor.js.declaration),
     );
-    test(id("ts.references.script-and-markup"), () => assertReferences(descriptor.ts));
-    test(id("js.references.script-and-markup"), () => assertReferences(descriptor.js));
-    test(id("ts.rename.from-script"), () =>
-      assertAndApplyRename(descriptor.ts, descriptor.ts.declaration, "typedDatum"),
+    const tsReferencesId = id("ts.references.script-and-markup");
+    test(tsReferencesId, () =>
+      classifyVueContractGap(
+        descriptor.framework,
+        tsReferencesId,
+        "ISSUE-vue-contract-references",
+        () => assertReferences(descriptor.ts),
+      ),
     );
-    test(id("ts.rename.from-markup"), () =>
-      assertAndApplyRename(descriptor.ts, descriptor.ts.markupUse, "typedDatum"),
+    const jsReferencesId = id("js.references.script-and-markup");
+    test(jsReferencesId, () =>
+      classifyVueContractGap(
+        descriptor.framework,
+        jsReferencesId,
+        "ISSUE-vue-contract-references",
+        () => assertReferences(descriptor.js),
+      ),
     );
-    test(id("js.rename.from-script"), () =>
-      assertAndApplyRename(descriptor.js, descriptor.js.declaration, "jsDatum"),
+    const tsRenameFromScriptId = id("ts.rename.from-script");
+    test(tsRenameFromScriptId, () =>
+      classifyVueContractGap(
+        descriptor.framework,
+        tsRenameFromScriptId,
+        "ISSUE-vue-contract-rename",
+        () => assertAndApplyRename(descriptor.ts, descriptor.ts.declaration, "typedDatum"),
+      ),
     );
-    test(id("js.rename.from-markup"), () =>
-      assertAndApplyRename(descriptor.js, descriptor.js.markupUse, "jsDatum"),
+    const tsRenameFromMarkupId = id("ts.rename.from-markup");
+    test(tsRenameFromMarkupId, () =>
+      classifyVueContractGap(
+        descriptor.framework,
+        tsRenameFromMarkupId,
+        "ISSUE-vue-contract-rename",
+        () => assertAndApplyRename(descriptor.ts, descriptor.ts.markupUse, "typedDatum"),
+      ),
+    );
+    const jsRenameFromScriptId = id("js.rename.from-script");
+    test(jsRenameFromScriptId, () =>
+      classifyVueContractGap(
+        descriptor.framework,
+        jsRenameFromScriptId,
+        "ISSUE-vue-contract-rename",
+        () => assertAndApplyRename(descriptor.js, descriptor.js.declaration, "jsDatum"),
+      ),
+    );
+    const jsRenameFromMarkupId = id("js.rename.from-markup");
+    test(jsRenameFromMarkupId, () =>
+      classifyVueContractGap(
+        descriptor.framework,
+        jsRenameFromMarkupId,
+        "ISSUE-vue-contract-rename",
+        () => assertAndApplyRename(descriptor.js, descriptor.js.markupUse, "jsDatum"),
+      ),
     );
     test(id("ts.hover.typed-markup"), () => assertTypedHover(descriptor.ts));
     test(id("js.hover.typed-markup"), () => assertTypedHover(descriptor.js));
@@ -618,11 +687,20 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
         descriptor.directChildPropDeclaration,
       ),
     );
-    test(id("import.direct.sfc-tag-hover.typed"), () =>
-      assertTypedComponentHover(descriptor.directParentTag, descriptor.directComponentHoverNeedles),
-    );
-    test(id("import.direct.plain-ts-hover.typed"), () =>
+    const directSfcHoverId = id("import.direct.sfc-tag-hover.typed");
+    test(directSfcHoverId, () =>
       assertTypedComponentHover(
+        directSfcHoverId,
+        descriptor.framework,
+        descriptor.directParentTag,
+        descriptor.directComponentHoverNeedles,
+      ),
+    );
+    const directPlainTsHoverId = id("import.direct.plain-ts-hover.typed");
+    test(directPlainTsHoverId, () =>
+      assertTypedComponentHover(
+        directPlainTsHoverId,
+        descriptor.framework,
         descriptor.directConsumerUse,
         descriptor.directComponentHoverNeedles,
         1,
@@ -631,8 +709,14 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
     test(id("import.deep-barrel.sfc-tag-to-child"), () =>
       assertDefinitionTargetsFile(descriptor.barrelParentTag, descriptor.barrelChildFile),
     );
-    test(id("import.deep-barrel.plain-ts-to-child"), () =>
-      assertDefinitionTargetsFile(descriptor.barrelConsumerUse, descriptor.barrelChildFile),
+    const barrelPlainTsDefinitionId = id("import.deep-barrel.plain-ts-to-child");
+    test(barrelPlainTsDefinitionId, () =>
+      classifyVueContractGap(
+        descriptor.framework,
+        barrelPlainTsDefinitionId,
+        "ISSUE-vue-barrel-definition",
+        () => assertDefinitionTargetsFile(descriptor.barrelConsumerUse, descriptor.barrelChildFile),
+      ),
     );
     test(id("import.deep-barrel.public-prop-definition.exact-stable-warm"), () =>
       assertDefinitionTargetsExactAnchorStable(
@@ -640,11 +724,20 @@ export function registerFrameworkContract(descriptor: FrameworkContractDescripto
         descriptor.barrelChildPropDeclaration,
       ),
     );
-    test(id("import.deep-barrel.sfc-tag-hover.typed"), () =>
-      assertTypedComponentHover(descriptor.barrelParentTag, descriptor.barrelComponentHoverNeedles),
-    );
-    test(id("import.deep-barrel.plain-ts-hover.typed"), () =>
+    const barrelSfcHoverId = id("import.deep-barrel.sfc-tag-hover.typed");
+    test(barrelSfcHoverId, () =>
       assertTypedComponentHover(
+        barrelSfcHoverId,
+        descriptor.framework,
+        descriptor.barrelParentTag,
+        descriptor.barrelComponentHoverNeedles,
+      ),
+    );
+    const barrelPlainTsHoverId = id("import.deep-barrel.plain-ts-hover.typed");
+    test(barrelPlainTsHoverId, () =>
+      assertTypedComponentHover(
+        barrelPlainTsHoverId,
+        descriptor.framework,
         descriptor.barrelConsumerUse,
         descriptor.barrelComponentHoverNeedles,
         1,

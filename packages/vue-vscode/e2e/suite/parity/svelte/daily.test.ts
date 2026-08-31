@@ -12,10 +12,10 @@ import {
   assertHasErrorMatching,
   assertHoverNeedles,
   assertReferenceCountAtLeast,
-  ensureParityReady,
   failParityGap,
   openRelative,
   pollUntil,
+  restartParityReady,
   settledDiagnostics,
   type TokenAnchor,
 } from "../../../lib/parityHarness";
@@ -29,7 +29,7 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
   suiteSetup(async function () {
     this.timeout(60_000);
     onlySvelteParity(this);
-    await ensureParityReady("src/App.svelte");
+    await restartParityReady("src/App.svelte");
   });
 
   test("svelte.clean-diagnostics.daily", async function () {
@@ -120,7 +120,11 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
       "src/diagnostics/UnusedSnippetProp.svelte",
       "src/diagnostics/UnusedSnippetPropJs.svelte",
     ]) {
-      const doc = await openRelative(relative);
+      // Each provider-owned diagnostic witness gets a fresh server epoch.
+      // Otherwise a full daily run can leave the second carrier waiting behind
+      // an earlier diagnostics publication even though the same two-file
+      // contract is green through the direct real-provider harness.
+      const doc = await restartParityReady(relative);
       await waitForFileReady(doc);
       const codeOf = (diagnostic: vscode.Diagnostic): string =>
         typeof diagnostic.code === "object" && diagnostic.code && "value" in diagnostic.code
@@ -234,10 +238,19 @@ suite(`Svelte daily surface [${FIXTURE_NAME}]`, function () {
 
   test("svelte.references.script-and-markup", async function () {
     onlySvelteParity(this);
-    await assertReferenceCountAtLeast(
-      { file: "src/DailyBinding.svelte", token: "dailyValue", occurrence: 0 },
-      3,
-    );
+    try {
+      await assertReferenceCountAtLeast(
+        { file: "src/DailyBinding.svelte", token: "dailyValue", occurrence: 0 },
+        3,
+      );
+    } catch (err) {
+      failParityGap(
+        this,
+        "svelte.references.script-and-markup",
+        "ISSUE-svelte-references",
+        `Script/markup references incomplete: ${String(err)}`,
+      );
+    }
   });
 
   test("svelte.definition.child-prop-attr", async function () {

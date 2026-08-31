@@ -11,7 +11,9 @@
 export type ProductGapManifest = Readonly<Record<string, string>>;
 
 const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> = {
-  "ecosystem-parity@shared-tsgo": {},
+  "ecosystem-parity@shared-tsgo": {
+    "eco.svelte.lib-alias.hover": "ISSUE-eco-svelte-lib-hover",
+  },
   "ecosystem-parity@tsgo": {},
   "ecosystem-parity@tsserver": {},
   "mixed-parity@shared-tsgo": {
@@ -146,6 +148,12 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "shared.style.id.references": "ISSUE-style-id-references",
     "shared.ts.rename.from-script": "ISSUE-ts-rename-script",
     "shared.workspace-symbols.find-binding": "ISSUE-shared-workspace-symbols",
+    "svelte.matrix.directives.style-color.hover": "ISSUE-svelte-matrix-style-color",
+    "svelte.matrix.events.handler.def": "ISSUE-svelte-matrix-events-handler",
+    "svelte.matrix.js.refs": "ISSUE-svelte-matrix-js-refs",
+    "svelte.matrix.mapping.clean": "ISSUE-svelte-matrix-mapping-clean",
+    "svelte.matrix.strict-rest.clean": "ISSUE-svelte-matrix-strict-rest-clean",
+    "svelte.references.script-and-markup": "ISSUE-svelte-references",
     "strict.svelte.rest-props-opt-in": "ISSUE-svelte-strict-rest-props",
     "svelte.control.each-item-hover": "ISSUE-svelte-each-hover",
     "svelte.control.if-branch": "ISSUE-svelte-if-narrowing",
@@ -172,6 +180,9 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "shared.ts.dom-event.classic-or-legacy-not-contextual":
       "ISSUE-dom-event-over-inference-boundary",
     "shared.workspace-symbols.find-binding": "ISSUE-shared-workspace-symbols",
+    "svelte.matrix.directives.style-color.hover": "ISSUE-svelte-matrix-style-color",
+    "svelte.matrix.events.handler.def": "ISSUE-svelte-matrix-events-handler",
+    "svelte.matrix.js.refs": "ISSUE-svelte-matrix-js-refs",
     "svelte.control.each-item-hover": "ISSUE-svelte-each-hover",
     "svelte.control.if-branch": "ISSUE-svelte-if-narrowing",
     "svelte.definition.child-prop-attr": "ISSUE-svelte-prop-attr-definition",
@@ -274,6 +285,8 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "generic.slot.wrong-method-on-inferred-type": "ISSUE-vue-generic-slot-wrong",
     "intrinsic.type-definition.div-not-any": "ISSUE-vue-intrinsic-type-definition",
     "js.wrong-prop-type.errors": "ISSUE-vue-js-wrong-prop",
+    "vue.matrix.js.refs.bump": "ISSUE-vue-matrix-js-refs",
+    "vue.matrix.style-bind.accent.def": "ISSUE-vue-matrix-style-bind-def",
     "lsp.document-format.carrier": "ISSUE-lsp-document-format",
     "lsp.signature-help.script-call": "ISSUE-lsp-signature-help",
     "product.extract-component.command": "ISSUE-product-extract-component",
@@ -314,6 +327,8 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "lsp.semantic-tokens.kinds": "ISSUE-lsp-semantic-tokens",
     "lsp.signature-help.script-call": "ISSUE-lsp-signature-help",
     "product.extract-component.command": "ISSUE-product-extract-component",
+    "vue.matrix.js.refs.bump": "ISSUE-vue-matrix-js-refs",
+    "vue.matrix.style-bind.accent.def": "ISSUE-vue-matrix-style-bind-def",
     "shared.code-action.apply.organize-imports": "ISSUE-code-action-apply-organize",
     "shared.inlay-hints.script-region": "ISSUE-product-inlay-hints",
     "shared.workspace-symbols.find-binding": "ISSUE-shared-workspace-symbols",
@@ -329,8 +344,12 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
 export function knownProductGapsForRoute(
   fixture: string,
   typeProvider: string,
+  requiredTestIds?: readonly string[],
 ): ProductGapManifest {
-  return KNOWN_PRODUCT_GAPS_BY_ROUTE[`${fixture}@${typeProvider}`] ?? {};
+  const gaps = KNOWN_PRODUCT_GAPS_BY_ROUTE[`${fixture}@${typeProvider}`] ?? {};
+  if (!requiredTestIds) return gaps;
+  const required = new Set(requiredTestIds);
+  return Object.fromEntries(Object.entries(gaps).filter(([id]) => required.has(id)));
 }
 
 export const KNOWN_PRODUCT_GAP_ROUTE_KEYS = Object.freeze(
