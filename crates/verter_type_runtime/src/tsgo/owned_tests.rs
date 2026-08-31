@@ -173,6 +173,52 @@ fn no_diagnostics_is_ok_even_when_content_unavailable() {
     );
 }
 
+#[test]
+fn javascript_carrier_semantics_follow_project_check_js() {
+    let carrier = "/ws/src/Widget.vue.jsx";
+    let content = "const view = <button onClick={event => event.missing} />;\n";
+    assert!(!javascript_carrier_semantic_diagnostics_enabled(
+        carrier, content, false
+    ));
+    assert!(javascript_carrier_semantic_diagnostics_enabled(
+        carrier, content, true
+    ));
+    assert!(javascript_carrier_semantic_diagnostics_enabled(
+        "/ws/src/Widget.vue.tsx",
+        content,
+        false
+    ));
+}
+
+#[test]
+fn leading_file_check_pragmas_override_project_check_js() {
+    let carrier = "/ws/src/Widget.svelte.jsx";
+    assert!(javascript_carrier_semantic_diagnostics_enabled(
+        carrier,
+        "// @ts-check: authored\nconst view = <div />;\n",
+        false,
+    ));
+    assert!(!javascript_carrier_semantic_diagnostics_enabled(
+        carrier,
+        "\r\n/* banner */\n// @ts-nocheck\r\nconst view = <div />;\n",
+        true,
+    ));
+}
+
+#[test]
+fn non_pragmas_cannot_override_javascript_project_policy() {
+    let carrier = "/ws/src/Widget.vue.jsx";
+    for content in [
+        "/* @ts-check */\nconst view = <div />;\n",
+        "// @ts-check/foo\nconst view = <div />;\n",
+        "const view = <div />;\n// @ts-check\n",
+    ] {
+        assert!(!javascript_carrier_semantic_diagnostics_enabled(
+            carrier, content, false
+        ));
+    }
+}
+
 /// Content present ⇒ diagnostics position through the shared index at their true
 /// byte offsets (the happy path of `position_carrier_diagnostics`).
 #[test]
