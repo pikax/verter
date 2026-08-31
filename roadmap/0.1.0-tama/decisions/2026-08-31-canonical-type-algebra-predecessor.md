@@ -282,3 +282,40 @@ Rust visibility makes the mints unforgeable from OUTSIDE the crate and provable 
 compile-fail, while in-crate the exhaustive carrier-category match is the forcing
 function rather than the type system. In-crate unforgeability is not claimed.
 
+## Correction: why the heritage carrier is excluded
+
+The ruling excluded the ordered heritage and overload carriers on the stated grounds
+that reordering them would destroy heritage precedence and overload order. A negative
+control run against that exclusion showed the first half is NOT true of this tree, and
+the exclusion needs its real justification recorded so a later implementer does not
+reason their way past it.
+
+Measured: planting a canonical sort of the heritage carrier's arms failed ZERO tests
+across the merged-declaration, heritage and shadow suites. Planting an unambiguous
+reversal — which a coincidental id-order sort cannot imitate — still left every
+VALUE-level "own body shadows inherited member" test green. Every reachable consumer
+resolves own-versus-heritage member conflicts through the role stamp and topology
+classification re-derived at the consumption site, never through the arm's position.
+Member-type precedence is therefore order-INDEPENDENT today, and the ruling's stated
+rationale does not hold for it.
+
+What the order does carry is the RENDERED TYPE TEXT. A reordered carrier renders
+`B & A & { x: number }` where the authored type is `A & B & { x: number }`, changing
+hover and display output. That is the property the exclusion actually protects, and it
+was under-protected: the one display-consistency test that existed happened to be
+immune to an ascending-id sort, because its fixture interns the heritage reference
+before the freshly built own object, making the sort a no-op there.
+
+A discriminating pin now exists. It uses three arms with an adversarial interning
+order — the second heritage reference interned first, so its node id sorts lower —
+because a two-arm fixture has nothing to swap past and cannot expose a sort at all.
+
+Overload order was checked in the same pass and is genuinely pinned by an existing
+assertion that reads the first and last projected signature and requires them to
+differ, so that half of the exclusion stands as stated.
+
+Consequence for the construction-site closure: the ordered carriers remain excluded,
+but the reason to cite is display and authored-order fidelity, not member precedence.
+An implementer who tests only value-level shadowing will conclude the exclusion is
+unnecessary, and will be wrong.
+
