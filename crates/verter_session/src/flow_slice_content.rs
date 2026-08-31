@@ -4970,7 +4970,13 @@ impl Lowerer<'_> {
     fn identifier_roots_a_narrow_destination(&self, name: &str, span: oxc_span::Span) -> bool {
         matches!(
             self.resolve_name(name, span),
-            NameBinding::Param(_) | NameBinding::Local(_)
+            // A CAPTURED binding is a landing slot like any other: the
+            // evaluator resolves a nested read of an enclosing frame's
+            // binding, and this half already WRITES through captured
+            // names. A guard over one therefore establishes a fact the
+            // checker applies and this lowering does not carry, so it is
+            // unrepresented rather than proved absent.
+            NameBinding::Param(_) | NameBinding::Local(_) | NameBinding::Captured
         ) || self.narrowing_alias_locals.contains(name)
     }
 

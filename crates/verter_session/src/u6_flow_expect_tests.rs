@@ -3923,3 +3923,75 @@ mod expectation_controls {
         );
     }
 }
+
+/// A control test written INSIDE a nested function value, over a binding
+/// an ENCLOSING frame declares, establishes a narrowing the checker
+/// applies to every read that follows it in that nested body. The
+/// lowering carries no such fact, so the demanded answer is a SUPERSET —
+/// and a superset is only ever admissible behind the typed gap.
+///
+/// A captured binding is a landing slot like any other here: the
+/// evaluator resolves the nested read against the enclosing frame's
+/// binding, so classifying it as "no slot to land on" would be a POSITIVE
+/// claim of inertness that the checker contradicts.
+///
+/// The controls are what make this discriminating rather than a blanket
+/// refusal of closures: a nested value narrowing its OWN parameter still
+/// publishes complete and warm, an outer-frame guard is untouched, and a
+/// closure that never mentions the capture keeps its clean result.
+#[test]
+fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
+    let degraded = [
+        (
+            "a `typeof` guard inside a returned arrow",
+            "export {};\nfunction makeProps(x: string | number) { return () => { if (typeof x === \"string\") return x; return 0 } }",
+        ),
+        (
+            "a truthiness guard inside a returned arrow",
+            "export {};\nfunction makeProps(x?: string) { return () => { if (x) return x; return 0 } }",
+        ),
+        (
+            "a guard inside an immediately invoked value",
+            "export {};\nfunction makeProps(x: string | number) { return (() => { if (typeof x === \"string\") return x; return 0 })() }",
+        ),
+    ];
+    for (case, script) in degraded {
+        let measured = drive_expect_boundary("", "cap_deg", script, "makeProps", None);
+        assert_eq!(
+            measured.boundary.degradation,
+            Some(Degr::FlowGap(FlowGap::GuardNarrowing)),
+            "{case}: the uncarried narrowing takes the typed gap"
+        );
+        assert!(
+            !measured.boundary.second_from_cache,
+            "{case}: a degraded result is never served warm"
+        );
+    }
+
+    let clean = [
+        (
+            "a nested value narrowing its OWN parameter",
+            "export {};\nfunction makeProps() { return (y: string | number) => { if (typeof y === \"string\") return y; return 0 } }",
+        ),
+        (
+            "the same guard one frame out",
+            "export {};\nfunction makeProps(x: string | number) { if (typeof x === \"string\") return x; return 0 }",
+        ),
+        (
+            "a closure that never mentions the capture",
+            "export {};\nfunction makeProps(x: string | number) { return () => 1 }",
+        ),
+    ];
+    for (case, script) in clean {
+        let measured = drive_expect_boundary("", "cap_ok", script, "makeProps", None);
+        assert_eq!(
+            measured.boundary.degradation,
+            Some(Degr::None),
+            "{case}: a carried or absent fact stays complete"
+        );
+        assert!(
+            measured.boundary.second_from_cache,
+            "{case}: and replays warm"
+        );
+    }
+}
