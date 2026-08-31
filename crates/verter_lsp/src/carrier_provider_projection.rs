@@ -19,6 +19,12 @@ use crate::documents::line_index::LineIndex;
 use crate::documents::provider_projection::TransformedBufferMap;
 use verter_semantic::resolver_core::{ResolvePhase, ResolveRequestKind};
 
+/// A provider projection is a query-returner over the workspace's immutable
+/// resolution root. Background discovery may publish a newer root while the
+/// projection is resolving its imports, so retry that transient fence against
+/// the new current view. The bound keeps sustained churn fail-closed.
+const PROVIDER_RESOLUTION_VIEW_MAX_ATTEMPTS: usize = 8;
+
 /// The exact bytes a provider holds for a carrier companion, together with the
 /// generated→provider map that describes *those* bytes.
 ///
@@ -135,6 +141,40 @@ fn provider_resolution_fence_is_current(
     }
 }
 
+fn with_current_provider_resolution_view<T>(
+    workspace: Option<&FilesystemWorkspace>,
+    mut prepare: impl FnMut(
+        Option<&Arc<verter_workspace::PublishedRoot>>,
+        Option<u64>,
+    ) -> Result<T, verter_workspace::ResolutionPublicationRefusal>,
+) -> Result<T, verter_workspace::ResolutionPublicationRefusal> {
+    for _ in 0..PROVIDER_RESOLUTION_VIEW_MAX_ATTEMPTS {
+        let published = workspace.and_then(FilesystemWorkspace::load_published);
+        if workspace.is_some()
+            && !published
+                .as_ref()
+                .is_some_and(|published| !published.snapshot.projects.is_empty())
+        {
+            return Err(verter_workspace::ResolutionPublicationRefusal::new(
+                verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
+            ));
+        }
+        let content_generation = workspace.map(WorkspaceRead::content_generation);
+        match prepare(published.as_ref(), content_generation) {
+            Err(refusal)
+                if refusal.reason()
+                    == verter_audit::NonAdmissionReason::ResolutionViewSuperseded =>
+            {
+                continue;
+            }
+            result => return result,
+        }
+    }
+    Err(verter_workspace::ResolutionPublicationRefusal::new(
+        verter_audit::NonAdmissionReason::ResolutionRetryExhausted,
+    ))
+}
+
 #[cfg(test)]
 pub(crate) fn expect_admitted<T>(
     publication: Result<T, verter_workspace::ResolutionPublicationRefusal>,
@@ -165,62 +205,53 @@ pub(crate) fn prepare_carrier_provider_surface(
     encoding: tower_lsp_server::ls_types::PositionEncodingKind,
     virtualize_verter_types: bool,
 ) -> Result<PreparedCarrierProviderSurface, verter_workspace::ResolutionPublicationRefusal> {
-    let published = workspace.and_then(FilesystemWorkspace::load_published);
-    if workspace.is_some()
-        && !published
-            .as_ref()
-            .is_some_and(|published| !published.snapshot.projects.is_empty())
-    {
-        return Err(verter_workspace::ResolutionPublicationRefusal::new(
-            verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
-        ));
-    }
-    let content_generation = workspace.map(WorkspaceRead::content_generation);
-    // BOTH the import specifier and the overlay path derive from the ONE
-    // descriptor naming authority — never a locally-formatted string — so the
-    // published sidecar can never drift from what `classify_carrier_companion`
-    // recognizes (the drift that silently dropped the sidecar from the SHARED
-    // overlay). Round-trip-guarded by
-    // `published_provider_paths_classify_as_companions_of_their_carrier`.
-    #[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
-    // keep admitted miss visibly distinct from refusal
-    let owner_resolves_verter_types = if virtualize_verter_types {
-        owner_resolves_verter_types(workspace, published.as_ref(), canonical_id)?
-    } else {
-        false
-    };
-    let verter_types_specifier = if virtualize_verter_types && !owner_resolves_verter_types {
-        verter_session::framework::descriptor::verter_types_import_specifier(provider_path)
-    } else {
-        None
-    };
+    with_current_provider_resolution_view(workspace, |published, content_generation| {
+        // BOTH the import specifier and the overlay path derive from the ONE
+        // descriptor naming authority — never a locally-formatted string — so the
+        // published sidecar can never drift from what `classify_carrier_companion`
+        // recognizes (the drift that silently dropped the sidecar from the SHARED
+        // overlay). Round-trip-guarded by
+        // `published_provider_paths_classify_as_companions_of_their_carrier`.
+        #[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
+        // keep admitted miss visibly distinct from refusal
+        let owner_resolves_verter_types = if virtualize_verter_types {
+            owner_resolves_verter_types(workspace, published, canonical_id)?
+        } else {
+            false
+        };
+        let verter_types_specifier = if virtualize_verter_types && !owner_resolves_verter_types {
+            verter_session::framework::descriptor::verter_types_import_specifier(provider_path)
+        } else {
+            None
+        };
 
-    let (prepared, rewrote_verter_types) = prepare_carrier_provider_imports_with_verter_types(
-        workspace,
-        published.as_ref(),
-        canonical_id,
-        generated,
-        encoding,
-        verter_types_specifier.as_deref(),
-    )?;
-    if !provider_resolution_fence_is_current(workspace, published.as_ref(), content_generation) {
-        return Err(verter_workspace::ResolutionPublicationRefusal::new(
-            verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
-        ));
-    }
-    Ok(PreparedCarrierProviderSurface {
-        prepared,
-        // The overlay is only a live dependency when an import actually points at
-        // it; a carrier that never mentions `@verter/types` needs no overlay file.
-        // The path derivation shares the specifier derivation's fail-closed
-        // basename predicate, so `rewrote_verter_types` (a specifier existed and
-        // was written into the carrier) implies the overlay path derives too — a
-        // rewrite can never point at an overlay this refuses to name.
-        virtual_verter_types_path: rewrote_verter_types
-            .then(|| {
-                verter_session::framework::descriptor::verter_types_sidecar_path(provider_path)
-            })
-            .flatten(),
+        let (prepared, rewrote_verter_types) = prepare_carrier_provider_imports_with_verter_types(
+            workspace,
+            published,
+            canonical_id,
+            generated,
+            encoding.clone(),
+            verter_types_specifier.as_deref(),
+        )?;
+        if !provider_resolution_fence_is_current(workspace, published, content_generation) {
+            return Err(verter_workspace::ResolutionPublicationRefusal::new(
+                verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
+            ));
+        }
+        Ok(PreparedCarrierProviderSurface {
+            prepared,
+            // The overlay is only a live dependency when an import actually points at
+            // it; a carrier that never mentions `@verter/types` needs no overlay file.
+            // The path derivation shares the specifier derivation's fail-closed
+            // basename predicate, so `rewrote_verter_types` (a specifier existed and
+            // was written into the carrier) implies the overlay path derives too — a
+            // rewrite can never point at an overlay this refuses to name.
+            virtual_verter_types_path: rewrote_verter_types
+                .then(|| {
+                    verter_session::framework::descriptor::verter_types_sidecar_path(provider_path)
+                })
+                .flatten(),
+        })
     })
 }
 
@@ -254,32 +285,23 @@ pub(crate) fn prepare_carrier_provider_imports(
     generated: &str,
     encoding: tower_lsp_server::ls_types::PositionEncodingKind,
 ) -> Result<PreparedCarrierProviderContent, verter_workspace::ResolutionPublicationRefusal> {
-    let published = workspace.and_then(FilesystemWorkspace::load_published);
-    if workspace.is_some()
-        && !published
-            .as_ref()
-            .is_some_and(|published| !published.snapshot.projects.is_empty())
-    {
-        return Err(verter_workspace::ResolutionPublicationRefusal::new(
-            verter_audit::NonAdmissionReason::ResolutionUntrackedBackend,
-        ));
-    }
-    let content_generation = workspace.map(WorkspaceRead::content_generation);
-    let publication = prepare_carrier_provider_imports_with_verter_types(
-        workspace,
-        published.as_ref(),
-        canonical_id,
-        generated,
-        encoding,
-        None,
-    )
-    .map(|(prepared, _)| prepared);
-    if !provider_resolution_fence_is_current(workspace, published.as_ref(), content_generation) {
-        return Err(verter_workspace::ResolutionPublicationRefusal::new(
-            verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
-        ));
-    }
-    publication
+    with_current_provider_resolution_view(workspace, |published, content_generation| {
+        let publication = prepare_carrier_provider_imports_with_verter_types(
+            workspace,
+            published,
+            canonical_id,
+            generated,
+            encoding.clone(),
+            None,
+        )
+        .map(|(prepared, _)| prepared);
+        if !provider_resolution_fence_is_current(workspace, published, content_generation) {
+            return Err(verter_workspace::ResolutionPublicationRefusal::new(
+                verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
+            ));
+        }
+        publication
+    })
 }
 
 /// Returns the prepared surface plus whether an `@verter/types` reference was
@@ -446,6 +468,43 @@ fn prepare_carrier_provider_imports_with_verter_types(
 mod tests {
     use super::*;
     use verter_span::TsPosition;
+
+    #[test]
+    fn provider_projection_retries_a_superseded_resolution_view() {
+        let mut attempts = 0;
+        let prepared = with_current_provider_resolution_view(None, |_, _| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(verter_workspace::ResolutionPublicationRefusal::new(
+                    verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
+                ))
+            } else {
+                Ok("current")
+            }
+        })
+        .expect("a later current view must be returned");
+
+        assert_eq!(prepared, "current");
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn provider_projection_bounds_sustained_resolution_churn() {
+        let mut attempts = 0;
+        let refusal = with_current_provider_resolution_view::<()>(None, |_, _| {
+            attempts += 1;
+            Err(verter_workspace::ResolutionPublicationRefusal::new(
+                verter_audit::NonAdmissionReason::ResolutionViewSuperseded,
+            ))
+        })
+        .expect_err("sustained churn must remain a typed refusal");
+
+        assert_eq!(
+            refusal.reason(),
+            verter_audit::NonAdmissionReason::ResolutionRetryExhausted
+        );
+        assert_eq!(attempts, PROVIDER_RESOLUTION_VIEW_MAX_ATTEMPTS);
+    }
 
     #[test]
     fn non_true_policy_rewrites_only_framework_carriers_and_tracks_columns() {
