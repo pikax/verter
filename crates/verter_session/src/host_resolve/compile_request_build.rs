@@ -490,6 +490,9 @@ pub(crate) fn compile_unsupported_code(
         verter_compiler::framework_common::CompileUnsupported::RequestExecutionRefused(_) => {
             "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"
         }
+        verter_compiler::framework_common::CompileUnsupported::ProductExecutionUngranted {
+            ..
+        } => "HOST_COMPILE_PRODUCT_EXECUTION_UNGRANTED",
     }
 }
 

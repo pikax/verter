@@ -15,3 +15,13 @@ fn absent_capabilities_are_compile_time_truth() {
     tests.compile_fail("tests/cases/compile-fail/register_semantic_rejects_mismatched_epoch.rs");
     tests.compile_fail("tests/cases/compile-fail/epoch_id_is_not_a_framework_epoch.rs");
 }
+
+/// Consume-once admission evidence: one issued admission cannot drive a
+/// second execution (by-value move), and the per-demand execution grant
+/// can be neither forged by struct literal nor minted outside the crate.
+#[test]
+fn admissions_are_consume_once_and_grants_are_unforgeable() {
+    let tests = trybuild::TestCases::new();
+    tests.compile_fail("tests/cases/compile-fail/compile_admission_not_reexecutable.rs");
+    tests.compile_fail("tests/cases/compile-fail/product_execution_grant_not_forgeable.rs");
+}

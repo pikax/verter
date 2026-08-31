@@ -36,6 +36,13 @@ pub struct SvelteRuntimeInputs {
 /// Typed Svelte runtime refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SvelteRuntimeError {
+    /// The presented execution grant does not admit the requested runtime
+    /// product — the demand's admission evidence was carved for another
+    /// leg, so this compile never runs.
+    ExecutionUngranted {
+        /// The runtime product the request demanded.
+        product: ProductKind,
+    },
     /// The request named a product other than a runtime target.
     NotRuntimeOnly {
         /// Product the runtime backend will not emit.
@@ -80,12 +87,19 @@ impl RuntimeCompilerBackend<SvelteSfc5> for SvelteRuntimeBackend {
 
     fn compile_runtime(
         &self,
+        grant: crate::framework_common::capability::ProductExecutionGrant,
         source: &str,
         artifact: &FrameworkParseArtifact,
         request: &CompileRequest,
         inputs: &SvelteRuntimeInputs,
     ) -> Result<DirectCompileOutput, SvelteRuntimeError> {
         require_runtime_only(request)?;
+        // Consume the demand's execution grant by value; a grant carved for
+        // a different demand fails typed before any compile work runs.
+        let expected = requested_runtime_kind(request);
+        grant
+            .consume_for(expected)
+            .map_err(|_| SvelteRuntimeError::ExecutionUngranted { product: expected })?;
         let Some(parsed) = SvelteCarrierCompiler.parsed_svelte(artifact) else {
             return Err(SvelteRuntimeError::UnusableParse);
         };
@@ -123,6 +137,20 @@ fn requested_svelte_syntax_profile(
     }
     syntax_profile_id_for(&FileLanguage::svelte(), &svelte_standard_parse_options())
         .map_err(|_| SvelteRuntimeError::ProfileMismatch)
+}
+
+/// The single runtime kind an already-validated runtime-only request
+/// demands (a dual-kind request never reaches execution).
+fn requested_runtime_kind(request: &CompileRequest) -> ProductKind {
+    if request
+        .products()
+        .iter()
+        .any(|p| p.kind() == ProductKind::RuntimeServer)
+    {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    }
 }
 
 fn require_runtime_only(request: &CompileRequest) -> Result<(), SvelteRuntimeError> {
@@ -220,6 +248,7 @@ mod tests {
             SvelteRuntimeError::ProfileMismatch => "profile",
             SvelteRuntimeError::FrameworkMismatch => "framework",
             SvelteRuntimeError::Direct(_) => "direct",
+            SvelteRuntimeError::ExecutionUngranted { .. } => "ungranted",
         }
     }
 

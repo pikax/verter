@@ -340,6 +340,40 @@ pub enum CompileUnsupported {
     /// enforced at `CompileRequest::new` (before any carrier compile is
     /// attempted at all); this is the residual post-parse half.
     RequestExecutionRefused(crate::compile_request::CompileRequestError),
+    /// A product leg was demanded without (or with the wrong) consume-once
+    /// execution grant for it. Product-backend legs execute only under a
+    /// grant carved off the demand's admission (or minted by the retained
+    /// registry compatibility route); a demanded-but-ungranted leg fails
+    /// closed instead of executing without admission evidence.
+    ProductExecutionUngranted {
+        /// The demanded product whose execution grant was absent or wrong.
+        product: crate::compile_request::ProductKind,
+    },
+}
+
+/// The retained registry compatibility routes' grant mint: the
+/// [`CarrierCompiler::compile_bundle`] / [`CarrierCompiler::compile_ide`]
+/// entries predate the host-issued admission flow, so they mint their leg
+/// grants directly from the neutral option demand at the route boundary.
+/// Crate-private — an external caller reaches a product backend only
+/// through an admission carve — and deleted with the routes it serves.
+pub(crate) fn registry_route_execution_grants(
+    opts: &RuntimeCompileOptions,
+) -> super::capability::ProductExecutionGrants {
+    use super::capability::{ProductExecutionGrant, ProductExecutionGrants};
+    use crate::compile_request::ProductKind;
+    ProductExecutionGrants {
+        runtime: opts.want_runtime.then(|| {
+            ProductExecutionGrant::mint(if opts.ssr {
+                ProductKind::RuntimeServer
+            } else {
+                ProductKind::RuntimeClient
+            })
+        }),
+        projection: opts
+            .want_ide
+            .then(|| ProductExecutionGrant::mint(ProductKind::IdeCompanion)),
+    }
 }
 
 /// Runtime-codegen options threaded into [`CarrierCompiler::compile_bundle`].

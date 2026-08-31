@@ -393,7 +393,14 @@ impl CarrierCompiler for VueCarrierCompiler {
             },
             vue_request_from_admitted_artifact(artifact),
         )?;
+        // Retained registry route: the projection grant is minted at this
+        // route boundary (crate-private mint); admission-issued flows carve
+        // theirs off the consumed admission instead.
+        let grant = super::capability::ProductExecutionGrant::mint(
+            crate::compile_request::ProductKind::IdeCompanion,
+        );
         super::registered_carrier_projection::project_ide_from_catalog(
+            grant,
             artifact,
             source,
             &request,
@@ -413,7 +420,13 @@ impl CarrierCompiler for VueCarrierCompiler {
         opts: &RuntimeCompileOptions,
         alloc: &oxc_allocator::Allocator,
     ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
-        vue_carrier_bundle(source, artifact, opts, alloc)
+        vue_carrier_bundle(
+            source,
+            artifact,
+            opts,
+            alloc,
+            super::carrier_compiler::registry_route_execution_grants(opts),
+        )
     }
 }
 
@@ -422,11 +435,17 @@ impl CarrierCompiler for VueCarrierCompiler {
 /// prerequisites and deduplicated diagnostics. Shared by the compatibility
 /// [`CarrierCompiler::compile_bundle`] route and the Vue host-integration
 /// backend so both drive the identical single-population pass.
+///
+/// Every product-backend leg requires — and consumes — its own
+/// [`super::capability::ProductExecutionGrant`]: the host route carves
+/// them off the consumed admission, the retained registry route mints them
+/// at its boundary, and a demanded-but-ungranted leg fails closed typed.
 pub(crate) fn vue_carrier_bundle(
     source: &str,
     artifact: &FrameworkParseArtifact,
     opts: &RuntimeCompileOptions,
     alloc: &oxc_allocator::Allocator,
+    mut grants: super::capability::ProductExecutionGrants,
 ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
     let Some(parsed) = VueCarrierCompiler.parsed_sfc(artifact) else {
         return Err(CompileUnsupported::NoIdeProjection {
@@ -512,7 +531,23 @@ pub(crate) fn vue_carrier_bundle(
                 }),
             ));
         };
-        bundle = backend.compile_bundle_runtime(source, parsed, opts, alloc)?;
+        // The runtime leg executes only under its consume-once grant for
+        // the demanded runtime kind — never with no admission evidence.
+        let expected_runtime = if opts.ssr {
+            crate::compile_request::ProductKind::RuntimeServer
+        } else {
+            crate::compile_request::ProductKind::RuntimeClient
+        };
+        let Some(grant) = grants
+            .runtime
+            .take()
+            .filter(|grant| grant.admits(expected_runtime))
+        else {
+            return Err(CompileUnsupported::ProductExecutionUngranted {
+                product: expected_runtime,
+            });
+        };
+        bundle = backend.compile_bundle_runtime(grant, source, parsed, opts, alloc)?;
     }
 
     if opts.want_ide {
@@ -548,7 +583,18 @@ pub(crate) fn vue_carrier_bundle(
             .clone()
             .map(VueMacroSemanticInput::Runtime)
             .unwrap_or_default();
+        // The projection leg executes only under its consume-once grant.
+        let Some(grant) = grants
+            .projection
+            .take()
+            .filter(|grant| grant.admits(crate::compile_request::ProductKind::IdeCompanion))
+        else {
+            return Err(CompileUnsupported::ProductExecutionUngranted {
+                product: crate::compile_request::ProductKind::IdeCompanion,
+            });
+        };
         let companion = super::registered_carrier_projection::project_ide_from_catalog(
+            grant,
             artifact,
             source,
             &request,

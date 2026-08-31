@@ -46,7 +46,7 @@ pub use crate::svelte::{svelte_semantic_authority_registration, SvelteSemanticAu
 pub use capability::{
     CarrierFrontend, FrameworkEpoch, FrameworkEpochId, FrameworkHostIntegrationBackend,
     FrameworkSemanticAuthority, HostEpoch, HostEpochId, NativeHostEpoch, Present,
-    ProjectionBackend, RuntimeCompilerBackend,
+    ProductExecutionGrant, ProductExecutionGrants, ProjectionBackend, RuntimeCompilerBackend,
 };
 pub use carrier_compiler::{
     CarrierCompileOutcome, CarrierCompiler, CompileUnsupported, IdeCompileOptions, IdeOutput,

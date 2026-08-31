@@ -75,3 +75,35 @@ error[E0616]: field `backend` of struct `BoundVueNativeHost` is private
    |
 23 |         let _ = vue.backend;
    |                     ^^^^^^^ private field
+
+error[E0624]: method `into_host_backend` is private
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:31:17
+   |
+31 |       let _ = vue.into_host_backend();
+   |                   ^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: src/host_resolve/native_host_binding.rs
+   |
+   | /     pub(crate) fn into_host_backend(
+   | |         self,
+   | |     ) -> (
+   | |         &'static VueHostIntegrationBackend,
+   | |         NativeHostRequestAttribution,
+   | |     ) {
+   | |_____- private method defined here
+
+error[E0624]: method `into_host_backend` is private
+  --> tests/cases/compile-fail/native_host_binding_sealed.rs:32:20
+   |
+32 |       let _ = svelte.into_host_backend();
+   |                      ^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: src/host_resolve/native_host_binding.rs
+   |
+   | /     pub(crate) fn into_host_backend(
+   | |         self,
+   | |     ) -> (
+   | |         &'static SvelteHostIntegrationBackend,
+   | |         NativeHostRequestAttribution,
+   | |     ) {
+   | |_____- private method defined here

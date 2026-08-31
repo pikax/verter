@@ -161,11 +161,29 @@ fn compile_via_backend_with_inputs(
 ) -> Result<DirectCompileOutput, SvelteRuntimeError> {
     RuntimeCompilerBackend::compile_runtime(
         &SvelteRuntimeBackend,
+        runtime_grant_for(request),
         source,
         artifact,
         request,
         inputs,
     )
+}
+
+/// Test-minted consume-once runtime grant matching the request's demanded
+/// runtime kind (production carves grants off a host-issued admission).
+fn runtime_grant_for(
+    request: &CompileRequest,
+) -> verter_compiler::framework_common::ProductExecutionGrant {
+    let kind = if request
+        .products()
+        .iter()
+        .any(|p| p.kind() == ProductKind::RuntimeServer)
+    {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    };
+    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(kind)
 }
 
 fn compile_via_standalone(
@@ -712,6 +730,7 @@ fn svelte_runtime_error_is_closed_without_request_execution_refused() {
             SvelteRuntimeError::ProfileMismatch => "profile",
             SvelteRuntimeError::FrameworkMismatch => "framework",
             SvelteRuntimeError::Direct(_) => "direct",
+            SvelteRuntimeError::ExecutionUngranted { .. } => "ungranted",
         }
     }
     assert_eq!(

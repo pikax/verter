@@ -28,10 +28,12 @@
 //!
 //! [`BoundNativeHostRequest::bind`] is the ONE guarded constructor.
 //! Framework identity is derived SOLELY from the registered
-//! host-integration catalog — never from path text, extension sniffing,
-//! or a lane-supplied framework flag — and every unavailable outcome is
-//! a typed [`NativeHostBindingUnavailable`] arm, never a fallback to
-//! another framework or host.
+//! host-integration catalog — the EXACT adapter × framework-epoch ×
+//! host-epoch row, with the framework epoch read from the registered
+//! artifact, never from path text, extension sniffing, or a lane-supplied
+//! framework flag — and every unavailable outcome is a typed
+//! [`NativeHostBindingUnavailable`] arm, never a fallback to another
+//! framework or host.
 
 use std::sync::Arc;
 
@@ -137,16 +139,23 @@ impl NativeHostRequestAttribution {
 /// by-value consumption point.
 #[derive(Debug)]
 pub struct BoundVueNativeHost {
-    backend: VueHostIntegrationBackend,
+    backend: &'static VueHostIntegrationBackend,
     attribution: NativeHostRequestAttribution,
 }
 
 impl BoundVueNativeHost {
     /// The single by-value consumption point for a Vue binding: destroys
-    /// the binding and yields the framework-specific host binding beside
-    /// the attribution. Performs no execution.
+    /// the binding and yields the catalog-registered framework-specific
+    /// host binding beside the attribution. Performs no execution.
+    /// Session-internal: host content is never fetchable as a service
+    /// from outside the crate — the consuming execution routes live here.
     #[must_use]
-    pub fn into_host_backend(self) -> (VueHostIntegrationBackend, NativeHostRequestAttribution) {
+    pub(crate) fn into_host_backend(
+        self,
+    ) -> (
+        &'static VueHostIntegrationBackend,
+        NativeHostRequestAttribution,
+    ) {
         (self.backend, self.attribution)
     }
 
@@ -162,16 +171,24 @@ impl BoundVueNativeHost {
 /// by-value consumption point.
 #[derive(Debug)]
 pub struct BoundSvelteNativeHost {
-    backend: SvelteHostIntegrationBackend,
+    backend: &'static SvelteHostIntegrationBackend,
     attribution: NativeHostRequestAttribution,
 }
 
 impl BoundSvelteNativeHost {
     /// The single by-value consumption point for a Svelte binding:
-    /// destroys the binding and yields the framework-specific host
-    /// binding beside the attribution. Performs no execution.
+    /// destroys the binding and yields the catalog-registered
+    /// framework-specific host binding beside the attribution. Performs
+    /// no execution. Session-internal: host content is never fetchable as
+    /// a service from outside the crate — the consuming execution routes
+    /// live here.
     #[must_use]
-    pub fn into_host_backend(self) -> (SvelteHostIntegrationBackend, NativeHostRequestAttribution) {
+    pub(crate) fn into_host_backend(
+        self,
+    ) -> (
+        &'static SvelteHostIntegrationBackend,
+        NativeHostRequestAttribution,
+    ) {
         (self.backend, self.attribution)
     }
 
@@ -214,9 +231,17 @@ pub enum NativeHostBindingUnavailable {
         /// The host epoch the caller requested.
         requested_host_epoch: &'static str,
     },
-    /// More than one registered row (distinct framework epochs) matches
-    /// the adapter + host epoch; selection would be arbitrary, so the
-    /// bind fails closed instead of picking one.
+    /// The adapter has rows for the requested host epoch, but none for
+    /// the artifact's framework epoch.
+    MismatchedFrameworkEpoch {
+        /// The adapter the caller asked to bind.
+        adapter_id: FrameworkAdapterId,
+        /// The framework epoch the registered artifact carries.
+        requested_framework_epoch: FrameworkEpochId,
+    },
+    /// More than one registered row matches the exact adapter + framework
+    /// epoch + host epoch; selection would be arbitrary, so the bind
+    /// fails closed instead of picking one.
     AmbiguousRegistration {
         /// The adapter whose registration is ambiguous.
         adapter_id: FrameworkAdapterId,
@@ -248,20 +273,21 @@ impl BoundNativeHostRequest {
     /// The ONE guarded constructor.
     ///
     /// Derives framework identity SOLELY from the registered
-    /// host-integration catalog: the row selected by `adapter_id` and the
-    /// `HostE` host epoch chooses the variant, supplies the framework
-    /// epoch witness, and must carry the caller's carrier language. The
-    /// snapshot witness must still be the live source generation.
+    /// host-integration catalog: the row selected by the EXACT
+    /// `adapter_id` × `framework_epoch` × `HostE` host-epoch triple
+    /// chooses the variant and must carry the caller's carrier language.
+    /// The snapshot witness must still be the live source generation.
     ///
-    /// Caller-input obligations. `adapter_id` and `carrier_language_id`
-    /// must come from a REGISTERED identity row — the parse artifact's
-    /// `adapter_id()`/`language_id()` or the registered `FileLanguage`
-    /// row — never from path text, extension sniffing, or a lane flag.
-    /// `canonical_id`, `snapshot`, and `live_source_generation` must all
-    /// be read from ONE request context: the constructor cannot detect a
-    /// canonical id paired with another file's snapshot, and
-    /// `live_source_generation` must be sourced from the scheduler/store
-    /// authority at bind time, never a lane-computed value.
+    /// Caller-input obligations. `adapter_id`, `carrier_language_id`, and
+    /// `framework_epoch` must come from a REGISTERED identity row — the
+    /// parse artifact's `adapter_id()`/`language_id()`/`epoch()` or the
+    /// registered `FileLanguage` row — never from path text, extension
+    /// sniffing, or a lane flag. `canonical_id`, `snapshot`, and
+    /// `live_source_generation` must all be read from ONE request
+    /// context: the constructor cannot detect a canonical id paired with
+    /// another file's snapshot, and `live_source_generation` must be
+    /// sourced from the scheduler/store authority at bind time, never a
+    /// lane-computed value.
     ///
     /// The staleness check here is a best-effort bind-time witness: a
     /// supersession may still land between observing the live generation
@@ -269,15 +295,47 @@ impl BoundNativeHostRequest {
     /// publish-time completion fence, which revalidates against the
     /// carried `(canonical_id, whole_hash, source_generation)` witness.
     ///
-    /// Guard order is deterministic: catalog identity first
-    /// (unregistered → host-epoch mismatch → registration ambiguity, the
-    /// last detected while scanning epoch-matched rows → carrier
-    /// language), then snapshot staleness. A future second FRAMEWORK
-    /// epoch registered for one adapter and host epoch fails closed as
-    /// ambiguous; disambiguating it would add an epoch input here.
+    /// Guard order is deterministic: catalog identity first (unregistered
+    /// → host-epoch mismatch → framework-epoch mismatch → registration
+    /// ambiguity, the last detected while scanning fully-matched rows →
+    /// carrier language), then snapshot staleness. Two framework epochs
+    /// registered for one adapter and host epoch disambiguate by the
+    /// artifact's epoch — never an arbitrary pick and never an ambiguity
+    /// refusal for an exact-epoch match.
     pub fn bind<HostE: HostEpoch>(
         adapter_id: &FrameworkAdapterId,
         carrier_language_id: &LanguageId,
+        framework_epoch: &FrameworkEpochId,
+        canonical_id: &str,
+        snapshot: &SourceSnapshot,
+        live_source_generation: u64,
+    ) -> Result<Self, NativeHostBindingUnavailable> {
+        Self::bind_in_catalog::<HostE>(
+            built_in_host_integration_catalog(),
+            adapter_id,
+            carrier_language_id,
+            framework_epoch,
+            canonical_id,
+            snapshot,
+            live_source_generation,
+        )
+    }
+
+    /// [`Self::bind`] over an explicit catalog, so the selection rules —
+    /// notably exact framework-epoch disambiguation between two installed
+    /// epochs — are provable against a purpose-built catalog. Production
+    /// always binds against the built-in catalog through [`Self::bind`].
+    fn bind_in_catalog<HostE: HostEpoch>(
+        catalog: &'static verter_compiler::framework_common::catalog::ImmutableCapabilityCatalog<
+            (),
+            (),
+            (),
+            (),
+            InstalledHostIntegration,
+        >,
+        adapter_id: &FrameworkAdapterId,
+        carrier_language_id: &LanguageId,
+        framework_epoch: &FrameworkEpochId,
         canonical_id: &str,
         snapshot: &SourceSnapshot,
         live_source_generation: u64,
@@ -285,10 +343,11 @@ impl BoundNativeHostRequest {
         record_binding_construction_attempt();
 
         let mut adapter_registered = false;
+        let mut host_epoch_matched = false;
         let mut selected: Option<(&'static CatalogIdentity, &'static InstalledHostIntegration)> =
             None;
         let mut ambiguous = false;
-        for row in built_in_host_integration_catalog().iter() {
+        for row in catalog.iter() {
             let identity = row.identity();
             if identity.capability() != CatalogCapability::HostIntegration
                 || identity.adapter_id() != adapter_id
@@ -300,6 +359,10 @@ impl BoundNativeHostRequest {
                 .host_epoch()
                 .is_some_and(|host| host.as_str() == HostE::ID)
             {
+                continue;
+            }
+            host_epoch_matched = true;
+            if identity.epoch() != framework_epoch {
                 continue;
             }
             let Some(installed) = row.host_integration() else {
@@ -319,14 +382,19 @@ impl BoundNativeHostRequest {
             });
         }
         let Some((identity, installed)) = selected else {
-            return Err(if adapter_registered {
+            return Err(if !adapter_registered {
+                NativeHostBindingUnavailable::UnregisteredIdentity {
+                    adapter_id: adapter_id.clone(),
+                }
+            } else if !host_epoch_matched {
                 NativeHostBindingUnavailable::MismatchedHostEpoch {
                     adapter_id: adapter_id.clone(),
                     requested_host_epoch: HostE::ID,
                 }
             } else {
-                NativeHostBindingUnavailable::UnregisteredIdentity {
+                NativeHostBindingUnavailable::MismatchedFrameworkEpoch {
                     adapter_id: adapter_id.clone(),
+                    requested_framework_epoch: framework_epoch.clone(),
                 }
             });
         };
@@ -354,11 +422,11 @@ impl BoundNativeHostRequest {
         };
         Ok(match installed {
             InstalledHostIntegration::Vue(backend) => Self::Vue(BoundVueNativeHost {
-                backend: *backend,
+                backend,
                 attribution,
             }),
             InstalledHostIntegration::Svelte(backend) => Self::Svelte(BoundSvelteNativeHost {
-                backend: *backend,
+                backend,
                 attribution,
             }),
         })
@@ -400,9 +468,9 @@ impl crate::VerterHost {
     /// A warm hit performs no compile and never reaches this point.
     ///
     /// Framework identity derives SOLELY from the registered parse
-    /// artifact's identity row (`adapter_id()`/`language_id()`) through the
-    /// host-integration catalog — never from path text or language
-    /// classification. `canonical_id` and the source snapshot come from
+    /// artifact's identity row (`adapter_id()`/`language_id()`/`epoch()`)
+    /// through the host-integration catalog — never from path text or
+    /// language classification. `canonical_id` and the source snapshot come from
     /// the request's ONE coherent scheduler read; the live source
     /// generation is re-read from the scheduler authority at bind time (a
     /// best-effort staleness witness — the durable rail stays the
@@ -438,6 +506,7 @@ impl crate::VerterHost {
         match BoundNativeHostRequest::bind::<NativeHostEpoch>(
             artifact.adapter_id(),
             artifact.language_id(),
+            artifact.epoch(),
             canonical_id,
             source_snap,
             live.generation,
@@ -502,6 +571,25 @@ mod tests {
         }
     }
 
+    /// The registered framework-epoch witness for an adapter, read from
+    /// the built-in catalog rows themselves (never a hand-spelled value).
+    fn registered_epoch(adapter_id: &FrameworkAdapterId) -> &'static FrameworkEpochId {
+        built_in_host_integration_catalog()
+            .iter()
+            .find(|row| row.identity().adapter_id() == adapter_id)
+            .expect("the adapter has a registered host-integration row")
+            .identity()
+            .epoch()
+    }
+
+    fn vue_epoch() -> &'static FrameworkEpochId {
+        registered_epoch(&FrameworkAdapterId::vue())
+    }
+
+    fn svelte_epoch() -> &'static FrameworkEpochId {
+        registered_epoch(&FrameworkAdapterId::svelte())
+    }
+
     fn bind_vue(
         snapshot: &SourceSnapshot,
         live: u64,
@@ -509,6 +597,7 @@ mod tests {
         BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::vue(),
             &VueHostIntegrationBackend.carrier_language_id(),
+            vue_epoch(),
             CANONICAL,
             snapshot,
             live,
@@ -553,6 +642,7 @@ mod tests {
         let bound = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::svelte(),
             &SvelteHostIntegrationBackend.carrier_language_id(),
+            svelte_epoch(),
             "/src/App.svelte",
             &snap,
             1,
@@ -574,6 +664,7 @@ mod tests {
         let bound = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::svelte(),
             &SvelteHostIntegrationBackend.carrier_language_id(),
+            svelte_epoch(),
             "/src/Confusing.vue",
             &snap,
             1,
@@ -594,6 +685,7 @@ mod tests {
         let err = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &unregistered,
             &VueHostIntegrationBackend.carrier_language_id(),
+            vue_epoch(),
             CANONICAL,
             &snap,
             0,
@@ -615,6 +707,7 @@ mod tests {
         let err = BoundNativeHostRequest::bind::<OtherHostEpoch>(
             &FrameworkAdapterId::vue(),
             &VueHostIntegrationBackend.carrier_language_id(),
+            vue_epoch(),
             CANONICAL,
             &snap,
             0,
@@ -629,6 +722,126 @@ mod tests {
         );
     }
 
+    /// A registered adapter and host epoch presented with a framework
+    /// epoch no row carries fails closed with the typed framework-epoch
+    /// mismatch — never an arbitrary row pick, never a fallback epoch.
+    #[test]
+    fn mismatched_framework_epoch_fails_closed_typed() {
+        let snap = snapshot(0);
+        let err = BoundNativeHostRequest::bind::<NativeHostEpoch>(
+            &FrameworkAdapterId::vue(),
+            &VueHostIntegrationBackend.carrier_language_id(),
+            svelte_epoch(),
+            CANONICAL,
+            &snap,
+            0,
+        )
+        .expect_err("a framework epoch with no registered Vue row must not bind");
+        assert_eq!(
+            err,
+            NativeHostBindingUnavailable::MismatchedFrameworkEpoch {
+                adapter_id: FrameworkAdapterId::vue(),
+                requested_framework_epoch: svelte_epoch().clone(),
+            }
+        );
+    }
+
+    struct SecondVueEpoch;
+    impl verter_compiler::framework_common::FrameworkEpoch for SecondVueEpoch {
+        const ID: &'static str = "vue-preview";
+    }
+
+    /// A second-epoch registration surrogate: the typed registration
+    /// constructor requires a backend implementing the host-integration
+    /// trait FOR that epoch; the installed payload it maps to is still the
+    /// real Vue arm, so the catalog row differs from the built-in one only
+    /// by framework epoch.
+    struct SecondEpochVueBackend;
+    impl
+        verter_compiler::framework_common::FrameworkHostIntegrationBackend<
+            SecondVueEpoch,
+            NativeHostEpoch,
+        > for SecondEpochVueBackend
+    {
+        type CompileAdmission = ();
+        type ParseArtifact = ();
+        type MultiProductDemand = ();
+        type RuntimeRenderDemand = ();
+        type AdmissionRefusal = ();
+
+        fn admit_host_products(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+            Err(())
+        }
+
+        fn admit_runtime_render(&self, _artifact: &(), _demand: ()) -> Result<(), ()> {
+            Err(())
+        }
+    }
+
+    /// Two framework epochs installed for ONE adapter and host epoch: the
+    /// bind disambiguates by the requested (artifact) framework epoch and
+    /// selects the exact row — it does not refuse as ambiguous, and it
+    /// never picks a row the artifact's epoch does not name.
+    #[test]
+    fn two_installed_framework_epochs_disambiguate_by_artifact_epoch() {
+        use verter_compiler::framework_common::{
+            vue_host_integration_registration, CatalogRow, Present, TypedCapabilityRegistration,
+            VueHostIntegrationBackend as VueBackend,
+        };
+        let catalog: &'static verter_compiler::framework_common::catalog::ImmutableCapabilityCatalog<
+            (),
+            (),
+            (),
+            (),
+            InstalledHostIntegration,
+        > = Box::leak(Box::new(
+            verter_compiler::framework_common::catalog::ImmutableCapabilityCatalog::try_from_rows(
+                [
+                    CatalogRow::from(
+                        vue_host_integration_registration()
+                            .map_host_integration(InstalledHostIntegration::Vue),
+                    ),
+                    CatalogRow::from(
+                        TypedCapabilityRegistration::register_host_integration::<
+                            SecondVueEpoch,
+                            NativeHostEpoch,
+                            _,
+                        >(
+                            VueBackend.adapter_id(),
+                            VueBackend.carrier_language_id(),
+                            Present(SecondEpochVueBackend),
+                        )
+                        .map_host_integration(|_| InstalledHostIntegration::Vue(VueBackend)),
+                    ),
+                ],
+            )
+            .expect("the two rows differ by framework epoch, so identities are unique"),
+        ));
+        let second_epoch = catalog
+            .iter()
+            .map(|row| row.identity().epoch())
+            .find(|epoch| epoch.as_str() == "vue-preview")
+            .expect("the second framework-epoch row is installed");
+        let snap = snapshot(1);
+        for epoch in [vue_epoch(), second_epoch] {
+            let bound = BoundNativeHostRequest::bind_in_catalog::<NativeHostEpoch>(
+                catalog,
+                &FrameworkAdapterId::vue(),
+                &VueBackend.carrier_language_id(),
+                epoch,
+                CANONICAL,
+                &snap,
+                1,
+            )
+            .expect("an exact-epoch match must bind, not refuse as ambiguous");
+            assert_eq!(
+                bound.attribution().framework_epoch(),
+                epoch,
+                "the bound row is the exact requested framework epoch"
+            );
+        }
+    }
+
     /// A registered row whose carrier language disagrees with the
     /// caller's carrier language fails closed — the exact catalog row,
     /// not just the adapter, authorizes the bind.
@@ -638,6 +851,7 @@ mod tests {
         let err = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &FrameworkAdapterId::vue(),
             &SvelteHostIntegrationBackend.carrier_language_id(),
+            vue_epoch(),
             CANONICAL,
             &snap,
             0,
@@ -678,6 +892,7 @@ mod tests {
         let err = BoundNativeHostRequest::bind::<NativeHostEpoch>(
             &unregistered,
             &VueHostIntegrationBackend.carrier_language_id(),
+            vue_epoch(),
             CANONICAL,
             &snap,
             4,
@@ -810,6 +1025,59 @@ mod tests {
         assert!(
             matches!(err, crate::HostError::Superseded),
             "a stale bind must surface as the typed Superseded host error, got: {err:?}"
+        );
+        assert!(
+            host.compile_cache()
+                .get(CANONICAL)
+                .is_none_or(|state| state.compile_slots.is_empty()),
+            "a refused bind publishes no compile output"
+        );
+    }
+
+    /// Fail-closed at the common production binding point: a registered
+    /// artifact whose framework epoch has no installed host-integration
+    /// row refuses the bind with the typed HOST_NATIVE_BINDING_UNAVAILABLE
+    /// compile error — no fallback framework, no compile, nothing
+    /// published.
+    #[test]
+    fn mismatched_artifact_framework_epoch_refuses_typed_and_publishes_nothing() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        upsert_vue(&host, VUE_SRC);
+        let snap = host
+            .scheduler
+            .try_get_source(CANONICAL)
+            .expect("the upserted source is live");
+        let efs = host
+            .effective_file_state_from_snapshot(&snap, CANONICAL, None)
+            .expect("the upserted source carries host data");
+        let artifact = efs
+            .framework_parse
+            .as_deref()
+            .expect("a Vue carrier registers a framework parse artifact");
+        let reminted = artifact.remint_epoch_for_tests("unregistered-epoch");
+        let err = host
+            .bind_native_host_compile_attempt(
+                Some(&reminted),
+                CANONICAL,
+                snap.source.len() as u32,
+                &snap,
+                crate::types::CompileCacheMode::Session,
+            )
+            .expect_err("an unregistered framework epoch must not bind");
+        let crate::HostError::CompileError(failure) = err else {
+            panic!("expected the typed compile-error refusal, got another host error");
+        };
+        assert!(
+            failure
+                .diagnostics
+                .diagnostics
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.code == "HOST_NATIVE_BINDING_UNAVAILABLE"
+                        && diagnostic.message.contains("MismatchedFrameworkEpoch")
+                ),
+            "the refusal carries the typed binding-unavailable diagnostic, got {:?}",
+            failure.diagnostics.diagnostics
         );
         assert!(
             host.compile_cache()

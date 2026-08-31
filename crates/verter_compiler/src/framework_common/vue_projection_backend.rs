@@ -100,11 +100,19 @@ impl ProjectionBackend for VueProjectionBackend {
 
     fn project_ide(
         &self,
+        grant: crate::framework_common::capability::ProductExecutionGrant,
         source: &str,
         artifact: &FrameworkParseArtifact,
         request: &CompileRequest,
         inputs: &VueProjectionInputs,
     ) -> Result<VueIdeCompanion, VueProjectionError> {
+        // Consume the demand's execution grant by value; a grant carved for
+        // a different demand fails typed before any projection work runs.
+        grant.consume_for(ProductKind::IdeCompanion).map_err(|_| {
+            VueProjectionError::Unsupported(CompileUnsupported::ProductExecutionUngranted {
+                product: ProductKind::IdeCompanion,
+            })
+        })?;
         require_ide_only(request)?;
         let Some(parsed) = VueCarrierCompiler.parsed_sfc(artifact) else {
             return Err(no_ide());

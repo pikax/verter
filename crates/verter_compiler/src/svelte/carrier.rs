@@ -412,7 +412,14 @@ impl CarrierCompiler for SvelteCarrierCompiler {
                 ..Default::default()
             },
         )?;
+        // Retained registry route: the projection grant is minted at this
+        // route boundary (crate-private mint); admission-issued flows carve
+        // theirs off the consumed admission instead.
+        let grant = crate::framework_common::capability::ProductExecutionGrant::mint(
+            crate::compile_request::ProductKind::IdeCompanion,
+        );
         crate::framework_common::registered_carrier_projection::project_ide_from_catalog(
+            grant,
             artifact,
             source,
             &request,
@@ -431,7 +438,13 @@ impl CarrierCompiler for SvelteCarrierCompiler {
         opts: &RuntimeCompileOptions,
         alloc: &oxc_allocator::Allocator,
     ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
-        svelte_carrier_bundle(source, artifact, opts, alloc)
+        svelte_carrier_bundle(
+            source,
+            artifact,
+            opts,
+            alloc,
+            crate::framework_common::carrier_compiler::registry_route_execution_grants(opts),
+        )
     }
 }
 
@@ -446,6 +459,7 @@ pub(crate) fn svelte_carrier_bundle(
     artifact: &FrameworkParseArtifact,
     opts: &RuntimeCompileOptions,
     alloc: &oxc_allocator::Allocator,
+    mut grants: crate::framework_common::capability::ProductExecutionGrants,
 ) -> Result<CarrierCompileOutcome, CompileUnsupported> {
     // A foreign artifact (not a Svelte carrier) declines with the typed
     // answer — never a silent empty bundle.
@@ -497,8 +511,24 @@ pub(crate) fn svelte_carrier_bundle(
                 ),
             ));
         };
+        // The runtime leg executes only under its consume-once grant for
+        // the demanded runtime kind — never with no admission evidence.
+        let expected_runtime = if opts.ssr {
+            crate::compile_request::ProductKind::RuntimeServer
+        } else {
+            crate::compile_request::ProductKind::RuntimeClient
+        };
+        let Some(grant) = grants
+            .runtime
+            .take()
+            .filter(|grant| grant.admits(expected_runtime))
+        else {
+            return Err(CompileUnsupported::ProductExecutionUngranted {
+                product: expected_runtime,
+            });
+        };
         if let Err(refusal) =
-            backend.compile_bundle_runtime(source, parsed, opts, alloc, &mut bundle)
+            backend.compile_bundle_runtime(grant, source, parsed, opts, alloc, &mut bundle)
         {
             return Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(refusal));
         }
@@ -545,8 +575,19 @@ pub(crate) fn svelte_carrier_bundle(
                 ..Default::default()
             },
         )?;
+        // The projection leg executes only under its consume-once grant.
+        let Some(grant) = grants
+            .projection
+            .take()
+            .filter(|grant| grant.admits(crate::compile_request::ProductKind::IdeCompanion))
+        else {
+            return Err(CompileUnsupported::ProductExecutionUngranted {
+                product: crate::compile_request::ProductKind::IdeCompanion,
+            });
+        };
         let companion =
             crate::framework_common::registered_carrier_projection::project_ide_from_catalog(
+                grant,
                 artifact,
                 source,
                 &request,

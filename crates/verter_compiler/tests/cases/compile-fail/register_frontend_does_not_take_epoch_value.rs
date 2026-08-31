@@ -14,7 +14,14 @@ impl ProjectionBackend for ProjectionOnly {
     type ExecutionInputs = ();
     type Error = ();
 
-    fn project_ide(&self, _: &str, _: &(), _: &(), _: &()) -> Result<(), ()> {
+    fn project_ide(
+        &self,
+        _: verter_compiler::framework_common::ProductExecutionGrant,
+        _: &str,
+        _: &(),
+        _: &(),
+        _: &(),
+    ) -> Result<(), ()> {
         Ok(())
     }
 }

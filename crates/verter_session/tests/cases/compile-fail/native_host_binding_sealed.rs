@@ -6,7 +6,7 @@
 //! regressed (a derive added, a field widened), the line would compile
 //! and trybuild would fail the driving test.
 
-use verter_session::BoundNativeHostRequest;
+use verter_session::{BoundNativeHostRequest, BoundSvelteNativeHost, BoundVueNativeHost};
 
 fn requires_clone<T: Clone>() {}
 fn requires_copy<T: Copy>() {}
@@ -22,6 +22,14 @@ fn seal(binding: BoundNativeHostRequest) {
         // The host binding is a private field: never fetchable as a service.
         let _ = vue.backend;
     }
+}
+
+fn extraction_seam_is_session_internal(vue: BoundVueNativeHost, svelte: BoundSvelteNativeHost) {
+    // The by-value consumption seam is session-internal: an external crate
+    // cannot extract the framework-specific host backend as a reusable
+    // service from either arm.
+    let _ = vue.into_host_backend();
+    let _ = svelte.into_host_backend();
 }
 
 fn main() {}

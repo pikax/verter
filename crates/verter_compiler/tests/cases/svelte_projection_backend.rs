@@ -26,6 +26,14 @@ use verter_language::registered_source_authority::{
 };
 use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId, ParseOptions};
 
+/// Test-minted consume-once projection grant (production carves grants off
+/// a host-issued admission).
+fn ide_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
+    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
+        verter_compiler::compile_request::ProductKind::IdeCompanion,
+    )
+}
+
 const KITCHEN_SINK: &str = concat!(
     "<script>let name = $state('world'); let count = $state(0);</script>\n",
     "<h1>Hello {name}!</h1>\n",
@@ -149,10 +157,11 @@ fn svelte_ide_projection_matches_compile_ide_on_kitchen_sink() {
     let request = ide_only_request("Kitchen.svelte", !opts.skip_source_map);
     let via_backend = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             KITCHEN_SINK,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("projection backend");
     assert_eq!(via_backend.ide.code, via_compile_ide.code);
@@ -185,10 +194,11 @@ fn svelte_ide_projection_matches_compile_ide_on_a_typescript_carrier() {
         .expect("compile_ide simple");
     let via_backend = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SIMPLE,
             &artifact,
             &ide_only_request("Simple.svelte", true),
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("projection backend");
     assert_eq!(via_backend.ide.code, via_compile_ide.code);
@@ -214,18 +224,20 @@ fn svelte_ide_projection_is_deterministic() {
     let request = ide_only_request("Simple.svelte", true);
     let first = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SIMPLE,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("first");
     let second = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SIMPLE,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("second");
     assert_eq!(first.ide.code, second.ide.code);
@@ -247,7 +259,7 @@ fn svelte_ide_projection_refuses_a_foreign_artifact() {
     let vue = registered_artifact("file:///foreign.vue", source, false);
     let request = ide_only_request("Foreign.svelte", true);
     let err = SvelteProjectionBackend
-        .project_ide(source, &vue, &request, &SvelteProjectionInputs::default())
+        .project_ide(ide_grant(), source, &vue, &request, &SvelteProjectionInputs)
         .expect_err("foreign artifact has no Svelte parse");
     match err {
         SvelteProjectionError::Unsupported(CompileUnsupported::NoIdeProjection { adapter_id }) => {
@@ -263,10 +275,11 @@ fn svelte_ide_projection_refuses_source_that_does_not_match_the_admitted_artifac
     let request = ide_only_request("Simple.svelte", true);
     let err = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             "<script>let n = 2</script>",
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect_err("mismatched source must not reparse");
     match err {
@@ -303,10 +316,11 @@ fn svelte_ide_projection_binds_request_syntax_profile_to_admitted_artifact() {
     );
 
     let ok = SvelteProjectionBackend.project_ide(
+        ide_grant(),
         SIMPLE,
         &artifact,
         &ide_only_request("Profile.svelte", true),
-        &SvelteProjectionInputs::default(),
+        &SvelteProjectionInputs,
     );
     assert!(ok.is_ok(), "strict artifact versus strict request: {ok:?}");
 
@@ -318,10 +332,11 @@ fn svelte_ide_projection_binds_request_syntax_profile_to_admitted_artifact() {
     );
     let err = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SIMPLE,
             &vue,
             &ide_only_request("Profile.svelte", true),
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect_err("admitted Vue syntax profile must not satisfy a Svelte request");
     match err {
@@ -360,10 +375,11 @@ fn svelte_ide_projection_succeeds_for_foreign_namespace_like_compile_ide() {
     .expect("Foreign namespace constructs at the request layer");
     let via_backend = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SIMPLE,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("IDE-only Foreign namespace must project like compile_ide");
     assert_eq!(via_backend.ide.code, via_compile_ide.code);
@@ -388,10 +404,11 @@ fn svelte_ide_projection_refuses_a_runtime_product_request() {
     .expect("runtime request constructs");
     let err = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SIMPLE,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect_err("runtime product is not an IDE projection");
     match err {
@@ -420,10 +437,11 @@ fn svelte_ide_projection_refuses_an_analysis_product_request() {
     .expect("analysis request constructs");
     let err = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SIMPLE,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect_err("analysis is not an IDE projection");
     match err {
@@ -441,10 +459,11 @@ fn svelte_ide_projection_carrier_diagnostics_use_the_carrier_source_space() {
     let (carrier_token, _) = RuntimeOutputDescriptor::carrier_source(AWAIT_EXPR);
     let via_backend = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             AWAIT_EXPR,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("carrier diagnostics");
     assert!(

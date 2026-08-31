@@ -9,9 +9,78 @@ use std::marker::PhantomData;
 
 use verter_language::ParseOptions;
 
+use crate::compile_request::ProductKind;
+
 /// Marker wrapping a capability implementation that is actually present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Present<T>(pub T);
+
+/// Consume-once execution evidence for ONE admitted compile-product
+/// demand.
+///
+/// Product backends ([`ProjectionBackend::project_ide`],
+/// [`RuntimeCompilerBackend::compile_runtime`]) and the shared bundle
+/// orchestration legs require this value: driving a product backend
+/// without it is unrepresentable, and because the grant is neither
+/// `Clone` nor `Copy` and is consumed by value, one grant drives at most
+/// one execution of its admitted demand.
+///
+/// Provenance: a grant is carved off a host-issued compile admission by
+/// value (`into_execution_grants` on the admission types) — the
+/// host-integration backend composes parse + semantic into the admission
+/// and remains the sole issuer — or minted crate-internally by the
+/// retained registry-dispatched `compile_bundle`/`compile_ide`
+/// compatibility routes, which die with those routes. The inner field is
+/// private, so an external caller cannot forge one.
+#[derive(Debug)]
+pub struct ProductExecutionGrant {
+    admitted: ProductKind,
+}
+
+impl ProductExecutionGrant {
+    /// Crate-internal mint. Reachable only from the admission carve and
+    /// the retained registry-route orchestration.
+    pub(crate) fn mint(admitted: ProductKind) -> Self {
+        Self { admitted }
+    }
+
+    /// Test-only mint so backend integration tests can drive a product
+    /// backend directly without composing a full admission.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn mint_for_tests(admitted: ProductKind) -> Self {
+        Self { admitted }
+    }
+
+    /// The product demand this grant admits.
+    #[must_use]
+    pub fn admits(&self, kind: ProductKind) -> bool {
+        self.admitted == kind
+    }
+
+    /// Consume this grant for the named product leg: the demand-match
+    /// check plus the by-value consumption in one step. A grant carved
+    /// for a different demand fails typed with the kind it actually
+    /// admitted — never a silent execution under the wrong demand.
+    pub(crate) fn consume_for(self, product: ProductKind) -> Result<(), ProductKind> {
+        if self.admitted == product {
+            Ok(())
+        } else {
+            Err(self.admitted)
+        }
+    }
+}
+
+/// The per-demand execution grants carved off ONE compile admission (or
+/// minted by a retained registry compatibility route): at most one grant
+/// per product-backend leg. Each slot is consume-once by value.
+#[derive(Debug, Default)]
+pub struct ProductExecutionGrants {
+    /// Grant for the admitted runtime product leg, when one was admitted.
+    pub runtime: Option<ProductExecutionGrant>,
+    /// Grant for the admitted IDE-projection leg, when one was admitted.
+    pub projection: Option<ProductExecutionGrant>,
+}
 
 /// Framework semantic epoch identity (catalog key component).
 ///
@@ -149,9 +218,12 @@ pub trait ProjectionBackend: Send + Sync + 'static {
     type Error: Send + Sync + 'static;
 
     /// Project the IDE companion over an already-admitted parse. Does not
-    /// re-parse. Must not plan or publish a runtime product.
+    /// re-parse. Must not plan or publish a runtime product. Consumes the
+    /// demand's execution grant by value: one grant drives one projection,
+    /// and a grant carved for a different demand fails typed.
     fn project_ide(
         &self,
+        grant: ProductExecutionGrant,
         source: &str,
         artifact: &Self::ParseArtifact,
         request: &Self::Request,
@@ -181,9 +253,12 @@ pub trait RuntimeCompilerBackend<E: FrameworkEpoch>: Send + Sync + 'static {
     /// Compile requested runtime products over an already-admitted parse.
     /// Does not re-parse. One request shares parse, semantic, plan, and emit
     /// prerequisites across selected runtime targets. Must not plan or
-    /// publish an IDE companion.
+    /// publish an IDE companion. Consumes the demand's execution grant by
+    /// value: one grant drives one runtime compile, and a grant carved for
+    /// a different demand fails typed.
     fn compile_runtime(
         &self,
+        grant: ProductExecutionGrant,
         source: &str,
         artifact: &Self::ParseArtifact,
         request: &Self::Request,
@@ -202,6 +277,11 @@ pub trait RuntimeCompilerBackend<E: FrameworkEpoch>: Send + Sync + 'static {
 /// must not require projection capability, and a missing required
 /// capability is a typed [`Self::AdmissionRefusal`] — never a fallback to
 /// another lane, framework, or compatibility compiler.
+///
+/// The issued admission is consume-once: the backend's execution entries
+/// take it by value, so one issuance drives at most one execution of the
+/// admitted demand, and the per-demand [`ProductExecutionGrant`]s carved
+/// off it are each consumed by the one product-backend leg they admit.
 pub trait FrameworkHostIntegrationBackend<E: FrameworkEpoch, HostE: HostEpoch>:
     Send + Sync + 'static
 {

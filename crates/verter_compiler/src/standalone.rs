@@ -58,7 +58,7 @@ use crate::compile_request::{
     CompileProduct, CompileRequest, CompileRequestError, FrameworkCompileRequest, FrameworkOption,
     ProductKind, SvelteOption,
 };
-use crate::framework_common::capability::FrameworkEpochId;
+use crate::framework_common::capability::{FrameworkEpochId, ProductExecutionGrant};
 use crate::framework_common::catalog::{CatalogCapability, CatalogRow, ImmutableCapabilityCatalog};
 use crate::framework_common::generated_chunk::{
     compose_generated_chunk, GeneratedFragment, GeneratedUnit,
@@ -99,6 +99,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 use std::sync::OnceLock;
 use verter_css_syntax::CssDialect;
+use verter_debug_assert::verter_debug_assert;
 use verter_language::FrameworkAdapterId;
 
 /// Ephemeral, non-identity execution inputs for a Svelte compile — resolved
@@ -1853,13 +1854,26 @@ impl VueRuntimeBackend {
     /// (the neutral carrier option set rather than a canonical request), and
     /// the product is the per-block runtime bundle rather than an assembled
     /// artifact set — no composition or publication runs on this entry.
+    /// Consumes the runtime leg's execution grant by value; a grant carved
+    /// for a different demand fails closed typed.
     pub(crate) fn compile_bundle_runtime(
         &self,
+        grant: ProductExecutionGrant,
         source: &str,
         parsed: &ParsedSfc,
         opts: &RuntimeCompileOptions,
         alloc: &Allocator,
     ) -> Result<RuntimeCompileOutput, CompileUnsupported> {
+        let expected_runtime = if opts.ssr {
+            ProductKind::RuntimeServer
+        } else {
+            ProductKind::RuntimeClient
+        };
+        grant.consume_for(expected_runtime).map_err(|_| {
+            CompileUnsupported::ProductExecutionUngranted {
+                product: expected_runtime,
+            }
+        })?;
         record_runtime_backend_delegation();
         let extras = opts.vue_facts.as_ref();
         let macros = extras
@@ -1967,14 +1981,33 @@ impl SvelteRuntimeBackend {
     /// official-rejected runtime surface FAILS CLOSED with the typed
     /// product-free refusal, absorbing any diagnostics already collected on
     /// `bundle`.
+    ///
+    /// Consumes the runtime leg's execution grant by value. The demanded
+    /// runtime kind was exact-matched against the grant at the bundle
+    /// choke (the sole caller) before this entry runs; this error channel
+    /// carries only runtime-surface refusals, so the demand match is
+    /// re-checked here as a debug invariant rather than a second typed
+    /// arm.
     pub(crate) fn compile_bundle_runtime(
         &self,
+        grant: ProductExecutionGrant,
         source: &str,
         parsed: &ParsedSvelte,
         opts: &RuntimeCompileOptions,
         alloc: &Allocator,
         bundle: &mut RuntimeCompileOutput,
     ) -> Result<(), RuntimeSurfaceRefusal> {
+        // Consume the grant by value (always, in every profile); the
+        // demand-match verdict is precomputed into a let and only the
+        // inert bool rides the debug assertion.
+        let grant_admits_demand = grant
+            .consume_for(if opts.ssr {
+                ProductKind::RuntimeServer
+            } else {
+                ProductKind::RuntimeClient
+            })
+            .is_ok();
+        verter_debug_assert!(grant_admits_demand);
         record_runtime_backend_delegation();
         let runtime_opts = SvelteRuntimeOptions {
             filename: opts.filename.clone(),

@@ -1,10 +1,10 @@
 error[E0061]: this function takes 3 arguments but 4 arguments were supplied
-  --> tests/cases/compile-fail/register_frontend_does_not_take_epoch_value.rs:23:13
+  --> tests/cases/compile-fail/register_frontend_does_not_take_epoch_value.rs:30:13
    |
-23 |     let _ = TypedCapabilityRegistration::register_frontend::<VueSfcV3, _>(
+30 |     let _ = TypedCapabilityRegistration::register_frontend::<VueSfcV3, _>(
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
-26 |         "svelte",
+33 |         "svelte",
    |         -------- unexpected argument #3 of type `&'static str`
    |
 note: associated function defined here
@@ -14,18 +14,18 @@ note: associated function defined here
    |            ^^^^^^^^^^^^^^^^^
 help: remove the extra argument
    |
-25 -         LanguageId::new("vue"),
-26 -         "svelte",
-25 +         LanguageId::new("vue"),
+32 -         LanguageId::new("vue"),
+33 -         "svelte",
+32 +         LanguageId::new("vue"),
    |
 
 error[E0061]: this function takes 3 arguments but 4 arguments were supplied
-  --> tests/cases/compile-fail/register_frontend_does_not_take_epoch_value.rs:29:13
+  --> tests/cases/compile-fail/register_frontend_does_not_take_epoch_value.rs:36:13
    |
-29 |     let _ = TypedCapabilityRegistration::register_projection::<VueSfcV3, _>(
+36 |     let _ = TypedCapabilityRegistration::register_projection::<VueSfcV3, _>(
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ...
-32 |         "svelte",
+39 |         "svelte",
    |         -------- unexpected argument #3 of type `&'static str`
    |
 note: associated function defined here
@@ -35,7 +35,7 @@ note: associated function defined here
    |            ^^^^^^^^^^^^^^^^^^^
 help: remove the extra argument
    |
-31 -         LanguageId::new("vue"),
-32 -         "svelte",
-31 +         LanguageId::new("vue"),
+38 -         LanguageId::new("vue"),
+39 -         "svelte",
+38 +         LanguageId::new("vue"),
    |

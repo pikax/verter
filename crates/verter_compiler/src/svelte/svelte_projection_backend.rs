@@ -88,11 +88,19 @@ impl ProjectionBackend for SvelteProjectionBackend {
 
     fn project_ide(
         &self,
+        grant: crate::framework_common::capability::ProductExecutionGrant,
         source: &str,
         artifact: &FrameworkParseArtifact,
         request: &CompileRequest,
         _inputs: &SvelteProjectionInputs,
     ) -> Result<SvelteIdeCompanion, SvelteProjectionError> {
+        // Consume the demand's execution grant by value; a grant carved for
+        // a different demand fails typed before any projection work runs.
+        grant.consume_for(ProductKind::IdeCompanion).map_err(|_| {
+            SvelteProjectionError::Unsupported(CompileUnsupported::ProductExecutionUngranted {
+                product: ProductKind::IdeCompanion,
+            })
+        })?;
         require_ide_only(request)?;
         let Some(parsed) = SvelteCarrierCompiler.parsed_svelte(artifact) else {
             return Err(no_ide());

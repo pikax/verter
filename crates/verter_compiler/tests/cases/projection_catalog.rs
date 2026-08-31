@@ -134,6 +134,14 @@ fn produced_bundle(
     }
 }
 
+/// Test-minted consume-once projection grant (production carves grants off
+/// a host-issued admission).
+fn ide_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
+    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
+        verter_compiler::compile_request::ProductKind::IdeCompanion,
+    )
+}
+
 #[test]
 fn built_in_projection_catalog_installs_vue_and_svelte_rows() {
     let catalog = built_in_projection_catalog();
@@ -196,6 +204,7 @@ fn unknown_epoch_is_a_catalog_miss_not_a_projection() {
     let reminted = artifact.remint_epoch_for_tests("unknown-epoch");
     let _ = take_projection_producer_invocations();
     let err = project_ide_from_catalog(
+        ide_grant(),
         &reminted,
         VUE_SIMPLE,
         &vue_ide_request("Miss.vue"),
@@ -221,6 +230,7 @@ fn catalog_vue_projection_matches_the_vue_backend() {
     let request = vue_ide_request("Catalog.vue");
     let via_backend = VueProjectionBackend
         .project_ide(
+            ide_grant(),
             VUE_SIMPLE,
             &artifact,
             &request,
@@ -229,6 +239,7 @@ fn catalog_vue_projection_matches_the_vue_backend() {
         .expect("vue backend");
     let _ = take_projection_producer_invocations();
     let via_catalog = project_ide_from_catalog(
+        ide_grant(),
         &artifact,
         VUE_SIMPLE,
         &request,
@@ -259,14 +270,16 @@ fn catalog_svelte_projection_matches_the_svelte_backend() {
     let request = svelte_ide_request("Catalog.svelte");
     let via_backend = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SVELTE_SIMPLE,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("svelte backend");
     let _ = take_projection_producer_invocations();
     let via_catalog = project_ide_from_catalog(
+        ide_grant(),
         &artifact,
         SVELTE_SIMPLE,
         &request,
@@ -289,6 +302,7 @@ fn vue_compile_ide_delegates_to_the_catalog_backend_once() {
     let request = vue_ide_request("Ide.vue");
     let via_backend = VueProjectionBackend
         .project_ide(
+            ide_grant(),
             VUE_SIMPLE,
             &artifact,
             &request,
@@ -319,10 +333,11 @@ fn svelte_compile_ide_delegates_to_the_catalog_backend_once() {
     let request = svelte_ide_request("Ide.svelte");
     let via_backend = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SVELTE_SIMPLE,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("svelte backend");
     let _ = take_projection_producer_invocations();
@@ -345,6 +360,7 @@ fn vue_compile_bundle_ide_product_delegates_to_the_catalog_backend_once() {
     let request = vue_ide_request("Bundle.vue");
     let via_backend = VueProjectionBackend
         .project_ide(
+            ide_grant(),
             VUE_SIMPLE,
             &artifact,
             &request,
@@ -385,10 +401,11 @@ fn svelte_compile_bundle_ide_product_delegates_to_the_catalog_backend_once() {
     let request = svelte_ide_request("Bundle.svelte");
     let via_backend = SvelteProjectionBackend
         .project_ide(
+            ide_grant(),
             SVELTE_SIMPLE,
             &artifact,
             &request,
-            &SvelteProjectionInputs::default(),
+            &SvelteProjectionInputs,
         )
         .expect("svelte backend");
     let _ = take_projection_producer_invocations();
@@ -429,6 +446,7 @@ fn vue_ide_only_compile_bundle_diagnostics_equal_catalog_companion() {
     let artifact = registered_artifact("file:///dup-diag.vue", SOURCE, false);
     let request = vue_ide_request("DupDiag.vue");
     let companion = project_ide_from_catalog(
+        ide_grant(),
         &artifact,
         SOURCE,
         &request,
@@ -558,6 +576,7 @@ fn vue_compile_bundle_runtime_and_ide_merges_unique_diagnostics() {
     );
 
     let companion = project_ide_from_catalog(
+        ide_grant(),
         &artifact,
         SOURCE,
         &request,

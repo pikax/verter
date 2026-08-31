@@ -162,7 +162,31 @@ fn compile_via_backend_with_inputs(
     request: &CompileRequest,
     inputs: &VueRuntimeInputs,
 ) -> Result<verter_compiler::standalone::DirectCompileOutput, VueRuntimeError> {
-    RuntimeCompilerBackend::compile_runtime(&VueRuntimeBackend, source, artifact, request, inputs)
+    RuntimeCompilerBackend::compile_runtime(
+        &VueRuntimeBackend,
+        runtime_grant_for(request),
+        source,
+        artifact,
+        request,
+        inputs,
+    )
+}
+
+/// Test-minted consume-once runtime grant matching the request's demanded
+/// runtime kind (production carves grants off a host-issued admission).
+fn runtime_grant_for(
+    request: &CompileRequest,
+) -> verter_compiler::framework_common::ProductExecutionGrant {
+    let kind = if request
+        .products()
+        .iter()
+        .any(|p| p.kind() == ProductKind::RuntimeServer)
+    {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    };
+    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(kind)
 }
 
 fn selected_style(code: &str) -> RuntimeBlockContentInput {
@@ -292,6 +316,40 @@ fn assert_runtime_parity(
         assert_eq!(backend_style.scope_hash, standalone_style.scope_hash);
         assert_eq!(backend_style.has_global, standalone_style.has_global);
     }
+}
+
+/// A grant carved for a different demand refuses typed before any
+/// compile work runs — the demand match is part of consumption.
+#[test]
+fn wrong_demand_grant_refuses_runtime_typed() {
+    let artifact = registered_artifact("file:///wrong-grant.vue", SIMPLE);
+    let request = runtime_request(
+        "Wrong.vue",
+        vec![client_product(false, None)],
+        VueCompileRequest::default(),
+        false,
+    );
+    let projection_grant = verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
+        ProductKind::IdeCompanion,
+    );
+    let err = RuntimeCompilerBackend::compile_runtime(
+        &VueRuntimeBackend,
+        projection_grant,
+        SIMPLE,
+        &artifact,
+        &request,
+        &default_inputs(),
+    )
+    .expect_err("a projection grant must not drive the runtime leg");
+    assert!(
+        matches!(
+            err,
+            VueRuntimeError::ExecutionUngranted {
+                product: ProductKind::RuntimeClient,
+            }
+        ),
+        "expected the typed ungranted refusal, got {err:?}"
+    );
 }
 
 #[test]
@@ -1655,6 +1713,7 @@ fn vue_runtime_error_variants_are_runtime_only() {
             VueRuntimeError::ProfileMismatch => "profile",
             VueRuntimeError::FrameworkMismatch => "framework",
             VueRuntimeError::Direct(_) => "direct",
+            VueRuntimeError::ExecutionUngranted { .. } => "ungranted",
         }
     }
     assert_eq!(classify(VueRuntimeError::BlockContentUnavailable), "block");

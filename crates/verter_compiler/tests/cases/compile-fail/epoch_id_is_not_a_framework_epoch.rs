@@ -32,7 +32,14 @@ impl RuntimeCompilerBackend<FrameworkEpochId> for RuntimeCapable {
     type Error = ();
     type Output = ();
 
-    fn compile_runtime(&self, _: &str, _: &(), _: &(), _: &()) -> Result<(), ()> {
+    fn compile_runtime(
+        &self,
+        _: verter_compiler::framework_common::ProductExecutionGrant,
+        _: &str,
+        _: &(),
+        _: &(),
+        _: &(),
+    ) -> Result<(), ()> {
         Ok(())
     }
 }

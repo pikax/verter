@@ -954,6 +954,7 @@ pub struct InstalledIdeCompanion {
 #[derive(Clone, Copy)]
 pub struct InstalledProjectionBackend {
     project_ide_fn: fn(
+        super::capability::ProductExecutionGrant,
         &str,
         &FrameworkParseArtifact,
         &CompileRequest,
@@ -979,6 +980,7 @@ impl std::fmt::Debug for InstalledProjectionBackend {
 impl InstalledProjectionBackend {
     const fn new(
         project_ide_fn: fn(
+            super::capability::ProductExecutionGrant,
             &str,
             &FrameworkParseArtifact,
             &CompileRequest,
@@ -988,9 +990,11 @@ impl InstalledProjectionBackend {
         Self { project_ide_fn }
     }
 
-    /// Project the IDE companion from the catalog-selected row.
+    /// Project the IDE companion from the catalog-selected row. Consumes
+    /// the projection leg's execution grant by value.
     pub fn project_ide(
         &self,
+        grant: super::capability::ProductExecutionGrant,
         source: &str,
         artifact: &FrameworkParseArtifact,
         request: &CompileRequest,
@@ -998,7 +1002,7 @@ impl InstalledProjectionBackend {
     ) -> Result<InstalledIdeCompanion, CompileUnsupported> {
         #[cfg(any(test, feature = "test-support"))]
         PROJECTION_PRODUCER_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
-        (self.project_ide_fn)(source, artifact, request, inputs)
+        (self.project_ide_fn)(grant, source, artifact, request, inputs)
     }
 }
 
@@ -1036,12 +1040,14 @@ pub fn take_projection_producer_invocations() -> u64 {
 }
 
 fn vue_project_ide(
+    grant: super::capability::ProductExecutionGrant,
     source: &str,
     artifact: &FrameworkParseArtifact,
     request: &CompileRequest,
     inputs: &ProjectionCatalogInputs,
 ) -> Result<InstalledIdeCompanion, CompileUnsupported> {
     match VueProjectionBackend.project_ide(
+        grant,
         source,
         artifact,
         request,
@@ -1072,12 +1078,19 @@ fn vue_project_ide(
 }
 
 fn svelte_project_ide(
+    grant: super::capability::ProductExecutionGrant,
     source: &str,
     artifact: &FrameworkParseArtifact,
     request: &CompileRequest,
     _inputs: &ProjectionCatalogInputs,
 ) -> Result<InstalledIdeCompanion, CompileUnsupported> {
-    match SvelteProjectionBackend.project_ide(source, artifact, request, &SvelteProjectionInputs) {
+    match SvelteProjectionBackend.project_ide(
+        grant,
+        source,
+        artifact,
+        request,
+        &SvelteProjectionInputs,
+    ) {
         Ok(companion) => Ok(InstalledIdeCompanion {
             ide: companion.ide,
             diagnostics: companion
@@ -1168,6 +1181,7 @@ pub fn registered_projection_for(
 /// [`CompileUnsupported::NoIdeProjection`] — no frontend hop, no Vue/Svelte
 /// match, no silent empty companion.
 pub fn project_ide_from_catalog(
+    grant: super::capability::ProductExecutionGrant,
     artifact: &FrameworkParseArtifact,
     source: &str,
     request: &CompileRequest,
@@ -1177,7 +1191,7 @@ pub fn project_ide_from_catalog(
         .ok_or_else(|| CompileUnsupported::NoIdeProjection {
             adapter_id: artifact.adapter_id().clone(),
         })?
-        .project_ide(source, artifact, request, inputs)
+        .project_ide(grant, source, artifact, request, inputs)
 }
 
 fn catalog_miss_reject(

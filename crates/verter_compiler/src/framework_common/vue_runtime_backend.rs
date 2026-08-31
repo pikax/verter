@@ -63,6 +63,13 @@ pub struct VueRuntimeInputs {
 /// Typed Vue runtime refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VueRuntimeError {
+    /// The presented execution grant does not admit the requested runtime
+    /// product — the demand's admission evidence was carved for another
+    /// leg, so this compile never runs.
+    ExecutionUngranted {
+        /// The runtime product the request demanded.
+        product: ProductKind,
+    },
     /// Selected block content cannot be compiled truthfully.
     BlockContentUnavailable,
     /// Canonical request execution refused after parse (SSR × vapor, …).
@@ -109,12 +116,19 @@ impl RuntimeCompilerBackend<VueSfcV3> for VueRuntimeBackend {
 
     fn compile_runtime(
         &self,
+        grant: crate::framework_common::capability::ProductExecutionGrant,
         source: &str,
         artifact: &FrameworkParseArtifact,
         request: &CompileRequest,
         inputs: &VueRuntimeInputs,
     ) -> Result<DirectCompileOutput, VueRuntimeError> {
         require_runtime_only(request)?;
+        // Consume the demand's execution grant by value; a grant carved for
+        // a different demand fails typed before any compile work runs.
+        let expected = requested_runtime_kind(request);
+        grant
+            .consume_for(expected)
+            .map_err(|_| VueRuntimeError::ExecutionUngranted { product: expected })?;
         let Some(parsed) = VueCarrierCompiler.parsed_sfc(artifact) else {
             return Err(VueRuntimeError::UnusableParse);
         };
@@ -176,6 +190,20 @@ fn requested_vue_syntax_profile(
 
     syntax_profile_id_for(&FileLanguage::vue(), &options)
         .map_err(|_| VueRuntimeError::ProfileMismatch)
+}
+
+/// The single runtime kind an already-validated runtime-only request
+/// demands (a dual-kind request never reaches execution).
+fn requested_runtime_kind(request: &CompileRequest) -> ProductKind {
+    if request
+        .products()
+        .iter()
+        .any(|p| p.kind() == ProductKind::RuntimeServer)
+    {
+        ProductKind::RuntimeServer
+    } else {
+        ProductKind::RuntimeClient
+    }
 }
 
 fn require_runtime_only(request: &CompileRequest) -> Result<(), VueRuntimeError> {

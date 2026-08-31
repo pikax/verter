@@ -28,6 +28,14 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 
 const KITCHEN_SINK: &str = include_str!("../fixtures/kitchen-sink.vue");
 
+/// Test-minted consume-once projection grant (production carves grants off
+/// a host-issued admission).
+fn ide_grant() -> verter_compiler::framework_common::ProductExecutionGrant {
+    verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
+        ProductKind::IdeCompanion,
+    )
+}
+
 const SIMPLE: &str = concat!(
     "<script setup lang=\"ts\">\n",
     "const count = 1;\n",
@@ -123,6 +131,34 @@ fn projected_template(code: &str) -> RuntimeBlockContentInput {
     }
 }
 
+/// A grant carved for a different demand refuses typed before any
+/// projection work runs — the demand match is part of consumption.
+#[test]
+fn wrong_demand_grant_refuses_projection_typed() {
+    let artifact = registered_artifact("file:///wrong-grant.vue", SIMPLE);
+    let runtime_grant = verter_compiler::framework_common::ProductExecutionGrant::mint_for_tests(
+        ProductKind::RuntimeClient,
+    );
+    let err = VueProjectionBackend
+        .project_ide(
+            runtime_grant,
+            SIMPLE,
+            &artifact,
+            &ide_only_request("Wrong.vue", false),
+            &VueProjectionInputs::default(),
+        )
+        .expect_err("a runtime grant must not drive the projection leg");
+    assert!(
+        matches!(
+            err,
+            VueProjectionError::Unsupported(CompileUnsupported::ProductExecutionUngranted {
+                product: ProductKind::IdeCompanion,
+            })
+        ),
+        "expected the typed ungranted refusal, got {err:?}"
+    );
+}
+
 #[test]
 fn vue_projection_catalog_row_binds_vue_adapter_identity() {
     let row = vue_projection_backend_registration();
@@ -157,6 +193,7 @@ fn vue_ide_projection_matches_compile_ide_on_kitchen_sink() {
     let request = ide_only_request("Kitchen.vue", !opts.skip_source_map);
     let via_backend = VueProjectionBackend
         .project_ide(
+            ide_grant(),
             KITCHEN_SINK,
             &artifact,
             &request,
@@ -177,7 +214,7 @@ fn vue_ide_projection_matches_compile_ide_on_kitchen_sink() {
             .source_map
             .declared_space_tokens
     );
-    assert_eq!(via_backend.ide.is_jsx, false);
+    assert!(!via_backend.ide.is_jsx);
     assert!(!via_backend.ide.code.is_empty());
 }
 
@@ -186,10 +223,22 @@ fn vue_ide_projection_is_deterministic() {
     let artifact = registered_artifact("file:///simple.vue", SIMPLE);
     let request = ide_only_request("Simple.vue", true);
     let first = VueProjectionBackend
-        .project_ide(SIMPLE, &artifact, &request, &VueProjectionInputs::default())
+        .project_ide(
+            ide_grant(),
+            SIMPLE,
+            &artifact,
+            &request,
+            &VueProjectionInputs::default(),
+        )
         .expect("first");
     let second = VueProjectionBackend
-        .project_ide(SIMPLE, &artifact, &request, &VueProjectionInputs::default())
+        .project_ide(
+            ide_grant(),
+            SIMPLE,
+            &artifact,
+            &request,
+            &VueProjectionInputs::default(),
+        )
         .expect("second");
     assert_eq!(first.ide.code, second.ide.code);
     assert_eq!(first.ide.source_map, second.ide.source_map);
@@ -232,7 +281,13 @@ fn vue_ide_projection_refuses_a_foreign_artifact() {
     };
     let request = ide_only_request("Foreign.vue", true);
     let err = VueProjectionBackend
-        .project_ide(source, &svelte, &request, &VueProjectionInputs::default())
+        .project_ide(
+            ide_grant(),
+            source,
+            &svelte,
+            &request,
+            &VueProjectionInputs::default(),
+        )
         .expect_err("foreign artifact has no Vue parse");
     match err {
         VueProjectionError::Unsupported(CompileUnsupported::NoIdeProjection { adapter_id }) => {
@@ -248,6 +303,7 @@ fn vue_ide_projection_refuses_source_that_does_not_match_the_admitted_artifact()
     let request = ide_only_request("Simple.vue", true);
     let err = VueProjectionBackend
         .project_ide(
+            ide_grant(),
             "<script setup>const n = 2</script>",
             &artifact,
             &request,
@@ -330,6 +386,7 @@ fn vue_ide_projection_binds_request_syntax_profile_to_admitted_artifact() {
             },
         );
         let outcome = VueProjectionBackend.project_ide(
+            ide_grant(),
             case.source,
             &artifact,
             &request,
@@ -448,7 +505,13 @@ fn vue_ide_projection_refuses_a_runtime_product_request() {
     )
     .expect("runtime request constructs");
     let err = VueProjectionBackend
-        .project_ide(SIMPLE, &artifact, &request, &VueProjectionInputs::default())
+        .project_ide(
+            ide_grant(),
+            SIMPLE,
+            &artifact,
+            &request,
+            &VueProjectionInputs::default(),
+        )
         .expect_err("runtime product is not an IDE projection");
     match err {
         VueProjectionError::NotIdeOnly { unexpected } => {
@@ -488,6 +551,7 @@ fn vue_ide_projection_supplied_template_matches_compile_ide_without_a_runtime_pr
     ));
     let via_backend = VueProjectionBackend
         .project_ide(
+            ide_grant(),
             source,
             &artifact,
             &request,
@@ -539,7 +603,13 @@ fn vue_ide_projection_carrier_diagnostics_use_the_carrier_source_space() {
     let request = ide_only_request("CarrierDiag.vue", true);
     let (carrier_token, _) = RuntimeOutputDescriptor::carrier_source(source);
     let via_backend = VueProjectionBackend
-        .project_ide(source, &artifact, &request, &VueProjectionInputs::default())
+        .project_ide(
+            ide_grant(),
+            source,
+            &artifact,
+            &request,
+            &VueProjectionInputs::default(),
+        )
         .expect("carrier diagnostics");
     assert!(
         !via_backend.diagnostics.is_empty(),
@@ -565,6 +635,7 @@ fn vue_ide_projection_tags_selected_template_diagnostics_with_selected_source_sp
     let (carrier_token, _) = RuntimeOutputDescriptor::carrier_source(source);
     let via_backend = VueProjectionBackend
         .project_ide(
+            ide_grant(),
             source,
             &artifact,
             &request,
@@ -628,6 +699,7 @@ fn vue_ide_projection_plain_script_external_template_is_typed_unavailable() {
     let request = ide_only_request("ExternalPlain.vue", true);
     let err = VueProjectionBackend
         .project_ide(
+            ide_grant(),
             source,
             &artifact,
             &request,
@@ -665,7 +737,13 @@ fn vue_ide_projection_refuses_an_analysis_product_request() {
     )
     .expect("analysis request constructs");
     let err = VueProjectionBackend
-        .project_ide(SIMPLE, &artifact, &request, &VueProjectionInputs::default())
+        .project_ide(
+            ide_grant(),
+            SIMPLE,
+            &artifact,
+            &request,
+            &VueProjectionInputs::default(),
+        )
         .expect_err("analysis is not an IDE projection");
     match err {
         VueProjectionError::NotIdeOnly { unexpected } => {
