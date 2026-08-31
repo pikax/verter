@@ -10,8 +10,10 @@
  *     so a STALE green summary from a prior run can never false-green a CURRENT
  *     zero-exit crash that writes no fresh summary; and
  *   - {@link enforceRunSummary}: fail on an ordinary test failure, an unmanifested
- *     pending row, a MISSING summary (a zero-exit host crash), or a 0-test execution.
- *     Required parity runs may account an exact row as an explicit product gap.
+ *     pending row in an exact capability run, a MISSING summary (a zero-exit
+ *     host crash), or a vacuous execution. Required parity runs may account an
+ *     exact row as an explicit product gap. Legacy multi-fixture suites may
+ *     report inapplicable rows as pending, but must still prove a real pass.
  *
  * Split out of `runTests.ts` (whose `main()` auto-runs) so the oracle is unit-testable
  * without launching the editor host; the poll window is injectable so the missing-summary
@@ -132,8 +134,8 @@ export interface EnforceRunSummaryOptions {
 /**
  * Enforce the mocha run summary as the authoritative pass/fail oracle. Throws — so the
  * caller counts a fixture failure — when the summary reports an unclassified failure,
- * an unmanifested pending row, when the summary is MISSING, or when it reports a
- * 0-test execution. The
+ * an unmanifested pending row in an exact capability run, when the summary is
+ * MISSING, or when it reports a vacuous execution. The
  * delete-before-run (`clearRunArtifacts`) guarantees any summary observed here was
  * written by THIS run, never a stale prior-run leftover.
  */
@@ -245,8 +247,11 @@ export async function enforceRunSummary(
     throw new Error(`${label}: run executed 0 tests (vacuous pass refused)`);
   }
   const pending = summary.pendingTestIds ?? [];
-  if (!opts.allowedPendingTestIds && pending.length > 0) {
+  if (opts.requiredTestIds && !opts.allowedPendingTestIds && pending.length > 0) {
     throw new Error(`${label}: pending test ID(s) in required run: ${pending.join(", ")}`);
+  }
+  if (!opts.requiredTestIds && (summary.passedTestIds?.length ?? 0) === 0) {
+    throw new Error(`${label}: run reported no passing test IDs (vacuous pass refused)`);
   }
   if (opts.allowedPendingTestIds) {
     const allowedCounts = countIds(opts.allowedPendingTestIds);

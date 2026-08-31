@@ -39,7 +39,7 @@ describe("clearRunArtifacts", () => {
 
 describe("enforceRunSummary stale/missing robustness", () => {
   it("refuses a current run with no fresh summary after deleting a stale green summary", async () => {
-    writeSummary({ failures: 0, executed: 3 });
+    writeSummary({ failures: 0, executed: 3, passedTestIds: ["stale pass"] });
     clearRunArtifacts(logFile);
 
     await expect(
@@ -48,7 +48,7 @@ describe("enforceRunSummary stale/missing robustness", () => {
   });
 
   it("demonstrates that an uncleared stale green summary would be accepted", async () => {
-    writeSummary({ failures: 0, executed: 3 });
+    writeSummary({ failures: 0, executed: 3, passedTestIds: ["stale pass"] });
 
     await expect(
       enforceRunSummary(logFile, "editor-owned-project@shared-tsgo", { pollMs: 0 }),
@@ -96,13 +96,13 @@ describe("enforceRunSummary result semantics", () => {
   });
 
   it("passes a clean summary with executed tests", async () => {
-    writeSummary({ failures: 0, executed: 4 });
+    writeSummary({ failures: 0, executed: 4, passedTestIds: ["activation starts"] });
     await expect(
       enforceRunSummary(logFile, "editor-owned-project@shared-tsgo", { pollMs: 0 }),
     ).resolves.toBeUndefined();
   });
 
-  it("refuses pending tests even when the run has no capability manifest", async () => {
+  it("allows fixture-inapplicable pending rows only when an unmanifested run has a real pass", async () => {
     writeSummary({
       failures: 0,
       executed: 2,
@@ -112,7 +112,17 @@ describe("enforceRunSummary result semantics", () => {
 
     await expect(
       enforceRunSummary(logFile, "single-project@tsserver", { pollMs: 0 }),
-    ).rejects.toThrow(/pending test.*definition from barrel file/i);
+    ).resolves.toBeUndefined();
+
+    writeSummary({
+      failures: 0,
+      executed: 1,
+      passedTestIds: [],
+      pendingTestIds: ["fixture-specific optional row"],
+    });
+    await expect(
+      enforceRunSummary(logFile, "single-project@tsserver", { pollMs: 0 }),
+    ).rejects.toThrow(/no passing test IDs/i);
   });
 
   it("accepts only the exact explicitly allowed pending manifest", async () => {
@@ -365,6 +375,7 @@ describe("enforceRunSummary result semantics", () => {
     writeSummary({
       failures: 0,
       executed: 2,
+      passedTestIds: ["svelte.clean-diagnostics.daily"],
       fixture: "svelte-parity",
       loadedFiles: ["parity/svelte/daily.test.js", "parity/svelte/matrix.test.js"],
     });
@@ -401,6 +412,7 @@ describe("enforceRunSummary result semantics", () => {
     writeSummary({
       failures: 0,
       executed: 1,
+      passedTestIds: ["vue.clean-diagnostics.daily"],
       fixture: "vue-parity",
       loadedFiles: ["parity/vue/daily.test.js", "parity/vue/daily.test.js"],
     });
@@ -416,6 +428,7 @@ describe("enforceRunSummary result semantics", () => {
     writeSummary({
       failures: 0,
       executed: 1,
+      passedTestIds: ["svelte.clean-diagnostics.daily"],
       fixture: "svelte-parity",
       loadedFiles: ["parity/svelte/daily.test.js", "parity/svelte/daily.test.js"],
     });

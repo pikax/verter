@@ -34761,6 +34761,84 @@ async fn rename_still_covers_the_full_authored_set_when_the_provider_answers() {
     drop(service);
 }
 
+/// Svelte's generated TypeScript surface can repeat a typed local in synthetic
+/// component scaffolding. The provider correctly includes that generated-only
+/// occurrence in its rename answer, but no source-map range exists for it. A
+/// conservative authored-token inventory must prove the real source transaction
+/// complete so this synthetic same-companion drop does not veto a valid rename.
+#[tokio::test(flavor = "multi_thread")]
+async fn svelte_typed_local_rename_ignores_only_generated_occurrence_after_full_source_coverage() {
+    const SOURCE: &str = "<script lang=\"ts\">\ninterface ContractValue { label: string; count: number }\nlet typedValue: ContractValue = { label: \"typed\", count: 1 };\nfunction renderTyped(): string { return `${typedValue.label}:${typedValue.count}`; }\n</script>\n<button onclick={renderTyped}>{typedValue.label}</button>\n";
+    let app_path = "src/App.svelte";
+    let (_temp, service, drain_handle, provider, workspace_id) =
+        make_definition_test_server_with_kind(
+            &[(app_path, "svelte", SOURCE)],
+            crate::TypeProviderKind::Tsgo,
+        )
+        .await;
+    let server = service.inner();
+    let uri = workspace_uri(&workspace_id, app_path);
+    server.ensure_current_file_synced(&uri).await;
+    server.publish_import_dependencies_settled(&uri).await;
+
+    let position = find_document_position(server, &uri, "typedValue", 0);
+    let ctx = synced_type_provider_context(server, &uri).await;
+    let query_offset = merge::carrier_position_to_tsx_offset_validated(
+        &position,
+        &ctx.carrier_line_index,
+        &ctx.mapper,
+        &ctx.tsx_line_index,
+    )
+    .expect("the declaration maps into the Svelte IDE surface");
+    let mut provider_locations = authored_token_ranges(SOURCE, "typedValue")
+        .into_iter()
+        .map(|(start_line, start_character, _, _)| {
+            let start = merge::carrier_position_to_tsx_offset_validated(
+                &Position::new(start_line, start_character),
+                &ctx.carrier_line_index,
+                &ctx.mapper,
+                &ctx.tsx_line_index,
+            )
+            .expect("every authored typedValue occurrence maps into the Svelte IDE surface");
+            crate::type_provider::protocol::RenameLocation {
+                path: ctx.tsx_path.clone(),
+                start,
+                end: start + "typedValue".len() as u32,
+            }
+        })
+        .collect::<Vec<_>>();
+    provider_locations.push(crate::type_provider::protocol::RenameLocation {
+        path: ctx.tsx_path.clone(),
+        start: ctx.tsx_content.len() as u32 + 100,
+        end: ctx.tsx_content.len() as u32 + 100 + "typedValue".len() as u32,
+    });
+    provider.set_rename_locations(&ctx.tsx_path, query_offset, provider_locations);
+
+    let edit = super::nav_features_navigation::handle_rename(
+        server,
+        RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            new_name: "renamedValue".into(),
+            work_done_progress_params: Default::default(),
+        },
+    )
+    .await
+    .expect("rename request should succeed")
+    .expect("full authored coverage must admit the rename despite generated-only scaffolding");
+
+    assert_eq!(
+        rename_edit_ranges(&edit, &uri),
+        authored_token_ranges(SOURCE, "typedValue"),
+        "the admitted rename must still cover exactly every authored occurrence"
+    );
+
+    drain_handle.abort();
+    drop(service);
+}
+
 /// CSS class rename is a Verter-native surface with NO TypeScript correlate:
 /// the provider legitimately yields nothing for it, and the completeness gate
 /// must not refuse it. Proves the gate keys on the provider-backed binding
