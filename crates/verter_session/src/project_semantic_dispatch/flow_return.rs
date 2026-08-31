@@ -25,6 +25,7 @@
 
 use std::sync::Arc;
 
+use super::call_resolve::union_self_roots;
 use super::dispatch_txn::flow_obligation_state::{
     FlowDemandCarrier, FlowEvaluationProvenance, ObservedFlowConvergence,
 };
@@ -256,6 +257,15 @@ pub(crate) mod flow_admission_fault_injection {
         /// `ProjectSemanticDispatch::inject_unproven_flow_member_for_tests`.
         pub(crate) unproven_flow_member:
             std::sync::Mutex<Option<crate::semantic_query::FlowReturnKey>>,
+
+        /// When armed (`Some`), every FLOW-root close records the
+        /// canonicals of the component carrier it composed — the
+        /// self-root union the root AND its batched members publish on —
+        /// whether or not the component then admits. An observation seam,
+        /// not a fault: a degraded component publishes no entry to read the
+        /// carrier back from, and its composition must still be provable.
+        /// See `ProjectSemanticDispatch::record_flow_root_carrier_for_tests`.
+        pub(crate) flow_root_carrier_probe: std::sync::Mutex<Option<Vec<std::sync::Arc<str>>>>,
     }
 
     /// RAII arm/disarm for one slot of one host's knobs.
@@ -1504,6 +1514,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }
     }
 
+    /// Test-only: record the component carrier a FLOW-root close composed
+    /// into the armed
+    /// [`flow_admission_fault_injection::FlowAdmissionFaultKnobs::flow_root_carrier_probe`]
+    /// slot (its canonicals, in composition order); a no-op while the
+    /// slot is disarmed.
+    #[cfg(any(test, feature = "test-support"))]
+    fn record_flow_root_carrier_for_tests(
+        &self,
+        roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    ) {
+        let mut probe = self
+            .ctx
+            .host_for_fact_tracer_install()
+            .flow_fault_injection
+            .flow_root_carrier_probe
+            .lock()
+            .expect("the flow-root carrier probe is never poisoned");
+        if let Some(recorded) = probe.as_mut() {
+            *recorded = roots
+                .iter()
+                .map(|(canonical, _)| Arc::clone(canonical))
+                .collect();
+        }
+    }
+
     /// Test-only: leave ONE unproven provisional flow member on the
     /// pending ledger beneath the OPEN machinery-root frame `root_idx`,
     /// so the root's close drains it exactly as an organic torn component
@@ -2358,20 +2393,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return FlowFramePop::RootClose(FlowRootClose::NoValue(failure));
         }
         // The published component's self-roots are the UNION of every
-        // drained member's roots across BOTH domains (the root's own file,
-        // every drained flow member's file, and every relation member's
-        // observed node roots): a cross-file edit invalidates the whole
-        // component.
+        // drained member's roots across ALL THREE domains (the root's own
+        // file, every drained flow member's file, every drained CALL
+        // member's observed roots — its callee, receiver, arguments and
+        // explicit type arguments, which can live in files no flow member
+        // touches — and every relation member's observed node roots), plus
+        // the members already completed under this root that the drain
+        // publishes on the same carrier: a cross-file edit invalidates the
+        // whole component.
         let mut scc_self_roots = self_roots.clone();
         for member in &flow_members {
-            for root in &member.self_roots {
-                if !scc_self_roots
-                    .iter()
-                    .any(|(canonical, _)| canonical == &root.0)
-                {
-                    scc_self_roots.push(root.clone());
-                }
-            }
+            union_self_roots(&mut scc_self_roots, &member.self_roots);
+        }
+        for (_, state, _) in &call_results {
+            union_self_roots(&mut scc_self_roots, &state.self_roots);
         }
         if !relation_members.is_empty() {
             let mut nodes = Vec::with_capacity(relation_members.len() * 2);
@@ -2379,15 +2414,31 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 nodes.push(member.key.source);
                 nodes.push(member.key.target);
             }
-            for root in self.observed_self_roots_from_nodes(nodes) {
-                if !scc_self_roots
-                    .iter()
-                    .any(|(canonical, _)| canonical == &root.0)
-                {
-                    scc_self_roots.push(root);
-                }
-            }
+            union_self_roots(
+                &mut scc_self_roots,
+                &self.observed_self_roots_from_nodes(nodes),
+            );
         }
+        {
+            let txn = self.dispatch_txn.borrow();
+            for member in &txn.flow.completed_members {
+                union_self_roots(&mut scc_self_roots, &member.self_roots);
+            }
+            for member in &txn.call.completed_members {
+                union_self_roots(&mut scc_self_roots, &member.self_roots);
+            }
+            let relation_nodes = txn
+                .relation
+                .completed_members
+                .iter()
+                .flat_map(|member| [member.key.source, member.key.target]);
+            union_self_roots(
+                &mut scc_self_roots,
+                &self.observed_self_roots_from_nodes(relation_nodes),
+            );
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        self.record_flow_root_carrier_for_tests(&scc_self_roots);
         // The drained members discharge through the shared coordinator
         // (no relation root — every relation member routes to the
         // completed batch; the flow members FINALIZE there — each enters

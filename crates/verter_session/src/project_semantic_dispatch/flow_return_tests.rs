@@ -6154,6 +6154,246 @@ function f(x: A | B, A: typeof B) {
     });
 }
 
+/// Assert that an `instanceof` test over `A | B` establishes no narrowing
+/// and never warms: the join keeps BOTH class arms, the demand carries
+/// the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[track_caller]
+fn assert_instanceof_class_arms_gap_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+        panic!("{name}: the join is a union, got {expr:?}");
+    };
+    for class in ["A", "B"] {
+        assert!(
+            arms.iter().any(|arm| matches!(
+                arm,
+                verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+            )),
+            "{name}: no narrow is established through the constructor — the `{class}` arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "{name}: the constructor test degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable constructor binding never warms"
+    );
+}
+
+/// A same-file predicate's target is authored in the CALLEE's declaration
+/// scope — `isNum(x): x is T` names the MODULE alias `type T = number` —
+/// but the fact is consumed inside the CALLER's frame, whose binder
+/// environment interns the caller's own `<T extends number>`. Lowering
+/// the target there rebinds it to the caller's `T`: no arm of `string |
+/// number` is assignable to a type parameter, the target itself is
+/// assignable to the subject, so the narrow becomes `T` and `f` publishes
+/// `T | boolean` where the checker says `number | boolean` — complete and
+/// warm. The channel refuses a target the caller frame rebinds: the
+/// demand keeps the unnarrowed join, carries the typed gap, and holds
+/// zero candidates.
+#[test]
+fn generic_caller_binder_never_captures_a_predicate_target() {
+    const CANONICAL: &str = "/ws/caller-binder-predicate/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+type T = number;
+
+function isNum(x: unknown): x is T { return true }
+
+function f<T extends number>(x: string | number, _t: T) {
+  if (isNum(x)) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// `x instanceof A` narrows to the PREDICATE target of a static
+/// `[Symbol.hasInstance]` when the constructor's static side carries one
+/// — directly or through its heritage: with `static
+/// [Symbol.hasInstance](x: unknown): x is B` the checker narrows `A | B`
+/// to `B`, and `f` returns `B | boolean`. An owner-scope type reference
+/// for `A` narrows to the class instance type `A` instead — a
+/// wrong-complete `A | boolean` that would warm. Such a constructor is
+/// refused at lowering: both demands keep both class arms, carry the
+/// typed gap, and hold zero candidates.
+#[test]
+fn instanceof_with_symbol_has_instance_never_narrows_to_the_class_instance() {
+    const CANONICAL: &str = "/ws/instanceof-has-instance/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+class B { b = 1 }
+class A {
+  a = 1;
+  static [Symbol.hasInstance](x: unknown): x is B { return true }
+}
+class Base {
+  static [Symbol.hasInstance](x: unknown): x is B { return true }
+}
+class C extends Base { c = 1 }
+
+function direct(x: A | B) {
+  if (x instanceof A) return x;
+  return false;
+}
+
+function inherited(x: C | B) {
+  if (x instanceof C) return x;
+  return false;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_instanceof_class_arms_gap_unwarmed(dispatch, &host, CANONICAL, "direct");
+        let key = whole_return_key(dispatch, CANONICAL, "inherited");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = &expr else {
+            panic!("inherited: the join is a union, got {expr:?}");
+        };
+        for class in ["C", "B"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Ref { name, .. } if name.as_ref() == class
+                )),
+                "inherited: the `{class}` arm survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "inherited: the constructor test degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "inherited: an inherited `Symbol.hasInstance` never warms"
+        );
+    });
+}
+
+/// A DISCARDED sequence operand's assertion call narrows everything after
+/// it: `(assertString(x), x)` is `string` in the checker. Lowering only
+/// the last operand and blanket-certifying the discarded call
+/// decided-above published the unnarrowed `string | number` complete and
+/// warm. The discarded assertion is unprovable here: the demand keeps the
+/// unnarrowed join, carries the typed gap, and holds zero candidates.
+#[test]
+fn discarded_sequence_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  return (assertString(x), x);
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_control_callee_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A FLOW-rooted component's carrier — the self-root union the root and
+/// its batched members publish on — covers every file any drained member
+/// observed, the CALL members included. Here `seed`'s initializer in a
+/// THIRD file calls back into the pending root, so its call drains as a
+/// call member whose self-roots name that file (its program point and
+/// its argument node), while no flow or relation member of the component
+/// does: a carrier composed from the flow and relation members alone
+/// omits it. The component degrades (a program-expression hold has no
+/// value to resurrect the read with) and publishes nothing, so the
+/// composed carrier is read through the observation probe.
+///
+/// The explicit-type-argument spelling of the same omission
+/// (`bb<Arg>(n - 1)` with `Arg` imported from a third file) composes the
+/// same incomplete carrier, but its edit is already caught by the fact
+/// rail — the import's resolution facts — so it warms and invalidates
+/// correctly before and after the union; the third-file program point is
+/// the observation that only the union covers.
+#[test]
+fn flow_root_component_carrier_covers_call_member_roots() {
+    const A: &str = "/ws/scc-call-roots/a.ts";
+    const A_SRC: &str = r#"
+import { seed } from "/ws/scc-call-roots/c";
+
+export function a(n: number) {
+  if (n <= 0) return seed;
+  return 1;
+}
+"#;
+    const C: &str = "/ws/scc-call-roots/c.ts";
+    const C_SRC: &str = r#"
+import { a } from "/ws/scc-call-roots/a";
+
+export const seed = a(0);
+"#;
+
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, A, A_SRC);
+    upsert_ts(&host, C, C_SRC);
+    *host
+        .flow_fault_injection
+        .flow_root_carrier_probe
+        .lock()
+        .expect("the flow-root carrier probe is never poisoned") = Some(Vec::new());
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, A, "a");
+        let _ = execute_flow(dispatch, key);
+    });
+    let roots = host
+        .flow_fault_injection
+        .flow_root_carrier_probe
+        .lock()
+        .expect("the flow-root carrier probe is never poisoned")
+        .take()
+        .expect("the probe stays armed");
+    assert!(
+        !roots.is_empty(),
+        "the flow-root close composed and recorded a carrier"
+    );
+    for file in [A, C] {
+        assert!(
+            roots.iter().any(|root| root.as_ref() == file),
+            "the component carrier covers {file}: {roots:?}"
+        );
+    }
+}
+
 /// A mixed component's UNPROVEN deferred flow members poison the
 /// MACHINERY ROOT that consumed their values. The joint fixed point
 /// feeds the evaluated flow-member overrides into the call/relation

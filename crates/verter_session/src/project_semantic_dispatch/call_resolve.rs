@@ -2786,7 +2786,8 @@ fn tuple_suffix_target(
     }
 }
 
-fn union_self_roots(
+/// Union `source`'s self-roots into `target`, one root per canonical.
+pub(super) fn union_self_roots(
     target: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     source: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
 ) {

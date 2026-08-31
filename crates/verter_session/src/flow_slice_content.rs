@@ -2561,10 +2561,12 @@ struct Lowerer<'a> {
     /// gaps them.
     predicate_guard_call_spans: FxHashSet<verter_span::Span>,
     /// A narrowing position lowered inside the CURRENT statement — a
-    /// control-position test, an assertion statement — carried a fact
-    /// this half can neither certify result-independent nor back with
-    /// guard evidence (an unprovable control call, a call-instantiated
-    /// predicate target, an unprovable `instanceof` constructor): the
+    /// control-position test, an assertion statement, a sequence's
+    /// discarded operand — carried a fact this half can neither certify
+    /// result-independent nor back with guard evidence (an unprovable
+    /// control call, a predicate target the call site rebinds, an
+    /// unprovable `instanceof` constructor, an unprovable discarded
+    /// call): the
     /// statement loop drains this into a [`SliceStatement::Gap`]
     /// (`GuardNarrowing`) AHEAD of the statement — a typed degradation,
     /// never a silent certification. The `if` statement takes the flag
@@ -3096,7 +3098,7 @@ impl Lowerer<'_> {
         let Expression::Identifier(callee) = unwrap_parenthesized(&call.callee) else {
             return None;
         };
-        let (ordinal, _) = self.same_file_predicate(callee.name.as_str(), false)?;
+        let (ordinal, _) = self.same_file_predicate(callee.name.as_str(), false, call.span)?;
         let argument = call
             .arguments
             .get(ordinal)
@@ -4397,7 +4399,7 @@ impl Lowerer<'_> {
         if !matches!(self.resolve_name(name, callee.span), NameBinding::Free) {
             return SliceGuard::None;
         }
-        let Some((ordinal, Some(target))) = self.same_file_predicate(name, false) else {
+        let Some((ordinal, Some(target))) = self.same_file_predicate(name, false, call.span) else {
             return SliceGuard::None;
         };
         let Some(argument) = call
@@ -4442,7 +4444,57 @@ impl Lowerer<'_> {
         if !matches!(self.resolve_name(name, span), NameBinding::Free) {
             return false;
         }
-        self.same_file_class_declarations(name).len() == 1
+        let declarations = self.same_file_class_declarations(name);
+        let [class] = declarations.as_slice() else {
+            return false;
+        };
+        self.class_static_side_provably_plain(class, &mut Vec::new())
+    }
+
+    /// Whether a same-file top-level class's STATIC side provably declares
+    /// no `[Symbol.hasInstance]` — the one static member that changes what
+    /// `instanceof` narrows to. A static method, property or accessor of
+    /// that key whose type is a type predicate makes the checker narrow to
+    /// the PREDICATE's target instead of the class's instance type, and the
+    /// static side is inherited through the heritage chain. Any static
+    /// COMPUTED key can spell it (`static [key]` over `const key =
+    /// Symbol.hasInstance`), so a class declaring one is not provably
+    /// plain; nor is a class whose superclass is anything but a provably
+    /// plain same-file top-level class (a value binding, an import, a call
+    /// expression, an unresolvable heritage cycle). A top-level class name
+    /// is a duplicate identifier against any other same-name top-level
+    /// value, so "exactly one same-file class declaration" is the whole
+    /// binding proof at the top level.
+    fn class_static_side_provably_plain(
+        &self,
+        class: &oxc_ast::ast::Class<'_>,
+        visited: &mut Vec<oxc_span::Span>,
+    ) -> bool {
+        use oxc_ast::ast::ClassElement;
+        if visited.contains(&class.span) {
+            return false;
+        }
+        visited.push(class.span);
+        let own_side_plain = class.body.body.iter().all(|element| match element {
+            ClassElement::MethodDefinition(method) => !(method.r#static && method.computed),
+            ClassElement::PropertyDefinition(property) => !(property.r#static && property.computed),
+            ClassElement::AccessorProperty(accessor) => !(accessor.r#static && accessor.computed),
+            ClassElement::StaticBlock(_) | ClassElement::TSIndexSignature(_) => true,
+        });
+        if !own_side_plain {
+            return false;
+        }
+        match class.super_class.as_ref().map(unwrap_parenthesized) {
+            None => true,
+            Some(Expression::Identifier(base)) => {
+                let bases = self.same_file_class_declarations(base.name.as_str());
+                match bases.as_slice() {
+                    [base_class] => self.class_static_side_provably_plain(base_class, visited),
+                    _ => false,
+                }
+            }
+            Some(_) => false,
+        }
     }
 
     /// Every same-file top-level `class` DECLARATION with `name`, in
@@ -4586,12 +4638,13 @@ impl Lowerer<'_> {
 
     /// Read a SAME-FILE function declaration's return-type predicate:
     /// `x is T` (`asserts` false) or `asserts x is T` / a targetless
-    /// `asserts x` (`asserts` true). Returns the ordinal of the parameter
-    /// the predicate talks about and the target type lowered through the
-    /// frame gate (a BODY position — the frame's own type declarations are
-    /// in scope there, exactly like a declarator annotation); the target
-    /// is `None` for the targetless assertion spelling. `None` for the
-    /// whole read for any other signature spelling.
+    /// `asserts x` (`asserts` true), consumed at the call site `site`.
+    /// Returns the ordinal of the parameter the predicate talks about and
+    /// the target type lowered through the frame gate (a BODY position —
+    /// the frame's own type declarations are in scope there, exactly like
+    /// a declarator annotation); the target is `None` for the targetless
+    /// assertion spelling. `None` for the whole read for any other
+    /// signature spelling.
     ///
     /// The channel serves EXACTLY ONE PROVABLY CLOSED declaration
     /// ([`Self::closed_callee_declaration`]). An overload group (two or
@@ -4603,7 +4656,12 @@ impl Lowerer<'_> {
     /// same reason one level up: its checker-visible signature set may
     /// hold overloads this file never shows. A refused callee establishes
     /// no fact.
-    fn same_file_predicate(&self, name: &str, asserts: bool) -> Option<(usize, Option<GatedType>)> {
+    fn same_file_predicate(
+        &self,
+        name: &str,
+        asserts: bool,
+        site: oxc_span::Span,
+    ) -> Option<(usize, Option<GatedType>)> {
         let (function, predicate, annotation_span) = self.closed_predicate_annotation(name)?;
         if predicate.asserts != asserts {
             return None;
@@ -4611,16 +4669,23 @@ impl Lowerer<'_> {
         let target = match predicate.type_annotation.as_ref() {
             Some(target) => {
                 let lowered = lower_ts_type(&target.type_annotation, self.source);
+                // The target is authored in the CALLEE's declaration scope
+                // and consumed in the CALLER's frame, so it must be closed
+                // over names BOTH resolve identically — the module scope.
                 // A target naming a binding of the CALLEE's own declaration
                 // is instantiated by the CALL — `T` of `isSame<T>(x: T): x
                 // is T` binds to the argument's type; `typeof y` names the
                 // callee's own parameter — an inference this half does not
-                // perform. Lowering such a target in the CALLER's
-                // environment binds whatever the owner scope holds under
-                // that name (an unrelated `type T = number`), so the
-                // channel refuses it: no fact, and the call takes the typed
-                // guard-narrowing gap at its consumer.
-                if predicate_target_names_callee_binding(function, &lowered) {
+                // perform. A target naming a binding of the CALLER's frame
+                // (its own or an enclosing `<T>`, a body-local `type T`, a
+                // local `y` under a `typeof y` root) would REBIND at the
+                // call site: the caller's binder environment and lexical
+                // authority answer before the module's `type T = number`.
+                // Either way the channel refuses it: no fact, and the call
+                // takes the typed guard-narrowing gap at its consumer.
+                if predicate_target_names_callee_binding(function, &lowered)
+                    || self.predicate_target_names_caller_binding(&lowered, site)
+                {
                     return None;
                 }
                 Some(self.gate(lowered, annotation_span, &[]))
@@ -4664,23 +4729,58 @@ impl Lowerer<'_> {
     }
 
     /// Whether the provably closed same-file callee `name` declares an
-    /// `asserts x is T` whose target the predicate channel REFUSES as
-    /// call-instantiated ([`predicate_target_names_callee_binding`]).
-    /// The checker narrows the rest of the region through that assertion
-    /// and this half cannot apply it, so the statement degrades through
-    /// the typed guard-narrowing gap instead of lowering as a bare throw
-    /// point that leaves the subject silently unnarrowed.
-    fn assertion_target_is_call_instantiated(&self, name: &str) -> bool {
+    /// `asserts x is T` whose target the predicate channel REFUSES — as
+    /// call-instantiated ([`predicate_target_names_callee_binding`]) or
+    /// as rebound at the call site `site`
+    /// ([`Self::predicate_target_names_caller_binding`]). The checker
+    /// narrows the rest of the region through that assertion and this
+    /// half cannot apply it, so the statement degrades through the typed
+    /// guard-narrowing gap instead of lowering as a bare throw point that
+    /// leaves the subject silently unnarrowed.
+    fn assertion_target_is_refused(&self, name: &str, site: oxc_span::Span) -> bool {
         let Some((function, predicate, _)) = self.closed_predicate_annotation(name) else {
             return false;
         };
         predicate.asserts
             && predicate.type_annotation.as_ref().is_some_and(|target| {
-                predicate_target_names_callee_binding(
-                    function,
-                    &lower_ts_type(&target.type_annotation, self.source),
-                )
+                let lowered = lower_ts_type(&target.type_annotation, self.source);
+                predicate_target_names_callee_binding(function, &lowered)
+                    || self.predicate_target_names_caller_binding(&lowered, site)
             })
+    }
+
+    /// Whether a same-file predicate's TARGET, consumed at the call site
+    /// `site` of THIS frame, references a name the frame's own environment
+    /// binds — so that lowering it here would rebind it away from the
+    /// callee's declaration scope. A value root (`typeof y`) is rebound by
+    /// any frame binding of `y` (a parameter, a local, a capture); a type
+    /// name is rebound by a type parameter of this frame or any enclosing
+    /// frame (the composed binder environment interns those ahead of every
+    /// owner-scope alias), or by a frame-owned declaration in either
+    /// type-space meaning. A value-only local of a type name's spelling
+    /// binds nothing in type space and is transparent here.
+    fn predicate_target_names_caller_binding(
+        &self,
+        target: &TypeExpr,
+        site: oxc_span::Span,
+    ) -> bool {
+        let names = verter_type_expr::referenced_names(target);
+        if names
+            .value_roots
+            .iter()
+            .any(|root| !matches!(self.resolve_name(root, site), NameBinding::Free))
+        {
+            return true;
+        }
+        names.type_names.iter().any(|occurrence| {
+            let head = occurrence.head.as_str();
+            self.type_param_names
+                .iter()
+                .any(|binder| binder.as_ref() == head)
+                || self.captures.binder_names.contains(head)
+                || self.name_is_frame_bound(head, site, NameMeaning::Type, &[])
+                || self.name_is_frame_bound(head, site, NameMeaning::Namespace, &[])
+        })
     }
 
     /// The narrowable reference an expression NAMES: a static member
@@ -4798,7 +4898,7 @@ impl Lowerer<'_> {
                     _ => None,
                 };
                 let assertion = free_callee.and_then(|name| {
-                    let (ordinal, target) = self.same_file_predicate(name, true)?;
+                    let (ordinal, target) = self.same_file_predicate(name, true, call.span)?;
                     let argument = call
                         .arguments
                         .get(ordinal)
@@ -4806,15 +4906,15 @@ impl Lowerer<'_> {
                     let subject = self.narrow_subject_of(argument)?;
                     Some(SliceStatement::Assertion { subject, target })
                 });
-                // A closed same-file assertion whose target the CALL
-                // instantiates (`asserts x is T` on `assertSame<T>`) narrows
-                // in the checker but is refused by the predicate channel:
-                // the statement degrades through the typed gap rather than
-                // lowering as a throw point that leaves the subject
-                // silently unnarrowed.
+                // A closed same-file assertion whose target the predicate
+                // channel refuses (`asserts x is T` on `assertSame<T>`, or
+                // over a `T` this frame rebinds) narrows in the checker but
+                // cannot be applied here: the statement degrades through
+                // the typed gap rather than lowering as a throw point that
+                // leaves the subject silently unnarrowed.
                 if assertion.is_none()
                     && free_callee
-                        .is_some_and(|name| self.assertion_target_is_call_instantiated(name))
+                        .is_some_and(|name| self.assertion_target_is_refused(name, call.span))
                 {
                     self.control_test_gap = true;
                 }
@@ -4994,6 +5094,13 @@ impl Lowerer<'_> {
             // sequence through the leaf lowering answered a fabricated
             // `any` for it, clean and warm. Any other sequence keeps the
             // leaf lowering.
+            //
+            // A DISCARDED operand's call still RUNS, and an assertion
+            // call among them narrows the read that follows
+            // (`(assertString(x), x)` is `string`). Such a call is
+            // certified decided-above only when it provably establishes
+            // no narrowing; every other one flags the enclosing
+            // statement's guard-narrowing gap.
             Expression::SequenceExpression(sequence)
                 if sequence
                     .expressions
@@ -5004,10 +5111,10 @@ impl Lowerer<'_> {
                     .expressions
                     .last()
                     .expect("the guard proved a last operand");
-                // The DISCARDED operands' calls never feed the sequence's
-                // value (it is the last operand's): decided above.
                 for discarded in &sequence.expressions[..sequence.expressions.len() - 1] {
-                    self.record_decided_above_calls(discarded);
+                    if self.record_discarded_operand_calls(discarded) {
+                        self.control_test_gap = true;
+                    }
                 }
                 self.lower_expr(last, mode)
             }
@@ -5627,11 +5734,12 @@ impl Lowerer<'_> {
     /// position — see [`SliceContent::decided_above_call_spans`]. Called
     /// only by positions whose produced type PROVABLY does not derive
     /// from any call inside the expression: the leaf arms that passed
-    /// the fabricated-value gate, the optional-`any`-chain carrier, and
-    /// a sequence's discarded operands. Control-position tests take the
-    /// narrower [`Self::record_control_position_calls`] instead — a test
-    /// call can CONTROL the arms' narrowing, which this blanket recorder
-    /// cannot see.
+    /// the fabricated-value gate and the optional-`any`-chain carrier.
+    /// Control-position tests and a sequence's discarded operands take
+    /// the narrower [`Self::record_control_position_calls`] /
+    /// [`Self::record_discarded_operand_calls`] instead — a test call can
+    /// CONTROL the arms' narrowing and a discarded assertion call narrows
+    /// what follows it, which this blanket recorder cannot see.
     fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
         struct CallSpans<'s> {
             spans: &'s mut Vec<verter_span::Span>,
@@ -5680,6 +5788,42 @@ impl Lowerer<'_> {
     /// and the caller emits the typed `GuardNarrowing` gap: a degraded
     /// success, `ReturnOnly`, never a silently certified superset.
     fn record_control_position_calls(&mut self, test: &Expression<'_>) -> bool {
+        self.record_result_independent_calls(test, ResultIndependentPosition::ControlTest)
+    }
+
+    /// Record the RESULT-INDEPENDENT call / construct spans of one
+    /// DISCARDED sequence operand. The sequence's value never consumes
+    /// the operand, but the checker binds a call in that position into
+    /// the control flow (the left-hand side of a comma expression is a
+    /// potential assertion): an `asserts` callee narrows every read that
+    /// follows it. A discarded call is decided above ONLY when the
+    /// callee provably establishes no narrowing:
+    /// - a `new` construct (a construct signature is never an assertion);
+    /// - a bare-identifier callee resolving FREE to a PROVABLY CLOSED
+    ///   same-file declaration ([`Self::closed_callee_declaration`])
+    ///   whose return annotation is absent or is not an `asserts`
+    ///   predicate — assertion signatures are never inferred, so an
+    ///   unannotated closed declaration cannot assert, and a plain `x is
+    ///   T` predicate narrows nothing when its result is discarded.
+    ///
+    /// Every other discarded call — an imported, exported, script-global
+    /// or member callee, a closed `asserts` callee — is one this half can
+    /// neither certify nor evidence, so the operand returns `true` and
+    /// the caller flags the enclosing statement's typed `GuardNarrowing`
+    /// gap: a degraded success, never a silently certified superset.
+    fn record_discarded_operand_calls(&mut self, operand: &Expression<'_>) -> bool {
+        self.record_result_independent_calls(operand, ResultIndependentPosition::DiscardedOperand)
+    }
+
+    /// The shared scanner behind [`Self::record_control_position_calls`]
+    /// and [`Self::record_discarded_operand_calls`]: every call /
+    /// construct in `expr` is either certified decided-above under the
+    /// position's rule or reported unprovable (`true`).
+    fn record_result_independent_calls(
+        &mut self,
+        expr: &Expression<'_>,
+        position: ResultIndependentPosition,
+    ) -> bool {
         enum ControlCall {
             Construct(verter_span::Span),
             Call {
@@ -5710,7 +5854,7 @@ impl Lowerer<'_> {
             }
         }
         let mut scanner = ControlCalls { calls: Vec::new() };
-        scanner.visit_expression(test);
+        scanner.visit_expression(expr);
         let mut unprovable = false;
         for call in scanner.calls {
             let span = match call {
@@ -5726,12 +5870,8 @@ impl Lowerer<'_> {
                             && self
                                 .closed_callee_declaration(name)
                                 .is_some_and(|function| {
-                                    function.return_type.as_ref().is_some_and(|annotation| {
-                                        !matches!(
-                                            annotation.type_annotation,
-                                            TSType::TSTypePredicate(_)
-                                        )
-                                    })
+                                    position
+                                        .certifies_closed_return(function.return_type.as_deref())
                                 })
                     });
                     if !certified {
@@ -5866,6 +6006,40 @@ impl Lowerer<'_> {
                 ty,
                 shadowed: Arc::from(shadowed.into_boxed_slice()),
             }
+        }
+    }
+}
+
+/// A position whose calls never feed the demanded value, with the rule
+/// under which a PROVABLY CLOSED same-file callee's authored return
+/// annotation certifies a call there as establishing no narrowing.
+#[derive(Clone, Copy)]
+enum ResultIndependentPosition {
+    /// An `if` / ternary test: a predicate callee CONTROLS the arms'
+    /// narrowing, and an inferred boolean return can be an inferred
+    /// predicate, so only an authored NON-predicate annotation certifies.
+    ControlTest,
+    /// A sequence's discarded operand: only an `asserts` callee narrows
+    /// what follows, and assertion signatures are never inferred, so an
+    /// absent annotation or any non-`asserts` annotation certifies.
+    DiscardedOperand,
+}
+
+impl ResultIndependentPosition {
+    fn certifies_closed_return(
+        self,
+        annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
+    ) -> bool {
+        match self {
+            Self::ControlTest => annotation.is_some_and(|annotation| {
+                !matches!(annotation.type_annotation, TSType::TSTypePredicate(_))
+            }),
+            Self::DiscardedOperand => !annotation.is_some_and(|annotation| {
+                matches!(
+                    &annotation.type_annotation,
+                    TSType::TSTypePredicate(predicate) if predicate.asserts
+                )
+            }),
         }
     }
 }

@@ -860,6 +860,377 @@ fn instanceof_constructor_binds_through_the_frame_before_owner_scope() {
     assert_eq!(guard_gap_count(&closed), 0, "{closed:?}");
 }
 
+/// The body region of the ONE nested function value `name` returns.
+fn returned_nested_body(node: &SliceContent) -> &SliceRegion {
+    node.body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument: Some(SliceExpr::NestedFunctionValue { body, .. }),
+                ..
+            } => Some(body),
+            _ => None,
+        })
+        .expect("the function returns a nested function value")
+}
+
+/// The number of `if` statements of `region` guarded by a predicate fact.
+fn region_predicate_guard_count(region: &SliceRegion) -> usize {
+    region
+        .statements
+        .iter()
+        .filter(|statement| {
+            matches!(
+                statement,
+                SliceStatement::If {
+                    guard: SliceGuard::TypePredicate { .. },
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// The number of typed guard-narrowing gaps of `region`.
+fn region_guard_gap_count(region: &SliceRegion) -> usize {
+    region
+        .statements
+        .iter()
+        .filter(|statement| {
+            matches!(
+                statement,
+                SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing)
+            )
+        })
+        .count()
+}
+
+/// A same-file predicate's TARGET is authored in the CALLEE's declaration
+/// scope: `x is T` on a top-level `isNum` names the MODULE's `T`. The
+/// fact is consumed inside the CALLER's frame, whose binder environment
+/// interns the caller's own type parameters and whose lexical authority
+/// binds its body-local declarations first — so a target naming anything
+/// the CALLER binds (its own or an enclosing frame's `<T>`, a body-local
+/// `type T` / `class T`, a local value under a `typeof y` root) would
+/// rebind to the WRONG declaration: `isNum(x): x is T` over `type T =
+/// number` narrows `number | string` to `number` in the checker, and to
+/// the caller's `T extends number` here. The channel refuses every such
+/// target — guard and `asserts` spellings alike — and the position takes
+/// the typed gap. A caller binding an UNRELATED name, or a value-only
+/// local of the same name (a `const T` never shadows a type), keeps the
+/// guard.
+#[test]
+fn predicate_target_over_caller_bindings_never_resolves_in_the_caller_environment() {
+    const PRELUDE: &str = "export {};\ntype T = number;\nconst y = 1;\n\
+                           function isNum(x: unknown): x is T { return true }\n\
+                           function isY(x: unknown): x is typeof y { return true }\n";
+    let refused = [
+        (
+            "the caller's own type parameter",
+            "function f<T extends number>(x: number | string, _t: T) { if (isNum(x)) return x; return false }",
+        ),
+        (
+            "a body-local type alias",
+            "function f(x: number | string) { type T = string; if (isNum(x)) return x; return false }",
+        ),
+        (
+            "a body-local class",
+            "function f(x: number | string) { class T { t = 1 }; if (isNum(x)) return x; return false }",
+        ),
+        (
+            "a body-local value under the target's `typeof` root",
+            "function f(x: number | string) { const y = \"s\"; if (isY(x)) return x; return false }",
+        ),
+        (
+            "a parameter under the target's `typeof` root",
+            "function f(x: number | string, y: string) { if (isY(x)) return x; return false }",
+        ),
+    ];
+    for (case, caller) in refused {
+        let node = content_for(&format!("{PRELUDE}{caller}"), "f");
+        assert_eq!(
+            predicate_guard_count(&node),
+            0,
+            "{case}: a target the caller frame rebinds is never minted as a guard: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the control test gaps: {node:?}"
+        );
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: the predicate call is never certified: {node:?}"
+        );
+    }
+
+    let enclosing = content_for(
+        &format!(
+            "{PRELUDE}function outer<T extends number>() {{ \
+             return (x: number | string) => {{ if (isNum(x)) return x; return false }} }}"
+        ),
+        "outer",
+    );
+    let nested = returned_nested_body(&enclosing);
+    assert_eq!(
+        region_predicate_guard_count(nested),
+        0,
+        "an ENCLOSING frame's type parameter rebinds the target too: {enclosing:?}"
+    );
+    assert_eq!(
+        region_guard_gap_count(nested),
+        1,
+        "the nested control test gaps: {enclosing:?}"
+    );
+    assert!(
+        enclosing.decided_above_call_spans.is_empty(),
+        "the nested predicate call is never certified: {enclosing:?}"
+    );
+
+    let asserting = content_for(
+        &format!(
+            "{PRELUDE}function assertNum(x: unknown): asserts x is T {{}}\n\
+             function g<T extends number>(x: number | string, _t: T) {{ assertNum(x); return x }}"
+        ),
+        "g",
+    );
+    assert!(
+        !asserting
+            .body
+            .statements
+            .iter()
+            .any(|statement| matches!(statement, SliceStatement::Assertion { .. })),
+        "a caller-rebound assertion target is never minted: {asserting:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&asserting),
+        1,
+        "the assertion statement gaps: {asserting:?}"
+    );
+
+    for (case, caller) in [
+        (
+            "an unrelated caller binder",
+            "function f<U>(x: number | string, _u: U) { if (isNum(x)) return x; return false }",
+        ),
+        (
+            "a value-only local of the target's name",
+            "function f(x: number | string) { const T = 1; if (isNum(x)) return x; return false }",
+        ),
+    ] {
+        let node = content_for(&format!("{PRELUDE}{caller}"), "f");
+        assert_eq!(
+            predicate_guard_count(&node),
+            1,
+            "{case}: a target closed over the module scope keeps its guard: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+}
+
+/// `x instanceof A` narrows to the class's INSTANCE type only when the
+/// constructor's static side has no `[Symbol.hasInstance]`: a static
+/// method of that key whose return is a type predicate makes the checker
+/// narrow to the PREDICATE's target instead (`x is B` on `A` narrows `A |
+/// B` to `B`, not `A`), and the static side is INHERITED through the
+/// heritage chain. The evaluator's owner-scope type reference always
+/// yields the instance type, so the gate refuses a class that declares a
+/// static computed key (any computed key can spell `Symbol.hasInstance`
+/// through an alias), and a class whose heritage it cannot prove clean
+/// (a superclass that is not itself a provably closed same-file class).
+/// A plain class, a class with instance-side computed keys only, and a
+/// class extending a provably clean same-file class keep the guard.
+#[test]
+fn instanceof_constructor_with_symbol_has_instance_never_narrows_to_the_class_instance() {
+    const BODY: &str = "function f(x: A | B) { if (x instanceof A) return x; return false }";
+    const B: &str = "class B { b = 1 }\n";
+    let refused = [
+        (
+            "a direct static [Symbol.hasInstance]",
+            format!(
+                "export {{}};\n{B}class A {{ static [Symbol.hasInstance](x: unknown): x is B {{ return true }} }}\n{BODY}"
+            ),
+        ),
+        (
+            "an inherited static [Symbol.hasInstance]",
+            format!(
+                "export {{}};\n{B}class Base {{ static [Symbol.hasInstance](x: unknown): x is B {{ return true }} }}\n\
+                 class A extends Base {{}}\n{BODY}"
+            ),
+        ),
+        (
+            "an aliased static computed key",
+            format!(
+                "export {{}};\n{B}const key = Symbol.hasInstance;\n\
+                 class A {{ static [key](x: unknown): x is B {{ return true }} }}\n{BODY}"
+            ),
+        ),
+        (
+            "a static computed property",
+            format!(
+                "export {{}};\n{B}class A {{ static [Symbol.hasInstance] = (x: unknown): x is B => true }}\n{BODY}"
+            ),
+        ),
+        (
+            "an imported superclass",
+            format!("import {{ Base }} from \"./base\";\n{B}class A extends Base {{}}\n{BODY}"),
+        ),
+        (
+            "a superclass expression",
+            format!(
+                "export {{}};\n{B}declare function mixin(): new () => object;\n\
+                 class A extends mixin() {{}}\n{BODY}"
+            ),
+        ),
+        (
+            "a superclass shadowed by a same-file value",
+            format!(
+                "export {{}};\n{B}class Real {{ static [Symbol.hasInstance](x: unknown): x is B {{ return true }} }}\n\
+                 const Base = Real;\nclass A extends Base {{}}\n{BODY}"
+            ),
+        ),
+    ];
+    for (case, source) in &refused {
+        let node = content_for(source, "f");
+        assert_eq!(
+            instanceof_guard_count(&node),
+            0,
+            "{case}: no guard over a constructor whose static side may carry \
+             `Symbol.hasInstance`: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 1, "{case}: the test gaps: {node:?}");
+    }
+
+    let accepted = [
+        (
+            "an instance-side computed key only",
+            format!(
+                "export {{}};\n{B}class A {{ [Symbol.hasInstance](x: unknown): x is B {{ return true }}; static n = 1 }}\n{BODY}"
+            ),
+        ),
+        (
+            "a provably clean same-file superclass",
+            format!("export {{}};\n{B}class Base {{ base = 1 }}\nclass A extends Base {{}}\n{BODY}"),
+        ),
+    ];
+    for (case, source) in &accepted {
+        let node = content_for(source, "f");
+        assert_eq!(
+            instanceof_guard_count(&node),
+            1,
+            "{case}: the class's instance type IS the narrowing target: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+}
+
+/// A sequence's DISCARDED operands never feed its value, but a call among
+/// them still runs — and an ASSERTION call narrows everything after it
+/// (`(assertString(x), x)` is `string` in the checker). Blanket-certifying
+/// those calls decided-above dropped the narrowing while the superset
+/// completed clean. A discarded call is certified only when it provably
+/// establishes no narrowing: a `new` construct, or a provably closed
+/// same-file `function` declaration whose return annotation is not an
+/// `asserts` predicate (an unannotated declaration cannot be an assertion
+/// — assertion signatures are never inferred). Every other discarded call
+/// is unprovable: never certified, and the statement takes the typed gap.
+#[test]
+fn discarded_sequence_operand_calls_are_never_blanket_certified() {
+    let refused = [
+        (
+            "a closed same-file assertion",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { return (assertString(x), x) }",
+        ),
+        (
+            "an imported callee",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return (touch(), x) }",
+        ),
+        (
+            "an exported same-file callee",
+            "export function touch() {}\n\
+             function f(x: string | number) { return (touch(), x) }",
+        ),
+        (
+            "a member callee",
+            "export {};\ndeclare const o: { touch(): void };\n\
+             function f(x: string | number) { return (o.touch(), x) }",
+        ),
+        (
+            "a closed assertion nested in a ternary arm",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(c: boolean, x: string | number) { return c ? (assertString(x), x) : x }",
+        ),
+    ];
+    for (case, source) in refused {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: an unprovable discarded call is never certified: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    // A provably non-narrowing OUTER call is certified on its own
+    // account; the unprovable assertion nested in its argument is not,
+    // and still gaps the statement.
+    let nested_source = "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+                         function touch(_v: unknown) {}\n\
+                         function f(x: string | number) { return (touch(assertString(x)), x) }";
+    let nested = content_for(nested_source, "f");
+    let certified_texts: Vec<&str> = nested
+        .decided_above_call_spans
+        .iter()
+        .map(|span| &nested_source[span.start as usize..span.end as usize])
+        .collect();
+    assert_eq!(
+        certified_texts,
+        ["touch(assertString(x))"],
+        "only the outer non-narrowing call is certified: {nested:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&nested),
+        1,
+        "the nested assertion gaps the statement: {nested:?}"
+    );
+
+    let certified = [
+        (
+            "a closed unannotated same-file callee",
+            "export {};\nfunction touch() {}\n\
+             function f(x: string | number) { return (touch(), x) }",
+            1,
+        ),
+        (
+            "a closed non-predicate-annotated same-file callee",
+            "export {};\nfunction touch(): void {}\n\
+             function f(x: string | number) { return (touch(), x) }",
+            1,
+        ),
+        (
+            "a construct",
+            "export {};\nclass Probe {}\n\
+             function f(x: string | number) { return (new Probe(), x) }",
+            1,
+        ),
+    ];
+    for (case, source, spans) in certified {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            spans,
+            "{case}: a provably non-narrowing discarded call is certified: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {
