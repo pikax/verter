@@ -75,39 +75,6 @@ function splitYamlKeyValue(text) {
   return { key: parseYamlScalar(text.slice(0, colon)), rest: text.slice(colon + 1).trim() };
 }
 
-function parseYamlMapping(rows, start, parentIndent) {
-  const object = {};
-  if (start >= rows.length) return { value: object, next: start };
-  const level = rows[start].indent;
-  if (level <= parentIndent) return { value: object, next: start };
-  let i = start;
-  while (i < rows.length) {
-    const row = rows[i];
-    if (row.indent < level) break;
-    if (row.indent > level) {
-      throw new GitHubAdapterError("release-check.yml must invoke release.yml");
-    }
-    const split = splitYamlKeyValue(row.text);
-    if (!split || typeof split.key !== "string" || split.key.length === 0) {
-      throw new GitHubAdapterError("release-check.yml must invoke release.yml");
-    }
-    if (split.rest !== "") {
-      object[split.key] = parseYamlScalar(split.rest);
-      i += 1;
-      continue;
-    }
-    if (i + 1 < rows.length && rows[i + 1].indent > level) {
-      const nested = parseYamlMapping(rows, i + 1, level);
-      object[split.key] = nested.value;
-      i = nested.next;
-      continue;
-    }
-    object[split.key] = null;
-    i += 1;
-  }
-  return { value: object, next: i };
-}
-
 function workflowJobs(text) {
   const rows = [];
   for (const raw of String(text).split(/\r?\n/u)) {
@@ -125,7 +92,64 @@ function workflowJobs(text) {
     return split?.key === "jobs" && split.rest === "";
   });
   if (jobsIndex === -1 || jobsIndex + 1 >= rows.length) return {};
-  return parseYamlMapping(rows, jobsIndex + 1, 0).value;
+
+  // Parse only job-level keys and the caller's direct `with:` mapping. Ordinary
+  // runner jobs contain YAML sequences under `steps:`; recursively pretending
+  // every nested node is a mapping made a preceding PR validation job render the
+  // later reusable-workflow caller invisible. The release identity needs no step
+  // internals, and indentation keeps action-step `uses:` entries out of scope.
+  const jobs = {};
+  let i = jobsIndex + 1;
+  while (i < rows.length && rows[i].indent > 0) {
+    const jobRow = rows[i];
+    if (jobRow.indent !== 2) {
+      i += 1;
+      continue;
+    }
+    const jobSplit = splitYamlKeyValue(jobRow.text);
+    if (!jobSplit || typeof jobSplit.key !== "string" || jobSplit.rest !== "") {
+      throw new GitHubAdapterError("release-check.yml must invoke release.yml");
+    }
+    const job = {};
+    let j = i + 1;
+    while (j < rows.length && rows[j].indent > 2) {
+      const property = rows[j];
+      if (property.indent !== 4) {
+        j += 1;
+        continue;
+      }
+      const propertySplit = splitYamlKeyValue(property.text);
+      if (!propertySplit || typeof propertySplit.key !== "string") {
+        throw new GitHubAdapterError("release-check.yml must invoke release.yml");
+      }
+      if (propertySplit.rest !== "") {
+        job[propertySplit.key] = parseYamlScalar(propertySplit.rest);
+        j += 1;
+        continue;
+      }
+      if (propertySplit.key === "with") {
+        const withInputs = {};
+        let k = j + 1;
+        while (k < rows.length && rows[k].indent > 4) {
+          if (rows[k].indent === 6) {
+            const input = splitYamlKeyValue(rows[k].text);
+            if (input && typeof input.key === "string") {
+              withInputs[input.key] = parseYamlScalar(input.rest);
+            }
+          }
+          k += 1;
+        }
+        job.with = withInputs;
+        j = k;
+        continue;
+      }
+      job[propertySplit.key] = null;
+      j += 1;
+    }
+    jobs[jobSplit.key] = job;
+    i = j;
+  }
+  return jobs;
 }
 
 function assertReleaseCheckDryRun(text) {

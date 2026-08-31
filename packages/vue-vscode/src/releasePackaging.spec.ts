@@ -223,9 +223,36 @@ const chainTo = (graph: Map<string, string[]>, from: string, target: string): st
  */
 describe("release gating", () => {
   const release = read(".github/workflows/release.yml");
+  const releaseCheck = read(".github/workflows/release-check.yml");
   const graph = parseNeedsGraph(release);
 
   const publishJobs = ["publish-crates", "publish-npm", "publish-vscode"];
+
+  it("keeps PR release validation read-only and reserves the full rehearsal for dispatch", () => {
+    expect(releaseCheck).toMatch(/permissions:\n  contents: read/);
+
+    const jobs = workflowJobs(releaseCheck);
+    const pullRequest = jobs.get("pull-request-contract") ?? "";
+    expect(pullRequest).toContain("if: github.event_name == 'pull_request'");
+    expect(pullRequest).toContain("pnpm --filter verter-vscode exec vitest run");
+    expect(pullRequest).toContain("src/releasePackaging.spec.ts");
+    expect(pullRequest).toContain("node --test scripts/githubctl/tests/release-plan.test.mjs");
+
+    const dispatched = jobs.get("dry-run") ?? "";
+    expect(dispatched).toContain("if: github.event_name == 'workflow_dispatch'");
+    expect(dispatched).toContain("uses: ./.github/workflows/release.yml");
+    expect(dispatched).toContain("dry_run: true");
+    for (const permission of [
+      "contents: write",
+      "deployments: write",
+      "id-token: write",
+      "checks: write",
+      "issues: write",
+      "pull-requests: write",
+    ]) {
+      expect(dispatched).toContain(permission);
+    }
+  });
 
   it.each(publishJobs)("%s transitively depends on a job that runs tests", (job) => {
     expect(graph.has(job), `release.yml must define a \`${job}:\` job`).toBe(true);
