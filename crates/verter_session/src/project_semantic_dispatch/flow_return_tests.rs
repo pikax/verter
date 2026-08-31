@@ -6460,6 +6460,206 @@ function f(x: string | number) {
     });
 }
 
+/// Assert that a dropped same-frame narrowing never publishes warm for a
+/// `{ y, x }` return: the later read of `x` keeps BOTH arms of the
+/// unnarrowed `string | number` parameter, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[track_caller]
+fn assert_object_read_gaps_unwarmed(
+    dispatch: &ProjectSemanticDispatch<'_>,
+    host: &VerterHost,
+    canonical: &str,
+    name: &str,
+) {
+    let key = whole_return_key(dispatch, canonical, name);
+    let result = flow_result_value(dispatch, key.clone());
+    let expr = host
+        .project_node_to_type_expr_for_test(result.return_type())
+        .expect("return node must project to TypeExpr");
+    let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+        panic!("{name}: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+    };
+    for primitive in [
+        verter_type_expr::PrimitiveName::String,
+        verter_type_expr::PrimitiveName::Number,
+    ] {
+        assert!(
+            arms.iter()
+                .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+            "{name}: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+             survives, got {expr:?}"
+        );
+    }
+    assert_eq!(
+        result.degradation(),
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "{name}: the unprovable call degrades to the typed guard-narrowing gap"
+    );
+    assert_eq!(
+        dispatch
+            .graph()
+            .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+        0,
+        "{name}: an unprovable call never warms"
+    );
+}
+
+/// A CONTROL position nested inside a leaf-lowered expression is still a
+/// control position: the checker binds the predicate call in the ternary
+/// test into the branch narrowing even though the WHOLE array folds into
+/// one shallow-pass leaf answer — `[isString(x) ? x : false]` is
+/// `(string | boolean)[]` in the checker. Blanket-certifying the nested
+/// test call decided-above dropped that narrowing and the unnarrowed
+/// superset sealed complete and warm. The nested control call takes the
+/// per-callee certification instead: a predicate callee is unprovable
+/// here, so the element keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn leaf_nested_conditional_predicate_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/leaf-nested-control/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function isString(x: unknown): x is string {
+  return typeof x === "string";
+}
+
+function f(x: string | number) {
+  return [isString(x) ? x : false];
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Array { element, .. } = &expr else {
+            panic!("f: the return is an array, got {expr:?}");
+        };
+        // The dropped branch narrowing never collapses the element to the
+        // narrowed branch read: the `false` arm survives and no arm is the
+        // narrowed `string`. (The consequent's bare `typeof x` root rides
+        // its own typed miss carrier — bare frame-rooted `typeof` roots
+        // are not path-projected, before and after this change.)
+        let verter_type_expr::TypeExpr::Union(arms) = element.as_ref() else {
+            panic!("f: the element keeps the unnarrowed join, got {expr:?}");
+        };
+        assert!(
+            arms.iter().any(|arm| *arm
+                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Boolean)),
+            "f: the `false` arm survives, got {expr:?}"
+        );
+        assert!(
+            !arms.iter().any(|arm| *arm
+                == verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::String)),
+            "f: the narrowed branch read never publishes, got {expr:?}"
+        );
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "f: the nested control call degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "f: an unprovable nested control call never warms"
+        );
+    });
+}
+
+/// A type carrier folds a non-object operand into ONE shallow-pass answer
+/// without visiting it, so a direct assertion call under the carrier —
+/// `(assertString(x) as void)` — never reaches a structural arm and would
+/// be blanket-certified decided-above while the checker narrows every read
+/// that follows. The call takes the per-callee certification instead: an
+/// `asserts` callee is unprovable, so the later read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
+/// the family slot holds zero candidates.
+#[test]
+fn leaf_carrier_wrapped_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/carrier-wrapped-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (assertString(x) as void);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// The RIGHTMOST operand of a sequence is the sequence's value, so the
+/// discarded-operand split never touches it — but a carrier folding the
+/// whole sequence discards the VALUE, not the evaluation: `((0,
+/// assertString(x)) as unknown)` still runs the assertion, and the checker
+/// narrows every read that follows. The folded rightmost assertion takes
+/// the same per-callee certification: unprovable, so the later read of `x`
+/// keeps the unnarrowed join, the demand carries the typed
+/// `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn rightmost_sequence_assertion_under_carrier_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/rightmost-sequence-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = ((0, assertString(x)) as unknown);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A class STATIC BLOCK runs at class evaluation — enclosing-frame
+/// immediate, unlike the deferred bodies around it. Guarding the whole
+/// class body as a nested frame skipped the sequence split for the block,
+/// blanket-certifying the block's assertion decided-above while the
+/// checker narrows `x` for the read that follows the class. The static
+/// block takes the same-frame discipline: the assertion is unprovable, so
+/// the later read of `x` keeps the unnarrowed join, the demand carries the
+/// typed `GuardNarrowing` gap, and the family slot holds zero candidates.
+#[test]
+fn class_static_block_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/static-block-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (class { static { (assertString(x), 0); } } as object);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
 /// A FLOW-rooted component's carrier — the self-root union the root and
 /// its batched members publish on — covers every file any drained member
 /// observed, the CALL members included. Here `seed`'s initializer in a

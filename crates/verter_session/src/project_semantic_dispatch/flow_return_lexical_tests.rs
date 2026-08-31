@@ -5716,7 +5716,14 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// tnGenericMember    string            fails closed ← composes a call
 /// tnAmbSequence      "TA"              fails closed ← call position
 /// tnAmbNonNull       "TA"              fails closed ← call position
-/// tnAmbAs            "TA"              "TA"         ← exact
+/// tnAmbAs            "TA"              "TA"         ← exact value, but
+///                                                     DEGRADED and never
+///                                                     warm: the folded
+///                                                     call's callee is an
+///                                                     exported overload
+///                                                     pair, unprovable
+///                                                     under the per-callee
+///                                                     certification
 /// tnStrTernary       "a" | "b"         "a" | "b"    ← exact
 /// tnGenericBare      string            string       ← exact: the explicit
 ///                                                     type argument
@@ -5729,8 +5736,8 @@ fn flow_return_ternary_self_recursion_refuses_where_the_checker_refuses() {
 /// None`; dropping `SequenceExpression` / the type-carrier recursion
 /// from `value_is_unmodeled_call` flips the two call-position rows the
 /// same way; making the gate unconditional on the form (dropping the
-/// `embeds_any` conjunct) flips `tnAmbAs` / `tnStrTernary` to fail
-/// closed, which is the over-refusal direction.
+/// `embeds_any` conjunct) flips `tnAmbAs` / `tnStrTernary` to full
+/// fail-closed marker values, which is the over-refusal direction.
 #[test]
 fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     let host = make_r5_host();
@@ -5754,7 +5761,25 @@ fn flow_return_leaf_answered_call_forms_publish_any_not_a_carrier() {
     // The two rows that ARE exact, and the explicit-type-argument row the
     // executor now resolves exactly: they discriminate the `any` rows
     // above from "everything answers `any`".
-    assert_clean_warm(&host, "tnAmbAs", string_lit("TA"));
+    //
+    // `tnAmbAs`: the carrier pins the value — `"TA"` is the carrier's own
+    // exact answer, and the call's result is genuinely discarded — but the
+    // call under the carrier is certified decided-above ONLY when the
+    // callee provably establishes no narrowing, and `tnAmb` is an
+    // EXPORTED, OVERLOADED ambient pair: its checker-visible signature set
+    // is not enumerable from this file (a merged `declare module` overload
+    // could carry an `asserts` predicate). The value still publishes
+    // exact, DEGRADED through the typed guard-narrowing gap, never warm.
+    let tn_amb_as = r5_eval(&host, "tnAmbAs").expect("tnAmbAs must produce a value");
+    assert_eq!(tn_amb_as.ty, string_lit("TA"), "tnAmbAs return type");
+    assert_eq!(
+        tn_amb_as.degradation,
+        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+            crate::semantic_query::FlowGap::GuardNarrowing
+        )),
+        "tnAmbAs: the unprovable carrier-folded call degrades to the typed gap"
+    );
+    assert_eq!(tn_amb_as.candidates, 0, "tnAmbAs never warms");
     assert_clean_warm(
         &host,
         "tnStrTernary",

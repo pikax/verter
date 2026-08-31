@@ -4960,7 +4960,7 @@ impl Lowerer<'_> {
                         // resolving the chain's terminal call: decided
                         // above. A non-`any` root degrades at evaluation,
                         // which blocks the seal regardless.
-                        self.record_decided_above_calls(expr);
+                        self.record_optional_any_chain_calls(expr, chain);
                         SliceExpr::OptionalAnyChain {
                             root: Box::new(self.lower_identifier_read(root, mode)),
                         }
@@ -5734,40 +5734,94 @@ impl Lowerer<'_> {
     /// position — see [`SliceContent::decided_above_call_spans`]. Called
     /// only by positions whose produced type PROVABLY does not derive
     /// from any call inside the expression: the leaf arms that passed
-    /// the fabricated-value gate and the optional-`any`-chain carrier.
-    /// Control-position tests and a sequence's discarded operands take
-    /// the narrower [`Self::record_control_position_calls`] /
-    /// [`Self::record_discarded_operand_calls`] instead — a test call can
-    /// CONTROL the arms' narrowing and a discarded assertion call narrows
-    /// what follows it, which this blanket recorder cannot see.
+    /// the fabricated-value gate. (The optional-`any`-chain carrier takes
+    /// [`Self::record_optional_any_chain_calls`] — its terminal call is
+    /// decided on the chain's own account, not this one's.)
     ///
-    /// The same blind spot exists INSIDE a leaf: the direct-sequence arm
-    /// of [`Self::lower_expr`] sees only a sequence that IS the lowered
-    /// expression, so a sequence the shared shallow pass folds into one
-    /// leaf answer without visiting it — `((assertString(x), 0) as
-    /// number)` is `number` to that pass — never takes that arm, and its
-    /// discarded operands' calls would be blanket-certified here while
-    /// their narrowing is silently dropped (the checker narrows `x` to
-    /// `string`; the superset would publish complete and warm). Every
-    /// same-frame sequence in the lowered expression therefore contributes
-    /// its discarded operands to the SAME [`ResultIndependentPosition::
-    /// DiscardedOperand`] discipline the direct arm applies: certified
-    /// only when the callee provably establishes no narrowing, otherwise
-    /// the enclosing statement's typed `GuardNarrowing` gap. A nested
-    /// function / class body is its OWN frame — its names never resolve
-    /// against this frame's skeleton — so its sequences keep the blanket
-    /// treatment they always had (only an already-discarded operand's
-    /// content stays discarded inside one). A class's decorators and
-    /// `super_class` heritage expression evaluate in the ENCLOSING frame,
-    /// so sequences among them take the same-frame split.
+    /// "The produced type does not derive from the calls" is NOT "the
+    /// calls cannot narrow": the shallow pass folds control-flow-bearing
+    /// forms into one leaf answer WITHOUT visiting them (`[isString(x) ?
+    /// x : false]`, `(assertString(x) as void)`, `((0, assertString(x))
+    /// as unknown)`), so a call inside a leaf can still narrow a read of
+    /// this frame — through a nested test's branch narrowing or through
+    /// an `asserts` callee in ANY same-frame position — and a class
+    /// static block inside a leaf RUNS at class evaluation. Every
+    /// same-frame call / construct of the lowered expression therefore
+    /// takes the SAME per-callee certification the control-position and
+    /// discarded-operand arms apply ([`Self::certify_result_independent_calls`]):
+    /// a nested control position (a ternary test, a `&&` / `||` left
+    /// operand, a statement test inside an immediately-evaluated static
+    /// block) certifies under [`ResultIndependentPosition::ControlTest`],
+    /// every other same-frame position under [`ResultIndependentPosition::
+    /// DiscardedOperand`] (a value position's predicate narrows nothing;
+    /// only an `asserts` callee narrows what follows). A call that
+    /// provably establishes no narrowing is decided above; every other
+    /// one flags the enclosing statement's typed `GuardNarrowing` gap.
+    ///
+    /// A nested function / class body is its OWN frame — its names never
+    /// resolve against this frame's skeleton and its calls run at ITS
+    /// evaluation, never in this statement — so its calls keep the
+    /// blanket decided-above treatment they always had. The exceptions
+    /// evaluate in the ENCLOSING frame and take the same-frame
+    /// discipline: a class's decorators and `super_class` heritage
+    /// expression, and a class's STATIC BLOCKS (enclosing-frame-immediate
+    /// at class evaluation — unlike methods, which run when called, and
+    /// property initializers, which run at construction).
     fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
         let mut scanner = LeafCallScanner::default();
         scanner.visit_expression(expr);
+        self.drain_leaf_call_scanner(scanner);
+    }
+
+    /// Record the call / construct spans of one admitted OPTIONAL-`any`
+    /// CHAIN. The chain's TERMINAL call is decided above on the chain's
+    /// own account: the evaluator admits the [`SliceExpr::OptionalAnyChain`]
+    /// carrier only while the reaching root is still `any` (a non-`any`
+    /// root degrades at evaluation), and a call on an `any`-typed callee
+    /// resolves no signature — it cannot carry an `asserts` predicate, so
+    /// it narrows nothing. Every OTHER call the route carries — inside
+    /// the terminal call's ARGUMENTS or a computed member key
+    /// (`a?.b(assertString(x))` narrows `x` in the checker whether or not
+    /// the receiver is `any`) — is an ordinary same-frame position and
+    /// takes the per-callee certification of [`Self::record_decided_above_calls`].
+    fn record_optional_any_chain_calls(
+        &mut self,
+        whole: &Expression<'_>,
+        chain: &oxc_ast::ast::ChainExpression<'_>,
+    ) {
+        let mut scanner = LeafCallScanner::default();
+        if let oxc_ast::ast::ChainElement::CallExpression(call) = &chain.expression {
+            // The route admits at most one call, the terminal element;
+            // the callee route itself holds none (only computed keys,
+            // which the scanner reaches as ordinary expressions).
+            self.decided_above_call_spans.push(call.span.into());
+            scanner.visit_expression(&call.callee);
+            for argument in &call.arguments {
+                if let Some(expression) = argument.as_expression() {
+                    scanner.visit_expression(expression);
+                }
+            }
+        } else {
+            scanner.visit_expression(whole);
+        }
+        self.drain_leaf_call_scanner(scanner);
+    }
+
+    /// Discharge one walked [`LeafCallScanner`]: nested-frame calls are
+    /// decided above outright; the same-frame `control` / `discarded`
+    /// channels certify per-callee, and any unprovable call flags the
+    /// enclosing statement's typed `GuardNarrowing` gap.
+    fn drain_leaf_call_scanner(&mut self, scanner: LeafCallScanner) {
         self.decided_above_call_spans.extend(scanner.decided);
-        if self.certify_result_independent_calls(
+        let control_unprovable = self.certify_result_independent_calls(
+            scanner.control,
+            ResultIndependentPosition::ControlTest,
+        );
+        let discarded_unprovable = self.certify_result_independent_calls(
             scanner.discarded,
             ResultIndependentPosition::DiscardedOperand,
-        ) {
+        );
+        if control_unprovable || discarded_unprovable {
             self.control_test_gap = true;
         }
     }
@@ -6011,11 +6065,15 @@ impl Lowerer<'_> {
 /// annotation certifies a call there as establishing no narrowing.
 #[derive(Clone, Copy)]
 enum ResultIndependentPosition {
-    /// An `if` / ternary test: a predicate callee CONTROLS the arms'
+    /// An `if` / ternary test — including one folded inside a
+    /// leaf-lowered expression: a predicate callee CONTROLS the arms'
     /// narrowing, and an inferred boolean return can be an inferred
     /// predicate, so only an authored NON-predicate annotation certifies.
     ControlTest,
-    /// A sequence's discarded operand: only an `asserts` callee narrows
+    /// A sequence's discarded operand, or any other position whose VALUE
+    /// the demanded answer provably does not consume (a call folded into
+    /// a leaf-lowered expression, a statement inside an immediately
+    /// evaluated class static block): only an `asserts` callee narrows
     /// what follows, and assertion signatures are never inferred, so an
     /// absent annotation or any non-`asserts` annotation certifies.
     DiscardedOperand,
@@ -6085,57 +6143,136 @@ impl<'a> Visit<'a> for ControlCalls {
 
 /// The call collector behind [`Lowerer::record_decided_above_calls`]:
 /// every call / construct of a leaf-lowered expression lands in exactly
-/// one of two channels. A call inside a same-frame sequence's DISCARDED
-/// operand is `discarded` (it runs and can narrow what follows, so it
-/// takes the [`ResultIndependentPosition::DiscardedOperand`] rule); every
-/// other call is `decided` (blanket-certified decided-above, as before).
+/// one of three channels, and the DEFAULT is fail-closed — there is no
+/// blanket same-frame certification. A call inside a same-frame CONTROL
+/// position (a ternary test, a `&&` / `||` left operand, a statement test
+/// inside an immediately-evaluated class static block) is `control` (its
+/// result can decide the narrowing a branch evaluates under, so it takes
+/// the [`ResultIndependentPosition::ControlTest`] rule); every other
+/// same-frame call is `discarded` (the leaf answer provably does not
+/// derive from it, so only an `asserts` callee narrows what follows — the
+/// [`ResultIndependentPosition::DiscardedOperand`] rule). Both channels
+/// certify per-callee through
+/// [`Lowerer::certify_result_independent_calls`]; an unprovable call
+/// flags the enclosing statement's typed `GuardNarrowing` gap.
 ///
 /// A nested function / class body is its OWN frame — its names never
-/// resolve against this frame's skeleton — so its sequences do not split:
-/// its calls keep the blanket `decided` treatment they always had (only
-/// content already inside a discarded operand stays discarded there). A
-/// class's decorators and `super_class` heritage expression are NOT part
-/// of that frame — they evaluate in the ENCLOSING frame before the body
-/// exists — so they are visited outside the nested-frame guard and their
-/// sequences split like any other same-frame sequence.
+/// resolve against this frame's skeleton and its calls run at ITS
+/// evaluation (a method when called, a property initializer at
+/// construction), never in this statement — so its calls keep the
+/// blanket `decided` treatment they always had. A class's decorators,
+/// `super_class` heritage expression, and STATIC BLOCKS are NOT deferred:
+/// they evaluate in the ENCLOSING frame, so they are visited outside the
+/// nested-frame guard and their control positions split like any other
+/// same-frame position.
 #[derive(Default)]
 struct LeafCallScanner {
     decided: Vec<verter_span::Span>,
     discarded: Vec<ControlCall>,
-    discarded_nesting: usize,
+    control: Vec<ControlCall>,
+    control_nesting: usize,
     nested_frame_nesting: usize,
 }
 
+impl LeafCallScanner {
+    /// Visit one same-frame CONTROL-position expression: every call it
+    /// holds (transitively, until a nested frame) takes the
+    /// [`ResultIndependentPosition::ControlTest`] rule.
+    fn visit_control_expression(&mut self, expr: &Expression<'_>) {
+        self.control_nesting += 1;
+        self.visit_expression(expr);
+        self.control_nesting -= 1;
+    }
+}
+
 impl<'a> Visit<'a> for LeafCallScanner {
-    fn visit_sequence_expression(&mut self, sequence: &oxc_ast::ast::SequenceExpression<'a>) {
+    fn visit_conditional_expression(&mut self, it: &oxc_ast::ast::ConditionalExpression<'a>) {
         if self.nested_frame_nesting > 0 {
-            walk::walk_sequence_expression(self, sequence);
+            walk::walk_conditional_expression(self, it);
             return;
         }
-        if let Some((last, discarded)) = sequence.expressions.split_last() {
-            // The sequence's VALUE is its last operand; the earlier ones
-            // are discarded — everything under them is discarded too.
-            self.discarded_nesting += 1;
-            for operand in discarded {
-                self.visit_expression(operand);
-            }
-            self.discarded_nesting -= 1;
-            self.visit_expression(last);
+        // The ternary's TEST is a control position exactly as the
+        // statement-level `if` twin's: a predicate call there narrows the
+        // branch reads even when the whole conditional folds into a leaf.
+        self.visit_control_expression(&it.test);
+        self.visit_expression(&it.consequent);
+        self.visit_expression(&it.alternate);
+    }
+    fn visit_logical_expression(&mut self, it: &oxc_ast::ast::LogicalExpression<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_logical_expression(self, it);
+            return;
+        }
+        // The left operand decides whether the right evaluates and under
+        // which narrowing (`isString(x) && x` reads `x` as `string` in
+        // the checker) — a control position, conservatively for `??` too.
+        self.visit_control_expression(&it.left);
+        self.visit_expression(&it.right);
+    }
+    // Statement TESTS are control positions. Statements are reachable
+    // inside a leaf-lowered expression only through an immediately
+    // evaluated class static block; everywhere else a nested-frame guard
+    // has already routed the whole subtree to the blanket channel.
+    fn visit_if_statement(&mut self, it: &oxc_ast::ast::IfStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_if_statement(self, it);
+            return;
+        }
+        self.visit_control_expression(&it.test);
+        self.visit_statement(&it.consequent);
+        if let Some(alternate) = &it.alternate {
+            self.visit_statement(alternate);
         }
     }
+    fn visit_while_statement(&mut self, it: &oxc_ast::ast::WhileStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_while_statement(self, it);
+            return;
+        }
+        self.visit_control_expression(&it.test);
+        self.visit_statement(&it.body);
+    }
+    fn visit_do_while_statement(&mut self, it: &oxc_ast::ast::DoWhileStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_do_while_statement(self, it);
+            return;
+        }
+        self.visit_statement(&it.body);
+        self.visit_control_expression(&it.test);
+    }
+    fn visit_for_statement(&mut self, it: &oxc_ast::ast::ForStatement<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_for_statement(self, it);
+            return;
+        }
+        if let Some(init) = &it.init {
+            self.visit_for_statement_init(init);
+        }
+        if let Some(test) = &it.test {
+            self.visit_control_expression(test);
+        }
+        if let Some(update) = &it.update {
+            self.visit_expression(update);
+        }
+        self.visit_statement(&it.body);
+    }
     fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
-        if self.discarded_nesting > 0 {
-            self.discarded.push(ControlCall::of_call(call));
-        } else {
+        if self.nested_frame_nesting > 0 {
             self.decided.push(call.span.into());
+        } else if self.control_nesting > 0 {
+            self.control.push(ControlCall::of_call(call));
+        } else {
+            self.discarded.push(ControlCall::of_call(call));
         }
         walk::walk_call_expression(self, call);
     }
     fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
-        if self.discarded_nesting > 0 {
-            self.discarded.push(ControlCall::Construct(new.span.into()));
-        } else {
+        if self.nested_frame_nesting > 0 {
             self.decided.push(new.span.into());
+        } else if self.control_nesting > 0 {
+            self.control.push(ControlCall::Construct(new.span.into()));
+        } else {
+            self.discarded.push(ControlCall::Construct(new.span.into()));
         }
         walk::walk_new_expression(self, new);
     }
@@ -6154,14 +6291,26 @@ impl<'a> Visit<'a> for LeafCallScanner {
         walk::walk_arrow_function_expression(self, it);
         self.nested_frame_nesting -= 1;
     }
+    fn visit_static_block(&mut self, it: &oxc_ast::ast::StaticBlock<'a>) {
+        // A static block runs at CLASS EVALUATION — one frame out from
+        // the body guard `visit_class` applied, and never deferred the
+        // way a method body or property initializer is. Drop exactly the
+        // class's own guard level (a genuinely enclosing nested frame's
+        // guard stays: a class inside a nested function evaluates with
+        // THAT function, not with this statement).
+        self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+        walk::walk_static_block(self, it);
+        self.nested_frame_nesting += 1;
+    }
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
         // Decorators and the `super_class` heritage expression evaluate in
         // the ENCLOSING frame — before the class body exists — so they are
-        // visited OUTSIDE the nested-frame guard and their sequences take
-        // the same-frame discarded-operand discipline. Only the class BODY
-        // is a nested frame. (`walk_class` visits children in exactly this
-        // order; the name binding, type parameters, and implements clause
-        // carry no runtime expressions.)
+        // visited OUTSIDE the nested-frame guard and their calls take the
+        // same-frame discipline. Only the class BODY is guarded — and
+        // inside it `visit_static_block` drops the guard again for the
+        // immediately-evaluated static blocks. (`walk_class` visits
+        // children in exactly this order; the name binding, type
+        // parameters, and implements clause carry no runtime expressions.)
         self.visit_decorators(&it.decorators);
         if let Some(super_class) = &it.super_class {
             self.visit_expression(super_class);

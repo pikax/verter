@@ -1390,6 +1390,217 @@ fn class_heritage_sequence_calls_are_never_blanket_certified() {
     );
 }
 
+/// A CONTROL position nested inside a leaf-lowered expression is still a
+/// control position: the checker binds a predicate call in a ternary test
+/// or a `&&` / `||` left operand into the branch narrowing even when the
+/// WHOLE form folds into one shallow-pass leaf answer (`[isString(x) ? x
+/// : false]` is `(string | boolean)[]` in the checker). Blanket-certifying
+/// that call decided-above dropped the narrowing while the unnarrowed
+/// superset completed clean. A call inside a leaf takes the SAME
+/// per-callee certification the statement-level control arm applies:
+/// certified only when the callee provably establishes no narrowing,
+/// otherwise the enclosing statement takes the typed gap.
+#[test]
+fn leaf_nested_control_position_calls_are_never_blanket_certified() {
+    let refused = [
+        (
+            "a closed same-file predicate in a ternary test",
+            "export {};\nfunction isString(x: unknown): x is string { return typeof x === \"string\" }\n\
+             function f(x: string | number) { return [isString(x) ? x : false] }",
+        ),
+        (
+            "a closed same-file predicate in a `&&` left operand folded by a carrier",
+            "export {};\nfunction isString(x: unknown): x is string { return typeof x === \"string\" }\n\
+             function f(x: string | number) { const y = ((isString(x) && x) as unknown); return { y, x } }",
+        ),
+        (
+            "an imported callee in a ternary test",
+            "import { isString } from \"./is\";\n\
+             function f(x: string | number) { return [isString(x) ? x : false] }",
+        ),
+        (
+            "a closed UNANNOTATED same-file callee in a ternary test",
+            "export {};\nfunction check(x: string | number) { return true }\n\
+             function f(x: string | number) { return [check(x) ? x : false] }",
+        ),
+    ];
+    for (case, source) in refused {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: an unprovable nested control call is never certified: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    let certified = [
+        (
+            "a closed non-predicate-annotated callee in a ternary test",
+            "export {};\nfunction check(x: string | number): boolean { return true }\n\
+             function f(x: string | number) { return [check(x) ? x : false] }",
+        ),
+        (
+            "a closed non-predicate-annotated callee in a `&&` left operand folded by a carrier",
+            "export {};\nfunction check(x: string | number): boolean { return true }\n\
+             function f(x: string | number) { const y = ((check(x) && x) as unknown); return { y, x } }",
+        ),
+    ];
+    for (case, source) in certified {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a provably non-narrowing nested control call is certified: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+}
+
+/// An assertion call hides in a leaf-lowered VALUE position whenever a
+/// type carrier folds the whole form without visiting it: `(assertString(x)
+/// as void)` is `void` to the shallow pass, and the carrier arm keeps the
+/// whole-carrier leaf lowering for a non-object operand — so the call never
+/// reaches a structural arm and would be blanket-certified decided-above
+/// while the checker narrows every read that follows. The rightmost operand
+/// of a folded sequence is the same leak one position over: `((0,
+/// assertString(x)) as unknown)` discards nothing syntactically, but the
+/// assertion still runs. Both take the per-callee certification: only a
+/// provably non-asserting callee certifies; anything else gaps the
+/// enclosing statement.
+#[test]
+fn leaf_carrier_wrapped_assertion_calls_are_never_blanket_certified() {
+    let refused = [
+        (
+            "a closed same-file assertion under a carrier",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { const y = (assertString(x) as void); return { y, x } }",
+        ),
+        (
+            "a closed same-file assertion as a folded sequence's LAST operand",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { const y = ((0, assertString(x)) as unknown); return { y, x } }",
+        ),
+        (
+            "an imported callee under a carrier",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { const y = (touch() as void); return { y, x } }",
+        ),
+    ];
+    for (case, source) in refused {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: an unprovable leaf value-position call is never certified: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    let certified = [
+        (
+            "a closed unannotated same-file callee under a carrier",
+            "export {};\nfunction touch() {}\n\
+             function f(x: string | number) { const y = (touch() as void); return { y, x } }",
+        ),
+        (
+            "a closed non-assertion predicate as a folded sequence's last operand",
+            "export {};\nfunction check(x: unknown): x is string { return true }\n\
+             function f(x: string | number) { const y = ((0, check(x)) as unknown); return { y, x } }",
+        ),
+    ];
+    for (case, source) in certified {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a provably non-narrowing leaf value-position call is certified: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+}
+
+/// A class STATIC BLOCK runs at class evaluation — enclosing-frame
+/// immediate, unlike the deferred bodies around it (methods run when
+/// called, property initializers at construction). Guarding the whole
+/// class body as a nested frame skipped the sequence split for the block:
+/// `(class { static { (assertString(x), 0); } } as object)` blanket-certified
+/// the assertion decided-above while the checker narrows `x` for every
+/// read after the class. A static block's calls take the SAME same-frame
+/// discipline the enclosing statement would: certified only when the
+/// callee provably establishes no narrowing, otherwise the typed gap.
+/// Deferred bodies keep the nested-frame blanket treatment.
+#[test]
+fn class_static_block_calls_take_enclosing_frame_discipline() {
+    let refused = [
+        (
+            "a closed same-file assertion in a static block's discarded operand",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { return (class { static { (assertString(x), 0); } } as object) }",
+        ),
+        (
+            "an imported callee in a static block",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return (class { static { touch(); } } as object) }",
+        ),
+    ];
+    for (case, source) in refused {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: an unprovable static-block call is never certified: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    let certified = [(
+        "a closed unannotated same-file callee in a static block",
+        "export {};\nfunction touch() {}\n\
+         function f(x: string | number) { return (class { static { touch(); } } as object) }",
+    )];
+    for (case, source) in certified {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a provably non-narrowing static-block call is certified: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+
+    // Deferred bodies stay nested frames: a property initializer runs at
+    // CONSTRUCTION, not at class evaluation, so its calls keep the
+    // nested-frame blanket certification.
+    let deferred = [(
+        "a property initializer",
+        "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+         function f(x: string | number) { return (class { p = (assertString(x), 0) } as object) }",
+    )];
+    for (case, source) in deferred {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            1,
+            "{case}: a deferred body keeps the nested-frame blanket certification: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a deferred body mints no gap: {node:?}"
+        );
+    }
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {
