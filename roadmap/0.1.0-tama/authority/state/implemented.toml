@@ -368,6 +368,11 @@ node_id = "CCA1N3A"
 commit_message = "fix(session): prepare framework execution inputs inside the bound arm"
 commit_date = "2026-08-31T19:00:00+01:00"
 
+[[implemented]]
+node_id = "CCA1N"
+commit_message = "docs(*): record native host-integration route convergence"
+commit_date = "2026-08-31T20:30:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
