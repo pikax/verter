@@ -6328,6 +6328,73 @@ function f(x: string | number) {
     });
 }
 
+/// A type carrier folds its operand into ONE shallow-pass answer WITHOUT
+/// visiting it (`((assertString(x), 0) as number)` is `number`), so the
+/// direct-sequence protection never runs for the wrapped sequence and the
+/// discarded assertion's call would be blanket-certified decided-above —
+/// the checker narrows `x` to `string` while the unnarrowed superset
+/// publishes complete and warm. The wrapped discarded assertion takes the
+/// same discarded-operand discipline as the direct sequence: the binding
+/// keeps the carrier's asserted type, the later read of `x` keeps the
+/// unnarrowed join, the demand carries the typed `GuardNarrowing` gap, and
+/// the family slot holds zero candidates.
+#[test]
+fn type_carrier_wrapped_sequence_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/wrapped-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = ((assertString(x), 0) as number);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        assert_eq!(
+            object_prop(&expr, "y"),
+            &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number),
+            "f: the binding keeps the carrier's asserted type: {expr:?}"
+        );
+        let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+            panic!("f: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+                 survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "f: the wrapped discarded assertion degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "f: an unprovable wrapped discarded assertion never warms"
+        );
+    });
+}
+
 /// A FLOW-rooted component's carrier — the self-root union the root and
 /// its batched members publish on — covers every file any drained member
 /// observed, the CALL members included. Here `seed`'s initializer in a

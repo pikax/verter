@@ -5740,24 +5740,34 @@ impl Lowerer<'_> {
     /// [`Self::record_discarded_operand_calls`] instead — a test call can
     /// CONTROL the arms' narrowing and a discarded assertion call narrows
     /// what follows it, which this blanket recorder cannot see.
+    ///
+    /// The same blind spot exists INSIDE a leaf: the direct-sequence arm
+    /// of [`Self::lower_expr`] sees only a sequence that IS the lowered
+    /// expression, so a sequence the shared shallow pass folds into one
+    /// leaf answer without visiting it — `((assertString(x), 0) as
+    /// number)` is `number` to that pass — never takes that arm, and its
+    /// discarded operands' calls would be blanket-certified here while
+    /// their narrowing is silently dropped (the checker narrows `x` to
+    /// `string`; the superset would publish complete and warm). Every
+    /// same-frame sequence in the lowered expression therefore contributes
+    /// its discarded operands to the SAME [`ResultIndependentPosition::
+    /// DiscardedOperand`] discipline the direct arm applies: certified
+    /// only when the callee provably establishes no narrowing, otherwise
+    /// the enclosing statement's typed `GuardNarrowing` gap. A nested
+    /// function / class body is its OWN frame — its names never resolve
+    /// against this frame's skeleton — so its sequences keep the blanket
+    /// treatment they always had (only an already-discarded operand's
+    /// content stays discarded inside one).
     fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
-        struct CallSpans<'s> {
-            spans: &'s mut Vec<verter_span::Span>,
-        }
-        impl<'a> Visit<'a> for CallSpans<'_> {
-            fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
-                self.spans.push(call.span.into());
-                walk::walk_call_expression(self, call);
-            }
-            fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
-                self.spans.push(new.span.into());
-                walk::walk_new_expression(self, new);
-            }
-        }
-        let mut scanner = CallSpans {
-            spans: &mut self.decided_above_call_spans,
-        };
+        let mut scanner = LeafCallScanner::default();
         scanner.visit_expression(expr);
+        self.decided_above_call_spans.extend(scanner.decided);
+        if self.certify_result_independent_calls(
+            scanner.discarded,
+            ResultIndependentPosition::DiscardedOperand,
+        ) {
+            self.control_test_gap = true;
+        }
     }
 
     /// Record the RESULT-INDEPENDENT call / construct spans of one
@@ -5824,39 +5834,23 @@ impl Lowerer<'_> {
         expr: &Expression<'_>,
         position: ResultIndependentPosition,
     ) -> bool {
-        enum ControlCall {
-            Construct(verter_span::Span),
-            Call {
-                span: verter_span::Span,
-                callee: Option<(String, oxc_span::Span)>,
-            },
-        }
-        struct ControlCalls {
-            calls: Vec<ControlCall>,
-        }
-        impl<'a> Visit<'a> for ControlCalls {
-            fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
-                let callee = match unwrap_parenthesized(&call.callee) {
-                    Expression::Identifier(identifier) => {
-                        Some((identifier.name.as_str().to_owned(), identifier.span))
-                    }
-                    _ => None,
-                };
-                self.calls.push(ControlCall::Call {
-                    span: call.span.into(),
-                    callee,
-                });
-                walk::walk_call_expression(self, call);
-            }
-            fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
-                self.calls.push(ControlCall::Construct(new.span.into()));
-                walk::walk_new_expression(self, new);
-            }
-        }
         let mut scanner = ControlCalls { calls: Vec::new() };
         scanner.visit_expression(expr);
+        self.certify_result_independent_calls(scanner.calls, position)
+    }
+
+    /// Certify one collected set of result-independent calls: each is
+    /// either pushed decided-above under `position`'s rule or reported
+    /// unprovable (`true`). A call whose [`SliceGuard::TypePredicate`]
+    /// fact this lowering minted is evidence-backed at guard application
+    /// instead — neither certified nor gapped.
+    fn certify_result_independent_calls(
+        &mut self,
+        calls: Vec<ControlCall>,
+        position: ResultIndependentPosition,
+    ) -> bool {
         let mut unprovable = false;
-        for call in scanner.calls {
+        for call in calls {
             let span = match call {
                 ControlCall::Construct(span) => span,
                 ControlCall::Call { span, callee } => {
@@ -6041,6 +6035,123 @@ impl ResultIndependentPosition {
                 )
             }),
         }
+    }
+}
+
+/// One call / construct collected for the result-independent discipline:
+/// its authored span plus, for a call, the bare-identifier callee (name +
+/// span) when the callee spells one.
+enum ControlCall {
+    Construct(verter_span::Span),
+    Call {
+        span: verter_span::Span,
+        callee: Option<(String, oxc_span::Span)>,
+    },
+}
+
+impl ControlCall {
+    fn of_call(call: &oxc_ast::ast::CallExpression<'_>) -> Self {
+        let callee = match unwrap_parenthesized(&call.callee) {
+            Expression::Identifier(identifier) => {
+                Some((identifier.name.as_str().to_owned(), identifier.span))
+            }
+            _ => None,
+        };
+        ControlCall::Call {
+            span: call.span.into(),
+            callee,
+        }
+    }
+}
+
+/// The whole-expression call collector behind
+/// [`Lowerer::record_result_independent_calls`].
+struct ControlCalls {
+    calls: Vec<ControlCall>,
+}
+
+impl<'a> Visit<'a> for ControlCalls {
+    fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+        self.calls.push(ControlCall::of_call(call));
+        walk::walk_call_expression(self, call);
+    }
+    fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
+        self.calls.push(ControlCall::Construct(new.span.into()));
+        walk::walk_new_expression(self, new);
+    }
+}
+
+/// The call collector behind [`Lowerer::record_decided_above_calls`]:
+/// every call / construct of a leaf-lowered expression lands in exactly
+/// one of two channels. A call inside a same-frame sequence's DISCARDED
+/// operand is `discarded` (it runs and can narrow what follows, so it
+/// takes the [`ResultIndependentPosition::DiscardedOperand`] rule); every
+/// other call is `decided` (blanket-certified decided-above, as before).
+///
+/// A nested function / class body is its OWN frame — its names never
+/// resolve against this frame's skeleton — so its sequences do not split:
+/// its calls keep the blanket `decided` treatment they always had (only
+/// content already inside a discarded operand stays discarded there).
+#[derive(Default)]
+struct LeafCallScanner {
+    decided: Vec<verter_span::Span>,
+    discarded: Vec<ControlCall>,
+    discarded_nesting: usize,
+    nested_frame_nesting: usize,
+}
+
+impl<'a> Visit<'a> for LeafCallScanner {
+    fn visit_sequence_expression(&mut self, sequence: &oxc_ast::ast::SequenceExpression<'a>) {
+        if self.nested_frame_nesting > 0 {
+            walk::walk_sequence_expression(self, sequence);
+            return;
+        }
+        if let Some((last, discarded)) = sequence.expressions.split_last() {
+            // The sequence's VALUE is its last operand; the earlier ones
+            // are discarded — everything under them is discarded too.
+            self.discarded_nesting += 1;
+            for operand in discarded {
+                self.visit_expression(operand);
+            }
+            self.discarded_nesting -= 1;
+            self.visit_expression(last);
+        }
+    }
+    fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
+        if self.discarded_nesting > 0 {
+            self.discarded.push(ControlCall::of_call(call));
+        } else {
+            self.decided.push(call.span.into());
+        }
+        walk::walk_call_expression(self, call);
+    }
+    fn visit_new_expression(&mut self, new: &oxc_ast::ast::NewExpression<'a>) {
+        if self.discarded_nesting > 0 {
+            self.discarded.push(ControlCall::Construct(new.span.into()));
+        } else {
+            self.decided.push(new.span.into());
+        }
+        walk::walk_new_expression(self, new);
+    }
+    // Nested function / arrow / class bodies are their own frames.
+    fn visit_function(
+        &mut self,
+        it: &oxc_ast::ast::Function<'a>,
+        flags: oxc_syntax::scope::ScopeFlags,
+    ) {
+        self.nested_frame_nesting += 1;
+        walk::walk_function(self, it, flags);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_arrow_function_expression(&mut self, it: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_arrow_function_expression(self, it);
+        self.nested_frame_nesting -= 1;
+    }
+    fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        self.nested_frame_nesting += 1;
+        walk::walk_class(self, it);
+        self.nested_frame_nesting -= 1;
     }
 }
 

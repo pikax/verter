@@ -1231,6 +1231,97 @@ fn discarded_sequence_operand_calls_are_never_blanket_certified() {
     }
 }
 
+/// A type carrier folds its operand into ONE shallow-pass answer WITHOUT
+/// visiting it (`(…, 0) as number` is `number`), so a sequence under the
+/// carrier never reaches the direct-sequence arm and its discarded
+/// operands' calls escape to the leaf's blanket certification. An
+/// assertion call there still narrows every read that follows, so it takes
+/// the SAME discarded-operand discipline the direct arm applies: certified
+/// only when the callee provably establishes no narrowing, otherwise the
+/// statement takes the typed gap.
+#[test]
+fn type_carrier_wrapped_sequence_calls_are_never_blanket_certified() {
+    let refused = [
+        (
+            "a closed same-file assertion",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { return ((assertString(x), 0) as number) }",
+        ),
+        (
+            "a closed same-file assertion under nested parens",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { return (((assertString(x), 0)) as number) }",
+        ),
+        (
+            "a closed same-file assertion under an angle-bracket assertion",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { return <number>(assertString(x), 0) }",
+        ),
+        (
+            "an imported callee",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { return ((touch(), 0) as number) }",
+        ),
+        (
+            "an exported same-file callee",
+            "export function touch() {}\n\
+             function f(x: string | number) { return ((touch(), 0) as number) }",
+        ),
+    ];
+    for (case, source) in refused {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: an unprovable wrapped discarded call is never certified: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    // A provably non-narrowing wrapped discarded call keeps its
+    // certification, and a carrier over a plain non-call leaf mints no
+    // gap — the unwrapped-sequence discipline (covered by the direct-arm
+    // test above) is unchanged.
+    let certified = [
+        (
+            "a closed unannotated same-file callee",
+            "export {};\nfunction touch() {}\n\
+             function f(x: string | number) { return ((touch(), 0) as number) }",
+            1,
+        ),
+        (
+            "a closed non-predicate-annotated same-file callee",
+            "export {};\nfunction touch(): void {}\n\
+             function f(x: string | number) { return ((touch(), 0) as number) }",
+            1,
+        ),
+        (
+            "a construct",
+            "export {};\nclass Probe {}\n\
+             function f(x: string | number) { return ((new Probe(), 0) as number) }",
+            1,
+        ),
+        (
+            "no call at all",
+            "export {};\n\
+             function f(x: string | number) { return (0 as number) }",
+            0,
+        ),
+    ];
+    for (case, source, spans) in certified {
+        let node = content_for(source, "f");
+        assert_eq!(
+            node.decided_above_call_spans.len(),
+            spans,
+            "{case}: a provably non-narrowing wrapped discarded call is certified: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {
