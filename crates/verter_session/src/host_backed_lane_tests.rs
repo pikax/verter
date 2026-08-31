@@ -2,13 +2,16 @@
 //! its request-scoped bound host request — the SAME artifact and demand set
 //! for admission and execution.
 //!
-//! Two structural/discriminating proofs:
+//! Three structural/discriminating proofs:
 //! - attribution injection: a binding bound for a DIFFERENT file trips the
 //!   lane's bound-attribution gate before any admission or execution;
 //! - admitted-demand-set execution: the executed multi-product population
 //!   is exactly the admitted one, byte-checked per product against a
 //!   directly-driven registered-backend oracle, with the sibling-absence
-//!   negatives (an unadmitted product never publishes).
+//!   negatives (an unadmitted product never publishes);
+//! - bound-arm-local execution inputs: framework execution-input
+//!   preparation runs only once a bound arm is reached, and every arm
+//!   restates the compiled file's dependency/semantic axis exactly once.
 
 use std::sync::Arc;
 
@@ -470,6 +473,131 @@ fn a_profile_demanding_no_product_publishes_under_either_ssr_axis() {
             "nothing was demanded, so nothing publishes — the placeholder exists only to \
              keep canonical request construction admissible, got {:?}",
             produced.outputs.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proof 3 — framework execution-input preparation is bound-arm-local
+// ---------------------------------------------------------------------------
+
+const SVELTE_SRC: &str = "<script>\n  let n = 1;\n</script>\n<div class=\"a\">{n}</div>\n<style>.a { color: red }</style>\n";
+
+fn sync_count(host: &VerterHost) -> usize {
+    host.test_force
+        .wrapper_sync_transitive_count
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn reset_sync_count(host: &VerterHost) {
+    host.test_force
+        .wrapper_sync_transitive_count
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The lane's generic preconditions are decided BEFORE any framework
+/// execution-input preparation runs. A profile carrying parse-affecting
+/// template grammar cannot be honored against the registered parse, so
+/// the request refuses without resolving the carrier's cross-file macro
+/// types and without restating the file's dependency/semantic axis — a
+/// request that produces nothing has no basis to rewrite that axis, and
+/// resolving cross-file types for it is work on a request that cannot
+/// succeed.
+///
+/// DISCRIMINATING: a lane that prepares framework execution inputs above
+/// its bound dispatch reaches the cross-file producer and its dependency
+/// synchronization for this doomed request too, so the counter fires and
+/// this fails.
+#[test]
+fn a_precondition_refusal_prepares_no_framework_execution_inputs() {
+    let host = new_host();
+    let canonical = "/proj/PreconditionRefusal.vue";
+    upsert(&host, canonical, VUE_SRC);
+    let input = compile_input(&host, canonical);
+    let mismatched = CompileProfile {
+        delimiters: Some(("[[".to_string(), "]]".to_string())),
+        ..CompileProfile::default()
+    };
+
+    reset_sync_count(&host);
+    let Err(refusal) = host.compile_entry(&input, &mismatched, Some(bind(&host, canonical))) else {
+        panic!("a profile whose grammar the registered parse cannot honor must refuse");
+    };
+    assert!(
+        refusal
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_CARRIER_GRAMMAR_MISMATCH"),
+        "the refusal must be the grammar precondition, got {:?}",
+        refusal
+            .diagnostics
+            .iter()
+            .map(|d| d.code.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        sync_count(&host),
+        0,
+        "a request refused on a generic precondition must not have reached framework \
+         execution-input preparation, so it must perform no dependency synchronization"
+    );
+
+    // Positive control: the SAME input under a grammar the registered
+    // parse honors does reach the framework arm and does synchronize.
+    reset_sync_count(&host);
+    host.compile_entry(
+        &input,
+        &CompileProfile::default(),
+        Some(bind(&host, canonical)),
+    )
+    .expect("the honored-grammar compile produces");
+    assert_eq!(
+        sync_count(&host),
+        1,
+        "the control compile must reach framework execution-input preparation, or the \
+         refusal assertion above proves nothing"
+    );
+}
+
+/// EVERY bound framework arm synchronizes the compiled file's
+/// dependency/semantic axis exactly once per host-backed compile — the
+/// axis is a property of the compiled file, not of one framework. A
+/// carrier whose execution-input preparation contributes no cross-file
+/// semantic type dependencies still restates the axis with its empty
+/// contribution, because the axis is REPLACED rather than merged and a
+/// skipped restatement leaves the previous compile's edges standing.
+///
+/// DISCRIMINATING against the shape this route must NOT take: relocating
+/// the synchronization into a single framework's arm silently drops it
+/// for every other carrier, which no product-payload assertion observes.
+#[test]
+fn every_bound_framework_arm_synchronizes_the_dependency_axis_once() {
+    for (canonical, source) in [
+        ("/proj/ArmAxis.vue", VUE_SRC),
+        ("/proj/ArmAxis.svelte", SVELTE_SRC),
+    ] {
+        let host = new_host();
+        upsert(&host, canonical, source);
+        let input = compile_input(&host, canonical);
+        reset_sync_count(&host);
+        let outcome = host.compile_entry(
+            &input,
+            &CompileProfile::default(),
+            Some(bind(&host, canonical)),
+        );
+        assert!(
+            outcome.is_ok(),
+            "{canonical}: the bound arm must execute, got {:?}",
+            outcome.err().map(|d| d
+                .diagnostics
+                .iter()
+                .map(|x| (x.code.clone(), x.message.clone()))
+                .collect::<Vec<_>>())
+        );
+        assert_eq!(
+            sync_count(&host),
+            1,
+            "{canonical}: the bound arm must synchronize the dependency axis exactly once"
         );
     }
 }

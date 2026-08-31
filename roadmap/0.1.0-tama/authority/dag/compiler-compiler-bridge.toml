@@ -1046,9 +1046,45 @@ rescope_files = 12
 rescope_unrelated_packages = 3
 
 [[node]]
+id = "CCA1N3A"
+name = "Bound-arm host-backed framework execution inputs"
+predecessors = ["CCA1N3"]
+phase = "compiler"
+train = "compiler.compiler-bridge"
+product = "compiler_bridge"
+kind = "repair"
+semantic_role = "delivery"
+class = "compiler"
+owner = "compiler.compiler-bridge:host-backed framework execution-input preparation and its refusal placement"
+conflict_domains = ["compiler_execution"]
+resource_class = "rust-mixed"
+gate_profile = "targeted-domain"
+review_profile = "public-3"
+dispatchable = true
+optional = false
+release_gating = "none"
+external_requirements = []
+charter = "charters/compiler-compiler-bridge/CCA1N3A.md"
+implementation_effort_min = "medium"
+implementation_effort_default = "medium"
+review_effort_min = "high"
+review_effort_default = "high"
+verification_effort_min = "medium"
+verification_effort_default = "medium"
+confirmation_effort_min = "medium"
+confirmation_effort_default = "medium"
+size = "S"
+max_production_loc = 200
+max_production_files = 3
+max_related_packages = 1
+rescope_loc = 1500
+rescope_files = 12
+rescope_unrelated_packages = 3
+
+[[node]]
 id = "CCA1N"
 name = "Native host-integration route convergence join"
-predecessors = ["CCA1N3","CCA1N4","CCA1N4A","CCA1N2G"]
+predecessors = ["CCA1N3","CCA1N3A","CCA1N4","CCA1N4A","CCA1N2G"]
 phase = "compiler"
 train = "compiler.compiler-bridge"
 product = "compiler_bridge"

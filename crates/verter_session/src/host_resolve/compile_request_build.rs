@@ -1,6 +1,7 @@
 //! The session side of the bound host compile routes: demand
-//! construction, bound-backend execution dispatch, refusal mapping, and
-//! the result-carrier plumbing shared by
+//! construction, bound-backend execution dispatch, the host-backed
+//! lane's arm-local framework execution-input preparation, refusal
+//! mapping, and the result-carrier plumbing shared by
 //! [`crate::host_resolve::virtual_file_pipeline`]'s two compile lanes.
 //!
 //! Neither lane constructs a session-side `CompileRequest`: each builds
@@ -151,15 +152,30 @@ fn vue_option_attempt_from_profile(
 }
 
 /// The host-backed compile lane's ONE bound execution: the consumed
-/// binding's catalog arm yields the backend, the backend issues the
-/// demand-specific multi-product admission over the SAME presented
-/// artifact, and the product execution consumes that admission by value —
-/// one request, one backend call, one admitted
-/// parse/semantic/projection/plan/emit population. The lane holds no
-/// framework selector, no session-side request construction, and no
-/// registry dispatch; issuance and execution are paired by the
-/// admission's parse key, so admitting one artifact and executing another
-/// is unrepresentable at this seam.
+/// binding's catalog arm yields the backend, that arm prepares its own
+/// framework execution inputs, the backend issues the demand-specific
+/// multi-product admission over the SAME presented artifact, and the
+/// product execution consumes that admission by value — one request, one
+/// backend call, one admitted parse/semantic/projection/plan/emit
+/// population. The lane holds no framework selector, no session-side
+/// request construction, and no registry dispatch; issuance and execution
+/// are paired by the admission's parse key, so admitting one artifact and
+/// executing another is unrepresentable at this seam.
+///
+/// Framework EXECUTION INPUTS are prepared inside the arm that consumes
+/// them, never by the generic route above this dispatch: an arm resolves
+/// the cross-file semantic inputs its own backend reads, restates the
+/// compiled file's dependency/semantic axis with the transitive
+/// dependencies that resolution observed, and refuses on its own
+/// dependency diagnostics. A carrier therefore cannot reach another
+/// framework's producer, refusal, or execution-input carrier — the
+/// generic route has no framework execution-input value to hand it.
+///
+/// The axis restatement is arm-local but not framework-conditional: it is
+/// a property of the compiled file, it REPLACES rather than merges, and
+/// it runs BEFORE the arm's own dependency refusal so a compile refused
+/// for an unresolvable macro type still records the dependencies whose
+/// repair must invalidate it.
 ///
 /// Every refusal is typed and fail-closed — never a fallback lane,
 /// framework, or compatibility compiler:
@@ -174,11 +190,11 @@ fn vue_option_attempt_from_profile(
 ///   after it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_bound_host_products(
+    host: &crate::VerterHost,
     binding: super::native_host_binding::BoundNativeHostRequest,
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     profile: &CompileProfile,
     snapshot: &CompileInput,
-    vue_facts: verter_compiler::compile::types::VueExecutionInputs,
     want_runtime: bool,
     want_ide: bool,
     want_template_data: bool,
@@ -198,6 +214,55 @@ pub(crate) fn execute_bound_host_products(
                 artifact,
                 &snapshot.canonical_id,
             );
+            // The Vue macro bundle demand FOLLOWS the caller's target
+            // instead of always asking for the heaviest one. A TSX-only
+            // (IDE) compile takes the public binding names; only a target
+            // that renders the runtime `props` option object pays for
+            // per-member broad-runtime classification, which resolves every
+            // member's type through the shared semantic engine. This arm
+            // always produces at least the names bundle, because the shared
+            // payload resolution underneath it is what yields this file's
+            // macro dependency diagnostics and its transitive macro type
+            // dependencies.
+            let macro_demand =
+                crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::for_compile_target(
+                    profile.target,
+                )
+                .unwrap_or(
+                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
+                );
+            let macro_output = host.produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand);
+            let macro_dependency_diagnostics =
+                super::vue_macro_dependency_diagnostics::collect(host, snapshot, &macro_output);
+            let transitive_macro_type_deps: std::collections::BTreeSet<String> =
+                macro_output.transitive_canonicals.iter().cloned().collect();
+            // Before the refusal below: a compile refused for an
+            // unresolvable macro type must still record the dependencies
+            // whose repair has to invalidate it, or fixing the missing
+            // type would never re-run this file.
+            host.sync_transitive_macro_type_dependencies(
+                &snapshot.canonical_id,
+                &transitive_macro_type_deps,
+            );
+            if !macro_dependency_diagnostics.is_empty() {
+                return Err(HostProductsFailure::Fatal(DiagnosticsSnapshot::from_vec(
+                    macro_dependency_diagnostics,
+                )));
+            }
+            // The host-resolved Vue cross-file inputs ride on the typed,
+            // ephemeral `VueExecutionInputs` carrier — excluded from
+            // `CompileRequest` identity, and reachable only from here.
+            let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
+                macro_runtime: macro_output.runtime,
+                prop_constness_overrides: None, // populated by the cross-file optimizer
+                style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+                style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
+                template_binding_metadata: None,
+                template_used_vars: None,
+                runtime_template_hole: false,
+                runtime_inline_template_chunk: false,
+                prepared_styles: snapshot.prepared_styles.clone(),
+            };
             let demand = vue_host_products_demand(
                 profile,
                 &snapshot.canonical_id,
@@ -238,6 +303,19 @@ pub(crate) fn execute_bound_host_products(
                 &attribution,
                 artifact,
                 &snapshot.canonical_id,
+            );
+            // This arm's execution inputs come entirely from the presented
+            // artifact and the profile, so it contributes no cross-file
+            // semantic type dependencies. It still restates the compiled
+            // file's dependency/semantic axis with that empty
+            // contribution: the axis is REPLACED, not merged, so skipping
+            // the restatement would leave a previous compute's edges
+            // standing for this file. Placed before the demand decode for
+            // the same reason the Vue arm places it before its dependency
+            // refusal — a refused compile still restates the axis.
+            host.sync_transitive_macro_type_dependencies(
+                &snapshot.canonical_id,
+                &std::collections::BTreeSet::new(),
             );
             // The Svelte-bound demand decodes the profile's Svelte option
             // tokens through the SAME typed decode boundary the render

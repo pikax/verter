@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=convergence
 semantic_role=convergence
 class=compiler
-predecessors=CCA1N3,CCA1N4,CCA1N4A,CCA1N2G
+predecessors=CCA1N3,CCA1N3A,CCA1N4,CCA1N4A,CCA1N2G
 owner=compiler.compiler-bridge:native host-route convergence proof
 conflict_domains=compiler_execution,host_service_graph
 resource_class=docs-light
@@ -45,6 +45,7 @@ Confirm both former generic session bundle selectors are gone through separate l
 
 - **CCA1N4:** the runtime-render lane executes both Vue and Svelte through bound framework host backends; its outer bundle call and route evidence have converged.
 - **CCA1N3:** the host-backed `compile_entry` call and its complete eight-file route-record population have converged.
+- **CCA1N3A:** on the host-backed lane, framework execution-input preparation and its dependency-diagnostic refusal are arm-local to the bound framework arm; the generic route above the bound dispatch carries no framework semantics.
 - **CCA1N4A:** the runtime-render route record states only the verification its consumers actually perform.
 - **CCA1N2G:** carrier grammar at source ingestion derives from immutable compiler-catalog identity; no Vue-else-Svelte grammar fallthrough remains.
 

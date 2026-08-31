@@ -363,6 +363,11 @@ node_id = "CCA1N4A"
 commit_message = "fix(session): state the runtime-render route record's real verification"
 commit_date = "2026-08-31T18:05:00+01:00"
 
+[[implemented]]
+node_id = "CCA1N3A"
+commit_message = "fix(session): prepare framework execution inputs inside the bound arm"
+commit_date = "2026-08-31T19:00:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
@@ -1596,4 +1601,8 @@ sync_to_github = true
 [[github_issue]]
 node_id = "CCA1N4A"
 gh_issue = 449
+sync_to_github = true
+[[github_issue]]
+node_id = "CCA1N3A"
+gh_issue = 450
 sync_to_github = true

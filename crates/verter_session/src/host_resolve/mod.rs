@@ -21,8 +21,9 @@
 //! Module layout:
 //! - [`compile_request_build`] — the bound compile lanes' session side:
 //!   the framework host-backend demand constructors, the host-backed
-//!   bound execution dispatch (`execute_bound_host_products`), refusal
-//!   mapping, and the shared result carriers both `compile_entry` and
+//!   bound execution dispatch (`execute_bound_host_products`) with its
+//!   arm-local framework execution-input preparation, refusal mapping,
+//!   and the shared result carriers both `compile_entry` and
 //!   `compile_entry_runtime_render` consume.
 //! - [`frontier_helpers`] — route-cache and wildcard-ranking helpers.
 //! - [`native_host_binding`] — the sealed request-scoped

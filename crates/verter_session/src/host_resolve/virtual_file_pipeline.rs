@@ -3144,7 +3144,7 @@ impl VerterHost {
         profile: &CompileProfile,
         binding: Option<BoundNativeHostRequest>,
     ) -> Result<CompileEntryOutcome, DiagnosticsSnapshot> {
-        let mut diagnostics = snapshot.parse_diagnostics.clone();
+        let diagnostics = snapshot.parse_diagnostics.clone();
 
         // Test-only observable: the per-file source re-clone the
         // RuntimeRender lane avoids for a simple (no external `src=`) file.
@@ -3156,63 +3156,7 @@ impl VerterHost {
 
         let alloc = Allocator::new();
 
-        // The macro bundle demand FOLLOWS the caller's target instead of
-        // always asking for the heaviest one. A TSX-only (IDE) compile takes
-        // the public binding names; only a target that renders the runtime
-        // `props` option object pays for per-member broad-runtime
-        // classification, which resolves every member's type through the
-        // shared semantic engine. A Vue carrier always produces at least the
-        // names bundle, because the shared payload resolution underneath it is
-        // what yields this file's macro dependency diagnostics and its
-        // transitive macro type dependencies.
-        let macro_demand =
-            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::for_compile_target(
-                profile.target,
-            )
-            .unwrap_or(
-                crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
-            );
-        // Framework identity comes from the request-scoped binding — the
-        // catalog-selected registered identity — never from language
-        // classification of the canonical path.
-        let macro_output = matches!(binding, Some(BoundNativeHostRequest::Vue(_)))
-            .then(|| self.produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand));
-        let macro_dependency_diagnostics = macro_output
-            .as_ref()
-            .map(|output| super::vue_macro_dependency_diagnostics::collect(self, snapshot, output))
-            .unwrap_or_default();
-        let transitive_macro_type_deps = macro_output
-            .as_ref()
-            .map(|output| output.transitive_canonicals.iter().cloned().collect())
-            .unwrap_or_default();
-        self.sync_transitive_macro_type_dependencies(
-            &snapshot.canonical_id,
-            &transitive_macro_type_deps,
-        );
-        if !macro_dependency_diagnostics.is_empty() {
-            diagnostics =
-                diagnostics.merge(DiagnosticsSnapshot::from_vec(macro_dependency_diagnostics));
-            return Err(diagnostics);
-        }
-
         let scope = self.config.effective_scope();
-
-        // The host-resolved Vue cross-file inputs ride on the typed,
-        // ephemeral `VueExecutionInputs` carrier — excluded from
-        // `CompileRequest` identity, but no longer erased through an
-        // `Arc<dyn Any>` downcast. A non-Vue carrier ignores it; Vue reads
-        // it directly.
-        let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
-            macro_runtime: macro_output.and_then(|output| output.runtime),
-            prop_constness_overrides: None, // populated by the cross-file optimizer
-            style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
-            style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
-            template_binding_metadata: None,
-            template_used_vars: None,
-            runtime_template_hole: false,
-            runtime_inline_template_chunk: false,
-            prepared_styles: snapshot.prepared_styles.clone(),
-        };
 
         // The RUNTIME products are requested when the profile target
         // carries a runtime output bit. The target bits already participate
@@ -3267,19 +3211,22 @@ impl VerterHost {
         }
 
         // One backend call per host-backed request: the consumed binding's
-        // catalog arm yields the backend, the backend issues the
-        // multi-product admission over the SAME presented artifact (an
-        // unsupported option, an unproducible demand, or a malformed
-        // Svelte token refuses typed at issuance, before any codegen input
-        // is built), and the product execution consumes the admission by
-        // value — one request, one backend call, one admitted population.
+        // catalog arm yields the backend, that arm prepares its own
+        // framework execution inputs, the backend issues the multi-product
+        // admission over the SAME presented artifact (an unsupported
+        // option, an unproducible demand, or a malformed Svelte token
+        // refuses typed at issuance, before any codegen input is built),
+        // and the product execution consumes the admission by value — one
+        // request, one backend call, one admitted population. Nothing
+        // above this call resolves, prepares, or refuses on any
+        // framework's semantic execution inputs.
         // See `compile_request_build::execute_bound_host_products`.
         let products = match execute_bound_host_products(
+            self,
             binding,
             artifact,
             profile,
             snapshot,
-            vue_facts,
             want_runtime,
             want_ide,
             want_template_data,
