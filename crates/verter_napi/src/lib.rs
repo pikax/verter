@@ -40,9 +40,17 @@ use verter_session as host;
 use verter_type_expr::TypeExpr;
 
 mod audit;
+mod host_compile_request;
+#[cfg(test)]
+mod host_compile_request_tests;
 mod memory_audit;
 mod meta;
 mod typeinfo;
+
+pub use host_compile_request::{
+    decode_host_compile_request, napi_host_compile_request_to_ffi, NapiHostCompileRequest,
+    NapiRequestedProduct,
+};
 
 // Re-imports for code actions and diagnostics (parity with verter_wasm)
 use verter_actions::{ActionContext, ActionEngine};
