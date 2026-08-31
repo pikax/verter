@@ -53,14 +53,14 @@ async fn completion_items(
     }
 }
 
-/// Whether an item was minted from the type provider's response (it carries
-/// the provider-neutral `verter_resolve` envelope the merge attaches to every
-/// provider completion). Verter-native items never carry it.
-fn is_provider_item(item: &CompletionItem) -> bool {
-    item.data
-        .as_ref()
-        .and_then(|d| d.get("verter_resolve"))
-        .is_some()
+/// The controlled member-completion witness for this fixture.
+///
+/// Only the type provider can infer that the `action` loop variable has the
+/// authored `Action` interface and therefore surface its `disabled` member.
+/// Local member completions do not necessarily carry completion-item resolve
+/// data, so a `verter_resolve` envelope is not a valid provider-origin test.
+fn is_provider_witness(item: &CompletionItem) -> bool {
+    item.label == "disabled"
 }
 
 real_provider_test!(
@@ -74,11 +74,15 @@ real_provider_test!(
             return;
         }
 
-        // Baseline (stable captured surface): the identifier completion inside
-        // `{{ count }}` serves provider-derived items.
-        let pos = session.find_position(&uri, "{{ count }}", 3);
+        // Baseline (stable captured surface): reuse the exact member-completion
+        // probe that established readiness above. A free identifier completion
+        // at the start of `{{ count }}` is provider-version sensitive and can be
+        // legitimately empty even though the project is fully typed; the
+        // `Action.disabled` member is declared by this controlled fixture and is
+        // therefore the deterministic non-vacuity witness this race needs.
+        let pos = session.find_position(&uri, "action.disabled", "action.".len());
         let baseline = completion_items(session, &uri, pos).await;
-        if !baseline.iter().any(is_provider_item)
+        if !baseline.iter().any(is_provider_witness)
             && session.allow_empty_result_skip(
                 "the provider surfaced no items at the probe position, so the \
                  torn-vs-dropped distinction below would be vacuous",
@@ -112,12 +116,13 @@ real_provider_test!(
         let _ = server.test_documents().did_change(&uri, 9001, &edited);
 
         // The probe position in the EDITED document (one line down).
-        let pos_after_edit = session.find_position(&uri, "{{ count }}", 3);
+        let pos_after_edit =
+            session.find_position(&uri, "action.disabled", "action.".len());
         let raced = completion_items(session, &uri, pos_after_edit).await;
 
         let provider_labels: Vec<String> = raced
             .iter()
-            .filter(|i| is_provider_item(i))
+            .filter(|i| is_provider_witness(i))
             .map(|i| i.label.clone())
             .collect();
 
@@ -168,7 +173,7 @@ real_provider_test!(
                 labels = completion_items(session, &uri, pos_after_edit)
                     .await
                     .iter()
-                    .filter(|i| is_provider_item(i))
+                    .filter(|i| is_provider_witness(i))
                     .map(|i| i.label.clone())
                     .collect();
             }

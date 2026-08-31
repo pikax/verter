@@ -595,7 +595,10 @@ fn compile_many_no_deadlock_under_full_host_and_scheduler_pools() {
     });
 
     assert!(
-        host.compile_one_call_count.load(Ordering::Relaxed) >= N,
+        host.test_force
+            .compile_one_call_count
+            .load(Ordering::Relaxed)
+            >= N,
         "every unique canonical must have been compiled at least once"
     );
 }
@@ -660,7 +663,7 @@ fn upsert_duplicate_canonical_panics_before_submit_batch_atomic() {
 
     // The side-effect-ordering observable starts unset on a fresh host.
     assert!(
-        host.last_upsert_priority.lock().is_none(),
+        host.test_force.last_upsert_priority.lock().is_none(),
         "precondition: fresh host has no recorded upsert priority"
     );
 
@@ -714,7 +717,7 @@ fn upsert_duplicate_canonical_panics_before_submit_batch_atomic() {
     // left this `Some(Priority::Interactive)` (the first duplicate ran
     // the loop body before the panic).
     assert!(
-        host.last_upsert_priority.lock().is_none(),
+        host.test_force.last_upsert_priority.lock().is_none(),
         "the uniqueness check must run BEFORE any per-request side effect — \
          `last_upsert_priority` (written inside the per-request loop) must \
          still be None after the panic. A recorded priority means the \

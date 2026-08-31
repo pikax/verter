@@ -367,7 +367,7 @@ impl VerterHost {
                     // means we missed both `get_source` and
                     // `FileArtifactStore::get_any` before reaching here.
                     #[cfg(test)]
-                    self.test_audit.record_read(canonical_id);
+                    self.test_force.audit.record_read(canonical_id);
                     return Some(source);
                 }
                 // Post-`ensure_loaded` artifact fallback — content-pinned
@@ -386,7 +386,7 @@ impl VerterHost {
                         ),
                     );
                     #[cfg(test)]
-                    self.test_audit.record_read(canonical_id);
+                    self.test_force.audit.record_read(canonical_id);
                     return Some(Arc::clone(&facts.raw_source));
                 }
             }

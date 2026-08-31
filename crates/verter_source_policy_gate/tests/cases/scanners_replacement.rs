@@ -1034,17 +1034,26 @@ fn scanners_replacement_b_70_has_single_extension_authority() {
         );
     }
 
-    // TRACKED arm: every tracked path under extensions/ must belong to a live
-    // extension.
+    // TRACKED arm: enumerate the repository index once. Policy applies to the
+    // committed source tree, not ignored node_modules or nested agent
+    // worktrees that happen to exist below the checkout on one developer's
+    // machine.
     let tracked = std::process::Command::new("git")
-        .args(["ls-files", "-z", "--", "extensions"])
+        .args(["ls-files", "-z"])
         .current_dir(&workspace)
         .output()
-        .expect("git ls-files for the extensions tree");
+        .expect("git ls-files for the workspace");
     assert!(tracked.status.success(), "git ls-files failed");
     let tracked = String::from_utf8(tracked.stdout).expect("tracked paths are utf-8");
-    for path in tracked.split('\0').filter(|path| !path.is_empty()) {
-        let path = path.replace('\\', "/");
+    let tracked_paths = tracked
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(|path| path.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    for path in tracked_paths
+        .iter()
+        .filter(|path| path.starts_with("extensions/"))
+    {
         assert!(
             LIVE_EXTENSIONS
                 .iter()
@@ -1053,25 +1062,19 @@ fn scanners_replacement_b_70_has_single_extension_authority() {
         );
     }
 
-    for entry in walkdir::WalkDir::new(&workspace)
-        .into_iter()
-        .filter_entry(|entry| {
-            !matches!(
-                entry.file_name().to_str(),
-                Some("node_modules" | "target" | ".git" | ".integration-tests")
-            )
-        })
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name() == "package.json")
+    for relative in tracked_paths
+        .iter()
+        .filter(|path| path.as_str() == "package.json" || path.ends_with("/package.json"))
     {
-        let source = fs::read_to_string(entry.path())
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", entry.path().display()));
+        let path = workspace.join(relative);
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         let normalized = source.replace("\\\\", "/");
         for retired in RETIRED_EXTENSIONS {
             assert!(
                 !normalized.contains(retired),
                 "{} still references the retired {retired} authority",
-                entry.path().display()
+                path.display()
             );
         }
     }

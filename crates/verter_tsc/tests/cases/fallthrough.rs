@@ -456,7 +456,7 @@ const MATRIX: &[(&str, bool, &str)] = &[
 fn fallthrough_attrs_accepted_only_where_they_reach_the_dom() {
     let (temp_dir, temp_path) = setup_temp_project();
 
-    let bin = env!("CARGO_BIN_EXE_verter-tsc");
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
     let output = Command::new(bin)
         .arg("--noEmit")
         .arg("-p")

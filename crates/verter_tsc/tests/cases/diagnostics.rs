@@ -296,7 +296,7 @@ fn verter_tsc_diagnostics_e2e() {
         None => return, // skip
     };
 
-    let bin = env!("CARGO_BIN_EXE_verter-tsc");
+    let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
     let output = Command::new(bin)
         .arg("--noEmit")
         .arg("-p")

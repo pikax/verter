@@ -64,7 +64,7 @@ test("provider filters form one non-empty, disjoint canonical partition", () => 
   assert.match(missingVerdict.errors.join("\n"), /exact provider test .* matched 0 times/);
 });
 
-test("CI builds one archive and fans out three uncapped consumers", () => {
+test("CI builds one archive and fans out four core shards plus provider consumers", () => {
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const build = yamlJob(workflow, "rust-test-build");
   const core = yamlJob(workflow, "rust-test");
@@ -77,6 +77,11 @@ test("CI builds one archive and fans out three uncapped consumers", () => {
   assert.match(build, /name:\s*rust-nextest-archive/);
   assert.doesNotMatch(build, /--(?:build-)?jobs\b|-j\s*\d|--test-threads\b|max-threads/);
   assert.match(success, /^\s*- rust-test-build\s*$/m);
+  assert.match(core, /strategy:\s*\n\s+fail-fast:\s*false/);
+  assert.match(core, /shard:\s*\[1, 2, 3, 4\]/);
+  assert.match(core, /name:\s*Rust Test \(Core \$\{\{ matrix\.shard \}\}\/4\)/);
+  assert.match(core, /--partition "hash:\$\{\{ matrix\.shard \}\}\/4"/);
+  assert.match(core, /name:\s*Rust Core Test Results \(\$\{\{ matrix\.shard \}\}\/4\)/);
   for (const [lane, job] of [
     ["core", core],
     ["tsserver", tsserver],

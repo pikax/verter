@@ -48,10 +48,6 @@ pub struct HostTestAuditState {
 }
 
 impl HostTestAuditState {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     pub(crate) fn record_read(&self, canonical_id: &str) {
         self.total_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -365,13 +361,13 @@ impl ResolutionCurrencyObserver {
 #[cfg(test)]
 impl crate::VerterHost {
     pub(crate) fn begin_resolution_currency_observation(&self) {
-        self.test_audit.resolution_currency.lock().begin();
+        self.test_force.audit.resolution_currency.lock().begin();
     }
 
     pub(crate) fn take_resolution_currency_observations(
         &self,
     ) -> Vec<ResolutionCurrencyObservation> {
-        self.test_audit.resolution_currency.lock().take()
+        self.test_force.audit.resolution_currency.lock().take()
     }
 
     pub(crate) fn observe_exact_witness_validation(
@@ -381,7 +377,7 @@ impl crate::VerterHost {
         target: Option<&str>,
         accepted: bool,
     ) {
-        self.test_audit.resolution_currency.lock().push(
+        self.test_force.audit.resolution_currency.lock().push(
             ResolutionCurrencyObservation::ExactWitnessValidation {
                 owner: owner.to_owned(),
                 specifier: specifier.to_owned(),
@@ -397,7 +393,7 @@ impl crate::VerterHost {
         specifier: &str,
         target: Option<&str>,
     ) {
-        self.test_audit.resolution_currency.lock().push(
+        self.test_force.audit.resolution_currency.lock().push(
             ResolutionCurrencyObservation::OwnerEdgeRecomputed {
                 owner: owner.to_owned(),
                 specifier: specifier.to_owned(),
@@ -412,7 +408,7 @@ impl crate::VerterHost {
         specifier: &str,
         target: Option<&str>,
     ) {
-        self.test_audit.resolution_currency.lock().push(
+        self.test_force.audit.resolution_currency.lock().push(
             ResolutionCurrencyObservation::OwnerEdgePublished {
                 owner: owner.to_owned(),
                 specifier: specifier.to_owned(),
@@ -427,7 +423,7 @@ impl crate::VerterHost {
         specifier: &str,
         target: Option<&str>,
     ) {
-        self.test_audit.resolution_currency.lock().push(
+        self.test_force.audit.resolution_currency.lock().push(
             ResolutionCurrencyObservation::OwnerEdgeReused {
                 owner: owner.to_owned(),
                 specifier: specifier.to_owned(),

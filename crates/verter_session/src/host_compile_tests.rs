@@ -338,13 +338,19 @@ fn compile_many_compiles_each_canonical_once() {
     let body = good_template("read-once");
     let inputs: Vec<CompileBatchInput> = (0..5).map(|_| ok_input("/A.vue", &body)).collect();
 
-    let baseline = host.compile_one_call_count.load(Ordering::Relaxed);
+    let baseline = host
+        .test_force
+        .compile_one_call_count
+        .load(Ordering::Relaxed);
     let entries = host.compile_many(
         inputs,
         CompileBatchOptions::default(),
         CompileManyTarget::HostBacked,
     );
-    let after = host.compile_one_call_count.load(Ordering::Relaxed);
+    let after = host
+        .test_force
+        .compile_one_call_count
+        .load(Ordering::Relaxed);
 
     assert_eq!(
         entries.len(),
@@ -384,7 +390,7 @@ fn compile_many_propagates_interactive_priority() {
     let host = new_host();
     let inputs = vec![ok_input("/PRIO_INT.vue", &good_template("p"))];
 
-    *host.last_upsert_priority.lock() = None;
+    *host.test_force.last_upsert_priority.lock() = None;
     host.compile_many(
         inputs,
         CompileBatchOptions {
@@ -394,7 +400,7 @@ fn compile_many_propagates_interactive_priority() {
         CompileManyTarget::HostBacked,
     );
     assert_eq!(
-        *host.last_upsert_priority.lock(),
+        *host.test_force.last_upsert_priority.lock(),
         Some(Priority::Interactive),
         "explicit Interactive must propagate to upsert_with_priority"
     );
@@ -403,7 +409,7 @@ fn compile_many_propagates_interactive_priority() {
     // upsert (fast-path skip is keyed by hash of source) so the
     // observable is overwritten.
     let inputs2 = vec![ok_input("/PRIO_INT.vue", &good_template("p2"))];
-    *host.last_upsert_priority.lock() = None;
+    *host.test_force.last_upsert_priority.lock() = None;
     host.compile_many(
         inputs2,
         CompileBatchOptions {
@@ -413,7 +419,7 @@ fn compile_many_propagates_interactive_priority() {
         CompileManyTarget::HostBacked,
     );
     assert_eq!(
-        *host.last_upsert_priority.lock(),
+        *host.test_force.last_upsert_priority.lock(),
         Some(Priority::Background),
         "explicit Background must propagate (NOT silently coerced to Interactive)"
     );
@@ -427,7 +433,7 @@ fn compile_many_propagates_interactive_priority() {
 fn compile_many_priority_default_is_background() {
     let host = new_host();
     let inputs = vec![ok_input("/PRIO_DEF.vue", &good_template("p"))];
-    *host.last_upsert_priority.lock() = None;
+    *host.test_force.last_upsert_priority.lock() = None;
     host.compile_many(
         inputs,
         CompileBatchOptions {
@@ -437,7 +443,7 @@ fn compile_many_priority_default_is_background() {
         CompileManyTarget::HostBacked,
     );
     assert_eq!(
-        *host.last_upsert_priority.lock(),
+        *host.test_force.last_upsert_priority.lock(),
         Some(Priority::Background),
         "default priority must be Background per sub-"
     );
@@ -644,7 +650,8 @@ fn compile_many_workers_carry_host_cpu_pool_id() {
     let host = new_host();
     // Reset both observables so the read after `compile_many`
     // reflects only this batch's worker.
-    host.compile_one_caller_kind_tag
+    host.test_force
+        .compile_one_caller_kind_tag
         .store(0, std::sync::atomic::Ordering::Relaxed);
     host.compile_one_host_cpu_pool_token
         .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
@@ -691,6 +698,7 @@ fn compile_many_workers_carry_host_cpu_pool_id() {
     // ran on a scheduler `CpuWorker` thread (e.g. via a refactor that
     // moved the token install into a different start_handler).
     let observed_kind = host
+        .test_force
         .compile_one_caller_kind_tag
         .load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
