@@ -4152,3 +4152,111 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
         &crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
     )
 }
+
+/// `"key" in x` over a union arm whose key set the graph cannot decide
+/// (a type parameter, an index-signature surface, an unresolvable
+/// carrier) must keep that arm possible on BOTH edges: the checker
+/// narrows such an arm, so reading "cannot decide" as "does not carry
+/// the key" fabricates a dead edge and loses a return contributor from
+/// a result then certified complete and warm. An OPTIONAL member is
+/// decided per edge: its arm is retained EXACTLY on the negated edge
+/// (a value may lack the key) and retained as a degraded superset on
+/// the positive edge (the checker refines the key present). `Impossible`
+/// needs positive proof: only a closed surface's required member drops
+/// an arm on the negated edge, only a closed key-absent surface on the
+/// positive edge — those controls stay exact, gap-free, and warm.
+#[test]
+fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc `--strict` checker verdict: the lower bound the result
+        /// must cover.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            id: "in_unclassified_type_param_positive",
+            script: "export function f<T>(x: T | { k: number }) { if (\"k\" in x) return x; return 0; }",
+            checker: "(T & Record<\"k\", unknown>) | { k: number } | 0",
+            rendered: "Union(TypeParam(T) | { k: number } | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "in_optional_member_negated",
+            script: "type A = { k?: number }; type B = { m: string };\nexport function f(x: A | B) { if (!(\"k\" in x)) return x; return 0; }",
+            checker: "A | B | 0",
+            rendered: "Union(DeclRef(A) | DeclRef(B) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "in_index_signature_arm_keeps_contributor",
+            script: "export function f(x: { [s: string]: number } | { m: string }) { if (!(\"k\" in x)) return x; return 0; }",
+            checker: "{ [s: string]: number } | { m: string } | 0",
+            rendered: "Union({  } | { m: string } | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "in_required_member_positive_control",
+            script: "type A = { k: number }; type B = { m: string };\nexport function f(x: A | B) { if (\"k\" in x) return x; return 0; }",
+            checker: "A | 0",
+            rendered: "Union(DeclRef(A) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "in_required_member_negated_control",
+            script: "type A = { k: number }; type B = { m: string };\nexport function f(x: A | B) { if (!(\"k\" in x)) return x; return 0; }",
+            checker: "B | 0",
+            rendered: "Union(DeclRef(B) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (a sound cover of checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}

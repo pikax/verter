@@ -4033,6 +4033,23 @@ enum ArmGuardClass {
     Unclassified,
 }
 
+/// One union arm's key-presence verdict for a `"key" in subject` test.
+/// The `in` guard needs one more state than [`ArmGuardClass`] because an
+/// OPTIONAL member decides the two edges differently: the arm provably
+/// stays on the NEGATED edge exactly as declared (a value of the arm's
+/// type may lack the key), while on the POSITIVE edge retention is a
+/// superset of the checker's key-present refinement and must carry the
+/// typed guard gap. `Always`/`Never` are per-edge PROOFS (a required
+/// member / a proven-absent key on a closed surface); `Unknown` proves
+/// nothing and keeps the arm on both edges with the gap recorded.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InArmPresence {
+    Always,
+    Never,
+    Optional,
+    Unknown,
+}
+
 /// Whether the evaluator genuinely CONSUMED a type-predicate fact, and
 /// whether every relation outcome that consumption asked was decided —
 /// the verdict the predicate call's guard-application evidence records
@@ -6926,28 +6943,85 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         }
     }
 
-    /// `"key" in subject`: keep the arms that CARRY the member; negation
-    /// keeps the ones that do not. The projection answers a miss as an
-    /// Opaque MARKER NODE, not as a walk failure — "carries the member"
-    /// is decided by the node being a real value, never an Opaque one.
+    /// `"key" in subject`: keep the arms proved to carry the member;
+    /// negation keeps the ones proved not to. Proof is per edge and
+    /// per arm ([`InArmPresence`]): a closed surface's REQUIRED member
+    /// proves the arm off the negated edge, a closed surface with the
+    /// key ABSENT proves it off the positive edge, an OPTIONAL member
+    /// proves neither drop — its arm is retained exactly on the
+    /// negated edge (a value may lack the key) and retained as a
+    /// degraded superset on the positive edge (the checker refines the
+    /// key present there). An arm whose key set the graph cannot
+    /// decide — a type parameter, an index-signature surface, an
+    /// unresolvable carrier — stays possible on BOTH edges and records
+    /// the typed guard gap: the checker narrows such an arm, so
+    /// dropping it would fabricate a dead edge and silently lose that
+    /// edge's return contributor.
     fn narrow_in(
         &mut self,
         key: &Arc<str>,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         negated: bool,
     ) -> GuardNarrowing {
-        let segments: [Arc<str>; 1] = [Arc::clone(key)];
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            let carries = this
-                .project_segments_navigate(arm, &segments)
-                .is_some_and(|node| {
-                    !matches!(
-                        this.dispatch.graph().node_data(node).as_deref(),
-                        Some(SemanticNodeData::Opaque(_))
-                    )
-                });
-            Some(carries != negated)
-        })
+        let mut gapped = false;
+        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(match this.arm_in_presence(arm, key) {
+                InArmPresence::Always => !negated,
+                InArmPresence::Never => negated,
+                InArmPresence::Optional => {
+                    if !negated {
+                        gapped = true;
+                    }
+                    true
+                }
+                InArmPresence::Unknown => {
+                    gapped = true;
+                    true
+                }
+            })
+        });
+        if gapped {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        fact
+    }
+
+    /// One union arm's key-presence verdict for `"key" in subject`,
+    /// decided from the arm's OWN closed surface: identity carriers
+    /// unwrap through the shared instantiate dispatch, then only a
+    /// closed object surface (no index signature) answers — a required
+    /// member is `Always`, a proven-absent key `Never`, an optional
+    /// member `Optional`. Every other shape — a type parameter, an
+    /// open index-signature surface, a primitive, an intersection, an
+    /// unresolvable carrier — is `Unknown`: nothing about the runtime
+    /// key set is proved, so neither edge of the test may drop the arm.
+    fn arm_in_presence(&mut self, arm: SemanticNodeId, key: &str) -> InArmPresence {
+        let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(arm) {
+            super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
+            super::relation::IdentityCarrierUnwrap::Unresolvable => return InArmPresence::Unknown,
+        };
+        match self.dispatch.graph().node_data(concrete).as_deref() {
+            Some(SemanticNodeData::Object(surface)) => {
+                if surface.closed().has_index_signature() || !surface.index_signatures.is_empty() {
+                    return InArmPresence::Unknown;
+                }
+                match surface.project_string_key(key) {
+                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                        if member.optional {
+                            InArmPresence::Optional
+                        } else {
+                            InArmPresence::Always
+                        }
+                    }
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
+                        InArmPresence::Never
+                    }
+                }
+            }
+            _ => InArmPresence::Unknown,
+        }
     }
 
     /// A user-defined predicate's narrow (`x is T` or `asserts x is T`):
