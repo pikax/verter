@@ -357,7 +357,12 @@ impl ProjectSemanticDispatch<'_> {
                 // A closed leaf-union composes directly: each leaf lowers
                 // through the shared in-scope lowerer and the ordered union
                 // node is interned as data (a decided result — no
-                // re-resolution, no normalization pass).
+                // re-resolution, no normalization pass). The mint is the
+                // authored/decided-shape SHELL bypass: the arm list is a
+                // fact-decided form in fact order under the owning file's
+                // scope, and normalizing it here would be a reduction
+                // inside fact lowering — a derived composite built FROM it
+                // still routes canonical at its own construction site.
                 ClosedTypeFact::LeafUnion(leaves) => {
                     let scope = self.raise_scope(&ctx);
                     let members: Vec<SemanticNodeId> = leaves
@@ -376,7 +381,11 @@ impl ProjectSemanticDispatch<'_> {
                         .collect();
                     SourceRaiseOutcome::Raised(HotTypeRef::new(
                         self.graph().intern_node_with_scope(
-                            SemanticNodeData::Union(Arc::from(members.into_boxed_slice())),
+                            SemanticNodeData::Union(
+                                crate::semantic_query::composite::CompositeList::authored_shell(
+                                    Arc::from(members.into_boxed_slice()),
+                                ),
+                            ),
                             scope,
                         ),
                     ))

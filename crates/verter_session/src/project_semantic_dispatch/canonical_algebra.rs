@@ -297,9 +297,11 @@ fn push_child_ids(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> boo
             out.extend(program.child_nodes());
             true
         }
-        D::Union(members)
-        | D::Intersection(members)
-        | D::MergedDecl {
+        D::Union(members) | D::Intersection(members) => {
+            out.extend(members.iter().copied());
+            true
+        }
+        D::MergedDecl {
             contributors: members,
         } => {
             out.extend(members.iter().copied());
@@ -726,9 +728,9 @@ fn canonicalize(
                 ),
             );
             if is_union {
-                graph.intern_node(SemanticNodeData::Union(list.members_arc()))
+                graph.intern_node(SemanticNodeData::Union(list))
             } else {
-                graph.intern_node(SemanticNodeData::Intersection(list.members_arc()))
+                graph.intern_node(SemanticNodeData::Intersection(list))
             }
         }
     };

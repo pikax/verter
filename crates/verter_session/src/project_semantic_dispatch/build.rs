@@ -4332,7 +4332,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     aliases.push(current);
                     current = *target;
                 }
-                SemanticNodeData::Intersection(arms) => break Arc::clone(arms),
+                SemanticNodeData::Intersection(arms) => break arms.members_arc(),
                 _ => return contributor,
             }
         };
@@ -4357,9 +4357,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return contributor;
         }
 
+        // ORDERED-carrier companion filter: the heritage intersection's
+        // arm order (own-body-last topology, rendered type text) survives
+        // the suppression filter verbatim — never the commutative route.
         let mut filtered_node = self.graph().intern_preserving_scope(
             current,
-            SemanticNodeData::Intersection(Arc::from(filtered.into_boxed_slice())),
+            SemanticNodeData::Intersection(
+                crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+                    filtered.into_boxed_slice(),
+                )),
+            ),
         );
         for alias in aliases.into_iter().rev() {
             filtered_node = self
@@ -6975,7 +6982,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .evaluate_deferred_semantic_node_with_context(*index_node, context)
             .into_active_query_build_node(self);
         let members = match self.graph().node_data(resolved).as_deref() {
-            Some(SemanticNodeData::Union(members)) => Arc::clone(members),
+            Some(SemanticNodeData::Union(members)) => members.members_arc(),
             _ => return None,
         };
         if members.is_empty() {
@@ -8714,7 +8721,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => MappedKeyRemapOutcome::Drop,
             Some(SemanticNodeData::Union(members)) => {
-                let members = Arc::clone(members);
+                let members = members.members_arc();
                 let mut keys: Vec<PropertyKey> = Vec::new();
                 for member in members.iter() {
                     let evaluated = self
@@ -9005,7 +9012,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<Arc<[SemanticNodeId]>> {
         let union_members_of = |node: SemanticNodeId| {
             self.graph().node_data(node).and_then(|data| match &*data {
-                SemanticNodeData::Union(members) => Some(Arc::clone(members)),
+                SemanticNodeData::Union(members) => Some(members.members_arc()),
                 _ => None,
             })
         };
@@ -9515,7 +9522,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(transformed)))
             }
             Some(SemanticNodeData::Union(members)) => {
-                let members = Arc::clone(members);
+                let members = members.members_arc();
                 let mapped: Vec<SemanticNodeId> = members
                     .iter()
                     .map(|m| {
@@ -9778,7 +9785,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => Some(Vec::new()),
             Some(SemanticNodeData::Union(members)) => {
-                let members = Arc::clone(members);
+                let members = members.members_arc();
                 let mut out: Vec<Arc<str>> = Vec::new();
                 for member in members.iter() {
                     let choices = self.template_arg_literal_choices(*member, eval_context)?;

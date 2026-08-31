@@ -158,7 +158,9 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
     let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let left = object(graph, [surface_member("a", number, false)]);
     let right = object(graph, [surface_member("b", string, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let program = program(
         graph,
         [
@@ -212,7 +214,9 @@ fn optional_spread_write_fold_distinguishes_policy_and_live_open_state() {
         crate::semantic_query::LiteralValue::Number(2.0),
     ));
     let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-    let optional_value = graph.intern_node(SemanticNodeData::Union(Arc::from([two, undefined])));
+    let optional_value = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([two, undefined])),
+    ));
     let optional = object(graph, [surface_member("a", optional_value, true)]);
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("T"),
@@ -620,7 +624,9 @@ fn keyof_and_substitution_consume_the_canonical_program() {
             surface_member("x", number, false),
         ],
     );
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let finite = program(
         graph,
         [
@@ -704,7 +710,9 @@ fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let left = object(graph, [surface_member("a", number, false)]);
     let right = object(graph, [surface_member("b", string, false)]);
-    let finite = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let finite = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let correlated = program(graph, [ObjectConstructionEffect::Spread(finite)]);
     assert!(matches!(
         dispatch.execute_relate_pair_as_result_for_tests(correlated, correlated),
@@ -751,7 +759,9 @@ fn distribution_cap_is_a_typed_budget_partial_and_never_a_miss() {
     let graph = host.project_type_store().semantic_graph();
     // One arm past the alternative-product distribution cap.
     let arms = (0..1025).map(|_| object(graph, [])).collect::<Vec<_>>();
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(arms)));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(arms)),
+    ));
     let capped = program(graph, [ObjectConstructionEffect::Spread(union)]);
     let key = SemanticQueryKey::ProjectObjectSpread {
         program: capped,
@@ -807,7 +817,9 @@ fn unclassifiable_spread_residual_yields_indeterminate_excess_not_generic_suppre
         display_name: Arc::from("T"),
     });
     let concrete = object(graph, [surface_member("known", number, false)]);
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from([concrete])));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([concrete])),
+    ));
 
     let excess_of = |program: SemanticNodeId| {
         project(
@@ -931,7 +943,9 @@ fn correlated_union_spread_rejects_empty_and_accepts_each_arm() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let left = object(graph, [surface_member("a", number, false)]);
     let right = object(graph, [surface_member("b", string, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let correlated = program(graph, [ObjectConstructionEffect::Spread(union)]);
 
     let empty = object(graph, []);
@@ -1582,7 +1596,9 @@ fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
 
     // An unclassifiable residual falls back safely: no rejection, no acceptance.
     let concrete = object(graph, [surface_member("known", number, false)]);
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from([concrete])));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([concrete])),
+    ));
     let unclassifiable = program(
         graph,
         [
@@ -1656,7 +1672,9 @@ fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
 
     // The alternative-product cap is a ReturnOnly operational partial.
     let arms = (0..1025).map(|_| object(graph, [])).collect::<Vec<_>>();
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(arms)));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(arms)),
+    ));
     let capped = program(graph, [ObjectConstructionEffect::Spread(union)]);
     let before = graph.memo_entry_count();
     let capped_result = dispatch.execute(SemanticQueryKey::ProjectObjectSpread {
@@ -1806,7 +1824,9 @@ fn inference_deposits_only_from_exact_whole_branch_positions() {
     // union rule.
     let left = object(graph, [surface_member("x", one, false)]);
     let right = object(graph, [surface_member("x", lit_s, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let correlated = program(graph, [ObjectConstructionEffect::Spread(union)]);
     let aggregated = expect_value(infer(correlated));
     match graph.node_data(aggregated).as_deref() {
@@ -1911,7 +1931,9 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
     // stays explicitly incomplete.
     let left = object(graph, [surface_member("a", number, false)]);
     let right = object(graph, [surface_member("b", string, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let correlated = program(graph, [ObjectConstructionEffect::Spread(union)]);
     let surface = shallow(correlated).expect("a correlated program joins");
     assert!(
@@ -1931,7 +1953,12 @@ fn distributed_and_aliased_program_operands_reach_the_program_relation() {
     let base = object(graph, [surface_member("a", number, false)]);
     let closed_program = program(graph, [ObjectConstructionEffect::Spread(base)]);
     let other = object(graph, [surface_member("b", number, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([closed_program, other])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            closed_program,
+            other,
+        ])),
+    ));
     let target = object(
         graph,
         [
@@ -1970,7 +1997,9 @@ fn distributed_and_aliased_program_operands_reach_the_program_relation() {
         display_name: Arc::from("T"),
     });
     let open = program(graph, [ObjectConstructionEffect::Spread(generic)]);
-    let open_union = graph.intern_node(SemanticNodeData::Union(Arc::from([open, other])));
+    let open_union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([open, other])),
+    ));
     assert_eq!(
         relate(&dispatch, open_union, target),
         crate::semantic_query::RelationResult::Unknown,
@@ -1980,7 +2009,9 @@ fn distributed_and_aliased_program_operands_reach_the_program_relation() {
     // The identity shortcut must not accept an open program pair: the same
     // open program reached through an alias still refuses publication.
     let open_alias = graph.intern_node(SemanticNodeData::Alias(open));
-    let pair_union = graph.intern_node(SemanticNodeData::Union(Arc::from([open_alias])));
+    let pair_union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([open_alias])),
+    ));
     assert_eq!(
         relate(&dispatch, pair_union, open),
         crate::semantic_query::RelationResult::Unknown,
@@ -2174,7 +2205,9 @@ fn path_projection_joins_closed_absent_alternatives_as_optional() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let left = object(graph, [surface_member("a", number, false)]);
     let right = object(graph, [surface_member("b", string, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let correlated = program(graph, [ObjectConstructionEffect::Spread(union)]);
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -2582,7 +2615,9 @@ fn exact_optional_property_types_threads_into_consumer_projections() {
         crate::semantic_query::LiteralValue::Number(2.0),
     ));
     let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-    let optional_value = graph.intern_node(SemanticNodeData::Union(Arc::from([two, undefined])));
+    let optional_value = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([two, undefined])),
+    ));
     let optional = object(graph, [surface_member("a", optional_value, true)]);
     let source = program(
         graph,
@@ -2596,7 +2631,11 @@ fn exact_optional_property_types_threads_into_consumer_projections() {
         graph,
         [surface_member(
             "a",
-            graph.intern_node(SemanticNodeData::Union(Arc::from([one, two, undefined]))),
+            graph.intern_node(SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+                    one, two, undefined,
+                ])),
+            )),
             false,
         )],
     );
@@ -2626,7 +2665,11 @@ fn exact_optional_property_types_threads_into_consumer_projections() {
         graph,
         [surface_member(
             "a",
-            graph.intern_node(SemanticNodeData::Union(Arc::from([one, two]))),
+            graph.intern_node(SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+                    one, two,
+                ])),
+            )),
             false,
         )],
     );
@@ -2777,7 +2820,9 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
     // OPEN keeps the typed open evidence (the sibling tests above).
     let left = object(graph, [surface_member("a", number, false)]);
     let right = object(graph, [surface_member("b", string, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let root = program(
         graph,
         [
@@ -2842,7 +2887,9 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
             surface_member("a", number, false),
         ],
     );
-    let union_root = graph.intern_node(SemanticNodeData::Union(Arc::from([xa, closed_arm])));
+    let union_root = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([xa, closed_arm])),
+    ));
     let view = empty_path_shallow_surface(&dispatch, graph, union_root);
     let names = surface_member_names(&view);
     assert_eq!(
@@ -2868,7 +2915,9 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
             ObjectConstructionEffect::Spread(type_param),
         ],
     );
-    let open_union_root = graph.intern_node(SemanticNodeData::Union(Arc::from([xa, open_arm])));
+    let open_union_root = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([xa, open_arm])),
+    ));
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: open_union_root,
         path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
@@ -2921,8 +2970,9 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
             ObjectConstructionEffect::Spread(type_param),
         ],
     );
-    let intersection_root =
-        graph.intern_node(SemanticNodeData::Intersection(Arc::from([xa, open_arm])));
+    let intersection_root = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([xa, open_arm])),
+    ));
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: intersection_root,
         path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
@@ -2971,7 +3021,9 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
             ObjectConstructionEffect::Spread(type_param),
         ],
     );
-    let open_union_root = graph.intern_node(SemanticNodeData::Union(Arc::from([xa, open_arm])));
+    let open_union_root = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([xa, open_arm])),
+    ));
     assert_eq!(
         dispatch.resolve_typeinfo_surface_view(
             open_union_root,
@@ -2988,7 +3040,9 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
             [surface_member("b", string, false)],
         ))],
     );
-    let closed_union_root = graph.intern_node(SemanticNodeData::Union(Arc::from([xa, closed_arm])));
+    let closed_union_root = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([xa, closed_arm])),
+    ));
     assert!(
         dispatch
             .resolve_typeinfo_surface_view(
@@ -3221,7 +3275,9 @@ fn macro_member_reader_publishes_open_program_positive_names_without_completenes
     // unions the alternatives' declared names.
     let left = object(graph, [surface_member("a", number, false)]);
     let right = object(graph, [surface_member("b", string, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([left, right])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
+    ));
     let multi_root = program(
         graph,
         [
@@ -3359,10 +3415,12 @@ fn formula_closed_keyof_intersects_dual_spellings_as_one_js_property() {
     // tsc's nominal `1 & "1"` is never; fold/lookups already collide.)
     let numeric_arm = object(graph, [numeric_surface_member(1, string)]);
     let string_arm = object(graph, [surface_member("1", number, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([
-        numeric_arm,
-        string_arm,
-    ])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            numeric_arm,
+            string_arm,
+        ])),
+    ));
     let root = program(graph, [ObjectConstructionEffect::Spread(union)]);
 
     let formula = project(
@@ -3453,10 +3511,12 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
             ObjectConstructionEffect::Spread(type_param),
         ],
     );
-    let union_root = graph.intern_node(SemanticNodeData::Union(Arc::from([
-        object(graph, [surface_member("a", string, false)]),
-        open_arm,
-    ])));
+    let union_root = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            object(graph, [surface_member("a", string, false)]),
+            open_arm,
+        ])),
+    ));
     // The walker's open-safe terminal returns the UNION carrier; the
     // reader must recover both arms' positive evidence from it.
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -3545,9 +3605,11 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
             property("extra", number, true),
         ],
     );
-    let intersection_root = graph.intern_node(SemanticNodeData::Intersection(Arc::from([
-        token_obj, open_extra,
-    ])));
+    let intersection_root = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            token_obj, open_extra,
+        ])),
+    ));
     let members = names_of(intersection_root);
     let token = members
         .iter()
@@ -3573,10 +3635,12 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
             property("x", number, false),
         ],
     );
-    let collision_root = graph.intern_node(SemanticNodeData::Intersection(Arc::from([
-        x_string_obj,
-        open_x,
-    ])));
+    let collision_root = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            x_string_obj,
+            open_x,
+        ])),
+    ));
     let members = names_of(collision_root);
     let x = members
         .iter()
@@ -3611,10 +3675,12 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
             property("x", number, false),
         ],
     );
-    let readonly_root = graph.intern_node(SemanticNodeData::Intersection(Arc::from([
-        readonly_x_obj,
-        open_x2,
-    ])));
+    let readonly_root = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            readonly_x_obj,
+            open_x2,
+        ])),
+    ));
     let members = names_of(readonly_root);
     let x = members
         .iter()
@@ -3650,7 +3716,12 @@ fn macro_union_merge_collapses_dual_spelling_members() {
             property("1", number, false),
         ],
     );
-    let union_root = graph.intern_node(SemanticNodeData::Union(Arc::from([numeric_arm, open_arm])));
+    let union_root = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            numeric_arm,
+            open_arm,
+        ])),
+    ));
     let members = crate::meta_resolve::projectors::read_positive_surface_members(&host, union_root);
     assert_eq!(
         members.len(),
@@ -3748,10 +3819,12 @@ fn union_common_member_merge_collapses_dual_spelling_members() {
     // the declaring-arms count; the arm-1 spelling is never emitted).
     let numeric_arm = object(graph, [numeric_surface_member(1, string)]);
     let string_arm = object(graph, [surface_member("1", number, false)]);
-    let union_root = graph.intern_node(SemanticNodeData::Union(Arc::from([
-        numeric_arm,
-        string_arm,
-    ])));
+    let union_root = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            numeric_arm,
+            string_arm,
+        ])),
+    ));
 
     let view = empty_path_shallow_surface(&dispatch, graph, union_root);
     let colliding: Vec<&crate::semantic_query::SurfaceMember> = view
@@ -3796,10 +3869,12 @@ fn intersection_merge_collapses_dual_spelling_members() {
     // first, widening the value to `string`).
     let numeric_arm = object(graph, [numeric_surface_member(1, string)]);
     let string_arm = object(graph, [surface_member("1", number, false)]);
-    let intersection_root = graph.intern_node(SemanticNodeData::Intersection(Arc::from([
-        numeric_arm,
-        string_arm,
-    ])));
+    let intersection_root = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            numeric_arm,
+            string_arm,
+        ])),
+    ));
 
     let view = empty_path_shallow_surface(&dispatch, graph, intersection_root);
     let colliding: Vec<&crate::semantic_query::SurfaceMember> = view
@@ -3980,10 +4055,12 @@ fn typeinfo_join_collapses_dual_spelling_members() {
     // unioned value (never two mis-optionaled strict-key rows).
     let numeric_arm = object(graph, [numeric_surface_member(1, string)]);
     let string_arm = object(graph, [surface_member("1", number, false)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from([
-        numeric_arm,
-        string_arm,
-    ])));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            numeric_arm,
+            string_arm,
+        ])),
+    ));
     let root = program(
         graph,
         [

@@ -1868,9 +1868,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // finalizes.
             let outcome = match member.outcome {
                 FlowReturnPendingOutcome::EvaluatedValue(result) => {
-                    FlowReturnPendingOutcome::EvaluatedValue(
+                    // Per-key substitution, then the final idempotent
+                    // pre-seal closure — the member's proof, the value
+                    // channel and the batch publish all see the closed
+                    // value.
+                    FlowReturnPendingOutcome::EvaluatedValue(self.close_flow_result_pre_seal(
                         self.apply_frame_key_substitution(&member.key, result),
-                    )
+                    ))
                 }
                 no_value => no_value,
             };
@@ -4259,7 +4263,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         match data.as_ref() {
             SemanticNodeData::Union(arms) => {
                 // Target disjunction: each arm is one accepting alternative.
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut branches = Vec::with_capacity(arms.len());
                 for arm in arms.iter() {
@@ -5216,14 +5220,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
 
         // ── Union/Intersection distribution ────────────────────────────
         if let SemanticNodeData::Union(members) = &*source_data {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(source_data);
             drop(target_data);
             distribute_and(work, results, &members, |m| (*m, target));
             return;
         }
         if let SemanticNodeData::Union(members) = &*target_data {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(source_data);
             drop(target_data);
             let alternatives: Vec<_> = members.iter().map(|member| (source, *member)).collect();
@@ -5235,7 +5239,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*source_data {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(source_data);
             drop(target_data);
             let alternatives: Vec<_> = members.iter().map(|member| (*member, target)).collect();
@@ -5247,7 +5251,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return;
         }
         if let SemanticNodeData::Intersection(members) = &*target_data {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(source_data);
             drop(target_data);
             distribute_and(work, results, &members, |m| (source, *m));
@@ -5965,7 +5969,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 vec![Arc::from(super::build::js_number_to_string(*n).as_str())]
             }
             SemanticNodeData::Union(members) => {
-                let members = Arc::clone(members);
+                let members = members.members_arc();
                 drop(key_data);
                 let mut keys: Vec<Arc<str>> = Vec::with_capacity(members.len());
                 for member in members.iter() {

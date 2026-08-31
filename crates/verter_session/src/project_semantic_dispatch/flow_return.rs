@@ -1433,6 +1433,51 @@ impl<'a> ProjectSemanticDispatch<'a> {
         result.with_return_type(self.graph().as_ref(), substituted)
     }
 
+    /// The final IDEMPOTENT pre-seal closure of a flow result: one
+    /// canonical re-close of the whole-return node, run exactly once per
+    /// close — after the component's fixed point, the post-convergence
+    /// literal widening, and the per-key substitution, and strictly
+    /// BEFORE `finalize_flow_demand` seals the value (the proof then
+    /// covers exactly the closed value). It never runs in a forbidden
+    /// position: it touches no flow-slice hash input, no raw-evidence
+    /// storage, no `MergedDecl` or other ordered merge carrier, no
+    /// already-sealed completion, and no display path.
+    ///
+    /// Scope is deliberately the TOP-LEVEL composite only — the one
+    /// composite shape flow construction itself derives is the join
+    /// UNION, and "normalization normalizes only the already-demanded
+    /// semantic portion". A UNION top re-closes through the canonical
+    /// authority (flatten, lattice absorption, structural `T | T = T`);
+    /// on an already-canonical join this is a no-op returning the same
+    /// interned node — the idempotence law. An INTERSECTION top is left
+    /// untouched: flow never derives one (the join is union-kinded, and
+    /// a singleton join returns its contributor unchanged), so an
+    /// intersection top IS its original constructor-owned carrier —
+    /// possibly an order-sensitive heritage or overload carrier the
+    /// commutative route must not reorder. Every other shape passes
+    /// through verbatim.
+    ///
+    /// Canonicalization evidence deposits ambiently through the single
+    /// disposition funnel: inspected file self-roots reach the enclosing
+    /// build's memo entry, and an `Incomplete` comparison suppresses
+    /// warm admission (ReturnOnly) without altering the value.
+    pub(super) fn close_flow_result_pre_seal(&self, result: FlowReturnResult) -> FlowReturnResult {
+        let node = result.return_type();
+        let Some(data) = self.graph().node_data(node) else {
+            return result;
+        };
+        let SemanticNodeData::Union(members) = &*data else {
+            return result;
+        };
+        let members: Vec<crate::semantic_query::SemanticNodeId> = members.iter().copied().collect();
+        drop(data);
+        let closed = self.intern_normalized_union_or_intersection(&members, true);
+        if closed == node {
+            return result;
+        }
+        result.with_return_type(self.graph().as_ref(), closed)
+    }
+
     /// Close the machinery ROOT frame.
     /// Test seam: close one inline frame with a decided outcome and
     /// tagged holds. Flow identities are rejected by the callee gate's
@@ -2476,6 +2521,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // value under an instantiation key is the instantiated
                 // return — one transfer point for both publish channels.
                 let result = self.apply_frame_key_substitution(&root_key, result);
+                // The final idempotent pre-seal closure: after fixed
+                // point, widening and substitution, before the seal — the
+                // proof and both publish channels see the closed value.
+                let result = self.close_flow_result_pre_seal(result);
                 // FINALIZE the root's own demand — after the component
                 // fixed point, the literal widening, and the per-key
                 // substitution: the proof covers exactly this value. A
@@ -6223,7 +6272,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
             self.dispatch.graph().node_data(node).as_deref()
         {
             if expanded.insert(node) {
-                for member in members.to_vec() {
+                for member in members.iter().copied() {
                     self.collect_enumerated_arms(member, arms, expanded, gapped);
                 }
             }

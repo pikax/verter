@@ -1448,9 +1448,11 @@ mod partial_admission_tests {
 
         // Fold None: a present-but-unraisable composite fails the fold — the
         // seam notes the loss before returning `None`, completeness Complete.
-        let union_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            vec![str_id, absent].into_boxed_slice(),
-        )));
+        let union_absent = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![str_id, absent].into_boxed_slice(),
+            )),
+        ));
         let _scope = ColdComputeCompletenessScope::enter();
         let (_raised, facts) = host
             .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {

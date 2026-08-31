@@ -74,11 +74,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // the rebuild path when no descendant produced a different
         // node id. The public signature is unchanged; callers see only
         // the result id.
+        //
+        // Evidence-blind-replay fence: the store-owned memo is
+        // cross-request, so a walk whose canonical composite routing
+        // deposited NON-TRIVIAL evidence (file self-roots, or an
+        // incomplete comparison's warm suppression) must not be
+        // replayed to a later request that would then skip the deposit
+        // — a stale warm read served on an under-rooted entry. The
+        // epoch advancing across the walk suppresses the publish; the
+        // result itself still flows to the caller.
+        let epoch_before = self.canonical_evidence_epoch.get();
         let result = self
             .substitute_with_change_tracking(node, parameter_node, arg)
             .0;
-        self.graph()
-            .substitute_memo_publish(node, parameter_node, arg, result);
+        if self.canonical_evidence_epoch.get() == epoch_before {
+            self.graph()
+                .substitute_memo_publish(node, parameter_node, arg, result);
+        }
         result
     }
 
@@ -151,10 +163,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             let changed = cached != node;
             return (cached, changed);
         }
+        // Same evidence-blind-replay fence as the top-level entry: a
+        // sub-walk whose canonical routing deposited non-trivial
+        // evidence is not replayable, and neither is any enclosing
+        // sub-walk (ancestors observe the same epoch advance).
+        let epoch_before = self.canonical_evidence_epoch.get();
         let (result, changed) =
             self.substitute_with_change_tracking_inner(node, parameter_node, arg);
-        self.graph()
-            .substitute_memo_publish(node, parameter_node, arg, result);
+        if self.canonical_evidence_epoch.get() == epoch_before {
+            self.graph()
+                .substitute_memo_publish(node, parameter_node, arg, result);
+        }
         (result, changed)
     }
 
@@ -207,6 +226,16 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     true,
                 )
             }
+            // Substitution is a composite CONSTRUCTION site (the ruling's
+            // "substitution and post-substitution finalization" inclusion
+            // arm): a CHANGED union routes through the canonical authority
+            // — substituting `T := string` into `T | string` yields two
+            // structurally equal arms the raw rebuild would keep (the
+            // duplicate-constituent class), and `T := never` leaves a
+            // `never` arm the lattice absorbs. The unchanged path still
+            // short-circuits (no rebuild, no canonicalization). Union arm
+            // order carries no overload precedence, so the commutative
+            // route is unconditionally safe here.
             SemanticNodeData::Union(members) => {
                 let mut new_members = Vec::with_capacity(members.len());
                 let mut any_changed = false;
@@ -220,13 +249,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     return (node, false);
                 }
                 (
-                    self.graph().intern_preserving_scope(
-                        node,
-                        SemanticNodeData::Union(Arc::from(new_members.into_boxed_slice())),
-                    ),
+                    self.intern_normalized_union_or_intersection(&new_members, true),
                     true,
                 )
             }
+            // A CHANGED intersection splits by CARRIER SEMANTICS, exactly
+            // as the member-value merge does: a possibly-callable
+            // contributor makes the intersection an overload-ordered
+            // carrier (call resolution tries arms in declaration order),
+            // so the substituted rebuild PRESERVES the authored order and
+            // scope — the classification follows transparent carriers and
+            // fails CLOSED on anything undecidable from the graph alone.
+            // Otherwise (every substituted contributor provably
+            // order-safe) the derived instantiation routes through the
+            // canonical authority (structural dedup, `X & unknown = X`,
+            // the proven-disjoint scalar collapse).
             SemanticNodeData::Intersection(members) => {
                 let mut new_members = Vec::with_capacity(members.len());
                 let mut any_changed = false;
@@ -239,13 +276,24 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 if !any_changed {
                     return (node, false);
                 }
-                (
+                let rebuilt = if new_members.iter().any(|member| {
+                    crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
+                        self.graph(),
+                        *member,
+                    )
+                }) {
                     self.graph().intern_preserving_scope(
                         node,
-                        SemanticNodeData::Intersection(Arc::from(new_members.into_boxed_slice())),
-                    ),
-                    true,
-                )
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                                Arc::from(new_members.into_boxed_slice()),
+                            ),
+                        ),
+                    )
+                } else {
+                    self.intern_normalized_union_or_intersection(&new_members, false)
+                };
+                (rebuilt, true)
             }
             SemanticNodeData::MergedDecl { contributors } => {
                 // Substitute into each merged contributor, preserving the

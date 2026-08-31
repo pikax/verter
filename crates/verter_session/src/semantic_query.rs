@@ -112,7 +112,7 @@ pub mod admit;
 /// [`SemanticNodeData::carrier_type_args`]; the sole rebuild channel is
 /// [`SemanticNodeData::map_carrier_type_args`].
 pub mod carrier;
-pub(crate) mod composite;
+pub mod composite;
 mod flow_return_result;
 pub use flow_return_result::FlowReturnResult;
 
@@ -8044,8 +8044,18 @@ pub enum SemanticNodeData {
     Alias(SemanticNodeId),
     Object(SurfaceView),
     ObjectSpreadProgram(ObjectSpreadProgram),
-    Union(Arc<[SemanticNodeId]>),
-    Intersection(Arc<[SemanticNodeId]>),
+    /// Union composite. The payload is the OPAQUE [`composite::CompositeList`]
+    /// carrier: construction requires an explicit
+    /// [`composite::CompositeCarrierCategory`] mint (the canonical algebra
+    /// for derived composites; a sealed per-category bypass for authored
+    /// shells, ordered carriers, preserving rebuilds and the
+    /// normalize-query subject), so a raw member list cannot become a
+    /// semantic union without classifying its carrier semantics. Reads
+    /// deref to `[SemanticNodeId]`.
+    Union(composite::CompositeList),
+    /// Intersection composite — same opaque payload discipline as
+    /// [`Self::Union`].
+    Intersection(composite::CompositeList),
     Primitive(PrimitiveKind),
     /// Literal-value carrier. Preserves exact literal identity
     /// (`"idle"`, `42`, `true`) so unions of literals don't collapse

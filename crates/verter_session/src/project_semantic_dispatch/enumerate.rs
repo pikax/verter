@@ -260,7 +260,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 results.push(KeyNamesArm::Names(names));
             }
             SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let n = arms.len();
                 if n == 0 {
@@ -273,7 +273,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
             }
             SemanticNodeData::Union(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let n = arms.len();
                 if n == 0 {
@@ -763,7 +763,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // refute. A single `None` arm makes the whole union
             // inconclusive.
             SemanticNodeData::Union(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut any_admits = false;
                 let mut all_refuted = true;
@@ -949,7 +949,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )
             }
             SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut any_admits = false;
                 let mut any_inconclusive = false;
@@ -978,7 +978,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             SemanticNodeData::Union(arms) => {
                 // `keyof (A | B)` is the INTERSECTION of A's and B's
                 // keysets. The needle admits iff EVERY arm admits.
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut all_admit = true;
                 let mut any_inconclusive = false;

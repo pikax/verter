@@ -1192,7 +1192,7 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     let arms: Arc<[SemanticNodeId]> = match &*node(&graph, handle.node()) {
-        SemanticNodeData::Intersection(arms) => Arc::clone(arms),
+        SemanticNodeData::Intersection(arms) => arms.members_arc(),
         other => panic!("expected Intersection, got {other:?}"),
     };
     assert_eq!(arms.len(), 2, "heritage ref arm + own-body object arm");

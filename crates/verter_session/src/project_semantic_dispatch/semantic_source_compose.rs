@@ -130,7 +130,8 @@ impl ProjectSemanticDispatch<'_> {
             // `ClosedTypeFact::LeafUnion` source arm: each leaf lowers
             // through the shared in-scope lowerer and the ORDERED union node
             // is interned as data (a decided result — no re-resolution, no
-            // normalization pass).
+            // normalization pass; the authored/decided-shape SHELL bypass,
+            // same rationale as the top-level arm).
             FactOrLocator::LeafUnion(leaves) => {
                 let members: Vec<SemanticNodeId> = leaves
                     .iter()
@@ -147,7 +148,11 @@ impl ProjectSemanticDispatch<'_> {
                     })
                     .collect();
                 self.graph().intern_node_with_scope(
-                    SemanticNodeData::Union(Arc::from(members.into_boxed_slice())),
+                    SemanticNodeData::Union(
+                        crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+                            members.into_boxed_slice(),
+                        )),
+                    ),
                     scope.clone(),
                 )
             }

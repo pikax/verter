@@ -1515,9 +1515,10 @@ fn node_reaches_non_owner_ref(
                 || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
-        SemanticNodeData::Union(members)
-        | SemanticNodeData::Intersection(members)
-        | SemanticNodeData::MergedDecl {
+        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            members.iter().copied().any(recur)
+        }
+        SemanticNodeData::MergedDecl {
             contributors: members,
         } => members.iter().copied().any(recur),
         SemanticNodeData::Object(surface) => {

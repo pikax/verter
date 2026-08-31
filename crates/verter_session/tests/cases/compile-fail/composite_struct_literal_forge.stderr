@@ -1,0 +1,5 @@
+error[E0451]: field `members` of struct `CompositeList` is private
+  --> tests/cases/compile-fail/composite_struct_literal_forge.rs:15:29
+   |
+15 |     let _ = CompositeList { members };
+   |                             ^^^^^^^ private field

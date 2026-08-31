@@ -514,9 +514,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     )
                 })
             }
-            SemanticNodeData::Union(members)
-            | SemanticNodeData::Intersection(members)
-            | SemanticNodeData::MergedDecl {
+            SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+                members.iter().any(|&member| {
+                    self.node_contains_imported_utility_route(
+                        scope_canonical_id,
+                        scope_owner,
+                        member,
+                        depth + 1,
+                    )
+                })
+            }
+            SemanticNodeData::MergedDecl {
                 contributors: members,
             } => members.iter().any(|&member| {
                 self.node_contains_imported_utility_route(
@@ -953,9 +961,10 @@ fn node_references_type_param_names(
                 || matches!(index, crate::semantic_query::IndexKey::Computed(inner) if recur(*inner))
         }
         SemanticNodeData::Tuple { elements, .. } => elements.iter().any(|el| recur(el.value)),
-        SemanticNodeData::Union(members)
-        | SemanticNodeData::Intersection(members)
-        | SemanticNodeData::MergedDecl {
+        SemanticNodeData::Union(members) | SemanticNodeData::Intersection(members) => {
+            members.iter().any(|&m| recur(m))
+        }
+        SemanticNodeData::MergedDecl {
             contributors: members,
         } => members.iter().any(|&m| recur(m)),
         SemanticNodeData::Object(surface) => {

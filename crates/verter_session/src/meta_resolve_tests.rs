@@ -8511,9 +8511,11 @@ mod node_predicates_tests {
                 )))
             })
             .collect();
-        let union = graph.intern_node(SemanticNodeData::Union(StdArc::from(
-            literals.into_boxed_slice(),
-        )));
+        let union = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+                literals.into_boxed_slice(),
+            )),
+        ));
         let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
             base: pick_or_omit_identity("Pick"),
             args: StdArc::from(vec![foo_ref, union].into_boxed_slice()),
@@ -8596,9 +8598,11 @@ mod node_predicates_tests {
         let foo_ref = graph.intern_node(SemanticNodeData::DeclRef {
             identity: foo_identity,
         });
-        let empty_union = graph.intern_node(SemanticNodeData::Union(StdArc::from(
-            Vec::<SemanticNodeId>::new().into_boxed_slice(),
-        )));
+        let empty_union = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+                Vec::<SemanticNodeId>::new().into_boxed_slice(),
+            )),
+        ));
         let pick_node = graph.intern_node(SemanticNodeData::InstantiationRef {
             base: pick_or_omit_identity("Pick"),
             args: StdArc::from(vec![foo_ref, empty_union].into_boxed_slice()),

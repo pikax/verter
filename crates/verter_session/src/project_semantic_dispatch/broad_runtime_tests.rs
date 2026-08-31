@@ -105,13 +105,15 @@ fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
         "1".to_owned(),
     )));
     let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::BigInt));
-    let subject = graph.intern_node(SemanticNodeData::Union(Arc::from([
-        string,
-        number,
-        string,
-        bigint_literal,
-        unknown,
-    ])));
+    let subject = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            string,
+            number,
+            string,
+            bigint_literal,
+            unknown,
+        ])),
+    ));
 
     let value = classify(&ProjectSemanticDispatch::new(&host), subject);
 
@@ -177,9 +179,11 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         &[BroadRuntimeKind::Function, BroadRuntimeKind::Object],
         "signature metadata classifies the object without reading member or signature bodies"
     );
-    let subject = graph.intern_node(SemanticNodeData::Union(Arc::from([
-        array, callable, object,
-    ])));
+    let subject = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            array, callable, object,
+        ])),
+    ));
 
     let value = classify(&ProjectSemanticDispatch::new(&host), subject);
 
@@ -199,7 +203,9 @@ fn broad_runtime_keeps_null_and_unsupported_undefined_distinct() {
     let graph = host.project_type_store().semantic_graph();
     let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
     let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-    let subject = graph.intern_node(SemanticNodeData::Union(Arc::from([null, undefined])));
+    let subject = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([null, undefined])),
+    ));
 
     assert_eq!(
         classify(&ProjectSemanticDispatch::new(&host), subject).kinds(),
@@ -320,7 +326,9 @@ fn all_unknown_intersection_is_explicit_complete_unknown() {
     let graph = host.project_type_store().semantic_graph();
     let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-    let subject = graph.intern_node(SemanticNodeData::Intersection(Arc::from([unknown, any])));
+    let subject = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([unknown, any])),
+    ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let output = dispatch.classify_broad_runtime_transient(subject);
 
@@ -596,7 +604,11 @@ fn classifier_work_exhaustion_is_partial_unknown_and_never_warms() {
         })
         .collect();
     let subject = graph.intern_node_with_scope(
-        SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())),
+        SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                arms.into_boxed_slice(),
+            )),
+        ),
         file_scope(&dispatch, "/work-limit.ts"),
     );
     let memo_entries_before = graph.memo_entry_count();

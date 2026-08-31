@@ -392,6 +392,16 @@ pub struct ProjectSemanticDispatch<'a> {
     /// a cache key, never thread-local — it rides this dispatch exactly
     /// like the other cold-compute cycle guards above.
     pub(super) dispatch_txn: std::cell::RefCell<dispatch_txn::CheckerDispatchTransaction>,
+    /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
+    /// deposit carrying file self-roots or an `incomplete` verdict).
+    /// Snapshot-and-compare fences an evidence-blind memo publish: the
+    /// substitution hash-cons memo is store-owned and cross-request, so a
+    /// result whose canonicalization observed file-scoped structure (or
+    /// could not prove itself complete) must NOT be replayed to a later
+    /// request that would then skip the deposit — the epoch advancing
+    /// across a walk suppresses the publish (and every enclosing
+    /// publish, since ancestors observe the same advance).
+    pub(super) canonical_evidence_epoch: std::cell::Cell<u64>,
     connected_demand: ConnectedDemandState,
     #[cfg(test)]
     connected_work_limit_for_tests: std::cell::Cell<usize>,
@@ -534,6 +544,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             dispatch_txn: std::cell::RefCell::new(
                 dispatch_txn::CheckerDispatchTransaction::default(),
             ),
+            canonical_evidence_epoch: std::cell::Cell::new(0),
             connected_demand: ConnectedDemandState::new(
                 MAX_CONNECTED_PROJECTION_WORK,
                 MAX_CONNECTED_QUERY_DEPTH,
@@ -752,11 +763,22 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 false_branch_ref: *false_branch,
                 distributive: *distributive,
             }),
+            // The normalize-query SUBJECT representation: the
+            // pre-normalization member list interned verbatim (the query's
+            // subject must stay distinct from its canonical result).
             SemanticQueryKey::NormalizeUnion { members } => {
-                graph.intern_node(SemanticNodeData::Union(Arc::clone(members)))
+                graph.intern_node(SemanticNodeData::Union(
+                    crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
+                        members,
+                    )),
+                ))
             }
             SemanticQueryKey::NormalizeIntersection { members } => {
-                graph.intern_node(SemanticNodeData::Intersection(Arc::clone(members)))
+                graph.intern_node(SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::query_subject(Arc::clone(
+                        members,
+                    )),
+                ))
             }
             SemanticQueryKey::Relate { source, .. } => *source,
             _ => {
@@ -890,6 +912,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         evidence: canonical_algebra::CanonicalEvidence,
     ) {
+        if evidence.incomplete || !evidence.inspected_file_roots.is_empty() {
+            self.canonical_evidence_epoch
+                .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        }
         if evidence.incomplete {
             if self.build_local_taint.borrow().is_empty() {
                 crate::request_context::mark_request_result_partial();
@@ -3831,9 +3857,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // return the bare literal and break that uniformity. All arms are
         // `Global`-scoped literals — no freshness evidence exists to lose.
         match lit_ids.as_slice() {
-            [_] => graph.intern_node(SemanticNodeData::Union(Arc::from(
-                lit_ids.into_boxed_slice(),
-            ))),
+            [_] => graph.intern_node(SemanticNodeData::Union(
+                crate::semantic_query::composite::CompositeList::query_subject(Arc::from(
+                    lit_ids.into_boxed_slice(),
+                )),
+            )),
             _ => self.intern_normalized_union_or_intersection(&lit_ids, true),
         }
     }

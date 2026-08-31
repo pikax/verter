@@ -460,7 +460,7 @@ pub(crate) fn read_positive_surface_members(
             members
         }
         Some(SemanticNodeData::Union(arms)) => {
-            let arms = Arc::clone(arms);
+            let arms = arms.members_arc();
             let per_arm: Vec<Vec<SurfaceMember>> = arms
                 .iter()
                 .map(|arm| read_positive_surface_members(ctx, *arm))
@@ -482,7 +482,7 @@ pub(crate) fn read_positive_surface_members(
         // rule would mark intersection members optional and union their
         // values.
         Some(SemanticNodeData::Intersection(arms)) => {
-            let arms = Arc::clone(arms);
+            let arms = arms.members_arc();
             let per_arm: Vec<Vec<SurfaceMember>> = arms
                 .iter()
                 .map(|arm| read_positive_surface_members(ctx, *arm))

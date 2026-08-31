@@ -859,8 +859,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if arm_ids.len() == 1 {
                     arm_ids[0]
                 } else {
+                    // Authored-syntax lowering: the shell keeps authored
+                    // order and scope; a reduction here is forbidden.
                     graph.intern_node_with_scope(
-                        SemanticNodeData::Union(Arc::from(arm_ids.into_boxed_slice())),
+                        SemanticNodeData::Union(
+                            crate::semantic_query::composite::CompositeList::authored_shell(
+                                Arc::from(arm_ids.into_boxed_slice()),
+                            ),
+                        ),
                         scope.clone(),
                     )
                 }
@@ -885,8 +891,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if arm_ids.len() == 1 {
                     arm_ids[0]
                 } else {
+                    // Authored-syntax lowering: see the Union arm above.
                     graph.intern_node_with_scope(
-                        SemanticNodeData::Intersection(Arc::from(arm_ids.into_boxed_slice())),
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::authored_shell(
+                                Arc::from(arm_ids.into_boxed_slice()),
+                            ),
+                        ),
                         scope.clone(),
                     )
                 }

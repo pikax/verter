@@ -205,7 +205,7 @@ pub(super) fn index_domains_overlap(
             &crate::semantic_query::PropertyKey::from_js_number(*n),
         ),
         SemanticNodeData::Union(members) => {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(target_data);
             members
                 .iter()
@@ -265,7 +265,7 @@ pub(super) fn index_signature_applies_to_property(
             }
         }
         SemanticNodeData::Union(members) => {
-            let members = Arc::clone(members);
+            let members = members.members_arc();
             drop(data);
             members
                 .iter()

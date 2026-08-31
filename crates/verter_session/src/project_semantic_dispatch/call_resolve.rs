@@ -2493,9 +2493,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     .iter()
                     .map(|member| self.call_shape_transform(*member, policy, memo))
                     .collect::<Vec<_>>();
+                // Order- and scope-preserving rebuild: an intersection
+                // reaching call-shape transformation may be an
+                // overload-ordered carrier, so the transformed arms keep
+                // their declaration order verbatim.
                 graph.intern_preserving_scope(
                     node,
-                    SemanticNodeData::Intersection(Arc::from(members.into_boxed_slice())),
+                    SemanticNodeData::Intersection(
+                        crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                            Arc::from(members.into_boxed_slice()),
+                        ),
+                    ),
                 )
             }
             Some(SemanticNodeData::Object(surface)) => {

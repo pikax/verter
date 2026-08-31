@@ -2216,9 +2216,11 @@ fn canonical_algebra_collapses_only_proven_facts() {
 
     // Nested composites FLATTEN recursively (a union is never an arm of a
     // union), across the raw-constructor seam too.
-    let inner = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![lit_a, string].into_boxed_slice(),
-    )));
+    let inner = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![lit_a, string].into_boxed_slice(),
+        )),
+    ));
     let flattened = canonical_algebra::canonical_union(&graph, &[inner, number]);
     match graph.node_data(flattened.node).as_deref() {
         Some(SemanticNodeData::Union(m)) => {
@@ -5267,9 +5269,11 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
         has_index_signature: false,
     };
     let object_node = graph.intern_node(SemanticNodeData::Object(surface));
-    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![object_node, array_node, string_node].into_boxed_slice(),
-    )));
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![object_node, array_node, string_node].into_boxed_slice(),
+        )),
+    ));
 
     // Substituted parameter (TypeParam K) is not present anywhere
     // in the tree above.
@@ -5310,7 +5314,12 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
 /// Change-tracking must NOT regress correctness when the parameter
 /// DOES appear: substitute(T → string) produces a node whose `T`
 /// references are replaced. Standard correctness check to pair with
-/// the no-op discriminator above.
+/// the no-op discriminator above. Substitution is a composite
+/// CONSTRUCTION site: the substituted `T | string` with `T := string`
+/// carries two structurally equal arms, and the canonical algebra
+/// (`T | T = T`, singleton unwrap) must collapse it to the retained
+/// member — a raw order-preserving rebuild that keeps both arms fails
+/// this contract.
 #[test]
 fn substitute_change_tracking_preserves_correctness_when_parameter_appears() {
     let host = host();
@@ -5325,26 +5334,23 @@ fn substitute_change_tracking_preserves_correctness_when_parameter_appears() {
         default: None,
         display_name: Arc::from("T"),
     });
-    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![parameter_node, string_node].into_boxed_slice(),
-    )));
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![parameter_node, string_node].into_boxed_slice(),
+        )),
+    ));
 
     let result = dispatch.substitute_semantic_type_param(union_node, parameter_node, string_node);
-    // Post-substitution union has both arms = string_node; structural
-    // intern dedups equivalent arms but the arm count is preserved.
-    let data = graph.node_data(result).expect("result data");
-    match data.as_ref() {
-        SemanticNodeData::Union(arms) => {
-            assert_eq!(arms.len(), 2);
-            assert_eq!(arms[0], string_node);
-            assert_eq!(arms[1], string_node);
-        }
-        other => panic!("expected substituted Union, got {other:?}"),
-    }
-    // Sanity: result id differs from union_node since the union body changed.
-    assert_ne!(
-        result, union_node,
-        "substituted union must intern to a fresh node id"
+    // Post-substitution both arms are `string_node`: the canonical
+    // union algebra (`T | T = T`, singleton unwrap) collapses the
+    // substituted composite to the retained member itself. A raw
+    // order-preserving rebuild that keeps `Union(string, string)`
+    // (case-B shape: a duplicate constituent surviving substitution)
+    // fails this contract.
+    assert_eq!(
+        result, string_node,
+        "substituting T := string into `T | string` must canonicalize \
+         to the single retained `string` member, not a duplicate-arm union"
     );
 }
 
@@ -5559,9 +5565,11 @@ fn build_conditional_distributive_union_distributes_per_member_via_execute_no_st
     // check = string | number ; extends = string ;
     // distributive = true → expect NormalizeUnion([ true_branch (for
     // string), false_branch (for number) ]).
-    let union_check = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, number_node].into_boxed_slice(),
-    )));
+    let union_check = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, number_node].into_boxed_slice(),
+        )),
+    ));
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
         check: union_check,
@@ -5616,9 +5624,11 @@ fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
     let true_branch = primitive(&graph, PrimitiveKind::Boolean);
     let false_branch = primitive(&graph, PrimitiveKind::Symbol);
 
-    let union_check = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, number_node].into_boxed_slice(),
-    )));
+    let union_check = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, number_node].into_boxed_slice(),
+        )),
+    ));
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Conditional {
         check: union_check,
@@ -5671,9 +5681,11 @@ fn build_conditional_distributive_union_behind_alias_carrier_distributes_per_mem
     let true_branch = primitive(&graph, PrimitiveKind::Boolean);
     let false_branch = primitive(&graph, PrimitiveKind::Symbol);
 
-    let union_node = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, number_node].into_boxed_slice(),
-    )));
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, number_node].into_boxed_slice(),
+        )),
+    ));
     // The carrier shell the union hides behind — the deferred-shell
     // evaluator unwraps it at the union-ness fact demand.
     let alias_check = graph.intern_node(SemanticNodeData::Alias(union_node));
@@ -5738,9 +5750,11 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
     // Two decl anchors vs. a primitive extends — each per-member
     // conditional returns a deferred `Conditional` shell because the
     // shallow relation check cannot decide the relation.
-    let union_check = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![a, b].into_boxed_slice(),
-    )));
+    let union_check = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a, b].into_boxed_slice(),
+        )),
+    ));
 
     // Compute the expected per-member deferred shells with
     // `distributive: false`.
@@ -5908,9 +5922,11 @@ fn intersection_arm_without_path_segment_is_ignored() {
     let num = primitive(&graph, PrimitiveKind::Number);
     let with_m = simple_object(&graph, &[("m", num)]);
     let without_m = simple_object(&graph, &[("n", num)]);
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![with_m, without_m].into_boxed_slice(),
-    )));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![with_m, without_m].into_boxed_slice(),
+        )),
+    ));
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
@@ -5947,9 +5963,11 @@ fn union_miss_propagates() {
     let num = primitive(&graph, PrimitiveKind::Number);
     let with_m = simple_object(&graph, &[("m", num)]);
     let without_m = simple_object(&graph, &[("n", num)]);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![with_m, without_m].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![with_m, without_m].into_boxed_slice(),
+        )),
+    ));
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
@@ -7563,9 +7581,11 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
     let key_y = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::String("y".to_string()),
     ));
-    let keys_xy = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_x, key_y].into_boxed_slice(),
-    )));
+    let keys_xy = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_x, key_y].into_boxed_slice(),
+        )),
+    ));
     let never = primitive(&graph, PrimitiveKind::Never);
     let broad_string = primitive(&graph, PrimitiveKind::String);
 
@@ -7721,9 +7741,11 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
     }
 
     // Pick<any, "x" | 1> = { x: any; 1: any } — mixed literal union.
-    let keys_x_or_1 = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_x, key_1].into_boxed_slice(),
-    )));
+    let keys_x_or_1 = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_x, key_1].into_boxed_slice(),
+        )),
+    ));
     let picked_mixed = instantiate_utility(&dispatch, &graph, "Pick", &[any, keys_x_or_1]);
     match graph.node_data(picked_mixed).as_deref() {
         Some(SemanticNodeData::Object(surface)) => {
@@ -7828,9 +7850,11 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
     let key_1 = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::Number(1.0),
     ));
-    let keys_a_or_1 = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_a, key_1].into_boxed_slice(),
-    )));
+    let keys_a_or_1 = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_a, key_1].into_boxed_slice(),
+        )),
+    ));
 
     // Pick<{ a: string; 1: number }, "a" | 1> = the full source surface.
     let picked = instantiate_utility(&dispatch, &graph, "Pick", &[source, keys_a_or_1]);
@@ -8018,9 +8042,11 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     }
 
     // `{ [K in 1 | "a"]: K }` = `{ 1: 1; a: "a" }`.
-    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_1, key_a].into_boxed_slice(),
-    )));
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_1, key_a].into_boxed_slice(),
+        )),
+    ));
     let param = key_param();
     let mapped = build_mapped(mapper_over(keys_1_or_a, param, param, None));
     match graph.node_data(mapped).as_deref() {
@@ -8089,9 +8115,11 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
 
     // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }` — duplicate produced names
     // UNION their per-K values.
-    let keys_dup = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_1, key_1_str].into_boxed_slice(),
-    )));
+    let keys_dup = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_1, key_1_str].into_boxed_slice(),
+        )),
+    ));
     let param = key_param();
     let mapped = build_mapped(mapper_over(keys_dup, param, param, None));
     match graph.node_data(mapped).as_deref() {
@@ -8698,9 +8726,11 @@ fn key_remap_publishes_numeric_literal_keys() {
     let key_a = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::String("a".to_string()),
     ));
-    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![number_literal(1.0), key_a].into_boxed_slice(),
-    )));
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![number_literal(1.0), key_a].into_boxed_slice(),
+        )),
+    ));
     let param = key_param();
     let mapped = build_mapped(keys_1_or_a, param, Some(param));
     match graph.node_data(mapped).as_deref() {
@@ -9042,9 +9072,11 @@ fn union_index_distribution_projects_numeric_literal_arms() {
         ))
     };
     let project_by_union = |base: SemanticNodeId, arms: &[SemanticNodeId]| -> SemanticNodeId {
-        let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-            arms.to_vec().into_boxed_slice(),
-        )));
+        let union = graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                arms.to_vec().into_boxed_slice(),
+            )),
+        ));
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
             path: Arc::from(vec![PathSegment::Index(IndexKey::Computed(union))].into_boxed_slice()),
@@ -9170,9 +9202,11 @@ fn union_index_distribution_preserves_carrier_valued_member_arms() {
         }
     };
     let union_of = |arms: &[SemanticNodeId]| -> SemanticNodeId {
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
-            arms.to_vec().into_boxed_slice(),
-        )))
+        graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                arms.to_vec().into_boxed_slice(),
+            )),
+        ))
     };
 
     // Convention anchor: the SINGLE-KEY path publishes the opaque member
@@ -9301,9 +9335,11 @@ fn object_record_relation_accepts_numeric_literal_keys() {
     let key_a = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::String("a".to_string()),
     ));
-    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![number_literal(1.0), key_a].into_boxed_slice(),
-    )));
+    let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![number_literal(1.0), key_a].into_boxed_slice(),
+        )),
+    ));
     let source_both = simple_object(&graph, &[("1", string_node), ("a", string_node)]);
     assert_eq!(
         relate(source_both, keys_1_or_a),
@@ -10001,9 +10037,11 @@ fn awaited_distributes_over_union_arms() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string_node = primitive(&graph, PrimitiveKind::String);
     let num = primitive(&graph, PrimitiveKind::Number);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![promise_carrier(&graph, string_node), num].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![promise_carrier(&graph, string_node), num].into_boxed_slice(),
+        )),
+    ));
 
     let result = instantiate_utility(&dispatch, &graph, "Awaited", &[union]);
     let data = graph.node_data(result).expect("node data");
@@ -10137,9 +10175,11 @@ fn non_nullable_reduces_settled_operands() {
     let string_node = primitive(&graph, PrimitiveKind::String);
     let null_node = primitive(&graph, PrimitiveKind::Null);
     let undefined_node = primitive(&graph, PrimitiveKind::Undefined);
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![string_node, null_node, undefined_node].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, null_node, undefined_node].into_boxed_slice(),
+        )),
+    ));
     let filtered = run(union);
     assert_eq!(
         filtered, string_node,
@@ -10170,9 +10210,11 @@ fn non_nullable_reduces_settled_operands() {
         "NonNullable over `never` must reduce to `never`"
     );
     // `NonNullable<null | undefined>` = `never` (every arm filtered).
-    let nullish_union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![null_node, undefined_node].into_boxed_slice(),
-    )));
+    let nullish_union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![null_node, undefined_node].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         run(nullish_union),
         never_node,
@@ -13483,9 +13525,11 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
         &graph,
         vec![surface_member("keep", union_projection, false, false)],
     );
-    let union_template = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![losing_target, winning_target].into_boxed_slice(),
-    )));
+    let union_template = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![losing_target, winning_target].into_boxed_slice(),
+        )),
+    ));
     let union_source_value = intern_object_with_members(
         &graph,
         vec![
@@ -13543,9 +13587,11 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
             surface_member("tag", string, false, false),
         ],
     );
-    let intersection_source_value = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![losing_source_arm, winning_source_arm].into_boxed_slice(),
-    )));
+    let intersection_source_value = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![losing_source_arm, winning_source_arm].into_boxed_slice(),
+        )),
+    ));
     let intersection_target = reverse_test_target(
         &graph,
         intersection_infer,
@@ -14035,9 +14081,11 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
         default: None,
         display_name: Arc::from("K"),
     });
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![obj, type_param].into_boxed_slice(),
-    )));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![obj, type_param].into_boxed_slice(),
+        )),
+    ));
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: intersection,
@@ -16233,9 +16281,11 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
             s.to_string(),
         )))
     };
-    let keys_ab = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![lit("a"), lit("b")].into_boxed_slice(),
-    )));
+    let keys_ab = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![lit("a"), lit("b")].into_boxed_slice(),
+        )),
+    ));
     let builtin = |name: &str| DeclIdentity {
         canonical_id: Arc::from("__builtin__"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -20611,9 +20661,11 @@ fn shallow_intersection_object_and_instantiation_ref_merges_members() {
         base: decl_identity_value(&host, "/w/inst.ts", "Foo"),
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
     });
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![object_a, inst_ref].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![object_a, inst_ref].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(
@@ -20651,9 +20703,11 @@ fn shallow_intersection_optionality_required_wins() {
     let t = primitive(&graph, PrimitiveKind::String);
     let optional_a = intern_object_with_members(&graph, vec![surface_member("a", t, true, false)]);
     let required_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, false)]);
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![optional_a, required_a].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![optional_a, required_a].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(
@@ -20682,9 +20736,11 @@ fn shallow_intersection_readonly_or_merged() {
     let t = primitive(&graph, PrimitiveKind::String);
     let readonly_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, true)]);
     let mutable_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, false)]);
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![readonly_a, mutable_a].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![readonly_a, mutable_a].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(&graph, result, "shallow_intersection_readonly_or_merged");
@@ -20819,9 +20875,11 @@ fn shallow_intersection_value_merge_intersection_node() {
         intern_object_with_members(&graph, vec![surface_member("a", value_a, false, false)]);
     let arm_b =
         intern_object_with_members(&graph, vec![surface_member("a", value_b, false, false)]);
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![arm_a, arm_b].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(
@@ -20871,9 +20929,11 @@ fn shallow_union_member_intersection_of_arms() {
     let num_id = primitive(&graph, PrimitiveKind::Number);
     let arm_a = intern_object_with_members(&graph, vec![surface_member("a", str_id, false, false)]);
     let arm_b = intern_object_with_members(&graph, vec![surface_member("a", num_id, false, false)]);
-    let base = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![arm_a, arm_b].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     let view = require_object_surface(&graph, result, "shallow_union_member_intersection_of_arms");
@@ -20888,9 +20948,11 @@ fn shallow_union_member_intersection_of_arms() {
     );
 
     // Negative: `{a: A} | string` — string arm has no `a` member.
-    let mixed = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![arm_a, str_id].into_boxed_slice(),
-    )));
+    let mixed = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![arm_a, str_id].into_boxed_slice(),
+        )),
+    ));
     let mixed_result = run_empty_path_shallow(&dispatch, mixed);
     let mixed_view = require_object_surface(
         &graph,
@@ -21003,9 +21065,11 @@ fn shallow_mapped_type_enumerates_keyset() {
     let key_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "b".to_string(),
     )));
-    let key_space = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_a, key_b].into_boxed_slice(),
-    )));
+    let key_space = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_a, key_b].into_boxed_slice(),
+        )),
+    ));
     let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("__Mapper"),
         param_index: 0,
@@ -21193,9 +21257,11 @@ fn shallow_walker_stack_depth_bounded_for_100_intersection() {
             )
         })
         .collect();
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        arms.into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            arms.into_boxed_slice(),
+        )),
+    ));
 
     // The query MUST terminate without stack overflow. The
     // walker hardening guarantee is an iterative frame stack so a
@@ -22529,9 +22595,11 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
         }
     };
     let union_of = |arms: &[SemanticNodeId]| -> SemanticNodeId {
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
-            arms.to_vec().into_boxed_slice(),
-        )))
+        graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                arms.to_vec().into_boxed_slice(),
+            )),
+        ))
     };
 
     // Single-key Identity rule: `Partial<{p: string}>` carrier walked at
@@ -24750,9 +24818,11 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     let key_b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
         "b".to_string(),
     )));
-    let key_space = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![key_a, key_b].into_boxed_slice(),
-    )));
+    let key_space = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![key_a, key_b].into_boxed_slice(),
+        )),
+    ));
     let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("__Mapper"),
         param_index: 0,
@@ -25184,9 +25254,11 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
         ),
         crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
     ]);
-    let open_intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![a_object, open_program].into_boxed_slice(),
-    )));
+    let open_intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a_object, open_program].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         dispatch.key_names_from_base_node(open_intersection),
         None,
@@ -25199,9 +25271,11 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
     let closed_program = program_of(vec![
         crate::semantic_query::ObjectConstructionEffect::Spread(b_object),
     ]);
-    let closed_intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![a_object, closed_program].into_boxed_slice(),
-    )));
+    let closed_intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a_object, closed_program].into_boxed_slice(),
+        )),
+    ));
     let mut names = dispatch
         .key_names_from_base_node(closed_intersection)
         .expect("a closed program arm enumerates");
@@ -25217,9 +25291,11 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
 
     // Pre-existing rule unchanged: a TypeParam arm is dropped, the
     // enumerable arm's keys survive.
-    let param_intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![a_object, type_param].into_boxed_slice(),
-    )));
+    let param_intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a_object, type_param].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         dispatch.key_names_from_base_node(param_intersection),
         Some(vec![crate::semantic_query::PropertyKey::string_literal(
@@ -25273,12 +25349,16 @@ fn keyof_intersection_poisons_through_union_nesting() {
             ),
         },
     ));
-    let union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![simple_object(&graph, &[("a", string)]), open_program].into_boxed_slice(),
-    )));
-    let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![union, simple_object(&graph, &[("c", string)])].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![simple_object(&graph, &[("a", string)]), open_program].into_boxed_slice(),
+        )),
+    ));
+    let intersection = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![union, simple_object(&graph, &[("c", string)])].into_boxed_slice(),
+        )),
+    ));
     assert_eq!(
         dispatch.key_names_from_base_node(intersection),
         None,
@@ -26531,9 +26611,11 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
                 ))))
             })
             .collect();
-        graph.intern_node(SemanticNodeData::Union(Arc::from(
-            members.into_boxed_slice(),
-        )))
+        graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                members.into_boxed_slice(),
+            )),
+        ))
     };
     let a = make_union("a");
     let b = make_union("b");
@@ -26959,9 +27041,11 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
     // value below.
     let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
     let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
-    let key_union = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![a, b].into_boxed_slice(),
-    )));
+    let key_union = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![a, b].into_boxed_slice(),
+        )),
+    ));
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
@@ -27892,9 +27976,11 @@ fn shallow_empty_path_intersection_root_still_rebuilds_merged_surface() {
         vec![surface_member("right", str_id, false, false)],
         false,
     );
-    let base = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        vec![left, right].into_boxed_slice(),
-    )));
+    let base = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![left, right].into_boxed_slice(),
+        )),
+    ));
 
     let result = run_empty_path_shallow(&dispatch, base);
     assert_ne!(result, left, "intersection root must not alias an arm");
@@ -28189,7 +28275,11 @@ fn oracle_value_union(
     ids.dedup();
     match ids.as_slice() {
         [only] => *only,
-        _ => graph.intern_node(SemanticNodeData::Union(Arc::from(ids.into_boxed_slice()))),
+        _ => graph.intern_node(SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                ids.into_boxed_slice(),
+            )),
+        )),
     }
 }
 
@@ -28943,5 +29033,85 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
         !classes.contains(PartialReasonSet::PROPAGATED),
         "a contained positional class must NOT be re-lifted as the anonymous bridge, \
          observed {classes:?}"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// The final idempotent pre-seal closure (`close_flow_result_pre_seal`).
+//
+// Through the live path the closure is defense-in-depth: the flow join,
+// substitution and widening all already produce canonical values, so a
+// non-canonical pre-seal value is unconstructible through the public
+// boundary — the laws are proven directly on the helper instead of
+// through a vacuous end-to-end fixture.
+// ──────────────────────────────────────────────────────────────────────
+
+/// A raw duplicate-arm union handed to the pre-seal closure collapses
+/// through the canonical authority (`T | T = T`, singleton unwrap), and
+/// re-closing the closed result is a no-op — the idempotence law.
+#[test]
+fn pre_seal_closure_canonicalizes_union_top_and_is_idempotent() {
+    use crate::semantic_query::FlowReturnResult;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    let never_node = primitive(&graph, PrimitiveKind::Never);
+    // A raw (pre-canonical) union fixture: duplicate arms plus a `never`
+    // arm the lattice absorbs.
+    let raw = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string_node, never_node, string_node].into_boxed_slice(),
+        )),
+    ));
+    let result = FlowReturnResult::new(&graph, raw, false, None);
+
+    let closed = dispatch.close_flow_result_pre_seal(result);
+    assert_eq!(
+        closed.return_type(),
+        string_node,
+        "the pre-seal closure must collapse `string | never | string` to `string`"
+    );
+    // Idempotence: closing an already-closed result is a no-op.
+    let reclosed = dispatch.close_flow_result_pre_seal(closed.clone());
+    assert_eq!(
+        reclosed.return_type(),
+        closed.return_type(),
+        "re-closing an already-closed result must be a no-op"
+    );
+}
+
+/// An INTERSECTION top passes through the pre-seal closure verbatim:
+/// flow never derives one (the join is union-kinded; a singleton join
+/// returns its contributor unchanged), so an intersection top is its
+/// original constructor-owned carrier — possibly an order-sensitive
+/// heritage or overload carrier the commutative route must not reorder.
+#[test]
+fn pre_seal_closure_leaves_intersection_top_untouched() {
+    use crate::semantic_query::FlowReturnResult;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let number_node = primitive(&graph, PrimitiveKind::Number);
+    let string_node = primitive(&graph, PrimitiveKind::String);
+    // A raw intersection top — even one the canonical route WOULD
+    // collapse (`string & number = never`) stays untouched: the closure
+    // does not re-decide a constructor-owned intersection carrier.
+    let inter = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![number_node, string_node].into_boxed_slice(),
+        )),
+    ));
+    let result = FlowReturnResult::new(&graph, inter, false, None);
+    let closed = dispatch.close_flow_result_pre_seal(result);
+    assert_eq!(
+        closed.return_type(),
+        inter,
+        "an intersection top is constructor-owned and passes through the \
+         pre-seal closure verbatim"
     );
 }

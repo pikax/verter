@@ -856,7 +856,11 @@ fn nested_bare_ref_carrier_in_intersection_resolves() {
     let a = bare_ref_carrier(&dispatch, "A", scope.clone(), &[]);
     let b = bare_ref_carrier(&dispatch, "B", scope, &[]);
     let intersection = graph.intern_node_with_scope(
-        SemanticNodeData::Intersection(Arc::from(vec![a, b].into_boxed_slice())),
+        SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![a, b].into_boxed_slice(),
+            )),
+        ),
         NodeScopeId::Global,
     );
 

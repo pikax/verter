@@ -289,7 +289,7 @@ fn realize_callable_member_inner(
         // normalizer then classifies the member non-slot.
         SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
             let is_union = matches!(data.as_ref(), SemanticNodeData::Union(_));
-            let arms = Arc::clone(arms);
+            let arms = arms.members_arc();
             drop(data);
             let mut realized_arms: Vec<crate::semantic_query::SemanticNodeId> =
                 Vec::with_capacity(arms.len());
@@ -305,7 +305,13 @@ fn realize_callable_member_inner(
             if realized_arms.iter().zip(arms.iter()).all(|(a, b)| a == b) {
                 return Some(node);
             }
-            let boxed = Arc::from(realized_arms.into_boxed_slice());
+            // Order- and arity-preserving rebuild: realized arms replace
+            // the originals 1:1, and the composite may be an
+            // overload-ordered carrier (slot-callable arms), so order is
+            // never re-decided here.
+            let boxed = crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                Arc::from(realized_arms.into_boxed_slice()),
+            );
             let rebuilt = if is_union {
                 SemanticNodeData::Union(boxed)
             } else {

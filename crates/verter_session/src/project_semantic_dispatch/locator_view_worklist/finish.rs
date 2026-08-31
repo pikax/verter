@@ -146,9 +146,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if ids.len() == 1 {
                     ids[0]
                 } else {
+                    // Order- and scope-preserving projection rebuild.
                     graph.intern_preserving_scope(
                         node,
-                        SemanticNodeData::Union(Arc::from(ids.into_boxed_slice())),
+                        SemanticNodeData::Union(
+                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                                Arc::from(ids.into_boxed_slice()),
+                            ),
+                        ),
                     )
                 }
             }
@@ -162,9 +167,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if ids.len() == 1 {
                     ids[0]
                 } else {
+                    // Order- and scope-preserving projection rebuild.
                     graph.intern_preserving_scope(
                         node,
-                        SemanticNodeData::Intersection(Arc::from(ids.into_boxed_slice())),
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
+                                Arc::from(ids.into_boxed_slice()),
+                            ),
+                        ),
                     )
                 }
             }

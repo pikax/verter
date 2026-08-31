@@ -71,13 +71,19 @@ fn function_with_return_span(
 }
 
 fn union(graph: &SemanticGraphStore, arms: Vec<SemanticNodeId>) -> SemanticNodeId {
-    graph.intern_node(SemanticNodeData::Union(Arc::from(arms.into_boxed_slice())))
+    graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            arms.into_boxed_slice(),
+        )),
+    ))
 }
 
 fn intersection(graph: &SemanticGraphStore, arms: Vec<SemanticNodeId>) -> SemanticNodeId {
-    graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-        arms.into_boxed_slice(),
-    )))
+    graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            arms.into_boxed_slice(),
+        )),
+    ))
 }
 
 fn alias(graph: &SemanticGraphStore, inner: SemanticNodeId) -> SemanticNodeId {

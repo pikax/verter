@@ -567,3 +567,21 @@ fn flow_solve_plan_and_spec_no_struct_literal() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/cases/compile-fail/flow_solve_plan_and_spec_no_struct_literal.rs");
 }
+
+/// The opaque union/intersection composite payload is unforgeable from
+/// outside the crate: no struct literal, no category-funnel mint, no
+/// derived-composite mint, no bypass mint, no nameable category registry.
+/// The recorded claim is exactly the disclosed language limit —
+/// cross-crate unforgeability proven here; in-crate the exhaustive
+/// carrier-category match is the forcing function, and in-crate
+/// unforgeability is NOT claimed.
+#[test]
+#[cfg_attr(
+    not(feature = "compile-fail"),
+    ignore = "run with --features compile-fail"
+)]
+fn composite_mint_unforgeable_outside_crate() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/cases/compile-fail/composite_mint_unforgeable.rs");
+    t.compile_fail("tests/cases/compile-fail/composite_struct_literal_forge.rs");
+}

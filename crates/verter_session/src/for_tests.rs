@@ -909,3 +909,16 @@ pub fn dispatch_flow_demand_footprint_for_tests(
     let _ = dispatch.execute(key);
     dispatch.flow_demand_footprint_for_tests()
 }
+
+/// Mint a raw composite-payload FIXTURE for integration tests that need
+/// a pre-canonical or deliberately nested `Union` / `Intersection` graph
+/// shape (display-projection guards, structural-hash discriminators).
+/// Routes through the sealed `TestFixture` carrier category, which is
+/// compiled solely under `cfg(any(test, feature = "test-support"))` —
+/// an ordinary production build has neither this function nor the
+/// category variant, so the production mint surface stays unforgeable
+/// from outside the crate.
+#[rustfmt::skip]
+pub fn composite_fixture_for_tests(members: std::sync::Arc<[crate::semantic_query::SemanticNodeId]>) -> crate::semantic_query::composite::CompositeList {
+    crate::semantic_query::composite::CompositeList::test_fixture(members)
+}

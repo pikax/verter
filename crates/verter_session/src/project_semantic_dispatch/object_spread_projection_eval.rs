@@ -766,7 +766,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         match data.as_ref() {
             SemanticNodeData::Union(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let product = states.len().saturating_mul(arms.len());
                 if arms.len() > DISTRIBUTION_CAP || product > DISTRIBUTION_CAP {

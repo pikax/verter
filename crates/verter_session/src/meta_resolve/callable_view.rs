@@ -267,7 +267,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // when any arm (incl. `undefined`) fails to realize.
             SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
                 let is_intersection = matches!(data.as_ref(), SemanticNodeData::Intersection(_));
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut callable: Option<SemanticNodeId> = None;
                 for arm in arms.iter() {
@@ -461,7 +461,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                     true
                 }
                 SemanticNodeData::Union(members) => {
-                    let members = Arc::clone(members);
+                    let members = members.members_arc();
                     drop(data);
                     // Fail-closed-WHOLE: the FIRST arm that fails to fully
                     // enumerate fails the whole union (stop scanning).
@@ -777,7 +777,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
             // recurse per arm (fail-closed on ANY non-snippet arm) and combine by
             // index.
             SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 let mut per_arm: Vec<Vec<PositionalParamNode>> = Vec::with_capacity(arms.len());
                 for arm in arms.iter() {
@@ -879,7 +879,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
                 // narrows a nullish arm away; an `Intersection` collapses to
                 // `never` on one (`Fn & undefined`) → not slot-callable.
                 let is_intersection = matches!(data.as_ref(), SemanticNodeData::Intersection(_));
-                let arms = Arc::clone(arms);
+                let arms = arms.members_arc();
                 drop(data);
                 for arm in arms.iter() {
                     // A PARTIAL arm normalization refuses the whole collection.

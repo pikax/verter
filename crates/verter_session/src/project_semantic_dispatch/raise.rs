@@ -1919,7 +1919,7 @@ fn rebuild_object(
 fn rebuild_union_or_intersection(
     dispatch: &ProjectSemanticDispatch<'_>,
     node: SemanticNodeId,
-    arms: &Arc<[SemanticNodeId]>,
+    arms: &[SemanticNodeId],
     is_union: bool,
     mapping: &MappingMap,
     context: ProjectionReductionContext,
@@ -1938,10 +1938,20 @@ fn rebuild_union_or_intersection(
     if !changed {
         return Some(node);
     }
+    // Order- and scope-preserving rebuild: the reduced arms replace the
+    // originals 1:1, inheriting the original carrier's semantics.
     let data = if is_union {
-        SemanticNodeData::Union(Arc::from(new_arms.into_boxed_slice()))
+        SemanticNodeData::Union(
+            crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
+                new_arms.into_boxed_slice(),
+            )),
+        )
     } else {
-        SemanticNodeData::Intersection(Arc::from(new_arms.into_boxed_slice()))
+        SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
+                new_arms.into_boxed_slice(),
+            )),
+        )
     };
     Some(dispatch.graph().intern_preserving_scope(node, data))
 }
@@ -4885,9 +4895,11 @@ mod tests {
         let empty_a = graph.intern_node(SemanticNodeData::Object(
             crate::project_semantic_dispatch::walk::empty_surface_view(),
         ));
-        let intersection = graph.intern_node(SemanticNodeData::Intersection(Arc::from(
-            vec![empty_a, empty_a].into_boxed_slice(),
-        )));
+        let intersection = graph.intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![empty_a, empty_a].into_boxed_slice(),
+            )),
+        ));
 
         let dispatch = ProjectSemanticDispatch::new(&host);
         let expr = dispatch

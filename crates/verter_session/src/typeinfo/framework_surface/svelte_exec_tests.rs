@@ -1025,9 +1025,11 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
         &graph,
         vec![ntuple(&graph, vec![(Some("x"), b_ty), (Some("b"), extra)])],
     );
-    let union = graph.intern_node(crate::semantic_query::SemanticNodeData::Union(Arc::from(
-        vec![arm_a, arm_b].into_boxed_slice(),
-    )));
+    let union = graph.intern_node(crate::semantic_query::SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![arm_a, arm_b].into_boxed_slice(),
+        )),
+    ));
 
     let params = CallableNodeView::new(&dispatch, union)
         .validated_snippet_positional_params(nav_context())
@@ -2372,9 +2374,11 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
 
     // Fold None: a present-but-unraisable composite fails the fold — the
     // seam notes the loss before returning `None`, completeness Complete.
-    let union_absent = graph.intern_node(SemanticNodeData::Union(Arc::from(
-        vec![str_id, absent].into_boxed_slice(),
-    )));
+    let union_absent = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![str_id, absent].into_boxed_slice(),
+        )),
+    ));
     let _scope = ColdComputeCompletenessScope::enter();
     let (_raised, facts) = host
         .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {

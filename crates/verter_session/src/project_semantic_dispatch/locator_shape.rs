@@ -462,7 +462,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if ids.len() == 1 {
                     ids[0]
                 } else {
-                    graph.intern_node_with_scope(SemanticNodeData::Union(ids), scope.clone())
+                    // Locator-shape shell lowering: authored order and
+                    // scope, never a reduction.
+                    graph.intern_node_with_scope(
+                        SemanticNodeData::Union(
+                            crate::semantic_query::composite::CompositeList::authored_shell(ids),
+                        ),
+                        scope.clone(),
+                    )
                 }
             }
             TypeExpr::Intersection(arms) => {
@@ -472,7 +479,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 } else if ids.len() == 1 {
                     ids[0]
                 } else {
-                    graph.intern_node_with_scope(SemanticNodeData::Intersection(ids), scope.clone())
+                    // Locator-shape shell lowering: see the Union arm above.
+                    graph.intern_node_with_scope(
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::authored_shell(ids),
+                        ),
+                        scope.clone(),
+                    )
                 }
             }
             TypeExpr::Array { element, readonly } => {

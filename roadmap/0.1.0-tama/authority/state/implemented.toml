@@ -238,6 +238,11 @@ node_id = "TA1A"
 commit_message = "feat(session): canonical union and intersection algebra with structural constituent identity"
 commit_date = "2026-08-31T18:30:00+01:00"
 
+[[implemented]]
+node_id = "TA1B"
+commit_message = "feat(session): flip the composite payload opaque and close every construction site"
+commit_date = "2026-08-31T23:30:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
