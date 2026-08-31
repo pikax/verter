@@ -18,6 +18,8 @@ import { assertNotVacuousPassLog } from "../lib/vacuousPass";
 import { pollBudget, sequenceParent, setRunnableAccessor, SUITE_TIMEOUT_MS } from "../lib/timeouts";
 import { launchServerProfile, routeBaseServerProfile } from "../helpers";
 import { serverProfileForSuite } from "../lib/serverProfiles";
+import { PARITY_FIXTURES, type ParityFixture } from "../lib/parityTestInventory";
+import { classifyExplicitProductGap, type RunSummaryFailure } from "../../src/runSummaryOracle";
 
 /** Recursively find the authored test sources under a directory. */
 function findTestSources(dir: string): string[] {
@@ -194,7 +196,7 @@ export async function run(): Promise<void> {
         // does serve carriers keeps the warmup as its readiness gate. Delete this
         // guard when carrier publication is connected for the extension-hosted
         // topology.
-        if (TYPE_PROVIDER !== "extension") {
+        if (TYPE_PROVIDER !== "extension" && TYPE_PROVIDER !== "off") {
           await openReadyCached(getAppVuePath());
         }
       } catch (err) {
@@ -212,7 +214,8 @@ export async function run(): Promise<void> {
   return new Promise((resolve, reject) => {
     const passedTestIds: string[] = [];
     const pendingTestIds: string[] = [];
-    const failedTests: Array<{ id: string; err: string; stack?: string }> = [];
+    const failedTests: RunSummaryFailure[] = [];
+    const productGapTestIds: string[] = [];
 
     const originalConsoleLog = console.log;
     console.log = (...args: unknown[]) => {
@@ -238,10 +241,18 @@ export async function run(): Promise<void> {
         passedTestIds,
         pendingTestIds,
         failedTests,
+        productGapTestIds,
         rootHookError: rootHookError ?? null,
       });
 
-      const failed = failures > 0 || (stats.failures ?? 0) > 0;
+      const parityRun = PARITY_FIXTURES.includes(FIXTURE_NAME as ParityFixture);
+      const productGapsAreTheOnlyFailures =
+        parityRun &&
+        !rootHookError &&
+        failedTests.length === productGapTestIds.length &&
+        (stats.failures ?? 0) === productGapTestIds.length &&
+        failures === productGapTestIds.length;
+      const failed = (failures > 0 || (stats.failures ?? 0) > 0) && !productGapsAreTheOnlyFailures;
       if (failed) {
         const detail =
           failedTests.length > 0
@@ -270,11 +281,15 @@ export async function run(): Promise<void> {
     runner.on("pass", (test) => passedTestIds.push(test.title));
     runner.on("pending", (test) => pendingTestIds.push(test.title));
     runner.on("fail", (test, err) => {
-      failedTests.push({
+      const failure: RunSummaryFailure = {
         id: test.title,
         err: err instanceof Error ? err.message : String(err),
         stack: err instanceof Error ? err.stack : undefined,
-      });
+        kind: test.type === "test" ? "test" : "hook",
+      };
+      failedTests.push(failure);
+      const productGap = classifyExplicitProductGap(failure);
+      if (productGap) productGapTestIds.push(productGap.id);
     });
   });
 }

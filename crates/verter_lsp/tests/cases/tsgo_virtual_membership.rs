@@ -26,6 +26,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::{Notify, OnceCell};
+use tower_lsp_server::Client;
+use verter_lsp::tsgo::composite::TsgoCompositeProvider;
+use verter_lsp::tsgo::ipc::{TsgoOwnedProvider, TsgoTypeProvider};
+use verter_lsp::type_provider::traits::TypeProvider;
+use verter_semantic::resolver_core::ConfiguredMembership;
+use verter_session::{HostConfig, VerterHost};
 use verter_tsgo_api::actor::spawn_actor;
 use verter_tsgo_api::proto::types::{
     method, Diagnostic, InitializeResponse, UpdateSnapshotResponse,
@@ -35,6 +42,16 @@ use verter_tsgo_api::transport::pipe::StdioPipeTransport;
 use verter_tsgo_api::{ClientHandle, RequestOptions};
 use verter_workspace::tsgo_virtual_config::{
     augment_tsconfig_bytes, build_virtual_overlay_snapshot,
+};
+use verter_workspace::{
+    canonical_path::CanonicalPath,
+    config::{load_compiler_options, load_project_membership, load_project_references},
+    published_state::PublishedRoot,
+    snapshot_builder::{
+        build_workspace_snapshot_simple, membership_to_spec, supported_extensions_for,
+    },
+    workspace_snapshot::{OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration},
+    FilesystemOptions, FilesystemWorkspace, WorkspaceAccess,
 };
 
 /// A real-dir source backed by `std::fs`, scoped to the fixture. This is the
@@ -96,6 +113,52 @@ fn tempdir() -> PathBuf {
     let dir = verter_test_support::unique_temp_dir("verter_lsp_vcfg");
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
+}
+
+fn file_uri(path: &str) -> String {
+    if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    }
+}
+
+fn host_for_vue_specific_fixture(root: &Path, tsconfig: &Path) -> Arc<VerterHost> {
+    let root = norm(root);
+    let tsconfig = norm(tsconfig);
+    let reader = FilesystemWorkspace::new(FilesystemOptions::default());
+    let membership = load_project_membership(&reader, &tsconfig);
+    let compiler_options = load_compiler_options(&reader, &tsconfig);
+    let spec = membership_to_spec(
+        &CanonicalPath::new(&root),
+        &membership,
+        &supported_extensions_for(&compiler_options),
+    );
+    let references = load_project_references(&reader, &tsconfig)
+        .into_iter()
+        .map(|path| CanonicalPath::new(&path))
+        .collect();
+    let project = OwnershipProject {
+        id: ProjectId(0),
+        root: CanonicalPath::new(&root),
+        workspace_root: CanonicalPath::new(&root),
+        payload: ProjectPayload::Configured {
+            tsconfig_path: CanonicalPath::new(&tsconfig),
+            membership: ConfiguredMembership {
+                spec,
+                materialized_files: Default::default(),
+            },
+            compiler_options,
+            references,
+            workspace_aliases: Vec::new(),
+        },
+    };
+    let snapshot = build_workspace_snapshot_simple(vec![project], SnapshotGeneration(1));
+    let workspace = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
+    workspace.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(snapshot)));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    host.set_workspace(Arc::clone(&workspace) as Arc<dyn WorkspaceAccess>);
+    host
 }
 
 async fn req_json<T: serde::de::DeserializeOwned>(
@@ -322,4 +385,88 @@ async fn vue_specific_include_companion_becomes_member_via_virtualization() {
         "the error is a type error, not a false module-not-found: {err:?}"
     );
     handle2.close().await.expect("close error leg");
+}
+
+/// A real `*.vue` owner proves the composite admission without pretending the
+/// generated `.vue.tsx` is already an attached-API configured root. User-facing
+/// diagnostics remain on the established rich managed LSP route, which owns the
+/// didOpen/didChange overlay. This is the regression for the API-only promotion
+/// that returned an empty set and erased the real editor diagnostic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vue_only_owner_preserves_managed_lsp_mutation_diagnostics() {
+    let Some(exe) = engine_or_skip().await else {
+        return;
+    };
+    let tmp = tempdir();
+    let (tsconfig, _src, source, companion) = write_vue_specific_fixture(&tmp);
+    assert!(source.exists());
+    assert!(
+        !companion.exists(),
+        "the generated companion stays off disk"
+    );
+
+    let root = norm(&tmp);
+    let companion = norm(&companion);
+    let root_uri = file_uri(&root);
+    let host = host_for_vue_specific_fixture(&tmp, &tsconfig);
+    let crash_notify = Arc::new(Notify::new());
+    let tsgo_bin = exe.to_string_lossy().into_owned();
+    let lsp = TsgoTypeProvider::spawn_with_crash_signal(
+        &tsgo_bin,
+        &root_uri,
+        Some(Arc::clone(&crash_notify)),
+    )
+    .await
+    .expect("spawn real tsgo --lsp");
+    let owned = TsgoOwnedProvider::attach(Arc::new(lsp), &tsgo_bin)
+        .await
+        .expect("attach production owned checker");
+    let resilient = verter_lsp::tsgo::resilient::new_owned(
+        owned,
+        crash_notify,
+        tsgo_bin,
+        root_uri,
+        Arc::new(OnceCell::<Client>::new()),
+        3,
+    );
+    let composite = TsgoCompositeProvider::new(Arc::new(resilient), host, None);
+
+    let clean = "export const value: string = \"ok\";\n";
+    let broken = "export const value: number = \"bad\";\n";
+    composite
+        .open_file(&companion, clean)
+        .await
+        .expect("didOpen");
+    assert!(composite
+        .get_diagnostics(&companion)
+        .await
+        .expect("clean diagnostics")
+        .is_empty());
+
+    composite
+        .update_file(&companion, broken)
+        .await
+        .expect("didChange error");
+    let diagnostics = composite
+        .get_diagnostics(&companion)
+        .await
+        .expect("mutated diagnostics");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code.as_deref() == Some("2322")),
+        "the proven owner must admit the managed LSP mutation diagnostic: {diagnostics:?}"
+    );
+
+    composite
+        .update_file(&companion, clean)
+        .await
+        .expect("didChange restore");
+    assert!(composite
+        .get_diagnostics(&companion)
+        .await
+        .expect("restored diagnostics")
+        .is_empty());
+    composite.shutdown().await.expect("shutdown");
+    std::fs::remove_dir_all(&tmp).expect("remove isolated fixture");
 }

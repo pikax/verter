@@ -142,10 +142,13 @@ jobs:
       # compile check followed serially by the small verter_shipped_cfg_contract
       # run under `no-debug-assertions`. `--exhaustive` changes failure
       # collection only; commands, filters, profiles, and coverage stay fixed.
+      # GitHub's dedicated 16 GiB runner grants the contained build forest 12
+      # GiB, retaining 4 GiB for the OS and runner services. The shared-machine
+      # gate default intentionally stays at 50% of physical memory.
       - name: Rust gate
         env:
           VERTER_REQUIRE_TSGO: "1"
-        run: node scripts/gate.mjs --exhaustive
+        run: node scripts/gate.mjs --exhaustive --memory-limit 12GiB
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Format

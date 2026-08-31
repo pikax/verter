@@ -844,7 +844,8 @@ function isE2eTypeProviderRoute(value: string): value is E2eTypeProviderRoute {
     value === "tsgo" ||
     value === "shared-tsgo" ||
     value === "editor-tsserver" ||
-    value === "extension"
+    value === "extension" ||
+    value === "off"
   );
 }
 

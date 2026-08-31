@@ -37,6 +37,13 @@ import {
   type E2eServerProfile,
 } from "./lib/serverProfiles";
 import { FIXTURE_SUITE_GLOBS } from "./lib/fixtureSuiteMap";
+import {
+  isProjectlessContractFixture,
+  PROJECTLESS_CONTRACT_LOADED_FILES,
+  PROJECTLESS_CONTRACT_SUITE_GLOB,
+  PROJECTLESS_CONTRACT_TEST_IDS,
+} from "./lib/projectlessContractManifest";
+import { knownProductGapsForRoute } from "./lib/knownProductGapManifest";
 
 const EDITOR_ACCEPTANCE_FIXTURE = "editor-owned-project";
 const EXTENSION_ACCEPTANCE_FIXTURE = "out-of-tree-monorepo";
@@ -537,16 +544,18 @@ async function main() {
               ? { VERTER_E2E_ONLY: "editor-owned-project.test" }
               : fixture === EXTENSION_ACCEPTANCE_FIXTURE
                 ? { VERTER_E2E_ONLY: "out-of-tree-monorepo.test" }
-                : CONTRACT_FIXTURES[fixture]
-                  ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
-                  : fixture in PARITY_FIXTURE_CONFIGS
-                    ? {
-                        VERTER_E2E_ONLY:
-                          onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
-                      }
-                    : onlyPattern
-                      ? { VERTER_E2E_ONLY: onlyPattern }
-                      : {}),
+                : isProjectlessContractFixture(fixture)
+                  ? { VERTER_E2E_ONLY: PROJECTLESS_CONTRACT_SUITE_GLOB }
+                  : CONTRACT_FIXTURES[fixture]
+                    ? { VERTER_E2E_ONLY: CONTRACT_FIXTURES[fixture].only }
+                    : fixture in PARITY_FIXTURE_CONFIGS
+                      ? {
+                          VERTER_E2E_ONLY:
+                            onlyPattern ?? PARITY_FIXTURE_CONFIGS[fixture as ParityFixture].only,
+                        }
+                      : onlyPattern
+                        ? { VERTER_E2E_ONLY: onlyPattern }
+                        : {}),
           },
         });
         // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
@@ -557,16 +566,22 @@ async function main() {
         // required gate; no ordinary fixture is allowed a legacy zero-execution pass.
         const contract = CONTRACT_FIXTURES[fixture];
         const parity = requiredParityRun(fixture, onlyPattern);
+        const projectlessContract = isProjectlessContractFixture(fixture);
         const requiredLoadedFiles = contract
           ? [`frameworks/${contract.framework}/contract.test.js`]
-          : parity?.loadedFiles;
+          : projectlessContract
+            ? PROJECTLESS_CONTRACT_LOADED_FILES
+            : parity?.loadedFiles;
         await enforceRunSummary(logFile, label, {
           expectedFixture: fixture,
           expectedTypeProvider: typeProvider,
           requiredLoadedFiles,
           requiredTestIds: contract
             ? requiredFrameworkContractIds(contract.framework)
-            : parity?.testIds,
+            : projectlessContract
+              ? PROJECTLESS_CONTRACT_TEST_IDS
+              : parity?.testIds,
+          allowedProductGaps: parity ? knownProductGapsForRoute(fixture, typeProvider) : undefined,
         });
         console.log(`  PASSED: ${label}`);
       } catch (err) {

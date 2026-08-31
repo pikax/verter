@@ -373,7 +373,6 @@ pub(crate) use import_sync_state::ImportSyncMemo;
 
 #[derive(Clone, Debug)]
 struct ImportedChildContractFreshnessKey {
-    workspace_content_generation: u64,
     resolver_snapshot_generation: u64,
     published_root: Option<Arc<verter_workspace::PublishedRoot>>,
     project_generation: u64,
@@ -381,8 +380,7 @@ struct ImportedChildContractFreshnessKey {
 
 impl PartialEq for ImportedChildContractFreshnessKey {
     fn eq(&self, other: &Self) -> bool {
-        self.workspace_content_generation == other.workspace_content_generation
-            && self.resolver_snapshot_generation == other.resolver_snapshot_generation
+        self.resolver_snapshot_generation == other.resolver_snapshot_generation
             && self.project_generation == other.project_generation
             && match (&self.published_root, &other.published_root) {
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),

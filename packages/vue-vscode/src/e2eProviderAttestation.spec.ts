@@ -6,6 +6,18 @@ import {
 } from "./e2eProviderAttestation";
 
 describe("E2E type-provider attestation", () => {
+  it("accepts a deliberate provider-off route only when the public status is none", () => {
+    expect(
+      attestE2eTypeProviderLog(
+        "Type provider status: none (no configured TypeScript project (tsconfig.json))",
+        "off",
+      ),
+    ).toMatchObject({ publicKind: "none", route: "off" });
+    expect(() => attestE2eTypeProviderLog("Type provider status: tsgo", "off")).toThrow(
+      /requested off.*reported tsgo/i,
+    );
+  });
+
   it("rejects the former vacuous managed-tsgo run before feature assertions", () => {
     expect(() =>
       attestE2eTypeProviderLog(

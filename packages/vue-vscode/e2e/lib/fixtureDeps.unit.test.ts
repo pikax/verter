@@ -604,11 +604,10 @@ describe("local dependency link semantics", () => {
   });
 
   it("names a file: target that does not exist, and displaces nothing", () => {
-    // `ecosystem-parity` declares `"verter": "file:../../../../../../verter-release-clean"`,
-    // a sibling checkout that is simply absent on most machines. The launcher
+    // A local checkout can be absent on a contributor or runner. The launcher
     // used to catch npm's failure and warn, which meant the suite ran against a
-    // tree missing the package under test; it now fails closed, which is right —
-    // but "npm exited 1" names neither what is missing nor what to do about it.
+    // tree missing a declared package; it now fails closed, which is right — but
+    // "npm exited 1" names neither what is missing nor what to do about it.
     const dir = tempFixture({
       name: "f",
       dependencies: { verter: "file:../verter-release-clean" },
@@ -662,6 +661,14 @@ describe("local dependency link semantics", () => {
 });
 
 describe("installFixtureDeps", () => {
+  it("keeps the ecosystem fixture independent of an unprovisioned sibling checkout", () => {
+    const manifestPath = path.resolve(__dirname, "../fixtures/ecosystem-parity/package.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    expect(manifest.dependencies).not.toHaveProperty("verter");
+  });
+
   it("does not run the installer for a directory with no package.json", () => {
     const dir = tempDir();
     const installer = recordingInstaller();

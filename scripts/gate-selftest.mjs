@@ -8623,34 +8623,69 @@ fi
       "shared_provider_carrier_never_leaks_to_editor|" +
       "shared_provider_reconnect_mints_fresh_engine_no_split_brain|" +
       "composite_overlays_shared_diagnostics_via_live_resolver|" +
-      "composite_successful_shared_route_never_activates_managed_fallback)$/)";
+      "composite_successful_shared_route_never_activates_managed_fallback|" +
+      "composite_shared_template_answers_are_typed_single_project|" +
+      "composite_shared_template_answers_are_typed_monorepo_nested_leaf)$/)";
     const overrideRows = [];
     const overrideRe =
       /\[\[profile\.(default|ci)\.overrides\]\]\s*\r?\n([\s\S]*?)(?=\r?\n\[\[|\r?\n\[(?!\[)|$)/g;
     for (const match of nextestToml.matchAll(overrideRe)) {
       const filter = /^filter\s*=\s*'([^']+)'\s*$/m.exec(match[2])?.[1] || null;
       const testGroup = /^test-group\s*=\s*'([^']+)'\s*$/m.exec(match[2])?.[1] || null;
+      const platform = /^platform\s*=\s*'([^']+)'\s*$/m.exec(match[2])?.[1] || null;
       const slowTimeout = /^slow-timeout\s*=\s*(\{[^\r\n]+\})\s*$/m.exec(match[2])?.[1] || null;
-      overrideRows.push({ profile: match[1], filter, testGroup, slowTimeout });
+      overrideRows.push({ profile: match[1], filter, testGroup, platform, slowTimeout });
     }
-    const exactOverrideCount = (profile, filter, testGroup, slowTimeout = null) =>
+    const exactOverrideCount = (profile, filter, testGroup, platform = null, slowTimeout = null) =>
       overrideRows.filter(
         (row) =>
           row.profile === profile &&
           row.filter === filter &&
           row.testGroup === testGroup &&
+          row.platform === platform &&
           row.slowTimeout === slowTimeout,
       ).length;
     const configOk =
       count(/^shared-provider-live\s*=\s*\{\s*max-threads\s*=\s*1\s*\}\s*$/gm) === 1 &&
       count(/^lsp-server-unit\s*=\s*\{\s*max-threads\s*=\s*1\s*\}\s*$/gm) === 1 &&
-      exactOverrideCount("default", expectedSharedFilter, "shared-provider-live") === 1 &&
-      exactOverrideCount("ci", expectedSharedFilter, "shared-provider-live") === 1 &&
-      exactOverrideCount("default", "test(/^server::server_tests::/)", "lsp-server-unit") === 1 &&
-      exactOverrideCount("ci", "test(/^server::server_tests::/)", "lsp-server-unit") === 1 &&
+      exactOverrideCount(
+        "default",
+        expectedSharedFilter,
+        "shared-provider-live",
+        "cfg(windows)",
+      ) === 1 &&
+      exactOverrideCount("ci", expectedSharedFilter, "shared-provider-live", "cfg(windows)") ===
+        1 &&
+      exactOverrideCount(
+        "default",
+        expectedSharedFilter,
+        null,
+        null,
+        '{ period = "60s", terminate-after = 6 }',
+      ) === 1 &&
+      exactOverrideCount(
+        "ci",
+        expectedSharedFilter,
+        null,
+        null,
+        '{ period = "60s", terminate-after = 6 }',
+      ) === 1 &&
+      exactOverrideCount(
+        "default",
+        "test(/^server::server_tests::/)",
+        "lsp-server-unit",
+        "cfg(windows)",
+      ) === 1 &&
+      exactOverrideCount(
+        "ci",
+        "test(/^server::server_tests::/)",
+        "lsp-server-unit",
+        "cfg(windows)",
+      ) === 1 &&
       exactOverrideCount(
         "default",
         "test(/^cases::g_compile::compile_fail::/)",
+        null,
         null,
         '{ period = "120s", terminate-after = 3 }',
       ) === 1 &&
@@ -8658,12 +8693,14 @@ fi
         "ci",
         "test(/^cases::g_compile::compile_fail::/)",
         null,
+        null,
         '{ period = "120s", terminate-after = 3 }',
       ) === 1;
     if (!configOk) {
       fail(
-        `(GB18.7) raising global test concurrency must preserve both serialized nextest groups, their ` +
-          `exact default/ci selectors, and both trybuild timeout overrides; parsed rows=` +
+        `(GB18.7) raising global test concurrency must preserve both Windows-only serialized nextest ` +
+          `groups, the all-platform shared-provider timeout, their exact default/ci selectors, and ` +
+          `both platform-neutral trybuild timeout overrides; parsed rows=` +
           JSON.stringify(overrideRows),
       );
       ok = false;

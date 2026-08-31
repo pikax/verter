@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 use verter_type_runtime::protocol::TypeProviderError;
 use verter_type_runtime::traits::ProviderFuture;
 
-use super::{InjectedRecord, LazyOverlayCore, OverlayPriority, OverlayTransport};
+use super::{InjectedRecord, LazyOverlayCore, OverlayPriority, OverlaySyncState, OverlayTransport};
 use crate::tsgo::transport_cell::EstablishedTransport;
 
 /// A transport double: records each injection/retraction and reports controllable
@@ -540,6 +540,11 @@ async fn failed_dirty_injection_is_not_synced_so_query_fails_closed() {
         "a carrier whose CURRENT content failed to inject is NOT synced — never serve \
          SHARED against the stale prior slot"
     );
+    assert_eq!(
+        core.sync_state_for_epoch("/ws/Foo.vue.tsx", established.identity.epoch),
+        OverlaySyncState::NeverInjected,
+        "the engagement refusal exposes the failed dirty barrier as typed sync state"
+    );
 
     // A later successful injection re-syncs the current content (self-healing).
     established.transport.set_inject_fails(false);
@@ -725,6 +730,57 @@ async fn reestablished_transport_replays_open_carrier_set() {
         ops_b,
         vec!["/ws/A.vue.tsx=a".to_string(), "/ws/B.vue.tsx=b".to_string()],
         "a re-established transport replays the whole open carrier set"
+    );
+}
+
+/// E2E-shaped diagnostics -> hover regression: diagnostics can warm and barrier-sync a
+/// carrier on transport A, then an editor reconnect can replace it with transport B before
+/// the hover's terminal engage check. The global carrier state is legitimately synced for
+/// B, but it must NEVER authorize returning the stale A provider captured by that hover.
+///
+/// This is the precise discrimination the old boolean gate lacked: `is_synced` answers
+/// whether *some current transport* owns the current bytes, while engagement must answer
+/// whether the *exact provider epoch being returned* owns them. The project binding remains
+/// the same single configured project throughout, matching the VS Code single-project route.
+#[tokio::test]
+async fn diagnostics_then_hover_requires_the_exact_transport_epoch() {
+    let core = LazyOverlayCore::<FakeTransport>::new();
+    let carrier = "/ws/src/App.vue.tsx";
+    core.record_content_at_priority(carrier, "const count = 1", OverlayPriority::Interactive);
+
+    // Diagnostics establishes A and completes the carrier barrier.
+    let diagnostics_epoch = establish_alive(&core, 1, "editor-session-a").await;
+    core.inject_all_dirty(&diagnostics_epoch, 1, |_, _| true, |_| true)
+        .await;
+    assert_eq!(
+        core.sync_state_for_epoch(carrier, diagnostics_epoch.identity.epoch),
+        OverlaySyncState::Synced,
+        "diagnostics is allowed to serve from its exact barrier-synced epoch"
+    );
+
+    // The editor reconnects. B replays and barrier-syncs the same single-project carrier.
+    diagnostics_epoch.transport.set_dead();
+    let hover_epoch = reestablish_after_death(&core).await;
+    core.inject_all_dirty(&hover_epoch, 1, |_, _| true, |_| true)
+        .await;
+    assert!(
+        core.is_synced(carrier),
+        "the global overlay is healthy and synced on the replacement transport"
+    );
+    assert_eq!(
+        core.sync_state_for_epoch(carrier, hover_epoch.identity.epoch),
+        OverlaySyncState::Synced,
+        "a hover that captured the replacement provider may engage"
+    );
+
+    // Discriminating assertion: B's healthy marker cannot authorize a stale A handle.
+    assert_eq!(
+        core.sync_state_for_epoch(carrier, diagnostics_epoch.identity.epoch),
+        OverlaySyncState::TransportEpochMismatch {
+            expected: diagnostics_epoch.identity.epoch,
+            active: hover_epoch.identity.epoch,
+        },
+        "hover must refuse with a typed exact-epoch mismatch instead of serving from A"
     );
 }
 

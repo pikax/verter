@@ -3,7 +3,6 @@
   "private": true,
   "dependencies": {
     "svelte": "5.56.10",
-    "verter": "file:../../../../../../verter-release-clean",
     "vue": "3.5.40"
   },
   "devDependencies": {

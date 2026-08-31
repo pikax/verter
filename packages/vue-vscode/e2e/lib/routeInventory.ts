@@ -6,7 +6,7 @@ export const TYPE_PROVIDER_ROUTES = ["tsserver", "tsgo", "shared-tsgo"] as const
  * neither is ever selected automatically, so each is exercised only by the
  * acceptance fixture that owns it.
  */
-export const NON_MATRIX_TYPE_PROVIDER_ROUTES = ["editor-tsserver", "extension"] as const;
+export const NON_MATRIX_TYPE_PROVIDER_ROUTES = ["editor-tsserver", "extension", "off"] as const;
 
 export type E2eTypeProviderRoute =
   | (typeof TYPE_PROVIDER_ROUTES)[number]
@@ -24,8 +24,6 @@ export const STANDARD_E2E_FIXTURES = [
   "tsconfig-references",
   "path-aliases",
   "composite-paths",
-  "no-config",
-  "single-file",
   "barrel-exports",
   "vue-contract",
   "svelte-contract",
@@ -36,9 +34,6 @@ export const STANDARD_E2E_FIXTURES = [
   "ecosystem-parity",
 ] as const;
 
-/** Shared editor attach requires a configured project binding. */
-export const SHARED_TSGO_INAPPLICABLE_FIXTURES = ["no-config", "single-file"] as const;
-
 export interface E2eRoute {
   readonly fixture: string;
   readonly typeProvider: E2eTypeProviderRoute;
@@ -47,6 +42,12 @@ export interface E2eRoute {
 export const EDITOR_ACCEPTANCE_ROUTES: readonly E2eRoute[] = [
   { fixture: "editor-owned-project", typeProvider: "editor-tsserver" },
   { fixture: "editor-owned-project", typeProvider: "shared-tsgo" },
+] as const;
+
+/** Projectless fixtures exercise the intentional provider-off product surface. */
+export const PROJECTLESS_E2E_ROUTES: readonly E2eRoute[] = [
+  { fixture: "no-config", typeProvider: "off" },
+  { fixture: "single-file", typeProvider: "off" },
 ] as const;
 
 /**
@@ -98,14 +99,9 @@ function isNonRequiredRoute(route: E2eRoute): boolean {
 export function buildE2eRouteInventory(): E2eRoute[] {
   return [
     ...STANDARD_E2E_FIXTURES.flatMap((fixture) =>
-      TYPE_PROVIDER_ROUTES.filter(
-        (typeProvider) =>
-          typeProvider !== "shared-tsgo" ||
-          !SHARED_TSGO_INAPPLICABLE_FIXTURES.includes(
-            fixture as (typeof SHARED_TSGO_INAPPLICABLE_FIXTURES)[number],
-          ),
-      ).map((typeProvider) => ({ fixture, typeProvider })),
+      TYPE_PROVIDER_ROUTES.map((typeProvider) => ({ fixture, typeProvider })),
     ),
+    ...PROJECTLESS_E2E_ROUTES,
     ...EDITOR_ACCEPTANCE_ROUTES,
     ...EXTENSION_ACCEPTANCE_ROUTES,
   ];

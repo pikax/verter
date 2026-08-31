@@ -1,0 +1,43 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it } from "vitest";
+
+import { KNOWN_PRODUCT_GAP_ROUTE_KEYS, knownProductGapsForRoute } from "./knownProductGapManifest";
+import { buildParityTestInventory, PARITY_FIXTURES } from "./parityTestInventory";
+import { TYPE_PROVIDER_ROUTES } from "./routeInventory";
+
+const libRoot = dirname(fileURLToPath(import.meta.url));
+
+describe("known product-gap manifest", () => {
+  it("declares every parity provider route and only required test IDs", () => {
+    const expectedRoutes = PARITY_FIXTURES.flatMap((fixture) =>
+      TYPE_PROVIDER_ROUTES.map((provider) => `${fixture}@${provider}`),
+    ).sort();
+    expect(KNOWN_PRODUCT_GAP_ROUTE_KEYS).toEqual(expectedRoutes);
+
+    const inventory = buildParityTestInventory({
+      suiteRoot: resolve(libRoot, "../suite/parity"),
+      matrixCasesFile: resolve(libRoot, "matrixCases.ts"),
+    });
+    for (const fixture of PARITY_FIXTURES) {
+      const required = new Set(inventory.testIdsByFixture[fixture]);
+      for (const provider of TYPE_PROVIDER_ROUTES) {
+        for (const [id, issue] of Object.entries(knownProductGapsForRoute(fixture, provider))) {
+          expect(required.has(id), `${fixture}@${provider}: ${id}`).toBe(true);
+          expect(issue).toMatch(/^ISSUE-[A-Za-z0-9_-]+$/);
+        }
+      }
+    }
+  });
+
+  it("keeps the confidence invalidation regression sentinel fatal", () => {
+    for (const provider of TYPE_PROVIDER_ROUTES) {
+      expect(
+        knownProductGapsForRoute("vue-parity", provider)[
+          "confidence.invalidation.edit-introduces-unknown-prop"
+        ],
+      ).toBeUndefined();
+    }
+  });
+});

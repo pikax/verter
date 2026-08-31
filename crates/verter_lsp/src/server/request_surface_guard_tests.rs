@@ -264,6 +264,34 @@ fn background_diagnostics_paths_use_captured_surface_and_revalidate() {
     }
 }
 
+/// The scanner can enqueue carrier retries after background init's first drain.
+/// Level 2 must therefore settle that post-scan queue before it claims the type
+/// provider is fully synchronized, and it must stay fail-closed while any retry
+/// remains queued.
+#[test]
+fn post_scan_completion_settles_provider_queue_before_notification() {
+    let source = read_server_source("background_init.rs");
+    let waiter_start = source
+        .find("if !await_scan_complete_after_ready(scanner_done_rx, ready_announced_rx).await")
+        .expect("guard must find the post-scan readiness waiter");
+    let waiter = &source[waiter_start..];
+    let notification = waiter
+        .find("send_notification::<TypeProviderSyncComplete>")
+        .expect("guard must find the level-2 notification");
+    let before_notification = &waiter[..notification];
+
+    assert!(
+        before_notification.contains("drain_pending_snapshot_provider_sync("),
+        "the post-scan waiter must drain carrier retries created by the scanner before \
+         TypeProviderSyncComplete"
+    );
+    assert!(
+        before_notification.contains("pending_snapshot_provider_sync.is_empty()"),
+        "TypeProviderSyncComplete must remain fail-closed while a scanner carrier retry \
+         is still pending"
+    );
+}
+
 /// FOREIGN carrier IDE locations map through the surface set pinned at request
 /// start (`capture_foreign_carrier_ide_set` + `foreign_ide_context`); the
 /// live-current foreign resolver is deleted and must not reappear.
