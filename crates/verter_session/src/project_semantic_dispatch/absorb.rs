@@ -69,10 +69,10 @@ impl ProjectSemanticDispatch<'_> {
         // Shared body: the graph-level canonical-algebra peek (single alias-
         // hop / extreme-classification implementation). The absorb-table
         // callers root their absorbed outputs from the operand set
-        // (`absorbed_output`), so the peek's inspected-root evidence is
-        // deliberately local here.
-        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
-        super::canonical_algebra::peek_special_via_graph(self.graph(), id, &mut evidence)
+        // (`absorbed_output`) and make no canonical claim (an undecided peek
+        // simply skips the fast-reject), so the peek runs evidence-free —
+        // no per-call allocation, lock traffic, or root recording.
+        super::canonical_algebra::peek_special_via_graph(self.graph(), id, None)
     }
 
     /// Intern a bare primitive node.

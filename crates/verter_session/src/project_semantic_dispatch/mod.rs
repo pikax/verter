@@ -870,19 +870,32 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// build — e.g. a top-level read from the projector, which routes
     /// partiality through the request sticky instead).
     /// Deposit one canonicalization's freshness evidence
-    /// ([`canonical_algebra::CanonicalEvidence`]) onto the ACTIVE cold-build
-    /// taint frame: the inspected file self-roots extend the frame's root
-    /// set (deduplicated), and an incomplete comparison folds
-    /// `cache_suppress` — ReturnOnly, never a warm canonical result. A
-    /// call with no active frame (a top-level graph consumer outside any
-    /// cold build) no-ops the ambient half; such callers' publication rails
-    /// carry their own fact-validated read sets.
+    /// ([`canonical_algebra::CanonicalEvidence`]) — the SINGLE evidence
+    /// disposition point for every canonical construction site.
+    ///
+    /// With an ACTIVE cold-build taint frame: the inspected file self-roots
+    /// extend the frame's root set (deduplicated), and an incomplete
+    /// comparison folds `cache_suppress` — ReturnOnly, never a warm
+    /// canonical result.
+    ///
+    /// With NO active frame (a top-level graph consumer outside any cold
+    /// build — projector member merges, typeinfo surface joins): the roots
+    /// are subsumed by the caller's own fact-railed read set (every arm
+    /// reached such a caller through fact-recorded reads on the same rail
+    /// that validates its publication), but `incomplete` is NOT subsumable
+    /// by any read set — it marks the REQUEST result partial, so the
+    /// enclosing publication (component-meta warm gate, typeinfo
+    /// promotion) refuses warm admission of the unproven-canonical value.
     pub(super) fn deposit_canonical_evidence(
         &self,
         evidence: canonical_algebra::CanonicalEvidence,
     ) {
         if evidence.incomplete {
-            self.fold_into_top_build_local_taint(false, true);
+            if self.build_local_taint.borrow().is_empty() {
+                crate::request_context::mark_request_result_partial();
+            } else {
+                self.fold_into_top_build_local_taint(false, true);
+            }
         }
         if evidence.inspected_file_roots.is_empty() {
             return;
@@ -3793,7 +3806,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if members.is_empty() {
             return graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
         }
-        let lit_ids: Vec<SemanticNodeId> = members
+        let mut lit_ids: Vec<SemanticNodeId> = members
             .iter()
             .map(|m| {
                 graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -3801,6 +3814,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 )))
             })
             .collect();
+        // Duplicate NAMES intern to one literal id, so the arity gate below
+        // keys on the DEDUPLICATED id set — `["a", "a"]` is arity 1 and
+        // must take the same uniform Union shell as `["a"]`, never fold to
+        // a bare `Literal` through the funnel.
+        {
+            let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+            lit_ids.retain(|id| seen.insert(*id));
+        }
         // Multi-arm inputs route through the canonical authority. The
         // arity-1 case is a DELIBERATE raw bypass, preserved by caller
         // contract (see the doc above: "always uniformly `Union` even at

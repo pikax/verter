@@ -7609,8 +7609,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
         let single_closed = matches!(formula.alternatives(), [only] if only.closed().is_some());
-        let members =
-            super::walk::spread_formula_positive_members_for_macro(self.graph(), &formula);
+        let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let members = super::walk::spread_formula_positive_members_for_macro(
+            self.graph(),
+            &formula,
+            &mut canonical_evidence,
+        );
+        self.deposit_canonical_evidence(canonical_evidence);
         Some((members, !single_closed))
     }
 
@@ -9405,14 +9410,15 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// self-roots, and an incomplete comparison sets `cache_suppress`
     /// (ReturnOnly — never a warm canonical result).
     ///
-    /// Emits one `Normalize` origin edge from the result to each
-    /// contributing source member whenever a multi-member input reduced to
-    /// a derived composite or to one of its own members — the edge lets
-    /// walkers recover the pre-canonical input set even after absorption /
-    /// dedup / sorting. Lattice-extreme folds (`any` / `unknown` / `never` /
-    /// an error carrier not among the members) emit no edge: piling
-    /// per-normalization edges onto the shared extreme primitives would
-    /// accumulate unbounded bogus provenance on global nodes.
+    /// Emits one `Normalize` origin edge from the result to EVERY
+    /// contributing source member whenever the input had more than one
+    /// member — lattice-extreme and proven-disjoint folds included — so
+    /// provenance recovery finds the pre-canonical input set even after
+    /// absorption / dedup / sorting (`NormalizeIntersection([string,
+    /// number])` records `string` and `number` on the shared `never`).
+    /// Edges landing on a shared `Global` primitive are accepted growth:
+    /// the derivation store deduplicates identical edges, and each edge is
+    /// a true "some normalization folded these contributors here" fact.
     pub(super) fn build_normalize_union(
         &self,
         members: &Arc<[SemanticNodeId]>,
@@ -9447,13 +9453,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let node = composite.node;
         let fence = self.project_generation_signature();
-        let records_edge = members.len() > 1
-            && (members.contains(&node)
-                || matches!(
-                    self.graph().node_data(node).as_deref(),
-                    Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
-                ));
-        if records_edge {
+        if members.len() > 1 {
             self.graph().record_origin_edge(
                 node,
                 OriginEdgeKind::Normalize,

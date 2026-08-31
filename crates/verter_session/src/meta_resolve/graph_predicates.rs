@@ -196,13 +196,17 @@ pub(crate) fn build_keys_union_node(
         .collect();
     let key_ids = key_ids?;
     // Canonical construction: the literal key-domain union routes through
-    // the one authority. Evidence disposition per the fact-railed-consumer
-    // wrapper (all arms are `Global`-scoped literals).
-    Some(
-        crate::project_semantic_dispatch::canonical_algebra::canonical_union_node_for_fact_railed_consumer(
-            graph, &key_ids,
-        ),
-    )
+    // the one authority. This is the PROVABLY-EMPTY-evidence site: every
+    // arm is a freshly interned `Global`-scoped childless literal, so the
+    // walk records no file roots and can never be incomplete — asserted
+    // below rather than threaded to a disposition boundary.
+    let composite =
+        crate::project_semantic_dispatch::canonical_algebra::canonical_union(graph, &key_ids);
+    verter_debug_assert::verter_debug_assert!(
+        composite.evidence.inspected_file_roots.is_empty() && !composite.evidence.incomplete,
+        "key-domain union over freshly interned Global literals must carry no evidence"
+    );
+    Some(composite.node)
 }
 
 /// Helper: walk an `IndexedAccess` chain and produce a

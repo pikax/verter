@@ -32,24 +32,35 @@
 //!    member's own scope; an empty member set folds to `Primitive(Never)`.
 //!
 //! 3. **Freshness evidence** ([`CanonicalEvidence`]): every file-scoped node
-//!    whose structure the identity walk inspected — INCLUDING discarded
-//!    duplicates and descendants reached through `Global` intermediates —
-//!    is recorded as a `(canonical, observed_whole_hash)` self-root, and an
-//!    incomplete or budget-tripped comparison marks the evidence
-//!    `incomplete`, which the dispatch funnel folds into the active
-//!    cold-build's `cache_suppress` (ReturnOnly, never warm).
+//!    whose structure the identity walk inspected — INCLUDING the
+//!    TRANSITIVE structure of discarded duplicates (a payload-equal discard
+//!    is an identity decision resting on the shared children) and
+//!    descendants reached through `Global` intermediates — is recorded as a
+//!    `(canonical, observed_whole_hash)` self-root, and an incomplete,
+//!    budget-tripped, or peek-undecided comparison marks the evidence
+//!    `incomplete` (ReturnOnly, never warm).
 //!
-//! The dispatch-level funnel is
+//! Evidence disposition is SINGLE: every construction site routes its
+//! [`CanonicalEvidence`] to
+//! `ProjectSemanticDispatch::deposit_canonical_evidence` — either through
+//! the dispatch-level funnel
 //! `ProjectSemanticDispatch::intern_normalized_union_or_intersection`
-//! (`build.rs`), which routes through these builders and deposits the
-//! evidence ambiently. Callers without a dispatch (graph-only helpers) call
-//! the builders directly and own their evidence disposition explicitly.
+//! (`build.rs`) or by threading the evidence up to the nearest
+//! dispatch-holding caller. Under an active cold-build frame the roots join
+//! the frame's self-root set and `incomplete` folds `cache_suppress`;
+//! without a frame the roots are subsumed by the site's own fact-railed
+//! read set while `incomplete` marks the REQUEST result partial, so the
+//! enclosing publication refuses warm promotion. The one exception is a
+//! site whose evidence is PROVABLY empty (all arms freshly-interned
+//! `Global` childless nodes), which asserts that instead of threading.
 //!
-//! Memoization discipline: identity decisions are cached only per
-//! canonicalization ([`canonicalize`]'s decided-pair map — each entry is a
-//! completed ROOT comparison of a fresh depth-0 traversal). No child result
-//! is ever spliced into another traversal, and no store-level or global
-//! fingerprint/representative cache exists here.
+//! Memoization discipline: no identity decision outlives one
+//! canonicalization. Wide arm sets narrow pairwise candidates with fresh
+//! depth-0 `structural_hash_of` fingerprints (a hash match is always
+//! confirmed by the exact cycle-safe comparator, never deduplicated on the
+//! hash alone). No child result is ever spliced into another traversal,
+//! and no store-level or global fingerprint/representative cache exists
+//! here.
 
 use std::sync::Arc;
 
@@ -89,20 +100,47 @@ pub(crate) enum StructuralIdentity {
 pub(crate) struct CanonicalEvidence {
     /// One `(canonical, observed_whole_hash)` self-root per file-scoped node
     /// whose payload the flatten / lattice / identity walk inspected —
-    /// including DISCARDED duplicates and descendants reached through
-    /// `Global` intermediates. An edit to any inspected file must miss the
-    /// warm read even when the node it invalidates no longer appears in the
-    /// canonical result.
+    /// including DISCARDED duplicates (their transitive structure too — a
+    /// payload-equal discard is an identity decision resting on the shared
+    /// child structure) and descendants reached through `Global`
+    /// intermediates. An edit to any inspected file must miss the warm read
+    /// even when the node it invalidates no longer appears in the canonical
+    /// result. Deterministic first-inspection order.
     pub(crate) inspected_file_roots: Vec<ObservedGraphSelfRoot>,
     /// `true` when any structural comparison returned
-    /// [`StructuralIdentity::Incomplete`] or a bounded scan was skipped for
-    /// size: the result is correct but not proven canonical, so it is
-    /// ReturnOnly — never a warm canonical result.
+    /// [`StructuralIdentity::Incomplete`], a bounded scan was skipped for
+    /// size, or a bounded alias peek could not decide: the result is correct
+    /// but not proven canonical, so it is ReturnOnly — never a warm
+    /// canonical result.
     pub(crate) incomplete: bool,
+    /// Nodes already scope-classified — one sidecar lookup per unique node
+    /// per canonicalization, regardless of how many walks revisit it.
+    seen_nodes: FxHashSet<SemanticNodeId>,
 }
 
 impl CanonicalEvidence {
+    /// Fold another canonicalization's evidence into this one — the
+    /// threading primitive for helpers that run several canonical
+    /// constructions before their caller reaches the single disposition
+    /// point (`ProjectSemanticDispatch::deposit_canonical_evidence`).
+    pub(crate) fn absorb(&mut self, other: CanonicalEvidence) {
+        self.incomplete |= other.incomplete;
+        for root in other.inspected_file_roots {
+            if !self
+                .inspected_file_roots
+                .iter()
+                .any(|(c, h)| *c == root.0 && *h == root.1)
+            {
+                self.inspected_file_roots.push(root);
+            }
+        }
+        self.seen_nodes.extend(other.seen_nodes);
+    }
+
     fn record_file_root(&mut self, graph: &SemanticGraphStore, node: SemanticNodeId) {
+        if !self.seen_nodes.insert(node) {
+            return;
+        }
         if let Some(NodeScopeId::File {
             canonical_id,
             whole_hash,
@@ -116,6 +154,38 @@ impl CanonicalEvidence {
             {
                 self.inspected_file_roots.push((canonical_id, whole_hash));
             }
+        }
+    }
+
+    /// Root the TRANSITIVE structure of a DISCARDED duplicate arm. A
+    /// payload-equal discard (tier 1, or the comparator's payload-equal
+    /// fast path) asserts structural identity through the shared children
+    /// WITHOUT descending, so the children's file scopes must still enter
+    /// the cache evidence — an edit to a descendant's file misses the warm
+    /// read. Bounded (shares the visited set with the rest of the walk);
+    /// a truncated walk marks the evidence incomplete rather than serving
+    /// a warm result on a possibly-narrow root set.
+    fn record_subtree_roots(&mut self, graph: &SemanticGraphStore, root: SemanticNodeId) {
+        const SUBTREE_ROOT_WALK_CAP: usize = 4096;
+        let mut stack: Vec<SemanticNodeId> = vec![root];
+        let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        let mut children: Vec<SemanticNodeId> = Vec::new();
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            if visited.len() > SUBTREE_ROOT_WALK_CAP {
+                self.incomplete = true;
+                return;
+            }
+            self.record_file_root(graph, node);
+            let Some(data) = graph.node_data(node) else {
+                self.incomplete = true;
+                continue;
+            };
+            children.clear();
+            push_child_ids(&data, &mut children);
+            stack.extend(children.iter().copied());
         }
     }
 }
@@ -150,47 +220,175 @@ const STRUCTURAL_DEDUP_ARM_CAP: usize = 128;
 /// absorb-table discipline (`absorb.rs::ALIAS_PEEK_HOPS`).
 const ALIAS_PEEK_HOPS: usize = 8;
 
+/// Minimum child-bearing arm count before the pairwise (tier-2) dedup
+/// narrows candidates by structural prehash. Below it, direct pairwise
+/// comparison is cheaper than hashing every arm; above it, hash-distinct
+/// arms skip the pairwise tier entirely, so a wide union of same-shaped
+/// but structurally distinct arms stays within the work budget instead of
+/// being permanently denied warm admission.
+const STRUCTURAL_PREHASH_MIN_ARMS: usize = 8;
+
+/// Push every semantic child id of `data` onto `out`, mirroring the
+/// comparator's descent topology (the full manual-`Eq` field set — the
+/// possibly-diverged `Object` kind-specific collections included). Returns
+/// `false` when the payload's children are NOT enumerable from here (the
+/// sealed [`DeferredCallable`](SemanticNodeData::DeferredCallable)
+/// composition payload) — the caller must treat the walk as incomplete.
+/// EXHAUSTIVE (no wildcard): a new variant fails to compile here until its
+/// child topology is classified.
+fn push_child_ids(data: &SemanticNodeData, out: &mut Vec<SemanticNodeId>) -> bool {
+    use SemanticNodeData as D;
+    match data {
+        D::Primitive(_)
+        | D::Literal(_)
+        | D::Opaque(_)
+        | D::RawFallback { .. }
+        | D::Infer { .. }
+        | D::InferRef { .. }
+        | D::DeclRef { .. } => true,
+        D::Alias(inner) | D::KeyOf { base: inner } => {
+            out.push(*inner);
+            true
+        }
+        D::Object(view) => {
+            for entry in view.entries.iter() {
+                match entry {
+                    SurfaceEntry::Member(member) => {
+                        out.extend(authored_property_key_child(&member.key));
+                        out.push(member.value);
+                    }
+                    SurfaceEntry::CallSignature(node) | SurfaceEntry::ConstructSignature(node) => {
+                        out.push(*node);
+                    }
+                    SurfaceEntry::IndexSignature(signature) => {
+                        out.push(signature.key_type);
+                        out.push(signature.value_type);
+                    }
+                }
+            }
+            for member in view.positive_members() {
+                out.extend(authored_property_key_child(&member.key));
+                out.push(member.value);
+            }
+            out.extend(view.call_signatures.iter().copied());
+            out.extend(view.construct_signatures.iter().copied());
+            for signature in view.index_signatures.iter() {
+                out.push(signature.key_type);
+                out.push(signature.value_type);
+            }
+            out.extend(view.keyspace);
+            true
+        }
+        D::ObjectSpreadProgram(program) => {
+            out.extend(program.child_nodes());
+            true
+        }
+        D::Union(members)
+        | D::Intersection(members)
+        | D::MergedDecl {
+            contributors: members,
+        } => {
+            out.extend(members.iter().copied());
+            true
+        }
+        D::Array { element, .. } => {
+            out.push(*element);
+            true
+        }
+        D::Tuple { elements, .. } => {
+            out.extend(elements.iter().map(|element| element.value));
+            true
+        }
+        D::TemplateLiteral { expressions, .. } => {
+            out.extend(expressions.iter().copied());
+            true
+        }
+        D::IndexedAccess { object, index } => {
+            out.push(*object);
+            out.extend(authored_property_key_child(index));
+            true
+        }
+        D::Mapped { source, mapper } => {
+            out.push(*source);
+            out.push(mapper.parameter_node);
+            out.push(mapper.key_space);
+            out.push(mapper.value_expr);
+            out.extend(mapper.name_remap);
+            true
+        }
+        carrier @ (D::TypeOf(_) | D::BareRef(_) | D::ImportType(_)) => {
+            out.extend(carrier.carrier_type_args().iter().copied());
+            true
+        }
+        D::TypeParam {
+            constraint,
+            default,
+            ..
+        } => {
+            out.extend(*constraint);
+            out.extend(*default);
+            true
+        }
+        D::Conditional {
+            check,
+            extends,
+            true_branch_ref,
+            false_branch_ref,
+            ..
+        } => {
+            out.extend([*check, *extends, *true_branch_ref, *false_branch_ref]);
+            true
+        }
+        D::Signature {
+            params,
+            return_type,
+            type_parameters,
+            return_carrier,
+            ..
+        } => {
+            out.extend(params.iter().map(|param| param.ty));
+            out.push(*return_type);
+            if let SignatureReturnCarrier::Declared(node) = return_carrier {
+                out.push(*node);
+            }
+            for decl in type_parameters.iter() {
+                out.push(decl.param);
+                out.extend(decl.constraint);
+                out.extend(decl.default);
+            }
+            true
+        }
+        // Sealed composition payload — its parts are readable only by a
+        // consumer witness, so its children cannot be enumerated here.
+        D::DeferredCallable(_) => false,
+        D::InstantiationRef { args, .. } => {
+            out.extend(args.iter().copied());
+            true
+        }
+        D::SyntheticBinding { value_node, .. } => {
+            out.push(SemanticNodeId(*value_node));
+            true
+        }
+    }
+}
+
+/// TypeScript numeric-literal identity for two f64 payloads — SameValueZero,
+/// the keying the checker's literal-type interning uses: `0` and `-0` are
+/// ONE literal type, `NaN` equals `NaN`, and every other pair compares by
+/// value. Returns `true` only when the two payloads are PROVABLY distinct
+/// literal types (a proven-empty intersection); `false` preserves the
+/// undecided/equal pair.
+pub(crate) fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
+    let same_value_zero = a == b || (a.is_nan() && b.is_nan());
+    !same_value_zero
+}
+
 /// Canonical union construction over `members`.
 pub(crate) fn canonical_union(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
 ) -> CanonicalComposite {
     canonicalize(graph, members, /* is_union */ true)
-}
-
-/// Canonical union construction for a caller OUTSIDE any dispatch cold
-/// build — a graph-only consumer (typeinfo surface projection, meta-resolve
-/// slot/key composition, relation parameter targets) whose publication rail
-/// carries its own fact-validated read set. Evidence disposition, decided
-/// ONCE here rather than ad hoc per site:
-///
-/// * inspected file roots — subsumed: every arm (a discarded structural
-///   duplicate included) reached the caller through fact-recorded reads in
-///   the SAME read set that validates the published result, so the file
-///   dependency is already on the publication rail;
-/// * `incomplete` — the arms are preserved verbatim (never a wrong
-///   collapse), which is byte-for-byte the pre-canonical shape these
-///   consumers published before; none of them claims canonical form. The
-///   canonical-claiming surfaces (the `NormalizeUnion` /
-///   `NormalizeIntersection` queries and every dispatch-context funnel
-///   caller) route through
-///   `ProjectSemanticDispatch::intern_normalized_union_or_intersection`,
-///   where `incomplete` folds `cache_suppress` (ReturnOnly).
-pub(crate) fn canonical_union_node_for_fact_railed_consumer(
-    graph: &SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> SemanticNodeId {
-    canonical_union(graph, members).node
-}
-
-/// Intersection twin of
-/// [`canonical_union_node_for_fact_railed_consumer`] — same evidence
-/// disposition.
-pub(crate) fn canonical_intersection_node_for_fact_railed_consumer(
-    graph: &SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> SemanticNodeId {
-    canonical_intersection(graph, members).node
 }
 
 /// Canonical intersection construction over `members`.
@@ -213,6 +411,19 @@ fn canonicalize(
     //    checker's own `getUnionType` flattening). Source order preserved.
     let flat = flatten_members(graph, members, is_union, &mut evidence);
 
+    // 1a. Singleton normalization returns its retained member UNCHANGED —
+    //     with that member's own scope — BEFORE the absorbers run: a
+    //     singleton file-scoped `any` / `never` / `unknown` (or an alias to
+    //     one) is the member itself, never the distinct Global primitive a
+    //     lattice fold would intern (the ruling admits no singleton
+    //     exception for absorbers, and aliases are never inlined).
+    if let [only] = flat.as_slice() {
+        return CanonicalComposite {
+            node: *only,
+            evidence,
+        };
+    }
+
     // 2. §22 lattice absorption over the flattened arms. The peeks follow
     //    transparent Alias redirects, so an aliased extreme absorbs too.
     let mut specials: Vec<Option<SpecialKind>> = Vec::with_capacity(flat.len());
@@ -221,7 +432,7 @@ fn canonicalize(
     let mut has_unknown = false;
     let mut has_never = false;
     for &m in &flat {
-        let special = peek_special_via_graph(graph, m, &mut evidence);
+        let special = peek_special_via_graph(graph, m, Some(&mut evidence));
         match special {
             Some((SpecialKind::Any, _)) => has_any = true,
             Some((SpecialKind::Unknown, _)) => has_unknown = true,
@@ -342,10 +553,15 @@ fn canonicalize(
     //    Tier 2 (pairwise, budgeted): the recursive comparator over the
     //    CHILD-BEARING survivors only — the arms whose structural identity
     //    can differ from payload identity (children interned under
-    //    different scopes). First occurrence survives; a discarded
-    //    duplicate's inspected roots stay in the evidence; an `Incomplete`
-    //    comparison (or an over-cap arm set) keeps every arm and taints
-    //    the evidence.
+    //    different scopes). Wide arm sets first narrow candidates by
+    //    structural prehash (`structural_hash_of`, sanctioned for candidate
+    //    narrowing only — a hash MATCH is always confirmed by the exact
+    //    cycle-safe comparator, never deduplicated on the hash alone), so
+    //    hash-distinct arms skip the pairwise tier. First occurrence
+    //    survives; a discarded duplicate's TRANSITIVE structure roots stay
+    //    in the evidence (the identity decision rests on the shared
+    //    children); an `Incomplete` comparison (or an over-cap arm set)
+    //    keeps every arm and taints the evidence.
     let hasher = std::collections::hash_map::RandomState::new();
     let mut seen_payloads: FxHashMap<u64, smallvec::SmallVec<[SemanticNodeId; 1]>> =
         FxHashMap::default();
@@ -369,8 +585,11 @@ fn canonicalize(
                 .node_data(candidate)
                 .is_some_and(|cand| *cand == *data)
             {
-                // Content-identical cross-scope duplicate — discarded; its
-                // root was recorded when the flatten walk inspected it.
+                // Content-identical cross-scope duplicate — discarded. The
+                // payload-equality claim rests on the SHARED CHILD ids, so
+                // the discarded arm's transitive structure roots enter the
+                // evidence even though tier 1 never descends.
+                evidence.record_subtree_roots(graph, m);
                 continue 'tier1;
             }
         }
@@ -383,31 +602,75 @@ fn canonicalize(
     if child_bearing.len() > STRUCTURAL_DEDUP_ARM_CAP {
         evidence.incomplete = true;
     } else if child_bearing.len() > 1 {
+        // Candidate narrowing for wide arm sets: bucket by structural
+        // prehash so the pairwise tier runs only within equal-hash groups.
+        // Hash-distinct arms are treated as candidates-for-nothing (both
+        // kept — never a collapse), which keeps a wide union of distinct
+        // same-shaped arms off the shared budget entirely. The prehash is
+        // deliberately skipped for small sets, where hashing every arm
+        // costs more than the direct pairwise walk. Known bounded
+        // divergence: the prehash includes `TypeParam.display_name`, which
+        // canonical identity excludes — a pair equal-except-display-name
+        // would narrow into different groups and stay two arms (a missed
+        // dedup, never a wrong collapse); `display_name` is derived from
+        // the declaration identity the hash also covers, so the pair
+        // cannot arise from one coherent generation.
+        let prehash_groups: Option<FxHashMap<crate::types::Hash16, Vec<usize>>> =
+            if child_bearing.len() > STRUCTURAL_PREHASH_MIN_ARMS {
+                let mut groups: FxHashMap<crate::types::Hash16, Vec<usize>> = FxHashMap::default();
+                for (position, (_, data)) in child_bearing.iter().enumerate() {
+                    let hash =
+                        crate::component_meta_audit::footprint_structural_hash::structural_hash_of(
+                            graph, data,
+                        );
+                    groups.entry(hash).or_default().push(position);
+                }
+                Some(groups)
+            } else {
+                None
+            };
         let mut budget = COMPARE_WORK_BUDGET;
         let mut discarded: Vec<usize> = Vec::new();
-        for i in 1..child_bearing.len() {
-            let (index_m, _) = child_bearing[i];
-            for (index_k, _) in &child_bearing[..i] {
-                let index_k = *index_k;
-                if discarded.contains(&index_k) {
-                    continue;
-                }
-                match compare_structural(
-                    graph,
-                    kept[index_m],
-                    kept[index_k],
-                    &mut evidence,
-                    &mut budget,
-                ) {
-                    StructuralIdentity::Equal => {
-                        discarded.push(index_m);
-                        break;
+        let compare_group = |group: &[usize],
+                             evidence: &mut CanonicalEvidence,
+                             discarded: &mut Vec<usize>,
+                             budget: &mut u32| {
+            for i in 1..group.len() {
+                let (index_m, _) = child_bearing[group[i]];
+                for &earlier in &group[..i] {
+                    let (index_k, _) = child_bearing[earlier];
+                    if discarded.contains(&index_k) {
+                        continue;
                     }
-                    StructuralIdentity::Distinct => {}
-                    StructuralIdentity::Incomplete => {
-                        evidence.incomplete = true;
+                    match compare_structural(graph, kept[index_m], kept[index_k], evidence, budget)
+                    {
+                        StructuralIdentity::Equal => {
+                            // The comparator's payload-equal fast path can
+                            // skip shared subtrees — root the DISCARDED
+                            // arm's full structure explicitly.
+                            evidence.record_subtree_roots(graph, kept[index_m]);
+                            discarded.push(index_m);
+                            break;
+                        }
+                        StructuralIdentity::Distinct => {}
+                        StructuralIdentity::Incomplete => {
+                            evidence.incomplete = true;
+                        }
                     }
                 }
+            }
+        };
+        match &prehash_groups {
+            Some(groups) => {
+                for group in groups.values() {
+                    if group.len() > 1 {
+                        compare_group(group, &mut evidence, &mut discarded, &mut budget);
+                    }
+                }
+            }
+            None => {
+                let all: Vec<usize> = (0..child_bearing.len()).collect();
+                compare_group(&all, &mut evidence, &mut discarded, &mut budget);
             }
         }
         if !discarded.is_empty() {
@@ -496,19 +759,35 @@ fn flatten_members(
 
 /// Graph-level lattice-extreme peek — the shared body behind
 /// `ProjectSemanticDispatch::peek_special`. Follows transparent `Alias`
-/// redirects (bounded), records inspected file roots, and returns the kind
-/// plus the RESOLVED node id (so an `error` operand's carrier is reused
-/// verbatim, preserving its `QueryError` payload and node identity).
+/// redirects (bounded), records inspected file roots on `evidence` when the
+/// caller makes a CANONICAL claim (`Some`), and returns the kind plus the
+/// RESOLVED node id (so an `error` operand's carrier is reused verbatim,
+/// preserving its `QueryError` payload and node identity).
+///
+/// A `None` return is a PROVEN non-special only when the peek terminated on
+/// a resolvable non-special payload. An exhausted hop bound or a dangling
+/// alias target is UNDECIDED: with evidence attached it marks the
+/// canonicalization incomplete (a deeply-aliased extreme must never escape
+/// absorption into a warm canonical result); evidence-free callers use the
+/// peek as a fast-reject only and make no canonical claim.
 pub(super) fn peek_special_via_graph(
     graph: &SemanticGraphStore,
     id: SemanticNodeId,
-    evidence: &mut CanonicalEvidence,
+    mut evidence: Option<&mut CanonicalEvidence>,
 ) -> Option<(SpecialKind, SemanticNodeId)> {
     let mut cur = id;
     // bounded-loop: ALIAS_PEEK_HOPS transparent Alias redirects.
     for _ in 0..ALIAS_PEEK_HOPS {
-        evidence.record_file_root(graph, cur);
-        let data = graph.node_data(cur)?;
+        if let Some(evidence) = evidence.as_deref_mut() {
+            evidence.record_file_root(graph, cur);
+        }
+        let Some(data) = graph.node_data(cur) else {
+            // Dangling target — undecided, never a proven non-special.
+            if let Some(evidence) = evidence {
+                evidence.incomplete = true;
+            }
+            return None;
+        };
         match &*data {
             SemanticNodeData::Alias(inner) => {
                 let next = *inner;
@@ -530,6 +809,10 @@ pub(super) fn peek_special_via_graph(
             }
             _ => return None,
         }
+    }
+    // Hop bound exhausted — undecided, never a proven non-special.
+    if let Some(evidence) = evidence {
+        evidence.incomplete = true;
     }
     None
 }
@@ -573,6 +856,14 @@ pub(crate) fn tag_level_disjoint(
             );
             concrete(*x) && concrete(*y) && x != y && !widening_pair
         }
+        // Literal identity is TS literal identity, not payload bit identity:
+        // numbers compare SameValueZero (`0` and `-0` are ONE literal type —
+        // the intern boundary normalizes `-0.0`, and a stray unnormalized
+        // payload must still never PROVE disjointness).
+        (
+            SemanticNodeData::Literal(LiteralValue::Number(x)),
+            SemanticNodeData::Literal(LiteralValue::Number(y)),
+        ) => numeric_literal_values_disjoint(*x, *y),
         (SemanticNodeData::Literal(x), SemanticNodeData::Literal(y)) => x != y,
         (SemanticNodeData::Literal(lit), SemanticNodeData::Primitive(prim))
         | (SemanticNodeData::Primitive(prim), SemanticNodeData::Literal(lit)) => {
@@ -669,7 +960,15 @@ fn scalar_domain_provably_empty(graph: &SemanticGraphStore, arms: &[SemanticNode
             }
             Some(SemanticNodeData::Literal(value)) => {
                 if let Some(prev) = &seen_literal {
-                    if prev != value {
+                    // TS literal identity: numeric pairs compare
+                    // SameValueZero (`0` / `-0` are one literal type).
+                    let provably_distinct = match (prev, value) {
+                        (LiteralValue::Number(x), LiteralValue::Number(y)) => {
+                            numeric_literal_values_disjoint(*x, *y)
+                        }
+                        _ => prev != value,
+                    };
+                    if provably_distinct {
                         return true;
                     }
                 } else {
@@ -737,6 +1036,60 @@ pub(crate) fn compare_structural(
     StructuralIdentity::Equal
 }
 
+/// Shallow identity of one [`SurfaceEntry::Member`] / positive-member pair:
+/// every non-child `SurfaceMember` field compares per the manual `Eq`
+/// (12/12) and the key/value children descend structurally.
+fn compare_surface_member(
+    ma: &crate::semantic_query::SurfaceMember,
+    mb: &crate::semantic_query::SurfaceMember,
+    work: &mut Vec<(SemanticNodeId, SemanticNodeId)>,
+) -> bool {
+    if ma.optional != mb.optional
+        || ma.readonly != mb.readonly
+        || ma.method_kind != mb.method_kind
+        || ma.has_implementation_body != mb.has_implementation_body
+        || ma.visibility != mb.visibility
+        || ma.spans != mb.spans
+        || ma.declaration_origin != mb.declaration_origin
+        || ma.declared_in_macro_type_arg != mb.declared_in_macro_type_arg
+        || ma.merge_role != mb.merge_role
+        || ma.excess_origin != mb.excess_origin
+    {
+        return false;
+    }
+    match (
+        authored_property_key_child(&ma.key),
+        authored_property_key_child(&mb.key),
+    ) {
+        (Some(ka), Some(kb)) => work.push((ka, kb)),
+        (None, None) => {
+            if ma.key != mb.key {
+                return false;
+            }
+        }
+        _ => return false,
+    }
+    work.push((ma.value, mb.value));
+    true
+}
+
+/// Shallow identity of one [`crate::semantic_query::IndexSignature`] pair.
+fn compare_index_signature(
+    ia: &crate::semantic_query::IndexSignature,
+    ib: &crate::semantic_query::IndexSignature,
+    work: &mut Vec<(SemanticNodeId, SemanticNodeId)>,
+) -> bool {
+    if ia.readonly != ib.readonly
+        || ia.spans != ib.spans
+        || ia.declaration_origin != ib.declaration_origin
+    {
+        return false;
+    }
+    work.push((ia.key_type, ib.key_type));
+    work.push((ia.value_type, ib.value_type));
+    true
+}
+
 /// One shallow layer of the comparator: compare every non-child field per
 /// `SemanticNodeData`'s manual equality rules and push child-id pairs for
 /// structural descent. Returns `false` for a shallow mismatch (⇒ Distinct).
@@ -783,10 +1136,22 @@ fn compare_shallow(
             true
         }
         (D::Object(sa), D::Object(sb)) => {
-            // `entries` is the primary stored surface (the kind-specific
-            // collections are derived indexes of it); `keyspace` is the one
-            // additional child slot.
-            if sa.entries.len() != sb.entries.len() {
+            // The FULL manual-`Eq` field set participates: `entries`,
+            // `keyspace`, AND the kind-specific collections (`members`,
+            // `call_signatures`, `construct_signatures`, `index_signatures`,
+            // `has_index_signature`). The collections are usually derived
+            // indexes of `entries`, but production CAN diverge them —
+            // `call_shape_transform` rebuilds a surface via
+            // `with_positive_members`, transforming `members` while
+            // `entries` keeps the originals — and two nodes the arena
+            // interns as DISTINCT must never compare `Equal` here.
+            if sa.entries.len() != sb.entries.len()
+                || sa.positive_members().len() != sb.positive_members().len()
+                || sa.call_signatures.len() != sb.call_signatures.len()
+                || sa.construct_signatures.len() != sb.construct_signatures.len()
+                || sa.index_signatures.len() != sb.index_signatures.len()
+                || sa.closed().has_index_signature() != sb.closed().has_index_signature()
+            {
                 return false;
             }
             if !push_opt(work, sa.keyspace, sb.keyspace) {
@@ -795,48 +1160,40 @@ fn compare_shallow(
             for (ea, eb) in sa.entries.iter().zip(sb.entries.iter()) {
                 match (ea, eb) {
                     (SurfaceEntry::Member(ma), SurfaceEntry::Member(mb)) => {
-                        if ma.optional != mb.optional
-                            || ma.readonly != mb.readonly
-                            || ma.method_kind != mb.method_kind
-                            || ma.has_implementation_body != mb.has_implementation_body
-                            || ma.visibility != mb.visibility
-                            || ma.spans != mb.spans
-                            || ma.declaration_origin != mb.declaration_origin
-                            || ma.declared_in_macro_type_arg != mb.declared_in_macro_type_arg
-                            || ma.merge_role != mb.merge_role
-                            || ma.excess_origin != mb.excess_origin
-                        {
+                        if !compare_surface_member(ma, mb, work) {
                             return false;
                         }
-                        match (
-                            authored_property_key_child(&ma.key),
-                            authored_property_key_child(&mb.key),
-                        ) {
-                            (Some(ka), Some(kb)) => work.push((ka, kb)),
-                            (None, None) => {
-                                if ma.key != mb.key {
-                                    return false;
-                                }
-                            }
-                            _ => return false,
-                        }
-                        work.push((ma.value, mb.value));
                     }
                     (SurfaceEntry::CallSignature(a), SurfaceEntry::CallSignature(b))
                     | (SurfaceEntry::ConstructSignature(a), SurfaceEntry::ConstructSignature(b)) => {
                         work.push((*a, *b));
                     }
                     (SurfaceEntry::IndexSignature(ia), SurfaceEntry::IndexSignature(ib)) => {
-                        if ia.readonly != ib.readonly
-                            || ia.spans != ib.spans
-                            || ia.declaration_origin != ib.declaration_origin
-                        {
+                        if !compare_index_signature(ia, ib, work) {
                             return false;
                         }
-                        work.push((ia.key_type, ib.key_type));
-                        work.push((ia.value_type, ib.value_type));
                     }
                     _ => return false,
+                }
+            }
+            for (ma, mb) in sa.positive_members().iter().zip(sb.positive_members()) {
+                if !compare_surface_member(ma, mb, work) {
+                    return false;
+                }
+            }
+            for (a, b) in sa.call_signatures.iter().zip(sb.call_signatures.iter()) {
+                work.push((*a, *b));
+            }
+            for (a, b) in sa
+                .construct_signatures
+                .iter()
+                .zip(sb.construct_signatures.iter())
+            {
+                work.push((*a, *b));
+            }
+            for (ia, ib) in sa.index_signatures.iter().zip(sb.index_signatures.iter()) {
+                if !compare_index_signature(ia, ib, work) {
+                    return false;
                 }
             }
             true

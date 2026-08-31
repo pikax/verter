@@ -503,12 +503,17 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     QueryResult::Value(formula) => formula,
                     _ => return None,
                 };
-                Some(
+                let mut canonical_evidence =
+                    crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default(
+                    );
+                let members =
                     crate::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
                         dispatch.ctx.project_type_store().semantic_graph(),
                         &formula,
-                    ),
-                )
+                        &mut canonical_evidence,
+                    );
+                dispatch.deposit_canonical_evidence(canonical_evidence);
+                Some(members)
             }
             _ => None,
         }

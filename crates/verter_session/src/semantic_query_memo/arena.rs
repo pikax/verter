@@ -203,7 +203,22 @@ impl NodeArena {
         self.push_impl(data, scope)
     }
 
-    fn push_impl(&self, data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
+    fn push_impl(&self, mut data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
+        // TS literal-type identity boundary: the checker interns numeric
+        // literal types by SameValueZero, so `-0` IS the literal type `0`
+        // (verified against the pinned checker: `0 & -0` is `0`, `0 | -0`
+        // is one arm, `-0` is assignable to `0`). Payload equality below is
+        // bit identity, which diverges from that exactly at the signed
+        // zero — normalize it here, the single intern choke point, so the
+        // two spellings share one node and no downstream comparison,
+        // dedup, or disjointness proof can tell them apart. NaN payloads
+        // pass through untouched (bit identity already groups them).
+        if let SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) = &mut data
+        {
+            if *n == 0.0 && n.is_sign_negative() {
+                *n = 0.0;
+            }
+        }
         // Fingerprint once, up front, outside every lock. Both shard
         // routing and the bucket key derive from this single hash of the
         // payload; the map probe then only hashes a `u64`.

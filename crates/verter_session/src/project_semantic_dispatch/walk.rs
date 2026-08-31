@@ -651,6 +651,7 @@ fn shallow_member_from_surface(m: &crate::semantic_query::SurfaceMember) -> Shal
 pub(crate) fn presence_intersection_members(
     graph: &SemanticGraphStore,
     arm_members: &[Vec<crate::semantic_query::SurfaceMember>],
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
         return only.clone();
@@ -667,7 +668,7 @@ pub(crate) fn presence_intersection_members(
             ))
         })
         .collect();
-    match merge_intersection_surfaces_with_graph(graph, &arm_surfaces) {
+    match merge_intersection_surfaces_with_graph(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
             .to_vec(),
@@ -688,6 +689,7 @@ pub(crate) fn presence_intersection_members(
 pub(crate) fn presence_union_members(
     graph: &SemanticGraphStore,
     arm_members: &[Vec<crate::semantic_query::SurfaceMember>],
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
         return only.clone();
@@ -704,7 +706,7 @@ pub(crate) fn presence_union_members(
             ))
         })
         .collect();
-    match merge_union_surfaces_for_macro(graph, &arm_surfaces) {
+    match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
             .to_vec(),
@@ -4131,7 +4133,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     let merged = if live_count == 1 {
                         arm_surfaces.iter_mut().find_map(std::mem::take)
                     } else {
-                        merge_intersection_surfaces_with_graph(self.graph(), &arm_surfaces)
+                        let mut canonical_evidence =
+                            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+                        let merged = merge_intersection_surfaces_with_graph(
+                            self.graph(),
+                            &arm_surfaces,
+                            &mut canonical_evidence,
+                        );
+                        self.dispatch.deposit_canonical_evidence(canonical_evidence);
+                        merged
                     };
                     self.contribute_surface(
                         parent_target,
@@ -4183,10 +4193,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                     // both are cache-keyed in distinct slots
                     // (`MacroSurfaceShallow` vs the `Shallow` publication
                     // slot) so they never collide.
-                    let merged = if self.context.is_macro_object_surface() {
-                        merge_union_surfaces_for_macro(self.graph(), &arm_surfaces)
-                    } else {
-                        merge_union_surfaces(self.graph(), &arm_surfaces)
+                    let merged = {
+                        let mut canonical_evidence =
+                            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+                        let merged = if self.context.is_macro_object_surface() {
+                            merge_union_surfaces_for_macro(
+                                self.graph(),
+                                &arm_surfaces,
+                                &mut canonical_evidence,
+                            )
+                        } else {
+                            merge_union_surfaces(
+                                self.graph(),
+                                &arm_surfaces,
+                                &mut canonical_evidence,
+                            )
+                        };
+                        self.dispatch.deposit_canonical_evidence(canonical_evidence);
+                        merged
                     };
                     self.contribute_surface(
                         parent_target,
@@ -4318,11 +4342,15 @@ impl<'a, 'b> PathWalker<'a, 'b> {
             .collect();
         arms.and_then(|arms| {
             let arms = arms.into_iter().map(Some).collect::<Vec<_>>();
-            if self.context.is_macro_object_surface() {
-                merge_union_surfaces_for_macro(self.graph(), &arms)
+            let mut canonical_evidence =
+                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+            let merged = if self.context.is_macro_object_surface() {
+                merge_union_surfaces_for_macro(self.graph(), &arms, &mut canonical_evidence)
             } else {
-                merge_union_surfaces(self.graph(), &arms)
-            }
+                merge_union_surfaces(self.graph(), &arms, &mut canonical_evidence)
+            };
+            self.dispatch.deposit_canonical_evidence(canonical_evidence);
+            merged
         })
     }
 
@@ -5116,10 +5144,24 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                                 ))
                             })
                             .collect();
-                        let merged = if self.context.is_macro_object_surface() {
-                            merge_union_surfaces_for_macro(self.graph(), &arm_surfaces)
-                        } else {
-                            merge_union_surfaces(self.graph(), &arm_surfaces)
+                        let merged = {
+                            let mut canonical_evidence =
+                                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+                            let merged = if self.context.is_macro_object_surface() {
+                                merge_union_surfaces_for_macro(
+                                    self.graph(),
+                                    &arm_surfaces,
+                                    &mut canonical_evidence,
+                                )
+                            } else {
+                                merge_union_surfaces(
+                                    self.graph(),
+                                    &arm_surfaces,
+                                    &mut canonical_evidence,
+                                )
+                            };
+                            self.dispatch.deposit_canonical_evidence(canonical_evidence);
+                            merged
                         };
                         self.contribute_surface(
                             target,
@@ -6071,6 +6113,7 @@ fn merge_declaration_surfaces(
 fn merge_intersection_surfaces_with_graph(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<ShallowSurface> {
     let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
     if live.is_empty() {
@@ -6110,7 +6153,7 @@ fn merge_intersection_surfaces_with_graph(
         ShallowSurfaceMember,
     > = by_key
         .into_iter()
-        .map(|(key, accum)| (key, accum.finish(graph)))
+        .map(|(key, accum)| (key, accum.finish(graph, evidence)))
         .collect();
 
     // Scan the contributing canonical streams once. Merged members occupy
@@ -6304,7 +6347,11 @@ impl MergedMemberAccum {
         }
     }
 
-    fn finish(self, graph: &SemanticGraphStore) -> ShallowSurfaceMember {
+    fn finish(
+        self,
+        graph: &SemanticGraphStore,
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> ShallowSurfaceMember {
         use crate::semantic_query::MemberMergeRole;
         // P2-1 own-body-shadows-heritage: when the name has an own-body
         // contributor AND a heritage contributor, the derived own-body member
@@ -6339,7 +6386,7 @@ impl MergedMemberAccum {
             };
         let value = match values.as_slice() {
             [single] => *single,
-            _ => merge_value_nodes_recursive(graph, &values),
+            _ => merge_value_nodes_recursive(graph, &values, evidence),
         };
         // Visibility aggregates to the MOST-RESTRICTIVE accessibility across the
         // contributors that ACTUALLY contribute to the surviving member (the
@@ -6409,6 +6456,7 @@ impl MergedMemberAccum {
 fn merge_value_nodes_recursive(
     graph: &SemanticGraphStore,
     values: &[SemanticNodeId],
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
     verter_debug_assert!(values.len() >= 2);
     // If every contributing value is an `Object` surface, produce a
@@ -6436,7 +6484,8 @@ fn merge_value_nodes_recursive(
     if all_objects {
         let opt_surfaces: Vec<Option<ShallowSurface>> =
             shallow_surfaces.into_iter().map(Some).collect();
-        if let Some(merged) = merge_intersection_surfaces_with_graph(graph, &opt_surfaces) {
+        if let Some(merged) = merge_intersection_surfaces_with_graph(graph, &opt_surfaces, evidence)
+        {
             return graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
         }
     }
@@ -6444,41 +6493,137 @@ fn merge_value_nodes_recursive(
     // preserved without forcing the values into an Object shape. The route
     // splits by CARRIER SEMANTICS:
     //
-    // * a callable-shaped contributor makes the intersection an
+    // * a POSSIBLY-callable contributor makes the intersection an
     //   overload-ordered carrier — call resolution over an intersection
     //   tries arms in declaration order, so the raw ORDER-PRESERVING
     //   intern is a deliberate bypass of the canonical authority
-    //   (commutative sorting would break overload precedence);
-    // * otherwise the derived member-value intersection routes through the
-    //   canonical authority (structural dedup + the proven-disjoint scalar
-    //   collapse, `string & number = never`). Evidence disposition per the
-    //   fact-railed-consumer wrapper.
-    if values.iter().any(|v| value_is_callable_shaped(graph, *v)) {
+    //   (commutative sorting would break overload precedence). The
+    //   classification follows transparent alias/reference carriers and
+    //   fails CLOSED (order preserved) on anything undecidable from the
+    //   graph alone;
+    // * otherwise (every contributor PROVABLY non-callable) the derived
+    //   member-value intersection routes through the canonical authority
+    //   (structural dedup + the proven-disjoint scalar collapse,
+    //   `string & number = never`), threading the evidence to the caller's
+    //   disposition boundary.
+    if values
+        .iter()
+        .any(|v| value_may_contribute_call_signatures(graph, *v))
+    {
         graph.intern_node(SemanticNodeData::Intersection(Arc::from(
             values.to_vec().into_boxed_slice(),
         )))
     } else {
-        crate::project_semantic_dispatch::canonical_algebra::canonical_intersection_node_for_fact_railed_consumer(
+        let composite = crate::project_semantic_dispatch::canonical_algebra::canonical_intersection(
             graph, values,
-        )
+        );
+        evidence.absorb(composite.evidence);
+        composite.node
     }
 }
 
-/// Whether a member-value contributor is callable-shaped — a `Signature`, a
-/// deferred callable, a merged declaration (an ordered overload group by
-/// construction), or an `Object` carrying call/construct signatures. Such a
-/// contributor makes the containing intersection an overload-ordered
-/// carrier, which the canonical (commutative) algebra must not reorder.
-fn value_is_callable_shaped(graph: &SemanticGraphStore, value: SemanticNodeId) -> bool {
-    match graph.node_data(value).as_deref() {
-        Some(SemanticNodeData::Signature { .. })
-        | Some(SemanticNodeData::DeferredCallable(_))
-        | Some(SemanticNodeData::MergedDecl { .. }) => true,
-        Some(SemanticNodeData::Object(view)) => {
-            !view.call_signatures.is_empty() || !view.construct_signatures.is_empty()
+/// Whether a member-value contributor MAY contribute call/construct
+/// signatures to the containing intersection — the carrier-semantics
+/// classification behind the overload-order exclusion. Such a contributor
+/// makes the intersection an overload-ordered carrier, which the canonical
+/// (commutative) algebra must not reorder.
+///
+/// The exclusion is specified by CARRIER SEMANTICS, not node shape, so the
+/// classification follows transparent `Alias` chains, recurses composite
+/// arms, and FAILS CLOSED: an unresolved reference carrier (`DeclRef`,
+/// `InstantiationRef`, `BareRef`, `ImportType`, `TypeOf`), an open generic
+/// position, an unreduced operator, a dangling node, or a budget-exceeded
+/// walk all count as possibly-callable — the authored order is preserved
+/// (the pre-canonical shape) rather than risking a wrong overload reorder.
+/// Only PROVABLY non-callable values (scalars, arrays, tuples, template
+/// literals, mapped types — which never yield call signatures — key
+/// domains, signature-free object surfaces, terminal error/miss carriers)
+/// admit the commutative canonical route.
+fn value_may_contribute_call_signatures(graph: &SemanticGraphStore, value: SemanticNodeId) -> bool {
+    const CLASSIFY_NODE_BUDGET: usize = 64;
+    let mut stack: Vec<SemanticNodeId> = vec![value];
+    let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node) {
+            continue;
         }
-        _ => false,
+        if visited.len() > CLASSIFY_NODE_BUDGET {
+            // Budget exceeded — undecided, fail closed.
+            return true;
+        }
+        let Some(data) = graph.node_data(node) else {
+            // Dangling — undecided, fail closed.
+            return true;
+        };
+        match &*data {
+            // Callable by construction.
+            SemanticNodeData::Signature { .. }
+            | SemanticNodeData::DeferredCallable(_)
+            | SemanticNodeData::MergedDecl { .. } => return true,
+            // An object surface contributes exactly its call/construct
+            // signatures — check BOTH the entry stream and the (possibly
+            // diverged) kind-specific collections.
+            SemanticNodeData::Object(view) => {
+                if !view.call_signatures.is_empty()
+                    || !view.construct_signatures.is_empty()
+                    || view.entries.iter().any(|entry| {
+                        matches!(
+                            entry,
+                            crate::semantic_query::SurfaceEntry::CallSignature(_)
+                                | crate::semantic_query::SurfaceEntry::ConstructSignature(_)
+                        )
+                    })
+                {
+                    return true;
+                }
+            }
+            // Transparent carriers / composites — classify what they carry.
+            SemanticNodeData::Alias(inner) => stack.push(*inner),
+            SemanticNodeData::Union(arms) | SemanticNodeData::Intersection(arms) => {
+                stack.extend(arms.iter().copied());
+            }
+            SemanticNodeData::SyntheticBinding { value_node, .. } => {
+                stack.push(SemanticNodeId(*value_node));
+            }
+            // PROVABLY non-callable shapes. Mapped types never yield call
+            // signatures (TS drops them); key domains, scalars, tuples,
+            // arrays, template literals cannot carry them; a terminal
+            // error/miss carrier can never later manifest signatures; an
+            // object spread program produces a plain surface (spreading
+            // copies own enumerable properties, never callability).
+            SemanticNodeData::Primitive(_)
+            | SemanticNodeData::Literal(_)
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::Mapped { .. }
+            | SemanticNodeData::ObjectSpreadProgram(_) => {}
+            SemanticNodeData::Opaque(err) => {
+                // The two NON-error identity carriers (`DeclPlaceholder`,
+                // an expandable declaration; `RecursiveRef`, a cycle back
+                // reference) may denote callables — undecided; every true
+                // error/miss `QueryError` is terminal with no signatures
+                // to contribute.
+                if !err.is_error_type() {
+                    return true;
+                }
+            }
+            // Undecidable without resolution — fail closed.
+            SemanticNodeData::RawFallback { .. }
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::Conditional { .. }
+            | SemanticNodeData::TypeOf(_)
+            | SemanticNodeData::TypeParam { .. }
+            | SemanticNodeData::Infer { .. }
+            | SemanticNodeData::InferRef { .. }
+            | SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. }
+            | SemanticNodeData::BareRef(_)
+            | SemanticNodeData::ImportType(_) => return true,
+        }
     }
+    false
 }
 
 /// Merge per-arm union surfaces under the TS-correct common-member rule,
@@ -6503,6 +6648,7 @@ fn value_is_callable_shaped(graph: &SemanticGraphStore, value: SemanticNodeId) -
 pub(super) fn merge_union_surfaces(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<ShallowSurface> {
     if arm_surfaces.is_empty() {
         return None;
@@ -6544,7 +6690,7 @@ pub(super) fn merge_union_surfaces(
             key: first_member.key.clone(),
             // Value type = union of the per-arm member values. A single
             // shared value node stays as-is (no singleton union wrapper).
-            value: accum.value_node(graph),
+            value: accum.value_node(graph, evidence),
             optional: accum.optional_in_any,
             readonly: accum.readonly_in_all,
             method_kind: None,
@@ -6632,16 +6778,25 @@ impl UnionMemberAccum {
 
     /// The merged member value: a single declaring arm's value stays
     /// as-is; multiple arms union in arm order (no singleton wrapper).
-    fn value_node(&self, graph: &SemanticGraphStore) -> SemanticNodeId {
+    fn value_node(
+        &self,
+        graph: &SemanticGraphStore,
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> SemanticNodeId {
         match self.values.as_slice() {
             [single] => *single,
             // Canonical construction: the per-arm member-value union routes
             // through the one authority (union arm order carries no
-            // overload precedence). Evidence disposition per the
-            // fact-railed-consumer wrapper.
-            values => crate::project_semantic_dispatch::canonical_algebra::canonical_union_node_for_fact_railed_consumer(
-                graph, values,
-            ),
+            // overload precedence); the evidence threads to the caller's
+            // disposition boundary.
+            values => {
+                let composite =
+                    crate::project_semantic_dispatch::canonical_algebra::canonical_union(
+                        graph, values,
+                    );
+                evidence.absorb(composite.evidence);
+                composite.node
+            }
         }
     }
 }
@@ -6717,6 +6872,7 @@ fn aggregate_union_members(
 pub(super) fn merge_union_surfaces_for_macro(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<ShallowSurface> {
     if arm_surfaces.is_empty() {
         return None;
@@ -6762,7 +6918,7 @@ pub(super) fn merge_union_surfaces_for_macro(
             accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
         members.push(ShallowSurfaceMember {
             key: key.clone(),
-            value: accum.value_node(graph),
+            value: accum.value_node(graph, evidence),
             optional,
             readonly: accum.readonly_in_all,
             method_kind: None,
@@ -6822,6 +6978,7 @@ fn surface_member_from_shallow(member: &ShallowSurfaceMember) -> SurfaceMember {
 pub(crate) fn spread_formula_positive_members_for_macro(
     graph: &SemanticGraphStore,
     formula: &crate::semantic_query::ObjectProjectionFormula,
+    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = formula.alternatives() {
         let surface = shallow_surface_from_projection_alternative(graph, only);
@@ -6839,7 +6996,7 @@ pub(crate) fn spread_formula_positive_members_for_macro(
             ))
         })
         .collect();
-    match merge_union_surfaces_for_macro(graph, &arm_surfaces) {
+    match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
             .to_vec(),
@@ -7093,10 +7250,22 @@ mod m1_merge_visibility_tests {
 
     use verter_type_expr::{MemberSpans, MemberVisibility};
 
-    use super::{
-        merge_intersection_surfaces_with_graph, merge_union_surfaces_for_macro, ShallowSurface,
-        ShallowSurfaceMember,
-    };
+    use super::{ShallowSurface, ShallowSurfaceMember};
+
+    /// Test-local 2-arg shims: these tests assert MERGE semantics, not
+    /// evidence disposition, so the threaded evidence sinks locally.
+    fn merge_intersection_surfaces_with_graph(
+        graph: &SemanticGraphStore,
+        arms: &[Option<ShallowSurface>],
+    ) -> Option<ShallowSurface> {
+        super::merge_intersection_surfaces_with_graph(graph, arms, &mut Default::default())
+    }
+    fn merge_union_surfaces_for_macro(
+        graph: &SemanticGraphStore,
+        arms: &[Option<ShallowSurface>],
+    ) -> Option<ShallowSurface> {
+        super::merge_union_surfaces_for_macro(graph, arms, &mut Default::default())
+    }
     use crate::semantic_query::{MemberMergeRole, PrimitiveKind, SemanticNodeData};
     use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -7435,5 +7604,100 @@ mod excess_origin_carrier_tests {
         assert_eq!(origin_of("fresh"), ExcessPropertyOrigin::FreshOwn);
         assert_eq!(origin_of("tainted"), ExcessPropertyOrigin::SpreadTainted);
         assert_eq!(origin_of("plain"), ExcessPropertyOrigin::NonLiteral);
+    }
+}
+
+#[cfg(test)]
+mod overload_carrier_exclusion_tests {
+    //! The overload-carrier exclusion is specified by CARRIER SEMANTICS: a
+    //! member-value intersection whose contributor MAY contribute call
+    //! signatures is an overload-ordered carrier the commutative canonical
+    //! algebra must not reorder. The classification therefore follows
+    //! transparent alias/reference carriers and fails CLOSED (order
+    //! preserved) on any contributor whose callability cannot be decided
+    //! from the graph alone.
+
+    use super::{merge_intersection_surfaces_with_graph, ShallowSurface, ShallowSurfaceMember};
+    use crate::semantic_query::{PrimitiveKind, SemanticNodeData, SurfaceEntry, SurfaceView};
+    use crate::semantic_query_memo::SemanticGraphStore;
+
+    fn value_member(
+        name: &str,
+        value: crate::semantic_query::SemanticNodeId,
+    ) -> ShallowSurfaceMember {
+        ShallowSurfaceMember {
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            spans: verter_type_expr::MemberSpans::default(),
+            declaration_origin: None,
+        }
+    }
+
+    /// Two authored intersection arms contribute the same member `m` with
+    /// ALIAS-wrapped callable values, the aliases interned in reverse of
+    /// authored order (the second contributor's alias holds the LOWER
+    /// ordinal). A shallow shape check misses the callable behind the alias,
+    /// routes the value intersection through the commutative canonical sort,
+    /// and publishes the overload arms in the OPPOSITE order — call
+    /// resolution then observes the wrong ordered signature set. The carrier
+    /// classification must follow the alias and preserve authored order.
+    #[test]
+    fn alias_wrapped_callables_keep_authored_overload_order() {
+        let graph = SemanticGraphStore::new();
+        let ret_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let ret_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let callable_object = |ret: crate::semantic_query::SemanticNodeId| {
+            graph.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
+                vec![SurfaceEntry::CallSignature(ret)],
+                None,
+                false,
+            )))
+        };
+        // Adversarial interning order: B's alias FIRST, so its ordinal sorts
+        // lower than A's.
+        let alias_b = graph.intern_node(SemanticNodeData::Alias(callable_object(ret_b)));
+        let alias_a = graph.intern_node(SemanticNodeData::Alias(callable_object(ret_a)));
+        assert!(alias_b.0 < alias_a.0, "fixture needs the reversed ordinals");
+
+        let arm = |value| {
+            Some(ShallowSurface::from_entries(
+                vec![super::ShallowSurfaceEntry::Member(value_member("m", value))],
+                None,
+            ))
+        };
+        let mut evidence =
+            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+        let merged = merge_intersection_surfaces_with_graph(
+            &graph,
+            &[arm(alias_a), arm(alias_b)],
+            &mut evidence,
+        )
+        .expect("two live arms merge");
+        let value = merged
+            .members
+            .iter()
+            .find(|m| m.string_name() == Some("m"))
+            .expect("member m survives")
+            .value;
+        match graph.node_data(value).as_deref() {
+            Some(SemanticNodeData::Intersection(arms)) => {
+                assert_eq!(
+                    arms.as_ref(),
+                    &[alias_a, alias_b],
+                    "authored contribution order is the overload order — the \
+                     canonical (commutative) sort must not touch an \
+                     alias-wrapped callable carrier"
+                );
+            }
+            other => panic!("expected the order-preserving intersection carrier, got {other:?}"),
+        }
     }
 }
