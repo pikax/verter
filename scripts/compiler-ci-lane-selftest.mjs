@@ -27,6 +27,8 @@ test("compiler trybuild cache belongs to the required job that executes the grou
   assert.match(compilerJob, /target\/tests\/trybuild/);
   assert.match(compilerJob, /default_compiler_compile_fail_contracts_are_enforced/);
   assert.match(compilerJob, /generated_svelte_artifacts_match_their_authoritative_inputs/);
+  assert.match(compilerJob, /cargo build -p verter_compiler/);
+  assert.match(compilerJob, /cargo test -p verter_compiler --lib/);
   assert.doesNotMatch(compilerJob, /max-threads|test-threads|--jobs|-j\s*\d/);
   assert.doesNotMatch(rustJob, /target\/tests\/trybuild/);
   assert.match(successJob, /^\s*- compiler-contracts\s*$/m);
