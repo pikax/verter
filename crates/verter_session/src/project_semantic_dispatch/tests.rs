@@ -5354,6 +5354,238 @@ fn substitute_change_tracking_preserves_correctness_when_parameter_appears() {
     );
 }
 
+/// Evidence-blind-replay fence, SUPPRESSION direction. The substitute
+/// hash-cons memo is store-owned and CROSS-REQUEST, so a walk whose
+/// canonical composite routing inspected file-scoped structure must not
+/// be replayed to a later request that would then never observe those
+/// self-roots — a warm read served on an under-rooted entry, exactly the
+/// stale-publication class the correctness budget puts at zero.
+///
+/// `T | string` with the `string` arm `File`-scoped: substituting
+/// `T := number` routes the CHANGED union through the canonical
+/// authority, whose flatten records the file-scoped arm's self-root, so
+/// `deposit_canonical_evidence` advances the epoch and the publish is
+/// suppressed. The result still flows to the caller — only the memo
+/// write is withheld.
+#[test]
+fn substitute_publish_suppressed_when_canonicalization_inspects_file_scope() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    // The evidence-bearing arm: a `File`-scoped `string`. Scope is arena
+    // identity, so this is a distinct id from the Global `string`.
+    let file_string = graph.intern_node_with_scope(
+        SemanticNodeData::Primitive(PrimitiveKind::String),
+        NodeScopeId::File {
+            canonical_id: Arc::from("/w/substitute_arm_owner.ts"),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [23; 16],
+            local_scope: None,
+        },
+    );
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![parameter_node, file_string].into_boxed_slice(),
+        )),
+    ));
+
+    let result = dispatch.substitute_semantic_type_param(union_node, parameter_node, number);
+    // The walk really did canonicalize a composite over the file-scoped
+    // arm (both arms survive — distinct primitive domains).
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Union(m)) if m.len() == 2
+        ),
+        "fixture must reach the canonical union route over the file-scoped arm"
+    );
+    assert_eq!(
+        graph.substitute_memo_get(union_node, parameter_node, number),
+        None,
+        "a walk whose canonicalization deposited file self-roots must NOT reach \
+         the cross-request substitute memo — replaying it to a request that never \
+         observes those roots is a stale warm read on an under-rooted entry"
+    );
+}
+
+/// Evidence-blind-replay fence, PUBLISH direction. The fence is armed by
+/// NON-TRIVIAL evidence only: a walk whose canonicalization inspected no
+/// file-scoped node and proved itself complete deposits nothing, leaves
+/// the epoch untouched, and stays freely replayable. Without this leg an
+/// over-broad fence (advancing the epoch on EVERY deposit, trivial ones
+/// included) would silently make the memo permanently unpublishable and
+/// still look correct.
+///
+/// The evidence-free twin of the suppression fixture: every arm is
+/// `Global`, so `T | string` with `T := number` canonicalizes with an
+/// empty root set.
+#[test]
+fn evidence_free_substitute_walk_still_publishes_to_the_memo() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let string = primitive(&graph, PrimitiveKind::String);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let union_node = graph.intern_node(SemanticNodeData::Union(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![parameter_node, string].into_boxed_slice(),
+        )),
+    ));
+
+    let result = dispatch.substitute_semantic_type_param(union_node, parameter_node, number);
+    assert!(
+        matches!(
+            graph.node_data(result).as_deref(),
+            Some(SemanticNodeData::Union(m)) if m.len() == 2
+        ),
+        "same canonical union route as the suppression twin, minus the file scope"
+    );
+    assert_eq!(
+        graph.substitute_memo_get(union_node, parameter_node, number),
+        Some(result),
+        "an all-Global walk deposits no self-roots and proves itself complete, so \
+         the fence must leave it replayable — the fence is armed by NON-TRIVIAL \
+         evidence, never by the mere fact that a canonicalization ran"
+    );
+}
+
+/// Substituted-intersection carrier split, POSSIBLY-CALLABLE leg. A
+/// changed intersection carrying a possibly-callable contributor is an
+/// overload-ordered carrier: call resolution tries arms in declaration
+/// order, so the rebuild must preserve the AUTHORED order rather than
+/// route through the commutative canonical authority, whose deterministic
+/// ordering sorts arms by node ordinal.
+///
+/// The fixture is built so the two routes are DISTINGUISHABLE. Members
+/// substituted during the walk intern in authored order, which would make
+/// the canonical sort reproduce the authored order and discriminate
+/// nothing; so the SUBSTITUTED forms are pre-interned with the SECOND
+/// authored arm minted FIRST, giving it the lower ordinal. A regression
+/// to the canonical route therefore emits the REVERSED carrier — a
+/// silently reversed overload set.
+#[test]
+fn substituted_possibly_callable_intersection_preserves_authored_arm_order() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string = primitive(&graph, PrimitiveKind::String);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+
+    // Adversarial ordinals: mint the SECOND authored arm's substituted
+    // form first so it sorts lower than the first's.
+    let a_substituted = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity::synthetic("A"),
+        args: Arc::from(vec![string].into_boxed_slice()),
+    });
+    let b_substituted = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity::synthetic("B"),
+        args: Arc::from(vec![string].into_boxed_slice()),
+    });
+    assert!(
+        a_substituted.0 < b_substituted.0,
+        "fixture precondition: the SECOND authored arm must carry the LOWER \
+         ordinal, otherwise the canonical sort reproduces authored order and \
+         the test discriminates nothing"
+    );
+
+    // `A<T>` / `B<T>` — `InstantiationRef` recurses into `args`, so the
+    // intersection is genuinely CHANGED, and it is fail-closed
+    // possibly-callable, so it takes the order-preserving leg.
+    let a_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity::synthetic("A"),
+        args: Arc::from(vec![parameter_node].into_boxed_slice()),
+    });
+    let b_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
+        base: crate::semantic_query::DeclIdentity::synthetic("B"),
+        args: Arc::from(vec![parameter_node].into_boxed_slice()),
+    });
+    // Authored order is `B<T> & A<T>`.
+    let intersection_node = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![b_ref, a_ref].into_boxed_slice(),
+        )),
+    ));
+
+    let result = dispatch.substitute_semantic_type_param(intersection_node, parameter_node, string);
+    match graph.node_data(result).as_deref() {
+        Some(SemanticNodeData::Intersection(members)) => {
+            assert_eq!(
+                &members[..],
+                &[b_substituted, a_substituted][..],
+                "a possibly-callable substituted intersection must keep the AUTHORED \
+                 arm order; the canonical route's ordinal sort would emit the \
+                 reversed carrier, silently reversing the overload set"
+            );
+        }
+        other => panic!("expected a retained Intersection carrier, got {other:?}"),
+    }
+}
+
+/// Substituted-intersection carrier split, ORDER-SAFE leg. When every
+/// substituted contributor is provably order-safe (scalars draw their
+/// entire apparent call-signature list from one shared global backing
+/// interface), the derived instantiation routes through the canonical
+/// authority — and must actually get the authority's semantics.
+///
+/// `T & string` with `T := number` is the sharpest witness: the
+/// proven-disjoint scalar collapse reduces it to `never`. A regression
+/// that sent this leg down the order-preserving rebuild would emit a
+/// retained `number & string` carrier instead, a wrong-complete result.
+#[test]
+fn substituted_order_safe_intersection_routes_through_the_canonical_authority() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = Arc::clone(host.project_type_store().semantic_graph());
+
+    let string = primitive(&graph, PrimitiveKind::String);
+    let number = primitive(&graph, PrimitiveKind::Number);
+    let never = primitive(&graph, PrimitiveKind::Never);
+    let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let intersection_node = graph.intern_node(SemanticNodeData::Intersection(
+        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![parameter_node, string].into_boxed_slice(),
+        )),
+    ));
+
+    let result = dispatch.substitute_semantic_type_param(intersection_node, parameter_node, number);
+    assert_eq!(
+        result, never,
+        "every substituted contributor is an order-safe scalar, so the changed \
+         intersection must reach the canonical authority and collapse the \
+         proven-disjoint `number & string` to `never` — never a retained carrier"
+    );
+}
+
 /// `infer` inside a closed conditional binds via the shared relation
 /// engine and emits `InferBind` edges. Worked Example C: bare-infer
 /// extends always closes the conditional, substituting `check` into

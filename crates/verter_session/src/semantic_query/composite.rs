@@ -35,6 +35,29 @@
 //!   projection, realized-arm rewriting, expansion combining). The rebuilt
 //!   list inherits the original carrier's semantics, so the rebuild must
 //!   not re-decide them — least of all by reordering.
+//!
+//!   **Disclosed residue.** Because the rebuild preserves rather than
+//!   re-decides, rebuilding a formerly-CANONICAL composite can yield a
+//!   member list that is no longer canonical. The rebuild substitutes each
+//!   arm independently, and two arms that were structurally DISTINCT before
+//!   can become identical after: in `Expanded`-mode output
+//!   (`walk::combine_expanded_arms`) two different reference arms that
+//!   expand to the same object surface produce `Union(obj, obj)` — a
+//!   duplicate constituent the canonical algebra would have collapsed.
+//!   Re-canonicalizing here is NOT the fix: this mint is also what carries
+//!   ordered overload and heritage carriers through a rebuild, where a
+//!   commutative sort or dedup would silently reverse the observed overload
+//!   set, so the category cannot re-decide per-site without giving up the
+//!   property it exists to hold.
+//!
+//!   This is residue, not a contract break. The canonical-node contract
+//!   closes at the PRE-SEAL boundary — the one idempotent closure that runs
+//!   after fixed-point convergence, substitution and inference but before
+//!   the result is sealed — and expansion output is a downstream projection
+//!   carrying no canonical pin, so nothing downstream is entitled to assume
+//!   a rebuilt list is canonical. A consumer that needs the canonical form
+//!   of a rebuilt composite must route it back through the authority as a
+//!   DERIVED composite rather than reading canonicity off this carrier.
 //! * [`CompositeCarrierCategory::QuerySubject`] — a query-argument
 //!   representation: the `NormalizeUnion` / `NormalizeIntersection`
 //!   SUBJECT (the pre-normalization member list interned verbatim so the
@@ -187,6 +210,12 @@ pub(crate) enum CompositeCarrierCategory {
     /// An order- and scope-preserving member-wise rebuild of an existing
     /// composite: the rebuilt list inherits the original's carrier
     /// semantics.
+    ///
+    /// Rebuilding a formerly-canonical composite may therefore produce a
+    /// NON-canonical list (arms distinct before substitution can coincide
+    /// after). See the module docs' disclosed-residue note: the canonical
+    /// contract closes at the pre-seal boundary, so a rebuilt list carries
+    /// no canonical pin.
     PreservingRebuild(PreservingRebuildMint),
     /// A query-argument representation: the `NormalizeUnion` /
     /// `NormalizeIntersection` subject, or the uniform arity-1 key-domain
