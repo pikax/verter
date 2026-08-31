@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=convergence
 semantic_role=convergence
 class=compiler
-predecessors=CCA1N3,CCA1N4,CCA1N2G
+predecessors=CCA1N3,CCA1N4,CCA1N4A,CCA1N2G
 owner=compiler.compiler-bridge:native host-route convergence proof
 conflict_domains=compiler_execution,host_service_graph
 resource_class=docs-light
@@ -45,6 +45,7 @@ Confirm both former generic session bundle selectors are gone through separate l
 
 - **CCA1N4:** the runtime-render lane executes both Vue and Svelte through bound framework host backends; its outer bundle call and route evidence have converged.
 - **CCA1N3:** the host-backed `compile_entry` call and its complete eight-file route-record population have converged.
+- **CCA1N4A:** the runtime-render route record states only the verification its consumers actually perform.
 - **CCA1N2G:** carrier grammar at source ingestion derives from immutable compiler-catalog identity; no Vue-else-Svelte grammar fallthrough remains.
 
 ## Acceptance and ownership
@@ -52,8 +53,8 @@ Confirm both former generic session bundle selectors are gone through separate l
 - Repository-wide structural evidence proves zero session `CarrierCompiler::compile_bundle` calls remain in the two migrated populations and no third route was absorbed.
 - Exactly one framework binding occurs per immutable host request; neither the host-backed nor the runtime-render lane contains a framework selector.
 - Vue/Svelte `FrameworkHostIntegrationBackend`s are the only framework request-topology owners and the sole issuers of `CompileAdmission` (one admission token type per backend; demand carried in the issued value); product backends consume host-issued admission and never mint it.
-- No compatibility fallback remains on either migrated lane; missing capability yields typed unavailability.
-- Generic session orchestration retains only lifecycle, batching, ordering, panic isolation, supersession, cancellation, refusal atomicity, audit correlation, and complete-only publication.
+- No compatibility fallback remains on either migrated lane: bound execution yields typed unavailability and never switches compiler, framework, or lane. The outer last-known-good publication policy is separately owned by CCA2C and is excluded from this join.
+- Generic session route and request orchestration retains only lifecycle, batching, ordering, panic isolation, supersession, cancellation, refusal atomicity, audit correlation, and complete-only publication. Excluded from this join: framework assembly already chartered to CCA2BV — the Vue main-module payload-shape assembly and the template virtual-file Vue import topology — and the outer stale-publication policy owned by CCA2C.
 - Route and audit records describe the executed bound topology; public request DTOs, unplugin/playground consumers, and staged artifacts remain excluded.
 
 ## Budget and verification

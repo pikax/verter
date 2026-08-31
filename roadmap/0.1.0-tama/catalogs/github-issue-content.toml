@@ -113,6 +113,13 @@ expected_outcome = "The runtime-render lane consumes the request-scoped framewor
 acceptance = ["Vue render output, maps, and diagnostics remain equivalent; Svelte render output honors the exact requested style policy.", "The runtime-render compatibility bundle call and every fixed-framework selection on the lane are gone.", "A missing runtime or host capability yields typed unavailability with no fallback to the host-backed lane.", "One render request performs one admitted population; Main plus requested style side-products need no second compile.", "The host-backed entry call is untouched and render route/audit records match the executed route."]
 
 [[issue]]
+node_id = "CCA1N4A"
+title = "Stop a committed route record from claiming verification it does not have"
+problem = "The session crate commits a product-surface inventory describing how each host compile route executes and how that description is kept honest. The runtime-render entry closes by asserting that its route string is equality-checked against structured observations by two named behavioral test suites. Neither suite opens the file: the inventory has one consumer, which embeds it as a string and asserts only that each route description is non-empty. A maintainer who changes that route therefore believes a stale description would fail a test, skips checking it, and the record silently drifts away from the code it claims to document."
+expected_outcome = "The record states only the coverage that exists. Its route prose is presented as derived from structured observations that behavioral suites do assert, with no claim that any test compares the prose itself, so a reader can tell at a glance which parts of the description are machine-checked and which need manual review after a route change."
+acceptance = ["No sentence in the record claims a comparison or equality check that no test performs.", "A test suite is credited only with behavior it actually covers, never with reading a file it never opens.", "The runtime-render and host-backed entries describe their verification in the same, consistent terms.", "The structured observations, executed route, products, axes, and aliases are unchanged and the inventory still parses for its consumer.", "No test, executed route, or user-visible behavior changes."]
+
+[[issue]]
 node_id = "CCA1N"
 title = "Confirm native host routes converge on single-binding backends"
 problem = "Two separate cutovers move the host-backed and runtime-render lanes onto bound framework host backends. Without one convergence check, a leftover compatibility call, a residual framework selector, or an absorbed third route risks surviving both landings and silently keeping a second execution path alive."
