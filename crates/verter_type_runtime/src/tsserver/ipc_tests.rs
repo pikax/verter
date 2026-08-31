@@ -1991,6 +1991,13 @@ fn tsserver_cold_companion_error_classifier_is_narrow() {
         tsserver_diag_error_is_companion_not_ready("Could not find source file: 'X.svelte.tsx'"),
         "the message-substring match is case/path independent"
     );
+    assert!(
+        tsserver_diag_error_is_companion_not_ready(
+            "Error processing request. Cannot read properties of undefined (reading \
+             'lineOffsetToPosition')\nTypeError: Cannot read properties of undefined"
+        ),
+        "TS 6's missing-ScriptInfo quickinfo failure is the same cold membership state"
+    );
 
     // HAZARD: a genuine module-not-found the user must see never reaches this
     // classifier (it is a SUCCESS-body diagnostic, not a transport error), and even

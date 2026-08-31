@@ -314,6 +314,26 @@ impl CarrierPublishCoordinator {
         self.reconciler().activate_published_sources(&sources).await
     }
 
+    /// Non-blockingly return the demanded sources that lack current-session IDE
+    /// advertisements. Readiness checks use this before activation so an LSP
+    /// request never waits behind background membership publication; the scanner
+    /// also feeds this exact set through the existing retry drain at its carrier
+    /// phase boundary.
+    pub(crate) fn missing_published_activations(
+        &self,
+        source_canonicals: &[String],
+    ) -> Vec<String> {
+        let sources: Vec<CanonicalSource> = source_canonicals
+            .iter()
+            .map(|source| CanonicalSource::new(source.clone()))
+            .collect();
+        self.reconciler()
+            .missing_published_activations(&sources)
+            .into_iter()
+            .map(|source| source.as_str().to_string())
+            .collect()
+    }
+
     /// The SINGLE membership-transition entry every production decision point routes
     /// through: resolve ownership ONCE (synchronously; the borrowing resolver is
     /// dropped before any await) and run the authoritative transition through the

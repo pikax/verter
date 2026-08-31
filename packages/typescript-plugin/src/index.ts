@@ -495,6 +495,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     // a newly ready imported carrier must clear a prior wildcard/TS2307 cache,
     // while an unrelated background-warmed carrier must not rebuild the Program.
     const observedCarrierImportKeys = new Set<string>();
+    // Roots for which this plugin instance has observed a real ScriptInfo. A
+    // later absence is recoverable drift; an active store entry that has never
+    // been materialised stays lazy and cannot turn an unrelated background
+    // publication into a project rebuild.
+    const observedManagedRootKeys = new Set<string>();
     const servedReadyVersions = () => {
       const versions = new Map<string, string>();
       for (const [providerPath, version] of store.readyFileVersions()) {
@@ -509,6 +514,9 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         const loaded =
           requestPath !== undefined &&
           info.project.projectService.getScriptInfo?.(normalizePath(requestPath)) !== undefined;
+        if (loaded && requestPath !== undefined) {
+          observedManagedRootKeys.add(activeKey(requestPath));
+        }
         if (!active && !loaded) continue;
         if (!editorOwnsMembership && ready?.role === "CarrierIde") {
           if (source !== undefined) versions.set(normalizePath(source), version);
@@ -616,6 +624,21 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         [...nextReadyVersions].some(
           ([providerPath, version]) => invalidatedReadyVersions.get(providerPath) !== version,
         );
+      // A virtual managed root can lose its ScriptInfo after the source's
+      // protocol-open lifecycle closes even though the durable store version and
+      // active working set are unchanged. A cold-query recovery advances the
+      // publication token specifically to reconcile that drift. Treat a missing
+      // (or detached) active root as serving-state change so the existing
+      // setImmediate reconciliation below recreates and re-adds it; unrelated
+      // inactive publications still take the no-rebuild fast path.
+      const activeManagedRootDrifted = desiredCarrierRoots().some((fileName) => {
+        const normalized = normalizePath(fileName);
+        const scriptInfo = info.project.projectService.getScriptInfo?.(normalized);
+        return (
+          observedManagedRootKeys.has(activeKey(normalized)) &&
+          (scriptInfo === undefined || !info.project.isRoot(scriptInfo))
+        );
+      });
       for (const [providerPath, version] of nextReadyVersions) {
         if (invalidatedReadyVersions.get(providerPath) !== version) {
           pendingScriptInfoReloads.add(providerPath);
@@ -623,7 +646,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       }
       invalidatedReadyVersions = nextReadyVersions;
       const servingStateChanged =
-        configuredServingStateChanged || (publicationAdvanced && relevantReadyVersionsChanged);
+        configuredServingStateChanged ||
+        (publicationAdvanced && (relevantReadyVersionsChanged || activeManagedRootDrifted));
       if (!servingStateChanged) return;
       if ((publicationAdvanced && relevantReadyVersionsChanged) || storeChanged) {
         pendingResolutionCacheClear = true;
@@ -725,6 +749,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
               membershipChanged = true;
             }
             if (scriptInfo !== undefined) {
+              observedManagedRootKeys.add(canonicalRoot(fileName));
               managedContentUpdated =
                 synchronizeManagedCarrierScriptInfo(fileName, scriptInfo) || managedContentUpdated;
               patchCarrierScriptInfoCoordinates(fileName, scriptInfo);

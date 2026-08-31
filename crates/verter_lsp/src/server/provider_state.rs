@@ -460,6 +460,20 @@ impl VerterLanguageServer {
         if expected_sources.is_empty() {
             return true;
         }
+        if !matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
+            let missing = coordinator.missing_published_activations(&expected_sources);
+            if !missing.is_empty() {
+                tracing::debug!(
+                    "workspace-symbol frontier not ready: advertised {}/{} carriers; first missing={}",
+                    expected_sources.len() - missing.len(),
+                    expected_sources.len(),
+                    missing[0]
+                );
+                self.signal_frontier_scanner_priority(expected_sources)
+                    .await;
+                return false;
+            }
+        }
         let activation = if matches!(self.type_provider_kind, crate::TypeProviderKind::Tsgo) {
             // TSGO consumes explicit companion buffers. The editor-facing
             // tsserver store can be fully advertised while those local opens
