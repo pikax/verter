@@ -6750,6 +6750,29 @@ function f(x: string | number) {
     });
 }
 
+/// A parser-legal TS wrapper does not launder a write: `((x) as any) =
+/// "s"` and `(x as any)++` retype the frame binding exactly as the bare
+/// forms do. The wrapped target takes the same typed gap — the later
+/// read keeps the unnarrowed join and the family slot holds zero
+/// candidates.
+#[test]
+fn class_declaration_wrapped_write_never_seals_unnarrowed() {
+    const CANONICAL: &str = "/ws/class-decl-wrapped-write/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function f(x: string | number) {
+  class C { static { ((x) as any) = "s"; } }
+  return x;
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_class_evaluation_write_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
 /// A call inside a discarded operand's NESTED frame never executes in
 /// this frame: the arrow body of `((() => { assertString(x); }), x)`
 /// runs only if the arrow is called, which nothing here does — so the

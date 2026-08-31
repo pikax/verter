@@ -6373,10 +6373,30 @@ impl<'a> LeafCallScanner<'a> {
         }
     }
 
+    /// Peel parser-legal wrappers recursively: a write through
+    /// `((x) as any) = v` still retypes `x`.
     fn collect_expression_write_target(&mut self, expression: &Expression<'a>) {
-        if let Expression::Identifier(identifier) = expression {
-            self.writes
-                .push((identifier.name.as_str(), identifier.span));
+        match expression {
+            Expression::Identifier(identifier) => {
+                self.writes
+                    .push((identifier.name.as_str(), identifier.span));
+            }
+            Expression::ParenthesizedExpression(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            Expression::TSAsExpression(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            Expression::TSSatisfiesExpression(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            Expression::TSNonNullExpression(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            Expression::TSTypeAssertion(inner) => {
+                self.collect_expression_write_target(&inner.expression);
+            }
+            _ => {}
         }
     }
 }
@@ -6396,11 +6416,27 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
     }
     fn visit_update_expression(&mut self, it: &oxc_ast::ast::UpdateExpression<'a>) {
         if self.nested_frame_nesting == 0 {
-            if let oxc_ast::ast::SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) =
-                &it.argument
-            {
-                self.writes
-                    .push((identifier.name.as_str(), identifier.span));
+            // A parser-legal TS wrapper still writes its inner binding:
+            // `(x as any)++` retypes `x` exactly as `x++` does.
+            use oxc_ast::ast::SimpleAssignmentTarget as T;
+            match &it.argument {
+                T::AssignmentTargetIdentifier(identifier) => {
+                    self.writes
+                        .push((identifier.name.as_str(), identifier.span));
+                }
+                T::TSAsExpression(inner) => {
+                    self.collect_expression_write_target(&inner.expression);
+                }
+                T::TSSatisfiesExpression(inner) => {
+                    self.collect_expression_write_target(&inner.expression);
+                }
+                T::TSNonNullExpression(inner) => {
+                    self.collect_expression_write_target(&inner.expression);
+                }
+                T::TSTypeAssertion(inner) => {
+                    self.collect_expression_write_target(&inner.expression);
+                }
+                _ => {}
             }
         }
         walk::walk_update_expression(self, it);

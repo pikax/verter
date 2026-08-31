@@ -1916,6 +1916,14 @@ fn class_evaluation_writes_to_frame_bindings_take_the_typed_gap() {
             "export {};\nfunction f(x: string | number) { return (class { static { x = \"s\"; } } as object) }",
         ),
         (
+            "a TS-wrapped assignment target",
+            "export {};\nfunction f(x: string | number) { class C { static { ((x) as any) = \"s\"; } } return x }",
+        ),
+        (
+            "a TS-wrapped update target",
+            "export {};\nfunction f(x: number | undefined) { class C { static { (x as any)++; } } return x }",
+        ),
+        (
             "a static block destructuring assignment",
             "export {};\nfunction f(x: string | number) { class C { static { [x] = [1]; } } return x }",
         ),
