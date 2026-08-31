@@ -4590,7 +4590,12 @@ impl Lowerer<'_> {
     /// loop-transparency rule consults, which must classify a test
     /// WITHOUT degrading the enclosing statement.
     fn classify_guard(&mut self, test: &Expression<'_>) -> GuardDisposition {
-        match unwrap_parenthesized(test) {
+        // The whole test rides the same reference-transparent wrappers a
+        // leaf reference does: `(typeof x === "string")!` and its
+        // `satisfies` twin still establish the inner fact, so the entry
+        // must peel them before dispatching or the composing forms behind
+        // one collapse to a proved absence of narrowing.
+        match unwrap_reference_transparent(test) {
             Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
                 self.classify_guard(&unary.argument).negated()
             }

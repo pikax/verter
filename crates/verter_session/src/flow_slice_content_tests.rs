@@ -2643,6 +2643,97 @@ fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
     );
 }
 
+/// The wrappers the checker treats as transparent when it matches a
+/// narrowing reference — parentheses, the postfix non-null assertion, and
+/// `satisfies` — wrap a WHOLE control test exactly as they wrap a leaf
+/// reference. `(typeof x === "string")!` still establishes the `typeof`
+/// fact, so peeling has to happen at the classifier's ENTRY: dispatching
+/// on the parenthesized form alone leaves every composing spelling behind
+/// one wrapper matching no arm, falling through to the truthiness rule,
+/// and reporting a PROVED absence of narrowing for a test that narrows —
+/// a silent superset, published complete and warm.
+///
+/// Gap count alone cannot discriminate this: a modeled guard and a proved
+/// absence of narrowing both mint zero gaps. The guard SHAPE is the
+/// discriminator, so this asserts the lowered fact itself.
+///
+/// A type assertion is deliberately NOT transparent here — it is not a
+/// matching reference for narrowing, so a test behind one establishes
+/// nothing rather than establishing something this half cannot express.
+#[test]
+fn reference_transparent_wrappers_around_a_whole_test_keep_its_narrowing_fact() {
+    fn guard_of(source: &str) -> SliceGuard {
+        let node = content_for(source, "f");
+        node.body
+            .statements
+            .iter()
+            .find_map(|statement| match statement {
+                SliceStatement::If { guard, .. } => Some(guard.clone()),
+                _ => None,
+            })
+            .expect("the body must contain the guarded statement")
+    }
+
+    // A wrapper around a MODELED form keeps the modeled fact.
+    let carried = [
+        (
+            "a non-null assertion around a `typeof` test",
+            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\")!) { return x } return 0 }",
+        ),
+        (
+            "a `satisfies` around a `typeof` test",
+            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") satisfies boolean) { return x } return 0 }",
+        ),
+        (
+            "a non-null assertion around a literal equality",
+            "export {};\nfunction f(x: 1 | 2) { if ((x === 1)!) { return x } return 0 }",
+        ),
+        (
+            "a non-null assertion around an `in` test",
+            "export {};\nfunction f(x: { a: number } | { b: number }) { if ((\"a\" in x)!) { return x } return 0 }",
+        ),
+    ];
+    for (case, source) in carried {
+        let guard = guard_of(source);
+        assert!(
+            !matches!(guard, SliceGuard::None),
+            "{case}: the wrapper is transparent, so the inner fact is carried: {guard:?}"
+        );
+    }
+
+    // A wrapper around an UNMODELED form still degrades — composition
+    // survives the wrapper in both directions.
+    let node = content_for(
+        "export {};\ntype A = { kind: \"a\" }; type B = { kind: \"b\" };\n\
+         function f(x: A | B) { if ((x[\"kind\"] === \"a\")!) { return x } return 0 }",
+        "f",
+    );
+    assert_eq!(
+        guard_gap_count(&node),
+        1,
+        "a wrapped unrepresented access still takes the typed gap: {node:?}"
+    );
+
+    // A type assertion is NOT a matching reference: the test establishes
+    // nothing, and inventing a gap here would degrade a test the checker
+    // itself leaves unnarrowed.
+    let asserted = content_for(
+        "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") as boolean) { return x } return 0 }",
+        "f",
+    );
+    assert!(
+        matches!(guard_of(
+            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") as boolean) { return x } return 0 }"
+        ), SliceGuard::None),
+        "a type assertion is not peeled"
+    );
+    assert_eq!(
+        guard_gap_count(&asserted),
+        0,
+        "and it mints no gap either: {asserted:?}"
+    );
+}
+
 /// A bare CALL STATEMENT feeds no value, but two of its effects reach the
 /// demand and neither is visible at the call site: an `asserts` callee
 /// narrows every read that follows, and a callee that never returns ENDS
