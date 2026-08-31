@@ -24,7 +24,8 @@ use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 use crate::decl_body_memo::DeclBodyMemo;
 use crate::flow_slice_content::{
     FlowSliceSelection, SliceBindingKind, SliceCall, SliceCallSite, SliceContent, SliceExpr,
-    SliceGuard, SliceObjectEntry, SliceObjectMember, SliceRegion, SliceStatement, SliceUnsupported,
+    SliceGuard, SliceGuardLiteral, SliceNarrowRoot, SliceObjectEntry, SliceObjectMember,
+    SliceRegion, SliceStatement, SliceSwitchTest, SliceTypeofKind, SliceUnsupported,
 };
 
 /// The MEMBER entries of a structural object literal, in authored order.
@@ -701,6 +702,39 @@ fn guard_gap_count(node: &SliceContent) -> usize {
             )
         })
         .count()
+}
+
+/// The guard of the body's first top-level `if` statement.
+///
+/// Gap COUNT cannot discriminate a modeled fact from a proved-inert one
+/// (both mint zero gaps), so a caller asserting a guard's exact SHAPE
+/// must reach it through this accessor rather than only checking
+/// [`guard_gap_count`].
+fn if_guard(node: &SliceContent) -> SliceGuard {
+    node.body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::If { guard, .. } => Some(guard.clone()),
+            _ => None,
+        })
+        .expect("the body must contain the guarded statement")
+}
+
+/// The guard carried by the body's first `return <ternary>` statement's
+/// `Union` arm join.
+fn ternary_return_guard(node: &SliceContent) -> SliceGuard {
+    node.body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Return {
+                argument: Some(SliceExpr::Union { guard, .. }),
+                ..
+            } => Some(guard.clone()),
+            _ => None,
+        })
+        .expect("the body must contain a returned ternary")
 }
 
 /// A same-file predicate whose TARGET names a binding of the CALLEE's own
@@ -3824,4 +3858,751 @@ fn elided_member_value_effects_take_the_typed_gap() {
             "{case}: no frame-reaching effect mints no gap: {node:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Guard shape — every modeled form must carry its EXACT fact, never merely
+// a zero gap count (gap count cannot discriminate a modeled guard from a
+// proved-inert one).
+// ---------------------------------------------------------------------------
+
+/// `typeof subject === "<kind>"` must model the EXACT compared kind for
+/// every one of the eight strings the operator can return — a
+/// mis-mapped kind (e.g. `"function"` read back as `Object`) would still
+/// mint zero gaps and pass a gap-count-only test while narrowing the
+/// wrong arm.
+#[test]
+fn typeof_guard_models_all_eight_kinds() {
+    let cases = [
+        ("string", SliceTypeofKind::String),
+        ("number", SliceTypeofKind::Number),
+        ("bigint", SliceTypeofKind::BigInt),
+        ("boolean", SliceTypeofKind::Boolean),
+        ("symbol", SliceTypeofKind::Symbol),
+        ("undefined", SliceTypeofKind::Undefined),
+        ("object", SliceTypeofKind::Object),
+        ("function", SliceTypeofKind::Function),
+    ];
+    for (spelling, expected_kind) in cases {
+        let node = content_for(
+            &format!(
+                "export {{}};\nfunction f(x: unknown) {{ if (typeof x === \"{spelling}\") {{ return x }} return 0 }}"
+            ),
+            "f",
+        );
+        let guard = if_guard(&node);
+        let SliceGuard::Typeof {
+            subject,
+            kind,
+            negated,
+        } = &guard
+        else {
+            panic!("{spelling}: the test must model a Typeof guard: {guard:?}");
+        };
+        assert!(
+            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            "{spelling}: the subject is the bare parameter: {guard:?}"
+        );
+        assert_eq!(
+            *kind, expected_kind,
+            "{spelling}: the wrong kind was modeled: {guard:?}"
+        );
+        assert!(!negated, "{spelling}: `===` is not negated: {guard:?}");
+        assert_eq!(guard_gap_count(&node), 0, "{spelling}: {node:?}");
+    }
+}
+
+/// `typeof` and literal equality both model either operand order and
+/// both flip `negated` for the inequality spelling. Reading the operands
+/// in a fixed order, or ignoring `!==`, would silently swap which arm a
+/// downstream evaluator applies the fact to.
+#[test]
+fn typeof_and_equality_guards_support_both_operand_orders_and_negation() {
+    // `typeof` — both orders, `===` and `!==`.
+    for (source, negated) in [
+        (
+            "export {};\nfunction f(x: unknown) { if (typeof x === \"string\") { return x } return 0 }",
+            false,
+        ),
+        (
+            "export {};\nfunction f(x: unknown) { if (\"string\" === typeof x) { return x } return 0 }",
+            false,
+        ),
+        (
+            "export {};\nfunction f(x: unknown) { if (typeof x !== \"string\") { return 0 } return x }",
+            true,
+        ),
+        (
+            "export {};\nfunction f(x: unknown) { if (\"string\" !== typeof x) { return 0 } return x }",
+            true,
+        ),
+    ] {
+        let node = content_for(source, "f");
+        let guard = if_guard(&node);
+        assert!(
+            matches!(
+                guard,
+                SliceGuard::Typeof {
+                    kind: SliceTypeofKind::String,
+                    negated: n,
+                    ..
+                } if n == negated
+            ),
+            "operand order / negation must not change the modeled fact: {guard:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{node:?}");
+    }
+
+    // Literal equality — both orders, `===` and `!==`.
+    for (source, negated) in [
+        (
+            "export {};\nfunction f(x: 1 | 2) { if (x === 1) { return x } return 0 }",
+            false,
+        ),
+        (
+            "export {};\nfunction f(x: 1 | 2) { if (1 === x) { return x } return 0 }",
+            false,
+        ),
+        (
+            "export {};\nfunction f(x: 1 | 2) { if (x !== 1) { return 0 } return x }",
+            true,
+        ),
+        (
+            "export {};\nfunction f(x: 1 | 2) { if (1 !== x) { return 0 } return x }",
+            true,
+        ),
+    ] {
+        let node = content_for(source, "f");
+        let guard = if_guard(&node);
+        let SliceGuard::EqLiteral {
+            subject,
+            literal,
+            negated: n,
+        } = &guard
+        else {
+            panic!("the test must model an EqLiteral guard: {guard:?}");
+        };
+        assert!(
+            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            "{guard:?}"
+        );
+        assert!(
+            matches!(literal, SliceGuardLiteral::Number(n) if n.as_ref() == "1"),
+            "the literal operand must be carried exactly: {guard:?}"
+        );
+        assert_eq!(
+            *n, negated,
+            "operand order must not change the negation reading: {guard:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{node:?}");
+    }
+}
+
+/// `"key" in subject` and `subject instanceof Ctor` each model their one
+/// closed shape and its negation.
+#[test]
+fn in_guard_and_instanceof_guard_model_their_closed_forms_and_negation() {
+    for (source, negated) in [
+        (
+            "export {};\nfunction f(x: { a: number } | { b: number }) { if (\"a\" in x) { return x } return 0 }",
+            false,
+        ),
+        (
+            "export {};\nfunction f(x: { a: number } | { b: number }) { if (!(\"a\" in x)) { return 0 } return x }",
+            true,
+        ),
+    ] {
+        let node = content_for(source, "f");
+        let guard = if_guard(&node);
+        let SliceGuard::In {
+            key,
+            subject,
+            negated: n,
+        } = &guard
+        else {
+            panic!("the test must model an In guard: {guard:?}");
+        };
+        assert_eq!(key.as_ref(), "a", "{guard:?}");
+        assert!(
+            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            "{guard:?}"
+        );
+        assert_eq!(*n, negated, "{guard:?}");
+        assert_eq!(guard_gap_count(&node), 0, "{node:?}");
+    }
+
+    for (source, negated) in [
+        (
+            "export {};\nclass A { a = 1 }\nclass B { b = 1 }\nfunction f(x: A | B) { if (x instanceof A) { return x } return false }",
+            false,
+        ),
+        (
+            "export {};\nclass A { a = 1 }\nclass B { b = 1 }\nfunction f(x: A | B) { if (!(x instanceof A)) { return false } return x }",
+            true,
+        ),
+    ] {
+        let node = content_for(source, "f");
+        let guard = if_guard(&node);
+        let SliceGuard::Instanceof {
+            subject,
+            ctor,
+            negated: n,
+        } = &guard
+        else {
+            panic!("the test must model an Instanceof guard: {guard:?}");
+        };
+        assert!(
+            matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty(),
+            "{guard:?}"
+        );
+        assert_eq!(ctor.as_ref(), "A", "{guard:?}");
+        assert_eq!(*n, negated, "{guard:?}");
+        assert_eq!(guard_gap_count(&node), 0, "{node:?}");
+    }
+}
+
+/// Bare truthiness lands the fact AT the tested reference: a bare
+/// parameter narrows the parameter itself (an empty path), a member
+/// access narrows AT that path — collapsing the two would either lose
+/// the path or narrow the wrong position when the checker's fact is
+/// member-local.
+#[test]
+fn truthy_guard_models_a_bare_parameter_and_a_member_path_subject() {
+    for (source, negated) in [
+        (
+            "export {};\nfunction f(x: string | undefined) { if (x) { return x } return 0 }",
+            false,
+        ),
+        (
+            "export {};\nfunction f(x: string | undefined) { if (!x) { return 0 } return x }",
+            true,
+        ),
+    ] {
+        let node = content_for(source, "f");
+        let guard = if_guard(&node);
+        assert!(
+            matches!(
+                guard,
+                SliceGuard::Truthy {
+                    ref subject,
+                    negated: n,
+                } if matches!(subject.root, SliceNarrowRoot::Param(0)) && subject.path.is_empty() && n == negated
+            ),
+            "a bare parameter's truthiness narrows the parameter itself, path-empty: {guard:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{node:?}");
+    }
+
+    for (source, negated) in [
+        (
+            "export {};\nfunction f(x: { y: number | undefined }) { if (x.y) { return x } return 0 }",
+            false,
+        ),
+        (
+            "export {};\nfunction f(x: { y: number | undefined }) { if (!x.y) { return 0 } return x }",
+            true,
+        ),
+    ] {
+        let node = content_for(source, "f");
+        let guard = if_guard(&node);
+        let SliceGuard::Truthy { subject, negated: n } = &guard else {
+            panic!("the test must model a Truthy guard: {guard:?}");
+        };
+        assert!(matches!(subject.root, SliceNarrowRoot::Param(0)), "{guard:?}");
+        assert_eq!(
+            subject.path.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            vec!["y"],
+            "the narrow lands AT the member path, not at the root: {guard:?}"
+        );
+        assert_eq!(*n, negated, "{guard:?}");
+        assert_eq!(guard_gap_count(&node), 0, "{node:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Composition — `!` / `&&` / `||` and nested / De Morgan forms.
+// ---------------------------------------------------------------------------
+
+/// Two FULLY modeled operands compose into a tree carrying BOTH facts —
+/// no `None` placeholder, which is reserved for an operand this half
+/// could not classify. Losing a leaf here would silently drop one of two
+/// facts the evaluator must apply.
+#[test]
+fn conjunction_and_disjunction_of_two_modeled_guards_compose_both_leaves() {
+    let and_node = content_for(
+        "export {};\nfunction f(x: string | number, y: 1 | 2) { if (typeof x === \"string\" && y === 1) { return x } return 0 }",
+        "f",
+    );
+    let SliceGuard::And(parts) = if_guard(&and_node) else {
+        panic!(
+            "a fully modeled conjunction must compose to And: {:?}",
+            and_node
+        );
+    };
+    assert_eq!(parts.len(), 2, "{parts:?}");
+    assert!(
+        matches!(
+            parts[0],
+            SliceGuard::Typeof {
+                kind: SliceTypeofKind::String,
+                negated: false,
+                ..
+            }
+        ),
+        "{parts:?}"
+    );
+    assert!(
+        matches!(parts[1], SliceGuard::EqLiteral { negated: false, .. }),
+        "{parts:?}"
+    );
+    assert_eq!(guard_gap_count(&and_node), 0, "{and_node:?}");
+
+    let or_node = content_for(
+        "export {};\nfunction f(x: string | number, y: 1 | 2) { if (typeof x === \"string\" || y === 1) { return x } return 0 }",
+        "f",
+    );
+    let SliceGuard::Or(parts) = if_guard(&or_node) else {
+        panic!(
+            "a fully modeled disjunction must compose to Or: {:?}",
+            or_node
+        );
+    };
+    assert_eq!(parts.len(), 2, "{parts:?}");
+    assert!(
+        matches!(
+            parts[0],
+            SliceGuard::Typeof {
+                kind: SliceTypeofKind::String,
+                negated: false,
+                ..
+            }
+        ),
+        "{parts:?}"
+    );
+    assert!(
+        matches!(parts[1], SliceGuard::EqLiteral { negated: false, .. }),
+        "{parts:?}"
+    );
+    assert_eq!(guard_gap_count(&or_node), 0, "{or_node:?}");
+
+    // Nested: `(a && b) || c`, all three modeled — the inner `And` stays
+    // intact as one arm of the outer `Or`.
+    let nested = content_for(
+        "export {};\nfunction f(x: string | number, y: 1 | 2, z: \"p\" | \"q\") { if ((typeof x === \"string\" && y === 1) || z === \"p\") { return x } return 0 }",
+        "f",
+    );
+    let SliceGuard::Or(outer) = if_guard(&nested) else {
+        panic!("the nested composition must root at Or: {:?}", nested);
+    };
+    assert_eq!(outer.len(), 2, "{outer:?}");
+    let SliceGuard::And(inner) = &outer[0] else {
+        panic!("the first disjunct must preserve the inner And: {outer:?}");
+    };
+    assert_eq!(inner.len(), 2, "{inner:?}");
+    assert!(matches!(inner[0], SliceGuard::Typeof { .. }), "{inner:?}");
+    assert!(
+        matches!(inner[1], SliceGuard::EqLiteral { .. }),
+        "{inner:?}"
+    );
+    assert!(
+        matches!(outer[1], SliceGuard::EqLiteral { .. }),
+        "{outer:?}"
+    );
+    assert_eq!(guard_gap_count(&nested), 0, "{nested:?}");
+}
+
+/// De Morgan negation of a FULLY modeled conjunction/disjunction must
+/// flip every leaf's `negated` flag AND swap the connective — the
+/// evaluator only ever asks a guard for its positive or negated reading,
+/// so a third, half-flipped shape here would be silently wrong.
+#[test]
+fn de_morgan_negation_of_a_fully_modeled_composition_flips_leaves_and_swaps_the_connective() {
+    let negated_and = content_for(
+        "export {};\nfunction f(x: string | number, y: 1 | 2) { if (!(typeof x === \"string\" && y === 1)) { return 0 } return x }",
+        "f",
+    );
+    let SliceGuard::Or(parts) = if_guard(&negated_and) else {
+        panic!("`!(a && b)` must become Or: {:?}", negated_and);
+    };
+    assert_eq!(parts.len(), 2, "{parts:?}");
+    assert!(
+        matches!(parts[0], SliceGuard::Typeof { negated: true, .. }),
+        "the `typeof` leaf must flip to negated: {parts:?}"
+    );
+    assert!(
+        matches!(parts[1], SliceGuard::EqLiteral { negated: true, .. }),
+        "the equality leaf must flip to negated: {parts:?}"
+    );
+
+    let negated_or = content_for(
+        "export {};\nfunction f(x: string | number, y: 1 | 2) { if (!(typeof x === \"string\" || y === 1)) { return 0 } return x }",
+        "f",
+    );
+    let SliceGuard::And(parts) = if_guard(&negated_or) else {
+        panic!("`!(a || b)` must become And: {:?}", negated_or);
+    };
+    assert_eq!(parts.len(), 2, "{parts:?}");
+    assert!(
+        matches!(parts[0], SliceGuard::Typeof { negated: true, .. }),
+        "{parts:?}"
+    );
+    assert!(
+        matches!(parts[1], SliceGuard::EqLiteral { negated: true, .. }),
+        "{parts:?}"
+    );
+}
+
+/// A composition with ONE unexpressible operand degrades the WHOLE test
+/// to the explicit `None` behind the typed gap — never a partial guard
+/// tree carrying only the modeled leaf, which would publish a real fact
+/// the checker does not apply standalone (the fact is conditioned on the
+/// unexpressible operand too).
+#[test]
+fn composition_with_one_unexpressible_operand_degrades_the_whole_test_to_none() {
+    for (op, test) in [("&&", "&&"), ("||", "||")] {
+        let source = format!(
+            "export {{}};\ntype A = {{ kind: \"a\" }}; type B = {{ kind: \"b\" }};\n\
+             function f(x: A | B) {{ if (typeof x === \"object\" {test} x[\"kind\"] === \"a\") {{ return x }} return 0 }}"
+        );
+        let node = content_for(&source, "f");
+        assert!(
+            matches!(if_guard(&node), SliceGuard::None),
+            "{op}: an unexpressible operand must degrade the WHOLE composition, never a partial tree: {node:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 1, "{op}: {node:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proved-inert tests — SHAPE, not merely a zero gap count.
+// ---------------------------------------------------------------------------
+
+/// PROVED non-narrowing forms must lower to the explicit `SliceGuard::None`
+/// — asserting only `guard_gap_count == 0` cannot tell a proved-inert test
+/// apart from a modeled one that also mints zero gaps, which is exactly
+/// how two prior lowering defects went unnoticed.
+#[test]
+fn proved_non_narrowing_tests_lower_to_an_explicit_none_guard() {
+    let cases = [
+        (
+            "a relational operator over a represented reference",
+            "export {};\nfunction f(x: number) { if (x > 1) { return x } return 0 }",
+        ),
+        (
+            "an equality between two unrepresented operands",
+            "export {};\nconst g = 1;\nfunction f(x: number) { if (g === 2) { return x } return 0 }",
+        ),
+        (
+            "a truthiness test behind a type assertion",
+            "export {};\nfunction f(x: string | number) { if (x as unknown) { return x } return 0 }",
+        ),
+    ];
+    for (case, source) in cases {
+        let node = content_for(source, "f");
+        let guard = if_guard(&node);
+        assert!(
+            matches!(guard, SliceGuard::None),
+            "{case}: a PROVED non-narrowing test must be the explicit None, not merely a zero gap count: {guard:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+}
+
+/// A binding INELIGIBLE for the alias channel — a `let` (only `const` /
+/// `using` re-establishes an aliased condition) or a `const` whose
+/// initializer `initializer_carries_a_narrowing` does not recognize (a
+/// relational comparison) — does NOT preserve whatever fact its
+/// initializer decided. But the test still establishes a real fact about
+/// the BINDING ITSELF: `if (c)` narrows `c`'s own type exactly as it
+/// would for any other local, independent of what initialized it. The
+/// guard is therefore `Truthy(Local("c"))`, NOT `None`: asserting only
+/// `guard_gap_count == 0` cannot tell a genuinely modeled (if narrowly
+/// useful) fact apart from a proved absence of one.
+#[test]
+fn a_binding_ineligible_for_the_alias_channel_still_models_its_own_truthiness() {
+    let cases = [
+        (
+            "a `let` alias of a comparison",
+            "export {};\nfunction f(x: string | number) { let c = typeof x === \"string\"; if (c) { return x } return 0 }",
+        ),
+        (
+            "a `const` alias of a non-narrowing (relational) initializer",
+            "export {};\nfunction f(x: number) { const c = x > 1; if (c) { return x } return 0 }",
+        ),
+    ];
+    for (case, source) in cases {
+        let node = content_for(source, "f");
+        let guard = if_guard(&node);
+        assert!(
+            matches!(
+                &guard,
+                SliceGuard::Truthy { subject, negated: false }
+                    if matches!(subject.root, SliceNarrowRoot::Local(ref name) if name.as_ref() == "c")
+                        && subject.path.is_empty()
+            ),
+            "{case}: the binding models its OWN truthiness, never the discarded initializer fact: {guard:?}"
+        );
+        assert_eq!(guard_gap_count(&node), 0, "{case}: {node:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Switch relation — the tri-state `SliceSwitchTest` carrier.
+// ---------------------------------------------------------------------------
+
+/// A `switch` clause's relation is one of THREE mutually exclusive
+/// carriers, never an optional literal: conflating an unrecognized case
+/// test with `Default` routes the discriminant's other values onto that
+/// clause's edge — a WRONG VALUE, not merely an incomplete answer.
+#[test]
+fn switch_case_relation_is_the_typed_three_state_carrier_and_an_unrecognized_test_is_unmodeled_not_default(
+) {
+    let node = content_for(
+        "export {};\nfunction f(x: 1 | 2 | 3, k: 1 | 2 | 3) { switch (x) { case 1: return x; case k: return x; default: return 0; } }",
+        "f",
+    );
+    let cases = node
+        .body
+        .statements
+        .iter()
+        .find_map(|statement| match statement {
+            SliceStatement::Switch { cases, .. } => Some(cases),
+            _ => None,
+        })
+        .expect("the body must contain the switch");
+    assert_eq!(cases.len(), 3, "{cases:?}");
+    assert!(
+        matches!(
+            cases[0].test,
+            SliceSwitchTest::Literal(SliceGuardLiteral::Number(ref n)) if n.as_ref() == "1"
+        ),
+        "a literal case test models its literal: {cases:?}"
+    );
+    assert!(
+        matches!(cases[1].test, SliceSwitchTest::Unmodeled),
+        "a represented-but-non-literal case test is Unmodeled, never Default — conflating the \
+         two would dispatch the discriminant's OTHER values onto this clause's edge: {cases:?}"
+    );
+    assert!(
+        matches!(cases[2].test, SliceSwitchTest::Default),
+        "the bare `default` clause is the Default carrier: {cases:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&node),
+        1,
+        "the Unmodeled clause still takes exactly one typed gap ahead of the switch: {node:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Ternary and loop positions.
+// ---------------------------------------------------------------------------
+
+/// The ternary's test shares the EXACT SAME classifier authority as `if`.
+/// A modeled test keeps its fact on the `Union` join; the identical
+/// source shape that degrades under `if` (an equality between two
+/// represented references) must degrade under `?:` too — a divergence
+/// here is precisely the defect class the module docs warn about ("the
+/// same source degrades under `if` and seals clean under `?:`").
+#[test]
+fn ternary_guard_shares_the_if_authority_for_a_modeled_and_an_unexpressible_test() {
+    let modeled = content_for(
+        "export {};\nfunction f(x: string | number) { return typeof x === \"string\" ? x : 0 }",
+        "f",
+    );
+    let guard = ternary_return_guard(&modeled);
+    assert!(
+        matches!(
+            guard,
+            SliceGuard::Typeof {
+                kind: SliceTypeofKind::String,
+                negated: false,
+                ..
+            }
+        ),
+        "the ternary's modeled test keeps its exact fact: {guard:?}"
+    );
+    assert_eq!(guard_gap_count(&modeled), 0, "{modeled:?}");
+
+    let unexpressible = content_for(
+        "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; return x === k ? x : 0 }",
+        "f",
+    );
+    let guard = ternary_return_guard(&unexpressible);
+    assert!(
+        matches!(guard, SliceGuard::None),
+        "an unexpressible ternary test must degrade to the explicit None: {guard:?}"
+    );
+    // The gap lands immediately ahead of the enclosing `return` statement,
+    // exactly as it does for an `if` — never fused into the `Union`
+    // carrier itself.
+    let statements = &unexpressible.body.statements;
+    let return_index = statements
+        .iter()
+        .position(|statement| matches!(statement, SliceStatement::Return { .. }))
+        .expect("the body must contain the return");
+    assert!(return_index > 0, "{statements:?}");
+    assert_eq!(
+        statements[return_index - 1],
+        SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+        "{statements:?}"
+    );
+    assert_eq!(guard_gap_count(&unexpressible), 1, "{unexpressible:?}");
+}
+
+/// A loop TEST consults the same tri-state classifier — never lowering a
+/// guard, only deciding whether a return-free loop stays fall-through
+/// TRANSPARENT. A MODELED narrow and an UNEXPRESSIBLE one over a
+/// downstream-selected slot must both refuse identically: collapsing the
+/// unexpressible answer to "no narrowing" would let the loop iterate
+/// under a narrow the checker applies and this half silently dropped.
+#[test]
+fn loop_test_consults_the_guard_classifier_for_both_a_modeled_and_an_unexpressible_narrow() {
+    let modeled = content_for(
+        "export {};\nfunction f(x: string | number) { while (typeof x === \"string\") { } return x }",
+        "f",
+    );
+    assert!(
+        modeled.body.statements.iter().any(|statement| matches!(
+            statement,
+            SliceStatement::Unsupported(SliceUnsupported::Loop)
+        )),
+        "a modeled narrow over a downstream-selected slot refuses: {modeled:?}"
+    );
+
+    let unexpressible = content_for(
+        "export {};\nfunction f(x: { a: number } | { b: number }, k: string) { while (k in x) { } return x }",
+        "f",
+    );
+    assert!(
+        unexpressible
+            .body
+            .statements
+            .iter()
+            .any(|statement| matches!(
+                statement,
+                SliceStatement::Unsupported(SliceUnsupported::Loop)
+            )),
+        "an UNEXPRESSIBLE narrow over the same downstream-selected slot must refuse identically, \
+         never fall through as though it narrowed nothing: {unexpressible:?}"
+    );
+
+    // Positive control: the SAME unexpressible test shape reaching no
+    // downstream-selected slot stays transparent — the refusal is about
+    // the SLOT, not the classifier answer alone.
+    let inert = content_for(
+        "export {};\nfunction f(x: { a: number } | { b: number }, k: string) { while (k in x) { } return 0 }",
+        "f",
+    );
+    assert!(
+        matches!(inert.body.statements.first(), Some(SliceStatement::TransparentLoop)),
+        "no downstream-selected slot: the loop stays transparent despite the same unexpressible test: {inert:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Gap placement — position, not just count.
+// ---------------------------------------------------------------------------
+
+/// The typed `GuardNarrowing` gap belongs immediately AHEAD of the `if` /
+/// `switch` construct it degrades, at the statement-list level — never
+/// drained into an arm's or a clause's own region, which would make it
+/// conditional on a branch that might not even execute.
+#[test]
+fn guard_narrowing_gap_lands_immediately_ahead_of_the_construct_never_inside_an_arm_or_clause() {
+    let if_node = content_for(
+        "export {};\nfunction f(x: \"a\" | \"b\") { let n = 0; const k = \"a\"; if (x === k) { return x; } return n; }",
+        "f",
+    );
+    let statements = &if_node.body.statements;
+    let if_index = statements
+        .iter()
+        .position(|statement| matches!(statement, SliceStatement::If { .. }))
+        .expect("an If statement must be present");
+    assert!(
+        if_index > 0,
+        "there must be a preceding statement to anchor the gap's position: {statements:?}"
+    );
+    assert_eq!(
+        statements[if_index - 1],
+        SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+        "the gap must sit immediately ahead of the If, not merely somewhere in the body: {statements:?}"
+    );
+    let SliceStatement::If {
+        consequent,
+        alternate,
+        ..
+    } = &statements[if_index]
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        region_guard_gap_count(consequent),
+        0,
+        "the consequent arm must not carry the construct's own gap: {statements:?}"
+    );
+    if let Some(alternate) = alternate {
+        assert_eq!(
+            region_guard_gap_count(alternate),
+            0,
+            "the alternate arm must not carry the construct's own gap: {statements:?}"
+        );
+    }
+
+    let switch_node = content_for(
+        "export {};\nfunction f(x: \"a\" | \"b\", k: \"a\" | \"b\") { let n = 0; switch (x) { case k: return x; } return n; }",
+        "f",
+    );
+    let statements = &switch_node.body.statements;
+    let switch_index = statements
+        .iter()
+        .position(|statement| matches!(statement, SliceStatement::Switch { .. }))
+        .expect("a Switch statement must be present");
+    assert!(
+        switch_index > 0,
+        "there must be a preceding statement to anchor the gap's position: {statements:?}"
+    );
+    assert_eq!(
+        statements[switch_index - 1],
+        SliceStatement::Gap(crate::semantic_query::FlowGap::GuardNarrowing),
+        "the gap must sit immediately ahead of the Switch: {statements:?}"
+    );
+    let SliceStatement::Switch { cases, .. } = &statements[switch_index] else {
+        unreachable!()
+    };
+    for case in cases.iter() {
+        assert_eq!(
+            region_guard_gap_count(&case.region),
+            0,
+            "no case clause region may carry the construct's own gap: {statements:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A truthiness subject wrapped in the postfix non-null assertion — an
+// unmodeled member-access route the classifier must not silently accept.
+// ---------------------------------------------------------------------------
+
+/// The postfix non-null assertion is transparent when it wraps the WHOLE
+/// test (`(expr)!`), but it is NOT a member-chain step this half's
+/// subject walker descends through: `x!.y` still reaches `y` through an
+/// access route [`narrow_subject_of`] cannot express, so the truthiness
+/// test over it must degrade — the same discipline already covers a
+/// computed and an optional member step.
+#[test]
+fn truthiness_of_a_non_null_asserted_member_subject_takes_the_typed_gap() {
+    let node = content_for(
+        "export {};\nfunction f(x: { y: number } | undefined) { if (x!.y) { return x } return 0 }",
+        "f",
+    );
+    assert!(
+        matches!(if_guard(&node), SliceGuard::None),
+        "an inexpressible access route degrades to the explicit None: {node:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&node),
+        1,
+        "a non-null-asserted member subject takes the typed gap: {node:?}"
+    );
 }
