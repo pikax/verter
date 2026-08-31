@@ -409,32 +409,19 @@ jobs:
         run: node scripts/check-integration-test-layout.mjs
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-      # THE canonical Rust gate. Builds the workspace test universe ONCE via
-      # `cargo nextest archive` and lists that archive once, then starts two isolated post-list
-      # lanes concurrently: archive-backed Surface 1 (nextest process
-      # isolation) and the shipped-cfg guard.
-      #
-      # This replaces the legacy `cargo nextest run --workspace` +
-      # `cargo test -p verter_session --tests` pair that this job used to run.
-      # The package-scoped blanket replay was redundant with Surface 1 and
-      # could trigger a second resolution/build. Deliberate shared-process
-      # contracts now live inside Surface 1's one test universe. release.yml
-      # already used gate.mjs; main CI had drifted onto the legacy pair.
-      #
-      # The shipped lane is serial within itself: a workspace/all-targets
-      # compile check under `no-debug-assertions`, then the small package-scoped
-      # `verter_shipped_cfg_contract` nextest run under that profile. It uses a
-      # target root isolated from Surface 1, so neither lane serializes behind
-      # the other's Cargo target lock. `--exhaustive` changes failure collection
-      # only; it does not change commands, filters, profiles, or coverage.
-      # GitHub's dedicated 16 GiB runner grants the contained build forest 12
-      # GiB, retaining 4 GiB for the OS and runner services. The shared-machine
-      # gate default intentionally stays at 50% of physical memory.
-      - name: Rust gate (one archive, overlapping isolated lanes)
+      # Run the workspace directly. Archiving first duplicates the test binaries
+      # and, on GitHub's effective 8 GiB job cgroup, allowed the archive linker
+      # forest to be OOM-killed before nextest executed a single test. Keep the
+      # canonical Surface 1 filter single-sourced in gate-internals.mjs: it omits
+      # only the registered trybuild performance exclusions and the shipped-cfg
+      # canaries that are intentionally invalid under the dev profile.
+      - name: Rust tests (direct nextest workspace run)
         env:
           VERTER_REQUIRE_TSGO: "1"
           NEXTEST_PROFILE: ci
-        run: node scripts/run-cached.mjs -- node scripts/gate.mjs --exhaustive --memory-limit 12GiB
+        run: |
+          export VERTER_NEXTEST_FILTER="$(node --input-type=module -e "import { buildCanonicalSurface1FilterExpr } from './scripts/gate-internals.mjs'; process.stdout.write(buildCanonicalSurface1FilterExpr())")"
+          node scripts/run-cached.mjs -- 'cargo nextest run --workspace --features verter_session/bf2-authoritative --build-jobs 2 --test-threads 4 --no-fail-fast -E "$VERTER_NEXTEST_FILTER"'
       # Independent FEATURE-OFF gate: the workspace runs above UNIFY cargo
       # features — `verter_svelte_conformance` dev-deps `verter_compiler` with
       # `features = ["conformance-trace"]`, so every workspace-built
