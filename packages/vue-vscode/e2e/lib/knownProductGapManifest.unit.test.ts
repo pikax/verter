@@ -68,8 +68,17 @@ describe("known product-gap manifest", () => {
     expect(svelteTsserver["svelte.matrix.strict-rest.clean"]).toBe(
       "ISSUE-svelte-matrix-strict-rest-clean",
     );
+    expect(svelteTsserver["shared.find.definition-then-refs-consistency"]).toBe(
+      "ISSUE-find-def-refs-consistency",
+    );
+    expect(svelteTsserver["shared.find.js.exact-min-set"]).toBe("ISSUE-find-js-exact");
+    expect(svelteTsserver["shared.rename.js.function"]).toBe("ISSUE-rename-js-function");
+    expect(svelteTsserver["shared.rename.ts.markup-origin"]).toBe("ISSUE-rename-ts-markup");
     expect(svelteTsserver["svelte.references.script-and-markup"]).toBeUndefined();
     expect(svelteTsserver["svelte.matrix.directives.if.hover"]).toBeUndefined();
+
+    const svelteTsgo = knownProductGapsForRoute("svelte-parity", "tsgo");
+    expect(svelteTsgo["lsp.type-definition.binding"]).toBe("ISSUE-lsp-type-definition");
 
     const vueTsgo = knownProductGapsForRoute("vue-parity", "tsgo");
     expect(vueTsgo["depth.rename.script-and-markup.min-two-edits"]).toBe(
@@ -81,5 +90,10 @@ describe("known product-gap manifest", () => {
     expect(vueTsgo["vue.matrix.directives.v-if.hover"]).toBeUndefined();
     expect(vueTsgo["vue.matrix.slots.header-local.hover"]).toBeUndefined();
     expect(vueTsgo["vue.matrix.no-virtual.component-tag"]).toBeUndefined();
+
+    const vueTsserver = knownProductGapsForRoute("vue-parity", "tsserver");
+    expect(vueTsserver["depth.rename.script-and-markup.min-two-edits"]).toBe(
+      "ISSUE-depth-rename-apply",
+    );
   });
 });
