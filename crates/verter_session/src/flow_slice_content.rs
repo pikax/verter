@@ -5757,7 +5757,9 @@ impl Lowerer<'_> {
     /// function / class body is its OWN frame — its names never resolve
     /// against this frame's skeleton — so its sequences keep the blanket
     /// treatment they always had (only an already-discarded operand's
-    /// content stays discarded inside one).
+    /// content stays discarded inside one). A class's decorators and
+    /// `super_class` heritage expression evaluate in the ENCLOSING frame,
+    /// so sequences among them take the same-frame split.
     fn record_decided_above_calls(&mut self, expr: &Expression<'_>) {
         let mut scanner = LeafCallScanner::default();
         scanner.visit_expression(expr);
@@ -6091,7 +6093,11 @@ impl<'a> Visit<'a> for ControlCalls {
 /// A nested function / class body is its OWN frame — its names never
 /// resolve against this frame's skeleton — so its sequences do not split:
 /// its calls keep the blanket `decided` treatment they always had (only
-/// content already inside a discarded operand stays discarded there).
+/// content already inside a discarded operand stays discarded there). A
+/// class's decorators and `super_class` heritage expression are NOT part
+/// of that frame — they evaluate in the ENCLOSING frame before the body
+/// exists — so they are visited outside the nested-frame guard and their
+/// sequences split like any other same-frame sequence.
 #[derive(Default)]
 struct LeafCallScanner {
     decided: Vec<verter_span::Span>,
@@ -6149,8 +6155,29 @@ impl<'a> Visit<'a> for LeafCallScanner {
         self.nested_frame_nesting -= 1;
     }
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
+        // Decorators and the `super_class` heritage expression evaluate in
+        // the ENCLOSING frame — before the class body exists — so they are
+        // visited OUTSIDE the nested-frame guard and their sequences take
+        // the same-frame discarded-operand discipline. Only the class BODY
+        // is a nested frame. (`walk_class` visits children in exactly this
+        // order; the name binding, type parameters, and implements clause
+        // carry no runtime expressions.)
+        self.visit_decorators(&it.decorators);
+        if let Some(super_class) = &it.super_class {
+            self.visit_expression(super_class);
+        }
         self.nested_frame_nesting += 1;
-        walk::walk_class(self, it);
+        if let Some(id) = &it.id {
+            self.visit_binding_identifier(id);
+        }
+        if let Some(type_parameters) = &it.type_parameters {
+            self.visit_ts_type_parameter_declaration(type_parameters);
+        }
+        if let Some(super_type_arguments) = &it.super_type_arguments {
+            self.visit_ts_type_parameter_instantiation(super_type_arguments);
+        }
+        self.visit_ts_class_implements_list(&it.implements);
+        self.visit_class_body(&it.body);
         self.nested_frame_nesting -= 1;
     }
 }

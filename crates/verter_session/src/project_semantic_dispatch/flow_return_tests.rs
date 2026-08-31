@@ -6395,6 +6395,71 @@ function f(x: string | number) {
     });
 }
 
+/// A class's `super_class` heritage expression evaluates in the ENCLOSING
+/// frame, so a discarded operand of a sequence there still narrows what
+/// follows: after `((class extends (assertString(x), Base) {}) as typeof
+/// Base)` the checker reads `x` as `string`. Treating the whole class as a
+/// nested frame skipped the sequence split, blanket-certified the heritage
+/// assertion decided-above, and — with no call obligation for the class
+/// expression — the unnarrowed superset published complete and warm. The
+/// heritage assertion takes the discarded-operand discipline: the later
+/// read of `x` keeps the unnarrowed `string | number` join, the demand
+/// carries the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[test]
+fn class_heritage_sequence_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/heritage-discarded-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+class Base {}
+
+function f(x: string | number) {
+  const y = ((class extends (assertString(x), Base) {}) as typeof Base);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let verter_type_expr::TypeExpr::Union(arms) = object_prop(&expr, "x") else {
+            panic!("f: the later read of `x` keeps the unnarrowed join, got {expr:?}");
+        };
+        for primitive in [
+            verter_type_expr::PrimitiveName::String,
+            verter_type_expr::PrimitiveName::Number,
+        ] {
+            assert!(
+                arms.iter()
+                    .any(|arm| *arm == verter_type_expr::TypeExpr::Primitive(primitive)),
+                "f: the dropped narrowing never shrinks the read — the {primitive:?} arm \
+                 survives, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "f: the heritage discarded assertion degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "f: an unprovable heritage discarded assertion never warms"
+        );
+    });
+}
+
 /// A FLOW-rooted component's carrier — the self-root union the root and
 /// its batched members publish on — covers every file any drained member
 /// observed, the CALL members included. Here `seed`'s initializer in a

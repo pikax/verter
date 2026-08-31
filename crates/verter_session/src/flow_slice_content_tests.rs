@@ -1322,6 +1322,74 @@ fn type_carrier_wrapped_sequence_calls_are_never_blanket_certified() {
     }
 }
 
+/// A class's decorators and `super_class` heritage expression evaluate in
+/// the ENCLOSING frame — before the class body exists — so a sequence
+/// among them takes the SAME discarded-operand discipline as any other
+/// same-frame sequence. Treating the WHOLE class as a nested frame
+/// skipped that split: `((class extends (assertString(x), Base) {}) as
+/// typeof Base)` blanket-certified the heritage assertion decided-above
+/// while the checker narrows `x` to `string`, and no call obligation
+/// exists for the class expression, so the unnarrowed superset would
+/// publish complete and warm. A heritage-sequence call is certified only
+/// when the callee provably establishes no narrowing; the assertion is
+/// unprovable, so the statement takes the typed gap.
+#[test]
+fn class_heritage_sequence_calls_are_never_blanket_certified() {
+    let refused = [(
+        "a closed same-file assertion in the heritage sequence",
+        "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+         class Base {}\n\
+         function f(x: string | number) { return ((class extends (assertString(x), Base) {}) as typeof Base) }",
+    )];
+    for (case, source) in refused {
+        let node = content_for(source, "f");
+        assert!(
+            node.decided_above_call_spans.is_empty(),
+            "{case}: an unprovable heritage call is never certified: {node:?}"
+        );
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the statement takes the typed gap: {node:?}"
+        );
+    }
+
+    // A plain heritage carries no call and stays gap-free.
+    let plain = content_for(
+        "export {};\nclass Base {}\n\
+         function f(x: string | number) { return ((class extends Base {}) as typeof Base) }",
+        "f",
+    );
+    assert!(
+        plain.decided_above_call_spans.is_empty(),
+        "a plain heritage has no call to record: {plain:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&plain),
+        0,
+        "a plain heritage mints no gap: {plain:?}"
+    );
+
+    // The class BODY stays its own frame: a sequence inside a method
+    // body does not split, and its calls keep the blanket decided-above
+    // treatment they always had.
+    let body = content_for(
+        "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+         function f(x: string | number) { return ((class { m() { return (assertString(x), x) } }) as object) }",
+        "f",
+    );
+    assert_eq!(
+        body.decided_above_call_spans.len(),
+        1,
+        "a class-body call keeps the nested-frame blanket certification: {body:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&body),
+        0,
+        "a class-body sequence does not split: {body:?}"
+    );
+}
+
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
 #[test]
 fn return_bearing_loop_is_unsupported() {
