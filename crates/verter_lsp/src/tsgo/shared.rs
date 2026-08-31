@@ -67,7 +67,8 @@ use verter_type_runtime::protocol::{
 };
 use verter_type_runtime::traits::{ProviderFuture, TypeProvider};
 use verter_type_runtime::tsgo::{
-    position_carrier_diagnostics, select_configured_project_carrier, TsgoTypeProvider,
+    javascript_carrier_semantic_diagnostics_enabled, position_carrier_diagnostics,
+    select_configured_project_carrier, TsgoTypeProvider,
 };
 
 use super::shared_support::{
@@ -771,15 +772,32 @@ impl TsgoSharedProvider {
         else {
             return Ok(None);
         };
+        let project_check_js = snap
+            .project_for_config(|config| verter_span::path::fs_paths_equal(config, tsconfig))
+            .and_then(|project| project.compiler_options.get("checkJs"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         *self.snapshot.lock() = Some((snap.snapshot, project_id.clone()));
 
-        let mut diags = self
-            .api
-            .get_semantic_diagnostics(&snap.snapshot, &project_id, &engine_carrier)
-            .await
-            .map_err(|e| {
-                TypeProviderError::new(format!("shared --api getSemanticDiagnostics: {e}"))
-            })?;
+        // Read only the carrier revision whose ordered injection barrier completed,
+        // and use that exact content for both policy and UTF-16 positioning.
+        let content =
+            require_synced_carrier_content(self.sync.synced_content(&engine_carrier, carrier))?;
+        let semantic_enabled = javascript_carrier_semantic_diagnostics_enabled(
+            &engine_carrier,
+            &content,
+            project_check_js,
+        );
+        let mut diags = if semantic_enabled {
+            self.api
+                .get_semantic_diagnostics(&snap.snapshot, &project_id, &engine_carrier)
+                .await
+                .map_err(|e| {
+                    TypeProviderError::new(format!("shared --api getSemanticDiagnostics: {e}"))
+                })?
+        } else {
+            Vec::new()
+        };
         if include_syntactic {
             diags.extend(
                 self.api
@@ -791,11 +809,6 @@ impl TsgoSharedProvider {
             );
         }
 
-        // Serve only from the content whose ordered sync barrier the shared
-        // Program acknowledged. Besides positioning diagnostics, this proves
-        // the result belongs to the current injected carrier revision.
-        let content =
-            require_synced_carrier_content(self.sync.synced_content(&engine_carrier, carrier))?;
         Ok(Some(position_carrier_diagnostics(
             &diags,
             Some(content),

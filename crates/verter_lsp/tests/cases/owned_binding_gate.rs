@@ -334,14 +334,16 @@ impl TypeProvider for MarkerOwned {
 /// A configured-project snapshot whose `include: ["src/**/*"]` OWNS `src/` under
 /// [`TSCONFIG`], built through the SAME production membership parse/expansion chain
 /// the resolver's own tests use, hermetically over an in-memory workspace.
-fn owning_snapshot() -> WorkspaceSnapshot {
+fn owning_snapshot_with_check_js(check_js: bool) -> WorkspaceSnapshot {
     let ws = MemoryWorkspace::new(MemoryOptions {
         roots: vec![WS_ROOT.to_string()],
         default_resolve_extensions: None,
     });
     ws.inject_file(
         TSCONFIG.to_string(),
-        Arc::<str>::from(r#"{ "include": ["src/**/*"] }"#),
+        Arc::<str>::from(format!(
+            r#"{{ "compilerOptions": {{ "checkJs": {check_js} }}, "include": ["src/**/*"] }}"#
+        )),
     );
     let root = CanonicalPath::new(WS_ROOT);
     let raw_membership = load_project_membership(&ws, TSCONFIG);
@@ -370,10 +372,24 @@ fn owning_snapshot() -> WorkspaceSnapshot {
     build_workspace_snapshot_simple(vec![project], SnapshotGeneration(1))
 }
 
+fn owning_snapshot() -> WorkspaceSnapshot {
+    owning_snapshot_with_check_js(false)
+}
+
 /// A host with the owning snapshot published (a bound source under `src/` resolves).
 fn host_with_snapshot() -> Arc<VerterHost> {
     let ws = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
     ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(owning_snapshot())));
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    host.set_workspace(Arc::clone(&ws) as Arc<dyn WorkspaceAccess>);
+    host
+}
+
+fn host_with_check_js_snapshot() -> Arc<VerterHost> {
+    let ws = Arc::new(FilesystemWorkspace::new(FilesystemOptions::default()));
+    ws.publish_snapshot(PublishedRoot::new_vfs_only(Arc::new(
+        owning_snapshot_with_check_js(true),
+    )));
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     host.set_workspace(Arc::clone(&ws) as Arc<dyn WorkspaceAccess>);
     host
@@ -523,11 +539,11 @@ async fn gate_bound_carrier_uses_established_managed_diagnostics_route() {
 }
 
 #[tokio::test]
-async fn partial_project_capability_none_does_not_erase_bound_managed_diagnostics() {
+async fn partial_project_capability_none_falls_back_when_check_js_is_enabled() {
     let owned = Arc::new(MarkerOwned::default());
     let c = TsgoCompositeProvider::new(
         Arc::clone(&owned) as Arc<dyn TypeProvider>,
-        host_with_snapshot(),
+        host_with_check_js_snapshot(),
         None,
     );
     let diags = c
@@ -547,6 +563,30 @@ async fn partial_project_capability_none_does_not_erase_bound_managed_diagnostic
             TSCONFIG.to_string()
         )],
         "a JavaScript carrier must ask its bound configured project before using the rich fallback"
+    );
+}
+
+#[tokio::test]
+async fn unavailable_project_capability_never_reenables_check_js_through_raw_fallback() {
+    let owned = Arc::new(MarkerOwned::default());
+    let c = TsgoCompositeProvider::new(
+        Arc::clone(&owned) as Arc<dyn TypeProvider>,
+        host_with_snapshot(),
+        None,
+    );
+    let diags = c
+        .get_diagnostics(&format!("{WS_ROOT}/src/Widget.vue.jsx"))
+        .await
+        .expect("composite diagnostics");
+    assert!(
+        diags.is_empty(),
+        "an unavailable project-bound capability under checkJs:false must not fall back to an inferred-project semantic result"
+    );
+    assert_eq!(owned.project_diagnostics_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        owned.raw_diagnostics_calls.load(Ordering::SeqCst),
+        0,
+        "the raw diagnostic marker proves a wrong inferred-project fallback leaked"
     );
 }
 

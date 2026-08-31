@@ -194,11 +194,21 @@ impl TsgoOwnedProvider {
         tsconfig: &str,
     ) -> Result<Vec<TypeDiagnostic>, crate::protocol::TypeProviderError> {
         let carrier = slash(path);
-        let Some((snapshot, project, engine_carrier)) =
+        let Some((snapshot, project, engine_carrier, project_check_js)) =
             self.api.resolve_for(&carrier, tsconfig).await
         else {
             return Ok(Vec::new());
         };
+        let content = self.lsp.cached_content(&engine_carrier).await;
+        if content.as_deref().is_some_and(|content| {
+            !javascript_carrier_semantic_diagnostics_enabled(
+                &engine_carrier,
+                content,
+                project_check_js,
+            )
+        }) {
+            return Ok(Vec::new());
+        }
         let diags = self
             .api
             .client
@@ -218,7 +228,6 @@ impl TsgoOwnedProvider {
         // for the carrier and reused for every diagnostic (not a per-diagnostic
         // walk). A missing content with diagnostics present is a FAIL-CLOSED explicit
         // error (never a forged `(0, 0)` span) — see `position_carrier_diagnostics`.
-        let content = self.lsp.cached_content(&engine_carrier).await;
         position_carrier_diagnostics(&diags, content, &engine_carrier)
     }
 
@@ -232,21 +241,32 @@ impl TsgoOwnedProvider {
         tsconfig: &str,
     ) -> Result<Option<Vec<TypeDiagnostic>>, crate::protocol::TypeProviderError> {
         let carrier = slash(path);
-        let Some((snapshot, project, engine_carrier)) =
+        let Some((snapshot, project, engine_carrier, project_check_js)) =
             self.api.resolve_for(&carrier, tsconfig).await
         else {
             return Ok(None);
         };
-        let mut diagnostics = self
-            .api
-            .client
-            .get_semantic_diagnostics(&snapshot, &project, &engine_carrier)
-            .await
-            .map_err(|e| {
-                crate::protocol::TypeProviderError::new(format!(
-                    "--api getSemanticDiagnostics: {e}"
-                ))
-            })?;
+        let content = self.lsp.cached_content(&engine_carrier).await;
+        let semantic_enabled = content.as_deref().is_none_or(|content| {
+            javascript_carrier_semantic_diagnostics_enabled(
+                &engine_carrier,
+                content,
+                project_check_js,
+            )
+        });
+        let mut diagnostics = if semantic_enabled {
+            self.api
+                .client
+                .get_semantic_diagnostics(&snapshot, &project, &engine_carrier)
+                .await
+                .map_err(|e| {
+                    crate::protocol::TypeProviderError::new(format!(
+                        "--api getSemanticDiagnostics: {e}"
+                    ))
+                })?
+        } else {
+            Vec::new()
+        };
         diagnostics.extend(
             self.api
                 .client
@@ -259,9 +279,81 @@ impl TsgoOwnedProvider {
                 })?,
         );
 
-        let content = self.lsp.cached_content(&engine_carrier).await;
         position_carrier_diagnostics(&diagnostics, content, &engine_carrier).map(Some)
     }
+}
+
+/// Whether a carrier should receive semantic diagnostics under its configured
+/// project's JavaScript policy.
+///
+/// TypeScript-family carriers are always checked. JavaScript JSX carriers follow
+/// the selected project's `checkJs` value unless an authored leading line pragma
+/// overrides it. The compiler lifts genuine authored pragmas to the carrier's
+/// leading trivia; block comments, token lookalikes, and comments after the first
+/// source token are not file-check pragmas.
+#[must_use]
+pub fn javascript_carrier_semantic_diagnostics_enabled(
+    carrier: &str,
+    content: &str,
+    project_check_js: bool,
+) -> bool {
+    let is_javascript = carrier
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("jsx"));
+    if !is_javascript {
+        return true;
+    }
+
+    match leading_file_check_pragma(content) {
+        Some(FileCheckPragma::Check) => true,
+        Some(FileCheckPragma::NoCheck) => false,
+        None => project_check_js,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FileCheckPragma {
+    Check,
+    NoCheck,
+}
+
+fn leading_file_check_pragma(content: &str) -> Option<FileCheckPragma> {
+    let mut leading = content;
+    let mut pragma = None;
+    loop {
+        leading = leading.trim_start_matches(char::is_whitespace);
+        if let Some(line) = leading.strip_prefix("//") {
+            let (comment, rest) = line
+                .split_once('\n')
+                .map_or((line, ""), |(comment, rest)| (comment, rest));
+            let comment = comment.trim_start();
+            for (directive, candidate) in [
+                ("@ts-check", FileCheckPragma::Check),
+                ("@ts-nocheck", FileCheckPragma::NoCheck),
+            ] {
+                if let Some(suffix) = comment.strip_prefix(directive) {
+                    if suffix
+                        .chars()
+                        .next()
+                        .is_none_or(|character| character.is_ascii_whitespace() || character == ':')
+                    {
+                        pragma = Some(candidate);
+                    }
+                }
+            }
+            leading = rest;
+            continue;
+        }
+        if let Some(block) = leading.strip_prefix("/*") {
+            let Some(end) = block.find("*/") else {
+                break;
+            };
+            leading = &block[end + 2..];
+            continue;
+        }
+        break;
+    }
+    pragma
 }
 
 /// Position a carrier's `--api` diagnostics into byte-contract [`TypeDiagnostic`]s,
@@ -309,9 +401,9 @@ fn slash(p: &str) -> String {
 
 impl ApiSurface {
     /// Refresh the `--api` snapshot for the configured project `tsconfig` (supplied
-    /// per query) and return `(snapshot_handle, project_id, engine_carrier_path)` for
-    /// `carrier`, or `None` when the project / carrier is not resolvable on the
-    /// checker.
+    /// per query) and return `(snapshot_handle, project_id, engine_carrier_path,
+    /// project_check_js)` for `carrier`, or `None` when the project / carrier is not
+    /// resolvable on the checker.
     ///
     /// `carrier` is the carrier file path; the returned engine path is the carrier
     /// AS THE ENGINE REPORTS IT in the project's root set (diagnostics must be
@@ -320,7 +412,7 @@ impl ApiSurface {
         &self,
         carrier: &str,
         tsconfig: &str,
-    ) -> Option<(OpaqueHandle, String, String)> {
+    ) -> Option<(OpaqueHandle, String, String, bool)> {
         // A FAILED project open is an unhealthy-provider signal, distinct from a
         // project that simply is not in the snapshot below. Surface it (the owned
         // provider must not serve as if healthy when the configured project cannot
@@ -342,11 +434,21 @@ impl ApiSurface {
         // its root set — configured-project membership, never an inferred/single-file
         // fallback. ABSENCE of the carrier from `project.root_files` is a `None`
         // (fail closed), not a degraded open.
-        let (project_id, engine_carrier) =
-            select_configured_project_carrier(&snap, tsconfig, carrier)?;
+        let project = snap.project_for_config(|c| fs_paths_equal(c, tsconfig))?;
+        let engine_carrier = project
+            .root_files
+            .iter()
+            .find(|file| fs_paths_equal(file, carrier))
+            .cloned()?;
+        let project_id = project.id.clone();
+        let project_check_js = project
+            .compiler_options
+            .get("checkJs")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         // Update the cached snapshot context (the handle is `Copy`).
         *self.snapshot.lock() = Some((snap.snapshot, project_id.clone()));
-        Some((snap.snapshot, project_id, engine_carrier))
+        Some((snap.snapshot, project_id, engine_carrier, project_check_js))
     }
 }
 

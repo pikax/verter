@@ -40,6 +40,7 @@ use verter_session::external_ts::{
 use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_session::VerterHost;
 use verter_workspace::traits::WorkspaceRead;
+use verter_workspace::workspace_snapshot::ProjectPayload;
 
 use verter_tsgo_api::control::Advertisement;
 use verter_type_runtime::protocol::{
@@ -1003,14 +1004,26 @@ impl TsgoCompositeProvider {
                 Ok(None) => tracing::debug!(
                     source = %source,
                     project = %carrier.bound().project(),
-                    "configured-project JavaScript diagnostics unavailable; using rich managed fallback"
+                    "configured-project JavaScript diagnostics unavailable; evaluating policy-safe fallback"
                 ),
                 Err(error) => tracing::warn!(
                     source = %source,
                     project = %carrier.bound().project(),
                     error = %error,
-                    "configured-project JavaScript diagnostics failed; using rich managed fallback"
+                    "configured-project JavaScript diagnostics failed; evaluating policy-safe fallback"
                 ),
+            }
+
+            // The pinned TSGO API cannot expose some generated companions as roots
+            // of nested configured projects. A raw LSP fallback would bind that JSX
+            // to an inferred project and re-enable semantic diagnostics even when
+            // the authoritative owning project has `checkJs: false`. Preserve the
+            // published project's policy in that unavailable-capability case. This
+            // deliberately does not synthesize support for authored `@ts-check` in
+            // the unavailable TSGO project shape; that remains a known capability
+            // gap rather than a wrong-project diagnostic result.
+            if self.configured_project_check_js(carrier.bound().project()) == Some(false) {
+                return Ok(Vec::new());
             }
         }
 
@@ -1018,6 +1031,30 @@ impl TsgoCompositeProvider {
         // admitted, use the same managed LSP surface that owns the didOpen/didChange
         // overlay; never use it for an unbound carrier.
         self.managed_diagnostics(path, background).await
+    }
+
+    /// Read `checkJs` from the same immutable published snapshot that minted the
+    /// carrier's configured-project witness. `None` retains the conservative rich
+    /// fallback; only an observed configured project with checking disabled can
+    /// suppress the wrong inferred-project semantic result.
+    fn configured_project_check_js(&self, configured_project: &str) -> Option<bool> {
+        let workspace = self.host.workspace_read();
+        let published = workspace.published_root()?;
+        let configured_project = normalize_canonical_id(configured_project);
+        published
+            .snapshot
+            .projects
+            .iter()
+            .find_map(|project| match &project.payload {
+                ProjectPayload::Configured {
+                    tsconfig_path,
+                    compiler_options,
+                    ..
+                } if normalize_canonical_id(tsconfig_path.as_str()) == configured_project => {
+                    Some(compiler_options.check_js)
+                }
+                _ => None,
+            })
     }
 
     /// Managed diagnostics for `path` on the requested lane.
