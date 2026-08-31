@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O3
+predecessors=CCA1O3,CCA1O1A,CCA1O3C
 owner=compiler.compiler-bridge:direct WASM carrier-fixture capture typed host requests
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -50,6 +50,8 @@ Move the direct WASM carrier-fixture capture tool to CCA1O3's typed request whil
 ## Exact predecessor contract
 
 - **CCA1O3:** implemented ledger row for “WASM typed host-request adapter”.
+- **CCA1O1A:** implemented ledger row for “Canonical Svelte custom-element prop-type admission”; the Svelte custom-element prop-type slot has its final shape, so no request this tool builds encodes a superseded closed vocabulary.
+- **CCA1O3C:** implemented ledger row for “Execution-proven WASM JS-boundary gate”; the browser boundary refusals this consumer relies on are proven by execution rather than by compilation alone.
 
 ## Acceptance and evidence
 

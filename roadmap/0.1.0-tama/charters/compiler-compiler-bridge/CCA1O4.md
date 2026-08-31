@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O2
+predecessors=CCA1O2,CCA1O2H,CCA1O2I
 owner=compiler.compiler-bridge:unplugin typed native host request route
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -51,6 +51,8 @@ Move unplugin's native host calls to CCA1O2's typed framework-discriminated requ
 ## Exact predecessor contract
 
 - **CCA1O2:** typed NAPI/native request and exact converter coexist with the legacy signatures.
+- **CCA1O2H:** implemented ledger row for “NAPI own-property closedness repair”; an own unknown or cross-framework key is refused whatever its value, so this consumer inherits the unqualified fail-closed rule.
+- **CCA1O2I:** implemented ledger row for “Generated native host-request TypeScript mirror”; the typed request declarations are generated and byte-pinned against the Rust schema.
 
 ## Invariants and acceptance
 

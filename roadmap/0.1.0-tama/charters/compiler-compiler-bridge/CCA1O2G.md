@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O2
+predecessors=CCA1O2,CCA1O2H,CCA1O2I
 owner=compiler.compiler-bridge:typescript-plugin typed native IDE request route
 conflict_domains=host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -50,6 +50,8 @@ Move the production TypeScript-plugin mirror host from positional native IDE pro
 ## Exact predecessor contract
 
 - **CCA1O2:** NAPI/native exposes the typed `HostCompileRequest` route beside the legacy profile route.
+- **CCA1O2H:** implemented ledger row for “NAPI own-property closedness repair”; the native decode refuses an own unknown or cross-framework key whatever its value, so the typed route this consumer moves onto is closed as declared.
+- **CCA1O2I:** implemented ledger row for “Generated native host-request TypeScript mirror”; the request declarations this consumer type-checks against are generated from the Rust schema and byte-pinned, so they cannot drift from the decoder.
 
 ## Invariants and acceptance
 

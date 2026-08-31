@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O2
+predecessors=CCA1O2,CCA1O2H,CCA1O2I
 owner=compiler.compiler-bridge:native benchmark typed host request population
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -51,6 +51,8 @@ Move the complete native benchmark population that supplies a legacy compile pro
 ## Exact predecessor contract
 
 - **CCA1O2:** implemented ledger row for “NAPI typed host-request adapter”.
+- **CCA1O2H:** implemented ledger row for “NAPI own-property closedness repair”; the native decode refuses an own unknown or cross-framework key whatever its value, so the typed route this caller moves onto is closed as declared.
+- **CCA1O2I:** implemented ledger row for “Generated native host-request TypeScript mirror”; the request declarations this caller is written against are generated from the Rust schema and byte-pinned, so they cannot drift from the decoder.
 
 ## Acceptance and evidence
 

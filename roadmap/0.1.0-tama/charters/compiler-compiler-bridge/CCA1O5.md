@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O3
+predecessors=CCA1O3,CCA1O1A,CCA1O3C
 owner=compiler.compiler-bridge:playground typed WASM host request route
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -50,6 +50,8 @@ Move the playground runtime consumer to CCA1O3's typed WASM request while all WA
 ## Exact predecessor contract
 
 - **CCA1O3:** typed WASM adapter and the complete WASM-local compatibility DTO family coexist with the legacy route.
+- **CCA1O1A:** implemented ledger row for “Canonical Svelte custom-element prop-type admission”; the Svelte custom-element prop-type slot has its final shape, so playground request construction encodes no superseded closed vocabulary.
+- **CCA1O3C:** implemented ledger row for “Execution-proven WASM JS-boundary gate”; the browser boundary refusals this runtime consumer depends on are proven by execution rather than by compilation alone.
 
 ## Invariants and acceptance
 

@@ -7,7 +7,7 @@ product=compiler_bridge
 kind=migration
 semantic_role=delivery
 class=compiler
-predecessors=CCA1O3
+predecessors=CCA1O3,CCA1O1A,CCA1O3C
 owner=compiler.compiler-bridge:WASM transport-surface probe typed host requests
 conflict_domains=compiler_execution,host_service_graph,public_protocol
 resource_class=ts-heavy
@@ -50,6 +50,8 @@ Move the direct WASM transport-surface probe to CCA1O3's typed request while the
 ## Exact predecessor contract
 
 - **CCA1O3:** implemented ledger row for “WASM typed host-request adapter”.
+- **CCA1O1A:** implemented ledger row for “Canonical Svelte custom-element prop-type admission”; the Svelte custom-element prop-type slot has its final shape, so the probe cases encode no superseded closed vocabulary.
+- **CCA1O3C:** implemented ledger row for “Execution-proven WASM JS-boundary gate”; the browser boundary refusals this probe classifies are proven by execution rather than by compilation alone.
 
 ## Acceptance and evidence
 

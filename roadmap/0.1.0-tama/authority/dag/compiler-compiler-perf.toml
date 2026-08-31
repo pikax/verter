@@ -2,9 +2,45 @@ schema = 4
 module = "compiler-compiler-perf"
 
 [[node]]
+id = "CPER0M"
+name = "NAPI memory-audit snapshot coherence"
+predecessors = ["CCA0"]
+phase = "compiler"
+train = "compiler.compiler-perf"
+product = "compiler_perf"
+kind = "repair"
+semantic_role = "delivery"
+class = "compiler"
+owner = "compiler.compiler-perf:native memory-audit counter snapshot coherence"
+conflict_domains = ["performance_evidence"]
+resource_class = "rust-mixed"
+gate_profile = "targeted-domain"
+review_profile = "concurrency-3"
+dispatchable = true
+optional = false
+release_gating = "none"
+external_requirements = []
+charter = "charters/compiler-compiler-perf/CPER0M.md"
+implementation_effort_min = "high"
+implementation_effort_default = "high"
+review_effort_min = "high"
+review_effort_default = "high"
+verification_effort_min = "high"
+verification_effort_default = "high"
+confirmation_effort_min = "high"
+confirmation_effort_default = "high"
+size = "S"
+max_production_loc = 150
+max_production_files = 1
+max_related_packages = 1
+rescope_loc = 1500
+rescope_files = 12
+rescope_unrelated_packages = 3
+
+[[node]]
 id = "CPER0"
 name = "Compiler equivalent-work and oracle genesis lock"
-predecessors = ["CPF1","PAR0","PER0","CCA2"]
+predecessors = ["CPF1","PAR0","PER0","CCA2","CPER0M"]
 phase = "compiler"
 train = "compiler.compiler-perf"
 product = "compiler_perf"
