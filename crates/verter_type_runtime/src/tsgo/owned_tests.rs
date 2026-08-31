@@ -277,6 +277,47 @@ fn map_api_diagnostic_severity_table() {
     assert_eq!(severity_name(&message.severity), "info");
 }
 
+#[test]
+fn project_bound_diagnostics_recover_only_rich_suggestions_and_preserve_tags() {
+    use crate::protocol::{TypeDiagnostic, TypeDiagnosticSeverity, TypeDiagnosticTag};
+
+    let diagnostic = |code: &str, severity, tags| TypeDiagnostic {
+        message: format!("diagnostic {code}"),
+        severity,
+        start: 4,
+        end: 10,
+        code: Some(code.to_string()),
+        tags,
+        related_information: Vec::new(),
+    };
+    let mut project_bound = vec![diagnostic("6133", TypeDiagnosticSeverity::Hint, Vec::new())];
+    let rich = vec![
+        diagnostic(
+            "6133",
+            TypeDiagnosticSeverity::Hint,
+            vec![TypeDiagnosticTag::Unnecessary],
+        ),
+        diagnostic("2322", TypeDiagnosticSeverity::Error, Vec::new()),
+        diagnostic("1005", TypeDiagnosticSeverity::Warning, Vec::new()),
+        diagnostic("7027", TypeDiagnosticSeverity::Hint, Vec::new()),
+    ];
+
+    merge_project_bound_suggestions(&mut project_bound, rich);
+
+    assert_eq!(
+        project_bound.len(),
+        2,
+        "only Hint rows may cross the LSP boundary"
+    );
+    assert_eq!(project_bound[0].code.as_deref(), Some("6133"));
+    assert_eq!(
+        project_bound[0].tags,
+        vec![TypeDiagnosticTag::Unnecessary],
+        "the rich duplicate must restore the editor-facing unused tag"
+    );
+    assert_eq!(project_bound[1].code.as_deref(), Some("7027"));
+}
+
 /// Build a fake `--api` snapshot with a single configured project whose root set is
 /// `root_files`. Mirrors what `update_snapshot_open_project` returns from the engine,
 /// constructed offline (all DTO fields are public).

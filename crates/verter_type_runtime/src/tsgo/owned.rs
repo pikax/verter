@@ -13,7 +13,9 @@
 //! `custom/initializeAPISession` and is the project-bound TYPECHECK / membership /
 //! reflection ORACLE ([`TsgoOwnedProvider::semantic_diagnostics_for_carrier_in_project`]).
 //! The served carrier path combines semantic and syntactic diagnostics from one
-//! configured-project snapshot and never unions in the raw `--lsp` pull.
+//! configured-project snapshot. For JavaScript carriers whose exact project
+//! policy enables checking, it additionally recovers the `--lsp` suggestion
+//! category (which the attached API does not expose) from the same process.
 //!
 //! This is the binding dual-surface architecture: ONE process, ONE query path, the
 //! two surfaces an internal implementation detail of one provider. There is NO
@@ -233,8 +235,10 @@ impl TsgoOwnedProvider {
 
     /// Project-bound user-facing diagnostics for a carrier, with an explicit
     /// served signal. Semantic and syntactic diagnostics are read from the same
-    /// configured-project snapshot; no raw LSP pull is mixed in because the
-    /// companion path may otherwise bind to an inferred or broader project.
+    /// configured-project snapshot. The attached API has no suggestion-diagnostic
+    /// request, so a policy-enabled JavaScript carrier recovers ONLY the Hint
+    /// category from the rich LSP pull; project semantic/syntactic authority is
+    /// never replaced by an inferred-project result.
     async fn diagnostics_for_carrier_in_project(
         &self,
         path: &str,
@@ -279,7 +283,47 @@ impl TsgoOwnedProvider {
                 })?,
         );
 
-        position_carrier_diagnostics(&diagnostics, content, &engine_carrier).map(Some)
+        let mut positioned = position_carrier_diagnostics(&diagnostics, content, &engine_carrier)?;
+        let is_javascript = engine_carrier
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("jsx"));
+        if is_javascript && semantic_enabled {
+            let rich = self.lsp.get_diagnostics(path).await?;
+            merge_project_bound_suggestions(&mut positioned, rich);
+        }
+        Ok(Some(positioned))
+    }
+}
+
+/// Add the diagnostic category the attached TSGO API cannot request.
+///
+/// The caller has already proved the exact configured project's JavaScript
+/// checking policy is enabled. Only `Hint` diagnostics cross from the raw LSP
+/// pull, so semantic and syntactic results remain rooted in the configured
+/// project. Duplicate suggestions enrich the project-bound row with editor tags
+/// instead of appearing twice.
+fn merge_project_bound_suggestions(
+    project_bound: &mut Vec<TypeDiagnostic>,
+    rich: Vec<TypeDiagnostic>,
+) {
+    for suggestion in rich
+        .into_iter()
+        .filter(|diagnostic| matches!(diagnostic.severity, TypeDiagnosticSeverity::Hint))
+    {
+        if let Some(existing) = project_bound.iter_mut().find(|diagnostic| {
+            diagnostic.code == suggestion.code
+                && diagnostic.start == suggestion.start
+                && diagnostic.end == suggestion.end
+                && diagnostic.message == suggestion.message
+        }) {
+            for tag in suggestion.tags {
+                if !existing.tags.contains(&tag) {
+                    existing.tags.push(tag);
+                }
+            }
+        } else {
+            project_bound.push(suggestion);
+        }
     }
 }
 
