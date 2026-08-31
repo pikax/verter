@@ -11304,7 +11304,18 @@ mod tests {
             parent_analysis_observed: Arc::clone(&parent_observed),
             dep_source_observed: Arc::clone(&dep_observed),
         });
-        let sched = Scheduler::test_with_executor(SchedulerConfig::default(), loader, executor);
+        // The TLS-propagation invariant is independent of host parallelism.
+        // Pin this fixture's private pools so a highly parallel nextest run
+        // cannot multiply host-sized pools into quadratic thread pressure.
+        let sched = Scheduler::test_with_executor(
+            SchedulerConfig {
+                cpu_threads: 2,
+                io_threads: 2,
+                dag_budget: None,
+            },
+            loader,
+            executor,
+        );
 
         let ctx = TestContext::new(PARENT_REQ_ID, true);
         let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
