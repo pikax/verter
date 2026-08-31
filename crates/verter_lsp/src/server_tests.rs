@@ -5659,7 +5659,7 @@ async fn completion_resolves_barrel_reexport_props_via_index_file() {
             "<script setup lang=\"ts\">\ndefineProps<{ label: string; zIndex?: number }>()\n</script>\n";
     let barrel_source = "export { default as BarrelComp } from './BarrelComp.vue'\n";
     let parent_source = "<script setup lang=\"ts\">\nimport { BarrelComp } from './components'\n</script>\n<template>\n  <BarrelComp  />\n</template>\n";
-    let (_temp, service, drain_handle, _provider, workspace_id) = make_definition_test_server(&[
+    let (_temp, service, drain_handle, provider, workspace_id) = make_definition_test_server(&[
         ("src/components/BarrelComp.vue", "vue", child_source),
         ("src/components/index.ts", "typescript", barrel_source),
         ("src/App.vue", "vue", parent_source),
@@ -5696,6 +5696,34 @@ async fn completion_resolves_barrel_reexport_props_via_index_file() {
     assert!(
         !labels.iter().any(|l| l.contains("___VERTER___")),
         "internal symbols must not leak: {labels:?}"
+    );
+
+    // The attribution-only E2E rail must still reach the already-synchronized
+    // provider when the optional native barrel-contract cache is cold. Normal
+    // product requests remain cache-only and fail closed on this miss.
+    server.evict_barrel_component_route_for_test(
+        &format!("{workspace_id}/src/App.vue"),
+        "BarrelComp",
+    );
+    server.set_provider_only_completions_for_test(true);
+    let provider_queries_before = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetCompletions { .. }))
+        .count();
+    let _ = server
+        .completion(completion_params(&app_uri, position, None))
+        .await
+        .expect("provider-only completion should remain queryable on a native cache miss");
+    let provider_queries_after = provider
+        .calls()
+        .iter()
+        .filter(|call| matches!(call, MockCall::GetCompletions { .. }))
+        .count();
+    assert_eq!(
+        provider_queries_after,
+        provider_queries_before + 1,
+        "a native barrel-contract miss must not short-circuit the provider-attribution rail"
     );
 
     drain_handle.abort();
