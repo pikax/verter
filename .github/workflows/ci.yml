@@ -941,7 +941,10 @@ jobs:
   vscode-e2e:
     name: VS Code E2E (${{ matrix.fixture }} / ${{ matrix.type_provider }})
     needs: [detect-changes, build-lsp-debug, build-vscode-e2e]
-    if: needs.detect-changes.outputs.vscode == 'true'
+    # Temporarily disabled: the 32-route matrix remains reproducible locally in
+    # Docker, while CI keeps the editor-neutral LSP contract as the required
+    # integration signal without downloading a separate 330 MB VS Code per leg.
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
