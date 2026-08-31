@@ -355,7 +355,18 @@ pub fn authored_component_attribute_name_context(
         .filter_map(|node| {
             let (opening_start, context) = match node.kind() {
                 MarkupNodeKind::Element(element) => {
-                    if element.kind != MarkupElementKind::Component {
+                    let authored_tag = inventory.slice(element.authored_name).ok()?;
+                    // Vue and Svelte both reserve an authored ASCII-uppercase
+                    // opening name for component syntax.  The parser's HTML
+                    // classification is case-insensitive, so a component such
+                    // as `<Button />` can otherwise be recorded as the native
+                    // `button` element and lose its attribute-name authority.
+                    if element.kind != MarkupElementKind::Component
+                        && !authored_tag
+                            .chars()
+                            .next()
+                            .is_some_and(|character| character.is_ascii_uppercase())
+                    {
                         return None;
                     }
                     let unclosed_attribute_name = element.attributes.iter().any(|attribute| {
@@ -379,7 +390,7 @@ pub fn authored_component_attribute_name_context(
                         return Some((
                             element.opening_name_span.start.saturating_sub(1),
                             AuthoredComponentAttributeNameContext::InexactUnclosedOpening {
-                                tag: inventory.slice(element.authored_name).ok()?.to_string(),
+                                tag: authored_tag.to_string(),
                             },
                         ));
                     }
@@ -420,7 +431,7 @@ pub fn authored_component_attribute_name_context(
                     (
                         element.opening_span.start,
                         AuthoredComponentAttributeNameContext::ExactAttribute {
-                            tag: inventory.slice(element.authored_name).ok()?.to_string(),
+                            tag: authored_tag.to_string(),
                         },
                     )
                 }

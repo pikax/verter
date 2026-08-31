@@ -1089,7 +1089,12 @@ async fn handle_completion_attempt(
         server.enqueue_import_dependency_publication_if_idle(uri);
     }
 
-    if native_only || recognized_authored_component_contract_miss.get() {
+    // The E2E attribution rail deliberately disables every native item and
+    // asks whether the already-synchronized TypeScript surface can answer on
+    // its own. A cold native contract cache must not turn that provider-only
+    // probe into a synthetic empty response; normal product requests retain
+    // the cache-only fail-closed behavior above.
+    if native_only || (recognized_authored_component_contract_miss.get() && !provider_only) {
         drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
