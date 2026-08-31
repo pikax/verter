@@ -2321,6 +2321,17 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
             "class Box { readonly tag = \"box\" }\nfunction makeProps() { const f = () => [\"s\", new Box()]; return { label: \"x\", made: f() } }",
             "{ label: string; made: (string | Box)[] }",
         ),
+        // A `switch` whose DISCRIMINANT is not a reference this half
+        // represents carries no clause relation the evaluator can apply.
+        // The checker narrows nothing here either, so the surface it
+        // publishes is the same one — but silence about a relation is
+        // not proof there is none, and this half has no proof to offer:
+        // the dispatch degrades rather than reporting COMPLETE.
+        (
+            "/src/U1SwitchUnmodeledDispatch.vue",
+            "function makeProps() { switch (1 as number) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
+            "{ label: string }",
+        ),
     ];
 
     for (canonical, script, checker) in NO_ANSWER {
@@ -2403,11 +2414,17 @@ fn an_uninferred_body_return_never_publishes_a_complete_warm_meta_surface() {
     );
 
     // The switch / try statement-position return shapes the no-answer set
-    // lost: both now publish the checker's surface, COMPLETE and warm.
+    // lost: both publish the checker's surface, COMPLETE and warm. The
+    // switch shape is the MODELED dispatch — a represented discriminant
+    // against a literal case relation, the one pair the slice content
+    // carries. A dispatch outside that pair degrades instead
+    // (`U1SwitchUnmodeledDispatch` in the no-answer set above), because
+    // this half cannot carry the clause relation to the evaluator and
+    // "no call and no write" is not evidence that none exists.
     for (canonical, script) in [
         (
             "/src/U1Switch.vue",
-            "function makeProps() { switch (1 as number) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
+            "function makeProps(k: number) { switch (k) { case 1: return { label: \"x\" } } return { label: \"y\" } }",
         ),
         (
             "/src/U1Try.vue",

@@ -6944,6 +6944,76 @@ function f(x: string | number) {
     });
 }
 
+/// A `switch` clause whose dispatch relation this half cannot carry must
+/// never be dispatched as the DEFAULT clause.
+///
+/// The default clause's dispatch edge is "the discriminant minus every
+/// carried test". Routing an unrecognized relation onto that edge is not
+/// a superset — it is a WRONG value: the clause is published as if it
+/// were reached only by the discriminant values no other clause claimed,
+/// so an arm the clause genuinely can see (`"b"`, claimed by the
+/// preceding literal clause) disappears from its read. A degraded result
+/// is still USED by tolerant consumers, so a partial must approximate in
+/// the safe direction. The unrecognized clause therefore applies NO
+/// dispatch narrow, and the switch carries the typed gap.
+#[test]
+fn switch_unrecognized_case_relation_never_takes_the_default_edge() {
+    const CANONICAL: &str = "/ws/switch-unrecognized-case-relation/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+const k: "a" = "a";
+
+function f(x: "a" | "b" | "c") {
+  switch (x) {
+    case "b":
+      throw new Error();
+    case k:
+      return { x };
+  }
+  throw new Error();
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        let key = whole_return_key(dispatch, CANONICAL, "f");
+        let result = flow_result_value(dispatch, key.clone());
+        let expr = host
+            .project_node_to_type_expr_for_test(result.return_type())
+            .expect("return node must project to TypeExpr");
+        let read = object_prop(&expr, "x");
+        let verter_type_expr::TypeExpr::Union(arms) = read else {
+            panic!("the unrecognized clause keeps the whole discriminant union, got {expr:?}");
+        };
+        for literal in ["a", "b", "c"] {
+            assert!(
+                arms.iter().any(|arm| matches!(
+                    arm,
+                    verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                        value
+                    )) if value.as_str() == literal
+                )),
+                "the `{literal}` arm survives an uncarried dispatch relation, got {expr:?}"
+            );
+        }
+        assert_eq!(
+            result.degradation(),
+            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing
+            )),
+            "the uncarried dispatch relation degrades to the typed guard-narrowing gap"
+        );
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0,
+            "an uncarried dispatch relation never warms"
+        );
+    });
+}
+
 /// An expression statement that is neither a modeled write nor a bare
 /// assertion call still EXECUTES: the discarded sequence operand of
 /// `(assertString(x), 0);` narrows `x` to `string` in the checker for the

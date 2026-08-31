@@ -2252,7 +2252,10 @@ fn for_loop_left_targets_in_scanned_positions_collect_writes() {
 /// `asserts` callee narrows what follows), and each case test takes the
 /// control-test discipline (a predicate callee CONTROLS the clause's
 /// narrowing). A bare-identifier test — including one aliasing a predicate
-/// call's result — carries no new call and stays silent.
+/// call's result — carries no new call, so the SCAN is silent on it; the
+/// dispatch relation rule is what gaps it
+/// (`switch_dispatch_relation_the_lowering_cannot_carry_takes_the_typed_gap`),
+/// because silence is not completeness evidence.
 #[test]
 fn switch_case_tests_and_discriminant_take_the_control_discipline() {
     let gapped = [
@@ -2280,6 +2283,11 @@ fn switch_case_tests_and_discriminant_take_the_control_discipline() {
             "a class-hidden write in a case test",
             "export {};\nfunction f(x: string | number) { switch (true) { case (class { static { x = \"s\"; } }, true): break; } return x }",
         ),
+        (
+            "a bare-identifier case test aliasing a predicate call's result",
+            "export {};\nfunction isString(x: unknown): x is string { return true }\n\
+             function f(x: string | number) { const c = isString(x); switch (true) { case c: break; } return x }",
+        ),
     ];
     for (case, source) in gapped {
         let node = content_for(source, "f");
@@ -2301,17 +2309,21 @@ fn switch_case_tests_and_discriminant_take_the_control_discipline() {
         1,
         "a provably non-narrowing case test is certified: {certified:?}"
     );
-    assert_eq!(guard_gap_count(&certified), 0, "{certified:?}");
+    // Certification and the dispatch relation rule are INDEPENDENT: the
+    // callee is proven non-narrowing (so its call is decided above),
+    // while the clause's RELATION — a `true` discriminant against a call
+    // test — is one this lowering carries nothing for, so the switch
+    // still takes the typed gap.
+    assert_eq!(
+        guard_gap_count(&certified),
+        1,
+        "a certified case call still leaves an uncarried dispatch relation: {certified:?}"
+    );
 
     let silent = [
         (
             "a literal case test",
             "export {};\nfunction f(x: string | number) { switch (x) { case 1: break; default: break; } return x }",
-        ),
-        (
-            "a bare-identifier case test aliasing a predicate call's result",
-            "export {};\nfunction isString(x: unknown): x is string { return true }\n\
-             function f(x: string | number) { const c = isString(x); switch (true) { case c: break; } return x }",
         ),
         (
             "a bare-identifier discriminant",
@@ -2326,6 +2338,561 @@ fn switch_case_tests_and_discriminant_take_the_control_discipline() {
             "{case}: no effect-bearing position mints no gap: {node:?}"
         );
     }
+}
+
+/// A `switch` dispatch narrows its discriminant per clause, and the ONLY
+/// relation this lowering carries to the evaluator is a represented
+/// discriminant against a LITERAL case test. Every other clause relation
+/// narrows in the checker with NO call and NO write to observe — a
+/// `typeof` relation under a `true` discriminant, a case test naming a
+/// literal-typed constant, a discriminant that is not a represented
+/// reference — so "the scan found nothing" is silence, not completeness.
+/// Each of those takes ONE typed gap ahead of the switch; the modeled
+/// pair and a test-free `default` stay silent.
+#[test]
+fn switch_dispatch_relation_the_lowering_cannot_carry_takes_the_typed_gap() {
+    let gapped = [
+        (
+            "a `typeof` relation under a literal discriminant",
+            "export {};\nfunction f(x: string | number) { switch (true) { case typeof x === \"string\": return x; } return 0 }",
+        ),
+        (
+            "a case test naming a literal-typed constant",
+            "export {};\nfunction f(x: 1 | 2) { const k: 1 = 1; switch (x) { case k: return x; } return 0 }",
+        ),
+        (
+            "an equality relation under a literal discriminant",
+            "export {};\nfunction f(x: \"a\" | \"b\") { switch (true) { case x === \"a\": return x; } return 0 }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the uncarried dispatch relation takes the typed gap: {node:?}"
+        );
+    }
+
+    let silent = [
+        (
+            "a represented discriminant against a literal case test",
+            "export {};\nfunction f(x: 1 | 2) { switch (x) { case 1: return x; } return 0 }",
+        ),
+        (
+            "a clause with no test at all",
+            "export {};\nfunction f(x: 1 | 2) { switch (x) { default: return x; } }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: the modeled dispatch mints no gap: {node:?}"
+        );
+    }
+}
+
+/// The guard vocabulary is SMALLER than the checker's narrowing, so a
+/// control test it cannot express must degrade rather than publish the
+/// unnarrowed union as a complete answer. The rule is positional: a test
+/// whose operands reach a REPRESENTED reference — a parameter or a
+/// modelable same-frame local, with or without a static member path —
+/// establishes a narrow at a slot this half models, so failing to express
+/// it is a missing fact, not an absent one. A test that reaches no
+/// represented slot narrows nothing this half could have applied and
+/// stays silent.
+///
+/// Every gapped row below narrows in the checker while carrying NO call
+/// and NO write for a scanner to observe.
+#[test]
+fn narrowing_control_forms_outside_the_guard_vocabulary_take_the_typed_gap() {
+    const IS_STRING: &str =
+        "export {};\nfunction isString(x: unknown): x is string { return true }\n";
+    let gapped = [
+        (
+            "a strict equality against a represented local",
+            "export {};\nfunction f(x: \"a\" | \"b\") { const k = \"a\"; if (x === k) { return x } return 0 }",
+        ),
+        (
+            "a strict equality between two parameters",
+            "export {};\nfunction f(x: \"a\" | \"b\", y: \"a\") { if (x === y) { return x } return 0 }",
+        ),
+        (
+            "a `typeof` compared against a represented local",
+            "export {};\nfunction f(x: string | number) { const k = \"string\"; if (typeof x === k) { return x } return 0 }",
+        ),
+        (
+            "a loose equality against a represented reference",
+            "export {};\nfunction f(x: string | null) { if (x == null) { return 0 } return x }",
+        ),
+        (
+            "an `in` test whose key is not a literal",
+            "export {};\nfunction f(x: { a: number } | { b: number }) { const k = \"a\"; if (k in x) { return x } return 0 }",
+        ),
+        (
+            "a nullish-coalescing test over a modeled operand",
+            "export {};\nfunction f(x: string | number, y: boolean) { if ((typeof x === \"string\") ?? y) { return x } return 0 }",
+        ),
+        (
+            "an optional chain proving its root non-nullish",
+            "export {};\nfunction f(x: { y?: number } | undefined) { if (x?.y) { return x } return 0 }",
+        ),
+        (
+            "a truthiness test of an assignment to a represented binding",
+            "export {};\nfunction f(x: string | number, y: string) { if ((x = y)) { return x } return 0 }",
+        ),
+        (
+            "a truthiness test whose value is a sequence's last operand",
+            "export {};\nfunction f(x: string | number) { if ((0, x)) { return x } return 0 }",
+        ),
+        (
+            "a truthiness test whose value is either branch of a conditional",
+            "export {};\nfunction f(x: string | number, b: boolean) { if (b ? x : 0) { return x } return 0 }",
+        ),
+        (
+            "a guard wrapped in a boolean comparison",
+            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") === true) { return x } return 0 }",
+        ),
+        (
+            "a guard wrapped in a negated boolean comparison",
+            "export {};\nfunction f(x: string | number) { if ((typeof x === \"string\") !== false) { return x } return 0 }",
+        ),
+        (
+            "a sequence whose value is a guard",
+            "export {};\nfunction f(x: string | number) { if ((0, typeof x === \"string\")) { return x } return 0 }",
+        ),
+        (
+            "a conditional whose branch is a guard",
+            "export {};\nfunction f(x: string | number, b: boolean) { if (b ? typeof x === \"string\" : false) { return x } return 0 }",
+        ),
+        (
+            "a coalescing test whose right operand is a guard",
+            "export {};\nfunction f(x: string | number) { if (null ?? (typeof x === \"string\")) { return x } return 0 }",
+        ),
+        (
+            "an equality over a computed discriminant access",
+            "export {};\nfunction f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { if (x[\"kind\"] === \"a\") { return x } return 0 }",
+        ),
+        (
+            "a truthiness test of an optional discriminant access",
+            "export {};\nfunction f(x: { kind?: string } | undefined) { if (x?.kind) { return x } return 0 }",
+        ),
+        (
+            "an `instanceof` over a computed access rooted at a parameter",
+            "export {};\nclass C {}\nfunction f(x: { v: C | number }, k: \"v\") { if (x[k] instanceof C) { return x } return 0 }",
+        ),
+        (
+            "an `instanceof` whose constructor is not provably a same-file class",
+            "import { C } from \"./c\";\nfunction f(x: unknown) { if (x instanceof C) { return x } return 0 }",
+        ),
+        (
+            "an `in` test with a computed key",
+            "export {};\nfunction f(x: { a: number } | { b: number }, k: string) { if (k in x) { return x } return 0 }",
+        ),
+        (
+            "a logical assignment used as a test",
+            "export {};\nfunction f(x: string | number, y: string) { if ((x ||= y)) { return x } return 0 }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the unexpressible narrow takes the typed gap: {node:?}"
+        );
+    }
+
+    // TypeScript preserves a narrowing FACT through a `const` alias, so
+    // the truthiness of the alias is not the whole narrowing: the alias
+    // re-establishes whatever its initializer decided. The initializer
+    // classification is syntactic — a call is included because a
+    // predicate callee is indistinguishable from any other at this
+    // altitude — and a `let` / `var` alias is NOT preserved by the
+    // checker, so it stays silent.
+    let alias_gapped = [
+        (
+            "a `const` alias of a predicate call",
+            "function f(x: string | number) { const c = isString(x); if (c) { return x } return 0 }",
+        ),
+        (
+            "a `const` alias of a `typeof` comparison",
+            "function f(x: string | number) { const c = typeof x === \"string\"; if (c) { return x } return 0 }",
+        ),
+        (
+            "a `const` alias of a negated comparison",
+            "function f(x: string | number) { const c = !(typeof x === \"number\"); if (c) { return x } return 0 }",
+        ),
+        (
+            "a `const` alias chained through another alias",
+            "function f(x: string | number) { const a = typeof x === \"string\"; const c = a; if (c) { return x } return 0 }",
+        ),
+        (
+            "a `const` alias of a discriminant read, tested by equality",
+            "function f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const kind = x.kind; if (kind === \"a\") { return x } return 0 }",
+        ),
+        (
+            "a destructured discriminant alias",
+            "function f(x: { kind: \"a\"; a: 1 } | { kind: \"b\"; b: 2 }) { const { kind } = x; if (kind === \"a\") { return x } return 0 }",
+        ),
+    ];
+    for (case, source) in alias_gapped {
+        let node = content_for(&format!("{IS_STRING}{source}"), "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the aliased narrowing fact takes the typed gap: {node:?}"
+        );
+    }
+
+    let silent = [
+        (
+            "a closed non-predicate callee in the test",
+            "export {};\nfunction check(x: unknown): boolean { return true }\n\
+             function f(x: string | number) { if (check(x)) { return x } return 0 }",
+        ),
+        (
+            "the modeled `typeof` guard",
+            "export {};\nfunction f(x: string | number) { if (typeof x === \"string\") { return x } return 0 }",
+        ),
+        (
+            "the modeled literal-equality guard",
+            "export {};\nfunction f(x: 1 | 2) { if (x === 1) { return x } return 0 }",
+        ),
+        (
+            "the modeled `in` guard",
+            "export {};\nfunction f(x: { a: number } | { b: number }) { if (\"a\" in x) { return x } return 0 }",
+        ),
+        (
+            "the modeled truthiness guard",
+            "export {};\nfunction f(x: string | undefined) { if (x) { return x } return 0 }",
+        ),
+        (
+            "a relational operator over a represented reference",
+            "export {};\nfunction f(x: number) { if (x > 1) { return x } return 0 }",
+        ),
+        (
+            "an equality between two unrepresented operands",
+            "export {};\nconst g = 1;\nfunction f(x: number) { if (g === 2) { return x } return 0 }",
+        ),
+        (
+            "an `in` test whose subject is not represented",
+            "export {};\nconst g: { a?: 1 } = {};\n\
+             function f(x: number) { const k = \"a\"; if (k in g) { return x } return 0 }",
+        ),
+        (
+            "a `let` alias of a comparison",
+            "export {};\nfunction f(x: string | number) { let c = typeof x === \"string\"; if (c) { return x } return 0 }",
+        ),
+        (
+            "a `const` alias of a non-narrowing initializer",
+            "export {};\nfunction f(x: number) { const c = x > 1; if (c) { return x } return 0 }",
+        ),
+        (
+            "a truthiness test behind a type assertion",
+            "export {};\nfunction f(x: string | number) { if (x as unknown) { return x } return 0 }",
+        ),
+        (
+            "an ANNOTATED `const` alias, which the checker does not inline",
+            "export {};\nfunction f(x: string | number) { const c: boolean = typeof x === \"string\"; if (c) { return x } return 0 }",
+        ),
+        (
+            "a computed access rooted at a name this frame does not bind",
+            "export {};\nconst g: Record<string, unknown> = {};\n\
+             function f(x: number, k: string) { if (g[k]) { return x } return 0 }",
+        ),
+        (
+            "an `instanceof` over a call result",
+            "export {};\nclass C {}\nfunction make(): unknown { return 1 }\n\
+             function f(x: number) { if (make() instanceof C) { return x } return 0 }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a form that narrows nothing this half models stays silent: {node:?}"
+        );
+    }
+
+    // The private-name BRAND check selects the subject's union arms by
+    // whether the class installed the field — the same selection the
+    // string-key `in` makes, and equally uncarried here. It only exists
+    // inside a class body, so it takes a member entry rather than the
+    // table's top-level function.
+    let memo = memo_for(
+        "export {};\n\
+         class C {\n\
+         \x20 #f = 1;\n\
+         \x20 static has(x: C | number) { if (#f in x) { return x } return 0 }\n\
+         }\n",
+    );
+    let index = memo.function_program_index();
+    let entry = member_entry_of(&index, "C", 1);
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
+    let brand = memo
+        .flow_slice_content(entry, selection, skeleton)
+        .expect("the class member slice content must build");
+    assert_eq!(
+        guard_gap_count(&brand),
+        1,
+        "a private-name brand check takes the typed gap: {brand:?}"
+    );
+}
+
+/// A bare CALL STATEMENT feeds no value, but two of its effects reach the
+/// demand and neither is visible at the call site: an `asserts` callee
+/// narrows every read that follows, and a callee that never returns ENDS
+/// the path, so the statements after it contribute nothing. The callee
+/// must therefore be PROVEN — a closed same-file declaration whose
+/// authored return is not an assertion signature and which provably
+/// completes. Everything else degrades; a proven `never` callee is
+/// MODELED as the terminator it is.
+#[test]
+fn statement_position_calls_are_proven_or_degrade() {
+    let gapped = [
+        (
+            "an imported callee",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { touch(); return x }",
+        ),
+        (
+            "an EXPORTED same-file callee, whose signature set this file cannot enumerate",
+            "export {};\nexport function touch(): void {}\n\
+             function f(x: string | number) { touch(); return x }",
+        ),
+        (
+            "a member callee",
+            "export {};\nconst api = { touch(): void {} };\n\
+             function f(x: string | number) { api.touch(); return x }",
+        ),
+        (
+            "a closed callee that may never complete",
+            "export {};\nfunction touch() { throw new Error() }\n\
+             function f(x: string | number) { touch(); return x }",
+        ),
+        (
+            "a closed `asserts` callee whose subject this half cannot name",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { assertString(x.toString()); return x }",
+        ),
+    ];
+    for (case, source) in gapped {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: an unproven statement call degrades: {node:?}"
+        );
+    }
+
+    let silent = [
+        (
+            "a closed callee with an authored non-`never` return",
+            "export {};\nfunction touch(): void {}\n\
+             function f(x: string | number) { touch(); return x }",
+        ),
+        (
+            "a closed callee with an EMPTY body",
+            "export {};\nfunction touch() {}\n\
+             function f(x: string | number) { touch(); return x }",
+        ),
+        (
+            "a closed callee carrying a return in its own frame",
+            "export {};\nfunction touch() { const n = 1; return n }\n\
+             function f(x: string | number) { touch(); return x }",
+        ),
+        (
+            "a closed same-file assertion this half APPLIES",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { assertString(x); return x }",
+        ),
+    ];
+    for (case, source) in silent {
+        let node = content_for(source, "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            0,
+            "{case}: a proven statement call mints no gap: {node:?}"
+        );
+    }
+
+    // A closed callee whose authored return is `never` is the terminator
+    // it says it is: the path ends at the statement and the trailing
+    // return is unreachable, exactly as the checker reads it.
+    let terminated = content_for(
+        "export {};\nfunction fail(): never { throw new Error() }\n\
+         function f(x: string | number) { if (typeof x !== \"string\") { fail(); } return x }",
+        "f",
+    );
+    let SliceStatement::If { consequent, .. } = &terminated.body.statements[0] else {
+        panic!("the body must open with the guarded arm: {terminated:?}");
+    };
+    assert_eq!(
+        consequent.statements.as_ref(),
+        &[SliceStatement::Throw],
+        "a proven `never` call lowers as the terminator: {terminated:?}"
+    );
+    assert!(
+        !consequent.can_fall_through,
+        "the arm cannot fall through past a callee that never returns: {terminated:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&terminated),
+        0,
+        "a proven `never` callee is MODELED, not degraded: {terminated:?}"
+    );
+}
+
+/// A closure created inside a GUARDED arm captures the guarded reading of
+/// the guard's subject, which the evaluator cannot reproduce at the
+/// capture's own evaluation — so the nested value takes the typed
+/// closure-capture gap. The `if` statement and the ternary are two
+/// spellings of ONE guard, so they must reach that rail identically: an
+/// arm-local active guard set that only the statement spelling populates
+/// makes the same source degrade under `if` and seal clean under `?:`.
+#[test]
+fn ternary_arms_reach_the_closure_capture_rail_like_the_if_arms() {
+    const PREFIX: &str = "export {};\n\
+         type T = { length: number };\n\
+         function isT(x: any): x is T { return true }\n";
+    let statement = content_for(
+        &format!("{PREFIX}function f(x: any) {{ if (isT(x)) {{ return (() => x)() }} return 0 }}"),
+        "f",
+    );
+    let ternary = content_for(
+        &format!("{PREFIX}function f(x: any) {{ return isT(x) ? (() => x)() : 0 }}"),
+        "f",
+    );
+    let capture_gaps = |node: &SliceContent| {
+        let mut found = false;
+        fn walk(region: &SliceRegion, found: &mut bool) {
+            for statement in region.statements.iter() {
+                match statement {
+                    SliceStatement::Return {
+                        argument: Some(argument),
+                        ..
+                    } => scan_expr(argument, found),
+                    SliceStatement::If {
+                        consequent,
+                        alternate,
+                        ..
+                    } => {
+                        walk(consequent, found);
+                        if let Some(alternate) = alternate {
+                            walk(alternate, found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn scan_expr(expr: &SliceExpr, found: &mut bool) {
+            match expr {
+                SliceExpr::NestedFunctionValue { gap, .. } => {
+                    if gap.is_some() {
+                        *found = true;
+                    }
+                }
+                SliceExpr::Union { arms, .. } => {
+                    for arm in arms.iter() {
+                        scan_expr(arm, found);
+                    }
+                }
+                SliceExpr::Call(SliceCall::Nested(nested), _) => scan_expr(nested, found),
+                _ => {}
+            }
+        }
+        walk(&node.body, &mut found);
+        found
+    };
+    assert!(
+        capture_gaps(&statement),
+        "the `if` arm's capture takes the closure-capture gap: {statement:?}"
+    );
+    assert!(
+        capture_gaps(&ternary),
+        "the ternary arm's capture takes the SAME rail: {ternary:?}"
+    );
+
+    // A `switch` clause body evaluates under the dispatch narrow of its
+    // discriminant, so a closure created there takes the same rail.
+    let dispatch = content_for(
+        "export {};\n\
+         function f(x: string | number) { switch (x) { case \"a\": return (() => x)(); } return 0 }",
+        "f",
+    );
+    let mut found = false;
+    fn scan_region(region: &SliceRegion, found: &mut bool) {
+        for statement in region.statements.iter() {
+            match statement {
+                SliceStatement::Switch { cases, .. } => {
+                    for case in cases.iter() {
+                        scan_region(&case.region, found);
+                    }
+                }
+                SliceStatement::Return {
+                    argument: Some(SliceExpr::Call(SliceCall::Nested(nested), _)),
+                    ..
+                } => {
+                    if let SliceExpr::NestedFunctionValue { gap, .. } = nested.as_ref() {
+                        if gap.is_some() {
+                            *found = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    scan_region(&dispatch.body, &mut found);
+    assert!(
+        found,
+        "the switch clause's capture takes the SAME rail: {dispatch:?}"
+    );
+}
+
+/// A destructured parameter element is a CORRELATED projection of its
+/// parameter object: a relation over the element selects the object's
+/// union arms and retypes the element's SIBLINGS. This half narrows
+/// neither the object nor the siblings, so the relation degrades rather
+/// than publishing a sibling's whole union as a complete answer.
+#[test]
+fn correlated_destructured_parameter_relations_take_the_typed_gap() {
+    const PROPS: &str = "export {};\n\
+         type P = { kind: \"a\"; payload: number } | { kind: \"b\"; payload: string };\n";
+    for (case, body) in [
+        (
+            "an equality over a destructured discriminant",
+            "function f({ kind, payload }: P) { if (kind === \"a\") { return payload } return 0 }",
+        ),
+        (
+            "a truthiness test over a destructured element",
+            "function f({ kind, payload }: P) { if (kind) { return payload } return 0 }",
+        ),
+    ] {
+        let node = content_for(&format!("{PROPS}{body}"), "f");
+        assert_eq!(
+            guard_gap_count(&node),
+            1,
+            "{case}: the correlated relation takes the typed gap: {node:?}"
+        );
+    }
+
+    // A SIMPLE parameter carries no sibling correlation: its guard is
+    // modeled and mints no gap.
+    let simple = content_for(
+        "export {};\nfunction f(kind: \"a\" | \"b\", payload: number) { if (kind === \"a\") { return payload } return 0 }",
+        "f",
+    );
+    assert_eq!(
+        guard_gap_count(&simple),
+        0,
+        "a simple parameter relation is modeled: {simple:?}"
+    );
 }
 
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
@@ -2949,8 +3516,8 @@ fn locator_miss_is_typed_none() {
 /// and a class subtree hides a write from the skeleton entirely. Each
 /// takes the fail-closed scan: an effect that could narrow a frame binding
 /// flags the typed `GuardNarrowing` gap. Ordinary value-neutral statements
-/// — a bare or member call whose arguments carry no effect, a visible
-/// write the unapplied-write ledger already covers — stay silent.
+/// — a call whose callee is PROVEN and whose arguments carry no effect, a
+/// visible write the unapplied-write ledger already covers — stay silent.
 #[test]
 fn unmodeled_expression_statement_effects_take_the_typed_gap() {
     let gapped = [
@@ -2994,6 +3561,20 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
             "a class-hidden write in an expression statement",
             "export {};\nfunction f(x: string | number) { void (class { static { x = \"s\"; } }); return x }",
         ),
+        // The statement's OWN callee is unproven in both of these: an
+        // imported binding and a member callee each have a
+        // checker-visible signature set this file cannot enumerate, so
+        // either could assert about a frame binding or never return.
+        (
+            "an imported callee in statement position",
+            "import { touch } from \"./touch\";\n\
+             function f(x: string | number) { touch(); return x }",
+        ),
+        (
+            "a member callee in statement position",
+            "export {};\ndeclare const console: { log(x: unknown): void };\n\
+             function f(x: string | number) { console.log(x); return x }",
+        ),
     ];
     for (case, source) in gapped {
         let node = content_for(source, "f");
@@ -3022,14 +3603,9 @@ fn unmodeled_expression_statement_effects_take_the_typed_gap() {
 
     let silent = [
         (
-            "a bare call with no frame-reaching effect",
-            "import { touch } from \"./touch\";\n\
-             function f(x: string | number) { touch(); return x }",
-        ),
-        (
-            "a member call whose argument carries no effect",
-            "export {};\ndeclare const console: { log(x: unknown): void };\n\
-             function f(x: string | number) { console.log(x); return x }",
+            "a PROVEN callee whose argument carries no effect",
+            "export {};\nfunction touch(x: unknown): void {}\n\
+             function f(x: string | number) { touch(x); return x }",
         ),
         (
             "a visible write the ledger already covers",

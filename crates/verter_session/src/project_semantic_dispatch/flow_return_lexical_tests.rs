@@ -6079,6 +6079,14 @@ const R1_CANONICAL: &str = "/ws/flow-r1fix.ts";
 const R1_FIXTURE: &str = r#"
 export declare function mayThrow(): void;
 
+// The MODULE-LOCAL twin. An exported binding is augmentable, so its
+// checker-visible signature set is not enumerable from this file and a
+// statement-position call to it is unproven — it could assert about a
+// frame binding, and it could diverge. The unexported ambient
+// declaration IS enumerable: one declaration, an authored `void` return,
+// no export spelling to augment through.
+declare function mayThrowClosed(): void;
+
 // The predicate helpers stay UNEXPORTED: the same-file predicate scan
 // reads direct function declarations, and an `export` wrapper is a
 // different statement shape (the corpus's scripts, spliced into a
@@ -6156,11 +6164,23 @@ export function r1SwitchCaseNarrows(u: A | B) {
 
 export function r1ThrowPointJoin(s: string) {
   let x: string | number = 0;
+  try { x = s; mayThrowClosed(); x = 0 } catch { return x }
+  return x
+}
+
+export function r1ThrowPointJoinOpenCallee(s: string) {
+  let x: string | number = 0;
   try { x = s; mayThrow(); x = 0 } catch { return x }
   return x
 }
 
 export function r1FinallyWrite() {
+  let x: string | number | boolean = true;
+  try { mayThrowClosed() } finally { x = 1 }
+  return x
+}
+
+export function r1FinallyWriteOpenCallee() {
   let x: string | number | boolean = true;
   try { mayThrow() } finally { x = 1 }
   return x

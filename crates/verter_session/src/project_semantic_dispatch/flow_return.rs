@@ -7484,8 +7484,22 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                     let return_base = self.return_edges.len();
                     let throw_base = self.throw_points.len();
                     let shadow_base = self.scope_shadows.len();
-                    let tests: Vec<crate::flow_slice_content::SliceGuardLiteral> =
-                        cases.iter().filter_map(|case| case.test.clone()).collect();
+                    // The remainder the DEFAULT edge subtracts is built
+                    // from the CARRIED relations only. An unrecognized
+                    // clause contributes nothing to it, which leaves the
+                    // remainder a SUPERSET of the true default set — the
+                    // sound direction — and never lets that clause's own
+                    // values disappear from another clause's edge.
+                    let tests: Vec<crate::flow_slice_content::SliceGuardLiteral> = cases
+                        .iter()
+                        .filter_map(|case| match &case.test {
+                            crate::flow_slice_content::SliceSwitchTest::Literal(literal) => {
+                                Some(literal.clone())
+                            }
+                            crate::flow_slice_content::SliceSwitchTest::Default
+                            | crate::flow_slice_content::SliceSwitchTest::Unmodeled => None,
+                        })
+                        .collect();
                     // Exhaustiveness is a resolver question: the lowering
                     // knows only `has_default`, so the no-matching-case
                     // path dies here, where the discriminant's arms and
@@ -7507,24 +7521,35 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                         if let Some(subject) = discriminant {
                             self.restore_layer_state(entry.clone());
                             match &case.test {
+                                // An unrecognized relation: the clause is
+                                // reachable for discriminant values this
+                                // half cannot enumerate, so its dispatch
+                                // edge carries NO narrow. It must never
+                                // take the DEFAULT edge — the remainder is
+                                // not this clause's reaching set, and
+                                // baking it in would publish a type the
+                                // clause was never proven to see.
+                                crate::flow_slice_content::SliceSwitchTest::Unmodeled => {}
                                 // The dispatch edge: the discriminant IS
                                 // this test.
-                                Some(test) => match self.narrow_eq_literal(subject, test, false) {
-                                    GuardNarrowing::Narrowed(fact_subject, node) => {
-                                        Self::bake_narrow_into_state(
-                                            &mut dispatch,
-                                            &fact_subject,
-                                            node,
-                                        );
+                                crate::flow_slice_content::SliceSwitchTest::Literal(test) => {
+                                    match self.narrow_eq_literal(subject, test, false) {
+                                        GuardNarrowing::Narrowed(fact_subject, node) => {
+                                            Self::bake_narrow_into_state(
+                                                &mut dispatch,
+                                                &fact_subject,
+                                                node,
+                                            );
+                                        }
+                                        GuardNarrowing::Impossible => {
+                                            dead_dispatch = true;
+                                        }
+                                        GuardNarrowing::Unchanged => {}
                                     }
-                                    GuardNarrowing::Impossible => {
-                                        dead_dispatch = true;
-                                    }
-                                    GuardNarrowing::Unchanged => {}
-                                },
+                                }
                                 // The default clause's dispatch edge: the
-                                // discriminant minus every test.
-                                None => {
+                                // discriminant minus every carried test.
+                                crate::flow_slice_content::SliceSwitchTest::Default => {
                                     if let Some((remainder, total)) =
                                         self.switch_discriminant_remainder(subject, &tests)
                                     {
