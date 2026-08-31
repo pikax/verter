@@ -94,6 +94,14 @@ const LAYER_7_HARNESSES: &[&str] = &[
     // production [dependencies] is empty and whose `verter_session` edge is
     // [dev-dependencies]-only — never depended ON by anything.
     "verter_shipped_cfg_contract",
+    // A non-shipping Node addon a `verter_napi` integration test loads to
+    // drive real JS values across the native boundary. It is excluded from
+    // `verter_napi`'s published package and is never built by the release
+    // `napi build`; its single incoming edge is that crate's
+    // [dev-dependencies], which is outside this test's tracked production
+    // closure. It exists so the boundary's own behaviour can be observed
+    // rather than asserted from a Rust model of it.
+    "verter_napi_request_fixture",
 ];
 
 /// Build tooling, not a layer. Checked by

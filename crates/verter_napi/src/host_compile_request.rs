@@ -13,13 +13,13 @@
 //! owns, so unknown-key, cross-framework, closed-vocabulary and
 //! missing-field refusals are the schema's own and cannot drift from it.
 //!
-//! One JS-side gap survives that, and it is the same gap the decode
-//! function documents below: an own property whose value is `undefined` is
-//! dropped while the JS object is read into a `Value`, so it never reaches
-//! serde at all. `{ framework: "vue", …, runes: undefined }` therefore
-//! decodes clean rather than refusing on the cross-framework key. What is
-//! refused is every key a caller states with a value; a key stated as
-//! `undefined` is indistinguishable from one never written.
+//! The JS object is materialised by
+//! [`crate::materialize_js_value`], which puts every own enumerable key of
+//! the payload in front of the schema whatever it carries — a key stated
+//! as `undefined` included. The schema's closedness therefore holds for
+//! the whole payload a caller wrote, not only for the keys they gave a
+//! defined value. Own keys are the whole payload: an inherited enumerable
+//! key is not part of what a caller wrote and does not reach the schema.
 //!
 //! ## What this layer owns, and what it deliberately does not
 //!
@@ -44,6 +44,8 @@ use napi::bindgen_prelude::{FromNapiValue, TypeName, ValidateNapiValue};
 use napi::{Error, Result, Status, ValueType};
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::js_value_graph::{materialize_js_value, NapiValueGraph};
 
 use verter_ffi::types::{
     FfiAnalysisProductRequest, FfiHostCompileIdentity, FfiHostCompileRequest, FfiIdeProductRequest,
@@ -94,11 +96,20 @@ pub enum NapiHostCompileRequest {
 /// slot: it stays absent, and what an absent slot means is the canonical
 /// request's decision.
 ///
-/// A JS property whose value is `undefined` is not carried into the
-/// decoded value at all, so it reads as absent rather than as `null`. That
-/// holds for an unknown key too: an `undefined`-valued key is dropped
-/// before serde can refuse it, which is the one refusal the closed schema
-/// cannot reach from here.
+/// A property stated as `undefined` arrives here as `null`: a known
+/// optional slot still reads as absent, and an unknown or cross-framework
+/// key is still present for the schema to refuse by name.
+///
+/// Which refusals name their slot is serde's own division and is not
+/// uniform. An unknown field, an unknown tag and a missing field are
+/// named in the message. A slot given the wrong KIND of value is not:
+/// `{ ssr: 5 }` and `{ ssr: undefined }` both report `invalid type: …,
+/// expected a boolean` with no field name, because the outermost
+/// `#[serde(tag = "framework")]` buffers the payload into serde's private
+/// content representation before the variant is deserialised, and no
+/// deserializer-side path tracker can see through that buffer. Closing
+/// that gap means changing how the framework tag is dispatched, which is
+/// a change to this decode's shape rather than to its message.
 pub fn decode_host_compile_request(value: Value) -> Result<NapiHostCompileRequest> {
     serde_json::from_value(value).map_err(|error| Error::new(Status::InvalidArg, error.to_string()))
 }
@@ -109,9 +120,10 @@ impl FromNapiValue for NapiHostCompileRequest {
         napi_val: napi::sys::napi_value,
     ) -> Result<Self> {
         // SAFETY: the caller supplies a live env/value pair from napi-rs's
-        // own argument extraction, which is exactly the contract
-        // `Value::from_napi_value` expects.
-        let value = unsafe { Value::from_napi_value(env, napi_val)? };
+        // own argument extraction, which is the contract `NapiValueGraph`
+        // requires of the environment it reads.
+        let graph = unsafe { NapiValueGraph::new(env) };
+        let value = materialize_js_value(&graph, &napi_val)?;
         decode_host_compile_request(value)
     }
 }
