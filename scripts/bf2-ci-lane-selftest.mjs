@@ -127,6 +127,7 @@ test("ci.yml keeps BF2 parallel, required, pinned/offline, and off the Rust core
   const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
   const rustFilter = yamlPathFilter(workflow, "rust");
   const jsFilter = yamlPathFilter(workflow, "js");
+  const rustBuildJob = yamlJob(workflow, "rust-test-build");
   const rustJob = yamlJob(workflow, "rust-test");
   const bf2Job = yamlJob(workflow, "bf2-authoritative");
   const successJob = yamlJob(workflow, "ci-success");
@@ -160,7 +161,12 @@ test("ci.yml keeps BF2 parallel, required, pinned/offline, and off the Rust core
     /--(?:build-)?jobs\b|-j\s*\d|--test-threads\b|max-threads/,
     "the core Rust CI lane must use the runner's full Cargo and Nextest capacity",
   );
-  assert.match(rustJob, /SCCACHE_GHA_ENABLED:\s*"true"/);
+  assert.doesNotMatch(
+    rustBuildJob,
+    /--(?:build-)?jobs\b|-j\s*\d|--test-threads\b|max-threads/,
+    "the shared Rust archive build must use the runner's full Cargo capacity",
+  );
+  assert.match(rustBuildJob, /SCCACHE_GHA_ENABLED:\s*"true"/);
 
   const coreSource = readFileSync(join(REPO_ROOT, "scripts", "gate.mjs"), "utf8");
   const bf2Source = readFileSync(join(REPO_ROOT, "scripts", "bf2-authoritative.mjs"), "utf8");

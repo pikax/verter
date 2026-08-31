@@ -279,7 +279,8 @@ producer command.
   (pnpm orders multi-filter recursive scripts topologically). NOT `pnpm build` (native + LSP + wasm + every
   TS package) and NOT `--filter @verter/typescript-plugin...` — the trailing ellipsis selects the package
   AND ITS DEPENDENCIES, dragging in `@verter/native`'s `napi build --release`. This is also the step
-  `ci.yml`'s `rust-test` and `release.yml`'s `test` job run before the gate.
+  `ci.yml`'s `rust-tsserver-live` and `release.yml`'s `test` job run before the
+  tsserver-bearing test selection.
 - **It never builds for you and never skips.** Building implicitly would make the verdict depend on a
   mutation the gate performed; skipping would restore the silent pass — with no install at all the affected
   tests SKIP and the gate goes green having proven nothing, the "unexpected prerequisite skips" half of
