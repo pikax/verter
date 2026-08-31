@@ -6460,6 +6460,38 @@ function f(x: string | number) {
     });
 }
 
+/// A semantically complete `any` leaf answer (`as any`) is warm-admissible,
+/// but the leaf still RUNS: a class static block executes at class
+/// evaluation, so the assertion inside `(class { static { assertString(x);
+/// } } as any)` narrows `x` to `string` for every read that follows in the
+/// checker. Answering `SemanticAny` before the leaf call scanner ran
+/// skipped the same-frame discipline — no gap, no call obligation (the
+/// skeleton mints none for a class body) — and the `{ a: any, x }` return
+/// sealed complete and warm with `x` unnarrowed. The leaf takes the same
+/// per-callee certification: the assertion is unprovable, so the later
+/// read of `x` keeps the unnarrowed `string | number` join, the demand
+/// carries the typed `GuardNarrowing` gap, and the family slot holds zero
+/// candidates.
+#[test]
+fn semantic_any_leaf_static_block_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/semantic-any-static-block/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const a = (class { static { assertString(x); } } as any);
+  return { a, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
 /// Assert that a dropped same-frame narrowing never publishes warm for a
 /// `{ y, x }` return: the later read of `x` keeps BOTH arms of the
 /// unnarrowed `string | number` parameter, the demand carries the typed
@@ -6650,6 +6682,32 @@ function assertString(x: unknown): asserts x is string {}
 
 function f(x: string | number) {
   const y = (class { static { (assertString(x), 0); } } as object);
+  return { y, x };
+}
+"#;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_ts(&host, CANONICAL, FIXTURE);
+    with_dispatch(&host, |dispatch| {
+        assert_object_read_gaps_unwarmed(dispatch, &host, CANONICAL, "f");
+    });
+}
+
+/// A STATIC property initializer also runs at class evaluation, so an
+/// assertion there narrows what follows exactly as a static block's
+/// would. The initializer takes the same enclosing-frame discipline: the
+/// later read of `x` keeps the unnarrowed `string | number` join, the
+/// demand carries the typed `GuardNarrowing` gap, and the family slot
+/// holds zero candidates.
+#[test]
+fn class_static_property_initializer_assertion_never_certifies_decided_above() {
+    const CANONICAL: &str = "/ws/static-property-assertion/main.ts";
+    const FIXTURE: &str = r#"
+export {};
+
+function assertString(x: unknown): asserts x is string {}
+
+function f(x: string | number) {
+  const y = (class { static p = (assertString(x), 0); } as object);
   return { y, x };
 }
 "#;

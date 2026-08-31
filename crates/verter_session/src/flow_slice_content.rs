@@ -5715,7 +5715,17 @@ impl Lowerer<'_> {
             {
                 SliceExpr::UnreducedCallValue
             }
-            LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::SemanticAny,
+            // A semantically complete `any` is WARM-ADMISSIBLE — so it is
+            // exactly the arm that cannot skip the leaf call scanner: the
+            // leaf still RUNS (a class static block inside it executes at
+            // class evaluation), and an `asserts` callee there narrows
+            // what follows in the checker. The calls take the same
+            // per-callee certification the modelled arms apply; an
+            // unprovable one flags the enclosing statement's typed gap.
+            LeafLowering::Free(ty) if is_any(&ty) => {
+                self.record_decided_above_calls(expr);
+                SliceExpr::SemanticAny
+            }
             LeafLowering::Free(ty) => {
                 self.record_decided_above_calls(expr);
                 SliceExpr::Type(GatedLeaf(ty))
@@ -6301,6 +6311,19 @@ impl<'a> Visit<'a> for LeafCallScanner {
         self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
         walk::walk_static_block(self, it);
         self.nested_frame_nesting += 1;
+    }
+    fn visit_property_definition(&mut self, it: &oxc_ast::ast::PropertyDefinition<'a>) {
+        // A STATIC property initializer also runs at class evaluation —
+        // the same enclosing-frame discipline as a static block. An
+        // instance property initializer is deferred to construction and
+        // keeps the body guard.
+        if it.r#static && it.value.is_some() {
+            self.nested_frame_nesting = self.nested_frame_nesting.saturating_sub(1);
+            walk::walk_property_definition(self, it);
+            self.nested_frame_nesting += 1;
+        } else {
+            walk::walk_property_definition(self, it);
+        }
     }
     fn visit_class(&mut self, it: &oxc_ast::ast::Class<'a>) {
         // Decorators and the `super_class` heritage expression evaluate in

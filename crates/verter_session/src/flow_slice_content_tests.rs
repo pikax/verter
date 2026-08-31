@@ -1549,6 +1549,11 @@ fn class_static_block_calls_take_enclosing_frame_discipline() {
             "import { touch } from \"./touch\";\n\
              function f(x: string | number) { return (class { static { touch(); } } as object) }",
         ),
+        (
+            "a closed same-file assertion in a static property initializer",
+            "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+             function f(x: string | number) { return (class { static p = (assertString(x), 0); } as object) }",
+        ),
     ];
     for (case, source) in refused {
         let node = content_for(source, "f");
@@ -1599,6 +1604,53 @@ fn class_static_block_calls_take_enclosing_frame_discipline() {
             "{case}: a deferred body mints no gap: {node:?}"
         );
     }
+}
+
+/// A semantically complete `any` leaf answer (`as any`) is warm-admissible
+/// by design — but the leaf still RUNS, and a class static block executes
+/// at class evaluation, so the assertion in `(class { static {
+/// assertString(x); } } as any)` narrows `x` to `string` for every read
+/// that follows in the checker. Answering `SemanticAny` BEFORE the leaf
+/// call scanner ran skipped the same-frame discipline entirely: the
+/// skeleton mints no call obligation for a class body, so nothing
+/// certified the call and nothing gapped — the enclosing `{ a, x }` could
+/// seal warm with `x` unnarrowed. The `SemanticAny` arm takes the SAME
+/// per-callee certification every other leaf arm applies: an unprovable
+/// static-block call flags the statement's typed gap and is never
+/// certified, while a plain call-free `as any` leaf stays clean.
+#[test]
+fn semantic_any_leaf_still_scans_immediate_static_block_calls() {
+    let node = content_for(
+        "export {};\nfunction assertString(x: unknown): asserts x is string {}\n\
+         function f(x: string | number) { const a = (class { static { assertString(x); } } as any); return { a, x } }",
+        "f",
+    );
+    assert!(
+        node.decided_above_call_spans.is_empty(),
+        "an unprovable static-block call under `as any` is never certified: {node:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&node),
+        1,
+        "the statement takes the typed gap: {node:?}"
+    );
+
+    // Positive control: a call-free `as any` leaf certifies nothing and
+    // mints no gap.
+    let clean = content_for(
+        "export {};\n\
+         function g(x: string | number) { const a = ({ p: 1 } as any); return { a, x } }",
+        "g",
+    );
+    assert!(
+        clean.decided_above_call_spans.is_empty(),
+        "a call-free leaf certifies nothing: {clean:?}"
+    );
+    assert_eq!(
+        guard_gap_count(&clean),
+        0,
+        "a call-free `as any` leaf stays clean: {clean:?}"
+    );
 }
 
 /// @ai-generated - return-bearing loop is typed-unsupported and stops the region
