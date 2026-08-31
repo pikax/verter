@@ -72,6 +72,9 @@ describe("known product-gap manifest", () => {
     expect(svelteTsserver["svelte.matrix.directives.if.hover"]).toBeUndefined();
 
     const vueTsgo = knownProductGapsForRoute("vue-parity", "tsgo");
+    expect(vueTsgo["depth.rename.script-and-markup.min-two-edits"]).toBe(
+      "ISSUE-depth-rename-apply",
+    );
     expect(vueTsgo["generic.infer.good-clean-no-type-args"]).toBe("ISSUE-vue-generic-infer-good");
     expect(vueTsgo["generic.defaulted-t-string.no-annotation"]).toBe("ISSUE-vue-generic-default");
     expect(vueTsgo["vue.matrix.generic-infer.clean"]).toBe("ISSUE-vue-matrix-generic-infer-clean");

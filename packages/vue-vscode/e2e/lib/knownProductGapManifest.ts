@@ -279,6 +279,7 @@ const KNOWN_PRODUCT_GAPS_BY_ROUTE: Readonly<Record<string, ProductGapManifest>> 
     "confidence.cross-file.wrong-prop-type": "ISSUE-vue-confidence-cross-file",
     "confidence.definition.never-virtual-for-daily-and-strict": "ISSUE-vue-confidence-no-virtual",
     "confidence.generic-list.wrong-selected-id": "ISSUE-vue-confidence-generic",
+    "depth.rename.script-and-markup.min-two-edits": "ISSUE-depth-rename-apply",
     "generic.defaulted-t-string.no-annotation": "ISSUE-vue-generic-default",
     "generic.event-handler.infers-from-options": "ISSUE-vue-generic-event-infer",
     "generic.expect-error.structural": "ISSUE-vue-generic-expect-error",

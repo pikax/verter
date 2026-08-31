@@ -2039,11 +2039,11 @@ export function reduceGateLaneReceipts({
   const shippedComplete = shippedCfgLaneEnabled
     ? Boolean(
         shipped?.check?.status === "ok" &&
-          shipped?.contract?.status === "ok" &&
-          shipped?.contract?.parseable &&
-          shipped?.contract?.complete &&
-          shipped?.parity?.complete &&
-          shipped?.parity?.matches,
+        shipped?.contract?.status === "ok" &&
+        shipped?.contract?.parseable &&
+        shipped?.contract?.complete &&
+        shipped?.parity?.complete &&
+        shipped?.parity?.matches,
       )
     : true;
   const coverageComplete = surfaceComplete && shippedComplete;
@@ -2160,6 +2160,7 @@ export const TRYBUILD_EXCLUDED_SUITES = Object.freeze([
   { package: "verter_compiler", modulePrefix: "cases::pending_nav_request_compile_fail::" },
   { package: "verter_compiler", modulePrefix: "cases::registered_geometry_compile_fail::" },
   { package: "verter_compiler", modulePrefix: "cases::segmented_overwrite_compile_fail::" },
+  { package: "verter_compiler", modulePrefix: "cases::verified_plain_css_compile_fail::" },
   { package: "verter_audit", modulePrefix: "cases::attribution_compile_fail::" },
   { package: "verter_type_runtime", modulePrefix: "cases::compile_fail::" },
 ]);

@@ -600,11 +600,21 @@ export async function importOracleModule(framework, specifier) {
   const loaderDir = path.join(installDir, ".bf2-loader");
   mkdirSync(loaderDir, { recursive: true });
   const digest = sha256Text(specifier).slice(0, 16);
-  const importerPath = path.join(loaderDir, `ns-${digest}.mjs`);
+  // The install is shared by every concurrent harness process. A stable
+  // importer name lets one process truncate the file while another process
+  // is importing it, yielding an empty namespace (for example, an undefined
+  // Vue `createSSRApp` or `renderToString`). Give every load its own file;
+  // the resolved package module still comes from Node's canonical cache and
+  // therefore shares the instance graph with compiled oracle scratch files.
+  const importerPath = path.join(loaderDir, `ns-${digest}-${process.pid}-${randomUUID()}.mjs`);
   writeFileSync(importerPath, `export * as ns from ${JSON.stringify(specifier)};\n`, "utf8");
-  const namespace = (await import(pathToFileURL(importerPath).href)).ns;
-  importedNamespaces.set(key, namespace);
-  return namespace;
+  try {
+    const namespace = (await import(pathToFileURL(importerPath).href)).ns;
+    importedNamespaces.set(key, namespace);
+    return namespace;
+  } finally {
+    rmSync(importerPath, { force: true });
+  }
 }
 
 /**
