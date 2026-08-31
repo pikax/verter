@@ -98,10 +98,9 @@
 //! shape) per the Stub-Prevention contract.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use quote::ToTokens;
-use walkdir::WalkDir;
 
 // Reuse the ONE rigorous parsed cfg classifier (EXACT canonical-shape
 // recogniser) from the sibling guard module rather than forking a second,
@@ -110,69 +109,15 @@ use walkdir::WalkDir;
 // classifiers diverge; this keeps the fence-protecting guards on a single
 // discriminating detector.
 use super::handle_capable_consumer_guards::cfg_is_exactly_test_or_test_support;
-
-// Relocated from `verter_session` (gate-performance step 2): this guard scans
-// verter_session's OWN production `src/` and reads specific verter_session
-// production files by relative path (`OWNER_REL`/`RAISE_REL`), so — unlike a
-// same-crate test where `CARGO_MANIFEST_DIR` IS the scanned crate —
-// `crate_root()` must explicitly re-anchor to `crates/verter_session` rather
-// than to this crate's own manifest dir. The ONE exception is this file's own
-// self-read (`own_src` below), which must resolve against THIS crate's own
-// manifest dir instead — see `own_crate_root()`.
-fn crate_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("crate is <ws>/crates/verter_source_policy_gate")
-        .join("crates/verter_session")
-}
-
-/// THIS crate's own manifest dir — distinct from `crate_root()` (the
-/// verter_session dir being scanned). Used only to re-read this file's own
-/// source for the self-referential doc/list-parity checks below.
-fn own_crate_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
+use super::source_corpus::{
+    session_production_source, session_production_src_files as production_src_files,
+    workspace_crate_production_src_files, workspace_crate_source_if_present,
+};
 
 fn read_rel(rel: &str) -> String {
-    let path = crate_root().join(rel);
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
-}
-
-fn is_test_file(rel: &str) -> bool {
-    rel.ends_with("_tests.rs")
-        || rel.ends_with("/tests.rs")
-        || rel.contains("/tests/")
-        || rel.contains("/tests_")
-}
-
-/// Production `.rs` files under `crates/verter_session/src`, relative to the
-/// crate root, test fixtures excluded.
-fn production_src_files() -> Vec<(String, String)> {
-    let src_root = crate_root().join("src");
-    let mut out = Vec::new();
-    for entry in WalkDir::new(&src_root) {
-        let entry = entry.expect("walkdir entry");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(crate_root())
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if is_test_file(&rel) {
-            continue;
-        }
-        let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
-        out.push((rel, src));
-    }
-    out.sort();
-    out
+    session_production_source(rel)
+        .unwrap_or_else(|| panic!("production source missing from shared corpus: {rel}"))
+        .to_string()
 }
 
 // ===========================================================================
@@ -242,7 +187,6 @@ fn whole_ident_occurrences(src: &str, needle: &str) -> usize {
 /// hardening_rounds: 0
 /// hardening_history: this single absence tripwire replaces three retired interim guards — the two bridge-reference pins (`residual_output_materialization_bridge_no_new_kind_b_references`, `kind_b_raise_then_decide_entrypoints_pinned`) and the dormant readiness fence (`node_domain_readiness_primitives_have_zero_production_callers`); no spelling-hardening rounds.
 /// ```
-#[test]
 fn retired_kind_b_bridge_symbol_absent_from_production_source() {
     let mut offenders: Vec<String> = Vec::new();
     for (rel, src) in production_src_files() {
@@ -2483,7 +2427,7 @@ fn reachable_production_modules(
 /// the file does not exist. Backs [`reachable_production_modules`] for the live
 /// guard (the self-test injects a synthetic loader instead).
 fn disk_loader(rel: &str) -> Option<String> {
-    std::fs::read_to_string(crate_root().join(rel)).ok()
+    session_production_source(rel).map(str::to_string)
 }
 
 /// One `define_output_capability!` invocation's extracted `(cap_name,
@@ -2704,7 +2648,6 @@ fn mint_scope_violations(scopes: &[CapMintScope]) -> Vec<String> {
     })
 }
 
-#[test]
 fn output_cap_mint_scope_is_per_leaf_not_subtree() {
     let scopes = collect_output_cap_mint_scopes();
     assert!(
@@ -5087,8 +5030,8 @@ impl<'ast> syn::visit::Visit<'ast> for TypeDefCollector {
 /// `<crate-name>::…` synthetic base derived from the relative path.
 fn type_def_source_files() -> Vec<(String, String)> {
     let mut srcs: Vec<(String, String)> = production_src_files()
-        .into_iter()
-        .map(|(rel, src)| (module_path_for_rel(&rel), src))
+        .iter()
+        .map(|(rel, src)| (module_path_for_rel(rel), src.clone()))
         .collect();
     // Cross-crate seed homes (relative to THIS crate's manifest dir). The
     // synthetic module base names the owning crate so a cross-crate type's
@@ -5187,9 +5130,11 @@ fn type_def_source_files() -> Vec<(String, String)> {
         ),
     ];
     for (rel, module_base) in EXTERNAL {
-        let path = crate_root().join(rel);
-        if let Ok(src) = std::fs::read_to_string(&path) {
-            srcs.push((module_base.to_string(), src));
+        let workspace_rel = rel
+            .strip_prefix("../")
+            .expect("cross-crate source must be relative to verter_session");
+        if let Some(source) = workspace_crate_source_if_present(workspace_rel) {
+            srcs.push((module_base.to_string(), source.to_string()));
         }
     }
     srcs
@@ -5387,9 +5332,11 @@ fn reexport_only_source_files() -> Vec<(String, String)> {
     ];
     let mut out: Vec<(String, String)> = Vec::new();
     for (rel, module_base) in REEXPORT_ONLY {
-        let path = crate_root().join(rel);
-        if let Ok(src) = std::fs::read_to_string(&path) {
-            out.push((module_base.to_string(), src));
+        let workspace_rel = rel
+            .strip_prefix("../")
+            .expect("cross-crate source must be relative to verter_session");
+        if let Some(source) = workspace_crate_source_if_present(workspace_rel) {
+            out.push((module_base.to_string(), source.to_string()));
         }
     }
     out
@@ -8150,7 +8097,6 @@ fn unclassifiable_input_idents(
     out
 }
 
-#[test]
 fn cross_sink_raw_authority_to_type_expr_boundary() {
     // The field-closure is computed from the real type defs; the scan is over
     // the real registered PUBLICATION sink scopes. With the admitted-token chain
@@ -10951,7 +10897,6 @@ fn dual_bearing_input_stays_forgeable_self_test_discriminates() {
     );
 }
 
-#[test]
 fn forgeable_input_fence_has_no_dual_bearing_type() {
     // The forgeable-authority closure's bearing fence skips a TypeExpr-bearing
     // type from the forgeable INPUT set. GAP-2 made that fence TRANSITIVE-correct:
@@ -11962,7 +11907,6 @@ fn unsafe_surface_violations(module_path: &str, file: &syn::File) -> Vec<String>
     v.out
 }
 
-#[test]
 fn authority_scopes_contain_no_unsafe() {
     let mut violations = Vec::new();
     let mut scanned = 0usize;
@@ -14926,6 +14870,15 @@ fn hot_materialize_offenders_in_parsed(parsed: &[(String, syn::File)]) -> Vec<St
     let returns_mat = hot_returns_materialized(&index);
     let returns_typeexpr = hot_returns_typeexpr_bare(&index);
 
+    hot_materialize_offenders_with_facts(parsed, &index, &returns_mat, &returns_typeexpr)
+}
+
+fn hot_materialize_offenders_with_facts(
+    parsed: &[(String, syn::File)],
+    index: &HotFnIndex,
+    returns_mat: &std::collections::HashSet<usize>,
+    returns_typeexpr: &std::collections::HashSet<String>,
+) -> Vec<String> {
     let mut offenders: Vec<String> = Vec::new();
     for (rel, file) in parsed {
         offenders.extend(hot_materialize_violations_in_file(
@@ -14938,10 +14891,6 @@ fn hot_materialize_offenders_in_parsed(parsed: &[(String, syn::File)]) -> Vec<St
     }
     offenders.sort();
     offenders
-}
-
-fn hot_materialize_offenders_in_sources(sources: &[(String, String)]) -> Vec<String> {
-    hot_materialize_offenders_in_parsed(&parse_hot_sources(sources))
 }
 
 /// A terminal-sink fn's self-policing summary (its `TypeExpr` params seeded
@@ -14991,6 +14940,16 @@ fn hot_self_policing_summaries(
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
+    hot_self_policing_summaries_in_file(rel, &file, index, returns_mat, returns_typeexpr)
+}
+
+fn hot_self_policing_summaries_in_file(
+    rel: &str,
+    file: &syn::File,
+    index: &HotFnIndex,
+    returns_mat: &std::collections::HashSet<usize>,
+    returns_typeexpr: &std::collections::HashSet<String>,
+) -> Vec<HotSelfPolicingSummary> {
     let mut scanner = HotMaterializeScanner {
         scan_rel: rel,
         mod_path: hot_mod_path_from_rel(rel),
@@ -15004,7 +14963,7 @@ fn hot_self_policing_summaries(
         self_policing: true,
         per_fn: BTreeMap::new(),
     };
-    syn::visit::Visit::visit_file(&mut scanner, &file);
+    syn::visit::Visit::visit_file(&mut scanner, file);
     scanner
         .per_fn
         .into_values()
@@ -15018,6 +14977,73 @@ fn hot_self_policing_summaries(
         .collect()
 }
 
+#[derive(Debug)]
+struct HotProductionFacts {
+    offenders: Vec<String>,
+    terminal_accounting_failures: Vec<String>,
+    terminal_policy_failures: Vec<String>,
+}
+
+fn hot_production_facts() -> &'static HotProductionFacts {
+    static FACTS: OnceLock<HotProductionFacts> = OnceLock::new();
+    FACTS.get_or_init(|| build_hot_production_facts(production_src_files()))
+}
+
+fn build_hot_production_facts(sources: &[(String, String)]) -> HotProductionFacts {
+    let parsed = parse_hot_sources(sources);
+    let index = build_hot_index(&parsed);
+    let returns_mat = hot_returns_materialized(&index);
+    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
+    let offenders =
+        hot_materialize_offenders_with_facts(&parsed, &index, &returns_mat, &returns_typeexpr);
+
+    let mut located = vec![0usize; HOT_TERMINAL_SINKS.len()];
+    for (entry_index, (suffix, function_name)) in HOT_TERMINAL_SINKS.iter().enumerate() {
+        for (rel, file) in &parsed {
+            if rel.ends_with(suffix) {
+                located[entry_index] += hot_count_fn_defs_in_file(file, function_name);
+            }
+        }
+    }
+
+    let mut terminal_policy_failures = Vec::new();
+    for (suffix, function_name) in HOT_TERMINAL_SINKS {
+        for (rel, file) in &parsed {
+            if !rel.ends_with(suffix) {
+                continue;
+            }
+            for summary in hot_self_policing_summaries_in_file(
+                rel,
+                file,
+                &index,
+                &returns_mat,
+                &returns_typeexpr,
+            ) {
+                if &summary.innermost == function_name && summary.fails() {
+                    terminal_policy_failures.push(format!(
+                        "{suffix}::{function_name} decides on a MATERIALIZED value (a fresh mint, or a seeded \
+                         param it never lowers) — a mislabeled terminal, a materialize-then-decide \
+                         site rather than a pure one-shot publication sink: decided_symbolic={:?} \
+                         lowered_symbolic={:?} notes={:?}",
+                        summary.decided_symbolic_params,
+                        summary.lowered_symbolic_params,
+                        summary.notes
+                    ));
+                }
+            }
+        }
+    }
+
+    HotProductionFacts {
+        offenders,
+        terminal_accounting_failures: hot_terminal_allowlist_accounting_failures(
+            HOT_TERMINAL_SINKS,
+            &located,
+        ),
+        terminal_policy_failures,
+    }
+}
+
 /// The hot-path reverse-materialization fence: scans ALL production
 /// `crates/verter_session/src/**/*.rs` (test files + `#[cfg(test)]` code
 /// excluded) and asserts NO fn reverse-materializes a `TypeExpr` (directly, via
@@ -15029,12 +15055,8 @@ fn hot_self_policing_summaries(
 /// materialization happening ONCE at a registered terminal sink. Any
 /// materialize-then-decide site that appears is a regression; the fence reports
 /// the complete offender inventory and must not be weakened to admit one.
-#[test]
 fn hot_path_never_calls_materialize_type_expr() {
-    // Collection step: the on-disk production tree. The scan/assert step is the
-    // SHARED factored pipeline (`hot_materialize_offenders_in_sources`) — the
-    // same path the in-memory revert-probe exercises.
-    let offenders = hot_materialize_offenders_in_sources(&production_src_files());
+    let offenders = &hot_production_facts().offenders;
 
     // Anti-false-positive rail: NO sanctioned terminal one-shot sink may appear
     // in the violation set. A terminal that publishes a materialized value with
@@ -15085,21 +15107,20 @@ fn hot_path_never_calls_materialize_type_expr() {
 ///    would no longer be evidence.
 /// 3. GREEN: the unmodified sources scan to zero again. No disk writes happen
 ///    at any point, so the probe is self-restoring by construction.
-#[test]
 fn hot_materialize_scanner_flags_in_memory_injected_offender() {
     let sources = production_src_files();
-    let parsed = parse_hot_sources(&sources);
 
-    // (1) GREEN on the real tree through the shared factored scan path.
-    let baseline = hot_materialize_offenders_in_parsed(&parsed);
+    // (1) GREEN on the real tree through the cached production fact path.
+    let baseline = &hot_production_facts().offenders;
     assert!(
         baseline.is_empty(),
         "probe step 1: the real production tree must scan green through the factored scan path; \
          got: {baseline:#?}"
     );
 
-    // (2) RED: clone the already-parsed corpus in memory and re-parse ONLY the
-    //     injected file. The other ~695 ASTs are shared with steps 1 and 3.
+    // (2) RED: parse an in-memory clone with one injected file through the same
+    //     fact builder. The production fact cache remains immutable and is not
+    //     rebuilt; this one extra parse is the discriminating mutation cost.
     const PROBE_FN: &str = "in_memory_probe_materializes_then_decides";
     let target_rel = "src/lib.rs";
     let target_src = sources
@@ -15118,7 +15139,7 @@ fn {PROBE_FN}(x: &TypeExpr) -> bool {{
     );
     let injected_file = syn::parse_file(&injected_src)
         .unwrap_or_else(|error| panic!("injected `{target_rel}` must parse: {error}"));
-    let mut injected_parsed = parsed.clone();
+    let mut injected_parsed = parse_hot_sources(sources);
     let slot = injected_parsed
         .iter_mut()
         .find(|(rel, _)| rel == target_rel)
@@ -15139,9 +15160,9 @@ fn {PROBE_FN}(x: &TypeExpr) -> bool {{
          by the SAME factored scan path the fence uses; got: {offenders:#?}"
     );
 
-    // (3) GREEN again on the untouched parsed corpus — the probe never
-    //     re-reads disk and never mutates `parsed`.
-    let restored = hot_materialize_offenders_in_parsed(&parsed);
+    // (3) GREEN again on the immutable cached production facts — the probe
+    //     never re-reads disk and never mutates the production fact model.
+    let restored = &hot_production_facts().offenders;
     assert!(
         restored.is_empty(),
         "probe step 3: the unmodified sources must scan green again (the probe never touches \
@@ -15263,73 +15284,25 @@ fn hot_terminal_allowlist_accounting_failures(
 /// `binding_fields_from_param_ty` shape navigates + re-mints a param it never
 /// lowers — caught). This is the rail that proves green-ness is trustworthy: a
 /// terminal that decides on a materialized value cannot hide on the allowlist.
-#[test]
 fn hot_terminal_allowlist_entries_are_pure_one_shot_sinks() {
-    let sources = production_src_files();
-    let parsed: Vec<(String, syn::File)> = sources
-        .iter()
-        .filter(|(rel, _)| !rel.contains("/typeinfo_tests/") && !rel.ends_with("/test_only.rs"))
-        .filter_map(|(rel, src)| syn::parse_file(src).ok().map(|f| (rel.clone(), f)))
-        .collect();
-    let index = build_hot_index(&parsed);
-    let returns_mat = hot_returns_materialized(&index);
-    let returns_typeexpr = hot_returns_typeexpr_bare(&index);
-
-    // Per-entry "located" = the terminal-sink fn DEFINITION exists in production
-    // source (counted over the parsed files), INDEPENDENT of whether the
-    // self-policing scan produced a summary for it.
-    let mut located: Vec<usize> = vec![0; HOT_TERMINAL_SINKS.len()];
-    for (idx, (suf, fname)) in HOT_TERMINAL_SINKS.iter().enumerate() {
-        for (rel, file) in &parsed {
-            if !rel.ends_with(suf) {
-                continue;
-            }
-            located[idx] += hot_count_fn_defs_in_file(file, fname);
-        }
-    }
-
-    let mut failures: Vec<String> = Vec::new();
-    for (suf, fname) in HOT_TERMINAL_SINKS {
-        for (rel, src) in &sources {
-            if !rel.ends_with(suf) {
-                continue;
-            }
-            for summary in
-                hot_self_policing_summaries(rel, src, &index, &returns_mat, &returns_typeexpr)
-            {
-                if &summary.innermost != fname {
-                    continue;
-                }
-                if summary.fails() {
-                    failures.push(format!(
-                        "{suf}::{fname} decides on a MATERIALIZED value (a fresh mint, or a seeded \
-                         param it never lowers) — a mislabeled terminal, a materialize-then-decide \
-                         site rather than a pure one-shot publication sink: decided_symbolic={:?} \
-                         lowered_symbolic={:?} notes={:?}",
-                        summary.decided_symbolic_params, summary.lowered_symbolic_params, summary.notes
-                    ));
-                }
-            }
-        }
-    }
+    let facts = hot_production_facts();
     // Per-entry accounting: each allowlist tuple listed exactly once AND located
     // in >= 1 production fn. (The prior aggregate `audited >= len` passed even
     // when one entry located zero and a sibling located two.)
-    let accounting = hot_terminal_allowlist_accounting_failures(HOT_TERMINAL_SINKS, &located);
     assert!(
-        accounting.is_empty(),
+        facts.terminal_accounting_failures.is_empty(),
         "TERMINAL ALLOWLIST ACCOUNTING: {} entry(ies) are unaccounted (duplicate listing or \
          located in zero production fns):\n{}",
-        accounting.len(),
-        accounting.join("\n")
+        facts.terminal_accounting_failures.len(),
+        facts.terminal_accounting_failures.join("\n")
     );
     assert!(
-        failures.is_empty(),
+        facts.terminal_policy_failures.is_empty(),
         "DISHONEST TERMINAL ALLOWLIST: {} entry(ies) decide on a materialized param \
          and must be REMOVED from `HOT_TERMINAL_SINKS` (→ RED conversion target), not \
          allowlisted as a pure terminal:\n{}",
-        failures.len(),
-        failures.join("\n")
+        facts.terminal_policy_failures.len(),
+        facts.terminal_policy_failures.join("\n")
     );
 }
 
@@ -16990,7 +16963,6 @@ fn hot_collection_mutation_receiver_taint_discriminates() {
 /// self-test in this file. An inert spelling is a false-confidence detector
 /// row: it can never fire in production, so it must either be swept or carry
 /// the self-test that proves the rail it exercises.
-#[test]
 fn hot_detector_spellings_are_live_or_synthetic() {
     /// Spellings that exist ONLY synthetically, each naming the self-test fn
     /// (in this file) that plants it and proves its rail fires.
@@ -17012,45 +16984,16 @@ fn hot_detector_spellings_are_live_or_synthetic() {
     // test files excluded. The detector spellings police call sites that can
     // live in any crate (`type_expr_to_object_shape` is defined in
     // `verter_semantic`), so liveness is workspace-wide, not session-local.
-    let crates_root = crate_root()
-        .parent()
-        .expect("verter_session crate dir must live under crates/")
-        .to_path_buf();
-    let mut prod_sources: Vec<String> = Vec::new();
-    for entry in WalkDir::new(&crates_root) {
-        let entry = entry.expect("walkdir entry");
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(&crates_root)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        // Only `<crate>/src/**` production files; test files excluded.
-        let Some((_, in_crate)) = rel.split_once('/') else {
-            continue;
-        };
-        if !in_crate.starts_with("src/") || is_test_file(&rel) {
-            continue;
-        }
-        prod_sources
-            .push(std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}")));
-    }
+    // Acquisition is owned by the one shared corpus walk; this rule must not
+    // grow a second repository traversal.
+    let prod_sources = workspace_crate_production_src_files();
     assert!(
         prod_sources.len() > 100,
-        "sanity: the workspace production walk found only {} files — the walk root is wrong",
+        "sanity: the shared workspace production corpus found only {} files — the walk root is wrong",
         prod_sources.len()
     );
 
-    let own_src = std::fs::read_to_string(
-        own_crate_root().join("tests/cases/output_projector_residual_guards.rs"),
-    )
-    .expect("read own source");
+    let own_src = include_str!("output_projector_residual_guards.rs");
 
     let lists: &[(&str, &[&str])] = &[
         ("HOT_MAT_DIRECT_IDENTS", HOT_MAT_DIRECT_IDENTS),
@@ -17071,7 +17014,7 @@ fn hot_detector_spellings_are_live_or_synthetic() {
         for ident in *idents {
             let live = prod_sources
                 .iter()
-                .any(|src| whole_ident_occurrences(src, ident) > 0);
+                .any(|(_, src)| whole_ident_occurrences(src, ident) > 0);
             let synthetic = SYNTHETIC_ONLY.iter().find(|(i, _)| i == ident);
             match (live, synthetic) {
                 (true, None) => {}
@@ -17101,6 +17044,53 @@ fn hot_detector_spellings_are_live_or_synthetic() {
         failures.len(),
         failures.join("\n")
     );
+}
+
+pub(super) const PRODUCTION_GUARDS: &[(&str, fn())] = &[
+    (
+        "retired_kind_b_bridge_symbol_absent_from_production_source",
+        retired_kind_b_bridge_symbol_absent_from_production_source,
+    ),
+    (
+        "output_cap_mint_scope_is_per_leaf_not_subtree",
+        output_cap_mint_scope_is_per_leaf_not_subtree,
+    ),
+    (
+        "cross_sink_raw_authority_to_type_expr_boundary",
+        cross_sink_raw_authority_to_type_expr_boundary,
+    ),
+    (
+        "forgeable_input_fence_has_no_dual_bearing_type",
+        forgeable_input_fence_has_no_dual_bearing_type,
+    ),
+    (
+        "authority_scopes_contain_no_unsafe",
+        authority_scopes_contain_no_unsafe,
+    ),
+    (
+        "hot_path_never_calls_materialize_type_expr",
+        hot_path_never_calls_materialize_type_expr,
+    ),
+    (
+        "hot_materialize_scanner_flags_in_memory_injected_offender",
+        hot_materialize_scanner_flags_in_memory_injected_offender,
+    ),
+    (
+        "hot_terminal_allowlist_entries_are_pure_one_shot_sinks",
+        hot_terminal_allowlist_entries_are_pure_one_shot_sinks,
+    ),
+    (
+        "hot_detector_spellings_are_live_or_synthetic",
+        hot_detector_spellings_are_live_or_synthetic,
+    ),
+];
+
+pub(super) fn run_production_guards() {
+    std::thread::scope(|scope| {
+        for (_, guard) in PRODUCTION_GUARDS {
+            scope.spawn(move || guard());
+        }
+    });
 }
 
 /// The `&str` literal VALUE of a top-level / nested `const NAME: &str = "…";`

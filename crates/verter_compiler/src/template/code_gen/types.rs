@@ -21,7 +21,7 @@ use super::shared::helpers::{
 /// `apply_to` mints its own only to drain already-authorized entries.
 ///
 /// External-crate unreachability:
-/// `tests/cases/segmented_overwrite_compile_fail.rs`. Intra-crate
+/// `tests/cases/compiler_compile_fail.rs`. Intra-crate
 /// exclusion of `ide`/`svelte` is the privacy checker, not a scanner.
 #[derive(Clone, Copy)]
 pub struct SegmentedOverwriteAuthority(());

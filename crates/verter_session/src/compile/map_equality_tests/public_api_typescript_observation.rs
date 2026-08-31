@@ -12,7 +12,7 @@
 //! read the checker's view, never declaration bytes.
 //!
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! public_api_typescript_observation -- --test-threads=1 --nocapture`
+//! public_api_typescript_observation -- --nocapture`
 //!
 //! Without the feature this module is not compiled. Read the
 //! `running N tests` line, never the exit code.

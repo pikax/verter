@@ -4,6 +4,7 @@
  *
  * Usage:
  *   node bin/check-candidate.mjs --golden <logical-name> --candidate <file.json> [--authoritative]
+ *   node bin/check-candidate.mjs --batch <file.json> [--authoritative]
  *
  * The candidate file is JSON: { "code": string, "map"?: object|null,
  * "diagnostics"?: array }. The golden name is a committed manifest entry
@@ -14,6 +15,9 @@
  * BF2_AUTHORITATIVE=1): every applicable axis must genuinely run — a
  * skipped axis exits 2 (fail-closed), so a consumer can prove its
  * acceptance evidence executed. Comparison failure exits 1; pass exits 0.
+ * Batch input is `{ "cases": [{ "caseId": string, "goldenName": string,
+ * "candidate": object }] }`. Cases run sequentially in one process and the
+ * ordered result envelope is emitted as exactly one JSON value on stdout.
  */
 
 import { readFileSync } from "node:fs";
@@ -28,19 +32,102 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--golden") args.goldenName = argv[++i];
     else if (argv[i] === "--candidate") args.candidatePath = argv[++i];
+    else if (argv[i] === "--batch") args.batchPath = argv[++i];
     else if (argv[i] === "--authoritative") args.authoritative = true;
     else throw new Error(`unknown argument: ${argv[i]}`);
   }
-  if (!args.goldenName || !args.candidatePath) {
-    throw new Error("required: --golden <logical-name> --candidate <file.json>");
+  const single = Boolean(args.goldenName || args.candidatePath);
+  if (args.batchPath && single) {
+    throw new Error("--batch is mutually exclusive with --golden/--candidate");
+  }
+  if (!args.batchPath && (!args.goldenName || !args.candidatePath)) {
+    throw new Error(
+      "required: --golden <logical-name> --candidate <file.json>, or --batch <file.json>",
+    );
   }
   return args;
 }
 
+function resultExitCode(result) {
+  if (result.verdict === "pass") return 0;
+  const onlyAuthoritativeSkips =
+    result.reasons.length > 0 &&
+    result.reasons.every((reason) => reason.startsWith("authoritative mode:"));
+  return onlyAuthoritativeSkips ? 2 : 1;
+}
+
+function typedFailure(error) {
+  return {
+    kind: "exception",
+    name: typeof error?.name === "string" ? error.name : "Error",
+    message: String(error?.message ?? error),
+  };
+}
+
+function validateBatch(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("batch input must be an object");
+  }
+  if (!Array.isArray(value.cases)) throw new TypeError("batch input.cases must be an array");
+  return value.cases;
+}
+
+async function checkBatch(batchPath, authoritative) {
+  const cases = validateBatch(JSON.parse(readFileSync(batchPath, "utf8")));
+  const reports = [];
+  for (const [index, entry] of cases.entries()) {
+    const caseId = typeof entry?.caseId === "string" ? entry.caseId : null;
+    const goldenName = typeof entry?.goldenName === "string" ? entry.goldenName : null;
+    try {
+      if (caseId === null) throw new TypeError(`case ${index}.caseId must be a string`);
+      if (goldenName === null) throw new TypeError(`case ${index}.goldenName must be a string`);
+      if (
+        entry.candidate === null ||
+        typeof entry.candidate !== "object" ||
+        Array.isArray(entry.candidate)
+      ) {
+        throw new TypeError(`case ${index}.candidate must be an object`);
+      }
+      const result = await checkCandidate({
+        goldenName,
+        candidate: entry.candidate,
+        authoritative,
+      });
+      reports.push({
+        index,
+        caseId,
+        goldenName,
+        status: "reported",
+        exitCode: resultExitCode(result),
+        result: { goldenName, authoritative, ...result },
+      });
+    } catch (error) {
+      reports.push({
+        index,
+        caseId,
+        goldenName,
+        status: "error",
+        failure: typedFailure(error),
+      });
+    }
+  }
+
+  const hasError = reports.some((report) => report.status === "error");
+  const envelope = {
+    schema: "verter-check-candidate-batch/v1",
+    verdict: hasError ? "error" : "reported",
+    reports,
+  };
+  let exitCode = 0;
+  if (hasError) exitCode = 3;
+  else if (reports.some((report) => report.exitCode === 1)) exitCode = 1;
+  else if (reports.some((report) => report.exitCode === 2)) exitCode = 2;
+  return { envelope, exitCode };
+}
+
 async function main() {
-  const { goldenName, candidatePath, authoritative } = parseArgs(process.argv.slice(2));
-  const candidate = JSON.parse(readFileSync(candidatePath, "utf8"));
-  // stdout is EXACTLY one JSON report. Oracle runtime modules print
+  const { goldenName, candidatePath, batchPath, authoritative } = parseArgs(process.argv.slice(2));
+  // stdout is EXACTLY one JSON value. Oracle runtime modules print
   // informational banners (e.g. the dev-build notice) on first evaluation —
   // during link-axis export-surface loading as well as runtime mounts — so
   // console chatter is routed to stderr for the duration of the check.
@@ -48,19 +135,25 @@ async function main() {
   const originalInfo = console.info;
   console.log = console.error;
   console.info = console.error;
-  let result;
+  let payload;
+  let exitCode;
   try {
-    result = await checkCandidate({ goldenName, candidate, authoritative });
+    if (batchPath) {
+      const batch = await checkBatch(batchPath, authoritative);
+      payload = batch.envelope;
+      exitCode = batch.exitCode;
+    } else {
+      const candidate = JSON.parse(readFileSync(candidatePath, "utf8"));
+      const result = await checkCandidate({ goldenName, candidate, authoritative });
+      payload = { goldenName, authoritative, ...result };
+      exitCode = resultExitCode(result);
+    }
   } finally {
     console.log = originalLog;
     console.info = originalInfo;
   }
-  console.log(JSON.stringify({ goldenName, authoritative, ...result }, null, 2));
-  if (result.verdict === "pass") return 0;
-  const onlyAuthoritativeSkips =
-    result.reasons.length > 0 &&
-    result.reasons.every((reason) => reason.startsWith("authoritative mode:"));
-  return onlyAuthoritativeSkips ? 2 : 1;
+  console.log(JSON.stringify(payload, null, batchPath ? 0 : 2));
+  return exitCode;
 }
 
 main()

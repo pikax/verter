@@ -20,11 +20,11 @@
 //! owns no correction.
 //!
 //! `cargo test -p verter_session --lib --features bf2-authoritative
-//! svelte_official_conformance_gate -- --test-threads=1 --nocapture`
+//! svelte_official_conformance_gate -- --nocapture`
 //!
 //! Without the feature this module is not compiled. Read the
-//! `running N tests` line, never the exit code. One request at a time
-//! so the harness's shared scratch is never concurrent.
+//! `running N tests` line, never the exit code. Harness scratch is
+//! process-scoped, so no test-thread restriction is required.
 
 use std::collections::BTreeSet;
 
@@ -1491,6 +1491,7 @@ fn check_candidate_envelope(golden_name: &str, envelope: &str) -> CellReport {
                     .collect()
             })
             .unwrap_or_default(),
+        raw: report,
     }
 }
 

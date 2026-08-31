@@ -8,7 +8,14 @@
 //! store, and two consecutive calls return the same payload. The
 //! tests assert that explicitly so a future change that accidentally
 //! draws records out of the store fails loudly.
+//!
+//! Canonical nextest execution uses the single aggregate `#[test]` below. Each
+//! logical case gets a fresh current-thread Tokio runtime as well as a fresh
+//! host, scheduler/driver, audit state, and LSP service. Dropping that runtime
+//! is the teardown fence for detached server tasks before the shared execution
+//! worker pools are leased to the next case.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -20,7 +27,53 @@ use verter_audit::{
 use verter_lsp::server::VerterLanguageServer;
 use verter_lsp::server::{GetAuditRecentParams, GetAuditRecordParams};
 use verter_lsp::{LspConfig, ProjectSyncMode, TypeProviderKind};
-use verter_session::{HostConfig, VerterHost};
+use verter_session::{HostConfig, TestHostWorkerPools, VerterHost};
+
+fn fresh_audit_host(worker_pools: &Arc<TestHostWorkerPools>) -> Arc<VerterHost> {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    Arc::new(VerterHost::new_with_test_worker_pools(
+        HostConfig {
+            audit_enabled: true,
+            ..HostConfig::default()
+        },
+        workspace,
+        Arc::clone(worker_pools),
+    ))
+}
+
+fn run_isolated_case<F, Fut>(name: &'static str, worker_pools: &Arc<TestHostWorkerPools>, case: F)
+where
+    F: FnOnce(Arc<VerterHost>) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    assert_eq!(
+        worker_pools.receipt().active_scheduler_shells,
+        0,
+        "{name}: the previous logical case must release its scheduler shell"
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build isolated audit-query Tokio runtime");
+    let host = fresh_audit_host(worker_pools);
+    let host_release = Arc::downgrade(&host);
+    runtime.block_on(case(host));
+
+    // `VerterLanguageServer::new` owns a detached SyncCoordinator task. Its
+    // future retains DocumentRegistry -> VerterHost even after LspService is
+    // dropped. Runtime teardown aborts and drops that task synchronously.
+    drop(runtime);
+    assert!(
+        host_release.upgrade().is_none(),
+        "{name}: runtime teardown must release every detached task and its host"
+    );
+    assert_eq!(
+        worker_pools.receipt().active_scheduler_shells,
+        0,
+        "{name}: host release must return the exclusive worker-pool lease"
+    );
+}
 
 fn build_test_server(host: Arc<VerterHost>) -> LspService<VerterLanguageServer> {
     let host_for_server = Arc::clone(&host);
@@ -112,12 +165,7 @@ fn publish_lsp_record(host: &Arc<VerterHost>, method: LspMethodTag, canonical: &
     request_id
 }
 
-#[tokio::test]
-async fn get_audit_record_returns_published_record_without_draining() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+async fn get_audit_record_returns_published_record_without_draining(host: Arc<VerterHost>) {
     let request_id = publish_lsp_record(&host, LspMethodTag::Hover, "/probe.vue");
 
     let service = build_test_server(Arc::clone(&host));
@@ -171,12 +219,7 @@ async fn get_audit_record_returns_published_record_without_draining() {
     assert_eq!(snap.records_store_size, 1);
 }
 
-#[tokio::test]
-async fn get_audit_record_returns_none_for_unknown_id() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+async fn get_audit_record_returns_none_for_unknown_id(host: Arc<VerterHost>) {
     let _ = publish_lsp_record(&host, LspMethodTag::Hover, "/probe.vue");
 
     let service = build_test_server(Arc::clone(&host));
@@ -204,12 +247,7 @@ async fn get_audit_record_returns_none_for_unknown_id() {
     assert!(response.is_none());
 }
 
-#[tokio::test]
-async fn get_audit_recent_returns_all_records_when_no_filter() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+async fn get_audit_recent_returns_all_records_when_no_filter(host: Arc<VerterHost>) {
     let id_a = publish_lsp_record(&host, LspMethodTag::Hover, "/a.vue");
     let id_b = publish_lsp_record(&host, LspMethodTag::Completion, "/b.vue");
     let id_c = publish_lsp_record(&host, LspMethodTag::Diagnostics, "/c.vue");
@@ -252,12 +290,7 @@ async fn get_audit_recent_returns_all_records_when_no_filter() {
     assert_eq!(again.len(), 3, "get_audit_recent must not drain the store");
 }
 
-#[tokio::test]
-async fn get_audit_recent_filters_by_kind() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+async fn get_audit_recent_filters_by_kind(host: Arc<VerterHost>) {
     // Three Lsp records, one ComponentMeta record.
     let _ = publish_lsp_record(&host, LspMethodTag::Hover, "/a.vue");
     let _ = publish_lsp_record(&host, LspMethodTag::Completion, "/b.vue");
@@ -311,12 +344,7 @@ async fn get_audit_recent_filters_by_kind() {
     );
 }
 
-#[tokio::test]
-async fn get_audit_recent_respects_limit() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+async fn get_audit_recent_respects_limit(host: Arc<VerterHost>) {
     let _ = publish_lsp_record(&host, LspMethodTag::Hover, "/a.vue");
     let _ = publish_lsp_record(&host, LspMethodTag::Completion, "/b.vue");
     let id_c = publish_lsp_record(&host, LspMethodTag::Diagnostics, "/c.vue");
@@ -354,12 +382,7 @@ async fn get_audit_recent_respects_limit() {
     );
 }
 
-#[tokio::test]
-async fn get_audit_recent_uses_default_limit_when_none() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+async fn get_audit_recent_uses_default_limit_when_none(host: Arc<VerterHost>) {
     // Publish more than the default limit (50) to verify it is
     // applied. `LspAuditSession` is cheap and synchronous.
     for i in 0..60 {
@@ -382,13 +405,7 @@ async fn get_audit_recent_uses_default_limit_when_none() {
     );
 }
 
-#[tokio::test]
-async fn get_audit_recent_empty_store_returns_empty_array() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
-
+async fn get_audit_recent_empty_store_returns_empty_array(host: Arc<VerterHost>) {
     let service = build_test_server(Arc::clone(&host));
     let server = service.inner();
 
@@ -399,15 +416,10 @@ async fn get_audit_recent_empty_store_returns_empty_array() {
     assert!(records.is_empty(), "Empty store must yield empty array");
 }
 
-#[tokio::test]
-async fn get_audit_record_preserves_kind_and_payload_pair() {
+async fn get_audit_record_preserves_kind_and_payload_pair(host: Arc<VerterHost>) {
     // Discriminating coverage that the round-trip through
     // `serde_json::to_value` actually preserves the kind/payload
     // discriminator pair, not just the request id.
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
     let request_id = publish_lsp_record(&host, LspMethodTag::Diagnostics, "/d.vue");
 
     // Sanity check: the in-memory record before any JSON round-trip
@@ -459,4 +471,64 @@ async fn get_audit_record_preserves_kind_and_payload_pair() {
         payload_tag, "Lsp",
         "kind_payload tag must match the LSP variant"
     );
+}
+
+/// One canonical nextest process for the audit-query family. Each case still
+/// constructs a fresh Tokio runtime, host, audit store, request counter,
+/// scheduler/driver, and LSP service; only the execution worker pools cross
+/// case boundaries.
+#[test]
+fn lsp_audit_query_cases_share_only_execution_pools() {
+    let config = HostConfig {
+        audit_enabled: true,
+        ..HostConfig::default()
+    };
+    let worker_pools = TestHostWorkerPools::new(
+        &config,
+        verter_scheduler::scheduler::SchedulerConfig::default(),
+    );
+    let pool_ids = worker_pools.pool_ids();
+
+    run_isolated_case(
+        "published record",
+        &worker_pools,
+        get_audit_record_returns_published_record_without_draining,
+    );
+    run_isolated_case(
+        "unknown record",
+        &worker_pools,
+        get_audit_record_returns_none_for_unknown_id,
+    );
+    run_isolated_case(
+        "recent records",
+        &worker_pools,
+        get_audit_recent_returns_all_records_when_no_filter,
+    );
+    run_isolated_case(
+        "kind filter",
+        &worker_pools,
+        get_audit_recent_filters_by_kind,
+    );
+    run_isolated_case("limit", &worker_pools, get_audit_recent_respects_limit);
+    run_isolated_case(
+        "default limit",
+        &worker_pools,
+        get_audit_recent_uses_default_limit_when_none,
+    );
+    run_isolated_case(
+        "empty store",
+        &worker_pools,
+        get_audit_recent_empty_store_returns_empty_array,
+    );
+    run_isolated_case(
+        "kind/payload pair",
+        &worker_pools,
+        get_audit_record_preserves_kind_and_payload_pair,
+    );
+
+    let receipt = worker_pools.receipt();
+    assert_eq!(receipt.pool_ids, pool_ids);
+    assert_eq!(receipt.host_shells_created, 8);
+    assert_eq!(receipt.scheduler_shells_created, 8);
+    assert_eq!(receipt.active_scheduler_shells, 0);
 }

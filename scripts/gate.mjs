@@ -206,23 +206,10 @@
 //   `@verter/native` is deliberately NOT among them (the plugin's `"files": ["src/index.ts"]` excludes
 //   `src/tsc/`, its only consumer), so the gate never demands a `napi build --release`.
 //
-// ORACLE-CACHE PREREQUISITE PREFLIGHT (gate mode only; runs SECOND, right after the build-prerequisite
-// preflight above)
-//   The `verter_session/bf2-authoritative` feature (now ON for every archive — see `ARCHIVE_FEATURES` in
-//   gate-internals.mjs) gates 45 tests, including the ENTIRE `svelte_official_conformance_gate` suite —
-//   the tests that compare Verter's Svelte output against the pinned official `svelte@5.56.10` oracle.
-//   Those tests realize their Vue/Svelte oracles OFFLINE from a gitignored local npm cache
-//   (`.oracle-npm-cache`, warmed from the network ONLY by the explicit, never-automatic
-//   `node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`). A fresh checkout has no cache, and the harness does
-//   NOT fail loudly when it cannot realize an oracle: it records the affected axis as skipped and keeps
-//   comparing every other axis — an environment absence that reads as a compiled-output divergence.
-//   Same shape as the build-prerequisite preflight: a REAL LOAD, not a stat. The probe calls the SAME
-//   `ensureOracleDomain` the suite's own `bin/check-candidate.mjs` calls, which validates the realized
-//   `.oracle-installs` tree against the committed lockfile's closure — an absent OR an invalid (present
-//   but unusable — corrupt, torn, or drifted) cache both FAIL SETUP loudly (exit 127, marker
-//   `ORACLE-CACHE PREREQUISITE MISSING`), naming the exact provisioning command. This is REALIZATION
-//   (offline, idempotent — the same automatic step every `bf2-authoritative` test already performs), never
-//   PROVISIONING (the networked step, which stays an explicit human/CI action the gate never runs).
+// BF2 AUTHORITATIVE COVERAGE
+//   The oracle-backed `verter_session/bf2-authoritative` inventory runs in the separate required CI job
+//   driven by `scripts/bf2-authoritative.mjs`. It is intentionally absent from this archive and from this
+//   gate's prerequisite path so the core Rust lane and BF2 lane execute in parallel.
 //
 // FRESHNESS-TOOLING PREFLIGHT + VERDICT-GATED TOLERANCE (gate mode only)
 //   The two `typeinfo_proto_ts_freshness` byte-equality tests regenerate the committed TS proto bindings
@@ -382,13 +369,9 @@ import {
   // build-prerequisite preflight (the non-cargo artifacts the suite loads from disk)
   checkBuildPrerequisites,
   probeBudgetMs,
-  // oracle-cache prerequisite preflight (the offline Svelte/Vue oracle npm cache the bf2-authoritative
-  // conformance suites realize from)
-  checkOracleCachePrerequisite,
-  oracleCacheProbeBudgetMs,
   // real conformance-harness preflight
   HARNESS_SMOKE_MARKER,
-  HARNESS_SMOKE_MODES,
+  CORE_HARNESS_SMOKE_MODES,
   harnessSmokeCommand,
   decideHarnessSmokeResult,
   formatHarnessSmokeFailure,
@@ -1344,9 +1327,8 @@ async function archiveAndList(ctx, variant = VARIANT_DEBUG) {
   // nextest's --extract-to canonicalizes the destination BEFORE extracting, so it must already exist.
   mkdirSync(extractDir, { recursive: true });
 
-  // --- BUILD the whole workspace test universe ONCE (ARCHIVE_FEATURES =>
-  // verter_session/bf2-authoritative ON, so the 45 oracle-backed conformance tests are
-  // PRESENT in the archive surface 1 runs from — see buildNextestArchiveArgs) ---
+  // --- BUILD the core workspace test universe ONCE. BF2 authoritative coverage is deliberately
+  // separate, so it does not extend this archive's critical path. ---
   log(`archiving ${variant.label} (cargo nextest archive --workspace) …`);
   const cargoTimingCapture = beginCargoTimingCapture(ctx, "dev-archive");
   const archiveRes = await ctx.supervisor.runStep("front", {
@@ -1974,7 +1956,7 @@ function replayGateLaneTranscript(receipts, ctx, allSuites) {
 // no Cargo universe has been built, and no gate verdict has been produced.
 async function runHarnessSmokeChecks(ctx) {
   const { cargoEnv, repoRealpath, runnerTarget, deadlineMs, stallMs, memoryLimitBytes } = ctx;
-  for (const mode of HARNESS_SMOKE_MODES) {
+  for (const mode of CORE_HARNESS_SMOKE_MODES) {
     const command = harnessSmokeCommand(repoRealpath, mode);
     log(`HARNESS-SMOKE [${mode}]: running the canonical conformance harness …`);
     const result = await ctx.supervisor.runStep("front", {
@@ -2062,41 +2044,9 @@ async function runGate(opts, ctx) {
   }
   log(`build-prerequisite preflight: SATISFIED — ${prerequisites.target} loaded`);
 
-  // ---------- ORACLE-CACHE PREREQUISITE PREFLIGHT (the gate's SECOND step) ----------
-  // `verter_session/bf2-authoritative` (now ON for every archive — see `buildNextestArchiveArgs`) gates 45
-  // tests, including the ENTIRE `svelte_official_conformance_gate` suite: the tests that actually compare
-  // Verter's Svelte output against the pinned official `svelte@5.56.10` oracle. Those tests realize their
-  // Vue/Svelte oracles OFFLINE from a gitignored local npm cache (`.oracle-npm-cache`, warmed from the
-  // network ONLY by the explicit `node packages/framework-conformance-harness/scripts/provision-oracle-npm-cache.mjs`, never by this gate). An
-  // absent or unusable cache does not make those tests fail loudly on their own: the harness records the
-  // affected axis as skipped and keeps comparing every other axis, so a missing cache reads as compiled-
-  // output DIVERGENCES, not as a setup problem.
-  // Like the build-prerequisite preflight above, the oracle is a REAL LOAD, not a stat: this calls the
-  // SAME `ensureOracleDomain` the suite's own `bin/check-candidate.mjs` calls on every request, which
-  // validates the realized closure against the committed lockfile (paths, names, versions, edges, per-
-  // package content digests). It runs BEFORE the archive build, same bounded-by-the-gate's-own-deadline
-  // model as the build-prerequisite probe (still holding the single-flight mutex).
-  const oracleStartedAtMs = nowMs();
-  const oraclePrereq = checkOracleCachePrerequisite({
-    repoRoot: repoRealpath,
-    env: cargoEnv,
-    timeoutMs: oracleCacheProbeBudgetMs(deadlineMs, nowMs()),
-  });
-  recordTelemetryPhaseSafe(ctx, "oracle-cache", {
-    status: oraclePrereq.ok ? "ok" : "failed",
-    startedAtMs: oracleStartedAtMs,
-  });
-  if (!oraclePrereq.ok) {
-    for (const line of oraclePrereq.lines) err(line);
-    return EXIT_USAGE;
-  }
-  log(
-    `oracle-cache prerequisite preflight: SATISFIED — realized ${JSON.stringify(oraclePrereq.realized)}`,
-  );
-
-  // ---------- REAL CONFORMANCE-HARNESS SMOKES (the gate's THIRD step) ----------
-  // Oracle realization proves the pinned installs are structurally usable. These smokes now exercise the
-  // two broader runtime boundaries before Cargo pays to build the Rust universe: the real Vapor DOM/runtime
+  // ---------- REAL CONFORMANCE-HARNESS SMOKES (the gate's SECOND step) ----------
+  // These smokes exercise the two broader runtime boundaries before Cargo pays to build the Rust universe:
+  // the real Vapor DOM/runtime
   // preload and the real workspace-domain TypeScript virtual host. Both run through the same contained-step
   // deadline/stall/RSS machinery as every other external gate phase and require an exact structured receipt.
   const harnessSmokesOk = await runHarnessSmokeChecks(ctx);

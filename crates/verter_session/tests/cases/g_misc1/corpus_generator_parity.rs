@@ -1,7 +1,7 @@
 //! Parity test — ensures the committed corpus audit tests tree
 //! matches what `scripts/gen-corpus-audit-tests.mjs` would produce
 //! against the vendored Vue fixture set under
-//! `crates/verter_session/tests/component_meta_audit_corpus/fixtures/`.
+//! `crates/verter_session/tests/cases/component_meta_audit_corpus/fixtures/`.
 //!
 //! Fails with a readable diff when the committed tree drifts from
 //! the generator output. Remediation: rerun
@@ -10,7 +10,7 @@
 //! Hermetic: the generator and fixtures both live inside the
 //! checkout, so this test runs without `.integration-tests/`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -122,28 +122,28 @@ fn corpus_generator_output_matches_committed_files() {
         );
     }
 
-    // Compare subdirectory file-set (presence only, not per-byte
-    // contents). `cargo fmt` normalizes minor generator-output
-    // layout variations (e.g. single-vs-multi-line `include_str!`
-    // calls depending on path length), so byte-exact per-file
-    // parity would be too brittle. Structural drift (missing or
-    // extra slugs) is what the parity test catches — per-file
-    // content drift is caught at build time (rustc compile errors)
-    // and by `cargo fmt --check`.
+    // Compare both generated file-set presence and LF-normalized bytes. The
+    // generated chunk rows carry `#[rustfmt::skip]`, so exact bytes are stable
+    // across `cargo fmt`; this catches a hand edit that silently pairs one
+    // canonical with another fixture's `include_str!` path.
     let generated_files = snapshot_dir(&generated_subdir);
     let committed_files = snapshot_dir(&committed_subdir);
 
     // The vendored fixture set under `fixtures/` is the input the
     // generator reads, not output it produces. Filter it out of the
     // structural-drift check so the parity test stays focused on
-    // generator output. `harness.rs` is the hand-written corpus
-    // regression capture harness that lives alongside the generated
-    // per-component tests; it is not generator output. `mod.rs` is the
-    // hand-written consolidation shim that `include!`s the generated
-    // `main.rs` so the former directory target surfaces under the
-    // `main` binary; it, too, is not generator output.
+    // generator output. `overrides/` is authored generator INPUT and therefore
+    // is not copied into a dry-run output tree. `harness.rs` and
+    // `chunk_harness.rs` are hand-written harnesses; `mod.rs` is the
+    // hand-written historical Main.vue duplicate.
     let is_generator_output = |rel: &str| {
-        !rel.starts_with("fixtures/") && rel != "fixtures" && rel != "harness.rs" && rel != "mod.rs"
+        !rel.starts_with("fixtures/")
+            && rel != "fixtures"
+            && !rel.starts_with("overrides/")
+            && rel != "overrides"
+            && rel != "harness.rs"
+            && rel != "chunk_harness.rs"
+            && rel != "mod.rs"
     };
     let gen_names: std::collections::BTreeSet<_> = generated_files
         .iter()
@@ -170,6 +170,31 @@ fn corpus_generator_output_matches_committed_files() {
             errors.len(),
             errors.join("\n"),
         );
+    }
+
+    let generated_contents = generated_files
+        .into_iter()
+        .filter(|(rel, _)| is_generator_output(rel))
+        .collect::<BTreeMap<_, _>>();
+    let committed_contents = committed_files
+        .into_iter()
+        .filter(|(rel, _)| is_generator_output(rel))
+        .collect::<BTreeMap<_, _>>();
+    for (relative, generated) in generated_contents {
+        let committed = committed_contents
+            .get(&relative)
+            .expect("file-set parity established above");
+        if &generated != committed {
+            let diff = similar::TextDiff::from_lines(committed, &generated)
+                .unified_diff()
+                .context_radius(3)
+                .header("committed", "regenerated")
+                .to_string();
+            panic!(
+                "generated corpus file `{relative}` is out of sync. Re-run `node \
+                 scripts/gen-corpus-audit-tests.mjs` and commit the result.\n\n{diff}"
+            );
+        }
     }
 }
 
@@ -228,12 +253,25 @@ fn expected_slugs(root: &Path) -> BTreeSet<String> {
     slugs
 }
 
-/// Asserts the committed corpus tree covers EVERY vendored `.vue`
-/// component under
-/// `crates/verter_session/tests/component_meta_audit_corpus/fixtures/`
-/// — no missing slugs, no extra ones. The generator is the trusted
-/// source of slug derivation; this test guards against the generator
-/// regressing to a subset pass.
+fn committed_override_slugs(root: &Path) -> BTreeSet<String> {
+    let overrides =
+        root.join("crates/verter_session/tests/cases/component_meta_audit_corpus/overrides");
+    fs::read_dir(&overrides)
+        .unwrap_or_else(|error| panic!("read_dir {overrides:?}: {error}"))
+        .filter_map(|entry| {
+            let path = entry.expect("override directory entry").path();
+            (path.extension().and_then(|extension| extension.to_str()) == Some("rs")).then(|| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .expect("override stem must be UTF-8")
+                    .to_string()
+            })
+        })
+        .collect()
+}
+
+/// Asserts the committed chunk tables cover EVERY vendored `.vue` component —
+/// no missing slugs and no duplicate/extra rows.
 ///
 /// Discriminating: if a future edit narrows the component sweep
 /// (e.g. adds a filter that drops nested-subdir components), the
@@ -242,34 +280,50 @@ fn expected_slugs(root: &Path) -> BTreeSet<String> {
 fn corpus_audit_coverage_covers_every_vendored_component() {
     let root = workspace_root();
     let expected = expected_slugs(&root);
+    let overrides = committed_override_slugs(&root);
     assert!(
         !expected.is_empty(),
         "discovery produced zero components — is the fixture present?",
     );
+    let orphan_overrides = overrides.difference(&expected).cloned().collect::<Vec<_>>();
+    assert!(
+        orphan_overrides.is_empty(),
+        "every authored override must replace a vendored fixture slug: {orphan_overrides:?}"
+    );
 
     let committed_subdir =
         root.join("crates/verter_session/tests/cases/component_meta_audit_corpus");
-    let committed: BTreeSet<String> = fs::read_dir(&committed_subdir)
+    let mut occurrence_counts = std::collections::BTreeMap::<String, usize>::new();
+    for entry in fs::read_dir(&committed_subdir)
         .unwrap_or_else(|e| panic!("read_dir {committed_subdir:?}: {e}"))
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let p = entry.path();
-            if !p.is_file() {
-                return None;
-            }
-            let name = p.file_name()?.to_string_lossy().into_owned();
-            if name == "README.md" || name == "mod.rs" || name == "harness.rs" {
-                // `harness.rs` hosts the corpus regression capture
-                // harness — it is hand-written, not generated, and
-                // lives alongside the generated per-component tests
-                // so they can `mod harness;` it locally without
-                // pulling in cross-target machinery.
-                return None;
-            }
-            let slug = name.strip_suffix(".rs")?.to_string();
-            Some(slug)
-        })
-        .collect();
+    {
+        let path = entry.expect("corpus dir entry").path();
+        let is_chunk = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("chunk_"))
+            .and_then(|suffix| suffix.strip_suffix(".rs"))
+            .is_some_and(|index| {
+                index.len() == 3 && index.chars().all(|character| character.is_ascii_digit())
+            });
+        if !is_chunk {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read generated chunk");
+        for line in source.lines() {
+            let Some(rest) = line.trim().strip_prefix("CorpusCase::new(\"") else {
+                continue;
+            };
+            let Some((slug, _)) = rest.split_once("\", \"") else {
+                panic!("malformed CorpusCase row in {}: {line}", path.display());
+            };
+            *occurrence_counts.entry(slug.to_string()).or_default() += 1;
+        }
+    }
+    for slug in &overrides {
+        *occurrence_counts.entry(slug.clone()).or_default() += 1;
+    }
+    let committed = occurrence_counts.keys().cloned().collect::<BTreeSet<_>>();
 
     let missing: Vec<&String> = expected.difference(&committed).collect();
     let extra: Vec<&String> = committed.difference(&expected).collect();
@@ -279,12 +333,16 @@ fn corpus_audit_coverage_covers_every_vendored_component() {
          Extra (committed — not expected): {extra:?}. \
          Re-run `node scripts/gen-corpus-audit-tests.mjs` and commit.",
     );
+    assert!(
+        occurrence_counts.values().all(|count| *count == 1),
+        "generated chunk rows must not duplicate a fixture slug: {occurrence_counts:?}",
+    );
 }
 
 /// Asserts the generator's output is deterministic: running the
 /// generator twice into two separate tempdirs MUST produce
 /// byte-identical `corpus_audit_tests.rs` entry files AND
-/// byte-identical per-component test files. Pins the cross-platform
+/// byte-identical generated chunk files. Pins the cross-platform
 /// determinism requirement that the generator sorts input files
 /// lexicographically.
 ///
@@ -330,7 +388,7 @@ fn corpus_audit_mod_rs_regenerates_deterministically_across_platforms() {
         "corpus_audit_tests.rs differs across two generator runs — generator is non-deterministic",
     );
 
-    // Compare per-component files byte-for-byte.
+    // Compare generated chunk trees byte-for-byte.
     let snapshot = |dir: &Path| -> Vec<(String, String)> {
         let subdir = dir.join("component_meta_audit_corpus");
         let mut out = Vec::new();

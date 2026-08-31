@@ -5,6 +5,10 @@
 //! payload, observe the published record on the host's records
 //! store. Without audit wiring the LSP handlers would leave the
 //! records store empty.
+//!
+//! Canonical nextest execution uses the single aggregate `#[tokio::test]`
+//! below. Its four sequential cases share only execution worker pools; every
+//! case constructs a fresh workspace, host, scheduler/driver, and audit state.
 
 use std::sync::Arc;
 
@@ -12,16 +16,27 @@ use verter_audit::payloads::tags::LspMethodTag;
 use verter_audit::{LspRequestPayload, RequestKind, RequestKindPayload};
 use verter_lsp::audit_harness;
 use verter_session::host_lsp_audit::LspAuditSession;
-use verter_session::{HostConfig, LspMethodTimeoutsConfig, VerterHost};
+use verter_session::{HostConfig, LspMethodTimeoutsConfig, TestHostWorkerPools, VerterHost};
 
-#[tokio::test]
-async fn lsp_audit_hover_session_publishes_lsp_record() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        footprint_capture: true,
-        lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
-        ..HostConfig::default()
-    }));
+fn fresh_host(config: HostConfig, worker_pools: &Arc<TestHostWorkerPools>) -> Arc<VerterHost> {
+    let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(Default::default()));
+    Arc::new(VerterHost::new_with_test_worker_pools(
+        config,
+        workspace,
+        Arc::clone(worker_pools),
+    ))
+}
+
+async fn lsp_audit_hover_session_publishes_lsp_record(worker_pools: &Arc<TestHostWorkerPools>) {
+    let host = fresh_host(
+        HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
+            ..HostConfig::default()
+        },
+        worker_pools,
+    );
 
     let canonical = "/probe.vue".to_string();
     let session = host.lsp_audit_begin(
@@ -91,9 +106,8 @@ async fn lsp_audit_hover_session_publishes_lsp_record() {
     );
 }
 
-#[tokio::test]
-async fn lsp_audit_disabled_returns_noop_session() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+async fn lsp_audit_disabled_returns_noop_session(worker_pools: &Arc<TestHostWorkerPools>) {
+    let host = fresh_host(HostConfig::default(), worker_pools);
     assert!(!host.config().audit_enabled);
 
     let session = host.lsp_audit_begin(
@@ -124,12 +138,16 @@ async fn lsp_audit_disabled_returns_noop_session() {
 /// `run_with_audit` end-to-end: drives the harness through the same
 /// path the LSP handlers take, asserting that audit-enabled runs
 /// publish a record AND audit-disabled runs short-circuit.
-#[tokio::test]
-async fn run_with_audit_publishes_record_when_audit_enabled() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig {
-        audit_enabled: true,
-        ..HostConfig::default()
-    }));
+async fn run_with_audit_publishes_record_when_audit_enabled(
+    worker_pools: &Arc<TestHostWorkerPools>,
+) {
+    let host = fresh_host(
+        HostConfig {
+            audit_enabled: true,
+            ..HostConfig::default()
+        },
+        worker_pools,
+    );
     let snap_before = host.host_audit_runtime().snapshot();
     assert_eq!(snap_before.records_store_size, 0);
 
@@ -158,9 +176,10 @@ async fn run_with_audit_publishes_record_when_audit_enabled() {
     assert_eq!(snap_after.active_request_count, 0);
 }
 
-#[tokio::test]
-async fn run_with_audit_short_circuits_when_audit_disabled() {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+async fn run_with_audit_short_circuits_when_audit_disabled(
+    worker_pools: &Arc<TestHostWorkerPools>,
+) {
+    let host = fresh_host(HostConfig::default(), worker_pools);
     let result = audit_harness::run_with_audit::<u8, _, _>(
         &host,
         LspMethodTag::Hover,
@@ -181,4 +200,25 @@ async fn run_with_audit_short_circuits_when_audit_disabled() {
     let snap = host.host_audit_runtime().snapshot();
     assert_eq!(snap.records_store_size, 0);
     assert_eq!(snap.active_request_count, 0);
+}
+
+#[tokio::test]
+async fn lsp_audit_hover_cases_share_only_execution_pools() {
+    let config = HostConfig::default();
+    let worker_pools = TestHostWorkerPools::new(
+        &config,
+        verter_scheduler::scheduler::SchedulerConfig::default(),
+    );
+    let pool_ids = worker_pools.pool_ids();
+
+    lsp_audit_hover_session_publishes_lsp_record(&worker_pools).await;
+    lsp_audit_disabled_returns_noop_session(&worker_pools).await;
+    run_with_audit_publishes_record_when_audit_enabled(&worker_pools).await;
+    run_with_audit_short_circuits_when_audit_disabled(&worker_pools).await;
+
+    let receipt = worker_pools.receipt();
+    assert_eq!(receipt.pool_ids, pool_ids);
+    assert_eq!(receipt.host_shells_created, 4);
+    assert_eq!(receipt.scheduler_shells_created, 4);
+    assert_eq!(receipt.active_scheduler_shells, 0);
 }

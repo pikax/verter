@@ -111,6 +111,11 @@ pub struct AuditedRequestBuilder {
     analysis_level: Option<AnalysisLevel>,
     host_config: Option<HostConfig>,
     attach_to: Option<Arc<VerterHost>>,
+    /// Execution-only worker substrate for table-driven hermetic tests.
+    /// Every resolution still constructs a fresh workspace, host, scheduler,
+    /// driver, caches, audit store, and declaration-lowering service.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    test_worker_pools: Option<Arc<crate::TestHostWorkerPools>>,
     // `true` means "build a fresh host internally" (default);
     // `false` means "must have been called with attach_to".
     hermetic: bool,
@@ -169,6 +174,16 @@ impl AuditedRequestBuilder {
     pub fn attach_to(mut self, host: Arc<VerterHost>) -> Self {
         self.attach_to = Some(host);
         self.hermetic = false;
+        self
+    }
+
+    /// Reuse only the execution worker pools across hermetic test cases.
+    ///
+    /// This seam is test-support-only and intentionally does not imply host
+    /// reuse. Each terminal builder call still owns a fresh semantic shell.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub fn test_worker_pools(mut self, pools: Arc<crate::TestHostWorkerPools>) -> Self {
+        self.test_worker_pools = Some(pools);
         self
     }
 
@@ -296,6 +311,16 @@ impl AuditedRequestBuilder {
                 verter_workspace::MemoryOptions::default(),
             )),
         };
+        #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+        let host = match self.test_worker_pools.clone() {
+            Some(worker_pools) => Arc::new(VerterHost::new_with_test_worker_pools(
+                config,
+                workspace,
+                worker_pools,
+            )),
+            None => Arc::new(VerterHost::new(config, workspace)),
+        };
+        #[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-support"))))]
         let host = Arc::new(VerterHost::new(config, workspace));
         // Inject any `files` the builder collected.
         for (canonical, content) in &self.files {

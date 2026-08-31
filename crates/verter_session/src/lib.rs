@@ -319,6 +319,8 @@ pub(crate) mod mapper_binder_registry;
 pub mod meta;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod runtime_render_lane_tests;
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+mod test_worker_pools;
 
 #[cfg(test)]
 mod artifact_root_retention_tests;
@@ -444,6 +446,10 @@ use rustc_hash::FxHashMap;
 #[cfg(test)]
 use shared::default_shared;
 use shared::Shared;
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+pub use test_worker_pools::{
+    TestHostWorkerPoolIds, TestHostWorkerPools, TestHostWorkerPoolsReceipt,
+};
 
 /// Central file store and compile cache for Vue SFC compilation.
 ///
@@ -839,6 +845,11 @@ pub struct VerterHost {
     /// Per-host so an overflow forced on one host's tracer never bumps
     /// the counter a different host's delta assertion reads.
     pub(crate) signature_overflow_at_install: std::sync::atomic::AtomicU64,
+    /// Exclusive ownership token for a shared test worker substrate. Declared
+    /// last so it is released only after every production host field (including
+    /// the scheduler/driver) has been dropped.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    pub(crate) _test_worker_pool_lease: Option<crate::test_worker_pools::TestHostWorkerPoolLease>,
 }
 
 // Manual Debug impl because Arc<dyn WorkspaceAccess> doesn't implement Debug.

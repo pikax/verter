@@ -38,7 +38,10 @@ attribution = ["verter_audit/attribution"]
 # that call them) use this gate so the reverse-materialization fence holds in
 # every build profile, not release-only. Production-unreachability is asserted
 # by `tests/cases/g_misc1/test_support_feature_off_in_default_build.rs`.
-test-support = []
+# The reusable worker-substrate seam exposes scheduler pool identities, so an
+# explicit session test-support opt-in must carry the scheduler's matching
+# default-off identity surface for downstream test crates too.
+test-support = ["verter_scheduler/test-support"]
 # Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
 # downstream crates' tests. Enabled ONLY via a downstream `[dev-dependencies]`
 # entry — never in a production build, so it cannot weaken a witness discipline.
@@ -76,7 +79,7 @@ external-corpus = []
 # (`src/compile/map_equality_tests/bf2_seed_matrix.rs`) plus the harness
 # authored-source oracle. Needs Node and a gitignored oracle install;
 # the default hermetic gate must not enable this. Run:
-# `cargo test -p verter_session --lib --features bf2-authoritative bf2_seed_matrix`.
+# `cargo test -p verter_session --lib --features bf2-authoritative authoritative_seed_matrix_contracts_share_one_verified_run`.
 bf2-authoritative = []
 # Opt-in: transport route-equivalence suite
 # (`src/transport_route_equivalence_tests.rs`). Drives built `@verter/native`

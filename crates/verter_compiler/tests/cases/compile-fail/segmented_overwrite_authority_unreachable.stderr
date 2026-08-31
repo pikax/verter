@@ -1,19 +1,7 @@
-error[E0603]: module `template` is private
-  --> tests/cases/compile-fail/segmented_overwrite_authority_unreachable.rs:29:26
-   |
-29 |         verter_compiler::template::code_gen::types::SegmentedOverwriteAuthority::new();
-   |                          ^^^^^^^^ private module    --------------------------- struct `SegmentedOverwriteAuthority` is not publicly re-exported
-   |
-note: the module `template` is defined here
-  --> src/lib.rs
-   |
-   | pub(crate) mod template;
-   | ^^^^^^^^^^^^^^^^^^^^^^^
-
 error[E0624]: associated function `new` is private
-  --> tests/cases/compile-fail/segmented_overwrite_authority_unreachable.rs:29:82
+  --> tests/cases/compile-fail/segmented_overwrite_authority_unreachable.rs:21:82
    |
-29 |         verter_compiler::template::code_gen::types::SegmentedOverwriteAuthority::new();
+21 |         verter_compiler::template::code_gen::types::SegmentedOverwriteAuthority::new();
    |                                                                                  ^^^ private associated function
    |
   ::: src/template/code_gen/types.rs

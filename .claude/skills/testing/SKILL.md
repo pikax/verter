@@ -171,11 +171,11 @@ by the effective memory ceiling: 12 jobs from 16 GiB, 8 jobs from 12 GiB, and 4
 jobs below that, always capped by available CPUs. This keeps the documented
 24-GiB host at 8 build jobs under its unchanged 12-GiB default ceiling; the
 measured 12-job peak was 11.60 GiB and is too close to call portable there.
-Explicit positive overrides remain exact. Raising global test
-concurrency does not widen `.config/nextest.toml`'s `shared-provider-live` or
-`lsp-server-unit` groups: both remain `max-threads = 1` under the default and CI
-profiles, with their existing selectors. The cargo-free gate self-test pins
-both group assignments as well as the default/override matrix.
+Explicit positive overrides remain exact. Windows uses full nextest capacity;
+there are no `max-threads = 1` exceptions for `shared-provider-live` or
+`lsp-server-unit`. The cargo-free gate self-test rejects those serialized group
+assignments while pinning the shared-provider hang protection and both
+platform-neutral trybuild timeout override pairs.
 
 On Windows, `--prepare` still warm-lists every archived suite and accepts only
 an exact status 0. Proc-macro suites are real test suites, not filterable
@@ -305,16 +305,19 @@ producer command.
   `finish()` exits 0 whenever FAIL is zero, so skipping on an infrastructure failure would silently retire a
   scenario whose artifacts are present.
 
-**Conformance-harness preflight — real work, before Cargo.** After the build-prerequisite load and pinned
-oracle-cache realization are confirmed, but before freshness tooling or the archive build, the gate runs
-the harness-owned `packages/framework-conformance-harness/bin/gate-smoke.mjs` in `vapor` and `typescript`
-modes. Vapor calls the real exported `ensureVaporRuntimePreloaded()` path; TypeScript calls the real exported
+**Conformance-harness preflight — real work, before Cargo.** After the build-prerequisite load, but before
+freshness tooling or the archive build, the core gate runs only the harness-owned
+`packages/framework-conformance-harness/bin/gate-smoke.mjs typescript`. The separate required BF2 lane
+realizes its pinned oracle offline and then runs `gate-smoke.mjs vapor` before exact inventory listing.
+Vapor calls the real exported `ensureVaporRuntimePreloaded()` path; TypeScript calls the real exported
 `observeTypeScript()` with a multi-file in-memory observation in the `workspace` domain and asserts its
 export plus zero relevant diagnostics. No DOM or virtual-host logic is copied into the gate. Each mode runs
-separately through `runContainedStep`, emits separately-attributed duration/RSS telemetry, and succeeds only
-with the exact-key, mode-bound `verter-harness-smoke/v1` object receipt emitted after the work completes.
-Non-zero exit, timeout/stall/memory ceiling or monitor abort, signal, spawn failure, or a missing/invalid/
-mismatched/extra-key receipt is setup failure 127 with exact `HARNESS-SMOKE FAILED [<mode>]` attribution;
+under process-tree supervision and succeeds only with the exact-key, mode-bound
+`verter-harness-smoke/v1` object receipt emitted after the work completes. Core TypeScript retains the
+canonical gate's deadline/stall/RSS enforcement and telemetry. BF2 Vapor uses the dedicated lane's
+90-minute absolute deadline and teardown without adding a stall, memory, build-job, or test-thread limit.
+Non-zero exit, applicable supervisor abort, signal, spawn failure, or a missing/invalid/mismatched/extra-key
+receipt is setup failure 127 with exact `HARNESS-SMOKE FAILED [<mode>]` attribution;
 there is no skip, warning, or tolerance. GB15's real-production-CLI self-test leg makes `pnpm` unresolvable,
 provides temporary executable `buf`/`oxfmt` shims, refuses to launch without that proof, and requires the
 production freshness preflight to report a non-installing outcome, so it cannot install or lock the developer
