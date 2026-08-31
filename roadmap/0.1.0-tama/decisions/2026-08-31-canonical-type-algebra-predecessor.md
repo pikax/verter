@@ -2,7 +2,9 @@
 
 - Status: accepted
 - Date: 2026-08-31
-- Scope: adds two predecessor units to D2B; amends no other node's budgets or boundaries
+- Scope: adds two predecessor units to D2B; amends no other node's budgets or boundaries.
+  No other node receives algebra ownership. The consumer clauses in D3R, D3P, D4, D7, E4 and
+  `NCF-FD-NARROW` were clarified to name TA1 and TA2 as the authorities they already consume.
 
 ## Context
 
@@ -215,3 +217,32 @@ and ordered carriers, with all other production semantic composite construction
 routed through the authority. Reconnaissance measured the surface at 34 production
 construction sites across 17 files, of which roughly 14 reach a published flow,
 component-meta or typeinfo surface.
+
+## Deferred: one generated projection is stale by construction
+
+The `NCF-FD-NARROW` amendment landed in its SOURCE, the `fact_sources` row of
+`catalogs/native-checker-family-manifest.toml`, which is the authority. Its generated
+projection at `charters/expansion-native-checker/generated-families/NCF-FD-NARROW.md`
+could not be regenerated: no generator exists in the tree. The thirty generated family
+charters were added in one commit with no accompanying tool, they carry per-slice
+content that is not derivable from the manifest alone, and the generator is owned by
+NCK4, which has a GitHub issue mapping but no implemented ledger row.
+
+The projection therefore stays stale until NCK4 lands, and the DAG validator does not
+cross-check generated bodies against the manifest, so nothing detects it
+mechanically. The exact delta the regenerated file will need is one bullet under
+`#### Required fact and proof inputs`, between the relation/comparability proofs entry
+and the assignment/capture effects entry:
+
+    - ClassifyTruthinessDomain truthiness-domain facts; checker-private truthiness
+      classification is forbidden
+
+Recorded here so the amendment is not lost between the manifest and the projection.
+
+A second, narrower limitation is recorded rather than worked around: the manifest
+schema is `additionalProperties: false` over a fixed thirteen-field slice shape with
+no per-slice prohibition field, so the ban on checker-private truthiness
+classification rides the `fact_sources` string rather than a structural forbidden-
+design field. Giving it a field of its own requires a schema amendment plus the NCK4
+generator, and is not done here.
+
