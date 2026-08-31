@@ -59,4 +59,24 @@ describe("known product-gap manifest", () => {
       ).toBe("ISSUE-mixed-cross-import");
     }
   });
+
+  it("accepts confirmed feature debt without absorbing readiness failures", () => {
+    const svelteTsserver = knownProductGapsForRoute("svelte-parity", "tsserver");
+    expect(svelteTsserver["strict.svelte.rest-props-opt-in"]).toBe(
+      "ISSUE-svelte-strict-rest-props",
+    );
+    expect(svelteTsserver["svelte.matrix.strict-rest.clean"]).toBe(
+      "ISSUE-svelte-matrix-strict-rest-clean",
+    );
+    expect(svelteTsserver["svelte.references.script-and-markup"]).toBeUndefined();
+    expect(svelteTsserver["svelte.matrix.directives.if.hover"]).toBeUndefined();
+
+    const vueTsgo = knownProductGapsForRoute("vue-parity", "tsgo");
+    expect(vueTsgo["generic.infer.good-clean-no-type-args"]).toBe("ISSUE-vue-generic-infer-good");
+    expect(vueTsgo["generic.defaulted-t-string.no-annotation"]).toBe("ISSUE-vue-generic-default");
+    expect(vueTsgo["vue.matrix.generic-infer.clean"]).toBe("ISSUE-vue-matrix-generic-infer-clean");
+    expect(vueTsgo["vue.matrix.directives.v-if.hover"]).toBeUndefined();
+    expect(vueTsgo["vue.matrix.slots.header-local.hover"]).toBeUndefined();
+    expect(vueTsgo["vue.matrix.no-virtual.component-tag"]).toBeUndefined();
+  });
 });
