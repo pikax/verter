@@ -4017,6 +4017,22 @@ enum GuardNarrowing {
     Impossible,
 }
 
+/// One union arm's verdict against a runtime guard test. `NoMatch` is
+/// PROVED non-inhabitance of the tested edge — never "unrecognized". An
+/// arm the graph cannot classify (`any`, `unknown`, a memberless `{}`
+/// surface, an unresolved carrier, an undecided relation) is
+/// `Unclassified`: the checker still narrows such an arm, so it stays
+/// possible on BOTH edges of the test and the narrow records the typed
+/// guard gap instead of silently deciding either reading. This is what
+/// keeps [`GuardNarrowing::Impossible`] a positive proof: a branch goes
+/// dead only when every arm is proved off its edge.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArmGuardClass {
+    Match,
+    NoMatch,
+    Unclassified,
+}
+
 /// Whether the evaluator genuinely CONSUMED a type-predicate fact, and
 /// whether every relation outcome that consumption asked was decided —
 /// the verdict the predicate call's guard-application evidence records
@@ -6480,32 +6496,52 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
     }
 
     /// `typeof subject === "kind"`: keep the arms whose runtime type the
-    /// comparison names; negation drops them.
+    /// comparison names; negation drops them. An arm the graph cannot
+    /// classify stays on BOTH edges and degrades the result — the
+    /// checker narrows `unknown` / `any` under a `typeof` test, so
+    /// dropping such an arm would fabricate a dead branch and silently
+    /// lose that branch's return contributor.
     fn narrow_typeof(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
         kind: crate::flow_slice_content::SliceTypeofKind,
         negated: bool,
     ) -> GuardNarrowing {
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(this.arm_typeof_matches(arm, kind) != negated)
-        })
+        let mut unclassified = false;
+        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(match this.arm_typeof_class(arm, kind) {
+                ArmGuardClass::Match => !negated,
+                ArmGuardClass::NoMatch => negated,
+                ArmGuardClass::Unclassified => {
+                    unclassified = true;
+                    true
+                }
+            })
+        });
+        if unclassified {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        fact
     }
 
-    /// Whether one union arm's runtime type is the one a `typeof`
+    /// One union arm's verdict against the runtime type a `typeof`
     /// comparison names. A primitive is its own kind (`null` is the
     /// operator's `"object"` quirk); a literal its primitive's; objects,
     /// arrays, tuples and spread programs are `"object"`, signatures
-    /// `"function"`. Anything the graph cannot classify — an unresolved
-    /// reference, `any`, `unknown` — matches NEITHER reading, so the
-    /// positive filter drops it and the negated one keeps it.
-    fn arm_typeof_matches(
+    /// `"function"`; `never` is uninhabited, off both edges. Anything
+    /// the graph cannot place under exactly one runtime kind — `any`,
+    /// `unknown`, a memberless `{}` surface (primitives inhabit it), an
+    /// unresolved carrier — is `Unclassified`: `NoMatch` means PROVED
+    /// non-inhabitance of the tested edge, never "unrecognized".
+    fn arm_typeof_class(
         &self,
         arm: SemanticNodeId,
         kind: crate::flow_slice_content::SliceTypeofKind,
-    ) -> bool {
+    ) -> ArmGuardClass {
         use crate::flow_slice_content::SliceTypeofKind;
-        let primitive = match self.dispatch.graph().node_data(arm).as_deref() {
+        let classified = match self.dispatch.graph().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(primitive)) => match primitive {
                 PrimitiveKind::String => Some(SliceTypeofKind::String),
                 PrimitiveKind::Number => Some(SliceTypeofKind::Number),
@@ -6514,6 +6550,7 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 PrimitiveKind::Symbol => Some(SliceTypeofKind::Symbol),
                 PrimitiveKind::Undefined => Some(SliceTypeofKind::Undefined),
                 PrimitiveKind::Null | PrimitiveKind::Object => Some(SliceTypeofKind::Object),
+                PrimitiveKind::Never => return ArmGuardClass::NoMatch,
                 _ => None,
             },
             Some(SemanticNodeData::Literal(literal)) => match literal {
@@ -6522,14 +6559,24 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
                 crate::semantic_query::LiteralValue::BigInt(_) => Some(SliceTypeofKind::BigInt),
                 crate::semantic_query::LiteralValue::Boolean(_) => Some(SliceTypeofKind::Boolean),
             },
-            Some(SemanticNodeData::Object(_))
-            | Some(SemanticNodeData::ObjectSpreadProgram(_))
+            Some(SemanticNodeData::Object(surface)) => {
+                if surface.closed().is_empty() {
+                    None
+                } else {
+                    Some(SliceTypeofKind::Object)
+                }
+            }
+            Some(SemanticNodeData::ObjectSpreadProgram(_))
             | Some(SemanticNodeData::Array { .. })
             | Some(SemanticNodeData::Tuple { .. }) => Some(SliceTypeofKind::Object),
             Some(SemanticNodeData::Signature { .. }) => Some(SliceTypeofKind::Function),
             _ => None,
         };
-        primitive == Some(kind)
+        match classified {
+            Some(observed) if observed == kind => ArmGuardClass::Match,
+            Some(_) => ArmGuardClass::NoMatch,
+            None => ArmGuardClass::Unclassified,
+        }
     }
 
     /// A bare truthiness test keeps every arm that CAN take the requested
@@ -6837,9 +6884,46 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ) else {
             return GuardNarrowing::Unchanged;
         };
-        self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(this.assignable(arm, instance)? != negated)
-        })
+        let mut unclassified = false;
+        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+            Some(match this.arm_instanceof_class(arm, instance) {
+                ArmGuardClass::Match => !negated,
+                ArmGuardClass::NoMatch => negated,
+                ArmGuardClass::Unclassified => {
+                    unclassified = true;
+                    true
+                }
+            })
+        });
+        if unclassified {
+            self.record_degradation(FlowReturnDegradation::FlowGap(
+                crate::semantic_query::FlowGap::GuardNarrowing,
+            ));
+        }
+        fact
+    }
+
+    /// One union arm's verdict against a constructor's instance type.
+    /// Assignability decides only CLASSIFIED arms: for a top-shaped arm
+    /// (`any`, `unknown`, a memberless `{}` surface), an Opaque carrier,
+    /// or an undecided relation, "not assignable" does not prove the arm
+    /// cannot inhabit the `instanceof` edge — the checker narrows those
+    /// arms to the instance type instead of killing the branch.
+    fn arm_instanceof_class(&self, arm: SemanticNodeId, instance: SemanticNodeId) -> ArmGuardClass {
+        match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown))
+            | Some(SemanticNodeData::Opaque(_))
+            | None => return ArmGuardClass::Unclassified,
+            Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty() => {
+                return ArmGuardClass::Unclassified;
+            }
+            _ => {}
+        }
+        match self.assignable(arm, instance) {
+            Some(true) => ArmGuardClass::Match,
+            Some(false) => ArmGuardClass::NoMatch,
+            None => ArmGuardClass::Unclassified,
+        }
     }
 
     /// `"key" in subject`: keep the arms that CARRY the member; negation

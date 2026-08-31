@@ -2588,6 +2588,14 @@ mod corpus_suite {
                  `{ label: string, made: Opaque(UnmodeledPosition) }` — print syntax AND \
                  semantics differ; the Degraded divergence is held by the semantic test",
             ),
+            (
+                "N09_narrow_then_write",
+                "checker prints `{ label: string; }`; the renderer spells \
+                 `{ label: Union(string | Opaque(UnmodeledPosition)) }` — the retained \
+                 unmodelled-marker arm the `typeof` test cannot classify; print syntax \
+                 AND semantics differ; the KnownOwed divergence is held by the semantic \
+                 test",
+            ),
         ];
         let mut failures = Vec::new();
         for row in CORPUS {

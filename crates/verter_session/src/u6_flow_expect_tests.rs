@@ -3995,3 +3995,160 @@ fn narrowing_over_a_captured_binding_degrades_and_never_warms() {
         );
     }
 }
+
+/// A union arm the graph cannot classify against a runtime guard test
+/// (`any`, `unknown`) stays possible on BOTH edges of the test: the
+/// checker narrows such an arm, so dropping it fabricates a dead branch
+/// and loses that branch's return contributor from a result then
+/// certified complete and warm. The sound public outcome is the
+/// retained superset carrying the typed `FlowGap::GuardNarrowing`
+/// degradation — `ReturnOnly`, two cold computes, zero warm candidates —
+/// while a fully classified union keeps its exact, warm, gap-free
+/// narrow. Covers the positive and negated `typeof` spellings and the
+/// `instanceof` spelling.
+#[test]
+fn unclassifiable_guard_arms_remain_possible_degrade_and_never_warm() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc `--strict` checker verdict for the row: the lower bound
+        /// the retained superset must cover.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        /// `true`: clean row — exact value, warm replay, stored
+        /// candidate. `false`: degraded row — ReturnOnly, second call
+        /// cold again, zero stored candidates.
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            id: "guard_unclassified_typeof_unknown_positive",
+            script: "export function f(x: unknown) { if (typeof x === \"string\") return x; return 0; }",
+            checker: "string | 0",
+            rendered: "Union(unknown | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_unclassified_typeof_any_positive",
+            script: "export function f(x: any) { if (typeof x === \"string\") return x; return 0; }",
+            checker: "string | 0",
+            rendered: "Union(any | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_unclassified_typeof_unknown_negated",
+            script: "export function f(x: unknown) { if (typeof x !== \"string\") return 0; return x; }",
+            checker: "0 | string",
+            rendered: "Union(unknown | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_unclassified_instanceof_unknown",
+            script: "class C { m(): number { return 1; } }\nexport function f(x: unknown) { if (x instanceof C) return x; return 0; }",
+            checker: "C | 0",
+            rendered: "Union(unknown | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_unclassified_instanceof_any",
+            script: "class C { m(): number { return 1; } }\nexport function f(x: any) { if (x instanceof C) return x; return 0; }",
+            checker: "C | 0",
+            rendered: "Union(any | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "guard_classified_union_control",
+            script: "export function f(x: string | number) { if (typeof x === \"string\") return x; return 0; }",
+            checker: "string | 0",
+            rendered: "Union(string | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (a sound cover of checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
+
+/// Warm-candidate count for one program's `FlowReturn` slot after two
+/// public boundary calls on a fresh host.
+fn flow_return_candidate_count(id: &str, script: &str) -> usize {
+    let host = make_audit_host();
+    let canonical = format!("/wb/{id}__slots.ts");
+    upsert(
+        &host,
+        &canonical,
+        &crate::u6_flow_shape_corpus_tests::module_script(script),
+        FileLanguage::script_ts(),
+    );
+    let ident = identity(&canonical, "f");
+    for _ in 0..2 {
+        let _ =
+            host.get_flow_return_type_with_audit(&ident, ReturnProjectionDemand::whole_return());
+    }
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let key = crate::semantic_query::FlowReturnKey {
+        function: dispatch.flow_function_slot_for(
+            Arc::from(canonical.as_str()),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from("f"),
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        ),
+        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        context: dispatch.flow_return_context_for(&canonical),
+        demand: ReturnProjectionDemand::whole_return(),
+        input: crate::semantic_query::FlowInputContext::empty(),
+        result_contract:
+            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+    };
+    dispatch.graph().slot_candidate_count_for_tests(
+        &crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+    )
+}
