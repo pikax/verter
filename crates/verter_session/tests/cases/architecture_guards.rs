@@ -5181,6 +5181,12 @@ pub(crate) mod foundations_guards {
             // `verter_type_runtime` IPC entries).
             "crates/verter_tsgo_api/src/toolchain/discovery.rs",
             "crates/verter_tsgo_api/src/toolchain/validation.rs",
+            // Linux process-liveness probe — `/proc/<pid>/stat` is volatile
+            // kernel process metadata used to distinguish an exited zombie
+            // from a live engine/client. It is not workspace/semantic input
+            // and must not be cached by NativeFs. D14 carries the full
+            // per-callsite rationale.
+            "crates/verter_tsgo_api/src/process.rs",
             // Relay-shim rendezvous advertisement — the IPC file a shim
             // writes on startup so a `verter_lsp` control client can DISCOVER
             // it (create_dir_all / write / read / read_dir / remove). An IPC
