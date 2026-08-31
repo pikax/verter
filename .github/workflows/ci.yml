@@ -258,7 +258,6 @@ jobs:
               - 'CLAUDE.md'
               - '.github/workflows/ci.yml'
 
-
   tama-roadmap:
     name: Tama Roadmap
     needs: detect-changes
@@ -441,6 +440,13 @@ jobs:
       # Core owns generated-binding and compiler-tool freshness tests. Install
       # their pinned buf/oxfmt/TypeScript tools so they cannot skip vacuously.
       - run: pnpm install --frozen-lockfile
+      # A nextest archive contains the already-linked test executables, not the
+      # Cargo registry sources required by tests that deliberately spawn Cargo
+      # at runtime (for example trybuild privacy checks). Prime the locked
+      # registry on each fresh Core consumer before nextest makes those nested
+      # Cargo invocations offline.
+      - name: Fetch dependencies for runtime compile tests
+        run: cargo fetch --locked
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Download the shared Rust test archive
@@ -677,7 +683,6 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
         run: node scripts/bf2-authoritative.mjs
-
 
   js-build-test:
     name: JS Build & Test

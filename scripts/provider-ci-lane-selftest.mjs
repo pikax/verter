@@ -82,6 +82,12 @@ test("CI builds one archive and fans out four core shards plus provider consumer
   assert.match(core, /name:\s*Rust Test \(Core \$\{\{ matrix\.shard \}\}\/4\)/);
   assert.match(core, /--partition "hash:\$\{\{ matrix\.shard \}\}\/4"/);
   assert.match(core, /name:\s*Rust Core Test Results \(\$\{\{ matrix\.shard \}\}\/4\)/);
+  assert.match(
+    core,
+    /name:\s*Fetch dependencies for runtime compile tests[\s\S]*cargo fetch --locked/,
+  );
+  assert.doesNotMatch(tsserver, /cargo fetch\b/);
+  assert.doesNotMatch(tsgo, /cargo fetch\b/);
   for (const [lane, job] of [
     ["core", core],
     ["tsserver", tsserver],
