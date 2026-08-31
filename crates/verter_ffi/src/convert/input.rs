@@ -455,6 +455,415 @@ pub fn ffi_block_override_to_host(
             .collect::<Result<Vec<_>, FfiConversionError>>()?,
     })
 }
+// ── framework-discriminated host compile request → canonical request ─────
+
+use verter_compiler::compile_request::svelte::{
+    SvelteCompatibilityRequest, SvelteCssRequest, SvelteCustomElementDescriptor,
+    SvelteCustomElementPropDescriptor, SvelteFragmentsRequest, SvelteNamespaceRequest,
+    SvelteRunesRequest,
+};
+use verter_compiler::compile_request::vue::{
+    VueAssetUrlOptions, VueAssetUrlTransform, VueBackendRequest, VueCssModuleLocalsConvention,
+    VueCssModuleScopeBehaviour, VueCssModulesOptions, VueParsePad, VueWhitespaceStrategy,
+};
+use verter_compiler::compile_request::{
+    AnalysisProductRequest, CompileProduct, CompileRequest, CompileRequestError,
+    DeclarationProductRequest, FrameworkCompileRequest, FrameworkOption, IdeProductRequest,
+    PublicApiProductRequest, RuntimeProductRequest, SvelteOptionAttempt, VueOption,
+    VueOptionAttempt,
+};
+use verter_identity::profile::{
+    OutputProfileId, PresentationProfileId, SerializationProfileId, TypeScriptSemanticProfileId,
+};
+
+/// Maps a wire enum onto its 1:1 canonical counterpart. A wire variant left
+/// out of the list is a non-exhaustive-match compile error, so a variant
+/// added later can never fall through to a substituted value.
+macro_rules! map_variants {
+    ($value:expr, $wire:ident => $canonical:ident { $($variant:ident),+ $(,)? }) => {
+        match $value { $($wire::$variant => $canonical::$variant),+ }
+    };
+}
+
+/// The profile identities the host derives for one compile. They are
+/// content-derived digests, not caller-supplied values, so the wire schema
+/// has no field to ask for them and the conversion never invents one: the
+/// caller states them here, and each is placed on exactly the canonical
+/// product slots that carry it.
+///
+/// Deliberately has no `Default`: an absent profile must be an explicit
+/// `None` at the call site, never an implicit one inside the conversion.
+///
+/// Recorded limitation: one `output` / `presentation` / `serialization`
+/// identity is fanned across every product of the compile. The canonical
+/// products keep INDEPENDENT per-product profile slots on purpose (see
+/// `verter_compiler::compile_request::product`), and this parameter cannot
+/// express a compile whose products carry different ones. Nothing is
+/// served wrongly — a uniform assignment is a legal point in the canonical
+/// space — but per-product variation is unreachable through this entry
+/// point. It is a host-side parameter with no wire representation, so
+/// widening it to per-product identities later is not a wire change.
+#[derive(Debug, Clone)]
+pub struct HostResolvedCompileProfiles {
+    pub semantic: Option<TypeScriptSemanticProfileId>,
+    pub output: Option<OutputProfileId>,
+    pub presentation: Option<PresentationProfileId>,
+    pub serialization: Option<SerializationProfileId>,
+}
+
+/// Converts a framework-discriminated wire request into exactly ONE
+/// canonical [`CompileRequest`].
+///
+/// The canonical request stays the single request authority: this function
+/// only decodes and maps, then delegates every construction-time rule
+/// (product minimality, backend/product legality, option admission) to it,
+/// and returns its typed [`CompileRequestError`] verbatim. There is no
+/// second refusal vocabulary and no substituted value on any path — an
+/// option the wire omits is `None` at the boundary and stays whatever the
+/// canonical request derives it to be.
+///
+/// Every wire struct on this path is DESTRUCTURED with no `..` rest
+/// pattern, nested ones included, so a field added anywhere in the schema
+/// is a compile error here rather than a silently dropped option.
+pub fn ffi_host_compile_request_to_compile_request(
+    request: FfiHostCompileRequest,
+    profiles: &HostResolvedCompileProfiles,
+) -> Result<CompileRequest, CompileRequestError> {
+    let (identity, wire_products, framework) = match request {
+        FfiHostCompileRequest::Vue(FfiVueHostCompileRequest {
+            identity,
+            products,
+            options,
+        }) => (
+            identity,
+            products,
+            FrameworkCompileRequest::Vue(vue_options_to_attempt(options)?.into_request()?),
+        ),
+        FfiHostCompileRequest::Svelte(FfiSvelteHostCompileRequest {
+            identity,
+            products,
+            options,
+        }) => (
+            identity,
+            products,
+            FrameworkCompileRequest::Svelte(svelte_options_to_attempt(options).into_request()?),
+        ),
+    };
+    let FfiHostCompileIdentity {
+        filename,
+        component_id,
+        is_production,
+        force_js,
+    } = identity;
+
+    let products = wire_products
+        .into_iter()
+        .map(|product| requested_product_to_canonical(product, profiles))
+        .collect();
+
+    CompileRequest::new(
+        products,
+        framework,
+        profiles.semantic.clone(),
+        filename,
+        component_id,
+        is_production,
+        force_js,
+    )
+}
+
+fn requested_product_to_canonical(
+    product: FfiRequestedProduct,
+    profiles: &HostResolvedCompileProfiles,
+) -> CompileProduct {
+    let runtime = |FfiRuntimeProductRequest {
+                       inline,
+                       runtime_source_map,
+                   }| RuntimeProductRequest {
+        inline,
+        runtime_source_map,
+        output_profile: profiles.output.clone(),
+        serialization: profiles.serialization.clone(),
+    };
+    match product {
+        FfiRequestedProduct::RuntimeClient(wire) => CompileProduct::RuntimeClient(runtime(wire)),
+        FfiRequestedProduct::RuntimeServer(wire) => CompileProduct::RuntimeServer(runtime(wire)),
+        FfiRequestedProduct::IdeCompanion(FfiIdeProductRequest {
+            want_source_map,
+            embed_ambient_types,
+            conditional_root_narrowing,
+            strict_slots,
+            types_module_name,
+            ide_chunk_boundaries,
+        }) => CompileProduct::IdeCompanion(IdeProductRequest {
+            want_source_map,
+            embed_ambient_types,
+            conditional_root_narrowing,
+            strict_slots,
+            types_module_name,
+            ide_chunk_boundaries,
+            output_profile: profiles.output.clone(),
+            diagnostics: profiles.presentation.clone(),
+            serialization: profiles.serialization.clone(),
+        }),
+        FfiRequestedProduct::PublicApi => CompileProduct::PublicApi(PublicApiProductRequest {
+            output_profile: profiles.output.clone(),
+            serialization: profiles.serialization.clone(),
+        }),
+        FfiRequestedProduct::Declarations => {
+            CompileProduct::Declarations(DeclarationProductRequest {
+                output_profile: profiles.output.clone(),
+                serialization: profiles.serialization.clone(),
+            })
+        }
+        FfiRequestedProduct::Analysis(FfiAnalysisProductRequest {
+            want_script_bindings,
+            want_template_data,
+        }) => CompileProduct::Analysis(AnalysisProductRequest {
+            want_script_bindings,
+            want_template_data,
+        }),
+    }
+}
+
+/// Maps the wire Vue options onto the canonical admission surface. The
+/// refused slots cross as presence, not value, so the canonical surface —
+/// not this function — decides the refusal and names the row.
+///
+/// Destructured with no `..` rest pattern: a field added to the wire struct
+/// without a mapping here is a COMPILE ERROR, never a silently dropped
+/// option.
+fn vue_options_to_attempt(
+    options: FfiVueCompileOptions,
+) -> Result<VueOptionAttempt, CompileRequestError> {
+    let FfiVueCompileOptions {
+        backend,
+        ssr,
+        is_custom_element,
+        delimiters,
+        whitespace,
+        comments,
+        hoist_static,
+        cache_handlers,
+        hmr,
+        optimize_imports,
+        runtime_module_name,
+        ssr_runtime_module_name,
+        parse_pad,
+        ignore_empty,
+        babel_parser_plugins,
+        gen_default_as,
+        props_destructure,
+        script_custom_element,
+        transform_asset_urls,
+        style_trim,
+        css_modules,
+        compat_config,
+        compat_config_mode,
+        compat_config_compiler_is_on_element,
+        compat_config_compiler_v_bind_sync,
+        compat_config_compiler_v_if_v_for_precedence,
+        compat_config_compiler_v_bind_object_order,
+        compat_config_compiler_v_on_native,
+        compat_config_compiler_native_template,
+        compat_config_compiler_inline_template,
+        compat_config_compiler_filters,
+        transform_compat_config,
+        codegen_mode,
+    } = options;
+
+    Ok(VueOptionAttempt {
+        backend: map_variants!(backend, FfiVueBackend => VueBackendRequest {
+            Inferred, Vdom, Vapor
+        }),
+        ssr,
+        is_custom_element,
+        delimiters: delimiters.map(vue_delimiter_pair).transpose()?,
+        whitespace: whitespace.map(
+            |w| map_variants!(w, FfiVueWhitespace => VueWhitespaceStrategy { Preserve, Condense }),
+        ),
+        comments,
+        hoist_static,
+        cache_handlers,
+        hmr,
+        optimize_imports,
+        runtime_module_name,
+        ssr_runtime_module_name,
+        parse_pad: parse_pad
+            .map(|p| map_variants!(p, FfiVueParsePad => VueParsePad { Space, Line, Off })),
+        ignore_empty,
+        babel_parser_plugins,
+        gen_default_as,
+        props_destructure,
+        script_custom_element,
+        transform_asset_urls: transform_asset_urls.map(|t| match t {
+            FfiVueAssetUrlTransform::Disabled => VueAssetUrlTransform::Disabled,
+            FfiVueAssetUrlTransform::Enabled(FfiVueAssetUrlOptions {
+                base,
+                include_absolute,
+                tags,
+            }) => VueAssetUrlTransform::Enabled(VueAssetUrlOptions {
+                base,
+                include_absolute,
+                tags,
+            }),
+        }),
+        style_trim,
+        css_modules: css_modules.map(
+            |FfiVueCssModules {
+                 scope_behaviour,
+                 hash_prefix,
+                 locals_convention,
+                 export_globals,
+             }| VueCssModulesOptions {
+                scope_behaviour: scope_behaviour.map(|s| {
+                    map_variants!(s, FfiVueCssModuleScopeBehaviour => VueCssModuleScopeBehaviour {
+                        Local, Global
+                    })
+                }),
+                hash_prefix,
+                locals_convention: locals_convention.map(|c| {
+                    map_variants!(c, FfiVueCssModuleLocalsConvention => VueCssModuleLocalsConvention {
+                        CamelCase, CamelCaseOnly, Dashes, DashesOnly, AsIs
+                    })
+                }),
+                export_globals,
+            },
+        ),
+        compat_config,
+        compat_config_mode,
+        compat_config_compiler_is_on_element,
+        compat_config_compiler_v_bind_sync,
+        compat_config_compiler_v_if_v_for_precedence,
+        compat_config_compiler_v_bind_object_order,
+        compat_config_compiler_v_on_native,
+        compat_config_compiler_native_template,
+        compat_config_compiler_inline_template,
+        compat_config_compiler_filters,
+        transform_compat_config,
+        codegen_mode,
+    })
+}
+
+/// A delimiter pair is exactly two strings. Any other arity is a typed
+/// malformed-value refusal — never a fall back to the framework default.
+fn vue_delimiter_pair(raw: Vec<String>) -> Result<(String, String), CompileRequestError> {
+    let [open, close] =
+        <[String; 2]>::try_from(raw).map_err(|raw| CompileRequestError::MalformedOptionValue {
+            option: FrameworkOption::Vue(VueOption::ParserOptionsDelimiters),
+            value: raw.join(","),
+        })?;
+    Ok((open, close))
+}
+
+/// The Svelte half of [`vue_options_to_attempt`], under the same
+/// exhaustive-destructure and presence-not-value rules. Infallible: every
+/// Svelte slot is a total mapping, so no refusal is reachable before
+/// [`SvelteOptionAttempt::into_request`].
+fn svelte_options_to_attempt(options: FfiSvelteCompileOptions) -> SvelteOptionAttempt {
+    let FfiSvelteCompileOptions {
+        dev,
+        generate_module,
+        experimental_async,
+        custom_element,
+        custom_element_descriptor,
+        namespace,
+        css,
+        preserve_comments,
+        preserve_whitespace,
+        fragments,
+        runes,
+        disclose_version,
+        compatibility,
+        loose,
+        accessors,
+        immutable,
+        compatibility_component_api,
+        hmr,
+        custom_element_extend,
+    } = options;
+
+    SvelteOptionAttempt {
+        dev,
+        generate_module,
+        experimental_async,
+        custom_element,
+        custom_element_descriptor: custom_element_descriptor.map(svelte_custom_element_descriptor),
+        namespace: namespace.map(|n| {
+            map_variants!(n, FfiSvelteNamespace => SvelteNamespaceRequest {
+                Html, Svg, MathMl, Foreign
+            })
+        }),
+        css: css.map(|c| map_variants!(c, FfiSvelteCss => SvelteCssRequest { Injected, External })),
+        preserve_comments,
+        preserve_whitespace,
+        fragments: fragments
+            .map(|f| map_variants!(f, FfiSvelteFragments => SvelteFragmentsRequest { Html, Tree })),
+        runes: runes
+            .map(|r| map_variants!(r, FfiSvelteRunes => SvelteRunesRequest { True, False, Infer })),
+        disclose_version,
+        // The canonical compatibility request is a sealed marker with one
+        // inhabitant, so `default()` is its only constructor, not a
+        // substituted value: presence maps to presence.
+        compatibility: compatibility
+            .map(|FfiSvelteCompatibility {}| SvelteCompatibilityRequest::default()),
+        loose,
+        accessors,
+        immutable,
+        compatibility_component_api,
+        hmr,
+        custom_element_extend,
+    }
+}
+
+fn svelte_custom_element_descriptor(
+    descriptor: FfiSvelteCustomElementDescriptor,
+) -> SvelteCustomElementDescriptor {
+    let FfiSvelteCustomElementDescriptor { tag, shadow, props } = descriptor;
+    SvelteCustomElementDescriptor {
+        tag,
+        shadow,
+        props: props
+            .into_iter()
+            .map(
+                |(
+                    name,
+                    FfiSvelteCustomElementProp {
+                        attribute,
+                        reflect,
+                        prop_type,
+                    },
+                )| {
+                    (
+                        name,
+                        SvelteCustomElementPropDescriptor {
+                            attribute,
+                            reflect,
+                            prop_type: prop_type.map(svelte_custom_element_prop_type),
+                        },
+                    )
+                },
+            )
+            .collect(),
+    }
+}
+
+/// The wire's closed prop-type vocabulary rendered as the official Svelte
+/// spelling the canonical descriptor carries. Total by construction: the
+/// domain is closed at decode, so there is nothing to refuse here, and a
+/// variant added to the wire enum is a non-exhaustive-match compile error
+/// rather than a spelling this boundary invents.
+fn svelte_custom_element_prop_type(prop_type: FfiSvelteCustomElementPropType) -> String {
+    match prop_type {
+        FfiSvelteCustomElementPropType::String => "String",
+        FfiSvelteCustomElementPropType::Boolean => "Boolean",
+        FfiSvelteCustomElementPropType::Number => "Number",
+        FfiSvelteCustomElementPropType::Array => "Array",
+        FfiSvelteCustomElementPropType::Object => "Object",
+    }
+    .to_string()
+}
+
 pub fn ffi_virtual_query_to_host(
     input: FfiVirtualQuery,
 ) -> Result<host::VirtualQuery, FfiConversionError> {

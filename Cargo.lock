@@ -3324,6 +3324,7 @@ dependencies = [
  "verter_actions",
  "verter_compiler",
  "verter_diagnostics",
+ "verter_identity",
  "verter_language",
  "verter_macro_dto",
  "verter_protocol",
