@@ -358,6 +358,11 @@ node_id = "CCA1N3"
 commit_message = "feat(session): route host-backed compile through bound framework host backends"
 commit_date = "2026-08-31T14:30:00+01:00"
 
+[[implemented]]
+node_id = "CCA1N4A"
+commit_message = "fix(session): state the runtime-render route record's real verification"
+commit_date = "2026-08-31T18:05:00+01:00"
+
 [[github_issue]]
 node_id = "B4R0"
 gh_issue = 102
@@ -1587,4 +1592,8 @@ sync_to_github = true
 [[github_issue]]
 node_id = "CCA1N2G"
 gh_issue = 447
+sync_to_github = true
+[[github_issue]]
+node_id = "CCA1N4A"
+gh_issue = 449
 sync_to_github = true
