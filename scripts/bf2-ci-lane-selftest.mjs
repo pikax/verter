@@ -155,6 +155,11 @@ test("ci.yml keeps BF2 parallel, required, pinned/offline, and off the Rust core
     rustJob,
     /provision-oracle-npm-cache\.mjs|--features\s+(?:verter_session\/)?bf2-authoritative/,
   );
+  assert.doesNotMatch(
+    rustJob,
+    /--(?:build-)?jobs\b|-j\s*\d|--test-threads\b|max-threads/,
+    "the core Rust CI lane must use the runner's full Cargo and Nextest capacity",
+  );
   assert.match(rustJob, /SCCACHE_GHA_ENABLED:\s*"true"/);
 
   const coreSource = readFileSync(join(REPO_ROOT, "scripts", "gate.mjs"), "utf8");

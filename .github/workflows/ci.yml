@@ -431,7 +431,7 @@ jobs:
           NEXTEST_PROFILE: ci
         run: |
           export VERTER_NEXTEST_FILTER="$(node --input-type=module -e "import { buildCanonicalSurface1FilterExpr } from './scripts/gate-internals.mjs'; process.stdout.write(buildCanonicalSurface1FilterExpr())")"
-          node scripts/run-cached.mjs -- 'cargo nextest run --workspace --features verter_session/bf2-authoritative --build-jobs 2 --test-threads 4 --no-fail-fast -E "$VERTER_NEXTEST_FILTER"'
+          node scripts/run-cached.mjs -- 'cargo nextest run --workspace --no-fail-fast -E "$VERTER_NEXTEST_FILTER"'
       # Independent FEATURE-OFF gate: the workspace runs above UNIFY cargo
       # features — `verter_svelte_conformance` dev-deps `verter_compiler` with
       # `features = ["conformance-trace"]`, so every workspace-built
@@ -472,9 +472,9 @@ jobs:
           reporter: java-junit
           fail-on-error: false
 
-  # Required and parallel with rust-test. The canonical archive excludes
-  # trybuild because nested Cargo builds cannot execute from an extracted
-  # nextest archive; this lane owns the consolidated compiler driver and its
+  # Required and parallel with rust-test. The canonical direct run excludes
+  # the registered trybuild drivers so their nested Cargo work does not inflate
+  # the core lane; this job owns the consolidated compiler driver and its
   # deterministic generated-artifact freshness guard.
   compiler-contracts:
     name: Compiler Contracts
@@ -511,7 +511,7 @@ jobs:
           -E 'test(/^cases::compiler_compile_fail::default_compiler_compile_fail_contracts_are_enforced$/)
           or test(/^cases::svelte_generated_artifacts_freshness::generated_svelte_artifacts_match_their_authoritative_inputs$/)'
 
-  # Required and parallel with rust-test. The core archive deliberately omits
+  # Required and parallel with rust-test. The core direct run deliberately omits
   # `verter_session/bf2-authoritative`; this lane owns its pinned oracle setup,
   # exact source/list inventory admission, and full-capacity nextest run.
   bf2-authoritative:
