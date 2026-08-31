@@ -18,8 +18,8 @@ import { assertNotVacuousPassLog } from "../lib/vacuousPass";
 import { pollBudget, sequenceParent, setRunnableAccessor, SUITE_TIMEOUT_MS } from "../lib/timeouts";
 import { launchServerProfile, routeBaseServerProfile } from "../helpers";
 import { serverProfileForSuite } from "../lib/serverProfiles";
-import { PARITY_FIXTURES, type ParityFixture } from "../lib/parityTestInventory";
-import { classifyExplicitProductGap, type RunSummaryFailure } from "../../src/runSummaryOracle";
+import { productGapsForFixtureRoute } from "../lib/productGapRoute";
+import { type ProductGapSkip, type RunSummaryFailure } from "../../src/runSummaryOracle";
 
 /** Recursively find the authored test sources under a directory. */
 function findTestSources(dir: string): string[] {
@@ -123,6 +123,7 @@ export async function run(): Promise<void> {
   const testsRoot = path.resolve(__dirname);
   const onlyPattern = process.env.VERTER_E2E_ONLY || process.env.E2E_ONLY;
   const sourceRoot = path.resolve(testsRoot, "../../../e2e/suite");
+  const productGapManifest = productGapsForFixtureRoute(FIXTURE_NAME, TYPE_PROVIDER);
 
   // A LAUNCH configures ONE server, and Verter's native lane is an initialization
   // option, so a suite that declares a different server profile belongs to a
@@ -204,6 +205,19 @@ export async function run(): Promise<void> {
         throw err;
       }
     },
+    beforeEach(this: Mocha.Context) {
+      const testId = this.currentTest?.title;
+      const issue = testId ? productGapManifest[testId] : undefined;
+      if (!testId || !issue) return;
+
+      // Known feature debt is route-specific and statically reviewed. Skip it
+      // before its body can consume readiness budgets or obscure regressions;
+      // the pending event below records the exact ID + issue for the oracle and
+      // the human-facing degraded report. Infrastructure hooks and unmanifested
+      // tests never enter this branch.
+      console.warn(`  ⚠ SKIPPED KNOWN PRODUCT GAP: ${testId} (${issue})`);
+      this.skip();
+    },
     afterAll() {
       if (TYPE_PROVIDER === "shared-tsgo") {
         assertSharedTsgoServedWithoutFallback(readTestLog());
@@ -215,7 +229,7 @@ export async function run(): Promise<void> {
     const passedTestIds: string[] = [];
     const pendingTestIds: string[] = [];
     const failedTests: RunSummaryFailure[] = [];
-    const productGapTestIds: string[] = [];
+    const skippedProductGaps: ProductGapSkip[] = [];
 
     const originalConsoleLog = console.log;
     console.log = (...args: unknown[]) => {
@@ -241,18 +255,11 @@ export async function run(): Promise<void> {
         passedTestIds,
         pendingTestIds,
         failedTests,
-        productGapTestIds,
+        skippedProductGaps,
         rootHookError: rootHookError ?? null,
       });
 
-      const parityRun = PARITY_FIXTURES.includes(FIXTURE_NAME as ParityFixture);
-      const productGapsAreTheOnlyFailures =
-        parityRun &&
-        !rootHookError &&
-        failedTests.length === productGapTestIds.length &&
-        (stats.failures ?? 0) === productGapTestIds.length &&
-        failures === productGapTestIds.length;
-      const failed = (failures > 0 || (stats.failures ?? 0) > 0) && !productGapsAreTheOnlyFailures;
+      const failed = failures > 0 || (stats.failures ?? 0) > 0;
       if (failed) {
         const detail =
           failedTests.length > 0
@@ -279,7 +286,11 @@ export async function run(): Promise<void> {
     // registry consults it to check each claimed parent against the real deadline.
     activeRunner = runner;
     runner.on("pass", (test) => passedTestIds.push(test.title));
-    runner.on("pending", (test) => pendingTestIds.push(test.title));
+    runner.on("pending", (test) => {
+      pendingTestIds.push(test.title);
+      const issue = productGapManifest[test.title];
+      if (issue) skippedProductGaps.push({ id: test.title, issue });
+    });
     runner.on("fail", (test, err) => {
       const failure: RunSummaryFailure = {
         id: test.title,
@@ -288,8 +299,6 @@ export async function run(): Promise<void> {
         kind: test.type === "test" ? "test" : "hook",
       };
       failedTests.push(failure);
-      const productGap = classifyExplicitProductGap(failure);
-      if (productGap) productGapTestIds.push(productGap.id);
     });
   });
 }

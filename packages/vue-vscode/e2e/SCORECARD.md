@@ -18,7 +18,7 @@ Target: **every dimension ≥ 9** → **~90–95 / 100** on suite _completeness_
 | -------------------------------------------- | ------: | ----: | -------: | --------------------------------------------------------------------------------- |
 | Coverage breadth (features touched)          |      15 |     9 |     13.5 | Shared suites for type-neg, slots, ide-nav, strict, js, depth, style              |
 | Coverage depth (apply edits, JS+TS, mapping) |      15 |     9 |     13.5 | `depth-apply`: rename apply, HTML rename reject, event/slot mapping, undo         |
-| Honesty / anti-false-green                   |      10 |     9 |      9.0 | Tree-derived parity inventory; expect-error + live diags; failParityGap hard-fail |
+| Honesty / anti-false-green                   |      10 |     9 |      9.0 | Exact gap skips are reported as degraded; every unmanifested red hard-fails       |
 | Vue IDE surface matrix                       |      12 |     9 |     10.8 | Matrix + fallthrough + strict + slots + ide surface clean rows                    |
 | Svelte IDE surface matrix                    |      12 |     9 |     10.8 | Public-surface, runes/bindable/effect, snippet/ide/strict matrix rows             |
 | Typing / editing DX tests                    |      10 |     9 |      9.0 | ide-navigation auto-import + depth; depth undo; typing suites                     |
@@ -26,7 +26,7 @@ Target: **every dimension ≥ 9** → **~90–95 / 100** on suite _completeness_
 | CSS / style framework tests                  |       6 |     9 |      5.4 | Style def/ref + `:global` + local/global coexistence both FW                      |
 | Find/rename/code-actions                     |       6 |     9 |      5.4 | Rename apply/reject + existing code-action/find suites                            |
 | Ecosystem / multi-root / mixed               |       6 |     9 |      5.4 | Nuxt pages + Kit routes + multi-root dual hover/isolation + mixed wrong props     |
-| **Total**                                    | **100** |       |  **~92** | Product may stay red (`PRODUCT_GAP`); suite completeness is the score             |
+| **Total**                                    | **100** |       |  **~92** | Known debt stays visibly skipped/degraded; suite completeness is the score        |
 
 ## What the score means
 

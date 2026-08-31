@@ -73,6 +73,43 @@ const CONTRACT_FIXTURES: Readonly<Record<string, { framework: ContractFramework;
     "vue-contract": { framework: "vue", only: "frameworks/vue/contract.test" },
     "svelte-contract": { framework: "svelte", only: "frameworks/svelte/contract.test" },
   };
+
+function reportRouteResult(label: string, productGaps: Readonly<Record<string, string>>): number {
+  const gaps = Object.entries(productGaps).sort(([left], [right]) => left.localeCompare(right));
+  if (gaps.length === 0) {
+    console.log(`  PASSED: ${label}`);
+    return 0;
+  }
+
+  console.warn(
+    `  DEGRADED: ${label} passed executable checks with ${gaps.length} known product-gap ` +
+      `test(s) skipped`,
+  );
+  for (const [id, issue] of gaps) console.warn(`    - ${id} (${issue})`);
+
+  if (process.env.GITHUB_ACTIONS === "true") {
+    console.warn(
+      `::warning title=VS Code E2E degraded::${label} skipped ${gaps.length} known ` +
+        "product-gap test(s); see the job summary for the exact inventory",
+    );
+  }
+  const stepSummary = process.env.GITHUB_STEP_SUMMARY;
+  if (stepSummary) {
+    const rows = gaps.map(([id, issue]) => `| \`${id}\` | \`${issue}\` |`).join("\n");
+    try {
+      fs.appendFileSync(
+        stepSummary,
+        `\n### ⚠️ ${label}: degraded by known product gaps\n\n` +
+          `${gaps.length} test(s) were skipped before execution. This route is not fully green.\n\n` +
+          "| Skipped test | Tracking issue |\n| --- | --- |\n" +
+          `${rows}\n`,
+      );
+    } catch (error) {
+      console.warn(`  Could not append the degraded route report to ${stepSummary}: ${error}`);
+    }
+  }
+  return gaps.length;
+}
 /** Focused parity fixtures: only the parity suite tree runs. */
 const PARITY_FIXTURE_CONFIGS: Readonly<Record<ParityFixture, { only: string }>> = {
   "vue-parity": { only: "parity/" },
@@ -361,6 +398,8 @@ async function main() {
   const lspBinaryPath = copyLspBinaryToTemp(extensionDevelopmentPath);
 
   let totalFailures = 0;
+  let totalDegradedRoutes = 0;
+  let totalSkippedProductGaps = 0;
 
   for (const [index, route] of routesToRun.entries()) {
     const { fixture, typeProvider } = route;
@@ -574,11 +613,10 @@ async function main() {
             },
           });
         } catch (error) {
-          // VS Code exits non-zero when Mocha reports a known product gap. The
-          // structured run summary below is the verdict authority: it rejects
-          // unexpected failures, missing/duplicate required tests, and missing
-          // summaries. Retain the launcher error for diagnostics, but do not let
-          // its coarse exit code bypass the route-specific product-gap manifest.
+          // The structured run summary below is the verdict authority: it rejects
+          // every failure, missing/duplicate required tests, and missing summaries.
+          // Retain the launcher error for diagnostics because the editor process
+          // exit code is unreliable on some hosts.
           extensionHostError = error;
         }
         // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
@@ -591,6 +629,11 @@ async function main() {
         const parity = requiredParityRun(fixture, onlyPattern);
         const projectlessContract = isProjectlessContractFixture(fixture);
         const barrelRegression = isBarrelRegressionFixture(fixture);
+        const allowedProductGaps = parity
+          ? knownProductGapsForRoute(fixture, typeProvider, parity.testIds)
+          : contract
+            ? knownFrameworkContractGapsForRoute(contract.framework, typeProvider)
+            : undefined;
         const requiredLoadedFiles = contract
           ? [`frameworks/${contract.framework}/contract.test.js`]
           : projectlessContract
@@ -610,11 +653,7 @@ async function main() {
                 : barrelRegression
                   ? BARREL_REGRESSION_TEST_IDS
                   : parity?.testIds,
-            allowedProductGaps: parity
-              ? knownProductGapsForRoute(fixture, typeProvider, parity.testIds)
-              : contract
-                ? knownFrameworkContractGapsForRoute(contract.framework, typeProvider)
-                : undefined,
+            allowedProductGaps,
           });
         } catch (summaryError) {
           if (extensionHostError) {
@@ -628,10 +667,14 @@ async function main() {
         if (extensionHostError) {
           console.warn(
             `  Extension-host process exited non-zero for ${label}; the complete run summary ` +
-              "contains only statically allowed product gaps.",
+              "contains no test failures and passed its exact inventory checks.",
           );
         }
-        console.log(`  PASSED: ${label}`);
+        const skippedProductGaps = reportRouteResult(label, allowedProductGaps ?? {});
+        if (skippedProductGaps > 0) {
+          totalDegradedRoutes++;
+          totalSkippedProductGaps += skippedProductGaps;
+        }
       } catch (err) {
         console.error(`  FAILED: ${label}`, err);
         totalFailures++;
@@ -654,7 +697,14 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("\nAll fixture E2E tests passed.");
+  if (totalDegradedRoutes > 0) {
+    console.warn(
+      `\nFixture E2E gates completed with ${totalDegradedRoutes} DEGRADED route(s) and ` +
+        `${totalSkippedProductGaps} known product-gap test(s) skipped; not fully green.`,
+    );
+  } else {
+    console.log("\nAll fixture E2E tests passed with no known product-gap skips.");
+  }
 }
 
 main().catch((err) => {
