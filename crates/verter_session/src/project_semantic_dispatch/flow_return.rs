@@ -6874,15 +6874,25 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         Some((survivors, total))
     }
 
-    /// `subject instanceof Ctor`: keep the arms assignable to the
-    /// constructor's instance type (resolved as a bare type reference in
-    /// owner scope — the same lowering any authored annotation of that
-    /// name takes). The lowering mints this fact only for a constructor
-    /// name it proved to be the module's single same-file `class`
-    /// declaration left free by the frame, which is exactly when that
-    /// type reference IS the compared value's instance type; every other
-    /// right-hand side reaches the evaluator as a typed gap, never as a
-    /// fact over the wrong binding.
+    /// `subject instanceof Ctor`, applying the checker's own per-arm
+    /// narrowing (the same rule [`Self::narrow_to_predicate_target`]
+    /// applies to `x is T`): on the positive edge an arm assignable to
+    /// the constructor's instance type survives as itself, an arm the
+    /// instance type is assignable to narrows TO the instance type (the
+    /// downcast reading), and an unrelated arm keeps the checker's
+    /// intersection unless provably disjoint — the one proved dead
+    /// reading. The negated edge drops only an arm proved to BE the
+    /// tested class (node identity with the instance type); structural
+    /// assignability alone cannot prove derivation, so an assignable
+    /// but non-identical arm stays possible, degraded. The instance
+    /// type resolves as a bare type reference in owner scope — the same
+    /// lowering any authored annotation of that name takes. The
+    /// lowering mints this fact only for a constructor name it proved
+    /// to be the module's single same-file `class` declaration left
+    /// free by the frame, which is exactly when that type reference IS
+    /// the compared value's instance type; every other right-hand side
+    /// reaches the evaluator as a typed gap, never as a fact over the
+    /// wrong binding.
     fn narrow_instanceof(
         &mut self,
         subject: &crate::flow_slice_content::SliceNarrowSubject,
@@ -6901,45 +6911,171 @@ impl<'d, 'b> FlowEvaluator<'d, 'b> {
         ) else {
             return GuardNarrowing::Unchanged;
         };
-        let mut unclassified = false;
-        let fact = self.narrow_arms_by(subject, subject, |this, arm| {
-            Some(match this.arm_instanceof_class(arm, instance) {
-                ArmGuardClass::Match => !negated,
-                ArmGuardClass::NoMatch => negated,
-                ArmGuardClass::Unclassified => {
-                    unclassified = true;
-                    true
+        if negated {
+            // The checker's negated edge drops only an arm PROVED to be
+            // the tested class family; every other arm stays exactly as
+            // declared. Structural assignability over-approximates that
+            // proof — a same-shape but underived arm is assignable yet
+            // the checker keeps it — so the only structural proof of
+            // "this arm IS the tested class" is node identity with the
+            // instance type. An assignable-but-not-identical arm may or
+            // may not be derived: it stays possible, degraded.
+            let mut gapped = false;
+            let fact = self.narrow_arms_by(subject, subject, |this, arm| {
+                if this.instanceof_arm_is_unclassifiable(arm) {
+                    gapped = true;
+                    return Some(true);
                 }
-            })
-        });
-        if unclassified {
+                Some(match this.assignable(arm, instance) {
+                    Some(true) => {
+                        if arm == instance {
+                            false
+                        } else {
+                            gapped = true;
+                            true
+                        }
+                    }
+                    Some(false) => true,
+                    None => {
+                        gapped = true;
+                        true
+                    }
+                })
+            });
+            if gapped {
+                self.record_degradation(FlowReturnDegradation::FlowGap(
+                    crate::semantic_query::FlowGap::GuardNarrowing,
+                ));
+            }
+            return fact;
+        }
+        // The positive edge is the checker's own per-arm rule, the same
+        // rule `narrow_to_predicate_target` applies to `x is T`: an arm
+        // assignable to the instance type survives as itself; an arm the
+        // instance type is assignable to narrows TO the instance type
+        // (the downcast reading — `x: Base` guarded by `instanceof Sub`
+        // reads `Sub`); an arm related in neither direction keeps the
+        // checker's intersection unless the two are provably disjoint
+        // (a primitive arm against a class instance), which is the one
+        // proved dead reading. Arms the graph cannot classify or relate
+        // stay possible, degraded.
+        let Some(current) = self.subject_current_node(subject) else {
+            return GuardNarrowing::Unchanged;
+        };
+        let arms = self.union_arms_or_self(current);
+        let mut out: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
+        let mut changed = false;
+        let mut gapped = false;
+        for arm in &arms {
+            if self.instanceof_arm_is_unclassifiable(*arm) {
+                out.push(*arm);
+                gapped = true;
+                continue;
+            }
+            match self.assignable(*arm, instance) {
+                Some(true) => out.push(*arm),
+                Some(false) => {
+                    match self.assignable(instance, *arm) {
+                        Some(true) => {
+                            out.push(instance);
+                            changed = true;
+                        }
+                        Some(false) => {
+                            // The instance type is a CLASS instance by
+                            // the fact-minting rule, so a primitive or
+                            // literal arm is proved off the positive
+                            // edge outright — no primitive value is a
+                            // class instance, and the checker drops such
+                            // arms rather than intersect them.
+                            if self.arm_is_non_object_runtime_value(*arm) {
+                                changed = true;
+                            } else {
+                                let relation = self.nodes_provably_disjoint(*arm, instance);
+                                if relation.nominal_identity_missing {
+                                    self.record_degradation(FlowReturnDegradation::FlowGap(
+                                        crate::semantic_query::FlowGap::NominalRelation,
+                                    ));
+                                }
+                                if relation.provably_disjoint {
+                                    changed = true;
+                                } else {
+                                    out.push(
+                                        self.dispatch.intern_normalized_union_or_intersection(
+                                            &[*arm, instance],
+                                            false,
+                                        ),
+                                    );
+                                    changed = true;
+                                }
+                            }
+                        }
+                        None => {
+                            out.push(*arm);
+                            gapped = true;
+                        }
+                    }
+                }
+                None => {
+                    out.push(*arm);
+                    gapped = true;
+                }
+            }
+        }
+        if gapped {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 crate::semantic_query::FlowGap::GuardNarrowing,
             ));
         }
-        fact
+        if out.is_empty() {
+            return GuardNarrowing::Impossible;
+        }
+        if !changed && out.len() == arms.len() {
+            return GuardNarrowing::Unchanged;
+        }
+        let node = self
+            .dispatch
+            .intern_normalized_union_or_intersection(&out, true);
+        GuardNarrowing::Narrowed(subject.clone(), node)
     }
 
-    /// One union arm's verdict against a constructor's instance type.
-    /// Assignability decides only CLASSIFIED arms: for a top-shaped arm
-    /// (`any`, `unknown`, a memberless `{}` surface), an Opaque carrier,
-    /// or an undecided relation, "not assignable" does not prove the arm
-    /// cannot inhabit the `instanceof` edge — the checker narrows those
-    /// arms to the instance type instead of killing the branch.
-    fn arm_instanceof_class(&self, arm: SemanticNodeId, instance: SemanticNodeId) -> ArmGuardClass {
+    /// Whether one union arm is beyond `instanceof` classification
+    /// entirely: a top-shaped arm (`any`, `unknown`, a memberless `{}`
+    /// surface), an Opaque carrier, or a node with no data. The checker
+    /// narrows those arms to the instance type; without that capability
+    /// they stay possible on both edges and degrade the result instead
+    /// of killing a branch.
+    fn instanceof_arm_is_unclassifiable(&self, arm: SemanticNodeId) -> bool {
         match self.dispatch.graph().node_data(arm).as_deref() {
             Some(SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown))
             | Some(SemanticNodeData::Opaque(_))
-            | None => return ArmGuardClass::Unclassified,
-            Some(SemanticNodeData::Object(surface)) if surface.closed().is_empty() => {
-                return ArmGuardClass::Unclassified;
-            }
-            _ => {}
+            | None => true,
+            Some(SemanticNodeData::Object(surface)) => surface.closed().is_empty(),
+            _ => false,
         }
-        match self.assignable(arm, instance) {
-            Some(true) => ArmGuardClass::Match,
-            Some(false) => ArmGuardClass::NoMatch,
-            None => ArmGuardClass::Unclassified,
+    }
+
+    /// Whether one union arm's runtime values are never objects — a
+    /// scalar primitive or a literal. Such an arm cannot inhabit the
+    /// positive edge of an `instanceof` test against a class instance
+    /// type, so it is proved off that edge without consulting the
+    /// relation oracle. `object` is object-like and the top/uninhabited
+    /// kinds are classified elsewhere, so none of them answer here.
+    fn arm_is_non_object_runtime_value(&self, arm: SemanticNodeId) -> bool {
+        match self.dispatch.graph().node_data(arm).as_deref() {
+            Some(SemanticNodeData::Primitive(primitive)) => matches!(
+                primitive,
+                PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::Symbol
+                    | PrimitiveKind::Undefined
+                    | PrimitiveKind::Null
+                    | PrimitiveKind::Void
+                    | PrimitiveKind::Never
+            ),
+            Some(SemanticNodeData::Literal(_)) => true,
+            _ => false,
         }
     }
 

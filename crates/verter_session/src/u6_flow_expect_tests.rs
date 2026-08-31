@@ -4260,3 +4260,138 @@ fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
         assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
     }
 }
+
+/// `instanceof` narrows by the checker's own per-arm rule — the same
+/// rule the `x is T` predicate applies — and degrades ONLY the arms it
+/// cannot prove. Positive edge: an arm assignable to the instance type
+/// survives as itself; an arm the instance type is assignable to
+/// narrows TO the instance type (the downcast reading — dropping it
+/// instead fabricated a dead branch that published a wrong value warm);
+/// an arm related in neither direction keeps the checker's intersection
+/// (the checker keeps such a branch ALIVE — measured `0 | ({ name:
+/// string } & Unrel)` from the pinned tsc, not a dead branch). Negated
+/// edge: only an arm proved to BE the tested class (node identity with
+/// the instance type) drops; structural assignability alone cannot
+/// prove derivation (the checker KEEPS a same-shape underived arm), so
+/// such an arm is retained with the typed guard gap, ReturnOnly. A
+/// generic-class arm the relation oracle cannot decide and a
+/// construct-signature-typed right-hand side stay retained + gapped —
+/// sound supersets, never warm, never a fabricated dead edge.
+#[test]
+fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
+    struct Case {
+        id: &'static str,
+        script: &'static str,
+        /// tsc 7.0.2 `--strict --emitDeclarationOnly` verdict.
+        checker: &'static str,
+        rendered: &'static str,
+        degradation: Degr,
+        warm: bool,
+    }
+    let cases = [
+        Case {
+            id: "instanceof_downcast_positive",
+            script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Base) { if (x instanceof Sub) return x; return 0; }",
+            checker: "0 | Sub",
+            rendered: "Union(DeclRef(Sub) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_downcast_negated",
+            script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Base) { if (!(x instanceof Sub)) return 0; return x; }",
+            checker: "0 | Sub",
+            rendered: "Union(DeclRef(Sub) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_interface_subject_implementing_class",
+            script: "interface Animal { name: string }\nclass Dog implements Animal { name: string = \"\"; bark(): void { } }\nexport function f(x: Animal) { if (x instanceof Dog) return x; return 0; }",
+            checker: "0 | Dog",
+            rendered: "Union(DeclRef(Dog) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_unrelated_structural_arm_intersects_alive",
+            script: "class Unrel { tag = 1 }\nexport function f(x: { name: string }) { if (x instanceof Unrel) return x; return 0; }",
+            checker: "0 | ({ name: string; } & Unrel)",
+            rendered: "Union(Intersection({ name: string } & DeclRef(Unrel)) | 0)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_negated_identity_arm_drops_proved",
+            script: "class Base { name = \"\" }\nclass Sub extends Base { extra = 1 }\nexport function f(x: Sub | string) { if (!(x instanceof Sub)) return x; return 1; }",
+            checker: "string | 1",
+            rendered: "Union(string | 1)",
+            degradation: Degr::None,
+            warm: true,
+        },
+        Case {
+            id: "instanceof_negated_assignable_underived_arm_retained_gapped",
+            script: "interface Doglike { name: string; bark(): void }\nclass Dog { name = \"\"; bark(): void { } }\nexport function f(x: Doglike | number) { if (!(x instanceof Dog)) return x; return 1; }",
+            checker: "number | Doglike",
+            rendered: "Union(DeclRef(Doglike) | number)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "instanceof_generic_class_arm_retained_gapped",
+            script: "class Box<T> { v!: T }\nexport function f(x: Box<number>) { if (x instanceof Box) return x; return 0; }",
+            checker: "0 | Box<number>",
+            rendered: "Union(InstantiationRef(Box) | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+        Case {
+            id: "instanceof_construct_signature_rhs_stays_gapped",
+            script: "class Dog { name = \"\"; bark(): void { } }\nconst D: new () => Dog = Dog;\nexport function f(x: { name: string }) { if (x instanceof D) return x; return 0; }",
+            checker: "0 | Dog",
+            rendered: "Union({ name: string } | 0)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
+    ];
+    for case in &cases {
+        let measured = drive_expect_boundary("", case.id, case.script, "f", None);
+        let mut failures = Vec::new();
+        if let Some(rendered) = measured.rendered.as_deref() {
+            if rendered != case.rendered {
+                failures.push(format!(
+                    "value drifted: expected {} (covering checker `{}`), measured {}",
+                    case.rendered, case.checker, rendered
+                ));
+            }
+        } else {
+            failures.push(format!(
+                "the public boundary returned no value: {}",
+                measured.boundary.error.as_deref().unwrap_or("<unset>")
+            ));
+        }
+        if measured.boundary.degradation != Some(case.degradation) {
+            failures.push(format!(
+                "typed degradation drifted: expected {:?}, measured {:?}",
+                case.degradation, measured.boundary.degradation
+            ));
+        }
+        failures.extend(first_call_cold_clauses(&measured.boundary));
+        failures.extend(replay_clauses(case.warm, &measured.boundary));
+        let candidates = flow_return_candidate_count(case.id, case.script);
+        if case.warm {
+            if candidates == 0 {
+                failures.push(
+                    "clean row stored ZERO warm candidates — a complete result must warm"
+                        .to_owned(),
+                );
+            }
+        } else if candidates != 0 {
+            failures.push(format!(
+                "degraded row stored {candidates} warm candidate(s) — a guard-gapped result \
+                 is ReturnOnly and must store NONE"
+            ));
+        }
+        assert!(failures.is_empty(), "{}:\n{}", case.id, failures.join("\n"));
+    }
+}
