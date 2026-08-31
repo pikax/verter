@@ -395,3 +395,29 @@ dedicated concern inside the closure node's own review profile.
 This variance concerns budget only and prejudges neither correctness nor the
 apparent-type callability decision.
 
+## Bounded-work rationale for the closure node
+
+The charter routes bounded-work evidence to the review report and permits a terse
+not-applicable rationale in place of counters, forbidding their creation solely to
+satisfy it. Recorded here because no in-tree evidence convention exists.
+
+The seal adds no cache, counter, retained candidate or global fingerprint. Its memo
+change only SUPPRESSES publishes. Canonicalization at the newly routed sites runs on
+changed paths only, under budgets the substrate node already established, and the
+pre-seal closure re-interns an already-canonical top to the same node. There is no new
+repeated work to count.
+
+One real cost is disclosed rather than measured. The evidence-blind-replay fence makes
+the cross-request substitution memo permanently unpublishable for any walk whose
+canonicalization observed file-scoped roots, and file-rooted composites are the common
+case in real user code, so that path now recomputes per request. That is the sound
+direction: the alternative is replaying an under-rooted entry into a request that never
+observed the roots it depends on, which is a stale warm read and a correctness-budget
+violation rather than a performance one. Making it cheap again requires per-entry root
+carriage on the memo, which is a cache-model change owned elsewhere and deliberately
+not attempted here.
+
+No counters or soak were built to quantify it, per the charter. The trade is stated so
+a later owner can find it, not buried in a measurement that would have had to be
+invented.
+
