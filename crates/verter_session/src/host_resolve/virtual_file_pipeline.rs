@@ -9,10 +9,15 @@ use rustc_hash::FxHashMap;
 
 use crate::instant::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
+use super::compile_request_build::BoundRenderedMain;
 use super::compile_request_build::{
     build_bound_compile_request, compile_unsupported_code, derive_runtime_compile_options,
-    no_carrier_artifact_diagnostics, no_carrier_compiler_diagnostics,
-    render_lane_vue_compile_request, request_construction_refused_diagnostics,
+    no_carrier_artifact_diagnostics, no_carrier_compiler_diagnostics, render_execution_error,
+    request_construction_refused_diagnostics, svelte_render_admission_refused_diagnostics,
+    svelte_render_execution_refusal, svelte_runtime_render_demand,
+    vue_render_admission_refused_diagnostics, vue_render_execution_refusal,
+    vue_runtime_render_demand,
 };
 use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
@@ -175,6 +180,7 @@ pub(crate) fn vue_macro_output_matches_revision(
 /// `_sfc_main` bytes, optional map, and warning diagnostics of a
 /// successful render. Native-only (`host_compile`).
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
 pub(crate) struct RenderOnlyMain {
     pub(crate) code: Arc<str>,
     pub(crate) source_map: Option<Arc<str>>,
@@ -3654,211 +3660,229 @@ impl VerterHost {
         }))
     }
 
-    /// Render-only sibling of [`Self::compile_entry`]: produces the SAME
-    /// `Main` bytes through the SAME shared substrate (`compile_bundle`) and
-    /// the SAME host-side [`assemble_vue_main_module`], WITHOUT the per-file
-    /// session-wrapper overhead. Returns the assembled `Main` code, its
-    /// optional source map, and warning-severity diagnostics of a successful
-    /// render.
+    /// Render-only sibling of [`Self::compile_entry`]: executes the ONE
+    /// admitted runtime-render population through the request's BOUND
+    /// framework host-integration backend and assembles the runtime `Main`
+    /// host-side (the SAME byte-load-bearing [`assemble_vue_main_module`]
+    /// for a Vue carrier; a carrier-emitted self-contained body verbatim
+    /// otherwise). Returns the assembled `Main` code, its optional source
+    /// map, and warning-severity diagnostics of a successful render.
     ///
-    /// Differences from `compile_entry` (the DECIDED drop list):
-    /// - (a) the source is borrowed (`&*snapshot.source`) for the common
-    ///   no-external-`src=` case instead of re-cloned; the external-`src=`
-    ///   merge (which inherently allocates) is unchanged.
-    /// - (e) it NEVER calls `sync_transitive_macro_type_dependencies` — the
-    ///   render lane is pure and READ-ONLY w.r.t. the shared
-    ///   dependency/semantic-transitive axis. The axis is authoritatively
-    ///   reset by the Stage-B upsert and re-populated by whichever
-    ///   HostBacked/type-resolution request needs it.
-    /// - (f) one request-local runtime macro bundle is produced from TypeInfo;
-    ///   the render lane does not retain it or mutate dependency state.
+    /// Bound execution contract:
+    /// - The consumed binding's catalog arm yields the backend; the backend
+    ///   issues the demand-specific render admission over the presented
+    ///   artifact and executes it by value — one render request, one
+    ///   backend call, one admitted parse/semantic/runtime/assembly
+    ///   population. The lane holds no framework selection, no session-side
+    ///   request construction, and no registry dispatch.
+    /// - Missing runtime/host capability, an unproducible demand, and a
+    ///   canonical-request construction refusal are typed fatal outcomes —
+    ///   never a fallback to the host-backed lane, another framework, or a
+    ///   compatibility compiler.
+    /// - The lane is pure and READ-ONLY w.r.t. the shared
+    ///   dependency/semantic-transitive axis: it NEVER calls
+    ///   `sync_transitive_macro_type_dependencies` (the axis is
+    ///   authoritatively reset by the Stage-B upsert and re-populated by
+    ///   whichever HostBacked/type-resolution request needs it); one
+    ///   request-local runtime macro bundle is produced from TypeInfo on
+    ///   the Vue arm and never retained.
+    /// - No cache admission and no last-known-good fallback.
     #[cfg(not(target_arch = "wasm32"))]
-    fn compile_entry_runtime_render(
+    pub(crate) fn compile_entry_runtime_render(
         &self,
         snapshot: &CompileInput,
         profile: &CompileProfile,
         binding: Option<BoundNativeHostRequest>,
     ) -> Result<RenderOnlyMain, HostError> {
+        use verter_compiler::framework_common::{
+            FrameworkHostIntegrationBackend as _, SvelteHostExecutionInputs, VueHostExecutionInputs,
+        };
+
         let diagnostics = snapshot.parse_diagnostics.clone();
-
-        // (a) DROP the source re-clone for the common case. Only the
-        // external-`src=` merge (rare, and inherently allocating) builds an
-        // owned String; otherwise the substrate borrows the snapshot bytes.
-
-        // The compiler's own parse scratch. A local `Allocator` per render
-        // call passed straight into `compile_bundle` is NOT carrier-lifecycle
-        // state; it is transient parse scratch, dropped at the end of this
-        // call.
-        let alloc = Allocator::new();
-
-        let macro_output = self.produce_vue_macro_codegen(
-            &snapshot.canonical_id,
-            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
-        );
-
-        let scope = self.config.effective_scope();
-
-        let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
-            macro_runtime: macro_output.runtime,
-            prop_constness_overrides: None,
-            style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
-            style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
-            template_binding_metadata: None,
-            template_used_vars: None,
-            runtime_template_hole: false,
-            runtime_inline_template_chunk: false,
-            prepared_styles: snapshot.prepared_styles.clone(),
+        let fatal = |diagnostics: DiagnosticsSnapshot| {
+            HostError::CompileError(CompileFailure {
+                diagnostics,
+                requested_mode: profile.requested_mode,
+                actual_mode: profile.requested_mode,
+                downgrade_reason: None,
+            })
         };
 
-        let want_ide = profile.target.needs_tsx();
-        let want_template_data =
-            scope.needs_template_analysis() || profile.target.needs_template_data();
-
-        // The canonical, admission-checked request — the render lane's OWN
-        // fixed-Vue constructor (the characterized transitional request
-        // shape; see `render_lane_vue_compile_request`). The binding
-        // supplies this route's identity/audit coherence; it does not
-        // select the request shape. A refusal here is FATAL, matching every
-        // other construction-time site this lane already treats as fatal.
-        let request = match render_lane_vue_compile_request(
-            profile,
-            &snapshot.canonical_id,
-            want_ide,
-            want_template_data,
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                return Err(HostError::CompileError(CompileFailure {
-                    diagnostics: diagnostics.merge(request_construction_refused_diagnostics(
-                        &snapshot.canonical_id,
-                        snapshot.source.len() as u32,
-                        &error,
-                    )),
-                    requested_mode: profile.requested_mode,
-                    actual_mode: profile.requested_mode,
-                    downgrade_reason: None,
-                }));
-            }
-        };
-
-        // The compiler-visible runtime options, read back off the
-        // validated request — byte-identical construction to
-        // `compile_entry`'s.
-        let runtime_opts = derive_runtime_compile_options(
-            &request,
-            profile,
-            snapshot.block_content_inputs.clone(),
-            Some(vue_facts),
-            snapshot.prepared_styles.clone(),
-        );
-
-        // Route through the carrier registry (the single dispatch authority)
-        // — identical to `compile_entry`. Sites 3 (no artifact) and 4 (no
-        // compiler) stay FATAL. An input with no carrier artifact has no
-        // registered identity, so no binding exists either.
+        // An input with no carrier artifact has no registered identity, so
+        // no binding exists and there is no runtime surface to produce —
+        // the unchanged typed refusal.
         let (Some(artifact), Some(binding)) = (snapshot.framework_parse.as_ref(), binding) else {
-            return Err(HostError::CompileError(CompileFailure {
-                diagnostics: diagnostics.merge(no_carrier_artifact_diagnostics(
-                    &snapshot.canonical_id,
-                    snapshot.source.len() as u32,
-                )),
-                requested_mode: profile.requested_mode,
-                actual_mode: profile.requested_mode,
-                downgrade_reason: None,
-            }));
-        };
-        let Some(compiler) = crate::parse::carrier_compiler_registry()
-            .compiler_for_carrier_language(artifact.adapter_id(), artifact.language_id())
-        else {
-            return Err(HostError::CompileError(CompileFailure {
-                diagnostics: diagnostics.merge(no_carrier_compiler_diagnostics(
-                    artifact,
-                    snapshot.source.len() as u32,
-                )),
-                requested_mode: profile.requested_mode,
-                actual_mode: profile.requested_mode,
-                downgrade_reason: None,
-            }));
+            return Err(fatal(diagnostics.merge(no_carrier_artifact_diagnostics(
+                &snapshot.canonical_id,
+                snapshot.source.len() as u32,
+            ))));
         };
 
-        // The host OWNS the cached-parse validity decision — identical to
-        // `compile_entry` so the substrate sees the same parse for the same
-        // bytes/options.
+        // The host OWNS the cached-parse validity decision: the bound
+        // backend executes over the artifact's own registered parse, so a
+        // profile carrying parse-affecting template grammar (custom
+        // delimiters / custom elements) cannot be honored on this lane and
+        // refuses instead of compiling under the wrong grammar.
         let grammar_matches = profile
             .delimiters
             .as_ref()
             .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
             && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
         if !grammar_matches {
-            return Err(HostError::CompileError(CompileFailure {
-                diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
-                    HostDiagnostic {
-                        severity: HostSeverity::Error,
-                        code: "HOST_CARRIER_GRAMMAR_MISMATCH".to_string(),
-                        message: "compile profile grammar differs from registered grammar"
-                            .to_string(),
-                        arguments: Vec::new(),
-                        span: verter_span::Span::new(0, snapshot.source.len() as u32),
-                    },
-                ])),
-                requested_mode: profile.requested_mode,
-                actual_mode: profile.requested_mode,
-                downgrade_reason: None,
-            }));
+            return Err(fatal(diagnostics.merge(DiagnosticsSnapshot::from_vec(
+                vec![HostDiagnostic {
+                    severity: HostSeverity::Error,
+                    code: "HOST_CARRIER_GRAMMAR_MISMATCH".to_string(),
+                    message: "compile profile grammar differs from registered grammar".to_string(),
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, snapshot.source.len() as u32),
+                }],
+            ))));
         }
 
-        // Consume the binding exactly once, by value — identical
-        // discipline to `compile_entry` (see `into_attribution`).
-        let bound_attribution = binding.into_attribution();
-        verter_debug_assert_eq!(
-            bound_attribution.catalog_identity().adapter_id(),
-            artifact.adapter_id(),
-        );
-        verter_debug_assert_eq!(
-            bound_attribution.snapshot().canonical_id(),
-            snapshot.canonical_id,
-        );
+        // The compiler's own parse scratch — transient, dropped at the end
+        // of this call; never carrier-lifecycle state.
+        let alloc = Allocator::new();
 
-        let compiled = match compiler.compile_bundle(
-            snapshot.source.as_ref(),
-            artifact,
-            &runtime_opts,
-            &alloc,
-        ) {
-            // The render lane's whole subject is the runtime `Main`, so a
-            // refusal is simply the absence of the thing it was asked to
-            // render — the same typed outcome the HostBacked route reports.
-            Ok(CarrierCompileOutcome::RuntimeSurfaceRefused(refusal)) => {
-                return Err(HostError::RuntimeSurfaceRefused {
-                    canonical_id: snapshot.canonical_id.clone(),
-                    diagnostic_code: refusal.diagnostic_code,
-                    message: refusal.message,
-                });
-            }
-            Ok(CarrierCompileOutcome::Produced(bundle)) => bundle,
-            // Site 5 (`CompileUnsupported`) stays FATAL.
-            Err(unsupported) => {
-                let code = compile_unsupported_code(&unsupported);
-                return Err(HostError::CompileError(CompileFailure {
-                    diagnostics: diagnostics.merge(DiagnosticsSnapshot::from_vec(vec![
-                        HostDiagnostic {
-                            severity: HostSeverity::Error,
-                            code: code.to_string(),
-                            message: format!(
-                                "carrier '{}' cannot produce a runtime bundle for '{}'",
-                                artifact.adapter_id().as_str(),
-                                snapshot.canonical_id
+        // One backend call per render request: the consumed binding's
+        // catalog arm yields the backend, the backend issues the render
+        // admission over the SAME presented artifact, and the admission is
+        // consumed by value — issuance and execution are paired by the
+        // admission's parse key, so admitting one artifact and executing
+        // another is unrepresentable at this seam.
+        let rendered = match binding {
+            BoundNativeHostRequest::Vue(bound) => {
+                let (backend, attribution) = bound.into_host_backend();
+                crate::host_compile_audit::debug_assert_runtime_render_bound_attribution(
+                    &attribution,
+                    artifact,
+                    &snapshot.canonical_id,
+                );
+                // One request-local runtime macro bundle from TypeInfo; the
+                // render lane does not retain it or mutate dependency state.
+                let macro_output = self.produce_vue_macro_codegen(
+                    &snapshot.canonical_id,
+                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Runtime,
+                );
+                let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
+                    macro_runtime: macro_output.runtime,
+                    prop_constness_overrides: None,
+                    style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
+                    style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
+                    template_binding_metadata: None,
+                    template_used_vars: None,
+                    runtime_template_hole: false,
+                    runtime_inline_template_chunk: false,
+                    prepared_styles: snapshot.prepared_styles.clone(),
+                };
+                // The template-fact producer's DIAGNOSTICS companion: the
+                // producer is the only pass that parses template
+                // directive/interpolation expressions on this route, so the
+                // same demand axes the host-backed route analyzes under keep
+                // the render lane fail-closed on a malformed expression. The
+                // fact PAYLOAD never publishes on the render handoff.
+                let scope = self.config.effective_scope();
+                let want_template_data =
+                    scope.needs_template_analysis() || profile.target.needs_template_data();
+                let demand =
+                    vue_runtime_render_demand(profile, &snapshot.canonical_id, want_template_data);
+                let admission = match backend.admit_runtime_render(artifact, demand) {
+                    Ok(admission) => admission,
+                    Err(refusal) => {
+                        return Err(fatal(diagnostics.merge(
+                            vue_render_admission_refused_diagnostics(
+                                &snapshot.canonical_id,
+                                snapshot.source.len() as u32,
+                                refusal,
                             ),
-                            arguments: Vec::new(),
-                            span: verter_span::Span::new(0, snapshot.source.len() as u32),
-                        },
-                    ])),
-                    requested_mode: profile.requested_mode,
-                    actual_mode: profile.requested_mode,
-                    downgrade_reason: None,
-                }));
+                        )));
+                    }
+                };
+                let inputs = VueHostExecutionInputs {
+                    block_content: snapshot.block_content_inputs.clone(),
+                    vue_facts: Some(vue_facts),
+                    prepared_styles: snapshot.prepared_styles.clone(),
+                };
+                // A runtime-surface refusal is the absence of the render's
+                // whole subject (typed, same as the HostBacked route); every
+                // other execution refusal is fatal — see
+                // `vue_render_execution_refusal`.
+                match backend.compile_runtime_render(admission, artifact, &inputs, &alloc) {
+                    Ok(rendered) => BoundRenderedMain::Vue(rendered),
+                    Err(refusal) => {
+                        return Err(render_execution_error(
+                            vue_render_execution_refusal(
+                                artifact,
+                                &snapshot.canonical_id,
+                                snapshot.source.len() as u32,
+                                refusal,
+                            ),
+                            &snapshot.canonical_id,
+                            diagnostics,
+                            profile.requested_mode,
+                        ));
+                    }
+                }
+            }
+            BoundNativeHostRequest::Svelte(bound) => {
+                let (backend, attribution) = bound.into_host_backend();
+                crate::host_compile_audit::debug_assert_runtime_render_bound_attribution(
+                    &attribution,
+                    artifact,
+                    &snapshot.canonical_id,
+                );
+                // The Svelte-bound demand decodes the profile's Svelte
+                // option tokens through the SAME typed admission the
+                // host-backed constructor uses: a malformed token refuses
+                // HERE, never a silent default.
+                let demand = match svelte_runtime_render_demand(profile, &snapshot.canonical_id) {
+                    Ok(demand) => demand,
+                    Err(error) => {
+                        return Err(fatal(diagnostics.merge(
+                            request_construction_refused_diagnostics(
+                                &snapshot.canonical_id,
+                                snapshot.source.len() as u32,
+                                &error,
+                            ),
+                        )));
+                    }
+                };
+                let admission = match backend.admit_runtime_render(artifact, demand) {
+                    Ok(admission) => admission,
+                    Err(refusal) => {
+                        return Err(fatal(diagnostics.merge(
+                            svelte_render_admission_refused_diagnostics(
+                                &snapshot.canonical_id,
+                                snapshot.source.len() as u32,
+                                refusal,
+                            ),
+                        )));
+                    }
+                };
+                let inputs = SvelteHostExecutionInputs {
+                    block_content: snapshot.block_content_inputs.clone(),
+                    css_hash_override: profile.svelte_css_hash_override.clone(),
+                    prepared_styles: snapshot.prepared_styles.clone(),
+                };
+                match backend.compile_runtime_render(admission, artifact, &inputs, &alloc) {
+                    Ok(rendered) => BoundRenderedMain::Svelte(rendered),
+                    Err(refusal) => {
+                        return Err(render_execution_error(
+                            svelte_render_execution_refusal(
+                                artifact,
+                                &snapshot.canonical_id,
+                                snapshot.source.len() as u32,
+                                refusal,
+                            ),
+                            &snapshot.canonical_id,
+                            diagnostics,
+                            profile.requested_mode,
+                        ));
+                    }
+                }
             }
         };
+        let compiled = rendered.runtime_bundle();
 
         // Lift the bundle's framework-neutral diagnostics into the host
         // snapshot. Semantic producer failures fail closed on every compile
@@ -3932,20 +3956,15 @@ impl VerterHost {
             None => {
                 let assembled = assemble_vue_main_module(
                     &snapshot.canonical_id,
-                    &compiled,
+                    compiled,
                     &snapshot.meta,
                     profile,
                 )
                 .map_err(|failure| {
-                    HostError::CompileError(CompileFailure {
-                        diagnostics: assembled_map_failure_diagnostics(
-                            failure,
-                            snapshot.source.len() as u32,
-                        ),
-                        requested_mode: profile.requested_mode,
-                        actual_mode: profile.requested_mode,
-                        downgrade_reason: None,
-                    })
+                    fatal(assembled_map_failure_diagnostics(
+                        failure,
+                        snapshot.source.len() as u32,
+                    ))
                 })?;
                 (
                     assembled.code,

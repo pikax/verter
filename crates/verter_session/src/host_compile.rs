@@ -307,13 +307,16 @@ pub struct CompileBatchOptions {
 /// Compile lane for [`VerterHost::compile_many`]. Always explicit —
 /// never inferred from node kind, file, or caller.
 ///
-/// One shared substrate (`compile_bundle` + `assemble_vue_main_module`):
-///
 /// - [`CompileManyTarget::HostBacked`] — full `compile_entry` wrapper
 ///   (cache-mode, fact tracer, warm-hit, publish). IDE / analysis path.
 /// - [`CompileManyTarget::RuntimeRender`] — same `Main` bytes without
-///   per-file wrapper overhead. Cross-file macros still go through
-///   TypeInfo dispatch. Authoritative macro-root failures stay fatal.
+///   per-file wrapper overhead. Each batch entry is its own host compile
+///   request with its own request-scoped bound host request; the bound
+///   framework host backend issues the render admission and the matching
+///   runtime backend executes it, then the host assembles `Main`
+///   (`assemble_vue_main_module` for Vue). Cross-file macros still go
+///   through TypeInfo dispatch. Authoritative macro-root failures stay
+///   fatal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileManyTarget {
     /// The full session-wrapper path (`compile_entry`). Byte-for-byte

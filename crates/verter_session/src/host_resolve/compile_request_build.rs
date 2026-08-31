@@ -1,23 +1,29 @@
 //! The session's per-file/virtual-product `CompileRequest` construction
 //! authority — the construct-then-derive pattern
-//! [`crate::host_resolve::virtual_file_pipeline`]'s `compile_entry` /
-//! `compile_entry_runtime_render` route every compile through:
-//! [`build_vue_compile_request`] / [`build_svelte_compile_request`]
-//! admission-check every option `CompileProfile` carries and return the
-//! canonical, validated request; then [`derive_runtime_compile_options`]
-//! reads the framework-neutral `RuntimeCompileOptions` back off that
-//! validated request — never the reverse. Mirrors the pattern the internal
-//! one-shot compile route (`crate::compile::derive_legacy_vue_options`, in
-//! reverse) already establishes.
+//! [`crate::host_resolve::virtual_file_pipeline`]'s `compile_entry` routes
+//! every host-backed compile through: [`build_vue_compile_request`] /
+//! [`build_svelte_compile_request`] admission-check every option
+//! `CompileProfile` carries and return the canonical, validated request;
+//! then [`derive_runtime_compile_options`] reads the framework-neutral
+//! `RuntimeCompileOptions` back off that validated request — never the
+//! reverse. Mirrors the pattern the internal one-shot compile route
+//! (`crate::compile::derive_legacy_vue_options`, in reverse) already
+//! establishes.
 //!
 //! There is no shared framework fork here: the caller selects the
 //! framework constructor from its request-scoped native host binding (the
-//! sole framework-identity derivation site for host compile requests), and
-//! the runtime-render compatibility route uses its own fixed-Vue
-//! constructor ([`render_lane_vue_compile_request`]).
+//! sole framework-identity derivation site for host compile requests).
+//! The runtime-render lane does not construct a session-side
+//! `CompileRequest` at all: it builds the framework host backend's own
+//! render-only demand ([`vue_runtime_render_demand`] /
+//! [`svelte_runtime_render_demand`]) from the same profile axes, and the
+//! bound backend composes the canonical request inside its issued
+//! admission.
 
 use crate::types::*;
-use verter_compiler::framework_common::RuntimeCompileOptions;
+use verter_compiler::framework_common::{
+    RuntimeCompileOptions, SvelteHostRuntimeRenderDemand, VueHostRuntimeRenderDemand,
+};
 
 /// The demanded product set shared by both framework constructors.
 ///
@@ -121,12 +127,23 @@ pub(crate) fn build_vue_compile_request(
     verter_compiler::compile_request::CompileRequest,
     verter_compiler::compile_request::CompileRequestError,
 > {
-    use verter_compiler::compile_request::{
-        FrameworkCompileRequest, VueBackendRequest, VueOptionAttempt,
-    };
+    use verter_compiler::compile_request::FrameworkCompileRequest;
 
     let products = demanded_products(profile, want_runtime, want_ide, want_template_data);
-    let attempt = VueOptionAttempt {
+    let attempt = vue_option_attempt_from_profile(profile);
+    let framework = FrameworkCompileRequest::Vue(attempt.into_request()?);
+    finish_compile_request(products, framework, profile, canonical_id)
+}
+
+/// The typed Vue option attempt every Vue option the session
+/// `CompileProfile` carries maps onto — shared by the host-backed request
+/// constructor and the runtime-render bound demand so the two routes can
+/// never diverge on which profile axes reach Vue option admission.
+fn vue_option_attempt_from_profile(
+    profile: &CompileProfile,
+) -> verter_compiler::compile_request::VueOptionAttempt {
+    use verter_compiler::compile_request::{VueBackendRequest, VueOptionAttempt};
+    VueOptionAttempt {
         backend: if profile.force_vapor {
             VueBackendRequest::Vapor
         } else {
@@ -139,15 +156,14 @@ pub(crate) fn build_vue_compile_request(
         runtime_module_name: profile.runtime_module_name.clone(),
         script_custom_element: Some(profile.custom_element),
         ..Default::default()
-    };
-    let framework = FrameworkCompileRequest::Vue(attempt.into_request()?);
-    finish_compile_request(products, framework, profile, canonical_id)
+    }
 }
 
 /// Selects the framework constructor from the consumed request-scoped
 /// binding's catalog arm — the sole framework-identity derivation site for
 /// host compile requests. Used by the host-backed `compile_entry` route;
-/// the runtime-render route keeps its own fixed-Vue constructor below.
+/// the runtime-render route builds no session-side request at all (see the
+/// bound render-demand constructors below).
 pub(crate) fn build_bound_compile_request(
     binding: &super::native_host_binding::BoundNativeHostRequest,
     profile: &CompileProfile,
@@ -178,26 +194,64 @@ pub(crate) fn build_bound_compile_request(
     }
 }
 
-/// The runtime-render compatibility route's OWN fixed-Vue request
-/// constructor: the render lane's whole subject is the runtime `Main`
-/// module, so the runtime products are always demanded regardless of the
-/// caller's target bits, and the request is built in the Vue shape for
-/// every carrier (the characterized transitional request shape — see
-/// `runtime_render_builds_a_vue_shaped_request_for_a_svelte_carrier`).
-/// Render-lane-only: it exists solely for this compatibility route and is
-/// deleted with it once the route executes through its bound backend; the
-/// request-scoped binding already supplies the route's identity/audit
-/// coherence.
-pub(crate) fn render_lane_vue_compile_request(
+/// The render lane's Vue-BOUND demand: the render's whole subject is the
+/// runtime `Main` module, so exactly one runtime product is demanded
+/// (client, or server under `ssr`) plus the optional template-fact
+/// DIAGNOSTICS companion, and every Vue option axis the profile carries
+/// rides the same typed attempt the host-backed constructor validates.
+/// The bound backend owns request composition and admission; this
+/// function only translates the profile into the backend's demand
+/// document.
+pub(crate) fn vue_runtime_render_demand(
     profile: &CompileProfile,
     canonical_id: &str,
-    want_ide: bool,
-    want_template_data: bool,
-) -> Result<
-    verter_compiler::compile_request::CompileRequest,
-    verter_compiler::compile_request::CompileRequestError,
-> {
-    build_vue_compile_request(profile, canonical_id, true, want_ide, want_template_data)
+    template_fact_diagnostics: bool,
+) -> VueHostRuntimeRenderDemand {
+    use verter_compiler::compile_request::RuntimeProductRequest;
+    VueHostRuntimeRenderDemand {
+        runtime: RuntimeProductRequest {
+            inline: profile.inline,
+            runtime_source_map: profile.source_map,
+            ..Default::default()
+        },
+        template_fact_diagnostics,
+        vue_options: vue_option_attempt_from_profile(profile),
+        filename: profile
+            .filename
+            .clone()
+            .or_else(|| Some(canonical_id.to_string())),
+        component_id: profile.component_id.clone(),
+        is_production: profile.is_production,
+        force_js: profile.force_js,
+    }
+}
+
+/// The render lane's Svelte-BOUND demand: one runtime product (client, or
+/// server under `ssr`) with the exact requested style policy over the
+/// option axes the profile can express, decoded through the SAME typed
+/// admission the host-backed Svelte constructor uses — a malformed token
+/// refuses HERE, never a silent default, and an axis the bound execution
+/// cannot honor refuses typed at the backend's issuance.
+pub(crate) fn svelte_runtime_render_demand(
+    profile: &CompileProfile,
+    canonical_id: &str,
+) -> Result<SvelteHostRuntimeRenderDemand, verter_compiler::compile_request::CompileRequestError> {
+    use verter_compiler::compile_request::RuntimeProductRequest;
+    Ok(SvelteHostRuntimeRenderDemand {
+        runtime: RuntimeProductRequest {
+            inline: profile.inline,
+            runtime_source_map: profile.source_map,
+            ..Default::default()
+        },
+        ssr: profile.ssr,
+        svelte_options: svelte_option_attempt_from_profile(profile)?,
+        filename: profile
+            .filename
+            .clone()
+            .or_else(|| Some(canonical_id.to_string())),
+        is_production: profile.is_production,
+        force_js: profile.force_js,
+    })
 }
 
 /// Builds and admission-checks the canonical SVELTE-shaped
@@ -217,17 +271,34 @@ pub(crate) fn build_svelte_compile_request(
     verter_compiler::compile_request::CompileRequest,
     verter_compiler::compile_request::CompileRequestError,
 > {
+    use verter_compiler::compile_request::FrameworkCompileRequest;
+
+    let products = demanded_products(profile, want_runtime, want_ide, want_template_data);
+    let attempt = svelte_option_attempt_from_profile(profile)?;
+    let framework = FrameworkCompileRequest::Svelte(attempt.into_request()?);
+    finish_compile_request(products, framework, profile, canonical_id)
+}
+
+/// The typed Svelte option attempt every Svelte option the session
+/// `CompileProfile` carries maps onto — shared by the host-backed request
+/// constructor and the runtime-render bound demand so the two routes can
+/// never diverge on which profile axes reach Svelte option admission, or
+/// on the decode-boundary refusals below.
+fn svelte_option_attempt_from_profile(
+    profile: &CompileProfile,
+) -> Result<
+    verter_compiler::compile_request::SvelteOptionAttempt,
+    verter_compiler::compile_request::CompileRequestError,
+> {
     use verter_compiler::compile_request::svelte::{
         SvelteCompatibilityRequest, SvelteCssRequest, SvelteCustomElementDescriptor,
         SvelteFragmentsRequest, SvelteNamespaceRequest, SvelteRunesRequest,
     };
     use verter_compiler::compile_request::{
-        CompileRequestError, FrameworkCompileRequest, FrameworkOption, SvelteOption,
-        SvelteOptionAttempt,
+        CompileRequestError, FrameworkOption, SvelteOption, SvelteOptionAttempt,
     };
 
-    let products = demanded_products(profile, want_runtime, want_ide, want_template_data);
-    let framework = {
+    {
         // `svelte_namespace`/`svelte_fragments` are the decode-boundary
         // concern the Svelte carrier's own parsers document themselves as
         // NOT owning (`parse_svelte_namespace`/`parse_svelte_fragments` in
@@ -287,7 +358,7 @@ pub(crate) fn build_svelte_compile_request(
             shadow: profile.svelte_custom_element_shadow,
             props: Default::default(),
         });
-        let attempt = SvelteOptionAttempt {
+        Ok(SvelteOptionAttempt {
             dev: profile.svelte_dev,
             generate_module: profile.svelte_generate_module,
             experimental_async: profile.svelte_experimental_async,
@@ -311,10 +382,8 @@ pub(crate) fn build_svelte_compile_request(
                 .unwrap_or(false)
                 .then(SvelteCompatibilityRequest::default),
             ..Default::default()
-        };
-        FrameworkCompileRequest::Svelte(attempt.into_request()?)
-    };
-    finish_compile_request(products, framework, profile, canonical_id)
+        })
+    }
 }
 
 /// Reads the framework-neutral `RuntimeCompileOptions` back off a
@@ -432,6 +501,58 @@ pub(crate) fn request_construction_refused_diagnostics(
     }])
 }
 
+/// Maps a bound framework host backend's Vue runtime-render admission
+/// refusal onto the host diagnostics surface: a canonical-request
+/// construction refusal keeps the SAME
+/// `HOST_COMPILE_REQUEST_EXECUTION_REFUSED` code the host-backed
+/// constructor route reports for the identical demand, and every other
+/// typed issuance refusal (unavailable capability, unproducible demand,
+/// non-composable parse) surfaces as `HOST_COMPILE_ADMISSION_REFUSED` —
+/// never a fallback lane, framework, or compatibility compiler.
+pub(crate) fn vue_render_admission_refused_diagnostics(
+    canonical_id: &str,
+    source_len: u32,
+    refusal: verter_compiler::framework_common::VueHostAdmissionRefusal,
+) -> DiagnosticsSnapshot {
+    match refusal {
+        verter_compiler::framework_common::VueHostAdmissionRefusal::RequestConstructionRefused(
+            error,
+        ) => request_construction_refused_diagnostics(canonical_id, source_len, &error),
+        other => admission_refused_diagnostics(canonical_id, source_len, &format!("{other:?}")),
+    }
+}
+
+/// Svelte sibling of [`vue_render_admission_refused_diagnostics`].
+pub(crate) fn svelte_render_admission_refused_diagnostics(
+    canonical_id: &str,
+    source_len: u32,
+    refusal: verter_compiler::framework_common::SvelteHostAdmissionRefusal,
+) -> DiagnosticsSnapshot {
+    match refusal {
+        verter_compiler::framework_common::SvelteHostAdmissionRefusal::RequestConstructionRefused(
+            error,
+        ) => request_construction_refused_diagnostics(canonical_id, source_len, &error),
+        other => admission_refused_diagnostics(canonical_id, source_len, &format!("{other:?}")),
+    }
+}
+
+/// `HOST_COMPILE_ADMISSION_REFUSED`: the bound framework host backend
+/// refused to issue the demand-specific compile admission (outside the
+/// request-construction class, which keeps its own code above).
+pub(crate) fn admission_refused_diagnostics(
+    canonical_id: &str,
+    source_len: u32,
+    detail: &str,
+) -> DiagnosticsSnapshot {
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: "HOST_COMPILE_ADMISSION_REFUSED".to_string(),
+        message: format!("compile admission refused for '{canonical_id}': {detail}"),
+        arguments: Vec::new(),
+        span: verter_span::Span::new(0, source_len),
+    }])
+}
+
 /// `HOST_NO_CARRIER_ARTIFACT`: the input has no framework parse artifact,
 /// so no registered identity exists — no binding, no registry dispatch,
 /// and no runtime compile route.
@@ -467,6 +588,167 @@ pub(crate) fn no_carrier_compiler_diagnostics(
         arguments: Vec::new(),
         span: verter_span::Span::new(0, source_len),
     }])
+}
+
+/// The runtime-render lane's fatal diagnostic for a bound backend
+/// execution the shared orchestration refused
+/// (`verter_compiler::framework_common::CompileUnsupported`): the same
+/// stable per-arm code and carrier message the host-backed route reports
+/// for the identical refusal, so the two lanes cannot drift on this
+/// surface.
+pub(crate) fn runtime_bundle_unsupported_diagnostics(
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+    canonical_id: &str,
+    source_len: u32,
+    unsupported: &verter_compiler::framework_common::CompileUnsupported,
+) -> DiagnosticsSnapshot {
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: compile_unsupported_code(unsupported).to_string(),
+        message: format!(
+            "carrier '{}' cannot produce a runtime bundle for '{}'",
+            artifact.adapter_id().as_str(),
+            canonical_id
+        ),
+        arguments: Vec::new(),
+        span: verter_span::Span::new(0, source_len),
+    }])
+}
+
+/// A bound runtime-render EXECUTION refusal, mapped for the render lane:
+/// either the typed runtime-surface refusal (the render's subject is
+/// absent — surfaced as `HostError::RuntimeSurfaceRefused`) or a fatal
+/// diagnostics payload (shared-orchestration refusal keeping the
+/// host-backed lane's exact code/message; an issuance/execution pairing
+/// breach — structurally unreachable on the lane — mapped typed rather
+/// than unwrapped).
+pub(crate) enum RenderExecutionRefusal {
+    /// The requested runtime surface was refused; carries the carrier's
+    /// structural code and message.
+    Surface {
+        diagnostic_code: String,
+        message: String,
+    },
+    /// A fatal refusal: the diagnostics payload for the compile failure.
+    Fatal(DiagnosticsSnapshot),
+}
+
+/// Maps the Vue bound backend's execution refusal for the render lane.
+pub(crate) fn vue_render_execution_refusal(
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+    canonical_id: &str,
+    source_len: u32,
+    refusal: verter_compiler::framework_common::VueHostCompileRefusal,
+) -> RenderExecutionRefusal {
+    use verter_compiler::framework_common::VueHostCompileRefusal;
+    match refusal {
+        VueHostCompileRefusal::RuntimeSurfaceRefused {
+            diagnostic_code,
+            message,
+            ..
+        } => RenderExecutionRefusal::Surface {
+            diagnostic_code,
+            message,
+        },
+        VueHostCompileRefusal::Unsupported(unsupported) => {
+            RenderExecutionRefusal::Fatal(runtime_bundle_unsupported_diagnostics(
+                artifact,
+                canonical_id,
+                source_len,
+                &unsupported,
+            ))
+        }
+        refusal @ (VueHostCompileRefusal::AdmissionParseMismatch
+        | VueHostCompileRefusal::WrongDemand { .. }) => RenderExecutionRefusal::Fatal(
+            admission_refused_diagnostics(canonical_id, source_len, &format!("{refusal:?}")),
+        ),
+    }
+}
+
+/// Maps a bound render EXECUTION refusal onto the lane's `HostError`
+/// surface: a runtime-surface refusal is the typed
+/// `HostError::RuntimeSurfaceRefused`; everything else is a fatal compile
+/// failure carrying the request's diagnostics plus the refusal's payload.
+pub(crate) fn render_execution_error(
+    refusal: RenderExecutionRefusal,
+    canonical_id: &str,
+    diagnostics: DiagnosticsSnapshot,
+    requested_mode: CompileCacheMode,
+) -> crate::HostError {
+    match refusal {
+        RenderExecutionRefusal::Surface {
+            diagnostic_code,
+            message,
+        } => crate::HostError::RuntimeSurfaceRefused {
+            canonical_id: canonical_id.to_string(),
+            diagnostic_code,
+            message,
+        },
+        RenderExecutionRefusal::Fatal(payload) => crate::HostError::CompileError(CompileFailure {
+            diagnostics: diagnostics.merge(payload),
+            requested_mode,
+            actual_mode: requested_mode,
+            downgrade_reason: None,
+        }),
+    }
+}
+
+/// The bound render handoff of either catalog arm, held so the render
+/// lane's shared `Main`-assembly tail borrows ONE `RuntimeCompileOutput`
+/// regardless of which framework backend produced it. Not a dispatch
+/// surface: both arms come from the same bound execution, and the sum
+/// mirrors the sealed binding sum.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum BoundRenderedMain {
+    /// The Vue backend's render-only handoff.
+    Vue(verter_compiler::framework_common::VueHostRenderedMain),
+    /// The Svelte backend's render-only handoff.
+    Svelte(verter_compiler::framework_common::SvelteHostRenderedMain),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BoundRenderedMain {
+    /// The runtime bundle for host `Main` assembly.
+    pub(crate) fn runtime_bundle(
+        &self,
+    ) -> &verter_compiler::framework_common::RuntimeCompileOutput {
+        match self {
+            Self::Vue(rendered) => rendered.runtime_bundle(),
+            Self::Svelte(rendered) => rendered.runtime_bundle(),
+        }
+    }
+}
+
+/// Svelte sibling of [`vue_render_execution_refusal`].
+pub(crate) fn svelte_render_execution_refusal(
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+    canonical_id: &str,
+    source_len: u32,
+    refusal: verter_compiler::framework_common::SvelteHostCompileRefusal,
+) -> RenderExecutionRefusal {
+    use verter_compiler::framework_common::SvelteHostCompileRefusal;
+    match refusal {
+        SvelteHostCompileRefusal::RuntimeSurfaceRefused {
+            diagnostic_code,
+            message,
+            ..
+        } => RenderExecutionRefusal::Surface {
+            diagnostic_code,
+            message,
+        },
+        SvelteHostCompileRefusal::Unsupported(unsupported) => {
+            RenderExecutionRefusal::Fatal(runtime_bundle_unsupported_diagnostics(
+                artifact,
+                canonical_id,
+                source_len,
+                &unsupported,
+            ))
+        }
+        refusal @ (SvelteHostCompileRefusal::AdmissionParseMismatch
+        | SvelteHostCompileRefusal::WrongDemand { .. }) => RenderExecutionRefusal::Fatal(
+            admission_refused_diagnostics(canonical_id, source_len, &format!("{refusal:?}")),
+        ),
+    }
 }
 
 /// The stable host diagnostic code for each `verter_compiler::framework_common::CompileUnsupported` arm —

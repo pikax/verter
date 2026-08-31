@@ -42,28 +42,24 @@
 //! comment-shape × root-class × build-mode, style × SSR, script-kind × SSR,
 //! explicit no-comment negative controls across backend/build-mode, source
 //! maps on/off with a decoded-token assertion, a runtime-link assertion
-//! beyond bare parsing, and a direct `CarrierCompiler::compile_bundle`
-//! invocation — the SEPARATE production entry point
-//! (`compile_bundle_refuses_explicit_ssr_and_force_vapor`'s doc comment in
-//! `framework_common/vue_bridge.rs` states this in-tree: "a SEPARATE
-//! production entry into the shared codegen substrate from
-//! `CompileRequest::new`") that the host's `compile_many`/`compileMany`
-//! render lane reaches through
-//! `VerterHost::compile_entry_runtime_render` → `compiler.compile_bundle`,
-//! never through the pre-assembly `compile()` entry. Exercising it here
-//! proves the repair independently of the direct `compile()` route the rest
-//! of this file uses.
+//! beyond bare parsing, and a direct typed Vue runtime-backend invocation
+//! (`compile_through_vue_runtime_backend`) — the host/runtime contract
+//! (`VueHostIntegrationBackend::admit_runtime_render` →
+//! `compile_runtime_render`, one issued admission driving one runtime
+//! population over the registered parse artifact) that host render
+//! execution consumes, never the pre-assembly `compile()` entry.
+//! Exercising it here proves the repair independently of the direct
+//! `compile()` route the rest of this file uses.
 
 use crate::compile::types::VueExecutionInputs;
 use crate::compile::VueMacroSemanticInput;
 use crate::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, RuntimeProductRequest,
-    VueBackendRequest, VueCompileRequest,
+    VueBackendRequest, VueCompileRequest, VueOptionAttempt,
 };
-use crate::framework_common::vue_bridge::VueCarrierCompiler;
 use crate::framework_common::{
-    CarrierCompileOutcome, CarrierCompiler, CarrierCompilerRegistry, FrameworkParseArtifact,
-    RuntimeCompileOptions,
+    CarrierCompilerRegistry, FrameworkHostIntegrationBackend, FrameworkParseArtifact,
+    VueHostExecutionInputs, VueHostIntegrationBackend, VueHostRuntimeRenderDemand,
 };
 use oxc_allocator::Allocator;
 use oxc_sourcemap::OwnedSourceMap;
@@ -367,46 +363,58 @@ fn artifact_for(source: &str) -> Arc<FrameworkParseArtifact> {
     )
 }
 
-/// Compile the headline shape through `CarrierCompiler::compile_bundle` —
-/// the production entry point the host's `compile_many`/native `compileMany`
-/// render lane reaches via `compile_entry_runtime_render` (see this file's
-/// module doc). Distinct from every other test in this file, which drives
-/// the direct `compile()` route instead.
-fn native_route_compile_bundle(
+/// Compile the headline shape through direct typed Vue runtime-backend
+/// construction — the host/runtime contract
+/// ([`VueHostIntegrationBackend::admit_runtime_render`] issuing one
+/// render admission over the registered parse artifact, consumed by value
+/// by `compile_runtime_render`) that host render execution consumes.
+/// Distinct from every other test in this file, which drives the direct
+/// `compile()` route instead.
+fn compile_through_vue_runtime_backend(
     source: &str,
     is_production: bool,
     ssr: bool,
     force_vapor: bool,
 ) -> String {
-    let compiler = VueCarrierCompiler;
     let artifact = artifact_for(source);
-    let alloc = oxc_allocator::Allocator::new();
-    let outcome = compiler
-        .compile_bundle(
-            source,
-            &artifact,
-            &RuntimeCompileOptions {
-                filename: Some("Root.vue".to_string()),
-                is_production,
-                ssr,
-                force_vapor,
-                inline: Some(false),
-                want_runtime: true,
-                ..Default::default()
+    let backend = VueHostIntegrationBackend::registered();
+    let demand = VueHostRuntimeRenderDemand {
+        runtime: RuntimeProductRequest {
+            inline: Some(false),
+            ..Default::default()
+        },
+        vue_options: VueOptionAttempt {
+            backend: if force_vapor {
+                VueBackendRequest::Vapor
+            } else {
+                VueBackendRequest::Inferred
             },
+            ssr,
+            ..Default::default()
+        },
+        filename: Some("Root.vue".to_string()),
+        is_production,
+        ..Default::default()
+    };
+    let admission = backend
+        .admit_runtime_render(&artifact, demand)
+        .expect("a plain runtime-render demand must admit");
+    let alloc = oxc_allocator::Allocator::new();
+    let rendered = backend
+        .compile_runtime_render(
+            admission,
+            &artifact,
+            &VueHostExecutionInputs::default(),
             &alloc,
         )
-        .expect("compile_bundle must not refuse a plain runtime request");
-    let produced = match outcome {
-        CarrierCompileOutcome::Produced(bundle) => bundle,
-        CarrierCompileOutcome::RuntimeSurfaceRefused(refusal) => {
-            panic!("runtime surface refused: {refusal:?}")
-        }
-    };
-    produced
+        .unwrap_or_else(|refusal| panic!("the admitted render must produce: {refusal:?}"));
+    rendered
+        .runtime_bundle()
         .template
-        .unwrap_or_else(|| panic!("compile_bundle must produce a template block"))
+        .as_ref()
+        .unwrap_or_else(|| panic!("the runtime backend must produce a template block"))
         .code
+        .clone()
 }
 
 // Non-inline production forces the Options API (or template-only) path —
@@ -652,59 +660,61 @@ export default {}
 
 // ==================== Coverage completion ====================
 //
-// Everything below closes specific conformance-review gaps: native
-// `compile_bundle` invocation, source maps on/off, root-level trailing
-// comments, comment-shape × root-class × build-mode crossing, style × SSR,
-// script-kind × SSR, explicit no-comment negative controls, and a
-// runtime-link assertion beyond bare parsing.
+// Everything below closes specific conformance-review gaps: a direct
+// typed runtime-backend invocation, source maps on/off, root-level
+// trailing comments, comment-shape × root-class × build-mode crossing,
+// style × SSR, script-kind × SSR, explicit no-comment negative controls,
+// and a runtime-link assertion beyond bare parsing.
 
-// -------------------- Native route: `CarrierCompiler::compile_bundle` --------------------
+// -------------------- Typed runtime backend: host/runtime contract --------------------
 
-/// The headline VDOM shape through the SAME production entry point the
-/// host's `compile_many`/native `compileMany` render lane reaches
-/// (`compile_entry_runtime_render` → `compiler.compile_bundle`) — see the
-/// module doc for why this is a genuinely SEPARATE call chain from the
-/// direct `compile()` route.
+/// The headline VDOM shape through direct typed Vue runtime-backend
+/// construction (`admit_runtime_render` → `compile_runtime_render`) — see
+/// the module doc for why this is a genuinely SEPARATE call chain from
+/// the direct `compile()` route.
 #[test]
-fn native_route_vdom_leading_comment_static_class_root_production() {
+fn runtime_backend_vdom_leading_comment_static_class_root_production() {
     let source = r#"<script>
 export default {}
 </script>
 <template><!-- lead --><div class="root">hi</div></template>
 "#;
-    let code = native_route_compile_bundle(source, true, false, false);
+    let code = compile_through_vue_runtime_backend(source, true, false, false);
     assert!(!code.contains("<!--"), "comment leaked:\n{code}");
-    assert_parses(&code, "native-route vdom leading comment + static class");
+    assert_parses(&code, "runtime-backend vdom leading comment + static class");
 }
 
-/// The SSR sibling of [`native_route_vdom_leading_comment_static_class_root_production`].
+/// The SSR sibling of [`runtime_backend_vdom_leading_comment_static_class_root_production`].
 #[test]
-fn native_route_ssr_leading_comment_static_class_root_production() {
+fn runtime_backend_ssr_leading_comment_static_class_root_production() {
     let source = r#"<script>
 export default {}
 </script>
 <template><!-- lead --><div class="root">hi</div></template>
 "#;
-    let code = native_route_compile_bundle(source, true, true, false);
+    let code = compile_through_vue_runtime_backend(source, true, true, false);
     assert!(!code.contains("lead"), "comment content leaked:\n{code}");
-    assert_parses(&code, "native-route ssr leading comment + static class");
+    assert_parses(&code, "runtime-backend ssr leading comment + static class");
 }
 
 /// The zero-effective-root SSR shape (the branch that claims a
-/// whole-template segmented range) through the native route too.
+/// whole-template segmented range) through the typed runtime backend too.
 #[test]
-fn native_route_ssr_only_disabled_comment_zero_effective_roots() {
+fn runtime_backend_ssr_only_disabled_comment_zero_effective_roots() {
     let source = r#"<script>
 export default {}
 </script>
 <template><!-- only comment --></template>
 "#;
-    let code = native_route_compile_bundle(source, true, true, false);
+    let code = compile_through_vue_runtime_backend(source, true, true, false);
     assert!(
         !code.contains("only comment"),
         "comment content leaked:\n{code}"
     );
-    assert_parses(&code, "native-route ssr zero-effective-root comment-only");
+    assert_parses(
+        &code,
+        "runtime-backend ssr zero-effective-root comment-only",
+    );
 }
 
 // -------------------- Source maps: on/off, with a decoded-token assertion --------------------

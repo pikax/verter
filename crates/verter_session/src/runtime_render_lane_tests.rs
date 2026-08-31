@@ -22,12 +22,14 @@
 //! | `runtime_render_consumes_supplied_style_lang_projection` | Supplied style content projects its processed lang (`lang.css`) into the `Main` style import, byte-parity with `get_virtual_file`. |
 //! | `runtime_render_omitted_comments_tristate_matches_compiler_default` | Absent `comments` stays tri-state `None` (dev preserves / prod strips), never collapsed to `false`; explicit `Some(true)` honored; parity in all three. |
 //! | `runtime_render_threads_profile_filename_into_output` | Profile `filename` distinct from the canonical id reaches codegen (scope-id derivation), parity with the same-filename oracle, divergence from the filename-less oracle. |
-//! | `runtime_render_svelte_carrier_selects_the_svelte_backend_by_artifact_identity` | A `.svelte` input on the render route compiles through the Svelte compatibility implementation (artifact-identity dispatch), never Vue-assembled bytes. |
-//! | `runtime_render_builds_a_vue_shaped_request_for_a_svelte_carrier` | The render route's compile request is Vue-shaped for every carrier: a Svelte option that refuses Svelte-shaped construction is silently dropped here; the framework-aware `get_virtual_file` control refuses it. |
-//! | `runtime_render_collapses_svelte_request_options_to_defaults` | Request-borne Svelte options collapse to compiler defaults on the render route (byte-inert), while the framework-aware control honors them. |
-//! | `runtime_render_profile_borne_svelte_css_hash_override_survives` | Profile-borne Svelte options (`svelte_css_hash_override`) survive the Vue-shaped request and reach the Svelte backend byte-observably. |
-//! | `runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode` | Profile-borne `svelte_runes` survives the Vue-shaped request and flips the compile mode: forced-runes output drops the legacy flags import (byte-diff), and `Some(false)` turns a `$state` render into a typed legacy-rune refusal. |
-//! | `runtime_render_defaults_a_malformed_profile_borne_svelte_token` | A malformed profile-borne Svelte token (`svelte_namespace: Some("bogus")`) is silently defaulted on the render route (Vue-shaped request skips the Svelte decode), while the framework-aware control refuses it at request construction. |
+//! | `runtime_render_svelte_carrier_selects_the_svelte_backend_by_artifact_identity` | A `.svelte` input on the render route executes through the bound Svelte host backend (catalog-arm dispatch), never Vue-assembled bytes. |
+//! | `runtime_render_request_shape_follows_the_bound_catalog_arm` | The render route's request shape follows the BINDING arm: a Svelte carrier refuses `svelte_generate_module` through Svelte-bound admission (like the framework-aware control), while a Vue carrier ignores the Svelte-only field — failing in either direction if the lane rebuilt a fixed-framework request. |
+//! | `runtime_render_honors_svelte_request_options_through_the_bound_request` | Request-borne Svelte options (`svelte_disclose_version`) are honored on the render route through the Svelte-bound request, byte-identically to the framework-aware control. |
+//! | `runtime_render_profile_borne_svelte_css_hash_override_survives` | The resolved `cssHash` override rides the bound Svelte backend's execution-input channel and reaches the scoped-style class byte-observably. |
+//! | `runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode` | `svelte_runes` rides the typed Svelte-bound option attempt and flips the compile mode: forced-runes output drops the legacy flags import (byte-diff), and `Some(false)` turns a `$state` render into a typed legacy-rune refusal. |
+//! | `runtime_render_refuses_a_malformed_profile_borne_svelte_token` | A malformed profile-borne Svelte token (`svelte_namespace: Some("bogus")`) refuses at the render route's Svelte-bound construction — the same typed decode refusal the framework-aware control reports; a valid default profile still renders. |
+//! | `runtime_render_executes_the_admitted_runtime_kind` | The demand admitted is the demand executed: `ssr` on the render profile produces the SERVER module (byte-matching the getVirtualFile SSR oracle) and differs from the client render — failing if the lane executed a demand other than the admitted one. |
+//! | `runtime_render_bound_attribution_must_name_the_executed_artifact` | Injecting a binding bound for a DIFFERENT file's identity into the render execution trips the lane's bound-attribution invariant — failing if the lane admitted/executed an artifact other than the bound one. |
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1785,14 +1787,13 @@ fn runtime_render_threads_profile_filename_into_output() {
 const SVELTE_RUNES_SRC: &str =
     "<script>let count = $state(0);</script>\n<button onclick={() => count++}>{count}</button>\n";
 
-/// A `.svelte` input admitted to the render lane compiles through the SVELTE
-/// compatibility implementation, selected by the parse artifact's identity —
-/// never through the Vue backend. DISCRIMINATING: the `Main` is the Svelte
-/// client module (`svelte/internal/client`), carries no Vue runtime
-/// structure, and a lane that re-routed dispatch off anything other than the
-/// artifact identity (e.g. off the request's framework shape, which on this
-/// route is Vue for every carrier — see Test 21) would emit Vue-assembled
-/// bytes here instead.
+/// A `.svelte` input admitted to the render lane executes through the
+/// SVELTE bound host backend, selected by the request-scoped binding's
+/// catalog arm (which derives from the registered parse-artifact identity)
+/// — never through the Vue backend. DISCRIMINATING: the `Main` is the
+/// Svelte client module (`svelte/internal/client`), carries no Vue runtime
+/// structure, and a lane that re-routed dispatch off anything other than
+/// the registered identity would emit Vue-assembled bytes here instead.
 #[test]
 fn runtime_render_svelte_carrier_selects_the_svelte_backend_by_artifact_identity() {
     let host = new_host();
@@ -1828,29 +1829,28 @@ fn runtime_render_svelte_carrier_selects_the_svelte_backend_by_artifact_identity
 }
 
 // ---------------------------------------------------------------------------
-// Test 21 — the render route builds a Vue-shaped request for every carrier
+// Test 21 — the render route's request shape follows the bound catalog arm
 // ---------------------------------------------------------------------------
 
-/// CURRENT-BEHAVIOR PIN: the render route constructs its compile request in
-/// the VUE framework shape for every carrier, including a `.svelte` one — so
-/// a Svelte request option that REFUSES construction under a Svelte-shaped
-/// request is silently dropped on this route. The framework-aware
-/// `get_virtual_file(Main)` route over the SAME carrier + SAME profile is
-/// the in-test control proving the option is genuinely refusal-grade when
-/// the request is built in the carrier's own shape.
+/// The render route builds its request through the BOUND framework host
+/// backend, so the request shape follows the binding's catalog arm in both
+/// directions: a `.svelte` carrier refuses a Svelte option that is
+/// refusal-grade under Svelte-bound admission (`svelte_generate_module`,
+/// typed `UnsupportedOption` naming the `SvelteModule` capability cell),
+/// exactly like the framework-aware `get_virtual_file(Main)` control; a
+/// `.vue` carrier under the SAME profile ignores the Svelte-only field
+/// entirely, because the Vue-bound demand carries no Svelte axis.
 ///
-/// DISCRIMINATING in both directions: a render route that starts building
-/// carrier-shaped requests flips the first leg from success to refusal; a
-/// `get_virtual_file` route that stopped refusing would flip the control.
+/// DISCRIMINATING in both directions against a fixed-framework request on
+/// the lane: a render route that rebuilt a fixed-Vue request would flip the
+/// Svelte leg from refusal to defaulted success; one that decoded Svelte
+/// options globally would flip the Vue leg from success to refusal.
 #[test]
-fn runtime_render_builds_a_vue_shaped_request_for_a_svelte_carrier() {
+fn runtime_render_request_shape_follows_the_bound_catalog_arm() {
     let host = new_host();
     let canonical = "/proj/Shape.svelte";
     upsert_sibling(&host, canonical, SVELTE_RUNES_SRC);
 
-    // `svelte_generate_module` refuses `build_svelte_compile_request` under a
-    // Svelte-shaped request (typed `UnsupportedOption` naming the
-    // `SvelteModule` capability cell — see `compile_request_build.rs`).
     let mut profile = CompileProfile {
         target: CompileTarget::BUNDLER,
         is_production: true,
@@ -1858,34 +1858,40 @@ fn runtime_render_builds_a_vue_shaped_request_for_a_svelte_carrier() {
     };
     profile.svelte_generate_module = Some(true);
 
-    // Leg 1 — the render route: the request is built in the Vue shape, so
-    // the Svelte-only option never reaches Svelte option admission and the
-    // render SUCCEEDS with the option dropped.
-    let render = host.render_only_main(canonical, &profile).expect(
-        "the render route builds a Vue-shaped request for every carrier, \
-             so a Svelte-shaped construction refusal cannot fire on it",
+    // Leg 1 — the render route over the Svelte carrier: the Svelte-bound
+    // admission REFUSES the option with the same request-construction
+    // refusal code the framework-aware route reports.
+    let err = host.render_only_main(canonical, &profile).expect_err(
+        "the Svelte-bound render demand must refuse svelte_generate_module \
+         at admission — the option is refusal-grade under the carrier's own \
+         request shape",
     );
+    let crate::HostError::CompileError(failure) = err else {
+        panic!("the render refusal must surface as a compile failure, got: {err:?}");
+    };
     assert!(
-        render
-            .code
-            .contains("import * as $ from 'svelte/internal/client';"),
-        "the dropped-option render still produces the Svelte client module:\n{}",
-        render.code
+        failure
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"),
+        "the render refusal must carry the request-construction refusal \
+         diagnostic, got: {:?}",
+        failure.diagnostics.diagnostics
     );
 
-    // Leg 2 (control) — the framework-aware compile route builds the request
-    // in the carrier's own shape and REFUSES the same profile.
+    // Leg 2 (control) — the framework-aware compile route refuses the SAME
+    // profile with the SAME code.
     let err = host
         .get_virtual_file(crate::types::VirtualQuery {
             raw_id: None,
             canonical_id: Some(canonical.to_string()),
             node_kind: Some(crate::types::VirtualNodeKind::Main),
-            compile_profile: profile,
+            compile_profile: profile.clone(),
         })
         .expect_err(
             "the framework-aware route must refuse svelte_generate_module at \
-             request construction — proves the option is refusal-grade when \
-             the request is carrier-shaped",
+             request construction",
         );
     let crate::HostError::CompileError(failure) = err else {
         panic!("the control refusal must surface as a compile failure, got: {err:?}");
@@ -1900,24 +1906,40 @@ fn runtime_render_builds_a_vue_shaped_request_for_a_svelte_carrier() {
          diagnostic, got: {:?}",
         failure.diagnostics.diagnostics
     );
+
+    // Leg 3 — the SAME profile over a VUE carrier renders: the Vue-bound
+    // demand carries no Svelte axis, so the Svelte-only field cannot refuse
+    // (or otherwise affect) a Vue render.
+    let vue_canonical = "/proj/ShapeControl.vue";
+    upsert_sibling(
+        &host,
+        vue_canonical,
+        "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n",
+    );
+    let render = host
+        .render_only_main(vue_canonical, &profile)
+        .expect("a Vue carrier ignores the Svelte-only field — the bound demand has no such axis");
+    assert!(
+        !render.code.is_empty(),
+        "the Vue render must produce the runtime Main"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// Test 22 — Svelte request options collapse to defaults on the render route
+// Test 22 — Svelte request options are honored through the bound request
 // ---------------------------------------------------------------------------
 
-/// CURRENT-BEHAVIOR PIN: because the render route's request is Vue-shaped,
-/// `derive_runtime_compile_options` reads `request.svelte()` as `None` and
-/// every request-borne Svelte option (`svelte_disclose_version` here)
-/// collapses to its compiler default — byte-observably: the default
-/// `discloseVersion: true` emits the `svelte/internal/disclose-version`
-/// side-effect import even when the profile asked for `Some(false)`, and the
-/// output is byte-identical to a render with the option unset. The
-/// framework-aware `get_virtual_file(Main)` control over the SAME carrier
-/// honors `Some(false)` and drops the import, proving the option is
-/// byte-affecting when the request carries the Svelte shape.
+/// The render route's Svelte-bound request carries the profile's typed
+/// Svelte options, so a request-borne option (`svelte_disclose_version`
+/// here) is HONORED byte-observably: `Some(false)` drops the
+/// `svelte/internal/disclose-version` side-effect import, diverging from
+/// the option-unset render (whose default `discloseVersion: true` keeps
+/// it) and matching the framework-aware `get_virtual_file(Main)` control
+/// byte-for-byte. DISCRIMINATING: a render route that rebuilt a request
+/// without the carrier's own option shape would collapse the option to its
+/// compiler default and keep the import.
 #[test]
-fn runtime_render_collapses_svelte_request_options_to_defaults() {
+fn runtime_render_honors_svelte_request_options_through_the_bound_request() {
     let canonical = "/proj/Disclose.svelte";
     let base_profile = CompileProfile {
         target: CompileTarget::BUNDLER,
@@ -1927,37 +1949,43 @@ fn runtime_render_collapses_svelte_request_options_to_defaults() {
     let mut no_disclose_profile = base_profile.clone();
     no_disclose_profile.svelte_disclose_version = Some(false);
 
-    // Leg 1 — render route, option SET: collapses to the default (import
-    // present).
+    // Leg 1 — render route, option SET: the disclose-version import is
+    // dropped (the option reached the bound Svelte request).
     let host_a = new_host();
     upsert_sibling(&host_a, canonical, SVELTE_RUNES_SRC);
     let with_option = host_a
         .render_only_main(canonical, &no_disclose_profile)
         .expect("the render route must render the Svelte component");
     assert!(
-        with_option
+        !with_option
             .code
             .contains("import 'svelte/internal/disclose-version';"),
-        "svelte_disclose_version=Some(false) must collapse to the default \
-         (true) on the render route — the side-effect import stays:\n{}",
+        "svelte_disclose_version=Some(false) must be honored on the render \
+         route — the side-effect import must be dropped:\n{}",
         with_option.code
     );
 
-    // Leg 2 — render route, option UNSET: byte-identical output (the option
-    // had no effect at all on this route).
+    // Leg 2 — render route, option UNSET: the default keeps the import and
+    // the outputs genuinely diverge (the option is byte-affecting).
     let host_b = new_host();
     upsert_sibling(&host_b, canonical, SVELTE_RUNES_SRC);
     let without_option = host_b
         .render_only_main(canonical, &base_profile)
         .expect("the render route must render the Svelte component");
-    assert_eq!(
+    assert!(
+        without_option
+            .code
+            .contains("import 'svelte/internal/disclose-version';"),
+        "with the option unset, the compiler default keeps the import:\n{}",
+        without_option.code
+    );
+    assert_ne!(
         with_option.code, without_option.code,
-        "a request-borne Svelte option must be byte-inert on the render route"
+        "the request-borne Svelte option must be byte-affecting on the render route"
     );
 
-    // Leg 3 (control) — the framework-aware route honors `Some(false)` and
-    // drops the import: the option is genuinely byte-affecting when the
-    // request carries the Svelte shape.
+    // Leg 3 (control) — the framework-aware route under the SAME profile
+    // produces the SAME honored bytes.
     let host_c = new_host();
     upsert_sibling(&host_c, canonical, SVELTE_RUNES_SRC);
     let honored = host_c
@@ -1968,29 +1996,23 @@ fn runtime_render_collapses_svelte_request_options_to_defaults() {
             compile_profile: no_disclose_profile,
         })
         .expect("the framework-aware route must honor the canonical option");
-    assert!(
-        !honored
-            .code
-            .contains("import 'svelte/internal/disclose-version';"),
-        "the framework-aware route must drop the disclose-version import \
-         under Some(false):\n{}",
-        honored.code
+    assert_eq!(
+        with_option.code, honored.code,
+        "the render route's honored output must byte-match the framework-aware control"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 23 — profile-borne Svelte options SURVIVE the render route
+// Test 23 — the resolved cssHash override rides the bound execution inputs
 // ---------------------------------------------------------------------------
 
-/// CURRENT-BEHAVIOR PIN completing Test 22's collapse boundary: the collapse
-/// is scoped to REQUEST-borne Svelte options only. Options that
-/// `derive_runtime_compile_options` reads off the PROFILE directly —
-/// `svelte_css_hash_override` here — survive to the Svelte backend even
-/// though the request itself is Vue-shaped. Byte-observable: the resolved
-/// `cssHash` override is used verbatim as the scoped-style class in the
-/// render `Main`. DISCRIMINATING: a render route that started deriving these
-/// off the (Svelte-less) request too would fall back to the derived hash
-/// class and drop the caller's override token.
+/// The resolved `cssHash` scope-class override (`svelte_css_hash_override`)
+/// is an EXECUTION INPUT, not a request-identity axis: it rides the bound
+/// Svelte backend's execution-input channel and reaches the scoped-style
+/// class byte-observably. Byte-observable: the override token is used
+/// verbatim as the scope class in the render `Main`. DISCRIMINATING: a
+/// render route that dropped the execution-input channel would fall back to
+/// the derived hash class and lose the caller's override token.
 #[test]
 fn runtime_render_profile_borne_svelte_css_hash_override_survives() {
     let canonical = "/proj/Styled.svelte";
@@ -2040,10 +2062,9 @@ fn runtime_render_profile_borne_svelte_css_hash_override_survives() {
 // Test 24 — profile-borne `svelte_runes` survives AND flips the compile mode
 // ---------------------------------------------------------------------------
 
-/// Companion to the css-hash survival pin, for the SURVIVE family's
-/// mode-selecting member: `svelte_runes` is read directly off the profile by
-/// `derive_runtime_compile_options`, so it survives the render route's
-/// Vue-shaped request and reaches the Svelte backend's mode inference.
+/// Companion to the css-hash pin, for the mode-selecting option:
+/// `svelte_runes` rides the TYPED Svelte option attempt on the bound
+/// render request and reaches the Svelte backend's mode inference.
 ///
 /// Byte-observable on a MODE-NEUTRAL fixture (compiles in both modes): a
 /// forced `Some(true)` emits the runes module, while the unset control
@@ -2052,9 +2073,9 @@ fn runtime_render_profile_borne_svelte_css_hash_override_survives() {
 /// on the `$state` fixture: `Some(false)` forces legacy interpretation,
 /// where a rune name is a store subscription, and the render flips from
 /// success to the typed legacy-rune refusal. DISCRIMINATING: a render route
-/// that started deriving `runes` off the (Svelte-less) request would read
-/// `None` for every leg — the forced-runes leg would emit the legacy flags
-/// import and the `Some(false)` leg would stop refusing.
+/// that dropped the runes axis from its bound request would read `None` for
+/// every leg — the forced-runes leg would emit the legacy flags import and
+/// the `Some(false)` leg would stop refusing.
 #[test]
 fn runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode() {
     let base_profile = CompileProfile {
@@ -2142,27 +2163,22 @@ fn runtime_render_profile_borne_svelte_runes_survives_and_flips_the_mode() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 25 — a malformed profile-borne Svelte token is DEFAULTED on the
-// render route, refused on the framework-aware route
+// Test 25 — a malformed profile-borne Svelte token REFUSES on the render
+// route, exactly like the framework-aware route
 // ---------------------------------------------------------------------------
 
-/// CURRENT-BEHAVIOR PIN closing the malformed-token corner of the render
-/// route's degradation: the route's request is Vue-shaped, so the Svelte
-/// decode branch (which validates `svelte_namespace` tokens and refuses
-/// construction on an unrecognized one) is SKIPPED — the raw string rides
-/// the profile to the carrier, whose namespace parse resolves an
-/// unrecognized token to `None` (the default) rather than guessing. The
-/// render therefore SUCCEEDS with defaulted behavior, byte-identical to a
-/// render with the token unset. The framework-aware `get_virtual_file(Main)`
-/// control over the SAME carrier builds a Svelte-shaped request and REFUSES
-/// the same malformed token at construction.
+/// The render route's Svelte-bound demand decodes the profile's Svelte
+/// tokens through the SAME typed admission the framework-aware constructor
+/// uses, so a malformed `svelte_namespace` token refuses at construction on
+/// BOTH routes with the same request-construction refusal code — never a
+/// silent default. A default (token-less) profile still renders, proving
+/// the refusal is the token's, not the route's.
 ///
-/// DISCRIMINATING in both directions: a render route that started decoding
-/// profile-borne Svelte tokens flips the first leg from defaulted success to
-/// refusal; a framework-aware route that stopped validating the token flips
-/// the control from refusal to success.
+/// DISCRIMINATING: a render route that skipped the typed Svelte decode (a
+/// fixed-framework request on the lane) would flip the first leg from
+/// refusal back to silently-defaulted success.
 #[test]
-fn runtime_render_defaults_a_malformed_profile_borne_svelte_token() {
+fn runtime_render_refuses_a_malformed_profile_borne_svelte_token() {
     let canonical = "/proj/BogusNamespace.svelte";
     let base_profile = CompileProfile {
         target: CompileTarget::BUNDLER,
@@ -2172,37 +2188,47 @@ fn runtime_render_defaults_a_malformed_profile_borne_svelte_token() {
     let mut bogus_profile = base_profile.clone();
     bogus_profile.svelte_namespace = Some("bogus".to_string());
 
-    // Leg 1 — render route: the malformed token is NOT construction-refused;
-    // the render succeeds with the carrier's default namespace behavior.
+    // Leg 1 — render route: the malformed token refuses at the bound
+    // construction with the typed request-construction refusal.
     let host_a = new_host();
     upsert_sibling(&host_a, canonical, SVELTE_RUNES_SRC);
-    let with_bogus = host_a.render_only_main(canonical, &bogus_profile).expect(
-        "the render route's Vue-shaped request skips Svelte token decoding, \
-         so a malformed svelte_namespace cannot refuse construction here",
-    );
+    let err = host_a
+        .render_only_main(canonical, &bogus_profile)
+        .expect_err(
+            "the Svelte-bound render demand decodes svelte_namespace and \
+             must refuse an unrecognized token, never silently default it",
+        );
+    let crate::HostError::CompileError(failure) = err else {
+        panic!("the render refusal must surface as a compile failure, got: {err:?}");
+    };
     assert!(
-        with_bogus
-            .code
-            .contains("import * as $ from 'svelte/internal/client';"),
-        "the defaulted render still produces the Svelte client module:\n{}",
-        with_bogus.code
+        failure
+            .diagnostics
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "HOST_COMPILE_REQUEST_EXECUTION_REFUSED"),
+        "the render refusal must carry the request-construction refusal \
+         diagnostic, got: {:?}",
+        failure.diagnostics.diagnostics
     );
 
-    // Leg 2 — render route, token UNSET: byte-identical output — the
-    // malformed token was silently defaulted, not honored.
+    // Leg 2 — render route, token UNSET: the default profile renders (the
+    // refusal above is the malformed token's, not the route's).
     let host_b = new_host();
     upsert_sibling(&host_b, canonical, SVELTE_RUNES_SRC);
     let without = host_b
         .render_only_main(canonical, &base_profile)
         .expect("the token-less render must succeed");
-    assert_eq!(
-        with_bogus.code, without.code,
-        "a malformed profile-borne Svelte token must be byte-inert on the \
-         render route (silently defaulted)"
+    assert!(
+        without
+            .code
+            .contains("import * as $ from 'svelte/internal/client';"),
+        "the default render still produces the Svelte client module:\n{}",
+        without.code
     );
 
-    // Leg 3 (control) — the framework-aware route decodes the token during
-    // Svelte-shaped request construction and REFUSES the malformed value.
+    // Leg 3 (control) — the framework-aware route refuses the SAME token
+    // with the SAME code.
     let host_c = new_host();
     upsert_sibling(&host_c, canonical, SVELTE_RUNES_SRC);
     let err = host_c
@@ -2228,5 +2254,148 @@ fn runtime_render_defaults_a_malformed_profile_borne_svelte_token() {
         "the control refusal must carry the request-construction refusal \
          diagnostic, got: {:?}",
         failure.diagnostics.diagnostics
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 26 — the demand admitted is the demand executed (runtime kind)
+// ---------------------------------------------------------------------------
+
+/// The bound render execution runs EXACTLY the admitted demand: an `ssr`
+/// render profile admits the SERVER runtime product and the executed
+/// output is the SSR module (byte-matching the `get_virtual_file` SSR
+/// oracle), while the client profile's output is the client module — the
+/// two genuinely diverge. DISCRIMINATING: a lane that executed a demand
+/// other than the one its admission was issued for (e.g. always the
+/// client kind) would collapse the two outputs and mismatch the SSR
+/// oracle.
+#[test]
+fn runtime_render_executes_the_admitted_runtime_kind() {
+    let canonical = "/proj/RuntimeKind.vue";
+    let src = "<script setup lang=\"ts\">\nconst n = 1\n</script>\n<template><div>{{ n }}</div></template>\n";
+    let ssr_rp = render_profile(true, true, false, crate::types::HmrStrategy::None);
+    let client_rp = render_profile(true, false, false, crate::types::HmrStrategy::None);
+
+    let ssr = render_with_profile(&new_host(), canonical, src, ssr_rp.clone(), None);
+    assert!(
+        ssr.errors().is_empty(),
+        "ssr render errors: {:?}",
+        ssr.errors()
+    );
+    let client = render_with_profile(&new_host(), canonical, src, client_rp, None);
+    assert!(
+        client.errors().is_empty(),
+        "client render errors: {:?}",
+        client.errors()
+    );
+
+    assert!(
+        ssr.code().contains("ssrRender"),
+        "the admitted SERVER demand must execute the SSR module:\n{}",
+        ssr.code()
+    );
+    assert!(
+        !client.code().contains("ssrRender"),
+        "the admitted CLIENT demand must not execute the SSR module:\n{}",
+        client.code()
+    );
+    assert_ne!(
+        ssr.code(),
+        client.code(),
+        "the two admitted runtime kinds must produce divergent output"
+    );
+
+    // Oracle parity: the executed SSR bytes are the same SSR bytes the
+    // framework-aware route serves for the same profile.
+    let (hb_ssr, _, _) = host_backed_main_via_get_virtual_file(
+        &new_host(),
+        canonical,
+        src,
+        &get_virtual_file_profile(ssr_rp, None),
+    );
+    assert_eq!(
+        ssr.code(),
+        hb_ssr.as_ref(),
+        "the executed SSR demand must byte-match the getVirtualFile SSR oracle.\n--- RENDER ---\n{}\n--- GVF ---\n{}",
+        ssr.code(),
+        hb_ssr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 27 — the artifact admitted/executed must be the BOUND one
+// ---------------------------------------------------------------------------
+
+/// Injecting a binding bound for a DIFFERENT file's registered identity
+/// into the render execution trips the lane's bound-attribution invariant
+/// before any admission or execution: the bound catalog identity must name
+/// the executed artifact. DISCRIMINATING: a lane that admitted or executed
+/// an artifact other than the one its binding was created for would sail
+/// past this gate and this test would observe no panic.
+#[test]
+#[should_panic(expected = "runtime-render bound attribution must name the executed artifact")]
+fn runtime_render_bound_attribution_must_name_the_executed_artifact() {
+    let host = new_host();
+    let vue_canonical = "/proj/AttributionVue.vue";
+    let svelte_canonical = "/proj/AttributionSvelte.svelte";
+    upsert_sibling(&host, vue_canonical, "<template><div>x</div></template>\n");
+    upsert_sibling(&host, svelte_canonical, SVELTE_RUNES_SRC);
+
+    // The compile input — and the artifact presented for execution — of
+    // the VUE file.
+    let snap = host
+        .scheduler
+        .try_get_source(vue_canonical)
+        .expect("the Vue source is live");
+    let efs = host
+        .effective_file_state_from_snapshot(&snap, vue_canonical, None)
+        .expect("the Vue source carries host data");
+    let input = crate::types::CompileInput {
+        canonical_id: vue_canonical.to_string(),
+        source: efs.source,
+        whole_hash: efs.whole_hash,
+        meta: efs.meta,
+        parse_diagnostics: crate::types::DiagnosticsSnapshot::default(),
+        src_blocks: Vec::new(),
+        external_requests: Vec::new(),
+        has_supplied_block_content: false,
+        block_content_inputs: Default::default(),
+        macro_type_deps: Vec::new(),
+        script_imports: Vec::new(),
+        script_macros: Vec::new(),
+        script_bindings: Vec::new(),
+        script_macro_usage: None,
+        script_vue_api_calls: Vec::new(),
+        framework_parse: efs.framework_parse,
+        style_v_bind_vars: Vec::new(),
+        style_v_bind_usage_complete: true,
+        prepared_styles: Vec::new(),
+    };
+
+    // A binding bound for the SVELTE file's registered identity.
+    let svelte_snap = host
+        .scheduler
+        .try_get_source(svelte_canonical)
+        .expect("the Svelte source is live");
+    let svelte_efs = host
+        .effective_file_state_from_snapshot(&svelte_snap, svelte_canonical, None)
+        .expect("the Svelte source carries host data");
+    let foreign_binding = host
+        .bind_native_host_compile_attempt(
+            svelte_efs.framework_parse.as_deref(),
+            svelte_canonical,
+            svelte_snap.source.len() as u32,
+            &svelte_snap,
+            crate::types::CompileCacheMode::Session,
+        )
+        .expect("the registered Svelte identity binds")
+        .expect("a Svelte carrier registers a framework parse artifact");
+
+    // The lane must trip its bound-attribution invariant rather than admit
+    // or execute the mismatched pairing.
+    let _ = host.compile_entry_runtime_render(
+        &input,
+        &CompileProfile::default(),
+        Some(foreign_binding),
     );
 }

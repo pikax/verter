@@ -21,8 +21,9 @@
 //!
 //! Module layout:
 //! - [`compile_request_build`] — the canonical `CompileRequest`
-//!   construction/derivation pair `compile_entry` /
-//!   `compile_entry_runtime_render` route every compile through.
+//!   construction/derivation pair `compile_entry` routes every host-backed
+//!   compile through, plus the bound framework render-demand constructors
+//!   `compile_entry_runtime_render` builds its backend demands from.
 //! - [`frontier_helpers`] — route-cache and wildcard-ranking helpers.
 //! - [`native_host_binding`] — the sealed request-scoped
 //!   `BoundNativeHostRequest` binding substrate over the registered

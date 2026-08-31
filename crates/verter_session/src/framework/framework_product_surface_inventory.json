@@ -270,8 +270,9 @@
     },
     {
       "id": "compile.batch",
+      "note": "HostBacked lane only: the runtime-render rows are the separate `compile.batch.runtime-render` case; this record covers the registry-dispatched compile_entry route the HostBacked lane serves.",
       "hostEntryPoint": "crates/verter_session/src/host_compile.rs:327",
-      "requestType": "(&[CompileManyInput], CompileManyOptions)",
+      "requestType": "(Vec<CompileBatchInput>, CompileBatchOptions, CompileManyTarget::HostBacked)",
       "route": "compile_many -> the same compile_entry substrate as get_virtual_file",
       "products": [
         "virtual-node.main",
@@ -286,6 +287,32 @@
           "transport": "napi",
           "entryPoint": "crates/verter_napi/src/lib.rs:2355",
           "spelling": "VerterHost#compileMany"
+        }
+      ],
+      "successForRepresentativeInput": {
+        "vue": "yes",
+        "svelte": "yes — driven in svelte_batch_route_tests (in-process) and through the native transport in transport_route_equivalence_tests; the batch derives each input language from its canonical id, so a .svelte input is compiled by the Svelte carrier and its runtime refusals surface there"
+      }
+    },
+    {
+      "id": "compile.batch.runtime-render",
+      "hostEntryPoint": "crates/verter_session/src/host_compile.rs:327",
+      "requestType": "(Vec<CompileBatchInput>, CompileBatchOptions, CompileManyTarget::RuntimeRender { profile })",
+      "route": "compile_many -> render_only_main -> compile_entry_runtime_render: each batch entry is its own host compile request with its own request-scoped BoundNativeHostRequest (bind_native_host_compile_attempt, one binding per render attempt); the binding's catalog arm selects the framework host-integration backend, which issues the demand-specific runtime-render admission (admit_runtime_render) and executes it through the matching runtime backend (compile_runtime_render) — one admitted parse/semantic/runtime/assembly population, no cache admission, no last-known-good; Vue Main additionally through assemble_vue_main_module",
+      "routeEvidence": "Structured facts over route strings: the requested lane is the explicit CompileManyTarget variant; the selected host catalog identity (adapter, carrier language, framework epoch, host epoch) and the bound snapshot's source generation ride the binding's NativeHostRequestAttribution and are checked against the executed artifact at the lane's per-arm consumption points (debug_assert_runtime_render_bound_attribution in host_compile_audit.rs); the selected runtime identity is the catalog row the backend's execution re-selects (registered_runtime_for); the requested products are recorded on the issued admission's canonical request (admitted_products); the outcome is the typed CompileBatchOutcome sum (Produced | Failed) with runtime-surface refusals as typed HostError::RuntimeSurfaceRefused. The route string above is equality-checked against those observations by runtime_render_lane_tests.rs (binding cardinality, bound-arm request shape, admitted-demand execution, attribution mismatch) and svelte_batch_route_tests.rs.",
+      "products": [
+        "virtual-node.main",
+        "source-map",
+        "diagnostics"
+      ],
+      "profileAxes": [
+        "the CompileBatchRenderProfile axes (is_production, ssr, force_js, force_vapor, source_map, comments, hmr_strategy, filename, runtime_module_name, delimiters, custom_elements, custom_element) plus per-input component_id"
+      ],
+      "routeAliases": [
+        {
+          "transport": "napi",
+          "entryPoint": "crates/verter_napi/src/lib.rs:2355",
+          "spelling": "VerterHost#compileMany"
         },
         {
           "transport": "bundler",
@@ -294,8 +321,8 @@
         }
       ],
       "successForRepresentativeInput": {
-        "vue": "yes",
-        "svelte": "yes — driven in svelte_batch_route_tests (in-process, both lanes) and through the native transport in transport_route_equivalence_tests; the batch derives each input language from its canonical id, so a .svelte input is compiled by the Svelte carrier and its runtime refusals surface there"
+        "vue": "yes — the bound Vue backend's rendered Main byte-matches the get_virtual_file(Main) oracle (runtime_render_matches_host_backed_wrapper_output)",
+        "svelte": "yes — a .svelte input executes through the bound Svelte backend with the exact requested typed Svelte options (honored or typed-refused, never silently defaulted); runtime refusals surface as typed RuntimeSurfaceRefused"
       }
     },
     {

@@ -28,6 +28,15 @@
 //! default-filled record marked
 //! [`verter_audit::AuditCaptureState::FilteredNoop`] /
 //! [`verter_audit::AuditCaptureState::AuditDisabled`].
+//!
+//! Runtime-render attribution: the render-only lane
+//! (`compile_entry_runtime_render`) is not an audited entry-point of its
+//! own — its structured attribution is the request-scoped bound identity
+//! ([`crate::host_resolve::native_host_binding::NativeHostRequestAttribution`]:
+//! the registered catalog row plus the bound snapshot), checked against
+//! the executed artifact at the lane's per-arm consumption points via
+//! [`debug_assert_runtime_render_bound_attribution`] so the attribution
+//! can never disagree with the backend arm that actually executed.
 
 use std::convert::Infallible;
 use std::sync::atomic::Ordering;
@@ -778,6 +787,48 @@ impl VerterHost {
             code_transform_ops: ct_ops as u32,
         }
     }
+}
+
+/// Structured runtime-render bound-topology attribution check: the
+/// registered catalog row the request was bound to (adapter, carrier
+/// language, framework epoch, host epoch) plus the bound snapshot
+/// identity must describe EXACTLY the artifact the render admission was
+/// issued and executed over. Called at the render lane's per-arm binding
+/// consumption points, immediately before issuance, so the attribution a
+/// consumer would report can never disagree with the executed bound
+/// topology. Debug-build invariant: a mismatch is a session wiring
+/// defect (the binding and the compile input were read from different
+/// request contexts), not a user-input outcome.
+pub(crate) fn debug_assert_runtime_render_bound_attribution(
+    attribution: &crate::host_resolve::native_host_binding::NativeHostRequestAttribution,
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+    canonical_id: &str,
+) {
+    let identity = attribution.catalog_identity();
+    verter_debug_assert_eq!(
+        identity.adapter_id(),
+        artifact.adapter_id(),
+        "runtime-render bound attribution must name the executed artifact's adapter"
+    );
+    verter_debug_assert_eq!(
+        identity.carrier_language_id(),
+        artifact.language_id(),
+        "runtime-render bound attribution must name the executed artifact's carrier language"
+    );
+    verter_debug_assert_eq!(
+        identity.epoch(),
+        artifact.epoch(),
+        "runtime-render bound attribution must name the executed artifact's framework epoch"
+    );
+    verter_debug_assert!(
+        identity.host_epoch().is_some(),
+        "a host-integration catalog row always carries a host epoch"
+    );
+    verter_debug_assert_eq!(
+        attribution.snapshot().canonical_id(),
+        canonical_id,
+        "runtime-render bound attribution must name the executed request's canonical id"
+    );
 }
 
 fn registered_compile_rejected(code: &str, message: String) -> VerterCompileResult {
