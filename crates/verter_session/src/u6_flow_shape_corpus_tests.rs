@@ -1884,6 +1884,22 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "N126_all_fresh_conditional_return_read_stays_union",
         "1305271c5a32b029c7bf278529408ccac71eaf00f1beffd46e5744c884be9df3",
     ),
+    (
+        "N127_typeof_non_null_asserted_subject",
+        "d3ef34d563de3cae24a141c417d5b4cda8f1034823eded98ff41a0255785c008",
+    ),
+    (
+        "N128_typeof_as_asserted_subject_does_not_narrow",
+        "c982d7ff8cbddc0fba48676997be5463ae18ab4509a00a69a756a01ba62d25a0",
+    ),
+    (
+        "N129_typeof_satisfies_subject_does_not_narrow",
+        "b306ff59a2eb3c8f81121149bc3696bac43a2511c47e22a03309d0572acfd55c",
+    ),
+    (
+        "N130_typeof_non_null_asserted_subject_negated",
+        "283435a5a2f27ccd85d0e1a4a40f3ccba5266c934b7077a094bbccbf447205da",
+    ),
 ];
 
 // The suite
@@ -2875,6 +2891,26 @@ mod corpus_suite {
                 "N40_as_wrapped_guard",
                 "checker prints `{ v: string | number; }`; the renderer spells \
                  `{ v: Union(string | number) }`",
+            ),
+            (
+                "N127_typeof_non_null_asserted_subject",
+                "checker prints `{ v: string | number; }`; the renderer spells the \
+                 same node `{ v: Union(string | number) }`",
+            ),
+            (
+                "N128_typeof_as_asserted_subject_does_not_narrow",
+                "checker prints `{ v: string | number | null; }`; the renderer spells the \
+                 same node `{ v: Union(string | null | number) }`",
+            ),
+            (
+                "N129_typeof_satisfies_subject_does_not_narrow",
+                "checker prints `{ v: string | number | null; }`; the renderer spells the \
+                 same node `{ v: Union(string | null | number) }`",
+            ),
+            (
+                "N130_typeof_non_null_asserted_subject_negated",
+                "checker prints `{ v: number | null; }`; the renderer spells the \
+                 same node `{ v: Union(number | null) }`",
             ),
             (
                 "N49_closure_narrows_own_parameter",
@@ -4726,7 +4762,7 @@ const CONFORMANCE: &[(Owner, usize, usize, usize)] = &[
     (Owner::U6LoopClosure, 6, 1, 2),
     (Owner::U6ContextualCore, 8, 7, 1),
     (Owner::U6FlowReturnSubstrate, 63, 47, 3),
-    (Owner::U6NarrowTypeof, 44, 24, 20),
+    (Owner::U6NarrowTypeof, 48, 28, 20),
     // The `instanceof` arm rule: derived-arm selection with nullish
     // stripping and the whole-subject intersection fallback are exact;
     // the assignable-but-unproven-derived arm direction (a subclass test

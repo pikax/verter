@@ -5898,14 +5898,31 @@ impl Lowerer<'_> {
     /// Anything else — a call result, a computed member, a captured or
     /// free root — is not positionally substitutable, so no narrow can
     /// land on it.
+    ///
+    /// Every step reads through [`unwrap_reference_transparent`], so the
+    /// wrappers the checker treats as transparent to reference identity —
+    /// parentheses and the postfix non-null assertion — name the SAME
+    /// subject as the bare spelling, at the root and at every member step:
+    /// `typeof x! === "string"` narrows `x`, `u!.kind === "a"` selects on
+    /// `u.kind`, and `typeof a.b!` narrows `a.b` (all measured). Reading
+    /// through parentheses ALONE left those spellings reference-less, so a
+    /// guard over one was classified unrecognized and the whole result
+    /// degraded behind a typed gap instead of narrowing.
+    ///
+    /// `satisfies` and the `as` / angle-bracket type assertion are
+    /// deliberately NOT transparent here: neither is a matching reference
+    /// for narrowing, so peeling one would narrow where the checker does
+    /// not — a SUBSET of the checker's type, which drops a real
+    /// contributor and is worse than the superset a missing narrow
+    /// produces.
     fn narrow_subject_of(&self, expression: &Expression<'_>) -> Option<SliceNarrowSubject> {
         let mut segments: Vec<Arc<str>> = Vec::new();
-        let mut current = unwrap_parenthesized(expression);
+        let mut current = unwrap_reference_transparent(expression);
         let identifier = loop {
             match current {
                 Expression::StaticMemberExpression(member) => {
                     segments.push(Arc::from(member.property.name.as_str()));
-                    current = unwrap_parenthesized(&member.object);
+                    current = unwrap_reference_transparent(&member.object);
                 }
                 Expression::Identifier(identifier) => break identifier,
                 _ => return None,

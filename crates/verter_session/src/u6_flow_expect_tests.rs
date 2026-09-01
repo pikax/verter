@@ -4970,6 +4970,27 @@ fn truthiness_domain_facts_narrow_like_the_checker() {
             degradation: Degr::None,
             warm: true,
         },
+        // OVER-NARROW CONTROL. A postfix non-null assertion is
+        // transparent to REFERENCE IDENTITY — `v!.y` names `v.y` — but
+        // the truthiness fact must not travel UP to the parent: `y` is
+        // not a discriminant, and unlike `v?.y` (which is truthy only
+        // when `v` is non-nullish) the assertion proves nothing about
+        // `v` on the edge. The checker keeps `undefined` in `v`
+        // (measured: `v!.y` emits `{ v: { y: number; } | undefined; }`,
+        // `v?.y` emits `{ v: { y: number; }; }`), and the published
+        // value here EQUALS it. Dropping `undefined` would be the SUBSET
+        // direction — a real contributor deleted — so this row is the
+        // fence on the reference peel leaking into parent-arm selection.
+        // The undecidable `undefined` arm still records the typed guard
+        // gap, so the result is ReturnOnly and never warms.
+        Case {
+            id: "truthy3_non_null_asserted_member_keeps_parent_union",
+            script: "export function f(v: { y: number } | undefined) { if (v!.y) return { v }; return 1 }",
+            checker: "1 | { v: { y: number; } | undefined; }",
+            rendered: "Union({ v: Union({ y: number } | undefined) } | 1)",
+            degradation: Degr::FlowGap(FlowGap::GuardNarrowing),
+            warm: false,
+        },
         // An intersection with an object arm has no falsy inhabitant
         // (every inhabitant would inhabit the always-truthy arm), so the
         // falsy edge drops it while `number` stays.
